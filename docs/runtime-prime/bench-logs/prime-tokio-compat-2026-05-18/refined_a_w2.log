@@ -1,0 +1,39 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.21s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w2_h2_fanin/tokio_per_core
+Benchmarking w2_h2_fanin/tokio_per_core: Warming up for 3.0000 s
+Benchmarking w2_h2_fanin/tokio_per_core: Collecting 15 samples in estimated 4.0047 s (22k iterations)
+Benchmarking w2_h2_fanin/tokio_per_core: Analyzing
+w2_h2_fanin/tokio_per_core
+                        time:   [161.39 µs 167.37 µs 174.58 µs]
+                        thrpt:  [183.30 Kelem/s 191.20 Kelem/s 198.28 Kelem/s]
+                 change:
+                        time:   [−18.743% −14.118% −8.8716%] (p = 0.00 < 0.05)
+                        thrpt:  [+9.7353% +16.439% +23.066%]
+                        Performance has improved.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking w2_h2_fanin/prime
+Benchmarking w2_h2_fanin/prime: Warming up for 3.0000 s
+Benchmarking w2_h2_fanin/prime: Collecting 15 samples in estimated 4.0198 s (24k iterations)
+Benchmarking w2_h2_fanin/prime: Analyzing
+w2_h2_fanin/prime       time:   [162.26 µs 163.44 µs 165.15 µs]
+                        thrpt:  [193.76 Kelem/s 195.79 Kelem/s 197.22 Kelem/s]
+                 change:
+                        time:   [−28.996% −22.760% −16.695%] (p = 0.00 < 0.05)
+                        thrpt:  [+20.041% +29.467% +40.838%]
+                        Performance has improved.
+Benchmarking w2_h2_fanin/prime_tokio_compat
+Benchmarking w2_h2_fanin/prime_tokio_compat: Warming up for 3.0000 s
+Benchmarking w2_h2_fanin/prime_tokio_compat: Collecting 15 samples in estimated 4.0041 s (26k iterations)
+Benchmarking w2_h2_fanin/prime_tokio_compat: Analyzing
+w2_h2_fanin/prime_tokio_compat
+                        time:   [160.00 µs 161.88 µs 163.79 µs]
+                        thrpt:  [195.37 Kelem/s 197.67 Kelem/s 200.00 Kelem/s]
+                 change:
+                        time:   [−29.771% −23.683% −17.391%] (p = 0.00 < 0.05)
+                        thrpt:  [+21.053% +31.032% +42.392%]
+                        Performance has improved.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+

@@ -1,0 +1,99 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.49s
+     Running benches/bench_compat_libraries.rs (/tmp/cargo_target/release/deps/bench_compat_libraries-45de34a9af42a6dc)
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio: Collecting 15 samples in estimated 4.0391 s (7320 iterations)
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio: Analyzing
+compat_libs_h2_fanin/hyper_default_tokio
+                        time:   [515.56 µs 560.43 µs 600.40 µs]
+                        thrpt:  [53.298 Kelem/s 57.100 Kelem/s 62.068 Kelem/s]
+                 change:
+                        time:   [+48.194% +58.697% +70.223%] (p = 0.00 < 0.05)
+                        thrpt:  [−41.253% −36.987% −32.521%]
+                        Performance has regressed.
+Benchmarking compat_libs_h2_fanin/hyper_current_thread
+Benchmarking compat_libs_h2_fanin/hyper_current_thread: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/hyper_current_thread: Collecting 15 samples in estimated 4.0209 s (14k iterations)
+Benchmarking compat_libs_h2_fanin/hyper_current_thread: Analyzing
+compat_libs_h2_fanin/hyper_current_thread
+                        time:   [261.46 µs 277.48 µs 305.16 µs]
+                        thrpt:  [104.86 Kelem/s 115.33 Kelem/s 122.39 Kelem/s]
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat: Collecting 15 samples in estimated 4.0268 s (16k iterations)
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat: Analyzing
+compat_libs_h2_fanin/hyper_prime_compat
+                        time:   [237.13 µs 276.62 µs 328.88 µs]
+                        thrpt:  [97.300 Kelem/s 115.68 Kelem/s 134.95 Kelem/s]
+                 change:
+                        time:   [+34.315% +44.627% +59.861%] (p = 0.00 < 0.05)
+                        thrpt:  [−37.445% −30.856% −25.548%]
+                        Performance has regressed.
+Found 3 outliers among 15 measurements (20.00%)
+  1 (6.67%) low mild
+  2 (13.33%) high severe
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio: Collecting 15 samples in estimated 4.0330 s (11k iterations)
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio: Analyzing
+compat_libs_h2_fanin/pingora_default_tokio
+                        time:   [387.44 µs 400.77 µs 412.30 µs]
+                        thrpt:  [77.614 Kelem/s 79.846 Kelem/s 82.594 Kelem/s]
+                 change:
+                        time:   [+14.671% +17.966% +21.290%] (p = 0.00 < 0.05)
+                        thrpt:  [−17.553% −15.230% −12.794%]
+                        Performance has regressed.
+Benchmarking compat_libs_h2_fanin/pingora_current_thread
+Benchmarking compat_libs_h2_fanin/pingora_current_thread: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/pingora_current_thread: Collecting 15 samples in estimated 4.0025 s (18k iterations)
+Benchmarking compat_libs_h2_fanin/pingora_current_thread: Analyzing
+compat_libs_h2_fanin/pingora_current_thread
+                        time:   [205.07 µs 208.74 µs 215.32 µs]
+                        thrpt:  [148.62 Kelem/s 153.30 Kelem/s 156.04 Kelem/s]
+Found 2 outliers among 15 measurements (13.33%)
+  2 (13.33%) high mild
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat: Collecting 15 samples in estimated 4.0070 s (20k iterations)
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat: Analyzing
+compat_libs_h2_fanin/pingora_prime_compat
+                        time:   [200.35 µs 203.47 µs 209.11 µs]
+                        thrpt:  [153.03 Kelem/s 157.27 Kelem/s 159.72 Kelem/s]
+                 change:
+                        time:   [+2.2966% +5.4363% +8.4091%] (p = 0.00 < 0.05)
+                        thrpt:  [−7.7568% −5.1560% −2.2451%]
+                        Performance has regressed.
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio: Collecting 15 samples in estimated 4.0143 s (26k iterations)
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio: Analyzing
+compat_libs_h2_fanin/proxima_default_tokio
+                        time:   [171.68 µs 174.18 µs 175.38 µs]
+                        thrpt:  [182.46 Kelem/s 183.72 Kelem/s 186.39 Kelem/s]
+                 change:
+                        time:   [+3.6385% +7.1559% +10.466%] (p = 0.00 < 0.05)
+                        thrpt:  [−9.4747% −6.6780% −3.5108%]
+                        Performance has regressed.
+Benchmarking compat_libs_h2_fanin/proxima_current_thread
+Benchmarking compat_libs_h2_fanin/proxima_current_thread: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/proxima_current_thread: Collecting 15 samples in estimated 4.0152 s (23k iterations)
+Benchmarking compat_libs_h2_fanin/proxima_current_thread: Analyzing
+compat_libs_h2_fanin/proxima_current_thread
+                        time:   [165.33 µs 166.47 µs 167.67 µs]
+                        thrpt:  [190.85 Kelem/s 192.23 Kelem/s 193.55 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high severe
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat: Collecting 15 samples in estimated 4.0149 s (25k iterations)
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat: Analyzing
+compat_libs_h2_fanin/proxima_prime_compat
+                        time:   [155.73 µs 156.59 µs 157.55 µs]
+                        thrpt:  [203.11 Kelem/s 204.35 Kelem/s 205.48 Kelem/s]
+                 change:
+                        time:   [+0.7151% +2.4172% +4.6792%] (p = 0.02 < 0.05)
+                        thrpt:  [−4.4700% −2.3602% −0.7100%]
+                        Change within noise threshold.
+Found 2 outliers among 15 measurements (13.33%)
+  2 (13.33%) high severe
+

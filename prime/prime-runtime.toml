@@ -1,0 +1,108 @@
+# build-time sizing for runtime-prime.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_runtime_sized.rs.
+# every magic number in src/runtime/prime/ must trace back to here.
+
+[inbox]
+capacity = 1024
+# per-core inbox lane count = lanes_per_core * num_cores + lanes_headroom.
+# lanes bound *concurrent* producer threads targeting a core (they recycle on
+# producer-thread exit), NOT the ring depth. each lane eagerly allocates a
+# capacity-slot ring, so this is the dominant runtime memory knob.
+lanes_per_core = 2
+lanes_headroom = 32
+
+[timer]
+bottom_slots = 256
+upper_slots = 64
+slot_inline = 4
+
+[executor]
+task_slab_initial_cap = 1024
+run_queue_capacity = 1024
+
+[reactor]
+slab_initial_cap = 256
+# worker drive's spin-then-park policy (core_shard.rs worker_main): how many
+# `consumer.try_recv()` spin iterations to run before committing to a
+# `reactor.turn` syscall (kevent/epoll_wait) when the executor is idle.
+# BUSY = spin count while recent cross-core inbox arrivals have been seen
+# (hides the ~1us syscall for producer-driven bursts). override at build
+# time via PRIME_REACTOR_SPIN_BEFORE_PARK_BUSY.
+spin_before_park_busy = 256
+# IDLE = spin count once `idle_park_threshold` consecutive empty parks pass
+# with NO inbox arrivals (reactor-only / I/O-bound workloads gain nothing
+# from spinning on a channel nothing is pushing into — see
+# docs/runtime-prime/discipline.md v9-f, h2_load_5way 477us -> 37us). 0 =
+# park immediately once idle is confirmed. override via
+# PRIME_REACTOR_SPIN_BEFORE_PARK_IDLE.
+spin_before_park_idle = 0
+# consecutive empty parks with no inbox arrivals before dropping BUSY -> IDLE.
+# override via PRIME_REACTOR_IDLE_PARK_THRESHOLD.
+idle_park_threshold = 4
+
+[io_uring]
+# per-direction (read/write) fixed heap buffer on every TcpStream — the
+# kernel completes into/drains from this buffer since io_uring's async
+# completion model can't borrow a caller's transient poll_read/poll_write
+# slice. raising it batches larger reads/writes per syscall at the cost of
+# buf_size bytes * 2 (read + write) resident per open connection; lowering it
+# saves per-connection memory at the cost of more round trips for large
+# transfers. override at build time via PRIME_IO_URING_BUF_SIZE.
+buf_size = 16384
+
+[background_pool]
+default_threads = 0
+
+# inverted tokio-compat worker tuning ("the split" knobs). compile-time
+# defaults; std/alloc selects the MODE at runtime via PRIME_COMPAT, but these
+# counts are baked here so the no_std/no-conflaguration tiers still have them.
+[compat]
+# sister-drive yields per worker iteration: how aggressively a draining
+# tokio::spawn burst is pumped before re-checking the prime inbox. higher =
+# fewer loop turns per burst, lower = snappier inbox response.
+sister_drive_yields = 8
+# bounded park timeout (ms) for the non-linux (C2a) idle park. caps how long a
+# missed wakeup or an I/O-waiting sister task stalls before the next slice.
+park_timeout_ms = 1
+
+# proxima-quic + proxima-h3 sizing — consumed by the proxima-quic facade
+# (tier-2) which passes these as const-generic caps into proxima-quic-proto
+# (tier-1). The proto crate does NOT depend on prime; the facade is the
+# bridge between the build-time sizing and the proto's const generics.
+
+[quic]
+# Stream multiplexing caps.
+max_concurrent_bidi_streams = 1024
+max_concurrent_uni_streams = 1024
+# Per-connection flow-control windows.
+recv_window_bytes = 16777216         # 16 MiB
+send_window_bytes = 16777216         # 16 MiB
+# Idle / handshake / RTT defaults (ms).
+max_idle_timeout_ms = 30000
+initial_mtu_bytes = 1200
+max_udp_payload_size = 1452
+initial_rtt_ms = 333
+ack_delay_exponent = 3
+max_ack_delay_ms = 25
+active_connection_id_limit = 4
+# ACK range-set cap (ArrayRangeSet<MAX_ACK_RANGES>); overflow policy in C13.
+max_ack_ranges = 32
+# In-flight retransmit queue cap (heapless::Deque<SENT_PACKETS_CAP>); C14.
+sent_packets_cap = 1024
+# Endpoint demux table cap (heapless::IndexMap<DCID, ConnId, DCID_TABLE_CAP>); C27.
+dcid_table_cap = 8192
+# RFC 9221 unreliable DATAGRAM queue caps; C25.
+datagram_send_queue_cap = 256
+datagram_recv_queue_cap = 256
+# Multipath QUIC per-connection path tracking cap; C26.
+max_paths_per_connection = 4
+
+[h3]
+# H3 request map cap (heapless::IndexMap<StreamId, Request, MAX_CONCURRENT_REQUESTS>); C35/C36.
+max_concurrent_requests = 1024
+# QPACK dynamic-table cap (bytes); C33/C34.
+qpack_max_table_capacity = 4096
+# QPACK blocked-streams cap (per RFC 9204 §2.1.2); C34.
+qpack_blocked_streams = 100
+# RFC 9114 §7.2.4.2 maximum header section size.
+max_field_section_size = 65536

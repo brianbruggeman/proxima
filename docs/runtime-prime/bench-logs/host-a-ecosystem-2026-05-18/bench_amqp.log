@@ -1,0 +1,167 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 38s
+     Running benches/bench_amqp.rs (/tmp/cargo_target/release/deps/bench_amqp-dd9374f9cd9dadb5)
+Benchmarking amqp_method/proxima
+Benchmarking amqp_method/proxima: Warming up for 2.0000 s
+Benchmarking amqp_method/proxima: Collecting 20 samples in estimated 2.0000 s (806M iterations)
+Benchmarking amqp_method/proxima: Analyzing
+amqp_method/proxima     time:   [2.4748 ns 2.4776 ns 2.4802 ns]
+                        thrpt:  [4.5061 GiB/s 4.5108 GiB/s 4.5158 GiB/s]
+                 change:
+                        time:   [+5.6276% +5.9937% +6.3404%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.9623% −5.6548% −5.3278%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking amqp_method/parity
+Benchmarking amqp_method/parity: Warming up for 2.0000 s
+Benchmarking amqp_method/parity: Collecting 20 samples in estimated 2.0000 s (1.1B iterations)
+Benchmarking amqp_method/parity: Analyzing
+amqp_method/parity      time:   [1.7558 ns 1.7606 ns 1.7655 ns]
+                        thrpt:  [6.3302 GiB/s 6.3477 GiB/s 6.3650 GiB/s]
+                 change:
+                        time:   [+6.5412% +6.7863% +7.0410%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.5778% −6.3551% −6.1396%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking amqp_body/proxima
+Benchmarking amqp_body/proxima: Warming up for 2.0000 s
+Benchmarking amqp_body/proxima: Collecting 20 samples in estimated 2.0000 s (1.5B iterations)
+Benchmarking amqp_body/proxima: Analyzing
+amqp_body/proxima       time:   [1.3331 ns 1.3348 ns 1.3367 ns]
+                        thrpt:  [183.94 GiB/s 184.20 GiB/s 184.43 GiB/s]
+                 change:
+                        time:   [+6.2513% +6.5461% +6.8113%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.3769% −6.1439% −5.8835%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking amqp_body/parity
+Benchmarking amqp_body/parity: Warming up for 2.0000 s
+Benchmarking amqp_body/parity: Collecting 20 samples in estimated 2.0000 s (1.5B iterations)
+Benchmarking amqp_body/parity: Analyzing
+amqp_body/parity        time:   [1.2934 ns 1.2948 ns 1.2963 ns]
+                        thrpt:  [189.67 GiB/s 189.89 GiB/s 190.10 GiB/s]
+                 change:
+                        time:   [+6.1368% +6.3807% +6.6032%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.1942% −5.9980% −5.7819%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking amqp_heartbeat/proxima
+Benchmarking amqp_heartbeat/proxima: Warming up for 2.0000 s
+Benchmarking amqp_heartbeat/proxima: Collecting 20 samples in estimated 2.0000 s (1.0B iterations)
+Benchmarking amqp_heartbeat/proxima: Analyzing
+amqp_heartbeat/proxima  time:   [1.9698 ns 1.9777 ns 1.9845 ns]
+                        thrpt:  [3.7544 GiB/s 3.7673 GiB/s 3.7824 GiB/s]
+                 change:
+                        time:   [+6.2220% +6.9890% +7.7230%] (p = 0.00 < 0.05)
+                        thrpt:  [−7.1693% −6.5325% −5.8575%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+Benchmarking amqp_heartbeat/parity
+Benchmarking amqp_heartbeat/parity: Warming up for 2.0000 s
+Benchmarking amqp_heartbeat/parity: Collecting 20 samples in estimated 2.0000 s (1.3B iterations)
+Benchmarking amqp_heartbeat/parity: Analyzing
+amqp_heartbeat/parity   time:   [1.4877 ns 1.4913 ns 1.4946 ns]
+                        thrpt:  [4.9849 GiB/s 4.9959 GiB/s 5.0082 GiB/s]
+                 change:
+                        time:   [+6.5171% +6.6956% +6.8673%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.4260% −6.2754% −6.1183%]
+                        Performance has regressed.
+
+Benchmarking amqp_real/proxima_method
+Benchmarking amqp_real/proxima_method: Warming up for 2.0000 s
+Benchmarking amqp_real/proxima_method: Collecting 20 samples in estimated 2.0000 s (807M iterations)
+Benchmarking amqp_real/proxima_method: Analyzing
+amqp_real/proxima_method
+                        time:   [2.4759 ns 2.4792 ns 2.4821 ns]
+                        change: [+3.4899% +4.0869% +4.8056%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+Benchmarking amqp_real/amq_protocol_method
+Benchmarking amqp_real/amq_protocol_method: Warming up for 2.0000 s
+Benchmarking amqp_real/amq_protocol_method: Collecting 20 samples in estimated 2.0000 s (115M iterations)
+Benchmarking amqp_real/amq_protocol_method: Analyzing
+amqp_real/amq_protocol_method
+                        time:   [17.439 ns 18.457 ns 20.411 ns]
+                        change: [+6.8270% +11.146% +18.517%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking amqp_real/proxima_body
+Benchmarking amqp_real/proxima_body: Warming up for 2.0000 s
+Benchmarking amqp_real/proxima_body: Collecting 20 samples in estimated 2.0000 s (951M iterations)
+Benchmarking amqp_real/proxima_body: Analyzing
+amqp_real/proxima_body  time:   [2.0913 ns 2.0943 ns 2.0974 ns]
+                        change: [+4.7185% +4.9567% +5.1932%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking amqp_real/amq_protocol_body
+Benchmarking amqp_real/amq_protocol_body: Warming up for 2.0000 s
+Benchmarking amqp_real/amq_protocol_body: Collecting 20 samples in estimated 2.0000 s (38M iterations)
+Benchmarking amqp_real/amq_protocol_body: Analyzing
+amqp_real/amq_protocol_body
+                        time:   [53.009 ns 53.236 ns 53.459 ns]
+                        change: [+2.3012% +3.5417% +4.7296%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking amqp_real/proxima_heartbeat
+Benchmarking amqp_real/proxima_heartbeat: Warming up for 2.0000 s
+Benchmarking amqp_real/proxima_heartbeat: Collecting 20 samples in estimated 2.0000 s (1.0B iterations)
+Benchmarking amqp_real/proxima_heartbeat: Analyzing
+amqp_real/proxima_heartbeat
+                        time:   [2.0404 ns 2.0924 ns 2.1576 ns]
+                        change: [+9.3540% +11.564% +13.733%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 20 measurements (25.00%)
+  2 (10.00%) low severe
+  2 (10.00%) low mild
+  1 (5.00%) high severe
+Benchmarking amqp_real/amq_protocol_heartbeat
+Benchmarking amqp_real/amq_protocol_heartbeat: Warming up for 2.0000 s
+Benchmarking amqp_real/amq_protocol_heartbeat: Collecting 20 samples in estimated 2.0000 s (251M iterations)
+Benchmarking amqp_real/amq_protocol_heartbeat: Analyzing
+amqp_real/amq_protocol_heartbeat
+                        time:   [7.9546 ns 7.9615 ns 7.9680 ns]
+                        change: [+4.2537% +4.4853% +4.7041%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking amqp_workload_classify_method/proxima
+Benchmarking amqp_workload_classify_method/proxima: Warming up for 2.0000 s
+Benchmarking amqp_workload_classify_method/proxima: Collecting 20 samples in estimated 2.0000 s (1.0B iterations)
+Benchmarking amqp_workload_classify_method/proxima: Analyzing
+amqp_workload_classify_method/proxima
+                        time:   [1.9842 ns 1.9876 ns 1.9906 ns]
+                        thrpt:  [5.6144 GiB/s 5.6228 GiB/s 5.6326 GiB/s]
+                 change:
+                        time:   [+1.4660% +1.6795% +1.9004%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.8649% −1.6518% −1.4449%]
+                        Performance has regressed.
+Benchmarking amqp_workload_classify_method/amq_protocol
+Benchmarking amqp_workload_classify_method/amq_protocol: Warming up for 2.0000 s
+Benchmarking amqp_workload_classify_method/amq_protocol: Collecting 20 samples in estimated 2.0000 s (106M iterations)
+Benchmarking amqp_workload_classify_method/amq_protocol: Analyzing
+amqp_workload_classify_method/amq_protocol
+                        time:   [18.997 ns 19.075 ns 19.175 ns]
+                        thrpt:  [596.83 MiB/s 599.94 MiB/s 602.40 MiB/s]
+                 change:
+                        time:   [+1.7976% +2.1581% +2.5120%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.4504% −2.1125% −1.7658%]
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low severe
+  1 (5.00%) low mild
+

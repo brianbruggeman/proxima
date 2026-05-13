@@ -1,0 +1,61 @@
+[package]
+name = "proxima-process"
+description = "Process containment primitives for proxima: capability-typed commands, PTY and FD pipes, libc shim dispatch, and host grounds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+# alloc is always required (the crate uses Vec/String/etc.); declared
+# as a no-op feature so callers can mirror proxima-primitives::pipe's shape.
+alloc = []
+# std enables tier-2 modules (host_grounds, ipc, dispatched, command_pipe,
+# pty_pipe, fork_server, fd_pipe, command_settings, spawn, pty) that
+# require std::io / std::path / std::os::unix / std::thread.
+std = ["alloc"]
+
+[dependencies]
+bon.workspace = true
+bytes.workspace = true
+conflaguration = { workspace = true, features = ["derive", "toml"] }
+futures = { workspace = true, features = ["executor"] }
+libc.workspace = true
+nix = { version = "0.31.3", features = ["poll", "ioctl", "socket", "net", "term", "process", "signal", "fs", "uio"] }
+postcard = { workspace = true, features = ["alloc"] }
+proxima-primitives = { workspace = true, features = ["std"] }
+proxima-protocols = { workspace = true, features = ["process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+shell-words = "1.1.1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+serde_json = { version = "1", features = ["std"] }
+temp-env.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[build-dependencies]
+cc = "1.2.62"
+
+[[test]]
+name = "libc_shim_smoke"
+path = "tests/libc_shim_smoke.rs"
+required-features = ["std"]
+
+[[test]]
+name = "type_system_guarantees"
+path = "tests/type_system_guarantees.rs"
+required-features = ["std"]
+
+[[bench]]
+name = "bench_libc_shim"
+harness = false

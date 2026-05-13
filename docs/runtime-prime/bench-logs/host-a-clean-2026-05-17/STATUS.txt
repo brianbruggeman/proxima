@@ -1,0 +1,29 @@
+starting host-a-clean-2026-05-17 bench sweep at Sun May 17 17:25:13 CDT 2026
+=== bench_inbox ===
+bench_inbox: exit=0
+=== bench_timer ===
+bench_timer: exit=0
+=== bench_reactor ===
+bench_reactor: exit=0
+=== bench_local_executor ===
+bench_local_executor: exit=0
+=== bench_background_pool ===
+bench_background_pool: exit=0
+=== bench_spawn_burst ===
+bench_spawn_burst: exit=0
+=== bench_runtime_swap ===
+bench_runtime_swap: exit=0
+=== bench_fairness_imbalanced ===
+bench_fairness_imbalanced: exit=0
+=== bench_h2_spawn_blocking ===
+bench_h2_spawn_blocking: exit=0
+=== h2_runtime_swap ===
+h2_runtime_swap: exit=0
+=== h2_tail_multi_conn ===
+=== h2_tail_multi_conn ===
+h2_tail_multi_conn: exit=0
+=== h2_tail_scaling ===
+h2_tail_scaling: exit=0
+=== h3_runtime_swap ===
+h3_runtime_swap: exit=101 (pre-existing compile error: unused Result from spawn_factory_on_core)
+=== DONE at Sun May 17 18:08:52 CDT 2026 ===

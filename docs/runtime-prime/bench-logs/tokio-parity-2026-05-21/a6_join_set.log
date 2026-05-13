@@ -1,0 +1,56 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.30s
+     Running benches/bench_task_join_set_parity.rs (/tmp/cargo_target/release/deps/bench_task_join_set_parity-b771337db5e1ef30)
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_raw
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_raw: Warming up for 3.0000 s
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_raw: Collecting 100 samples in estimated 5.1557 s (25k iterations)
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_raw: Analyzing
+task_join_set_newtype_overhead/tokio_join_set_raw
+                        time:   [185.15 µs 186.45 µs 188.18 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) high mild
+  10 (10.00%) high severe
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_via_newtype
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_via_newtype: Warming up for 3.0000 s
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_via_newtype: Collecting 100 samples in estimated 5.7100 s (30k iterations)
+Benchmarking task_join_set_newtype_overhead/tokio_join_set_via_newtype: Analyzing
+task_join_set_newtype_overhead/tokio_join_set_via_newtype
+                        time:   [183.92 µs 184.45 µs 185.03 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_raw
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_raw: Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 10.0s. You may wish to increase target time to 10.9s, enable flat sampling, or reduce sample count to 10.
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_raw: Collecting 20 samples in estimated 10.905 s (210 iterations)
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_raw: Analyzing
+task_join_set_pipeline_drain/tokio_join_set_raw
+                        time:   [51.891 ms 51.917 ms 51.940 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_via_newtype
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_via_newtype: Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 10.0s. You may wish to increase target time to 10.9s, enable flat sampling, or reduce sample count to 10.
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_via_newtype: Collecting 20 samples in estimated 10.894 s (210 iterations)
+Benchmarking task_join_set_pipeline_drain/tokio_join_set_via_newtype: Analyzing
+task_join_set_pipeline_drain/tokio_join_set_via_newtype
+                        time:   [51.936 ms 52.388 ms 53.223 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_raw
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_raw: Warming up for 3.0000 s
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_raw: Collecting 10 samples in estimated 17.802 s (165 iterations)
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_raw: Analyzing
+task_join_set_abort_on_drop/tokio_join_set_raw
+                        time:   [107.80 ms 107.86 ms 107.94 ms]
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_via_newtype
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_via_newtype: Warming up for 3.0000 s
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_via_newtype: Collecting 10 samples in estimated 17.816 s (165 iterations)
+Benchmarking task_join_set_abort_on_drop/tokio_join_set_via_newtype: Analyzing
+task_join_set_abort_on_drop/tokio_join_set_via_newtype
+                        time:   [107.83 ms 107.91 ms 107.98 ms]
+

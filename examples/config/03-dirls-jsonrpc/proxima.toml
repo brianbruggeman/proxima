@@ -1,0 +1,42 @@
+# JSON-RPC dir-ls service.
+#
+# A shell pipeline parses the JSON-RPC envelope, runs `ls`, and emits
+# a JSON-RPC response. proxima frames the request body to stdin and
+# reads one JSON line from stdout per request via process_rpc. The
+# entire JSON-RPC handling lives in jq + busybox tools — no proxima
+# code, no glue.
+#
+# run:
+#   proxima serve --config proxima.toml --mount '/{*path}' --addr 127.0.0.1:8080
+#
+# test:
+#   curl -X POST http://127.0.0.1:8080/ \
+#     -H 'content-type: application/json' \
+#     -d '{"jsonrpc":"2.0","method":"list_dir","params":{"path":"/tmp"},"id":1}'
+#   # -> {"jsonrpc":"2.0","result":["file1","file2",...],"id":1}
+
+name = "dirls"
+
+# the shell loop reads one line of JSON-RPC envelope per iteration,
+# extracts .params.path and .id, runs `ls -1` on that path, and emits
+# the JSON-RPC response as a single compact line. unsafe paths get a
+# JSON-RPC error response.
+[[upstreams]]
+process_rpc = { command = "/bin/sh", args = [
+  "-c",
+  """
+  while IFS= read -r line; do
+    path=$(echo "$line" | jq -r '.params.path // "/"')
+    id=$(echo "$line" | jq -c '.id // 1')
+    if entries=$(ls -1 "$path" 2>/dev/null); then
+      if [ -n "$entries" ]; then
+        echo "$entries" | jq -R . | jq -sc --argjson id "$id" '{jsonrpc:"2.0", result:., id:$id}'
+      else
+        jq -nc --argjson id "$id" '{jsonrpc:"2.0", result:[], id:$id}'
+      fi
+    else
+      jq -nc --argjson id "$id" --arg path "$path" '{jsonrpc:"2.0", error:{code:-32000, message:"path not found", data:$path}, id:$id}'
+    fi
+  done
+  """,
+] }

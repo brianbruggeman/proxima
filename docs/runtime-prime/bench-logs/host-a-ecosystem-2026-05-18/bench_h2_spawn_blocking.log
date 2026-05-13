@@ -1,0 +1,27 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 47.74s
+     Running benches/bench_h2_spawn_blocking.rs (/tmp/cargo_target/release/deps/bench_h2_spawn_blocking-82d3947c4fb514e5)
+Benchmarking h2_spawn_blocking/tokio_per_core
+Benchmarking h2_spawn_blocking/tokio_per_core: Warming up for 2.0000 s
+Benchmarking h2_spawn_blocking/tokio_per_core: Collecting 60 samples in estimated 5.0230 s (24k iterations)
+Benchmarking h2_spawn_blocking/tokio_per_core: Analyzing
+h2_spawn_blocking/tokio_per_core
+                        time:   [210.57 µs 211.51 µs 212.58 µs]
+                        thrpt:  [4.7042 Kelem/s 4.7280 Kelem/s 4.7489 Kelem/s]
+                 change:
+                        time:   [+8.7447% +10.664% +12.435%] (p = 0.00 < 0.05)
+                        thrpt:  [−11.060% −9.6367% −8.0415%]
+                        Performance has regressed.
+Found 2 outliers among 60 measurements (3.33%)
+  2 (3.33%) high mild
+Benchmarking h2_spawn_blocking/prime
+Benchmarking h2_spawn_blocking/prime: Warming up for 2.0000 s
+Benchmarking h2_spawn_blocking/prime: Collecting 60 samples in estimated 5.1532 s (24k iterations)
+Benchmarking h2_spawn_blocking/prime: Analyzing
+h2_spawn_blocking/prime time:   [216.12 µs 216.96 µs 217.87 µs]
+                        thrpt:  [4.5900 Kelem/s 4.6090 Kelem/s 4.6270 Kelem/s]
+Found 7 outliers among 60 measurements (11.67%)
+  1 (1.67%) low severe
+  1 (1.67%) low mild
+  5 (8.33%) high mild
+

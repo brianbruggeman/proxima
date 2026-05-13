@@ -1,0 +1,540 @@
+[package]
+name = "proxima-protocols"
+description = "Sans-IO protocol parser primitives for proxima, one feature-gated module per protocol (DNS, MQTT, AMQP, Kafka, memcached, gRPC framing, protobuf wire, JSON-RPC envelopes, WebSocket frame/handshake, HAProxy PROXY protocol)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dependencies]
+aes = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+arrayvec = { workspace = true, optional = true }
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"], optional = true }
+bumpalo = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+chacha20 = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
+futures = { workspace = true, optional = true, features = ["std"] }
+hashbrown = { version = "0.17.1", optional = true }
+heapless = { workspace = true, optional = true }
+hkdf = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+httparse = { workspace = true, optional = true }
+memchr = { workspace = true, optional = true }
+proxima-codec = { workspace = true, features = ["alloc"], optional = true }
+proxima-core = { workspace = true, features = ["alloc"], optional = true }
+proxima-macros = { workspace = true, optional = true }
+proxima-primitives = { workspace = true, optional = true }
+rand_core = { version = "0.10.1", default-features = false, optional = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"], optional = true }
+serde = { workspace = true, features = ["derive", "alloc"], optional = true }
+serde_json = { workspace = true, features = ["alloc"], optional = true }
+sha1 = { version = "0.10", default-features = false, optional = true }
+sha2 = { workspace = true, optional = true }
+smallvec = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["io-util", "sync"] }
+tracing = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+[features]
+default = []
+std = []
+
+dns = []
+# DnsDatagramCodec impls `proxima_codec::Datagram` for DNS-over-UDP — one
+# packet is one message, matching the trait's atomic-datagram contract.
+dns-codec-trait = ["dns", "dep:proxima-codec"]
+
+# Sans-IO TCP connection state machine (RFC 793 control FSM) — extracted
+# from proxima-tcp. Tier-3: no_std + no-alloc, zero deps.
+tcp = []
+
+mqtt = ["dep:thiserror"]
+
+amqp = ["dep:thiserror"]
+
+kafka = ["dep:thiserror"]
+# KafkaFrameCodec impls `FrameCodec` for the `[i32 BE size][payload]`
+# request/response framing — the plug-and-play-floor sweep's codec
+# encoder pass (sweep/codec-encoders). see
+# `docs/pipe-to-metal/discipline.md`.
+kafka-codec-trait = ["kafka", "dep:proxima-codec"]
+
+memcached = ["dep:thiserror"]
+# MemcachedDatagramCodec impls `proxima_codec::Datagram` for memcached's
+# UDP mode (8-byte request-id/sequence/total header + the text protocol).
+memcached-codec-trait = ["memcached", "dep:proxima-codec"]
+
+# Sans-IO NVMe command-set wire codec for a userspace storage stack —
+# extracted from proxima-nvme-codec. Tier-3: no_std + no-alloc, zero deps.
+nvme = []
+
+# Sans-IO Ethernet/IPv4/TCP wire codec for a userspace network stack —
+# extracted from proxima-inet-codec. Tier-3: no_std + no-alloc, zero deps.
+inet = []
+
+# Sans-IO PostgreSQL wire protocol (v3.x) message codec + session state
+# machine — extracted from proxima-pgwire-codec. Tier-3: no_std +
+# no-alloc; memchr is the only dependency (SIMD NUL scans).
+pgwire_codec = ["dep:memchr"]
+
+# Shared dispatch contract between the libc-interpose shim and
+# proxima-vm — extracted from proxima-process-protocol. Tier-1:
+# no_std + alloc. `markers` re-exports proxima-core's marker traits.
+process = ["dep:serde", "dep:proxima-core"]
+
+grpc_framing = ["dep:thiserror"]
+# C9 of the codec-trait initiative: GrpcFrameCodec impls `FrameCodec`
+# for the gRPC 5-byte length-prefix framing. default-off until C11
+# e2e bench. see `docs/codec-trait/discipline.md`.
+grpc_framing-codec-trait = ["grpc_framing", "dep:proxima-codec"]
+# GrpcFrameCodec composes as the generic `codec_pipe::FrameCodecPipe` —
+# part of the plug-and-play-floor sweep (validate/pipe-transform-sweep).
+grpc_framing-frame-pipe = ["grpc_framing-codec-trait", "codec-pipe", "dep:bytes"]
+
+protobuf_wire = ["dep:thiserror"]
+# C8 of the codec-trait initiative: ProtobufWireCodec impls `WireCodec`
+# for the protobuf wire format. default-off until C11 e2e bench. see
+# `docs/codec-trait/discipline.md`.
+protobuf_wire-codec-trait = ["protobuf_wire", "dep:proxima-codec"]
+
+# The pure envelope types compile under no_std + alloc.
+jsonrpc = ["dep:serde", "dep:serde_json"]
+
+websocket_frame = ["dep:proxima-macros"]
+# C10 of the codec-trait initiative: WebSocketFrameCodec impls
+# `FrameCodec` for RFC 6455 WebSocket frames. default-off until C11
+# e2e bench. see `docs/codec-trait/discipline.md`.
+websocket_frame-codec-trait = ["websocket_frame", "dep:proxima-codec"]
+# WebSocketFrameCodec composes as the generic `codec_pipe::FrameCodecPipe` —
+# part of the plug-and-play-floor sweep (validate/pipe-transform-sweep).
+websocket_frame-frame-pipe = ["websocket_frame-codec-trait", "codec-pipe", "dep:bytes"]
+
+websocket_handshake = ["dep:sha1", "dep:base64"]
+
+# The sans-IO `parse` / `encode` / `ProxyHeader` / `WireVersion` /
+# `ParseError` core is no_std + alloc clean.
+proxy_protocol = ["dep:proxima-core"]
+# `proxy_protocol-std` gates the IO adapters (read_header, Prepended)
+# since they consume `futures::io::AsyncRead` which requires
+# futures/std.
+proxy_protocol-std = ["proxy_protocol", "std", "dep:futures"]
+# Adds a tokio-io variant of the read helpers on top of futures-io.
+proxy_protocol-tokio-runtime = ["proxy_protocol-std", "dep:tokio"]
+# ProxyProtocolCodec impls `FrameCodec` for PROXY protocol v1/v2 headers —
+# the plug-and-play-floor sweep's codec encoder pass (sweep/codec-encoders).
+# see `docs/pipe-to-metal/discipline.md`.
+proxy_protocol-codec-trait = ["proxy_protocol", "dep:proxima-codec"]
+
+# Sans-IO RESP2/RESP3 (Redis Serialization Protocol) codec — extracted
+# from proxima-redis (codec half only; the client stays in the
+# proxima-redis facade crate, mirroring the pgwire/pgwire_codec split).
+# Tier-1: no_std + alloc.
+redis = []
+# RedisFrameCodec impls `FrameCodec` for RESP2/RESP3 — the plug-and-play-
+# floor sweep's spot-check that "could cleanly impl FrameCodec" is the
+# right call for this codec (validate/pipe-transform-sweep).
+redis-codec-trait = ["redis", "dep:proxima-codec"]
+
+# HPACK header compression (RFC 7541) — extracted from proxima-hpack.
+hpack = ["dep:bytes", "dep:thiserror"]
+# tier-3: bare no_std + no alloc — leaf module subset (huffman,
+# integer, static_table). Mirrors proxima-hpack's original split.
+hpack-no-alloc = ["hpack"]
+# HpackCodec impls `StatefulCodec` with per-session HpackEncoder /
+# HpackDecoder vending. The module's own doc-comment says this stays
+# no_std + alloc clean (proxima-codec + proxima-core are the only
+# imports) — `proxima-core/std` was an unneeded leak, not a real
+# requirement; the `alloc` feature (baked into the dep declarations
+# above) is all this needs.
+hpack-codec-trait = ["hpack", "dep:proxima-codec", "dep:proxima-core"]
+
+# Sans-IO HTTP/1.x codec — extracted from proxima-h1-codec.
+http1_codec = ["dep:bumpalo", "dep:httparse", "dep:bytes", "dep:smallvec"]
+# tier-3: bare no_std + no alloc — streaming request-head parser subset.
+http1_codec-no-alloc = ["http1_codec"]
+# H1RequestCodec impls `FrameCodec` for HTTP/1.x request heads.
+http1_codec-codec-trait = ["http1_codec", "dep:proxima-codec"]
+# H1RequestCodec composes as the generic `codec_pipe::FrameCodecPipe` (was a
+# hardcoded H1-only adapter — generalized as part of the plug-and-play-floor
+# sweep, validate/pipe-transform-sweep) plus the `Replayable`/`Idempotent`/
+# `Labeled` capability impls on `OwnedFrame` so a parsed frame can be wrapped
+# by any `proxima-primitives` pipe combinator (e.g. `Retry`).
+http1_codec-frame-pipe = ["http1_codec-codec-trait", "codec-pipe", "dep:proxima-core"]
+
+# Shared `codec_pipe::FrameCodecPipe<C>` / `OnFrame<App>` generic adapter —
+# one `Pipe` impl over ANY `proxima_codec::FrameCodec`, not a per-codec
+# rewrite (guiding-principle 1). Enabled transitively by each codec's own
+# `-frame-pipe` feature (`http1_codec-frame-pipe`, `grpc_framing-frame-pipe`,
+# `websocket_frame-frame-pipe`, ...).
+codec-pipe = ["dep:proxima-primitives", "proxima-primitives/alloc", "dep:proxima-codec", "dep:bytes"]
+
+# Sans-IO HTTP/2 codec — extracted from proxima-h2-codec.
+http2_codec = ["hpack", "dep:smallvec", "dep:thiserror", "dep:bytes", "dep:tracing"]
+# tier-3: bare no_std + no alloc — per-stream state machine subset.
+http2_codec-no-alloc = ["http2_codec", "hpack-no-alloc"]
+# H2FrameCodec impls `FrameCodec` for HTTP/2 wire frames.
+http2_codec-codec-trait = ["http2_codec", "dep:proxima-codec"]
+
+# Sans-IO HTTP/3 + QPACK protocol implementation — extracted from
+# proxima-h3-proto. Depends on this crate's own `quic` module (folded
+# from proxima-quic-proto) rather than an external crate, so what was
+# once a dependency edge is now intra-crate.
+http3_codec = ["hpack", "quic-alloc", "dep:arrayvec", "dep:heapless"]
+# tier-1: alloc-tier state machines (server/client connections, QPACK
+# dynamic table). `http3_codec` already requires `quic-alloc`; this
+# alias is kept for existing consumers that request it explicitly.
+http3_codec-alloc = ["http3_codec"]
+# the quic-proto merge collapsed the separate no-alloc tier forward —
+# http3_codec's own base feature now requires quic-alloc unconditionally
+# (QPACK's dynamic table is inherently alloc-bearing), so this alias no
+# longer exposes a genuinely no_std no-alloc build. Kept for existing
+# consumers that request it explicitly.
+http3_codec-no-alloc = ["http3_codec"]
+# H3FrameCodec impls `FrameCodec` for HTTP/3 wire frames.
+http3_codec-codec-trait = ["http3_codec", "dep:proxima-codec"]
+# proves qpack::decoder's FieldSink/decode_into engine IS a
+# proxima_primitives::pipe::PartSource with no codec rewrite.
+http3_codec-part-source = ["http3_codec", "dep:proxima-primitives", "proxima-primitives/part-source"]
+
+# Sans-IO length-prefixed JSON framing codec (4-byte BE length + JSON
+# payload) — extracted from proxima-framing-json. Tier-1: no_std +
+# alloc.
+json_framing = []
+# JsonFrameCodec impls `FrameCodec` for the length-prefixed JSON framing —
+# the plug-and-play-floor sweep's spot-check that "could cleanly impl
+# FrameCodec" is the right call for this codec (validate/pipe-transform-sweep).
+json_framing-codec-trait = ["json_framing", "dep:proxima-codec"]
+# The std reconnect/retry client (`LengthPrefixedJsonClient` +
+# `server::read_frame`/`write_frame`) over any proxima-primitives::stream
+# `StreamUpstream`. The sans-IO `json_framing` codec above is always
+# available; this pulls in tokio + the stream/time transport seam.
+# `proxima-primitives/std`: the workspace entry sets default-features =
+# false; proxima-primitives folds in the former proxima-stream, whose own
+# workspace entry had no such override (implicit std by default) — this
+# keeps that behaviour.
+json_framing-std = [
+    "json_framing",
+    "std",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+    "dep:proxima-core",
+    "dep:futures",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:tracing",
+]
+# Sans-IO QUIC + TLS 1.3 protocol implementation per RFC 9000 / 9001 /
+# 9002 / 9221 + multipath draft — extracted from proxima-quic-proto.
+# Tier-3: no_std + no-alloc — crypto leaves (AEAD, header protection,
+# HKDF-Expand-Label, initial-secret derivation) + varint / packet
+# header / frame parse / connection_id / transport_parameters.
+quic = [
+    "dep:aes",
+    "dep:aes-gcm",
+    "dep:chacha20",
+    "dep:chacha20poly1305",
+    "dep:hkdf",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:rand_core",
+    "dep:arrayvec",
+    "dep:heapless",
+]
+# tier-1: alloc-tier state machines (connection FSM, stream flow
+# control table, endpoint DCID demux table, RFC 9221 datagram queues).
+quic-alloc = ["quic", "dep:proxima-core", "proxima-core/alloc", "dep:hashbrown"]
+# alias: quic-proto's own `std` feature was purely additive over
+# `alloc` (no separate std-only code path); kept for existing
+# consumers that request it explicitly.
+quic-std = ["quic-alloc"]
+# alias: quic-proto's own `no-alloc` feature never gated anything on
+# its own (the no_std no-alloc floor is just the absence of
+# `quic-alloc`); kept for existing consumers that request it
+# explicitly.
+quic-no-alloc = ["quic"]
+# C6 of the codec-trait initiative: QuicFrameCodec impls `FrameCodec`
+# for QUIC wire frames. requires alloc because FrameCodec::encode_frame
+# extends a Vec<u8>.
+quic-codec-trait = ["quic-alloc", "dep:proxima-codec"]
+# Exposes a scripted MockTlsProvider for integration testing. Off by
+# default; tests flip it on automatically via dev-deps.
+quic-mock-tls = ["quic-alloc"]
+# Exposes the External-AEAD variant on PacketKeyMaterial / HeaderKeyMaterial
+# PLUS the RustlsProvider impl. Std-tier escape hatch for bridging to
+# real-world TLS providers (rustls, ring) that hide raw AEAD bytes
+# behind trait objects.
+quic-tls-rustls = ["quic-alloc", "quic-std", "dep:rustls", "dep:webpki-roots"]
+
+[dev-dependencies]
+amq-protocol = { workspace = true }
+bytes = { workspace = true }
+criterion = { workspace = true, features = ["html_reports"] }
+hickory-proto = { workspace = true }
+kafka-protocol = { workspace = true }
+mqttbytes = { workspace = true }
+proxima = { workspace = true, features = ["test-support"] }
+prost = { workspace = true, features = ["std", "derive"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tungstenite = { workspace = true }
+stats_alloc = "0.1.10"
+rstest.workspace = true
+proptest.workspace = true
+smoltcp = { version = "0.13.1", default-features = false, features = ["std", "socket-tcp", "proto-ipv4", "medium-ip"] }
+pgwire = { version = "0.28.0", default-features = false }
+proxima-net = { workspace = true, features = ["tokio"] }
+redis-protocol.workspace = true
+rand_chacha = { version = "0.10.0", default-features = false }
+aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
+quinn-proto.workspace = true
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"] }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "bench_dns"
+harness = false
+required-features = ["dns"]
+
+[[bench]]
+name = "bench_nvme_codec"
+harness = false
+required-features = ["nvme"]
+
+[[bench]]
+name = "bench_mqtt"
+harness = false
+required-features = ["mqtt"]
+
+[[bench]]
+name = "bench_amqp"
+harness = false
+required-features = ["amqp"]
+
+[[bench]]
+name = "bench_kafka"
+harness = false
+required-features = ["kafka"]
+
+[[bench]]
+name = "bench_memcached"
+harness = false
+required-features = ["memcached"]
+
+[[bench]]
+name = "bench_grpc_framing"
+harness = false
+required-features = ["grpc_framing"]
+
+[[bench]]
+name = "bench_grpc_framing_codec_trait"
+harness = false
+required-features = ["grpc_framing-codec-trait"]
+
+[[bench]]
+name = "bench_protobuf_wire"
+harness = false
+required-features = ["protobuf_wire"]
+
+[[bench]]
+name = "bench_protobuf_wire_codec_trait"
+harness = false
+required-features = ["protobuf_wire-codec-trait"]
+
+[[bench]]
+name = "bench_websocket_frame"
+harness = false
+required-features = ["websocket_frame"]
+
+[[bench]]
+name = "bench_websocket_frame_codec_trait"
+harness = false
+required-features = ["websocket_frame-codec-trait"]
+
+[[bench]]
+name = "hpack_integer"
+harness = false
+required-features = ["hpack"]
+
+[[bench]]
+name = "hpack_huffman"
+harness = false
+required-features = ["hpack"]
+
+[[bench]]
+name = "hpack_static_table"
+harness = false
+required-features = ["hpack"]
+
+[[bench]]
+name = "hpack_block"
+harness = false
+required-features = ["hpack"]
+
+[[bench]]
+name = "hpack_decode_into"
+harness = false
+required-features = ["hpack"]
+
+[[bench]]
+name = "bench_hpack_codec_trait"
+harness = false
+required-features = ["hpack-codec-trait"]
+
+[[bench]]
+name = "bench_http1_codec_trait"
+harness = false
+required-features = ["http1_codec-codec-trait"]
+
+[[bench]]
+name = "bench_http2_codec_trait"
+harness = false
+required-features = ["http2_codec-codec-trait"]
+
+[[bench]]
+name = "bench_http3_codec_trait"
+harness = false
+required-features = ["http3_codec-codec-trait"]
+
+[[bench]]
+name = "bench_c34_decode"
+harness = false
+required-features = ["http3_codec-alloc"]
+
+[[bench]]
+name = "bench_part_source"
+harness = false
+required-features = ["http3_codec-part-source"]
+
+[[test]]
+name = "grease_frame_interop"
+path = "tests/grease_frame_interop.rs"
+required-features = ["http3_codec-alloc"]
+
+[[test]]
+name = "settings_adversarial_payload"
+path = "tests/settings_adversarial_payload.rs"
+required-features = ["http3_codec-alloc"]
+
+[[bench]]
+name = "bench_pgwire_codec"
+harness = false
+required-features = ["pgwire_codec"]
+
+[[example]]
+name = "pgwire_codec_session_walkthrough"
+required-features = ["pgwire_codec"]
+
+[[test]]
+name = "pgwire_codec_integration"
+path = "tests/pgwire_codec_integration.rs"
+required-features = ["pgwire_codec"]
+
+[[test]]
+name = "pgwire_codec_realpg_corpus"
+path = "tests/pgwire_codec_realpg_corpus.rs"
+required-features = ["pgwire_codec"]
+
+[[bench]]
+name = "bench_redis"
+harness = false
+required-features = ["redis"]
+
+[[test]]
+name = "redis_realredis_corpus"
+path = "tests/redis_realredis_corpus.rs"
+required-features = ["redis"]
+
+[[bench]]
+name = "quic_bench_c1_varint"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c2_packet_header"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c3_frame"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c4_transport_parameters"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c5_initial_keys"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c6_aead"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c7_header_protection"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c8_c9_state"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c10_packet_protection"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c11_connection_fsm"
+harness = false
+required-features = ["quic-mock-tls"]
+
+[[bench]]
+name = "quic_bench_c13_ack"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c14_loss"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_c15_newreno"
+harness = false
+required-features = ["quic"]
+
+[[bench]]
+name = "quic_bench_codec_trait"
+harness = false
+required-features = ["quic-codec-trait"]
+
+[[example]]
+name = "quic_connection_state_walkthrough"
+required-features = ["quic-mock-tls"]
+
+[[example]]
+name = "quic_varint_walkthrough"
+required-features = ["quic"]
+
+[[test]]
+name = "quic_rustls_handshake"
+path = "tests/quic_rustls_handshake.rs"
+required-features = ["quic-tls-rustls", "quic-mock-tls"]

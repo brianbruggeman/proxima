@@ -1,0 +1,158 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 32s
+     Running benches/bench_grpc_framing.rs (/tmp/cargo_target/release/deps/bench_grpc_framing-8aae8cf57226e59a)
+Benchmarking grpc_decode/proxima/16
+Benchmarking grpc_decode/proxima/16: Warming up for 2.0000 s
+Benchmarking grpc_decode/proxima/16: Collecting 20 samples in estimated 2.0000 s (2.2B iterations)
+Benchmarking grpc_decode/proxima/16: Analyzing
+grpc_decode/proxima/16  time:   [864.21 ps 864.62 ps 865.08 ps]
+                        thrpt:  [22.608 GiB/s 22.620 GiB/s 22.631 GiB/s]
+                 change:
+                        time:   [−13.011% −7.9650% −3.4830%] (p = 0.05 < 0.05)
+                        thrpt:  [+3.6087% +8.6544% +14.958%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking grpc_decode/parity/16
+Benchmarking grpc_decode/parity/16: Warming up for 2.0000 s
+Benchmarking grpc_decode/parity/16: Collecting 20 samples in estimated 2.0000 s (2.3B iterations)
+Benchmarking grpc_decode/parity/16: Analyzing
+grpc_decode/parity/16   time:   [863.83 ps 870.79 ps 882.64 ps]
+                        thrpt:  [22.158 GiB/s 22.460 GiB/s 22.641 GiB/s]
+                 change:
+                        time:   [−4.8151% −1.1404% +1.4595%] (p = 0.85 > 0.05)
+                        thrpt:  [−1.4385% +1.1535% +5.0586%]
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking grpc_decode/proxima/1024
+Benchmarking grpc_decode/proxima/1024: Warming up for 2.0000 s
+Benchmarking grpc_decode/proxima/1024: Collecting 20 samples in estimated 2.0000 s (2.3B iterations)
+Benchmarking grpc_decode/proxima/1024: Analyzing
+grpc_decode/proxima/1024
+                        time:   [863.61 ps 864.02 ps 864.50 ps]
+                        thrpt:  [1108.5 GiB/s 1109.1 GiB/s 1109.7 GiB/s]
+                 change:
+                        time:   [+1.2714% +2.1436% +2.8733%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.7931% −2.0987% −1.2555%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking grpc_decode/parity/1024
+Benchmarking grpc_decode/parity/1024: Warming up for 2.0000 s
+Benchmarking grpc_decode/parity/1024: Collecting 20 samples in estimated 2.0000 s (2.3B iterations)
+Benchmarking grpc_decode/parity/1024: Analyzing
+grpc_decode/parity/1024 time:   [864.37 ps 864.83 ps 865.43 ps]
+                        thrpt:  [1107.3 GiB/s 1108.1 GiB/s 1108.7 GiB/s]
+                 change:
+                        time:   [−0.0305% +0.6214% +1.1852%] (p = 0.01 < 0.05)
+                        thrpt:  [−1.1713% −0.6176% +0.0305%]
+                        Change within noise threshold.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high mild
+Benchmarking grpc_decode/proxima/65536
+Benchmarking grpc_decode/proxima/65536: Warming up for 2.0000 s
+Benchmarking grpc_decode/proxima/65536: Collecting 20 samples in estimated 2.0000 s (2.3B iterations)
+Benchmarking grpc_decode/proxima/65536: Analyzing
+grpc_decode/proxima/65536
+                        time:   [863.63 ps 863.94 ps 864.25 ps]
+                        thrpt:  [ 70627 GiB/s  70653 GiB/s  70678 GiB/s]
+                 change:
+                        time:   [−4.6439% −1.1883% +0.9322%] (p = 0.98 > 0.05)
+                        thrpt:  [−0.9236% +1.2026% +4.8701%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking grpc_decode/parity/65536
+Benchmarking grpc_decode/parity/65536: Warming up for 2.0000 s
+Benchmarking grpc_decode/parity/65536: Collecting 20 samples in estimated 2.0000 s (2.3B iterations)
+Benchmarking grpc_decode/parity/65536: Analyzing
+grpc_decode/parity/65536
+                        time:   [862.38 ps 863.61 ps 864.70 ps]
+                        thrpt:  [ 70590 GiB/s  70680 GiB/s  70781 GiB/s]
+                 change:
+                        time:   [−0.4651% +0.2984% +0.9547%] (p = 0.33 > 0.05)
+                        thrpt:  [−0.9456% −0.2975% +0.4672%]
+                        No change in performance detected.
+
+Benchmarking grpc_encode/proxima/16
+Benchmarking grpc_encode/proxima/16: Warming up for 2.0000 s
+Benchmarking grpc_encode/proxima/16: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking grpc_encode/proxima/16: Analyzing
+grpc_encode/proxima/16  time:   [30.505 ns 30.555 ns 30.603 ns]
+                        thrpt:  [654.42 MiB/s 655.44 MiB/s 656.52 MiB/s]
+                 change:
+                        time:   [+1.8306% +2.2407% +2.6531%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5846% −2.1916% −1.7977%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking grpc_encode/parity/16
+Benchmarking grpc_encode/parity/16: Warming up for 2.0000 s
+Benchmarking grpc_encode/parity/16: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking grpc_encode/parity/16: Analyzing
+grpc_encode/parity/16   time:   [29.835 ns 29.958 ns 30.052 ns]
+                        thrpt:  [666.43 MiB/s 668.52 MiB/s 671.27 MiB/s]
+                 change:
+                        time:   [+3.0649% +3.6387% +4.1982%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.0290% −3.5109% −2.9738%]
+                        Performance has regressed.
+Benchmarking grpc_encode/proxima/1024
+Benchmarking grpc_encode/proxima/1024: Warming up for 2.0000 s
+Benchmarking grpc_encode/proxima/1024: Collecting 20 samples in estimated 2.0000 s (26M iterations)
+Benchmarking grpc_encode/proxima/1024: Analyzing
+grpc_encode/proxima/1024
+                        time:   [43.167 ns 43.296 ns 43.460 ns]
+                        thrpt:  [22.051 GiB/s 22.134 GiB/s 22.200 GiB/s]
+                 change:
+                        time:   [+2.2321% +2.7177% +3.2648%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.1616% −2.6458% −2.1833%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking grpc_encode/parity/1024
+Benchmarking grpc_encode/parity/1024: Warming up for 2.0000 s
+Benchmarking grpc_encode/parity/1024: Collecting 20 samples in estimated 2.0000 s (26M iterations)
+Benchmarking grpc_encode/parity/1024: Analyzing
+grpc_encode/parity/1024 time:   [42.060 ns 42.136 ns 42.224 ns]
+                        thrpt:  [22.696 GiB/s 22.744 GiB/s 22.785 GiB/s]
+                 change:
+                        time:   [+2.9636% +3.4878% +4.0206%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.8652% −3.3703% −2.8783%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking grpc_encode/proxima/65536
+Benchmarking grpc_encode/proxima/65536: Warming up for 2.0000 s
+Benchmarking grpc_encode/proxima/65536: Collecting 20 samples in estimated 2.0001 s (1.6M iterations)
+Benchmarking grpc_encode/proxima/65536: Analyzing
+grpc_encode/proxima/65536
+                        time:   [1.2126 µs 1.2144 µs 1.2169 µs]
+                        thrpt:  [50.158 GiB/s 50.263 GiB/s 50.338 GiB/s]
+                 change:
+                        time:   [+0.1124% +1.0434% +1.8799%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.8452% −1.0327% −0.1123%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking grpc_encode/parity/65536
+Benchmarking grpc_encode/parity/65536: Warming up for 2.0000 s
+Benchmarking grpc_encode/parity/65536: Collecting 20 samples in estimated 2.0001 s (1.6M iterations)
+Benchmarking grpc_encode/parity/65536: Analyzing
+grpc_encode/parity/65536
+                        time:   [1.2141 µs 1.2197 µs 1.2279 µs]
+                        thrpt:  [49.712 GiB/s 50.046 GiB/s 50.277 GiB/s]
+                 change:
+                        time:   [−5.0783% −2.2331% +0.0628%] (p = 0.41 > 0.05)
+                        thrpt:  [−0.0628% +2.2841% +5.3500%]
+                        No change in performance detected.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

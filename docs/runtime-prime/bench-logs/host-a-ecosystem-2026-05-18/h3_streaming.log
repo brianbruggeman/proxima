@@ -1,0 +1,35 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 01s
+     Running benches/h3_streaming.rs (/tmp/cargo_target/release/deps/h3_streaming-7610cd0a6c87b6a7)
+Benchmarking h3_echo_256B/echo_on_warm_connection
+Benchmarking h3_echo_256B/echo_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_echo_256B/echo_on_warm_connection: Collecting 20 samples in estimated 5.0011 s (58k iterations)
+Benchmarking h3_echo_256B/echo_on_warm_connection: Analyzing
+h3_echo_256B/echo_on_warm_connection
+                        time:   [82.932 µs 83.641 µs 84.844 µs]
+                        thrpt:  [2.8775 MiB/s 2.9189 MiB/s 2.9439 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking h3_echo_64KiB/echo_on_warm_connection
+Benchmarking h3_echo_64KiB/echo_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_echo_64KiB/echo_on_warm_connection: Collecting 20 samples in estimated 5.0723 s (7770 iterations)
+Benchmarking h3_echo_64KiB/echo_on_warm_connection: Analyzing
+h3_echo_64KiB/echo_on_warm_connection
+                        time:   [656.85 µs 668.15 µs 681.23 µs]
+                        thrpt:  [91.746 MiB/s 93.541 MiB/s 95.150 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking h3_echo_16x4KiB/echo_on_warm_connection
+Benchmarking h3_echo_16x4KiB/echo_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_echo_16x4KiB/echo_on_warm_connection: Collecting 20 samples in estimated 5.0355 s (7770 iterations)
+Benchmarking h3_echo_16x4KiB/echo_on_warm_connection: Analyzing
+h3_echo_16x4KiB/echo_on_warm_connection
+                        time:   [645.66 µs 657.91 µs 674.66 µs]
+                        thrpt:  [92.639 MiB/s 94.997 MiB/s 96.800 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high severe
+

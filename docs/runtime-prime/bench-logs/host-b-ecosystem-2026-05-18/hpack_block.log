@@ -1,0 +1,133 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.98s
+     Running benches/hpack_block.rs (proxima/target/release/deps/hpack_block-449728478882e8e1)
+Benchmarking hpack_block_encode/request_minimal
+Benchmarking hpack_block_encode/request_minimal: Warming up for 2.0000 s
+Benchmarking hpack_block_encode/request_minimal: Collecting 20 samples in estimated 2.0000 s (11M iterations)
+Benchmarking hpack_block_encode/request_minimal: Analyzing
+hpack_block_encode/request_minimal
+                        time:   [175.68 ns 175.86 ns 176.07 ns]
+                        thrpt:  [22.718 Melem/s 22.745 Melem/s 22.768 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking hpack_block_encode/request_browser
+Benchmarking hpack_block_encode/request_browser: Warming up for 2.0000 s
+Benchmarking hpack_block_encode/request_browser: Collecting 20 samples in estimated 2.0003 s (1.2M iterations)
+Benchmarking hpack_block_encode/request_browser: Analyzing
+hpack_block_encode/request_browser
+                        time:   [1.7250 µs 1.7270 µs 1.7292 µs]
+                        thrpt:  [5.2047 Melem/s 5.2113 Melem/s 5.2175 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_block_encode/request_api
+Benchmarking hpack_block_encode/request_api: Warming up for 2.0000 s
+Benchmarking hpack_block_encode/request_api: Collecting 20 samples in estimated 2.0001 s (2.3M iterations)
+Benchmarking hpack_block_encode/request_api: Analyzing
+hpack_block_encode/request_api
+                        time:   [857.89 ns 858.94 ns 860.24 ns]
+                        thrpt:  [9.2997 Melem/s 9.3138 Melem/s 9.3252 Melem/s]
+Benchmarking hpack_block_encode/response_minimal
+Benchmarking hpack_block_encode/response_minimal: Warming up for 2.0000 s
+Benchmarking hpack_block_encode/response_minimal: Collecting 20 samples in estimated 2.0000 s (8.5M iterations)
+Benchmarking hpack_block_encode/response_minimal: Analyzing
+hpack_block_encode/response_minimal
+                        time:   [232.68 ns 232.80 ns 232.95 ns]
+                        thrpt:  [12.878 Melem/s 12.886 Melem/s 12.893 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking hpack_block_encode/response_cors
+Benchmarking hpack_block_encode/response_cors: Warming up for 2.0000 s
+Benchmarking hpack_block_encode/response_cors: Collecting 20 samples in estimated 2.0000 s (3.5M iterations)
+Benchmarking hpack_block_encode/response_cors: Analyzing
+hpack_block_encode/response_cors
+                        time:   [569.49 ns 570.05 ns 570.52 ns]
+                        thrpt:  [8.7639 Melem/s 8.7712 Melem/s 8.7797 Melem/s]
+
+Benchmarking hpack_block_decode/request_minimal
+Benchmarking hpack_block_decode/request_minimal: Warming up for 2.0000 s
+Benchmarking hpack_block_decode/request_minimal: Collecting 20 samples in estimated 2.0000 s (14M iterations)
+Benchmarking hpack_block_decode/request_minimal: Analyzing
+hpack_block_decode/request_minimal
+                        time:   [144.77 ns 145.04 ns 145.24 ns]
+                        thrpt:  [27.541 Melem/s 27.579 Melem/s 27.630 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking hpack_block_decode/request_browser
+Benchmarking hpack_block_decode/request_browser: Warming up for 2.0000 s
+Benchmarking hpack_block_decode/request_browser: Collecting 20 samples in estimated 2.0003 s (1.1M iterations)
+Benchmarking hpack_block_decode/request_browser: Analyzing
+hpack_block_decode/request_browser
+                        time:   [1.7480 µs 1.7523 µs 1.7560 µs]
+                        thrpt:  [5.1253 Melem/s 5.1362 Melem/s 5.1489 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_block_decode/request_api
+Benchmarking hpack_block_decode/request_api: Warming up for 2.0000 s
+Benchmarking hpack_block_decode/request_api: Collecting 20 samples in estimated 2.0000 s (1.8M iterations)
+Benchmarking hpack_block_decode/request_api: Analyzing
+hpack_block_decode/request_api
+                        time:   [1.1032 µs 1.1055 µs 1.1079 µs]
+                        thrpt:  [7.2208 Melem/s 7.2368 Melem/s 7.2514 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking hpack_block_decode/response_minimal
+Benchmarking hpack_block_decode/response_minimal: Warming up for 2.0000 s
+Benchmarking hpack_block_decode/response_minimal: Collecting 20 samples in estimated 2.0000 s (8.2M iterations)
+Benchmarking hpack_block_decode/response_minimal: Analyzing
+hpack_block_decode/response_minimal
+                        time:   [241.97 ns 242.46 ns 242.91 ns]
+                        thrpt:  [12.350 Melem/s 12.373 Melem/s 12.398 Melem/s]
+Benchmarking hpack_block_decode/response_cors
+Benchmarking hpack_block_decode/response_cors: Warming up for 2.0000 s
+Benchmarking hpack_block_decode/response_cors: Collecting 20 samples in estimated 2.0001 s (3.3M iterations)
+Benchmarking hpack_block_decode/response_cors: Analyzing
+hpack_block_decode/response_cors
+                        time:   [599.24 ns 601.35 ns 603.08 ns]
+                        thrpt:  [8.2907 Melem/s 8.3146 Melem/s 8.3439 Melem/s]
+
+Benchmarking hpack_block_roundtrip/request_minimal
+Benchmarking hpack_block_roundtrip/request_minimal: Warming up for 2.0000 s
+Benchmarking hpack_block_roundtrip/request_minimal: Collecting 20 samples in estimated 2.0000 s (5.8M iterations)
+Benchmarking hpack_block_roundtrip/request_minimal: Analyzing
+hpack_block_roundtrip/request_minimal
+                        time:   [346.00 ns 346.33 ns 346.74 ns]
+                        thrpt:  [11.536 Melem/s 11.550 Melem/s 11.561 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_block_roundtrip/request_browser
+Benchmarking hpack_block_roundtrip/request_browser: Warming up for 2.0000 s
+Benchmarking hpack_block_roundtrip/request_browser: Collecting 20 samples in estimated 2.0007 s (554k iterations)
+Benchmarking hpack_block_roundtrip/request_browser: Analyzing
+hpack_block_roundtrip/request_browser
+                        time:   [3.6027 µs 3.6053 µs 3.6088 µs]
+                        thrpt:  [2.4939 Melem/s 2.4963 Melem/s 2.4981 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking hpack_block_roundtrip/request_api
+Benchmarking hpack_block_roundtrip/request_api: Warming up for 2.0000 s
+Benchmarking hpack_block_roundtrip/request_api: Collecting 20 samples in estimated 2.0003 s (1.1M iterations)
+Benchmarking hpack_block_roundtrip/request_api: Analyzing
+hpack_block_roundtrip/request_api
+                        time:   [1.7731 µs 1.7748 µs 1.7763 µs]
+                        thrpt:  [4.5038 Melem/s 4.5077 Melem/s 4.5119 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking hpack_block_roundtrip/response_minimal
+Benchmarking hpack_block_roundtrip/response_minimal: Warming up for 2.0000 s
+Benchmarking hpack_block_roundtrip/response_minimal: Collecting 20 samples in estimated 2.0000 s (3.9M iterations)
+Benchmarking hpack_block_roundtrip/response_minimal: Analyzing
+hpack_block_roundtrip/response_minimal
+                        time:   [517.53 ns 517.89 ns 518.23 ns]
+                        thrpt:  [5.7890 Melem/s 5.7928 Melem/s 5.7968 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  2 (10.00%) high mild
+Benchmarking hpack_block_roundtrip/response_cors
+Benchmarking hpack_block_roundtrip/response_cors: Warming up for 2.0000 s
+Benchmarking hpack_block_roundtrip/response_cors: Collecting 20 samples in estimated 2.0001 s (1.6M iterations)
+Benchmarking hpack_block_roundtrip/response_cors: Analyzing
+hpack_block_roundtrip/response_cors
+                        time:   [1.2730 µs 1.2740 µs 1.2751 µs]
+                        thrpt:  [3.9214 Melem/s 3.9245 Melem/s 3.9278 Melem/s]
+

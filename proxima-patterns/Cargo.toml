@@ -1,0 +1,148 @@
+[package]
+name = "proxima-patterns"
+description = "Pattern-set primitives for proxima: pure pipe-primitive wiring (source/sink/transform/filter/gate/fan-in/out/observe/series) plus a domain data type, one feature per pattern — alert (alerting/guidance, formerly proxima-notify), balancer (load-balancing selection, formerly proxima-balancer), middleware (Pipe-graph HTTP-leaf auth/write-back, formerly proxima-middleware), control_plane (introspect/manage running Pipes, formerly proxima-control-plane), kv (cache-entry primitives + write-back rules, formerly proxima-kv)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[features]
+default = ["std", "alert", "balancer", "middleware", "control_plane", "kv"]
+
+# ── shared tier axis (workspace-standard alloc/std vocabulary) ──────────────
+alloc = ["proxima-core/alloc", "proxima-primitives/alloc", "serde/alloc"]
+std = ["alloc", "proxima-core/std", "proxima-primitives/std", "bytes/std", "serde/std"]
+
+# ── alert (was proxima-notify; renamed to resolve the collision with the
+# proxima_primitives::sync::Notify primitive) ───────────────────────────────
+# Tier policy mirrors the former proxima-notify crate's own tiers:
+#   tier-3 (--no-default-features --features alert,proto): proto types only,
+#     #![no_std], no per-call alloc, heapless containers.
+#   tier-1 (--features alert,proto,alloc-shim): proto types with alloc shims
+#     for the json-shape mapping helper (used by parity tests).
+#   tier-2 (--features alert,std + per-Pipe features): the default — full
+#     std + the std-facade Pipe impls behind their own per-component flags.
+alert = ["proto"]
+
+# Proto layer (event types + postcard codec + markers + sized constants).
+proto = ["dep:heapless", "dep:postcard", "dep:ulid"]
+
+# Tier-1 / Tier-2 base. pipes.rs (std-gated) unconditionally uses the event
+# types (AlertEvent/GuidanceAnswer/GuidanceQuestion).
+alloc-shim = ["alloc", "postcard?/alloc", "dep:serde_json"]
+
+# json-shape: render an AlertEvent into the documented JSON shape per
+# docs/proxima-notify/ALERT_EVENT_SCHEMA.md. Alloc-bound. Used by the
+# parity tests and by std facade Pipes (e.g. stdout-alert) when
+# `OutputFormat::Json` is selected.
+json-shape = ["alloc-shim"]
+
+# C3: ScheduledTriggerPipe (interval-driven producer Pipe).
+scheduled-trigger = ["alert", "std", "proto", "dep:proxima-runtime"]
+
+# C4: StdoutAlertPipe (terminal sink, formats AlertEvent to stdout).
+stdout-alert = ["alert", "std", "proto", "json-shape"]
+
+# C5: StdioGuidancePipe (duplex sync stdin/stdout for guidance round-trip).
+stdio-guidance = ["alert", "std", "proto", "dep:tokio"]
+
+# ── balancer (was proxima-balancer) ──────────────────────────────────────────
+# `std` gates the entire balancer surface (std::time::Instant metric windows +
+# std-bound proxima-primitives::transport tee replay); balancer never had an
+# alloc-only public surface, so selecting the pattern always pulls std,
+# matching the former crate's own `default = ["std"]`. proxima-primitives is
+# an always-on dependency post-merge (folds in the former proxima-transport),
+# so "std" alone (which forwards proxima-primitives/std above) is enough to
+# light up the transport tee — no separate `dep:` toggle needed.
+balancer = ["std"]
+
+# ── middleware (was proxima-middleware) ──────────────────────────────────────
+# Gates the HTTP leaf surface (auth/client_auth/context_inject/write_back).
+# Generic policy (retry/filter/delay/transform/validate/rate_limit/chaos/mutate)
+# lives in proxima-primitives::pipe; this module re-exports it for backward
+# compat. `proxima-kv` folded in as `kv`, so middleware's former
+# `dep:proxima-kv` becomes the intra-crate `kv` feature. proxima-primitives
+# (folds in the former proxima-sync + proxima-transport) is always-on
+# post-merge, so "std" alone covers what `dep:proxima-sync`/
+# `dep:proxima-transport` used to toggle separately.
+middleware = [
+    "std",
+    "kv",
+    "dep:proxima-auth",
+    "dep:serde_json",
+    "dep:bon",
+    "dep:conflaguration",
+    "dep:base64",
+    "dep:zeroize",
+    "dep:fastrand",
+    "dep:thiserror",
+    "dep:tracing",
+]
+runtime-prime-full = ["middleware", "proxima-primitives/runtime-prime-full"]
+
+# ── control_plane (was proxima-control-plane) ────────────────────────────────
+# `alloc` gives the ControlPlane trait + ControlPlanePipe (routing wiring).
+# StaticControlPlane leans on proxima-core's `Live<T>` (arc-swap), which has
+# no no_std path (arc-swap's no_std tier needs an unstable nightly feature —
+# see proxima-config/Cargo.toml (schema module) for the same call) so it stays behind `std`.
+control_plane = ["alloc", "dep:serde_json"]
+
+# ── kv (was proxima-kv) ───────────────────────────────────────────────────────
+kv = ["alloc", "dep:xxhash-rust", "dep:portable-atomic"]
+
+[dependencies]
+proxima-core = { workspace = true }
+proxima-primitives = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+futures = { workspace = true }
+
+# alert (proxima-notify) deps — proto layer tier-3-capable, facade optional.
+heapless = { workspace = true, features = ["serde"], optional = true }
+postcard = { workspace = true, optional = true }
+ulid = { workspace = true, features = ["serde"], optional = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"], optional = true }
+serde_json = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, features = ["std"], optional = true }
+
+# middleware deps.
+proxima-auth = { workspace = true, optional = true, features = ["std", "signing", "digest", "negotiate"] }
+base64 = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+fastrand = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"], optional = true }
+
+# kv deps.
+xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
+# 64-bit atomics on targets without native u64 atomics (thumbv7m et al); zero-cost native lowering on std/64-bit.
+portable-atomic = { workspace = true, default-features = false, optional = true }
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+rstest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time", "sync"] }
+tempfile = { workspace = true }
+proxima-telemetry = { workspace = true }
+proxima-core = { workspace = true, features = ["time-driver-mock"] }
+
+[[test]]
+name = "event_roundtrip"
+path = "tests/event_roundtrip.rs"
+required-features = ["alert", "proto"]
+
+[[example]]
+name = "alert_walkthrough"
+required-features = ["alert", "std", "proto", "json-shape"]
+
+[lints]
+workspace = true

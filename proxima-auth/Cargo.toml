@@ -1,0 +1,34 @@
+[package]
+name = "proxima-auth"
+description = "Sans-IO authentication FSM cores (token lifecycle, handshake, request-signing) for the proxima client/server auth axis — FSM in the middle, Pipe at the edges."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"], optional = true }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"], optional = true }
+hmac = { version = "0.12", default-features = false, optional = true }
+md-5 = { version = "0.10", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
+subtle = { version = "2.6.1", default-features = false, optional = true }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+# request-signing (auth form #5): AWS SigV4 / HMAC — HMAC-SHA256 + lowercase hex.
+signing = ["dep:hmac", "dep:sha2", "dep:hex"]
+# challenge/response handshake (auth form #4): HTTP Digest (RFC 7616) — MD5/SHA-256
+# H + lowercase hex; constant-time response compare via subtle.
+digest = ["dep:md-5", "dep:sha2", "dep:hex", "dep:subtle"]
+# SPNEGO / Negotiate (RFC 4559/4178): base64 HTTP transport + negotiate-loop FSM.
+negotiate = ["dep:base64"]
+
+[lints]
+workspace = true

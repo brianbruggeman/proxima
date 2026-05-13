@@ -1,0 +1,370 @@
+[package]
+name = "proxima-telemetry"
+description = "Substrate-native telemetry for proxima: traces, metrics, logs, events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dependencies]
+# direct dep for `proxima_core::arch` (per-chipset CPU hints, T0-safe); also
+# pulled transitively via proxima-primitives::pipe at the alloc tier.
+proxima-core = { workspace = true, default-features = false }
+proxima-primitives = { workspace = true, optional = true }
+# test-only: gated behind the `loom` feature for tests/loom_ring.rs.
+loom = { workspace = true, optional = true }
+arc-swap = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+bytes = { workspace = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+dashmap = { workspace = true, optional = true }
+fastrand = { workspace = true, optional = true }
+rustc-hash = { workspace = true, features = ["std"], optional = true }
+futures = { workspace = true, features = ["executor"], optional = true }
+hdrhistogram = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+smallvec = { workspace = true }
+thread_local = { workspace = true, optional = true }
+tracing = { workspace = true }
+postcard = { workspace = true, features = ["alloc"], optional = true }
+proxima-macros = { workspace = true, optional = true }
+prost = { workspace = true, features = ["std", "derive"], optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+atomic-waker = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true, optional = true }
+pin-project-lite.workspace = true
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+rstest = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+temp-env = "0.3.6"
+# incumbent-only: the ring/tee benches measure proxima against tokio::sync
+# {mpsc,broadcast}. NOT a runtime dep — the library drainer is std::thread and
+# tests are #[proxima::test]; no tokio::main/test macros here.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync"] }
+opentelemetry = { workspace = true, features = ["logs", "metrics"] }
+opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "trace", "logs", "metrics"] }
+prometheus = { workspace = true }
+metrics = { workspace = true }
+slog = { workspace = true }
+log = { workspace = true }
+faster-hex = { workspace = true }
+hex = { workspace = true }
+prost = { workspace = true, features = ["std", "derive"] }
+criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
+proxima-macros = { workspace = true }
+crossbeam-queue = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+flume = { workspace = true }
+rand.workspace = true
+
+[features]
+default = ["std"]
+# tier floor (no_std + no_alloc): sized + id + error + trace::{status,kind,clock}.
+# Anything touching `Tag` (which carries a `Bytes` variant) needs `alloc`.
+#
+# `alloc` (no_std + alloc): the data + primitive layer — tag, trace records,
+# log, metric instruments, sampler, ring, level, clock, propagation (the W3C
+# traceparent/baggage codec over `proxima_primitives::pipe::HeaderList`). No OS.
+# NOTE: proxima-primitives::pipe's alloc tier currently still pulls parking_lot
+# (via proxima-core/transport), so this tier builds on a hosted target but not
+# yet bare-metal no_std. Pushing proxima-primitives::pipe parking_lot-free is
+# the next domino for a bare-metal T1. `id` (TraceId/SpanId) needs neither
+# alloc nor proxima-primitives::pipe — it lives at the tier floor below, see
+# `pub mod id` in lib.rs.
+alloc = ["dep:fastrand", "dep:proxima-primitives", "proxima-primitives/alloc"]
+# emit: the typed hierarchical emit-control / filtering surface. Default-off
+# (disciplined-component): opt in with `--features emit`. Implies alloc (the
+# Coord/resolution data); the config + pipe parts additionally need std.
+emit = ["alloc"]
+# `std`: the runtime — legacy + recorder (per-core TLS + drainer thread) +
+# config loading + native/otlp exporters + pipes. Pulls dashmap + parking_lot +
+# hdrhistogram + std::time + thread_local. Implies `alloc`.
+std = [
+    "alloc",
+    "proxima-core/std",
+    "proxima-core/live",
+    "proxima-primitives/std",
+    "dep:arc-swap",
+    "dep:bon",
+    "dep:conflaguration",
+    "dep:dashmap",
+    "dep:rustc-hash",
+    "dep:futures",
+    "dep:hdrhistogram",
+    "dep:parking_lot",
+    "dep:serde_json",
+    "dep:thread_local",
+    "dep:postcard",
+    # log_buffer module (folded in from the former proxima-log-buffer
+    # satellite crate) — arc-swap/dashmap already above; adds Notify +
+    # the retained-line ring queue.
+    "dep:crossbeam-queue",
+]
+histogram    = ["std"]
+# instrument-metrics: the unified-instrument seam — a span's close also records its
+# duration into the per-name histogram, so one #[span]/#[instrument] yields a trace
+# span AND a duration metric (deletes hand-rolled Histogram+Instant timers). Compile-
+# time default-off firewall (disciplined-component gate 1); implies the histogram
+# instrument. See docs/unified-instrument/discipline.md.
+instrument-metrics = ["histogram"]
+# deferred-metric-fold: move the span-duration histogram fold OFF the emit hot
+# path. Emit pushes a 24-byte POD observation to a per-core lock-free ring
+# (mutex-free, zero-alloc); the by-name→histogram resolution + fold run at drain,
+# off the producing thread. Removes the shared-registry-Mutex contention the
+# inline fold shows under threads. Compile-time default-off (gate 1). Trade-off:
+# drop-on-full metric loss under burst; eventually-consistent counts (fold lags
+# emit by one drain). See docs/deferred-metric-fold/discipline.md.
+deferred-metric-fold = ["instrument-metrics", "lossless-backpressure"]
+otlp-http    = ["std", "dep:prost"]
+otlp-grpc    = ["otlp-http"]
+macros       = ["dep:proxima-macros"]
+tee-generic  = ["std"]
+tracing-init = ["std", "dep:tracing-subscriber"]
+# loom: swap the ring's atomics + UnsafeCell to loom's so tests/loom_ring.rs can
+# model-check the MPMC ring on stable (replaces the nightly tsan job). Test-only;
+# loom pulls std. Invoke: cargo test -p proxima-telemetry --features loom \
+#   --test loom_ring --release  (per-crate feature, NOT RUSTFLAGS=--cfg loom).
+loom = ["dep:loom", "proxima-core/loom"]
+# gate the elastic producer-assist (lossless Block overflow path). without this
+# feature, OverflowPolicy::Block degrades to Drop at runtime — no assist loop,
+# no SlotGate, no park/wake machinery. with it, a full ring causes the producer
+# to drain+export a batch itself (sync terminal) or park for the pump (async
+# terminal), guaranteeing zero record loss under burst. default-off so embedders
+# that never need lossless overflow don't pay for the condvar/park infrastructure.
+lossless-backpressure = ["std", "dep:atomic-waker", "proxima-core/park"]
+# error-elevation: tail-sampled trace buffering. A configurable floor level is
+# always emitted; for a sampled fraction of traces, an error trigger replays that
+# trace's full tree down to a configurable elevated level to a separate exporter.
+# Default-off (disciplined-component gate 1): a build without it is byte-identical
+# to today — the widened current-span verbose bit, the macro admit branch, and the
+# ElevationSink/FloorFilter pipes do not exist. Implies std (DashMap per-trace map,
+# the pipe chain, config). See docs/error-elevation/discipline.md.
+elevation = ["std"]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "bench_id"
+harness = false
+
+[[bench]]
+name = "bench_propagation"
+harness = false
+required-features = ["alloc"]
+
+[[bench]]
+name = "bench_emit_coord"
+harness = false
+required-features = ["emit"]
+
+[[bench]]
+name = "bench_emit_vs_tracing"
+harness = false
+required-features = ["emit"]
+
+[[bench]]
+name = "bench_level"
+harness = false
+
+[[bench]]
+name = "bench_tag"
+harness = false
+
+[[bench]]
+name = "bench_trace"
+harness = false
+
+[[bench]]
+name = "bench_counter"
+harness = false
+
+[[bench]]
+name = "bench_histogram"
+harness = false
+required-features = ["histogram"]
+
+[[bench]]
+name = "bench_log"
+harness = false
+
+[[bench]]
+name = "bench_recorder"
+harness = false
+
+[[bench]]
+name = "bench_instrument"
+harness = false
+
+[[bench]]
+name = "bench_otlp_http"
+harness = false
+required-features = ["otlp-http"]
+
+[[bench]]
+name = "bench_trace_native_vs_otlp"
+harness = false
+required-features = ["otlp-http"]
+
+[[bench]]
+name = "bench_otlp_grpc"
+harness = false
+required-features = ["otlp-grpc"]
+
+[[bench]]
+name = "bench_native"
+harness = false
+
+[[bench]]
+name = "bench_config"
+harness = false
+
+[[example]]
+name = "instrument_effective"
+required-features = ["instrument-metrics", "macros"]
+
+[[example]]
+name = "bench_emit_contention"
+required-features = ["instrument-metrics"]
+
+[[example]]
+name = "elevation_walkthrough"
+required-features = ["elevation"]
+
+[[bench]]
+name = "bench_macros"
+harness = false
+required-features = ["macros"]
+
+[[bench]]
+name = "bench_prime_hooks"
+harness = false
+
+[[bench]]
+name = "bench_tee_generic"
+harness = false
+required-features = ["tee-generic"]
+
+[[bench]]
+name = "bench_request_context"
+harness = false
+
+[[bench]]
+name = "bench_body_envelope"
+harness = false
+
+[[bench]]
+name = "bench_pipe_dispatch"
+harness = false
+
+[[bench]]
+name = "bench_tracing_bridge"
+harness = false
+required-features = ["tracing-init"]
+
+[[bench]]
+name = "bench_telemetry_vs_otel_sdk"
+harness = false
+
+[[bench]]
+name = "bench_overflow_vs_otel"
+harness = false
+
+[[bench]]
+name = "bench_concurrent_emit_vs_otel"
+harness = false
+
+[[bench]]
+name = "bench_trace_load"
+harness = false
+
+[[bench]]
+name = "bench_terminal_sinks"
+harness = false
+
+[[bench]]
+name = "bench_sink_flush"
+harness = false
+
+[[bench]]
+name = "bench_filter_view_pipes"
+harness = false
+
+[[bench]]
+name = "bench_record_alloc"
+harness = false
+
+[[bench]]
+name = "bench_record_sharing"
+harness = false
+
+[[bench]]
+name = "bench_sampler_pre_alloc_gate"
+harness = false
+
+[[bench]]
+name = "bench_shared_ring_tee"
+harness = false
+required-features = ["tee-generic"]
+
+[[bench]]
+name = "bench_sum_by_pipe"
+harness = false
+
+[[bench]]
+name = "bench_e2e_composition"
+harness = false
+required-features = ["histogram"]
+
+[[bench]]
+name = "bench_carry_fanout"
+harness = false
+
+[[bench]]
+name = "bench_drain_decompose"
+harness = false
+
+[[bench]]
+name = "bench_emit_decompose"
+harness = false
+
+# report-based load/soak/contention harnesses (custom main, not criterion):
+# print a report; run individually, e.g. `cargo bench --bench bench_trace_async_sweep`.
+[[bench]]
+name = "bench_trace_soak"
+harness = false
+
+[[bench]]
+name = "bench_trace_crossover"
+harness = false
+
+[[bench]]
+name = "bench_trace_backpressure"
+harness = false
+
+[[bench]]
+name = "bench_lossless_producer_assist"
+harness = false
+required-features = ["lossless-backpressure"]
+
+[[bench]]
+name = "bench_trace_async_sweep"
+harness = false
+
+[[bench]]
+name = "bench_elevation"
+harness = false
+required-features = ["elevation"]

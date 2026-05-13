@@ -1,0 +1,18 @@
+=== Running h2_runtime_swap with FEATS=runtime-tokio,runtime-prime-full,tcp,http1,http2 ===
+h2_runtime_swap exit=0
+=== Running bench_h2_spawn_blocking with FEATS=runtime-tokio,runtime-prime-full,tcp,http1,http2 ===
+bench_h2_spawn_blocking exit=0
+=== Running bench_spawn_burst with FEATS=runtime-tokio,runtime-prime-full,tcp,http1,http2 ===
+bench_spawn_burst exit=0
+=== Running bench_inbox with FEATS=runtime-tokio,runtime-prime-full,runtime-prime-inbox-alloc,tcp,http1,http2 ===
+bench_inbox exit=0
+=== Running bench_background_pool with FEATS=runtime-tokio,runtime-prime-full,runtime-prime-bgpool,rayon,tcp,http1,http2 ===
+bench_background_pool exit=0
+=== Running bench_local_executor with FEATS=runtime-tokio,runtime-prime-full,runtime-prime-executor,tcp,http1,http2 ===
+bench_local_executor exit=0
+=== Running bench_timer with FEATS=runtime-tokio,runtime-prime-full,runtime-prime-timer,tcp,http1,http2 ===
+bench_timer exit=0
+=== Running bench_reactor with FEATS=runtime-tokio,runtime-prime-full,runtime-prime-reactor,tcp,http1,http2 ===
+bench_reactor exit=0
+=== Running bench_fairness_imbalanced with FEATS=runtime-tokio,runtime-prime-full,tcp,http1,http2 ===
+bench_fairness_imbalanced exit=0

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/brianbruggeman/proxima/blob/main/spec/recording-http.schema.json",
+  "title": "proxima.recording http protocol subschema",
+  "description": "Concrete shape of the request and response objects when `protocol = \"http\"` in a recording-jsonl.schema event sequence.",
+  "$defs": {
+    "HttpRequest": {
+      "type": "object",
+      "required": ["method", "path"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "CONNECT"]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Lowercase header names; multi-value headers join with `, ` in the original-order canonical form."
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "HttpResponse": {
+      "type": "object",
+      "required": ["status", "headers"],
+      "properties": {
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              { "type": "string" },
+              { "type": "string" }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "description": "Header order matters for replay byte-equivalence; preserved as a list of pairs."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

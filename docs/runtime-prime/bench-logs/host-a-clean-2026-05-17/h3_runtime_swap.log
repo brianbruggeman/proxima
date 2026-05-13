@@ -1,0 +1,22 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+error: unused `Result` that must be used
+   --> rust/benches/h3_runtime_swap.rs:133:5
+    |
+133 | /     runtime.spawn_factory_on_core(
+134 | |         CoreId(0),
+135 | |         Box::new(move || {
+136 | |             Box::pin(async move {
+...   |
+173 | |         }),
+174 | |     );
+    | |_____^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `-D unused-must-use` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_must_use)]`
+help: use `let _ = ...` to ignore the resulting value
+    |
+133 |     let _ = runtime.spawn_factory_on_core(
+    |     +++++++
+
+error: could not compile `proxima` (bench "h3_runtime_swap") due to 1 previous error

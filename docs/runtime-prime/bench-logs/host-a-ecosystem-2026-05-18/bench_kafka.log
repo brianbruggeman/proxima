@@ -1,0 +1,79 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 31s
+     Running benches/bench_kafka.rs (/tmp/cargo_target/release/deps/bench_kafka-b2762eaf5acf2107)
+Benchmarking kafka_peek_size/proxima
+Benchmarking kafka_peek_size/proxima: Warming up for 2.0000 s
+Benchmarking kafka_peek_size/proxima: Collecting 20 samples in estimated 2.0000 s (4.0B iterations)
+Benchmarking kafka_peek_size/proxima: Analyzing
+kafka_peek_size/proxima time:   [503.79 ps 504.11 ps 504.56 ps]
+                        thrpt:  [7.3833 GiB/s 7.3898 GiB/s 7.3946 GiB/s]
+                 change:
+                        time:   [+4.4898% +4.7693% +5.0571%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.8137% −4.5522% −4.2969%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking kafka_peek_size/parity
+Benchmarking kafka_peek_size/parity: Warming up for 2.0000 s
+Benchmarking kafka_peek_size/parity: Collecting 20 samples in estimated 2.0000 s (3.9B iterations)
+Benchmarking kafka_peek_size/parity: Analyzing
+kafka_peek_size/parity  time:   [503.36 ps 503.56 ps 503.78 ps]
+                        thrpt:  [7.3947 GiB/s 7.3980 GiB/s 7.4008 GiB/s]
+                 change:
+                        time:   [+4.3262% +4.6707% +5.0094%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.7705% −4.4623% −4.1468%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking kafka_frame_parse/proxima
+Benchmarking kafka_frame_parse/proxima: Warming up for 2.0000 s
+Benchmarking kafka_frame_parse/proxima: Collecting 20 samples in estimated 2.0000 s (2.9B iterations)
+Benchmarking kafka_frame_parse/proxima: Analyzing
+kafka_frame_parse/proxima
+                        time:   [688.12 ps 689.34 ps 690.59 ps]
+                        thrpt:  [115.98 GiB/s 116.19 GiB/s 116.40 GiB/s]
+                 change:
+                        time:   [+5.6647% +6.0628% +6.4688%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.0758% −5.7162% −5.3610%]
+                        Performance has regressed.
+Benchmarking kafka_frame_parse/parity
+Benchmarking kafka_frame_parse/parity: Warming up for 2.0000 s
+Benchmarking kafka_frame_parse/parity: Collecting 20 samples in estimated 2.0000 s (2.9B iterations)
+Benchmarking kafka_frame_parse/parity: Analyzing
+kafka_frame_parse/parity
+                        time:   [688.81 ps 690.21 ps 692.16 ps]
+                        thrpt:  [115.72 GiB/s 116.04 GiB/s 116.28 GiB/s]
+                 change:
+                        time:   [+5.9525% +6.3698% +6.7774%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.3472% −5.9883% −5.6181%]
+                        Performance has regressed.
+
+Benchmarking kafka_header_parse/proxima
+Benchmarking kafka_header_parse/proxima: Warming up for 2.0000 s
+Benchmarking kafka_header_parse/proxima: Collecting 20 samples in estimated 2.0000 s (1.2B iterations)
+Benchmarking kafka_header_parse/proxima: Analyzing
+kafka_header_parse/proxima
+                        time:   [1.6772 ns 1.7233 ns 1.7853 ns]
+                        thrpt:  [42.776 GiB/s 44.316 GiB/s 45.532 GiB/s]
+                 change:
+                        time:   [+13.135% +15.226% +16.958%] (p = 0.00 < 0.05)
+                        thrpt:  [−14.500% −13.214% −11.610%]
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) low severe
+Benchmarking kafka_header_parse/parity
+Benchmarking kafka_header_parse/parity: Warming up for 2.0000 s
+Benchmarking kafka_header_parse/parity: Collecting 20 samples in estimated 2.0000 s (1.2B iterations)
+Benchmarking kafka_header_parse/parity: Analyzing
+kafka_header_parse/parity
+                        time:   [1.6662 ns 1.7113 ns 1.7719 ns]
+                        thrpt:  [43.100 GiB/s 44.626 GiB/s 45.833 GiB/s]
+                 change:
+                        time:   [+13.186% +15.275% +16.987%] (p = 0.00 < 0.05)
+                        thrpt:  [−14.520% −13.251% −11.650%]
+                        Performance has regressed.
+Found 5 outliers among 20 measurements (25.00%)
+  4 (20.00%) low severe
+  1 (5.00%) high mild
+

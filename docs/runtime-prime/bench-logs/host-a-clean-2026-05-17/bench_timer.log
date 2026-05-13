@@ -1,0 +1,77 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 30s
+     Running benches/bench_timer.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_timer-89fc3d2e3de0e539)
+Benchmarking timer_register_throughput/proxima
+Benchmarking timer_register_throughput/proxima: Warming up for 1.0000 s
+Benchmarking timer_register_throughput/proxima: Collecting 30 samples in estimated 3.5494 s (2325 iterations)
+Benchmarking timer_register_throughput/proxima: Analyzing
+timer_register_throughput/proxima
+                        time:   [903.97 µs 935.02 µs 978.72 µs]
+                        thrpt:  [10.217 Melem/s 10.695 Melem/s 11.062 Melem/s]
+                 change:
+                        time:   [+24.165% +27.435% +31.224%] (p = 0.00 < 0.05)
+                        thrpt:  [−23.794% −21.529% −19.462%]
+                        Performance has regressed.
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) high mild
+  2 (6.67%) high severe
+Benchmarking timer_register_throughput/tokio_time
+Benchmarking timer_register_throughput/tokio_time: Warming up for 1.0000 s
+Benchmarking timer_register_throughput/tokio_time: Collecting 30 samples in estimated 3.2211 s (2325 iterations)
+Benchmarking timer_register_throughput/tokio_time: Analyzing
+timer_register_throughput/tokio_time
+                        time:   [830.58 µs 840.07 µs 850.83 µs]
+                        thrpt:  [11.753 Melem/s 11.904 Melem/s 12.040 Melem/s]
+                 change:
+                        time:   [+14.797% +18.142% +22.199%] (p = 0.00 < 0.05)
+                        thrpt:  [−18.167% −15.356% −12.889%]
+                        Performance has regressed.
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+
+Benchmarking timer_drain_throughput/proxima
+Benchmarking timer_drain_throughput/proxima: Warming up for 1.0000 s
+Benchmarking timer_drain_throughput/proxima: Collecting 30 samples in estimated 3.2090 s (1860 iterations)
+Benchmarking timer_drain_throughput/proxima: Analyzing
+timer_drain_throughput/proxima
+                        time:   [889.29 µs 981.00 µs 1.0769 ms]
+                        thrpt:  [9.2860 Melem/s 10.194 Melem/s 11.245 Melem/s]
+                 change:
+                        time:   [+6.4366% +14.768% +24.089%] (p = 0.00 < 0.05)
+                        thrpt:  [−19.413% −12.868% −6.0473%]
+                        Performance has regressed.
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+Benchmarking timer_drain_throughput/tokio_time_joinall
+Benchmarking timer_drain_throughput/tokio_time_joinall: Warming up for 1.0000 s
+
+Warning: Unable to complete 30 samples in 3.0s. You may wish to increase target time to 3.9s, or reduce sample count to 20.
+Benchmarking timer_drain_throughput/tokio_time_joinall: Collecting 30 samples in estimated 3.9393 s (30 iterations)
+Benchmarking timer_drain_throughput/tokio_time_joinall: Analyzing
+timer_drain_throughput/tokio_time_joinall
+                        time:   [130.72 ms 130.93 ms 131.21 ms]
+                        thrpt:  [76.215 Kelem/s 76.374 Kelem/s 76.500 Kelem/s]
+                 change:
+                        time:   [+0.0208% +0.2099% +0.4232%] (p = 0.05 > 0.05)
+                        thrpt:  [−0.4214% −0.2094% −0.0208%]
+                        No change in performance detected.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+
+Benchmarking timer_register_then_cancel/proxima
+Benchmarking timer_register_then_cancel/proxima: Warming up for 1.0000 s
+Benchmarking timer_register_then_cancel/proxima: Collecting 30 samples in estimated 3.1810 s (1860 iterations)
+Benchmarking timer_register_then_cancel/proxima: Analyzing
+timer_register_then_cancel/proxima
+                        time:   [978.26 µs 989.84 µs 1.0019 ms]
+                        thrpt:  [19.963 Melem/s 20.205 Melem/s 20.444 Melem/s]
+                 change:
+                        time:   [+3.2209% +5.5051% +7.6139%] (p = 0.00 < 0.05)
+                        thrpt:  [−7.0752% −5.2178% −3.1204%]
+                        Performance has regressed.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+

@@ -1,0 +1,30 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.81s
+     Running benches/bench_runtime_swap.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_runtime_swap-5372bf5d45cdcaa4)
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core: Warming up for 1.0000 s
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core: Collecting 30 samples in estimated 3.0944 s (9300 iterations)
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core: Analyzing
+runtime_swap_cross_core_spawn/tokio_per_core
+                        time:   [329.46 µs 336.77 µs 344.26 µs]
+                        thrpt:  [2.9048 Melem/s 2.9694 Melem/s 3.0353 Melem/s]
+                 change:
+                        time:   [−14.245% −7.8613% −2.2171%] (p = 0.01 < 0.05)
+                        thrpt:  [+2.2673% +8.5320% +16.612%]
+                        Performance has improved.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime: Warming up for 1.0000 s
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime: Collecting 30 samples in estimated 3.0049 s (2790 iterations)
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime: Analyzing
+runtime_swap_cross_core_spawn/proxima_runtime
+                        time:   [1.0565 ms 1.0774 ms 1.0991 ms]
+                        thrpt:  [909.88 Kelem/s 928.20 Kelem/s 946.57 Kelem/s]
+                 change:
+                        time:   [−2.9517% −0.8409% +1.3371%] (p = 0.45 > 0.05)
+                        thrpt:  [−1.3195% +0.8480% +3.0415%]
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+

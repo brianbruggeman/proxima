@@ -1,0 +1,31 @@
+# proxima bare-metal profile — Cortex-M / RISC-V MCU without allocator.
+#
+# no_std + no alloc. Truly heapless: all containers are heapless::Vec<_, N>
+# via const-generic capacity bounds; the executor is the static-pool prime
+# variant; no TLS unless embedded-tls grows a no-alloc story; no HTTP/3.
+#
+# Note: this profile cannot be satisfied by today's prime crate without
+# the runtime-prime-inbox-const variant (out of scope of woolly-watching-
+# cupcake; see prior plan i-need-you-to-hidden-popcorn appendix for the
+# static-pool inbox sketch).
+
+schema = 1
+
+alloc = false
+std = false
+
+executor = "static-prime"
+reactor = "none"
+tls = "none"
+quic_enabled = false
+# quic_impl: bare-metal is no_std + no_alloc — the proxima-quic-proto tier-3
+# subset (varint, packet header, frame parse, AEAD in-place, header protection,
+# CID, packet number) compiles here, but the connection / endpoint / stream
+# state machines do not (they need alloc). A bare-metal user of the proto
+# crate gets the leaf primitives only; the I/O facade is not buildable here.
+quic_impl = "none"
+h3_impl = "none"
+# proxima ships no cortex-m systick driver (it is a platform concern); unbound
+# compiles everywhere and panics only if used. A real board overrides this with
+# its own systick Driver path — see examples/new-platform.README.md.
+timer = "crate::time::drivers::unbound::DRIVER"

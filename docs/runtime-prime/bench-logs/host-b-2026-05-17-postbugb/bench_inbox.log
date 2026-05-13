@@ -1,0 +1,166 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 40.90s
+     Running benches/bench_inbox.rs (target/release/deps/bench_inbox-1f62a74b73b9af9a)
+Benchmarking inbox_spsc_throughput/proxima
+Benchmarking inbox_spsc_throughput/proxima: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/proxima: Collecting 30 samples in estimated 3.1911 s (3720 iterations)
+Benchmarking inbox_spsc_throughput/proxima: Analyzing
+inbox_spsc_throughput/proxima
+                        time:   [871.27 µs 884.66 µs 900.75 µs]
+                        thrpt:  [22.204 Melem/s 22.607 Melem/s 22.955 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) low mild
+Benchmarking inbox_spsc_throughput/flume_unbounded
+Benchmarking inbox_spsc_throughput/flume_unbounded: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/flume_unbounded: Collecting 30 samples in estimated 3.3171 s (1860 iterations)
+Benchmarking inbox_spsc_throughput/flume_unbounded: Analyzing
+inbox_spsc_throughput/flume_unbounded
+                        time:   [1.7685 ms 1.7817 ms 1.7983 ms]
+                        thrpt:  [11.121 Melem/s 11.225 Melem/s 11.309 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high severe
+Benchmarking inbox_spsc_throughput/flume_bounded
+Benchmarking inbox_spsc_throughput/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/flume_bounded: Collecting 30 samples in estimated 3.9285 s (1860 iterations)
+Benchmarking inbox_spsc_throughput/flume_bounded: Analyzing
+inbox_spsc_throughput/flume_bounded
+                        time:   [2.1089 ms 2.1197 ms 2.1307 ms]
+                        thrpt:  [9.3866 Melem/s 9.4353 Melem/s 9.4835 Melem/s]
+Benchmarking inbox_spsc_throughput/std_sync_mpsc
+Benchmarking inbox_spsc_throughput/std_sync_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/std_sync_mpsc: Collecting 30 samples in estimated 3.0522 s (7905 iterations)
+Benchmarking inbox_spsc_throughput/std_sync_mpsc: Analyzing
+inbox_spsc_throughput/std_sync_mpsc
+                        time:   [398.37 µs 402.32 µs 405.95 µs]
+                        thrpt:  [49.268 Melem/s 49.712 Melem/s 50.205 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+Benchmarking inbox_spsc_throughput/tokio_mpsc
+Benchmarking inbox_spsc_throughput/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/tokio_mpsc: Collecting 30 samples in estimated 3.7423 s (1395 iterations)
+Benchmarking inbox_spsc_throughput/tokio_mpsc: Analyzing
+inbox_spsc_throughput/tokio_mpsc
+                        time:   [2.6772 ms 2.6886 ms 2.7029 ms]
+                        thrpt:  [7.3994 Melem/s 7.4389 Melem/s 7.4706 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+
+Benchmarking inbox_mpsc_fanin_4/proxima
+Benchmarking inbox_mpsc_fanin_4/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_4/proxima: Collecting 30 samples in estimated 3.0401 s (7905 iterations)
+Benchmarking inbox_mpsc_fanin_4/proxima: Analyzing
+inbox_mpsc_fanin_4/proxima
+                        time:   [385.03 µs 388.56 µs 392.40 µs]
+                        thrpt:  [50.968 Melem/s 51.472 Melem/s 51.945 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+Benchmarking inbox_mpsc_fanin_4/flume_bounded
+Benchmarking inbox_mpsc_fanin_4/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_4/flume_bounded: Collecting 30 samples in estimated 3.4788 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_4/flume_bounded: Analyzing
+inbox_mpsc_fanin_4/flume_bounded
+                        time:   [3.7524 ms 3.7756 ms 3.8002 ms]
+                        thrpt:  [5.2629 Melem/s 5.2971 Melem/s 5.3299 Melem/s]
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) low mild
+  2 (6.67%) high mild
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc: Collecting 30 samples in estimated 3.2318 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_4/tokio_mpsc
+                        time:   [3.4604 ms 3.4810 ms 3.5034 ms]
+                        thrpt:  [5.7088 Melem/s 5.7455 Melem/s 5.7796 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+
+Benchmarking inbox_mpsc_fanin_8/proxima
+Benchmarking inbox_mpsc_fanin_8/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_8/proxima: Collecting 30 samples in estimated 3.0984 s (7440 iterations)
+Benchmarking inbox_mpsc_fanin_8/proxima: Analyzing
+inbox_mpsc_fanin_8/proxima
+                        time:   [402.52 µs 406.90 µs 411.71 µs]
+                        thrpt:  [48.578 Melem/s 49.152 Melem/s 49.686 Melem/s]
+Found 5 outliers among 30 measurements (16.67%)
+  1 (3.33%) low mild
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+Benchmarking inbox_mpsc_fanin_8/flume_bounded
+Benchmarking inbox_mpsc_fanin_8/flume_bounded: Warming up for 1.0000 s
+
+Warning: Unable to complete 30 samples in 3.0s. You may wish to increase target time to 3.3s, enable flat sampling, or reduce sample count to 20.
+Benchmarking inbox_mpsc_fanin_8/flume_bounded: Collecting 30 samples in estimated 3.2825 s (465 iterations)
+Benchmarking inbox_mpsc_fanin_8/flume_bounded: Analyzing
+inbox_mpsc_fanin_8/flume_bounded
+                        time:   [6.7891 ms 6.9406 ms 7.1109 ms]
+                        thrpt:  [2.8126 Melem/s 2.8816 Melem/s 2.9459 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc: Collecting 30 samples in estimated 3.3107 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_8/tokio_mpsc
+                        time:   [3.5716 ms 3.6233 ms 3.6838 ms]
+                        thrpt:  [5.4292 Melem/s 5.5199 Melem/s 5.5998 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+
+Benchmarking inbox_mpsc_fanin_16/proxima
+Benchmarking inbox_mpsc_fanin_16/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_16/proxima: Collecting 30 samples in estimated 3.2666 s (4185 iterations)
+Benchmarking inbox_mpsc_fanin_16/proxima: Analyzing
+inbox_mpsc_fanin_16/proxima
+                        time:   [658.12 µs 683.61 µs 720.70 µs]
+                        thrpt:  [27.751 Melem/s 29.256 Melem/s 30.390 Melem/s]
+Benchmarking inbox_mpsc_fanin_16/flume_bounded
+Benchmarking inbox_mpsc_fanin_16/flume_bounded: Warming up for 1.0000 s
+
+Warning: Unable to complete 30 samples in 3.0s. You may wish to increase target time to 5.0s, enable flat sampling, or reduce sample count to 10.
+Benchmarking inbox_mpsc_fanin_16/flume_bounded: Collecting 30 samples in estimated 5.0323 s (465 iterations)
+Benchmarking inbox_mpsc_fanin_16/flume_bounded: Analyzing
+inbox_mpsc_fanin_16/flume_bounded
+                        time:   [10.946 ms 11.191 ms 11.456 ms]
+                        thrpt:  [1.7459 Melem/s 1.7871 Melem/s 1.8271 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc: Collecting 30 samples in estimated 3.8319 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_16/tokio_mpsc
+                        time:   [3.7266 ms 3.7893 ms 3.8534 ms]
+                        thrpt:  [5.1902 Melem/s 5.2780 Melem/s 5.3669 Melem/s]
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) high mild
+  1 (3.33%) high severe
+
+Benchmarking inbox_mpsc_fanin_32/proxima
+Benchmarking inbox_mpsc_fanin_32/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_32/proxima: Collecting 30 samples in estimated 3.1611 s (2790 iterations)
+Benchmarking inbox_mpsc_fanin_32/proxima: Analyzing
+inbox_mpsc_fanin_32/proxima
+                        time:   [796.16 µs 843.92 µs 890.46 µs]
+                        thrpt:  [22.460 Melem/s 23.699 Melem/s 25.121 Melem/s]
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+Benchmarking inbox_mpsc_fanin_32/flume_bounded
+Benchmarking inbox_mpsc_fanin_32/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_32/flume_bounded: Collecting 30 samples in estimated 3.4477 s (180 iterations)
+Benchmarking inbox_mpsc_fanin_32/flume_bounded: Analyzing
+inbox_mpsc_fanin_32/flume_bounded
+                        time:   [20.001 ms 20.510 ms 21.040 ms]
+                        thrpt:  [950.55 Kelem/s 975.15 Kelem/s 999.94 Kelem/s]
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc: Warming up for 1.0000 s
+
+Warning: Unable to complete 30 samples in 3.0s. You may wish to increase target time to 3.7s, enable flat sampling, or reduce sample count to 10.
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc: Collecting 30 samples in estimated 3.6731 s (465 iterations)
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_32/tokio_mpsc
+                        time:   [6.9875 ms 7.3660 ms 7.7691 ms]
+                        thrpt:  [2.5743 Melem/s 2.7152 Melem/s 2.8622 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+

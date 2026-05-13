@@ -1,0 +1,81 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 39s
+     Running benches/h2_runtime_swap.rs (proxima/target/release/deps/h2_runtime_swap-2ed2717da4133ad4)
+Benchmarking h2_load_5way/pingora
+Benchmarking h2_load_5way/pingora: Warming up for 2.0000 s
+Benchmarking h2_load_5way/pingora: Collecting 20 samples in estimated 5.0021 s (109k iterations)
+Benchmarking h2_load_5way/pingora: Analyzing
+h2_load_5way/pingora    time:   [44.980 µs 47.001 µs 49.359 µs]
+                        thrpt:  [20.260 Kelem/s 21.276 Kelem/s 22.232 Kelem/s]
+Benchmarking h2_load_5way/tokio_hyper
+Benchmarking h2_load_5way/tokio_hyper: Warming up for 2.0000 s
+Benchmarking h2_load_5way/tokio_hyper: Collecting 20 samples in estimated 5.0042 s (109k iterations)
+Benchmarking h2_load_5way/tokio_hyper: Analyzing
+h2_load_5way/tokio_hyper
+                        time:   [41.100 µs 43.053 µs 45.282 µs]
+                        thrpt:  [22.084 Kelem/s 23.227 Kelem/s 24.331 Kelem/s]
+Benchmarking h2_load_5way/proxima_on_tokio
+Benchmarking h2_load_5way/proxima_on_tokio: Warming up for 2.0000 s
+Benchmarking h2_load_5way/proxima_on_tokio: Collecting 20 samples in estimated 5.0003 s (151k iterations)
+Benchmarking h2_load_5way/proxima_on_tokio: Analyzing
+h2_load_5way/proxima_on_tokio
+                        time:   [33.005 µs 35.152 µs 37.409 µs]
+                        thrpt:  [26.731 Kelem/s 28.448 Kelem/s 30.298 Kelem/s]
+Benchmarking h2_load_5way/proxima_on_flume
+Benchmarking h2_load_5way/proxima_on_flume: Warming up for 2.0000 s
+Benchmarking h2_load_5way/proxima_on_flume: Collecting 20 samples in estimated 5.0061 s (140k iterations)
+Benchmarking h2_load_5way/proxima_on_flume: Analyzing
+h2_load_5way/proxima_on_flume
+                        time:   [30.544 µs 30.822 µs 31.265 µs]
+                        thrpt:  [31.984 Kelem/s 32.444 Kelem/s 32.739 Kelem/s]
+Benchmarking h2_load_5way/proxima_on_prime
+Benchmarking h2_load_5way/proxima_on_prime: Warming up for 2.0000 s
+Benchmarking h2_load_5way/proxima_on_prime: Collecting 20 samples in estimated 5.0050 s (146k iterations)
+Benchmarking h2_load_5way/proxima_on_prime: Analyzing
+h2_load_5way/proxima_on_prime
+                        time:   [33.608 µs 33.710 µs 33.830 µs]
+                        thrpt:  [29.559 Kelem/s 29.665 Kelem/s 29.755 Kelem/s]
+
+Benchmarking h2_runtime_swap_proxima_native/default_tokio
+Benchmarking h2_runtime_swap_proxima_native/default_tokio: Warming up for 2.0000 s
+Benchmarking h2_runtime_swap_proxima_native/default_tokio: Collecting 20 samples in estimated 5.0048 s (153k iterations)
+Benchmarking h2_runtime_swap_proxima_native/default_tokio: Analyzing
+h2_runtime_swap_proxima_native/default_tokio
+                        time:   [31.145 µs 31.574 µs 32.035 µs]
+                        thrpt:  [31.216 Kelem/s 31.672 Kelem/s 32.108 Kelem/s]
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime: Warming up for 2.0000 s
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime: Collecting 20 samples in estimated 5.0018 s (147k iterations)
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime: Analyzing
+h2_runtime_swap_proxima_native/per_core_runtime
+                        time:   [30.113 µs 30.212 µs 30.320 µs]
+                        thrpt:  [32.981 Kelem/s 33.100 Kelem/s 33.208 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core: Warming up for 2.0000 s
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core: Collecting 20 samples in estimated 5.0059 s (165k iterations)
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core: Analyzing
+h2_per_core_vs_hyper_pingora/proxima_native_per_core
+                        time:   [30.318 µs 30.486 µs 30.696 µs]
+                        thrpt:  [32.578 Kelem/s 32.802 Kelem/s 32.984 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio: Warming up for 2.0000 s
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio: Collecting 20 samples in estimated 5.0003 s (100k iterations)
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio: Analyzing
+h2_per_core_vs_hyper_pingora/hyper_default_tokio
+                        time:   [39.556 µs 41.856 µs 44.901 µs]
+                        thrpt:  [22.271 Kelem/s 23.891 Kelem/s 25.281 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio: Warming up for 2.0000 s
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio: Collecting 20 samples in estimated 5.0063 s (107k iterations)
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio: Analyzing
+h2_per_core_vs_hyper_pingora/pingora_default_tokio
+                        time:   [42.316 µs 45.111 µs 47.392 µs]
+                        thrpt:  [21.100 Kelem/s 22.168 Kelem/s 23.632 Kelem/s]
+

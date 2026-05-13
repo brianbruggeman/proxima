@@ -1,0 +1,17 @@
+[package]
+name = "proxima-example-new-platform"
+description = "capstone example: bring up a new target via PROXIMA_PROFILE + build.rs + conflaguration build-time constants"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+
+[build-dependencies]
+proxima-build = { workspace = true }
+
+[lints]
+workspace = true

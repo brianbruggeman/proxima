@@ -1,0 +1,21 @@
+# proxima prime profile — per-core prime executor with the prime-wheel timer.
+#
+# std + alloc + prime executor + native QUIC/H3. The timer axis selects the
+# link-injected prime-wheel driver (proxima_core::time -> ExternalDriver ->
+# prime's extern symbols), so proxima_core::time::sleep on a prime worker
+# drives off the per-core wheel instead of spawning a std timer thread. Build
+# a prime serve binary with PROXIMA_PROFILE=prime; the tokio client stays on
+# the default std-thread profile (prime-wheel panics off-worker by design).
+
+schema = 1
+
+alloc = true
+std = true
+
+executor = "prime"
+reactor = "tokio-epoll"
+tls = "rustls"
+quic_enabled = true
+quic_impl = "native"
+h3_impl = "native"
+timer = "prime-wheel"

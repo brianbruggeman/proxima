@@ -1,0 +1,32 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 01s
+     Running benches/h3_tail_scaling.rs (/tmp/cargo_target/release/deps/h3_tail_scaling-40266ad2532648d1)
+Benchmarking h3_tail_scaling_c1/warm_connection_p50_ns
+Benchmarking h3_tail_scaling_c1/warm_connection_p50_ns: Warming up for 2.0000 s
+Benchmarking h3_tail_scaling_c1/warm_connection_p50_ns: Collecting 20 samples in estimated 3.0041 s (37k iterations)
+Benchmarking h3_tail_scaling_c1/warm_connection_p50_ns: Analyzing
+h3_tail_scaling_c1/warm_connection_p50_ns
+                        time:   [27.594 ns 31.581 ns 38.857 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking h3_tail_scaling_c10/warm_connection_p50_ns
+Benchmarking h3_tail_scaling_c10/warm_connection_p50_ns: Warming up for 2.0000 s
+Benchmarking h3_tail_scaling_c10/warm_connection_p50_ns: Collecting 20 samples in estimated 3.0292 s (13k iterations)
+Benchmarking h3_tail_scaling_c10/warm_connection_p50_ns: Analyzing
+h3_tail_scaling_c10/warm_connection_p50_ns
+                        time:   [152.12 ns 173.68 ns 213.53 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking h3_tail_scaling_c100/warm_connection_p50_ns
+Benchmarking h3_tail_scaling_c100/warm_connection_p50_ns: Warming up for 2.0000 s
+Benchmarking h3_tail_scaling_c100/warm_connection_p50_ns: Collecting 20 samples in estimated 3.0736 s (2100 iterations)
+Benchmarking h3_tail_scaling_c100/warm_connection_p50_ns: Analyzing
+h3_tail_scaling_c100/warm_connection_p50_ns
+                        time:   [3.9180 µs 4.4582 µs 5.4487 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+

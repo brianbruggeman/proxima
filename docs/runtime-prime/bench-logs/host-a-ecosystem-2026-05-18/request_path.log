@@ -1,0 +1,28 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 21s
+     Running benches/request_path.rs (/tmp/cargo_target/release/deps/request_path-5e85b3c8b2e6da1d)
+Benchmarking request_path/synth_only
+Benchmarking request_path/synth_only: Warming up for 2.0000 s
+Benchmarking request_path/synth_only: Collecting 20 samples in estimated 3.0000 s (5.1M iterations)
+Benchmarking request_path/synth_only: Analyzing
+request_path/synth_only time:   [583.91 ns 587.39 ns 590.80 ns]
+                        thrpt:  [1.6926 Melem/s 1.7025 Melem/s 1.7126 Melem/s]
+                 change:
+                        time:   [+1.4924% +2.9105% +4.3641%] (p = 0.08 > 0.05)
+                        thrpt:  [−4.1816% −2.8282% −1.4705%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking request_path/cache_hit
+Benchmarking request_path/cache_hit: Warming up for 2.0000 s
+Benchmarking request_path/cache_hit: Collecting 20 samples in estimated 3.0002 s (990k iterations)
+Benchmarking request_path/cache_hit: Analyzing
+request_path/cache_hit  time:   [3.0136 µs 3.0230 µs 3.0298 µs]
+                        thrpt:  [330.06 Kelem/s 330.80 Kelem/s 331.83 Kelem/s]
+                 change:
+                        time:   [+2.2841% +2.9706% +3.6378%] (p = 0.02 < 0.05)
+                        thrpt:  [−3.5101% −2.8849% −2.2331%]
+                        Performance has regressed.
+

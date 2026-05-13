@@ -1,0 +1,55 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.29s
+     Running benches/bench_compat_libraries.rs (/tmp/cargo_target/release/deps/bench_compat_libraries-45de34a9af42a6dc)
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio: Collecting 15 samples in estimated 4.0351 s (12k iterations)
+Benchmarking compat_libs_h2_fanin/hyper_default_tokio: Analyzing
+compat_libs_h2_fanin/hyper_default_tokio
+                        time:   [327.83 µs 329.76 µs 332.45 µs]
+                        thrpt:  [96.255 Kelem/s 97.041 Kelem/s 97.611 Kelem/s]
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat: Collecting 15 samples in estimated 4.0009 s (22k iterations)
+Benchmarking compat_libs_h2_fanin/hyper_prime_compat: Analyzing
+compat_libs_h2_fanin/hyper_prime_compat
+                        time:   [184.07 µs 184.59 µs 185.21 µs]
+                        thrpt:  [172.78 Kelem/s 173.36 Kelem/s 173.84 Kelem/s]
+Found 5 outliers among 15 measurements (33.33%)
+  1 (6.67%) low severe
+  1 (6.67%) low mild
+  2 (13.33%) high mild
+  1 (6.67%) high severe
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio: Collecting 15 samples in estimated 4.0012 s (12k iterations)
+Benchmarking compat_libs_h2_fanin/pingora_default_tokio: Analyzing
+compat_libs_h2_fanin/pingora_default_tokio
+                        time:   [337.23 µs 338.34 µs 339.88 µs]
+                        thrpt:  [94.152 Kelem/s 94.580 Kelem/s 94.892 Kelem/s]
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat: Collecting 15 samples in estimated 4.0186 s (20k iterations)
+Benchmarking compat_libs_h2_fanin/pingora_prime_compat: Analyzing
+compat_libs_h2_fanin/pingora_prime_compat
+                        time:   [198.98 µs 199.88 µs 200.80 µs]
+                        thrpt:  [159.36 Kelem/s 160.10 Kelem/s 160.82 Kelem/s]
+Found 2 outliers among 15 measurements (13.33%)
+  1 (6.67%) low mild
+  1 (6.67%) high mild
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio: Collecting 15 samples in estimated 4.0181 s (26k iterations)
+Benchmarking compat_libs_h2_fanin/proxima_default_tokio: Analyzing
+compat_libs_h2_fanin/proxima_default_tokio
+                        time:   [154.52 µs 155.54 µs 156.90 µs]
+                        thrpt:  [203.96 Kelem/s 205.74 Kelem/s 207.09 Kelem/s]
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat: Collecting 15 samples in estimated 4.0154 s (26k iterations)
+Benchmarking compat_libs_h2_fanin/proxima_prime_compat: Analyzing
+compat_libs_h2_fanin/proxima_prime_compat
+                        time:   [154.24 µs 155.48 µs 157.09 µs]
+                        thrpt:  [203.70 Kelem/s 205.81 Kelem/s 207.47 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+

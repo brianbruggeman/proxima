@@ -1,0 +1,121 @@
+name: proxima-redis
+
+# Gate for the proxima-redis stack (docs/proxima-redis/discipline.md).
+# Re-proves the correctness claims on every push without anyone's memory
+# (guiding-principle 16): the sans-IO RESP codec, the client session FSM +
+# config + Pipe, and the HARD invariant — the bare sans-IO codec graph carries
+# zero tokio. Real-server e2e (redis:7 + valkey differential) is the witness
+# that the client speaks actual Redis/Valkey, not just our own codec.
+
+on:
+  push:
+    branches: [main, "feat/redis-client", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # The full stack gate: bare codec build + all-features build + clippy across
+  # the feature matrix + codec/client tests + the tokio gate.
+  redis-gate:
+    name: proxima-redis-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.redis == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-redis-gate.sh
+
+  # Tokio gate as its own fast job: the no-default-features codec graph must
+  # carry zero tokio (the bare-metal / DPDK embedding contract).
+  tokio-gate:
+    name: no-default-features carries zero tokio
+    needs: changes
+    if: needs.changes.outputs.redis == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: assert empty tokio subtree
+        run: |
+          leaked="$(cargo tree -p proxima-redis --no-default-features -e normal -i tokio 2>/dev/null || true)"
+          if printf '%s' "$leaked" | grep -q '^tokio'; then
+            printf 'FAIL: tokio leaked into the no-default-features graph:\n%s\n' "$leaked"
+            exit 1
+          fi
+          echo "ok: no tokio in the bare proxima-redis graph"
+
+  # Parity against the CANONICAL incumbents — real redis:7 AND real valkey, not a
+  # reimplementation we could share a bug with. The vendored corpus (re-run in
+  # the gate job above) parses real redis bytes offline; this job re-captures
+  # from a live redis:7 service so a structural drift in a newer release surfaces
+  # (principle 16 canary), then runs the live differential: the same client must
+  # see an identical RESP contract from real redis and real valkey.
+  real-redis-differential:
+    name: real redis/valkey differential parity
+    needs: changes
+    if: needs.changes.outputs.redis == 'true'
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REDIS_REAL_HOST: 127.0.0.1
+      REDIS_REAL_PORT: "6379"
+      VALKEY_REAL_HOST: 127.0.0.1
+      VALKEY_REAL_PORT: "6380"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: vendored corpus parses (byte-stable baseline, no server)
+        run: cargo nextest run -p proxima-protocols --no-default-features --features redis --test redis_realredis_corpus
+      - name: re-capture from the live service
+        run: cargo run -p proxima-redis --features client --example capture_realredis -- /tmp/realredis_fresh
+        env:
+          REDIS_REAL_HOST: 127.0.0.1
+          REDIS_REAL_PORT: "6379"
+      - name: live redis bytes still parse + match semantics (version-drift canary)
+        env:
+          REDIS_REAL_FIXTURES: /tmp/realredis_fresh
+        run: cargo nextest run -p proxima-protocols --no-default-features --features redis --test redis_realredis_corpus
+      - name: live differential — redis contract == valkey contract
+        run: cargo nextest run -p proxima-redis --features client --test differential_realredis
+      - name: live async client Pipe against real redis
+        run: cargo nextest run -p proxima-redis --features client --test client_pipe_realredis

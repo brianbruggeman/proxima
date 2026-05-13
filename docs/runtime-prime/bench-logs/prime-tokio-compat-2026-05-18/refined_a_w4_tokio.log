@@ -1,0 +1,18 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.22s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w4_mutex_contention/tokio_per_core
+Benchmarking w4_mutex_contention/tokio_per_core: Warming up for 1.0000 s
+
+Warning: Unable to complete 15 samples in 3.0s. You may wish to increase target time to 5.5s, enable flat sampling, or reduce sample count to 10.
+Benchmarking w4_mutex_contention/tokio_per_core: Collecting 15 samples in estimated 5.4544 s (120 iterations)
+Benchmarking w4_mutex_contention/tokio_per_core: Analyzing
+w4_mutex_contention/tokio_per_core
+                        time:   [45.743 ms 52.164 ms 59.620 ms]
+                        thrpt:  [268.37 Kelem/s 306.72 Kelem/s 349.78 Kelem/s]
+                 change:
+                        time:   [−3.6786% +8.8178% +24.052%] (p = 0.21 > 0.05)
+                        thrpt:  [−19.389% −8.1033% +3.8191%]
+                        No change in performance detected.
+Found 2 outliers among 15 measurements (13.33%)
+  2 (13.33%) high severe
+

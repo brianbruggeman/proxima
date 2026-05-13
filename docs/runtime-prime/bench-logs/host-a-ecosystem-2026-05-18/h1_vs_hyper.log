@@ -1,0 +1,45 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 41s
+     Running benches/h1_vs_hyper.rs (/tmp/cargo_target/release/deps/h1_vs_hyper-d3475a37510e72f4)
+Benchmarking h1_end_to_end/hyper::server::conn::http1 (duplex transport)
+Benchmarking h1_end_to_end/hyper::server::conn::http1 (duplex transport): Warming up for 2.0000 s
+Benchmarking h1_end_to_end/hyper::server::conn::http1 (duplex transport): Collecting 20 samples in estimated 5.0010 s (315k iterations)
+Benchmarking h1_end_to_end/hyper::server::conn::http1 (duplex transport): Analyzing
+h1_end_to_end/hyper::server::conn::http1 (duplex transport)
+                        time:   [15.903 µs 16.199 µs 16.610 µs]
+                        thrpt:  [60.206 Kelem/s 61.732 Kelem/s 62.881 Kelem/s]
+                 change:
+                        time:   [+3.8897% +7.9961% +12.399%] (p = 0.03 < 0.05)
+                        thrpt:  [−11.031% −7.4040% −3.7441%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking h1_end_to_end/proxima::Connection (in-process)
+Benchmarking h1_end_to_end/proxima::Connection (in-process): Warming up for 2.0000 s
+Benchmarking h1_end_to_end/proxima::Connection (in-process): Collecting 20 samples in estimated 5.0001 s (8.7M iterations)
+Benchmarking h1_end_to_end/proxima::Connection (in-process): Analyzing
+h1_end_to_end/proxima::Connection (in-process)
+                        time:   [570.45 ns 572.18 ns 574.20 ns]
+                        thrpt:  [1.7416 Melem/s 1.7477 Melem/s 1.7530 Melem/s]
+                 change:
+                        time:   [−2.0257% −1.3179% −0.8144%] (p = 0.07 > 0.05)
+                        thrpt:  [+0.8211% +1.3355% +2.0676%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+Benchmarking h1_end_to_end/proxima::Connection (duplex transport, async server task)
+Benchmarking h1_end_to_end/proxima::Connection (duplex transport, async server task): Warming up for 2.0000 s
+Benchmarking h1_end_to_end/proxima::Connection (duplex transport, async server task): Collecting 20 samples in estimated 5.0008 s (326k iterations)
+Benchmarking h1_end_to_end/proxima::Connection (duplex transport, async server task): Analyzing
+h1_end_to_end/proxima::Connection (duplex transport, async server task)
+                        time:   [15.254 µs 15.299 µs 15.347 µs]
+                        thrpt:  [65.161 Kelem/s 65.365 Kelem/s 65.555 Kelem/s]
+                 change:
+                        time:   [+0.9134% +2.4948% +4.1139%] (p = 0.11 > 0.05)
+                        thrpt:  [−3.9514% −2.4341% −0.9051%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+

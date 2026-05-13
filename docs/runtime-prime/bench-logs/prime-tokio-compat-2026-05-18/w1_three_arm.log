@@ -1,0 +1,34 @@
+   Compiling proxima v0.1.0 (proxima-p2-compat/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 2m 13s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-bee2609cbc9cc51b)
+Benchmarking w1_per_core_spawn/tokio_per_core
+Benchmarking w1_per_core_spawn/tokio_per_core: Warming up for 1.0000 s
+Benchmarking w1_per_core_spawn/tokio_per_core: Collecting 15 samples in estimated 3.1587 s (1440 iterations)
+Benchmarking w1_per_core_spawn/tokio_per_core: Analyzing
+w1_per_core_spawn/tokio_per_core
+                        time:   [2.0347 ms 2.0886 ms 2.1575 ms]
+                        thrpt:  [1.8540 Melem/s 1.9152 Melem/s 1.9659 Melem/s]
+                 change:
+                        time:   [−6.6939% −4.0062% −0.8366%] (p = 0.02 < 0.05)
+                        thrpt:  [+0.8437% +4.1734% +7.1742%]
+                        Change within noise threshold.
+Found 2 outliers among 15 measurements (13.33%)
+  2 (13.33%) high mild
+Benchmarking w1_per_core_spawn/prime
+Benchmarking w1_per_core_spawn/prime: Warming up for 1.0000 s
+Benchmarking w1_per_core_spawn/prime: Collecting 15 samples in estimated 3.2397 s (1560 iterations)
+Benchmarking w1_per_core_spawn/prime: Analyzing
+w1_per_core_spawn/prime time:   [2.0039 ms 2.0462 ms 2.0937 ms]
+                        thrpt:  [1.9105 Melem/s 1.9548 Melem/s 1.9961 Melem/s]
+                 change:
+                        time:   [−3.3712% −0.5504% +1.9005%] (p = 0.71 > 0.05)
+                        thrpt:  [−1.8650% +0.5534% +3.4888%]
+                        No change in performance detected.
+Benchmarking w1_per_core_spawn/prime_tokio_compat
+Benchmarking w1_per_core_spawn/prime_tokio_compat: Warming up for 1.0000 s
+Benchmarking w1_per_core_spawn/prime_tokio_compat: Collecting 15 samples in estimated 3.1988 s (1560 iterations)
+Benchmarking w1_per_core_spawn/prime_tokio_compat: Analyzing
+w1_per_core_spawn/prime_tokio_compat
+                        time:   [1.9975 ms 2.0552 ms 2.1279 ms]
+                        thrpt:  [1.8798 Melem/s 1.9463 Melem/s 2.0025 Melem/s]
+

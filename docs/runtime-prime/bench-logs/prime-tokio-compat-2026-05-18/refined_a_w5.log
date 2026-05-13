@@ -1,0 +1,39 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 2m 51s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w5_single_stream_get/tokio_per_core
+Benchmarking w5_single_stream_get/tokio_per_core: Warming up for 3.0000 s
+Benchmarking w5_single_stream_get/tokio_per_core: Collecting 15 samples in estimated 4.0016 s (77k iterations)
+Benchmarking w5_single_stream_get/tokio_per_core: Analyzing
+w5_single_stream_get/tokio_per_core
+                        time:   [45.212 µs 45.647 µs 46.101 µs]
+                        thrpt:  [21.691 Kelem/s 21.907 Kelem/s 22.118 Kelem/s]
+Benchmarking w5_single_stream_get/prime
+Benchmarking w5_single_stream_get/prime: Warming up for 3.0000 s
+Benchmarking w5_single_stream_get/prime: Collecting 15 samples in estimated 4.0008 s (67k iterations)
+Benchmarking w5_single_stream_get/prime: Analyzing
+w5_single_stream_get/prime
+                        time:   [48.505 µs 49.134 µs 49.656 µs]
+                        thrpt:  [20.139 Kelem/s 20.352 Kelem/s 20.617 Kelem/s]
+Found 2 outliers among 15 measurements (13.33%)
+  1 (6.67%) low mild
+  1 (6.67%) high severe
+Benchmarking w5_single_stream_get/prime_tokio_compat
+Benchmarking w5_single_stream_get/prime_tokio_compat: Warming up for 3.0000 s
+Benchmarking w5_single_stream_get/prime_tokio_compat: Collecting 15 samples in estimated 4.0010 s (104k iterations)
+Benchmarking w5_single_stream_get/prime_tokio_compat: Analyzing
+w5_single_stream_get/prime_tokio_compat
+                        time:   [32.971 µs 34.077 µs 34.996 µs]
+                        thrpt:  [28.575 Kelem/s 29.345 Kelem/s 30.330 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking w5_single_stream_get/hyper_tokio_baseline
+Benchmarking w5_single_stream_get/hyper_tokio_baseline: Warming up for 3.0000 s
+Benchmarking w5_single_stream_get/hyper_tokio_baseline: Collecting 15 samples in estimated 4.0027 s (100k iterations)
+Benchmarking w5_single_stream_get/hyper_tokio_baseline: Analyzing
+w5_single_stream_get/hyper_tokio_baseline
+                        time:   [38.123 µs 39.997 µs 43.245 µs]
+                        thrpt:  [23.124 Kelem/s 25.002 Kelem/s 26.231 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high severe
+

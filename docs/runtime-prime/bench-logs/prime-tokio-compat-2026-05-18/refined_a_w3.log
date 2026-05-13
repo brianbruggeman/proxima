@@ -1,0 +1,38 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.19s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w3_streaming_response/tokio_per_core
+Benchmarking w3_streaming_response/tokio_per_core: Warming up for 3.0000 s
+Benchmarking w3_streaming_response/tokio_per_core: Collecting 15 samples in estimated 4.0014 s (39k iterations)
+Benchmarking w3_streaming_response/tokio_per_core: Analyzing
+w3_streaming_response/tokio_per_core
+                        time:   [106.60 µs 112.32 µs 116.57 µs]
+                        thrpt:  [536.17 MiB/s 556.45 MiB/s 586.28 MiB/s]
+                 change:
+                        time:   [−17.957% −8.6894% +1.6731%] (p = 0.14 > 0.05)
+                        thrpt:  [−1.6456% +9.5163% +21.887%]
+                        No change in performance detected.
+Benchmarking w3_streaming_response/prime
+Benchmarking w3_streaming_response/prime: Warming up for 3.0000 s
+Benchmarking w3_streaming_response/prime: Collecting 15 samples in estimated 4.0090 s (34k iterations)
+Benchmarking w3_streaming_response/prime: Analyzing
+w3_streaming_response/prime
+                        time:   [114.00 µs 114.49 µs 115.14 µs]
+                        thrpt:  [542.81 MiB/s 545.92 MiB/s 548.27 MiB/s]
+                 change:
+                        time:   [−15.732% −10.545% −6.0769%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.4701% +11.789% +18.669%]
+                        Performance has improved.
+Benchmarking w3_streaming_response/prime_tokio_compat
+Benchmarking w3_streaming_response/prime_tokio_compat: Warming up for 3.0000 s
+Benchmarking w3_streaming_response/prime_tokio_compat: Collecting 15 samples in estimated 4.0019 s (39k iterations)
+Benchmarking w3_streaming_response/prime_tokio_compat: Analyzing
+w3_streaming_response/prime_tokio_compat
+                        time:   [106.59 µs 109.65 µs 112.96 µs]
+                        thrpt:  [553.28 MiB/s 570.01 MiB/s 586.37 MiB/s]
+                 change:
+                        time:   [−11.324% −3.4994% +7.7022%] (p = 0.53 > 0.05)
+                        thrpt:  [−7.1514% +3.6262% +12.770%]
+                        No change in performance detected.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high severe
+

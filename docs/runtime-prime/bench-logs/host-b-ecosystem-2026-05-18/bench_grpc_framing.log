@@ -1,0 +1,108 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 36s
+     Running benches/bench_grpc_framing.rs (proxima/target/release/deps/bench_grpc_framing-13302c0b4d2ffffb)
+Benchmarking grpc_decode/proxima/16
+Benchmarking grpc_decode/proxima/16: Warming up for 2.0000 s
+Benchmarking grpc_decode/proxima/16: Collecting 20 samples in estimated 2.0000 s (1.4B iterations)
+Benchmarking grpc_decode/proxima/16: Analyzing
+grpc_decode/proxima/16  time:   [1.4051 ns 1.4083 ns 1.4123 ns]
+                        thrpt:  [13.848 GiB/s 13.888 GiB/s 13.919 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking grpc_decode/parity/16
+Benchmarking grpc_decode/parity/16: Warming up for 2.0000 s
+Benchmarking grpc_decode/parity/16: Collecting 20 samples in estimated 2.0000 s (1.4B iterations)
+Benchmarking grpc_decode/parity/16: Analyzing
+grpc_decode/parity/16   time:   [1.4001 ns 1.4018 ns 1.4041 ns]
+                        thrpt:  [13.929 GiB/s 13.952 GiB/s 13.969 GiB/s]
+Found 6 outliers among 20 measurements (30.00%)
+  3 (15.00%) low mild
+  3 (15.00%) high severe
+Benchmarking grpc_decode/proxima/1024
+Benchmarking grpc_decode/proxima/1024: Warming up for 2.0000 s
+Benchmarking grpc_decode/proxima/1024: Collecting 20 samples in estimated 2.0000 s (1.4B iterations)
+Benchmarking grpc_decode/proxima/1024: Analyzing
+grpc_decode/proxima/1024
+                        time:   [1.3985 ns 1.3994 ns 1.4005 ns]
+                        thrpt:  [684.26 GiB/s 684.79 GiB/s 685.25 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+Benchmarking grpc_decode/parity/1024
+Benchmarking grpc_decode/parity/1024: Warming up for 2.0000 s
+Benchmarking grpc_decode/parity/1024: Collecting 20 samples in estimated 2.0000 s (1.4B iterations)
+Benchmarking grpc_decode/parity/1024: Analyzing
+grpc_decode/parity/1024 time:   [1.3942 ns 1.3962 ns 1.3983 ns]
+                        thrpt:  [685.34 GiB/s 686.39 GiB/s 687.37 GiB/s]
+Benchmarking grpc_decode/proxima/65536
+Benchmarking grpc_decode/proxima/65536: Warming up for 2.0000 s
+Benchmarking grpc_decode/proxima/65536: Collecting 20 samples in estimated 2.0000 s (1.4B iterations)
+Benchmarking grpc_decode/proxima/65536: Analyzing
+grpc_decode/proxima/65536
+                        time:   [1.3931 ns 1.3942 ns 1.3953 ns]
+                        thrpt:  [ 43746 GiB/s  43781 GiB/s  43815 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+Benchmarking grpc_decode/parity/65536
+Benchmarking grpc_decode/parity/65536: Warming up for 2.0000 s
+Benchmarking grpc_decode/parity/65536: Collecting 20 samples in estimated 2.0000 s (1.4B iterations)
+Benchmarking grpc_decode/parity/65536: Analyzing
+grpc_decode/parity/65536
+                        time:   [1.3887 ns 1.3909 ns 1.3930 ns]
+                        thrpt:  [ 43819 GiB/s  43885 GiB/s  43954 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking grpc_encode/proxima/16
+Benchmarking grpc_encode/proxima/16: Warming up for 2.0000 s
+Benchmarking grpc_encode/proxima/16: Collecting 20 samples in estimated 2.0000 s (45M iterations)
+Benchmarking grpc_encode/proxima/16: Analyzing
+grpc_encode/proxima/16  time:   [22.107 ns 22.143 ns 22.174 ns]
+                        thrpt:  [903.16 MiB/s 904.43 MiB/s 905.92 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking grpc_encode/parity/16
+Benchmarking grpc_encode/parity/16: Warming up for 2.0000 s
+Benchmarking grpc_encode/parity/16: Collecting 20 samples in estimated 2.0000 s (48M iterations)
+Benchmarking grpc_encode/parity/16: Analyzing
+grpc_encode/parity/16   time:   [21.029 ns 21.203 ns 21.437 ns]
+                        thrpt:  [934.25 MiB/s 944.55 MiB/s 952.35 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) low severe
+Benchmarking grpc_encode/proxima/1024
+Benchmarking grpc_encode/proxima/1024: Warming up for 2.0000 s
+Benchmarking grpc_encode/proxima/1024: Collecting 20 samples in estimated 2.0000 s (38M iterations)
+Benchmarking grpc_encode/proxima/1024: Analyzing
+grpc_encode/proxima/1024
+                        time:   [31.593 ns 31.627 ns 31.671 ns]
+                        thrpt:  [30.259 GiB/s 30.301 GiB/s 30.333 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking grpc_encode/parity/1024
+Benchmarking grpc_encode/parity/1024: Warming up for 2.0000 s
+Benchmarking grpc_encode/parity/1024: Collecting 20 samples in estimated 2.0000 s (38M iterations)
+Benchmarking grpc_encode/parity/1024: Analyzing
+grpc_encode/parity/1024 time:   [31.487 ns 31.539 ns 31.613 ns]
+                        thrpt:  [30.315 GiB/s 30.386 GiB/s 30.436 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking grpc_encode/proxima/65536
+Benchmarking grpc_encode/proxima/65536: Warming up for 2.0000 s
+Benchmarking grpc_encode/proxima/65536: Collecting 20 samples in estimated 2.0002 s (1.5M iterations)
+Benchmarking grpc_encode/proxima/65536: Analyzing
+grpc_encode/proxima/65536
+                        time:   [1.3142 µs 1.3173 µs 1.3193 µs]
+                        thrpt:  [46.265 GiB/s 46.338 GiB/s 46.445 GiB/s]
+Benchmarking grpc_encode/parity/65536
+Benchmarking grpc_encode/parity/65536: Warming up for 2.0000 s
+Benchmarking grpc_encode/parity/65536: Collecting 20 samples in estimated 2.0002 s (1.5M iterations)
+Benchmarking grpc_encode/parity/65536: Analyzing
+grpc_encode/parity/65536
+                        time:   [1.3228 µs 1.3242 µs 1.3254 µs]
+                        thrpt:  [46.053 GiB/s 46.096 GiB/s 46.146 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+

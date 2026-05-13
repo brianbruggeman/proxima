@@ -1,0 +1,67 @@
+# CI areas for change-scoped gates (consumed by scripts/ci-affected.py).
+# An area runs when a changed file is in one of its packages' Cargo
+# dependency closure, OR matches one of its path globs. A change to a shared
+# leaf crate fans out to every area that depends on it automatically.
+
+[area.prime_serve]
+packages = ["proxima"]
+paths = ["scripts/prime-serve-gate.sh", ".github/workflows/prime-serve.yml"]
+
+[area.intercept]
+packages = ["proxima-intercept"]
+paths = [
+    "scripts/intercept-component-gate.sh",
+    "scripts/bench-intercept-capture.sh",
+    ".github/workflows/proxima-intercept.yml",
+]
+
+[area.notify]
+packages = ["proxima-patterns", "proxima-recording"]
+paths = [
+    "scripts/notify-component-gate.sh",
+    "scripts/notify-component-gate.toml",
+    ".github/workflows/proxima-notify.yml",
+]
+
+[area.pgwire]
+packages = ["proxima-pgwire"]
+paths = ["scripts/proxima-pgwire-gate.sh", ".github/workflows/proxima-pgwire.yml"]
+
+[area.redis]
+packages = ["proxima-redis"]
+paths = ["scripts/proxima-redis-gate.sh", ".github/workflows/proxima-redis.yml"]
+
+[area.telemetry]
+packages = ["proxima-telemetry"]
+paths = ["scripts/telemetry-gate.sh", ".github/workflows/proxima-telemetry.yml"]
+
+[area.nostd]
+packages = [
+    "prime",
+    "proxima-protocols",
+    "proxima-primitives",
+    "proxima-patterns",
+    "proxima-recording",
+    "proxima-listeners-stream",
+    "proxima-listen",
+    "proxima-net",
+    "proxima-runtime",
+    "proxima-core",
+]
+paths = [
+    "scripts/nostd-gate.sh",
+    "scripts/nostd-gate.awk",
+    "scripts/quic-h3-gate.sh",
+    "scripts/tier-lift-gate.sh",
+    "scripts/tokio-free-floor.sh",
+    "scripts/thumbv7m-cliff-gate.sh",
+    "scripts/_floor-crate-matrix.sh",
+    ".github/workflows/no-std.yml",
+]
+
+[area.dpdk_stack]
+packages = ["proxima-protocols"]
+paths = [
+    "scripts/dpdk-stack-gate.sh",
+    ".github/workflows/dpdk-stack.yml",
+]

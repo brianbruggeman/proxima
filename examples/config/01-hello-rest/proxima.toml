@@ -1,0 +1,17 @@
+# hello world REST service.
+#
+# proxima fronts a synth upstream that returns a fixed response on
+# any path / method. zero application logic; the substrate is doing
+# everything.
+#
+# run:
+#   proxima serve --config proxima.toml --addr 127.0.0.1:8080
+#
+# test:
+#   curl http://127.0.0.1:8080/anything
+#   # -> hello world
+
+name = "hello"
+
+[[upstreams]]
+synth = { status = 200, body = "hello world\n", headers = { "content-type" = "text/plain" } }

@@ -1,0 +1,8 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.22s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w4_mutex_contention/prime_tokio_compat
+Benchmarking w4_mutex_contention/prime_tokio_compat: Warming up for 1.0000 s
+error: bench failed, to rerun pass `-p proxima --bench bench_runtime_compat`
+
+Caused by:
+  process didn't exit successfully: `/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d w4_mutex_contention/prime_tokio_compat --bench` (signal: 15, SIGTERM: termination signal)

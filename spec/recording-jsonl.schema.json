@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/brianbruggeman/proxima/blob/main/spec/recording-jsonl.schema.json",
+  "title": "proxima.recording.jsonl event line",
+  "description": "One JSON object per line. A completed interaction is the event sequence [start, req_chunk*, req_end, resp_start, resp_chunk*, end]. Multiple in-flight interactions interleave on the wire; the `id` field demuxes them.",
+  "type": "object",
+  "required": ["v", "k", "id"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "Recording format version. Readers must reject unknown versions."
+    },
+    "k": {
+      "type": "string",
+      "enum": ["start", "req_chunk", "req_end", "resp_start", "resp_chunk", "end"],
+      "description": "Event kind."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID identifying the interaction. Lexicographic order = insertion order."
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "k": { "const": "start" },
+        "ts": { "type": "string", "format": "date-time" },
+        "pipe": { "type": "string" },
+        "protocol": { "type": "string", "enum": ["http", "tcp", "grpc", "mcp", "passthrough"] },
+        "request": { "$ref": "#/$defs/RequestHeader" },
+        "meta": { "$ref": "#/$defs/RecordMeta" }
+      },
+      "required": ["ts", "pipe", "protocol", "request"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "k": { "const": "req_chunk" },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "b64": { "type": "string", "contentEncoding": "base64" }
+      },
+      "required": ["ts_ms", "b64"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "k": { "const": "req_end" },
+        "ts_ms": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["ts_ms"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "k": { "const": "resp_start" },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              { "type": "string" },
+              { "type": "string" }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      },
+      "required": ["ts_ms", "status", "headers"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "k": { "const": "resp_chunk" },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "b64": { "type": "string", "contentEncoding": "base64" }
+      },
+      "required": ["ts_ms", "b64"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "k": { "const": "end" },
+        "ts_ms": { "type": "integer", "minimum": 0 },
+        "latency_ms": { "type": "integer", "minimum": 0 },
+        "meta": { "$ref": "#/$defs/RecordMeta" }
+      },
+      "required": ["ts_ms", "latency_ms", "meta"],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "RequestHeader": {
+      "type": "object",
+      "required": ["method", "path"],
+      "properties": {
+        "method": { "type": "string" },
+        "path": { "type": "string" },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RecordMeta": {
+      "type": "object",
+      "properties": {
+        "cache": {
+          "type": "string",
+          "enum": ["hit", "miss", "bypass", "revalidated"]
+        },
+        "retries": { "type": "integer", "minimum": 0 },
+        "upstream": { "type": "string" },
+        "instance_id": { "type": "string" },
+        "extra": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

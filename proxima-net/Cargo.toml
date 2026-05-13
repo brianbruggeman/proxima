@@ -1,0 +1,186 @@
+[package]
+name = "proxima-net"
+description = "Network primitives for proxima: UDP PacketListener and addressing helpers (TCP traits live in proxima-primitives::stream), plus every platform network backend (prime/tokio/wasm/dpdk/xdp) as a feature-gated module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dependencies]
+bytes = { workspace = true }
+futures = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+prime = { workspace = true, optional = true }
+proxima-core = { workspace = true, optional = true }
+proxima-primitives = { workspace = true, optional = true }
+proxima-protocols = { workspace = true, features = ["inet", "tcp"] }
+socket2 = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["cargo_bench_support"] }
+proxima = { workspace = true, features = ["test-support"] }
+proxima-runtime = { workspace = true }
+rstest = { workspace = true }
+socket2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+# ==== prime backend (folded former proxima-net-prime crate) ====
+# prime-backed `StreamUpstream`/`AcceptorFactory` over the prime reactor.
+# The module itself additionally requires `runtime-prime-inbox-alloc` (see
+# the module cfg gate in src/lib.rs) — kept independent of this feature so
+# a build that asked the workspace for the mutually-exclusive
+# `runtime-prime-inbox-const` variant isn't fought.
+prime = [
+    "std",
+    "dep:prime",
+    "prime/runtime-prime-reactor",
+    "prime/runtime-prime-executor",
+    "prime/runtime-prime-bgpool",
+    "dep:futures",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+]
+# the alloc-backed prime inbox variant `prime::os::net` needs; mutually
+# exclusive with `runtime-prime-inbox-const` at the `prime` crate level.
+runtime-prime-inbox-alloc = ["prime/runtime-prime-inbox-alloc"]
+runtime-prime-inbox-const = ["prime/runtime-prime-inbox-const"]
+runtime-prime-full = ["prime/runtime-prime-full"]
+
+# pipe-shaped connection (additive spike, see
+# docs/algebraic-pipe/discipline.md C-GP5): DrainSource/RingSource read
+# ring + RingSink write ring + a SourcePipe pump over prime's
+# Readiness, proving the floor-io reshape end to end over a real
+# HTTP/1 request via proxima-protocols' FrameCodecPipe.
+
+# ==== tokio backend (folded former proxima-net-tokio crate) ====
+# tokio-backed impls of proxima-primitives::stream + proxima-net traits:
+# TCP, Unix, UDP listeners and upstreams.
+tokio = [
+    "std",
+    "dep:tokio",
+    "tokio/net",
+    "tokio/rt",
+    "tokio/sync",
+    "dep:tokio-util",
+    "tokio-util/compat",
+    "dep:socket2",
+    "socket2/all",
+    "dep:proxima-core",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+    "dep:futures",
+]
+
+# ==== wasm backend (folded former proxima-net-wasm crate) ====
+# wasm host-backed PacketListener; the actual host-import-linked backend
+# additionally requires `target_arch = "wasm32"` (see the module's own
+# internal cfg gate).
+wasm = ["std"]
+
+# ==== dpdk backend (folded former proxima-net-dpdk crate) ====
+# DPDK EAL + poll-mode-driver shell. Default-off; links `librte_*` and
+# needs a dpdk host toolchain (see build.rs).
+dpdk = [
+    "std",
+    "dep:thiserror",
+    "dep:futures",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+    "proxima-primitives/async-mutex",
+]
+
+# ==== xdp backend (folded former proxima-net-xdp crate) ====
+# AF_XDP zero-copy datapath. Default-off; the socket/UMEM/BPF half needs
+# linux + raw libc syscalls (see the module's own internal cfg gates); the
+# ring/uapi/sized sans-IO half builds on any host once this feature is on.
+xdp = [
+    "std",
+    "dep:libc",
+    "dep:prime",
+    "prime/runtime-prime-executor",
+    "prime/runtime-prime-reactor",
+    "runtime-prime-inbox-alloc",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+    "dep:futures",
+    "dep:thiserror",
+]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tap-bringup"
+path = "src/bin/tap_bringup.rs"
+required-features = ["dpdk"]
+
+[[bin]]
+name = "ping-responder"
+path = "src/bin/ping_responder.rs"
+required-features = ["dpdk"]
+
+[[bin]]
+name = "tcp-echo"
+path = "src/bin/tcp_echo.rs"
+required-features = ["dpdk"]
+
+[[bench]]
+name = "bench_connect"
+harness = false
+required-features = ["prime", "runtime-prime-inbox-alloc"]
+
+[[example]]
+name = "smoke"
+path = "examples/smoke.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_echo"
+path = "examples/xdp_echo.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_mode_probe"
+path = "examples/xdp_mode_probe.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_reactor_burst"
+path = "examples/xdp_reactor_burst.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_ring_walkthrough"
+path = "examples/xdp_ring_walkthrough.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_tcp_reactor"
+path = "examples/xdp_tcp_reactor.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_tcp"
+path = "examples/xdp_tcp.rs"
+required-features = ["xdp"]
+
+[[example]]
+name = "xdp_zerocopy_probe"
+path = "examples/xdp_zerocopy_probe.rs"
+required-features = ["xdp"]

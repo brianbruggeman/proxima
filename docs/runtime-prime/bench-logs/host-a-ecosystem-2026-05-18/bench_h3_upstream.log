@@ -1,0 +1,32 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 55s
+     Running benches/bench_h3_upstream.rs (/tmp/cargo_target/release/deps/bench_h3_upstream-558664d7254a5c4c)
+Benchmarking h3_upstream_proxima/call
+Benchmarking h3_upstream_proxima/call: Warming up for 2.0000 s
+Benchmarking h3_upstream_proxima/call: Collecting 20 samples in estimated 3.0091 s (36k iterations)
+Benchmarking h3_upstream_proxima/call: Analyzing
+h3_upstream_proxima/call
+                        time:   [80.768 µs 81.630 µs 82.641 µs]
+                        thrpt:  [12.100 Kelem/s 12.250 Kelem/s 12.381 Kelem/s]
+                 change:
+                        time:   [+75.524% +78.546% +81.367%] (p = 0.00 < 0.05)
+                        thrpt:  [−44.863% −43.992% −43.028%]
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking h3_upstream_parity/call
+Benchmarking h3_upstream_parity/call: Warming up for 2.0000 s
+Benchmarking h3_upstream_parity/call: Collecting 20 samples in estimated 3.0066 s (39k iterations)
+Benchmarking h3_upstream_parity/call: Analyzing
+h3_upstream_parity/call time:   [77.494 µs 78.000 µs 78.518 µs]
+                        thrpt:  [12.736 Kelem/s 12.820 Kelem/s 12.904 Kelem/s]
+                 change:
+                        time:   [+78.154% +79.826% +81.296%] (p = 0.00 < 0.05)
+                        thrpt:  [−44.842% −44.391% −43.869%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+

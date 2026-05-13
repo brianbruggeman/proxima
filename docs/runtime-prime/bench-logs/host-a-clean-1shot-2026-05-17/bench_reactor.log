@@ -1,0 +1,41 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 59s
+     Running benches/bench_reactor.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_reactor-368afbd4b22a5e0c)
+Benchmarking reactor_wake_latency/proxima
+Benchmarking reactor_wake_latency/proxima: Warming up for 1.0000 s
+Benchmarking reactor_wake_latency/proxima: Collecting 30 samples in estimated 3.0005 s (563k iterations)
+Benchmarking reactor_wake_latency/proxima: Analyzing
+reactor_wake_latency/proxima
+                        time:   [1.0274 µs 1.0402 µs 1.0548 µs]
+                        thrpt:  [948.07 Kelem/s 961.36 Kelem/s 973.29 Kelem/s]
+                 change:
+                        time:   [+20.529% +22.411% +24.286%] (p = 0.00 < 0.05)
+                        thrpt:  [−19.541% −18.308% −17.032%]
+                        Performance has regressed.
+Benchmarking reactor_wake_latency/tokio_unix
+Benchmarking reactor_wake_latency/tokio_unix: Warming up for 1.0000 s
+Benchmarking reactor_wake_latency/tokio_unix: Collecting 30 samples in estimated 3.0007 s (315k iterations)
+Benchmarking reactor_wake_latency/tokio_unix: Analyzing
+reactor_wake_latency/tokio_unix
+                        time:   [2.4564 µs 2.5507 µs 2.6495 µs]
+                        thrpt:  [377.43 Kelem/s 392.05 Kelem/s 407.09 Kelem/s]
+                 change:
+                        time:   [+38.149% +42.921% +47.350%] (p = 0.00 < 0.05)
+                        thrpt:  [−32.134% −30.031% −27.615%]
+                        Performance has regressed.
+
+Benchmarking reactor_turn_n_ready_16/proxima
+Benchmarking reactor_turn_n_ready_16/proxima: Warming up for 1.0000 s
+Benchmarking reactor_turn_n_ready_16/proxima: Collecting 30 samples in estimated 3.0328 s (27k iterations)
+Benchmarking reactor_turn_n_ready_16/proxima: Analyzing
+reactor_turn_n_ready_16/proxima
+                        time:   [14.027 µs 15.268 µs 17.188 µs]
+                        thrpt:  [930.86 Kelem/s 1.0480 Melem/s 1.1406 Melem/s]
+                 change:
+                        time:   [+64.080% +105.01% +169.37%] (p = 0.00 < 0.05)
+                        thrpt:  [−62.876% −51.223% −39.054%]
+                        Performance has regressed.
+Found 5 outliers among 30 measurements (16.67%)
+  2 (6.67%) high mild
+  3 (10.00%) high severe
+

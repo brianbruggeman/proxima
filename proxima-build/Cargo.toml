@@ -1,0 +1,25 @@
+[package]
+name = "proxima-build"
+description = "build.rs library: resolves a typed Profile via conflaguration, emits a generated module + cfg directives for downstream crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+conflaguration = { workspace = true, features = ["derive", "toml"] }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[bin]]
+name = "dump-profile"
+path = "src/bin/dump_profile.rs"
+
+[lints]
+workspace = true

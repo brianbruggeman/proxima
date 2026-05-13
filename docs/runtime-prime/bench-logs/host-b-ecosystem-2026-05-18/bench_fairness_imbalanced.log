@@ -1,0 +1,21 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 49.83s
+     Running benches/bench_fairness_imbalanced.rs (proxima/target/release/deps/bench_fairness_imbalanced-d42497a53d078fef)
+Benchmarking fairness_imbalanced/tokio_multi_thread
+Benchmarking fairness_imbalanced/tokio_multi_thread: Warming up for 2.0000 s
+Benchmarking fairness_imbalanced/tokio_multi_thread: Collecting 20 samples in estimated 10.467 s (840 iterations)
+Benchmarking fairness_imbalanced/tokio_multi_thread: Analyzing
+fairness_imbalanced/tokio_multi_thread
+                        time:   [12.478 ms 12.492 ms 12.504 ms]
+                        thrpt:  [15.995 Kelem/s 16.011 Kelem/s 16.028 Kelem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking fairness_imbalanced/prime_round_robin_fanout
+Benchmarking fairness_imbalanced/prime_round_robin_fanout: Warming up for 2.0000 s
+Benchmarking fairness_imbalanced/prime_round_robin_fanout: Collecting 20 samples in estimated 8.2300 s (630 iterations)
+Benchmarking fairness_imbalanced/prime_round_robin_fanout: Analyzing
+fairness_imbalanced/prime_round_robin_fanout
+                        time:   [13.068 ms 13.112 ms 13.153 ms]
+                        thrpt:  [15.205 Kelem/s 15.253 Kelem/s 15.305 Kelem/s]
+

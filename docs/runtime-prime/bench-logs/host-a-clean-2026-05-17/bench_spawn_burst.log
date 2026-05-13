@@ -1,0 +1,177 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 40.44s
+     Running benches/bench_spawn_burst.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_spawn_burst-24aaf7fb262a3d14)
+Benchmarking spawn_burst_1k/tokio_per_core
+Benchmarking spawn_burst_1k/tokio_per_core: Warming up for 1.0000 s
+Benchmarking spawn_burst_1k/tokio_per_core: Collecting 20 samples in estimated 3.0535 s (8820 iterations)
+Benchmarking spawn_burst_1k/tokio_per_core: Analyzing
+spawn_burst_1k/tokio_per_core
+                        time:   [338.94 µs 351.23 µs 364.37 µs]
+                        thrpt:  [2.7445 Melem/s 2.8471 Melem/s 2.9504 Melem/s]
+                 change:
+                        time:   [−61.668% −50.255% −37.214%] (p = 0.00 < 0.05)
+                        thrpt:  [+59.272% +101.02% +160.88%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking spawn_burst_1k/prime
+Benchmarking spawn_burst_1k/prime: Warming up for 1.0000 s
+Benchmarking spawn_burst_1k/prime: Collecting 20 samples in estimated 3.2339 s (2730 iterations)
+Benchmarking spawn_burst_1k/prime: Analyzing
+spawn_burst_1k/prime    time:   [1.0912 ms 1.1106 ms 1.1295 ms]
+                        thrpt:  [885.35 Kelem/s 900.41 Kelem/s 916.40 Kelem/s]
+                 change:
+                        time:   [−27.050% −23.784% −20.322%] (p = 0.00 < 0.05)
+                        thrpt:  [+25.505% +31.206% +37.080%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+
+Benchmarking spawn_burst_10k/tokio_per_core
+Benchmarking spawn_burst_10k/tokio_per_core: Warming up for 1.0000 s
+Benchmarking spawn_burst_10k/tokio_per_core: Collecting 20 samples in estimated 3.2941 s (1050 iterations)
+Benchmarking spawn_burst_10k/tokio_per_core: Analyzing
+spawn_burst_10k/tokio_per_core
+                        time:   [3.4588 ms 3.9549 ms 4.6524 ms]
+                        thrpt:  [2.1494 Melem/s 2.5285 Melem/s 2.8912 Melem/s]
+                 change:
+                        time:   [−37.306% −29.888% −21.051%] (p = 0.00 < 0.05)
+                        thrpt:  [+26.664% +42.629% +59.505%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking spawn_burst_10k/prime
+Benchmarking spawn_burst_10k/prime: Warming up for 1.0000 s
+Benchmarking spawn_burst_10k/prime: Collecting 20 samples in estimated 4.5869 s (420 iterations)
+Benchmarking spawn_burst_10k/prime: Analyzing
+spawn_burst_10k/prime   time:   [10.916 ms 11.138 ms 11.356 ms]
+                        thrpt:  [880.59 Kelem/s 897.84 Kelem/s 916.10 Kelem/s]
+                 change:
+                        time:   [−37.876% −27.955% −18.186%] (p = 0.00 < 0.05)
+                        thrpt:  [+22.229% +38.802% +60.967%]
+                        Performance has improved.
+
+Benchmarking spawn_sustained_10k_per_sec/tokio_per_core
+Benchmarking spawn_sustained_10k_per_sec/tokio_per_core: Warming up for 500.00 ms
+
+Warning: Unable to complete 15 samples in 4.0s. You may wish to increase target time to 7.5s, or reduce sample count to 10.
+Benchmarking spawn_sustained_10k_per_sec/tokio_per_core: Collecting 15 samples in estimated 7.5000 s (15 iterations)
+Benchmarking spawn_sustained_10k_per_sec/tokio_per_core: Analyzing
+spawn_sustained_10k_per_sec/tokio_per_core
+                        time:   [500.00 ms 500.27 ms 500.78 ms]
+                        change: [−0.1271% −0.0072% +0.1416%] (p = 0.91 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 15 measurements (13.33%)
+  1 (6.67%) high mild
+  1 (6.67%) high severe
+Benchmarking spawn_sustained_10k_per_sec/prime
+Benchmarking spawn_sustained_10k_per_sec/prime: Warming up for 500.00 ms
+
+Warning: Unable to complete 15 samples in 4.0s. You may wish to increase target time to 7.5s, or reduce sample count to 10.
+Benchmarking spawn_sustained_10k_per_sec/prime: Collecting 15 samples in estimated 7.5000 s (15 iterations)
+Benchmarking spawn_sustained_10k_per_sec/prime: Analyzing
+spawn_sustained_10k_per_sec/prime
+                        time:   [500.00 ms 500.02 ms 500.06 ms]
+                        change: [−0.0063% +0.0005% +0.0110%] (p = 0.93 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 15 measurements (20.00%)
+  3 (20.00%) high severe
+
+Benchmarking spawn_fanin_1/tokio_per_core
+Benchmarking spawn_fanin_1/tokio_per_core: Warming up for 1.0000 s
+Benchmarking spawn_fanin_1/tokio_per_core: Collecting 20 samples in estimated 3.0317 s (7770 iterations)
+Benchmarking spawn_fanin_1/tokio_per_core: Analyzing
+spawn_fanin_1/tokio_per_core
+                        time:   [376.14 µs 383.32 µs 391.00 µs]
+                        thrpt:  [2.5576 Melem/s 2.6088 Melem/s 2.6586 Melem/s]
+                 change:
+                        time:   [−58.175% −45.195% −31.802%] (p = 0.00 < 0.05)
+                        thrpt:  [+46.632% +82.465% +139.09%]
+                        Performance has improved.
+Benchmarking spawn_fanin_1/prime
+Benchmarking spawn_fanin_1/prime: Warming up for 1.0000 s
+Benchmarking spawn_fanin_1/prime: Collecting 20 samples in estimated 3.1100 s (2940 iterations)
+Benchmarking spawn_fanin_1/prime: Analyzing
+spawn_fanin_1/prime     time:   [1.0750 ms 1.1215 ms 1.1662 ms]
+                        thrpt:  [857.51 Kelem/s 891.65 Kelem/s 930.21 Kelem/s]
+                 change:
+                        time:   [−37.046% −31.957% −26.688%] (p = 0.00 < 0.05)
+                        thrpt:  [+36.403% +46.966% +58.846%]
+                        Performance has improved.
+
+Benchmarking spawn_fanin_2/tokio_per_core
+Benchmarking spawn_fanin_2/tokio_per_core: Warming up for 1.0000 s
+Benchmarking spawn_fanin_2/tokio_per_core: Collecting 20 samples in estimated 3.1244 s (3570 iterations)
+Benchmarking spawn_fanin_2/tokio_per_core: Analyzing
+spawn_fanin_2/tokio_per_core
+                        time:   [850.46 µs 859.14 µs 868.93 µs]
+                        thrpt:  [2.3017 Melem/s 2.3279 Melem/s 2.3517 Melem/s]
+                 change:
+                        time:   [−64.172% −54.378% −41.092%] (p = 0.00 < 0.05)
+                        thrpt:  [+69.755% +119.19% +179.11%]
+                        Performance has improved.
+Benchmarking spawn_fanin_2/prime
+Benchmarking spawn_fanin_2/prime: Warming up for 1.0000 s
+Benchmarking spawn_fanin_2/prime: Collecting 20 samples in estimated 3.1535 s (2520 iterations)
+Benchmarking spawn_fanin_2/prime: Analyzing
+spawn_fanin_2/prime     time:   [1.2658 ms 1.3033 ms 1.3422 ms]
+                        thrpt:  [1.4900 Melem/s 1.5346 Melem/s 1.5801 Melem/s]
+                 change:
+                        time:   [−45.403% −32.535% −18.839%] (p = 0.00 < 0.05)
+                        thrpt:  [+23.213% +48.225% +83.159%]
+                        Performance has improved.
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low mild
+  2 (10.00%) high mild
+
+Benchmarking spawn_fanin_4/tokio_per_core
+Benchmarking spawn_fanin_4/tokio_per_core: Warming up for 1.0000 s
+Benchmarking spawn_fanin_4/tokio_per_core: Collecting 20 samples in estimated 3.1765 s (1680 iterations)
+Benchmarking spawn_fanin_4/tokio_per_core: Analyzing
+spawn_fanin_4/tokio_per_core
+                        time:   [1.8574 ms 1.8995 ms 1.9578 ms]
+                        thrpt:  [2.0431 Melem/s 2.1058 Melem/s 2.1535 Melem/s]
+                 change:
+                        time:   [−20.610% −17.190% −13.673%] (p = 0.00 < 0.05)
+                        thrpt:  [+15.839% +20.759% +25.961%]
+                        Performance has improved.
+Benchmarking spawn_fanin_4/prime
+Benchmarking spawn_fanin_4/prime: Warming up for 1.0000 s
+Benchmarking spawn_fanin_4/prime: Collecting 20 samples in estimated 3.0763 s (1680 iterations)
+Benchmarking spawn_fanin_4/prime: Analyzing
+spawn_fanin_4/prime     time:   [1.7189 ms 1.7743 ms 1.8230 ms]
+                        thrpt:  [2.1941 Melem/s 2.2544 Melem/s 2.3271 Melem/s]
+                 change:
+                        time:   [−50.800% −39.340% −25.792%] (p = 0.00 < 0.05)
+                        thrpt:  [+34.756% +64.853% +103.25%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+
+Benchmarking spawn_fanin_8/tokio_per_core
+Benchmarking spawn_fanin_8/tokio_per_core: Warming up for 1.0000 s
+Benchmarking spawn_fanin_8/tokio_per_core: Collecting 20 samples in estimated 3.0275 s (840 iterations)
+Benchmarking spawn_fanin_8/tokio_per_core: Analyzing
+spawn_fanin_8/tokio_per_core
+                        time:   [3.5707 ms 3.6146 ms 3.6616 ms]
+                        thrpt:  [2.1848 Melem/s 2.2132 Melem/s 2.2404 Melem/s]
+                 change:
+                        time:   [−22.249% −21.008% −19.738%] (p = 0.00 < 0.05)
+                        thrpt:  [+24.592% +26.595% +28.615%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking spawn_fanin_8/prime
+Benchmarking spawn_fanin_8/prime: Warming up for 1.0000 s
+Benchmarking spawn_fanin_8/prime: Collecting 20 samples in estimated 3.1920 s (1050 iterations)
+Benchmarking spawn_fanin_8/prime: Analyzing
+spawn_fanin_8/prime     time:   [3.0593 ms 3.1365 ms 3.2132 ms]
+                        thrpt:  [2.4897 Melem/s 2.5506 Melem/s 2.6150 Melem/s]
+                 change:
+                        time:   [−20.815% −15.565% −10.176%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.329% +18.434% +26.287%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

@@ -1,0 +1,102 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.52s
+     Running benches/bench_compat_libraries.rs (/tmp/cargo_target/release/deps/bench_compat_libraries-45de34a9af42a6dc)
+Benchmarking compat_libs_single_stream/hyper_default_tokio
+Benchmarking compat_libs_single_stream/hyper_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/hyper_default_tokio: Collecting 15 samples in estimated 4.0040 s (105k iterations)
+Benchmarking compat_libs_single_stream/hyper_default_tokio: Analyzing
+compat_libs_single_stream/hyper_default_tokio
+                        time:   [37.377 µs 37.568 µs 37.770 µs]
+                        thrpt:  [26.476 Kelem/s 26.618 Kelem/s 26.755 Kelem/s]
+                 change:
+                        time:   [−25.183% −21.323% −17.443%] (p = 0.00 < 0.05)
+                        thrpt:  [+21.128% +27.102% +33.660%]
+                        Performance has improved.
+Benchmarking compat_libs_single_stream/hyper_current_thread
+Benchmarking compat_libs_single_stream/hyper_current_thread: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/hyper_current_thread: Collecting 15 samples in estimated 4.0041 s (114k iterations)
+Benchmarking compat_libs_single_stream/hyper_current_thread: Analyzing
+compat_libs_single_stream/hyper_current_thread
+                        time:   [34.918 µs 35.113 µs 35.304 µs]
+                        thrpt:  [28.325 Kelem/s 28.479 Kelem/s 28.638 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) low mild
+Benchmarking compat_libs_single_stream/hyper_prime_compat
+Benchmarking compat_libs_single_stream/hyper_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/hyper_prime_compat: Collecting 15 samples in estimated 4.0012 s (115k iterations)
+Benchmarking compat_libs_single_stream/hyper_prime_compat: Analyzing
+compat_libs_single_stream/hyper_prime_compat
+                        time:   [35.127 µs 35.474 µs 35.916 µs]
+                        thrpt:  [27.843 Kelem/s 28.190 Kelem/s 28.468 Kelem/s]
+                 change:
+                        time:   [−20.702% −16.990% −13.891%] (p = 0.00 < 0.05)
+                        thrpt:  [+16.132% +20.468% +26.106%]
+                        Performance has improved.
+Found 2 outliers among 15 measurements (13.33%)
+  1 (6.67%) low mild
+  1 (6.67%) high severe
+Benchmarking compat_libs_single_stream/pingora_default_tokio
+Benchmarking compat_libs_single_stream/pingora_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/pingora_default_tokio: Collecting 15 samples in estimated 4.0038 s (94k iterations)
+Benchmarking compat_libs_single_stream/pingora_default_tokio: Analyzing
+compat_libs_single_stream/pingora_default_tokio
+                        time:   [42.495 µs 43.919 µs 45.142 µs]
+                        thrpt:  [22.152 Kelem/s 22.769 Kelem/s 23.532 Kelem/s]
+                 change:
+                        time:   [−10.753% −5.3191% −0.1681%] (p = 0.08 > 0.05)
+                        thrpt:  [+0.1684% +5.6179% +12.049%]
+                        No change in performance detected.
+Benchmarking compat_libs_single_stream/pingora_current_thread
+Benchmarking compat_libs_single_stream/pingora_current_thread: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/pingora_current_thread: Collecting 15 samples in estimated 4.0009 s (83k iterations)
+Benchmarking compat_libs_single_stream/pingora_current_thread: Analyzing
+compat_libs_single_stream/pingora_current_thread
+                        time:   [34.904 µs 38.079 µs 44.365 µs]
+                        thrpt:  [22.540 Kelem/s 26.261 Kelem/s 28.650 Kelem/s]
+Benchmarking compat_libs_single_stream/pingora_prime_compat
+Benchmarking compat_libs_single_stream/pingora_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/pingora_prime_compat: Collecting 15 samples in estimated 4.0002 s (115k iterations)
+Benchmarking compat_libs_single_stream/pingora_prime_compat: Analyzing
+compat_libs_single_stream/pingora_prime_compat
+                        time:   [34.784 µs 37.051 µs 38.701 µs]
+                        thrpt:  [25.839 Kelem/s 26.990 Kelem/s 28.749 Kelem/s]
+                 change:
+                        time:   [−19.296% −16.098% −13.061%] (p = 0.00 < 0.05)
+                        thrpt:  [+15.024% +19.187% +23.909%]
+                        Performance has improved.
+Benchmarking compat_libs_single_stream/proxima_default_tokio
+Benchmarking compat_libs_single_stream/proxima_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/proxima_default_tokio: Collecting 15 samples in estimated 4.0001 s (110k iterations)
+Benchmarking compat_libs_single_stream/proxima_default_tokio: Analyzing
+compat_libs_single_stream/proxima_default_tokio
+                        time:   [35.850 µs 37.817 µs 40.162 µs]
+                        thrpt:  [24.899 Kelem/s 26.443 Kelem/s 27.894 Kelem/s]
+                 change:
+                        time:   [−8.3117% −3.7991% +1.5737%] (p = 0.17 > 0.05)
+                        thrpt:  [−1.5493% +3.9492% +9.0652%]
+                        No change in performance detected.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_single_stream/proxima_current_thread
+Benchmarking compat_libs_single_stream/proxima_current_thread: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/proxima_current_thread: Collecting 15 samples in estimated 4.0012 s (116k iterations)
+Benchmarking compat_libs_single_stream/proxima_current_thread: Analyzing
+compat_libs_single_stream/proxima_current_thread
+                        time:   [38.576 µs 48.035 µs 62.864 µs]
+                        thrpt:  [15.907 Kelem/s 20.818 Kelem/s 25.923 Kelem/s]
+Found 2 outliers among 15 measurements (13.33%)
+  1 (6.67%) high mild
+  1 (6.67%) high severe
+Benchmarking compat_libs_single_stream/proxima_prime_compat
+Benchmarking compat_libs_single_stream/proxima_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/proxima_prime_compat: Collecting 15 samples in estimated 4.0041 s (103k iterations)
+Benchmarking compat_libs_single_stream/proxima_prime_compat: Analyzing
+compat_libs_single_stream/proxima_prime_compat
+                        time:   [38.569 µs 39.594 µs 40.660 µs]
+                        thrpt:  [24.594 Kelem/s 25.257 Kelem/s 25.927 Kelem/s]
+                 change:
+                        time:   [+2.5129% +4.0429% +5.7848%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.4684% −3.8858% −2.4513%]
+                        Performance has regressed.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+

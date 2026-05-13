@@ -1,0 +1,34 @@
+# build-time sizing for proxima-protocols' http1_codec module.
+# read by build.rs, emitted as consts into
+# OUT_DIR/proxima_protocols_http1_codec_sized.rs.
+#
+# Per-system override via env var at build time:
+#
+#   PROXIMA_PROTOCOLS_HTTP1_CODEC_HEADER_INLINE_CAP=24 \
+#       cargo build -p proxima-protocols
+
+[header]
+# Inline capacity of the SmallVec backing RequestHead::headers (the
+# parser's own head type, h1.rs). A request with this many headers or
+# fewer parses with zero heap allocation for the header container; a
+# request with more headers spills onto the heap exactly like a plain
+# Vec would (documented fallback, not an error, and no worse than the
+# prior always-heap Vec). Kept small (rather than sized to a typical
+# full browser request with cookies) because each inline slot embeds a
+# `Header<'a>` (two fat pointers, 32 bytes) directly in RequestHead's
+# own bytes: 4 slots keeps RequestHead comfortably under clippy's
+# large_enum_variant threshold for the Status::{Partial,Complete} enum
+# that wraps it without a Box (a heap indirection here would trade
+# away the very allocation this cap exists to avoid); 5+ trips the
+# lint. Covers bodyless/simple requests (health checks, internal
+# RPC-over-HTTP1) with zero heap allocation; larger real-world header
+# sets spill exactly as before.
+#
+# Deliberately NOT reused for frame_codec_pipe::OwnedFrame::headers,
+# which stays a plain Vec<OwnedHeader> — OwnedHeader is two `Bytes`
+# (twice Header's size) and OwnedFrame/H1RequestFrame are moved by
+# value through the ENTIRE downstream pipe (unlike RequestHead, which
+# dies at the end of one parse+re-own call), so inlining there measured
+# as a net latency loss even though it also cut an allocation; see
+# OwnedFrame's doc comment (frame_codec_pipe.rs) for the measurement.
+inline_cap = 4

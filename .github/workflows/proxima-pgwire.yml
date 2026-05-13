@@ -1,0 +1,122 @@
+name: proxima-pgwire
+
+# Gate for the proxima-pgwire stack (docs/proxima-pgwire/discipline.md).
+# Re-proves the correctness claims on every push without anyone's memory
+# (guiding-principle 16): the sans-IO codec + session FSM, the Pipe-native
+# facade (SCRAM/MD5 auth, COPY, LISTEN/NOTIFY, portal suspension, direct-TLS,
+# the PBKDF2 reactor-offload), and the two hard invariants — the codec stays
+# untouched-green and the no-default-features facade graph carries zero tokio.
+# Real-client e2e (psql / sqlx / tokio-postgres / prime-mounted) are the
+# witnesses that the facade speaks actual PostgreSQL, not just our own codec.
+
+on:
+  push:
+    branches: [main, "feat/pgwire-gates", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # The full stack gate: bare-metal codec build + all-features build + clippy
+  # across the feature matrix + codec/facade tests + the tokio gate.
+  pgwire-gate:
+    name: proxima-pgwire-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.pgwire == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: install postgres client (psql witness)
+        run: |
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            brew install libpq && echo "$(brew --prefix libpq)/bin" >> "$GITHUB_PATH"
+          else
+            sudo apt-get update && sudo apt-get install -y postgresql-client
+          fi
+      - run: bash scripts/proxima-pgwire-gate.sh
+
+  # Tokio gate as its own fast job: the no-default-features facade graph must
+  # carry zero tokio (the bare-metal / DPDK embedding contract). A focused job
+  # so a regression here is unmistakable in the checks list.
+  tokio-gate:
+    name: no-default-features carries zero tokio
+    needs: changes
+    if: needs.changes.outputs.pgwire == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: assert empty tokio subtree
+        run: |
+          leaked="$(cargo tree -p proxima-pgwire --no-default-features -e normal -i tokio 2>/dev/null || true)"
+          if printf '%s' "$leaked" | grep -q '^tokio'; then
+            printf 'FAIL: tokio leaked into the no-default-features graph:\n%s\n' "$leaked"
+            exit 1
+          fi
+          echo "ok: no tokio in the bare proxima-pgwire graph"
+
+  # G13: parity against the CANONICAL incumbent — a real PostgreSQL server, not
+  # the pgwire 0.28 crate (itself a reimplementation we could share a bug with).
+  # The vendored corpus (always re-run in the gate job above) parses real PG's
+  # bytes; this job re-captures from a live postgres:17 service so a structural
+  # drift in a newer point release surfaces (principle 16 canary), then runs the
+  # live differential: the same tokio-postgres client must see an identical
+  # protocol contract from our facade and from real PostgreSQL.
+  realpg-differential:
+    name: real-postgres differential parity (G13)
+    needs: changes
+    if: needs.changes.outputs.pgwire == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: proxima
+          POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGWIRE_REALPG_HOST: localhost
+      PGWIRE_REALPG_PORT: "5432"
+      PGWIRE_REALPG_PASSWORD: proxima
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: vendored corpus parses (byte-stable baseline, no server)
+        run: cargo nextest run -p proxima-protocols --no-default-features --features pgwire_codec --test pgwire_codec_realpg_corpus
+      - name: re-capture from the live service
+        run: cargo run -p proxima-pgwire --example capture_realpg -- /tmp/realpg_fresh
+      - name: live PG bytes still parse + match semantics (version-drift canary)
+        env:
+          PGWIRE_REALPG_FIXTURES: /tmp/realpg_fresh
+        run: cargo nextest run -p proxima-protocols --no-default-features --features pgwire_codec --test pgwire_codec_realpg_corpus
+      - name: live differential — facade contract == real PostgreSQL
+        run: cargo nextest run -p proxima-pgwire --test differential_realpg

@@ -1,0 +1,195 @@
+[package]
+name = "proxima-http"
+description = "Runtime-agnostic HTTP/1.1, HTTP/2, HTTP/3, and WebSocket stacks for proxima, hyper-shaped, feature-gated per protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dependencies]
+proxima-protocols = { workspace = true }
+proxima-core = { workspace = true }
+proxima-primitives = { workspace = true, features = ["std"] }
+proxima-listen = { workspace = true }
+proxima-runtime = { workspace = true, features = ["std"] }
+proxima-telemetry = { workspace = true, features = ["std", "macros"] }
+# folded former proxima-net-prime / proxima-net-tokio crates: `prime` /
+# `tokio` features below select which backend module(s) get pulled in.
+proxima-net = { workspace = true, optional = true, default-features = false }
+proxima-tls = { workspace = true, optional = true, features = ["futures-io"] }
+proxima-quic = { workspace = true, optional = true, default-features = false }
+prime = { workspace = true, optional = true }
+
+bumpalo = { workspace = true, features = ["std", "collections"] }
+httparse = { workspace = true, features = ["std"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true, features = ["http1", "client"] }
+hyper-util = { workspace = true, optional = true, features = ["tokio", "client", "client-legacy", "http1", "http2"] }
+hyper-rustls = { workspace = true, optional = true, features = ["http1", "http2", "native-tokio", "aws-lc-rs", "webpki-tokio"] }
+pin-project-lite = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true, optional = true, features = ["aws_lc_rs", "pem"] }
+rustc-hash = { workspace = true, optional = true, features = ["std"] }
+rustls = { workspace = true, optional = true, features = ["std", "aws_lc_rs", "tls12"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+smallvec = { workspace = true, optional = true, features = ["const_generics"] }
+tracing = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["sync", "rt", "io-util", "net", "macros", "time"] }
+tokio-util = { workspace = true, optional = true, features = ["compat", "io"] }
+tokio-uring = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true, features = ["aws_lc_rs", "tls12"] }
+webpki-roots = { workspace = true }
+url = { workspace = true, optional = true }
+async-tungstenite = { workspace = true, optional = true, features = ["handshake", "futures-03-sink", "tokio-runtime"] }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true, features = ["rustls-aws-lc-rs", "runtime-tokio"] }
+bon = { workspace = true }
+conflaguration = { workspace = true, features = ["derive", "toml"] }
+xxhash-rust = { workspace = true, optional = true, features = ["xxh3"] }
+thiserror = { workspace = true, optional = true }
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+# time-driver-mock compiles proxima-core's deterministic MockDriver so the
+# native-h3 listener's injected Clock can be driven by virtual time in tests.
+proxima-core = { workspace = true, features = ["time-driver-mock", "std"] }
+rstest = { workspace = true }
+toml = { workspace = true }
+proxima-net = { workspace = true, features = ["tokio"] }
+proxima-protocols = { workspace = true, features = ["quic-tls-rustls", "quic-mock-tls"] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"] }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"] }
+prime = { workspace = true }
+# facade parity test: env-loader vs builder equivalence, and upstream.rs's
+# test uses futures::executor::block_on; the workspace futures is
+# default-features = false, so enable executor for tests.
+futures = { workspace = true, features = ["executor"] }
+criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http1", "client"] }
+hyper-util = { workspace = true, features = ["tokio", "client", "client-legacy", "http1"] }
+temp-env.workspace = true
+tempfile = { workspace = true }
+
+[features]
+default = ["http1"]
+
+http1 = [
+    "proxima-protocols/http1_codec",
+    "dep:http-body",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:xxhash-rust",
+]
+http1-tls = ["http1", "dep:hyper-rustls"]
+# tokio-free: the prime-native h1 client (client.rs/prime_upstream.rs) needs
+# only the sans-IO h1 codec, not the hyper/tokio-backed `http1` feature —
+# see http1/mod.rs's module gates and http_config.rs's doc comment.
+http1-stream-client = [
+    "proxima-protocols/http1_codec",
+    "dep:proxima-net",
+    "proxima-net/prime",
+    "proxima-net/runtime-prime-inbox-alloc",
+    "dep:proxima-tls",
+    "dep:url",
+    "dep:xxhash-rust",
+]
+# webpki-roots is a mandatory (non-optional) dep here — proxima-h3's
+# quinn-compat/native-upstream paths reference it directly regardless
+# of the http1-io-uring feature, mirroring proxima-h3's original
+# always-on dependency.
+http1-io-uring = ["http1", "dep:tokio-uring", "dep:tokio-rustls"]
+
+# `http2-native` is the tokio-free base: the sans-IO codec + the futures-io
+# connection driver (server.rs/client.rs) + the `AcceptorFactory` accept
+# loop (listener.rs's `serve_via_factory`). `http2` layers the legacy
+# tokio `TcpListener` fallback accept loop on top (used only when no
+# `AcceptorFactory` is injected) — no external `h2` crate either way.
+http2-native = ["proxima-protocols/http2_codec", "dep:rustc-hash", "dep:smallvec"]
+http2 = ["http2-native", "dep:tokio", "dep:tokio-util"]
+
+http3 = ["http3-native", "http3-quinn-compat"]
+# tokio-free: the sans-IO codec + native listener (listen.rs) drive over
+# `proxima-quic/native`, which is itself tokio-free (prime-driven).
+http3-native = [
+    "proxima-protocols/http3_codec-alloc",
+    "proxima-protocols/quic-tls-rustls",
+    "dep:proxima-quic",
+    "proxima-quic/native",
+    "dep:rustls",
+    "dep:rcgen",
+]
+http3-quinn-compat = [
+    "dep:h3",
+    "dep:h3-quinn",
+    "dep:quinn",
+    "dep:rustls",
+    "dep:proxima-quic",
+    "proxima-quic/quinn-compat",
+    "dep:tokio",
+]
+# the native client upstream facade (`http3/native/upstream.rs`) uses a
+# `tokio::sync::Mutex` today, so it needs `dep:tokio` even though the
+# listener side (`http3-native`) does not.
+http3-native-upstream = ["http3-native", "dep:tokio", "dep:prime"]
+http3-part-source = ["http3-native-upstream", "proxima-protocols/http3_codec-part-source", "proxima-primitives/part-source"]
+
+websocket = ["dep:async-tungstenite", "dep:proxima-net", "proxima-net/tokio", "dep:tokio"]
+
+# ALPN-multiplexed h1+h2 listener combiner (`listener` module), folded in
+# from the former `proxima-listeners-http` crate: drives this crate's own
+# http1/http2 stacks over a `proxima-listen::ListenProtocol`.
+http-listener = [
+    "http1",
+    "proxima-core/io-async-compat",
+    "proxima-core/io-async-compat-tokio",
+    "proxima-protocols/proxy_protocol-tokio-runtime",
+    # the combiner's legacy (no-`AcceptorFactory`) accept loop uses
+    # proxima-listen's tokio-native reuseport bind; see
+    # proxima-listen/src/handle.rs's `tokio` feature.
+    "proxima-listen/tokio",
+]
+# TLS termination for the `listener` module (folded from the former
+# `proxima-listeners-http` crate's own `tls` feature).
+tls = [
+    "http-listener",
+    "http1-tls",
+    "dep:proxima-tls",
+    "proxima-tls/tokio",
+    "dep:tokio-rustls",
+    "proxima-listen/tls",
+]
+thiserror = ["dep:thiserror"]
+
+[[bench]]
+name = "bench_h1_client_compare"
+harness = false
+required-features = ["http1-stream-client"]
+
+[[example]]
+name = "native_h3_demo"
+required-features = ["http3-native"]
+
+[[test]]
+name = "native_round_trip"
+path = "tests/native_round_trip.rs"
+required-features = ["http3-native"]
+
+[lints]
+workspace = true

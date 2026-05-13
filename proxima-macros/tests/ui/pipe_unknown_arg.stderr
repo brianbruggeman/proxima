@@ -1,0 +1,5 @@
+error: unknown #[proxima::pipe] arg; expected `send`, `unpin`, `boxed`, or `name = Ident`
+ --> tests/ui/pipe_unknown_arg.rs:4:8
+  |
+4 | #[pipe(bogus)]
+  |        ^^^^^

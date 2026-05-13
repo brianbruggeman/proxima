@@ -1,0 +1,83 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 50s
+     Running benches/bench_compat_libraries.rs (/tmp/cargo_target/release/deps/bench_compat_libraries-45de34a9af42a6dc)
+Benchmarking compat_libs_multicore_fanin/hyper_multi_thread
+Benchmarking compat_libs_multicore_fanin/hyper_multi_thread: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/hyper_multi_thread: Collecting 15 samples in estimated 5.0168 s (17k iterations)
+Benchmarking compat_libs_multicore_fanin/hyper_multi_thread: Analyzing
+compat_libs_multicore_fanin/hyper_multi_thread
+                        time:   [278.92 µs 285.89 µs 295.11 µs]
+                        thrpt:  [108.43 Kelem/s 111.93 Kelem/s 114.73 Kelem/s]
+Found 4 outliers among 15 measurements (26.67%)
+  2 (13.33%) low mild
+  1 (6.67%) high mild
+  1 (6.67%) high severe
+Benchmarking compat_libs_multicore_fanin/hyper_per_core
+Benchmarking compat_libs_multicore_fanin/hyper_per_core: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/hyper_per_core: Collecting 15 samples in estimated 5.0086 s (27k iterations)
+Benchmarking compat_libs_multicore_fanin/hyper_per_core: Analyzing
+compat_libs_multicore_fanin/hyper_per_core
+                        time:   [184.96 µs 220.74 µs 243.03 µs]
+                        thrpt:  [131.67 Kelem/s 144.97 Kelem/s 173.01 Kelem/s]
+Found 3 outliers among 15 measurements (20.00%)
+  3 (20.00%) high severe
+Benchmarking compat_libs_multicore_fanin/hyper_prime_compat
+Benchmarking compat_libs_multicore_fanin/hyper_prime_compat: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/hyper_prime_compat: Collecting 15 samples in estimated 5.0155 s (23k iterations)
+Benchmarking compat_libs_multicore_fanin/hyper_prime_compat: Analyzing
+compat_libs_multicore_fanin/hyper_prime_compat
+                        time:   [182.37 µs 218.39 µs 276.53 µs]
+                        thrpt:  [115.72 Kelem/s 146.53 Kelem/s 175.47 Kelem/s]
+Found 2 outliers among 15 measurements (13.33%)
+  2 (13.33%) high severe
+Benchmarking compat_libs_multicore_fanin/pingora_multi_thread
+Benchmarking compat_libs_multicore_fanin/pingora_multi_thread: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/pingora_multi_thread: Collecting 15 samples in estimated 5.0058 s (17k iterations)
+Benchmarking compat_libs_multicore_fanin/pingora_multi_thread: Analyzing
+compat_libs_multicore_fanin/pingora_multi_thread
+                        time:   [280.17 µs 292.11 µs 308.26 µs]
+                        thrpt:  [103.81 Kelem/s 109.55 Kelem/s 114.21 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_multicore_fanin/pingora_per_core
+Benchmarking compat_libs_multicore_fanin/pingora_per_core: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/pingora_per_core: Collecting 15 samples in estimated 5.0157 s (21k iterations)
+Benchmarking compat_libs_multicore_fanin/pingora_per_core: Analyzing
+compat_libs_multicore_fanin/pingora_per_core
+                        time:   [184.61 µs 186.41 µs 188.41 µs]
+                        thrpt:  [169.85 Kelem/s 171.66 Kelem/s 173.34 Kelem/s]
+Benchmarking compat_libs_multicore_fanin/pingora_prime_compat
+Benchmarking compat_libs_multicore_fanin/pingora_prime_compat: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/pingora_prime_compat: Collecting 15 samples in estimated 5.0040 s (29k iterations)
+Benchmarking compat_libs_multicore_fanin/pingora_prime_compat: Analyzing
+compat_libs_multicore_fanin/pingora_prime_compat
+                        time:   [219.65 µs 222.35 µs 226.59 µs]
+                        thrpt:  [141.22 Kelem/s 143.92 Kelem/s 145.68 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_multicore_fanin/proxima_multi_thread
+Benchmarking compat_libs_multicore_fanin/proxima_multi_thread: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/proxima_multi_thread: Collecting 15 samples in estimated 5.0208 s (18k iterations)
+Benchmarking compat_libs_multicore_fanin/proxima_multi_thread: Analyzing
+compat_libs_multicore_fanin/proxima_multi_thread
+                        time:   [196.49 µs 203.61 µs 213.38 µs]
+                        thrpt:  [149.97 Kelem/s 157.17 Kelem/s 162.86 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_multicore_fanin/proxima_per_core
+Benchmarking compat_libs_multicore_fanin/proxima_per_core: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/proxima_per_core: Collecting 15 samples in estimated 5.0173 s (18k iterations)
+Benchmarking compat_libs_multicore_fanin/proxima_per_core: Analyzing
+compat_libs_multicore_fanin/proxima_per_core
+                        time:   [217.98 µs 234.93 µs 270.79 µs]
+                        thrpt:  [118.17 Kelem/s 136.21 Kelem/s 146.80 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_multicore_fanin/proxima_prime_compat
+Benchmarking compat_libs_multicore_fanin/proxima_prime_compat: Warming up for 3.0000 s
+Benchmarking compat_libs_multicore_fanin/proxima_prime_compat: Collecting 15 samples in estimated 5.0051 s (21k iterations)
+Benchmarking compat_libs_multicore_fanin/proxima_prime_compat: Analyzing
+compat_libs_multicore_fanin/proxima_prime_compat
+                        time:   [222.07 µs 268.86 µs 328.99 µs]
+                        thrpt:  [97.266 Kelem/s 119.02 Kelem/s 144.10 Kelem/s]
+

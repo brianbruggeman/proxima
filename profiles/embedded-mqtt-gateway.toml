@@ -1,0 +1,25 @@
+# proxima embedded-mqtt-gateway profile — STM32-class MCUs with embassy.
+#
+# no_std + alloc, embassy executor, embassy-net reactor, embedded-tls.
+# Heap is available (the chip has one or alloc is software-supplied);
+# bare-metal-without-alloc lives in the bare-metal profile.
+
+schema = 1
+
+alloc = true
+std = false
+
+executor = "embassy"
+reactor = "embassy-net"
+tls = "embedded-tls"
+quic_enabled = false
+# quic_impl: embassy + embedded-tls cannot today host the QUIC stack — the
+# rustls + aws-lc-rs bridge needs a no_std + alloc reach that this profile
+# does not enable (embedded-tls instead of rustls). Future: a `native-no-rustls`
+# variant could compose with embedded-tls.
+quic_impl = "none"
+h3_impl = "none"
+# timer: embassy-time has no workspace dep or Driver adapter yet (discipline.md
+# "driver-embassy-time" follow-up), so it fails the whole crate to resolve, not
+# just a timer call. unbound compiles everywhere, panics only if used.
+timer = "crate::time::drivers::unbound::DRIVER"

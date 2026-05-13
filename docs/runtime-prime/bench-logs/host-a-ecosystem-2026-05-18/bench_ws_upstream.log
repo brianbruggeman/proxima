@@ -1,0 +1,39 @@
+   Compiling generic-array v0.14.7
+   Compiling proxima v0.1.0 (proxima/rust)
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling sha1 v0.10.6
+   Compiling tungstenite v0.29.0
+   Compiling async-tungstenite v0.34.1
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 41s
+     Running benches/bench_ws_upstream.rs (/tmp/cargo_target/release/deps/bench_ws_upstream-8f3dc6c1cf54bf46)
+Benchmarking ws_upstream_proxima/send_recv_warm_connection
+Benchmarking ws_upstream_proxima/send_recv_warm_connection: Warming up for 2.0000 s
+Benchmarking ws_upstream_proxima/send_recv_warm_connection: Collecting 20 samples in estimated 3.0014 s (92k iterations)
+Benchmarking ws_upstream_proxima/send_recv_warm_connection: Analyzing
+ws_upstream_proxima/send_recv_warm_connection
+                        time:   [30.590 µs 31.689 µs 33.157 µs]
+                        thrpt:  [117.81 KiB/s 123.27 KiB/s 127.70 KiB/s]
+                 change:
+                        time:   [+41.448% +48.045% +55.182%] (p = 0.00 < 0.05)
+                        thrpt:  [−35.560% −32.453% −29.303%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection: Warming up for 2.0000 s
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection: Collecting 20 samples in estimated 3.0040 s (95k iterations)
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection: Analyzing
+ws_upstream_direct_async_tungstenite/send_recv_warm_connection
+                        time:   [30.949 µs 31.436 µs 32.015 µs]
+                        thrpt:  [122.01 KiB/s 124.26 KiB/s 126.21 KiB/s]
+                 change:
+                        time:   [+8.9769% +13.606% +18.864%] (p = 0.00 < 0.05)
+                        thrpt:  [−15.870% −11.977% −8.2375%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+

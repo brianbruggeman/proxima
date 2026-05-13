@@ -1,0 +1,29 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 41.36s
+     Running benches/histogram_record.rs (/tmp/cargo_target/release/deps/histogram_record-a5f6dc2fc228efe0)
+Benchmarking histogram_record/single_thread
+Benchmarking histogram_record/single_thread: Warming up for 2.0000 s
+Benchmarking histogram_record/single_thread: Collecting 20 samples in estimated 3.0001 s (6.5M iterations)
+Benchmarking histogram_record/single_thread: Analyzing
+histogram_record/single_thread
+                        time:   [457.44 ns 461.03 ns 465.33 ns]
+                        thrpt:  [2.1490 Melem/s 2.1690 Melem/s 2.1861 Melem/s]
+                 change:
+                        time:   [−2.7686% −1.5707% −0.2288%] (p = 0.31 > 0.05)
+                        thrpt:  [+0.2293% +1.5958% +2.8475%]
+                        No change in performance detected.
+
+Benchmarking histogram_record/8_workers_one_record_each
+Benchmarking histogram_record/8_workers_one_record_each: Warming up for 2.0000 s
+Benchmarking histogram_record/8_workers_one_record_each: Collecting 20 samples in estimated 3.0059 s (101k iterations)
+Benchmarking histogram_record/8_workers_one_record_each: Analyzing
+histogram_record/8_workers_one_record_each
+                        time:   [29.560 µs 29.701 µs 29.866 µs]
+                        thrpt:  [267.86 Kelem/s 269.36 Kelem/s 270.64 Kelem/s]
+                 change:
+                        time:   [+63.342% +65.591% +67.904%] (p = 0.00 < 0.05)
+                        thrpt:  [−40.442% −39.610% −38.779%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+

@@ -1,0 +1,43 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.52s
+     Running benches/h1_dispatch.rs (proxima/target/release/deps/h1_dispatch-da2789c0f319fb19)
+Benchmarking h1_parse_head/small_get_5_headers
+Benchmarking h1_parse_head/small_get_5_headers: Warming up for 2.0000 s
+Benchmarking h1_parse_head/small_get_5_headers: Collecting 20 samples in estimated 3.0000 s (17M iterations)
+Benchmarking h1_parse_head/small_get_5_headers: Analyzing
+h1_parse_head/small_get_5_headers
+                        time:   [182.09 ns 182.19 ns 182.32 ns]
+                        thrpt:  [5.4848 Melem/s 5.4887 Melem/s 5.4917 Melem/s]
+                 change:
+                        time:   [−0.2705% −0.1860% −0.0819%] (p = 0.07 > 0.05)
+                        thrpt:  [+0.0819% +0.1863% +0.2712%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking h1_connection_round_trip_no_body/get_then_200_ok
+Benchmarking h1_connection_round_trip_no_body/get_then_200_ok: Warming up for 2.0000 s
+Benchmarking h1_connection_round_trip_no_body/get_then_200_ok: Collecting 20 samples in estimated 3.0000 s (9.0M iterations)
+Benchmarking h1_connection_round_trip_no_body/get_then_200_ok: Analyzing
+h1_connection_round_trip_no_body/get_then_200_ok
+                        time:   [334.20 ns 334.99 ns 335.95 ns]
+                        thrpt:  [2.9766 Melem/s 2.9852 Melem/s 2.9922 Melem/s]
+                 change:
+                        time:   [−1.3347% −1.0682% −0.8105%] (p = 0.01 < 0.05)
+                        thrpt:  [+0.8171% +1.0797% +1.3528%]
+                        Change within noise threshold.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) low mild
+
+Benchmarking h1_connection_round_trip_post_with_body/post_with_5_byte_body_then_200_echo
+Benchmarking h1_connection_round_trip_post_with_body/post_with_5_byte_body_then_200_echo: Warming up for 2.0000 s
+Benchmarking h1_connection_round_trip_post_with_body/post_with_5_byte_body_then_200_echo: Collecting 20 samples in estimated 3.0001 s (9.2M iterations)
+Benchmarking h1_connection_round_trip_post_with_body/post_with_5_byte_body_then_200_echo: Analyzing
+h1_connection_round_trip_post_with_body/post_with_5_byte_body_then_200_echo
+                        time:   [325.63 ns 326.08 ns 326.74 ns]
+                        thrpt:  [3.0606 Melem/s 3.0667 Melem/s 3.0710 Melem/s]
+                 change:
+                        time:   [−2.7145% −2.5259% −2.3534%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.4101% +2.5914% +2.7902%]
+                        Performance has improved.
+

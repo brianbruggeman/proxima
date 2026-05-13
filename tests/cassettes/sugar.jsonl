@@ -1,0 +1,4 @@
+{"v":3,"id":"01KT4RF1YYPZ4N7KPAJPA0ENW8","ts_ms":0,"proto":"http","phase":"started","ts":"1970-01-01T00:00:00Z","pipe":"cassette","request":{"method":"GET","path":"/v1/sugar"}}
+{"v":3,"id":"01KT4RF1YYPZ4N7KPAJPA0ENW8","ts_ms":0,"proto":"http","phase":"response_started","status":200,"headers":[["content-length","8"]]}
+{"v":3,"id":"01KT4RF1YYPZ4N7KPAJPA0ENW8","ts_ms":0,"proto":"http","phase":"response_chunk","b64":"c3VnYXItb2s="}
+{"v":3,"id":"01KT4RF1YYPZ4N7KPAJPA0ENW8","ts_ms":0,"proto":"http","phase":"ended","latency_ms":0,"meta":{"retries":0}}

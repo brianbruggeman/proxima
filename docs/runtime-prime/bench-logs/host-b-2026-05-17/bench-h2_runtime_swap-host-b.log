@@ -1,0 +1,448 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling memchr v2.8.0
+   Compiling serde v1.0.228
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling smallvec v1.15.1
+   Compiling bytes v1.11.1
+   Compiling equivalent v1.0.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling zerocopy v0.8.48
+   Compiling autocfg v1.5.0
+   Compiling futures-core v0.3.32
+   Compiling syn v2.0.117
+   Compiling jobserver v0.1.34
+   Compiling pkg-config v0.3.33
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.17.0
+   Compiling tracing-core v0.1.36
+   Compiling cc v1.2.61
+   Compiling zeroize v1.8.2
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling indexmap v2.14.0
+   Compiling futures-sink v0.3.32
+   Compiling num-traits v0.2.19
+   Compiling parking_lot_core v0.9.12
+   Compiling cmake v0.1.58
+   Compiling futures-channel v0.3.32
+   Compiling rustls-pki-types v1.14.1
+   Compiling writeable v0.6.3
+   Compiling log v0.4.29
+   Compiling futures-io v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling litemap v0.8.2
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling slab v0.4.12
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling aws-lc-sys v0.40.0
+   Compiling zmij v1.0.21
+   Compiling crossbeam-utils v0.8.21
+   Compiling vcpkg v0.2.15
+   Compiling serde_json v1.0.149
+   Compiling semver v1.0.28
+   Compiling byteorder v1.5.0
+   Compiling rustc_version v0.4.1
+   Compiling openssl-sys v0.9.116
+   Compiling parking_lot v0.12.5
+   Compiling bitflags v2.11.1
+   Compiling http v1.4.0
+   Compiling synstructure v0.13.2
+   Compiling aho-corasick v1.1.4
+   Compiling getrandom v0.3.4
+   Compiling anyhow v1.0.102
+   Compiling aws-lc-rs v1.16.3
+   Compiling regex-syntax v0.8.10
+   Compiling minimal-lexical v0.2.1
+   Compiling nom v7.1.3
+   Compiling foldhash v0.2.0
+   Compiling lazy_static v1.5.0
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerocopy-derive v0.8.48
+   Compiling zerofrom v0.1.7
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tokio-macros v2.7.0
+   Compiling yoke v0.8.2
+   Compiling tracing-attributes v0.1.31
+   Compiling zerovec v0.11.6
+   Compiling tokio v1.52.1
+   Compiling futures-macro v0.3.32
+   Compiling tinystr v0.8.3
+   Compiling icu_locale_core v2.2.0
+   Compiling tracing v0.1.44
+   Compiling futures-util v0.3.32
+   Compiling potential_utf v0.1.5
+   Compiling zerotrie v0.2.4
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling regex-automata v0.4.14
+   Compiling thiserror v1.0.69
+   Compiling rustversion v1.0.22
+   Compiling allocator-api2 v0.2.21
+   Compiling percent-encoding v2.3.2
+   Compiling version_check v0.9.5
+   Compiling hashbrown v0.16.1
+   Compiling idna_adapter v1.2.2
+   Compiling thiserror-impl v1.0.69
+   Compiling ppv-lite86 v0.2.21
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling getrandom v0.2.17
+   Compiling httparse v1.10.1
+   Compiling heck v0.5.0
+   Compiling fnv v1.0.7
+   Compiling thiserror v2.0.18
+   Compiling openssl-probe v0.2.1
+   Compiling rand_core v0.6.4
+   Compiling idna v1.1.0
+   Compiling tokio-util v0.7.18
+   Compiling form_urlencoded v1.2.2
+   Compiling thiserror-impl v2.0.18
+   Compiling libz-ng-sys v1.1.28
+   Compiling thread_local v1.1.9
+   Compiling atomic-waker v1.1.2
+   Compiling foreign-types-shared v0.1.1
+   Compiling ucd-trie v0.1.7
+   Compiling openssl v0.10.80
+   Compiling ryu v1.0.23
+   Compiling utf8parse v0.2.2
+   Compiling crc32fast v1.5.0
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+   Compiling darling_core v0.23.0
+   Compiling anstyle-parse v1.0.0
+   Compiling pest v2.8.6
+   Compiling foreign-types v0.3.2
+   Compiling h2 v0.4.14
+   Compiling url v2.5.8
+   Compiling rand_chacha v0.3.1
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling openssl-macros v0.1.1
+   Compiling http-body v1.0.1
+   Compiling untrusted v0.9.0
+   Compiling time-core v0.1.8
+   Compiling zstd-safe v7.2.4
+   Compiling try-lock v0.2.5
+   Compiling adler2 v2.0.1
+   Compiling httpdate v1.0.3
+   Compiling anstyle-query v1.1.5
+   Compiling cookie-factory v0.3.2
+   Compiling bit-vec v0.8.0
+   Compiling toml_write v0.1.2
+   Compiling prettyplease v0.2.37
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling num-conv v0.2.1
+   Compiling rustls v0.23.40
+   Compiling native-tls v0.2.18
+   Compiling winnow v0.7.15
+   Compiling base64 v0.22.1
+   Compiling simd-adler32 v0.3.9
+   Compiling powerfmt v0.2.0
+   Compiling winnow v1.0.2
+   Compiling miniz_oxide v0.8.9
+   Compiling deranged v0.5.8
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling toml_edit v0.22.27
+   Compiling anstream v1.0.0
+   Compiling time-macros v0.2.27
+   Compiling bit-set v0.8.0
+   Compiling want v0.3.1
+   Compiling rand v0.8.6
+   Compiling darling_macro v0.23.0
+   Compiling pest_meta v2.8.6
+   Compiling regex v1.12.3
+   Compiling rand_core v0.9.5
+   Compiling heapless v0.7.17
+   Compiling murmur3 v0.4.1
+   Compiling spin v0.9.8
+   Compiling memoffset v0.6.5
+   Compiling ref-cast v1.0.25
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling rustix v1.1.4
+   Compiling rust_decimal v1.42.0
+   Compiling typed-arena v2.0.2
+   Compiling getrandom v0.4.2
+   Compiling better_any v0.2.1
+   Compiling protobuf v2.28.0
+   Compiling clap_lex v1.1.0
+   Compiling paste v1.0.15
+   Compiling uuid v1.23.1
+   Compiling syn v1.0.109
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling subtle v2.6.1
+   Compiling toml_edit v0.25.11+spec-1.1.0
+   Compiling antlr4rust v0.3.0-rc2
+   Compiling clap_builder v4.6.0
+   Compiling time v0.3.47
+   Compiling alloc-stdlib v0.2.2
+   Compiling pest_generator v2.8.6
+   Compiling rand_chacha v0.9.0
+   Compiling darling v0.23.0
+   Compiling toml v0.8.23
+   Compiling hyper v1.9.0
+   Compiling amq-protocol-types v7.2.3
+   Compiling clap_derive v4.6.1
+   Compiling halfbrown v0.4.0
+   Compiling half v2.7.1
+   Compiling serde_yml v0.0.12
+   Compiling ahash v0.8.12
+   Compiling futures-executor v0.3.32
+   Compiling chrono v0.4.44
+   Compiling ref-cast-impl v1.0.25
+   Compiling crossbeam-queue v0.3.12
+   Compiling rstest_macros v0.26.1
+   Compiling hash32 v0.2.1
+   Compiling float-cmp v0.10.0
+   Compiling alloca v0.4.0
+   Compiling rustls-pemfile v2.2.0
+   Compiling ciborium-io v0.2.2
+   Compiling base64 v0.21.7
+   Compiling fastrand v2.4.1
+   Compiling arrayvec v0.7.6
+   Compiling tower-service v0.3.3
+   Compiling either v1.15.0
+   Compiling prometheus v0.13.4
+   Compiling falsehoods v1.0.0
+   Compiling fixedbitset v0.5.7
+   Compiling crc16 v0.4.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling petgraph v0.7.1
+   Compiling itertools v0.13.0
+   Compiling environs v1.2.0
+   Compiling hyper-util v0.1.20
+   Compiling ciborium-ll v0.2.2
+   Compiling tcp-stream v0.28.0
+   Compiling value-trait v0.12.1
+   Compiling clap v4.6.1
+   Compiling futures v0.3.32
+   Compiling amq-protocol-uri v7.2.3
+   Compiling bon-macros v3.9.1
+   Compiling proxima v0.1.0 (proxima/rust)
+   Compiling pest_derive v2.8.6
+   Compiling rand v0.9.4
+   Compiling libyml v0.0.5
+   Compiling brotli-decompressor v2.5.1
+   Compiling yasna v0.5.2
+   Compiling cel-parser v0.10.1
+   Compiling flate2 v1.1.9
+   Compiling proc-macro-crate v3.5.0
+   Compiling pem v3.0.6
+   Compiling cobs v0.3.0
+   Compiling pingora-timeout v0.8.0
+   Compiling tokio-stream v0.1.18
+   Compiling rustls-native-certs v0.8.3
+   Compiling lru v0.16.4
+   Compiling conflaguration-derive v1.1.0 (conflaguration/crates/conflaguration-derive)
+   Compiling async-stream-impl v0.3.6
+   Compiling async-trait v0.1.89
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-channel v0.5.15
+   Compiling webpki-roots v1.0.7
+   Compiling num_cpus v1.17.0
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling amq-protocol v7.2.3
+   Compiling hashbrown v0.14.5
+   Compiling pingora-error v0.8.0
+   Compiling glob v0.3.3
+   Compiling simdutf8 v0.1.5
+   Compiling unsafe-libyaml v0.2.11
+   Compiling bitflags v1.3.2
+   Compiling relative-path v1.9.3
+   Compiling dashmap v6.1.0
+   Compiling simd-json v0.17.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling nix v0.24.3
+   Compiling derivative v2.2.0
+   Compiling pingora-http v0.8.0
+   Compiling criterion-plot v0.8.2
+   Compiling tinyvec v1.11.0
+   Compiling walkdir v2.5.0
+   Compiling core_affinity v0.8.3
+   Compiling hdrhistogram v7.5.4
+   Compiling crossbeam-deque v0.8.6
+   Compiling async-stream v0.3.6
+   Compiling conflaguration v1.2.0 (conflaguration)
+   Compiling pingora-pool v0.8.0
+   Compiling tokio-test v0.4.5
+   Compiling postcard v1.1.3
+   Compiling bon v3.9.1
+   Compiling cel-interpreter v0.10.0
+   Compiling brotli v3.5.0
+   Compiling tempfile v3.27.0
+   Compiling ulid v1.2.1
+   Compiling json5 v0.4.1
+   Compiling amq-protocol-tcp v7.2.3
+   Compiling prost-derive v0.13.5
+   Compiling ciborium v0.2.2
+   Compiling sfv v0.10.4
+   Compiling daggy v0.8.1
+   Compiling ron v0.8.1
+   Compiling flume v0.12.0
+   Compiling pingora-runtime v0.8.0
+   Compiling http-body-util v0.1.3
+   Compiling bstr v1.12.1
+   Compiling matchers v0.2.0
+   Compiling arc-swap v1.9.1
+   Compiling strum_macros v0.26.4
+   Compiling enum-as-inner v0.6.1
+   Compiling tinytemplate v1.2.1
+   Compiling quick-xml v0.37.5
+   Compiling sharded-slab v0.1.7
+   Compiling log v0.3.9
+   Compiling tracing-log v0.2.0
+   Compiling socket2 v0.5.10
+   Compiling page_size v0.6.0
+   Compiling daemonize v0.5.0
+   Compiling ipnet v2.12.0
+   Compiling bumpalo v3.20.2
+   Compiling unicase v2.9.0
+   Compiling strum v0.26.3
+   Compiling xxhash-rust v0.8.15
+   Compiling openssl-probe v0.1.6
+   Compiling futures-timer v3.0.3
+   Compiling nu-ansi-term v0.50.3
+   Compiling utf-8 v0.7.6
+   Compiling anes v0.1.6
+   Compiling data-encoding v2.11.0
+   Compiling oorandom v11.1.5
+   Compiling rustc-hash v2.1.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling criterion v0.8.2
+   Compiling tungstenite v0.24.0
+   Compiling hickory-proto v0.24.4
+   Compiling rstest v0.26.1
+   Compiling hpack v0.3.0
+   Compiling prost v0.13.5
+   Compiling redis-protocol v6.0.0
+   Compiling temp-env v0.3.6
+   Compiling mqttbytes v0.6.0
+   Compiling zstd v0.13.3
+   Compiling pingora-core v0.8.0
+   Compiling rustls-webpki v0.103.13
+   Compiling rcgen v0.14.7
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+    Finished `bench` profile [optimized + debuginfo] target(s) in 3m 43s
+     Running benches/h2_runtime_swap.rs (target/release/deps/h2_runtime_swap-00e14bde8b6d9ec7)
+Benchmarking h2_load_5way/pingora
+Benchmarking h2_load_5way/pingora: Warming up for 3.0000 s
+Benchmarking h2_load_5way/pingora: Collecting 100 samples in estimated 5.1429 s (116k iterations)
+Benchmarking h2_load_5way/pingora: Analyzing
+h2_load_5way/pingora    time:   [42.338 µs 44.382 µs 46.429 µs]
+                        thrpt:  [21.538 Kelem/s 22.532 Kelem/s 23.619 Kelem/s]
+Benchmarking h2_load_5way/tokio_hyper
+Benchmarking h2_load_5way/tokio_hyper: Warming up for 3.0000 s
+Benchmarking h2_load_5way/tokio_hyper: Collecting 100 samples in estimated 5.1982 s (121k iterations)
+Benchmarking h2_load_5way/tokio_hyper: Analyzing
+h2_load_5way/tokio_hyper
+                        time:   [42.560 µs 43.522 µs 44.549 µs]
+                        thrpt:  [22.447 Kelem/s 22.977 Kelem/s 23.496 Kelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high mild
+Benchmarking h2_load_5way/proxima_on_tokio
+Benchmarking h2_load_5way/proxima_on_tokio: Warming up for 3.0000 s
+Benchmarking h2_load_5way/proxima_on_tokio: Collecting 100 samples in estimated 5.1623 s (157k iterations)
+Benchmarking h2_load_5way/proxima_on_tokio: Analyzing
+h2_load_5way/proxima_on_tokio
+                        time:   [32.476 µs 33.337 µs 34.357 µs]
+                        thrpt:  [29.106 Kelem/s 29.997 Kelem/s 30.792 Kelem/s]
+Found 19 outliers among 100 measurements (19.00%)
+  16 (16.00%) low severe
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking h2_load_5way/proxima_on_flume
+Benchmarking h2_load_5way/proxima_on_flume: Warming up for 3.0000 s
+Benchmarking h2_load_5way/proxima_on_flume: Collecting 100 samples in estimated 5.0796 s (167k iterations)
+Benchmarking h2_load_5way/proxima_on_flume: Analyzing
+h2_load_5way/proxima_on_flume
+                        time:   [30.484 µs 30.625 µs 30.799 µs]
+                        thrpt:  [32.468 Kelem/s 32.653 Kelem/s 32.804 Kelem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking h2_load_5way/proxima_on_prime
+Benchmarking h2_load_5way/proxima_on_prime: Warming up for 3.0000 s
+Benchmarking h2_load_5way/proxima_on_prime: Collecting 100 samples in estimated 5.0327 s (152k iterations)
+Benchmarking h2_load_5way/proxima_on_prime: Analyzing
+h2_load_5way/proxima_on_prime
+                        time:   [33.407 µs 33.614 µs 33.854 µs]
+                        thrpt:  [29.539 Kelem/s 29.749 Kelem/s 29.934 Kelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking h2_runtime_swap_proxima_native/default_tokio
+Benchmarking h2_runtime_swap_proxima_native/default_tokio: Warming up for 3.0000 s
+Benchmarking h2_runtime_swap_proxima_native/default_tokio: Collecting 100 samples in estimated 5.0491 s (157k iterations)
+Benchmarking h2_runtime_swap_proxima_native/default_tokio: Analyzing
+h2_runtime_swap_proxima_native/default_tokio
+                        time:   [31.427 µs 31.868 µs 32.368 µs]
+                        thrpt:  [30.895 Kelem/s 31.380 Kelem/s 31.820 Kelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) high mild
+  10 (10.00%) high severe
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime: Warming up for 3.0000 s
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime: Collecting 100 samples in estimated 5.0639 s (167k iterations)
+Benchmarking h2_runtime_swap_proxima_native/per_core_runtime: Analyzing
+h2_runtime_swap_proxima_native/per_core_runtime
+                        time:   [30.263 µs 30.336 µs 30.412 µs]
+                        thrpt:  [32.882 Kelem/s 32.964 Kelem/s 33.043 Kelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low severe
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core: Warming up for 3.0000 s
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core: Collecting 100 samples in estimated 5.1383 s (162k iterations)
+Benchmarking h2_per_core_vs_hyper_pingora/proxima_native_per_core: Analyzing
+h2_per_core_vs_hyper_pingora/proxima_native_per_core
+                        time:   [30.381 µs 30.482 µs 30.599 µs]
+                        thrpt:  [32.681 Kelem/s 32.807 Kelem/s 32.915 Kelem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio: Warming up for 3.0000 s
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio: Collecting 100 samples in estimated 5.2134 s (121k iterations)
+Benchmarking h2_per_core_vs_hyper_pingora/hyper_default_tokio: Analyzing
+h2_per_core_vs_hyper_pingora/hyper_default_tokio
+                        time:   [41.067 µs 42.758 µs 44.543 µs]
+                        thrpt:  [22.450 Kelem/s 23.387 Kelem/s 24.351 Kelem/s]
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio: Warming up for 3.0000 s
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio: Collecting 100 samples in estimated 5.1153 s (116k iterations)
+Benchmarking h2_per_core_vs_hyper_pingora/pingora_default_tokio: Analyzing
+h2_per_core_vs_hyper_pingora/pingora_default_tokio
+                        time:   [42.705 µs 44.084 µs 45.381 µs]
+                        thrpt:  [22.036 Kelem/s 22.684 Kelem/s 23.416 Kelem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+

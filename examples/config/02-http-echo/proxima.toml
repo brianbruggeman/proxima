@@ -1,0 +1,17 @@
+# HTTP echo service.
+#
+# proxima fronts a long-lived `cat` subprocess via process_rpc.
+# Each request body is written to cat's stdin; cat echoes one line
+# to stdout; that line becomes the response body.
+#
+# run:
+#   proxima serve --config proxima.toml --mount '/{*path}' --addr 127.0.0.1:8080
+#
+# test:
+#   curl -d "hello" http://127.0.0.1:8080/
+#   # -> hello
+
+name = "echo"
+
+[[upstreams]]
+process_rpc = { command = "/bin/cat" }

@@ -1,0 +1,118 @@
+[package]
+name = "proxima-pgwire"
+description = "PostgreSQL wire protocol server facade over proxima-primitives::stream / proxima-listen / proxima-tls: TCP + TLS lifecycle, authentication, statement/portal store, and the query-handler adapter around the sans-IO proxima-protocols::pgwire_codec session FSM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+proxima-protocols = { workspace = true, features = ["pgwire_codec", "std"] }
+# G10 streaming row source: `RowStream` carries an `async_channel::Receiver`,
+# the one mpsc whose `Receiver` is `Send + Sync + Clone` (so it rides `Carry`)
+# and that is executor-agnostic — it does NOT pull tokio into the bare graph.
+async-channel = { workspace = true }
+# the SQL-over-Pipe contract is the core surface: the driver builds a
+# `Request` and calls a `Pipe` per operation. `alloc` (no std) keeps tokio
+# out of the no-default-features graph — the upgrade seam (`Response.upgrade`,
+# a std-only surface) is pulled in only by the `listen` feature below.
+proxima-primitives = { workspace = true, default-features = false, features = ["alloc"] }
+proxima-core = { workspace = true, default-features = false }
+proxima-auth = { workspace = true, optional = true, features = ["alloc"] }
+bon = { workspace = true }
+bytes = { workspace = true }
+conflaguration = { workspace = true, features = ["derive", "toml"] }
+dashmap = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await"] }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+proxima-listen = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, optional = true, features = ["std"] }
+proxima-tls = { workspace = true, optional = true, features = ["futures-io"] }
+futures-rustls = { workspace = true, optional = true, features = ["aws_lc_rs", "tls12"] }
+serde_json = { workspace = true, optional = true }
+proxima-net = { workspace = true, optional = true, default-features = false, features = ["tokio"] }
+tokio = { workspace = true, optional = true, features = ["rt"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"], optional = true }
+hmac = { version = "0.12", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
+md-5 = { version = "0.10", default-features = false, optional = true }
+stringprep = { version = "0.1", optional = true }
+base64 = { version = "0.22", optional = true }
+subtle = { version = "2.6.1", optional = true }
+# plaintext password + derived SCRAM key material zeroized on drop; core
+# (not feature-gated) so the hygiene holds for Cleartext/MD5/SCRAM alike.
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
+
+[features]
+# the prime/native default: core driver + the connection-pipe upgrade seam
+# + listener mount over the runtime-matched acceptor factory + TLS upgrades.
+# `--no-default-features` leaves the sans-IO-adjacent core (driver over a
+# query `Pipe`, handler helpers, auth, store, config) with zero tokio in the
+# dependency graph for bare-metal embedding.
+default = ["listen", "tls", "scram", "md5-auth"]
+# `proxima-primitives/std` brings the `Response.upgrade` raw-socket-hijack
+# seam (std-only) the connection pipe returns, and lifts proxima-primitives::
+# stream's traits from "absent" to present; the listener deps mount it.
+listen = [
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "proxima-core/io-async-compat",
+    "dep:proxima-listen",
+    "dep:proxima-runtime",
+    "dep:serde_json",
+]
+tls = ["dep:proxima-tls", "dep:futures-rustls"]
+# legacy tokio TcpListener accept path + ambient spawn_local fallback for
+# apps built without a runtime-matched acceptor factory. Off by default
+# per the pgwire discipline log: prime/proxima-primitives::stream is the
+# first-class path, tokio is compat.
+tokio-compat = ["listen", "dep:proxima-net", "proxima-net/tokio", "dep:tokio"]
+# SCRAM-SHA-256 (RFC 7677 / RFC 5802) — PostgreSQL's standard auth. Pulls
+# the RustCrypto PBKDF2 / HMAC / SHA-256 primitives + SASLprep + base64.
+scram = ["dep:pbkdf2", "dep:hmac", "dep:sha2", "dep:stringprep", "dep:base64", "dep:subtle", "dep:proxima-auth"]
+# MD5 password auth (deprecated upstream, removed in PostgreSQL 18) — kept
+# for legacy clients.
+md5-auth = ["dep:md-5"]
+# the async client `Pipe` + `PipeFactory`: drives the sans-IO ClientSession
+# over a `StreamUpstream` transport so `proxima::Client` speaks pgwire as a
+# registered protocol. Pulls proxima-primitives::stream (the transport seam);
+# the blocking `PgClient` (under `scram`) needs none of this.
+client = ["scram", "proxima-primitives/std"]
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+proxima-runtime = { workspace = true, features = ["tokio"] }
+proxima-net = { workspace = true, features = ["tokio", "prime"] }
+prime = { workspace = true }
+proxima-tls = { workspace = true, features = ["futures-io"] }
+futures-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "process"] }
+tokio-postgres = { workspace = true }
+rstest = { workspace = true }
+temp-env = { workspace = true }
+proxima = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["listen"]
+
+[[bench]]
+name = "bench_scram_kdf"
+harness = false
+required-features = ["scram"]
+
+[[example]]
+name = "capture_realpg"
+required-features = ["scram"]

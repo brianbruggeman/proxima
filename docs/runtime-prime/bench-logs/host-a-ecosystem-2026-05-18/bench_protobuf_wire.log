@@ -1,0 +1,624 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 37s
+     Running benches/bench_protobuf_wire.rs (/tmp/cargo_target/release/deps/bench_protobuf_wire-7eda12c8647f605f)
+Benchmarking varint_decode/proxima/0
+Benchmarking varint_decode/proxima/0: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/0: Collecting 20 samples in estimated 2.0000 s (4.0B iterations)
+Benchmarking varint_decode/proxima/0: Analyzing
+varint_decode/proxima/0 time:   [504.00 ps 504.32 ps 504.68 ps]
+                        thrpt:  [1.8454 GiB/s 1.8467 GiB/s 1.8479 GiB/s]
+                 change:
+                        time:   [−84.541% −79.181% −68.437%] (p = 0.02 < 0.05)
+                        thrpt:  [+216.82% +380.33% +546.89%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_decode/parity/0
+Benchmarking varint_decode/parity/0: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/0: Collecting 20 samples in estimated 2.0000 s (2.5B iterations)
+Benchmarking varint_decode/parity/0: Analyzing
+varint_decode/parity/0  time:   [816.66 ps 944.30 ps 1.1278 ns]
+                        thrpt:  [845.59 MiB/s 1009.9 MiB/s 1.1404 GiB/s]
+                 change:
+                        time:   [−88.347% −83.293% −73.515%] (p = 0.03 < 0.05)
+                        thrpt:  [+277.57% +498.54% +758.18%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking varint_decode/prost/0
+Benchmarking varint_decode/prost/0: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/0: Collecting 20 samples in estimated 2.0000 s (3.4B iterations)
+Benchmarking varint_decode/prost/0: Analyzing
+varint_decode/prost/0   time:   [575.03 ps 629.38 ps 678.25 ps]
+                        thrpt:  [1.3731 GiB/s 1.4797 GiB/s 1.6196 GiB/s]
+                 change:
+                        time:   [−92.959% −89.923% −83.477%] (p = 0.03 < 0.05)
+                        thrpt:  [+505.22% +892.33% +1320.2%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_decode/proxima/1
+Benchmarking varint_decode/proxima/1: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/1: Collecting 20 samples in estimated 2.0000 s (4.0B iterations)
+Benchmarking varint_decode/proxima/1: Analyzing
+varint_decode/proxima/1 time:   [504.39 ps 504.55 ps 504.71 ps]
+                        thrpt:  [1.8453 GiB/s 1.8458 GiB/s 1.8464 GiB/s]
+                 change:
+                        time:   [−84.507% −79.107% −68.278%] (p = 0.02 < 0.05)
+                        thrpt:  [+215.23% +378.63% +545.47%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking varint_decode/parity/1
+Benchmarking varint_decode/parity/1: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/1: Collecting 20 samples in estimated 2.0000 s (2.5B iterations)
+Benchmarking varint_decode/parity/1: Analyzing
+varint_decode/parity/1  time:   [788.42 ps 789.07 ps 789.59 ps]
+                        thrpt:  [1.1795 GiB/s 1.1803 GiB/s 1.1813 GiB/s]
+                 change:
+                        time:   [−89.786% −85.775% −77.313%] (p = 0.02 < 0.05)
+                        thrpt:  [+340.78% +602.98% +879.00%]
+                        Performance has improved.
+Benchmarking varint_decode/prost/1
+Benchmarking varint_decode/prost/1: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/1: Collecting 20 samples in estimated 2.0000 s (3.4B iterations)
+Benchmarking varint_decode/prost/1: Analyzing
+varint_decode/prost/1   time:   [554.44 ps 562.68 ps 568.71 ps]
+                        thrpt:  [1.6376 GiB/s 1.6552 GiB/s 1.6798 GiB/s]
+                 change:
+                        time:   [−93.537% −90.899% −85.039%] (p = 0.02 < 0.05)
+                        thrpt:  [+568.42% +998.77% +1447.4%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking varint_decode/proxima/127
+Benchmarking varint_decode/proxima/127: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/127: Collecting 20 samples in estimated 2.0000 s (4.0B iterations)
+Benchmarking varint_decode/proxima/127: Analyzing
+varint_decode/proxima/127
+                        time:   [504.08 ps 504.39 ps 504.77 ps]
+                        thrpt:  [1.8451 GiB/s 1.8464 GiB/s 1.8476 GiB/s]
+                 change:
+                        time:   [−84.764% −79.018% −68.377%] (p = 0.02 < 0.05)
+                        thrpt:  [+216.22% +376.61% +556.36%]
+                        Performance has improved.
+Benchmarking varint_decode/parity/127
+Benchmarking varint_decode/parity/127: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/127: Collecting 20 samples in estimated 2.0000 s (2.5B iterations)
+Benchmarking varint_decode/parity/127: Analyzing
+varint_decode/parity/127
+                        time:   [788.03 ps 788.59 ps 789.11 ps]
+                        thrpt:  [1.1802 GiB/s 1.1810 GiB/s 1.1818 GiB/s]
+                 change:
+                        time:   [−89.531% −85.576% −77.080%] (p = 0.02 < 0.05)
+                        thrpt:  [+336.30% +593.30% +855.20%]
+                        Performance has improved.
+Benchmarking varint_decode/prost/127
+Benchmarking varint_decode/prost/127: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/127: Collecting 20 samples in estimated 2.0000 s (3.5B iterations)
+Benchmarking varint_decode/prost/127: Analyzing
+varint_decode/prost/127 time:   [553.64 ps 562.00 ps 568.17 ps]
+                        thrpt:  [1.6392 GiB/s 1.6572 GiB/s 1.6822 GiB/s]
+                 change:
+                        time:   [−93.633% −90.848% −84.893%] (p = 0.02 < 0.05)
+                        thrpt:  [+561.96% +992.63% +1470.6%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking varint_decode/proxima/128
+Benchmarking varint_decode/proxima/128: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/128: Collecting 20 samples in estimated 2.0000 s (1.2B iterations)
+Benchmarking varint_decode/proxima/128: Analyzing
+varint_decode/proxima/128
+                        time:   [1.6717 ns 1.6733 ns 1.6749 ns]
+                        thrpt:  [1.1121 GiB/s 1.1131 GiB/s 1.1142 GiB/s]
+                 change:
+                        time:   [−68.368% −60.173% −46.830%] (p = 0.01 < 0.05)
+                        thrpt:  [+88.075% +151.09% +216.14%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking varint_decode/parity/128
+Benchmarking varint_decode/parity/128: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/128: Collecting 20 samples in estimated 2.0000 s (1.7B iterations)
+Benchmarking varint_decode/parity/128: Analyzing
+varint_decode/parity/128
+                        time:   [1.1617 ns 1.1624 ns 1.1633 ns]
+                        thrpt:  [1.6012 GiB/s 1.6024 GiB/s 1.6034 GiB/s]
+                 change:
+                        time:   [−85.131% −79.811% −69.099%] (p = 0.02 < 0.05)
+                        thrpt:  [+223.61% +395.32% +572.54%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_decode/prost/128
+Benchmarking varint_decode/prost/128: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/128: Collecting 20 samples in estimated 2.0000 s (2.0B iterations)
+Benchmarking varint_decode/prost/128: Analyzing
+varint_decode/prost/128 time:   [998.80 ps 999.45 ps 1.0001 ns]
+                        thrpt:  [1.8625 GiB/s 1.8637 GiB/s 1.8649 GiB/s]
+                 change:
+                        time:   [−88.783% −84.630% −75.745%] (p = 0.02 < 0.05)
+                        thrpt:  [+312.28% +550.62% +791.52%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_decode/proxima/16383
+Benchmarking varint_decode/proxima/16383: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/16383: Collecting 20 samples in estimated 2.0000 s (1.2B iterations)
+Benchmarking varint_decode/proxima/16383: Analyzing
+varint_decode/proxima/16383
+                        time:   [1.6736 ns 1.6753 ns 1.6767 ns]
+                        thrpt:  [1.1109 GiB/s 1.1119 GiB/s 1.1130 GiB/s]
+                 change:
+                        time:   [−66.384% −57.794% −43.431%] (p = 0.03 < 0.05)
+                        thrpt:  [+76.774% +136.93% +197.47%]
+                        Performance has improved.
+Benchmarking varint_decode/parity/16383
+Benchmarking varint_decode/parity/16383: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/16383: Collecting 20 samples in estimated 2.0000 s (1.7B iterations)
+Benchmarking varint_decode/parity/16383: Analyzing
+varint_decode/parity/16383
+                        time:   [1.1620 ns 1.1627 ns 1.1635 ns]
+                        thrpt:  [1.6009 GiB/s 1.6020 GiB/s 1.6029 GiB/s]
+                 change:
+                        time:   [−85.103% −79.238% −68.182%] (p = 0.03 < 0.05)
+                        thrpt:  [+214.29% +381.64% +571.27%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking varint_decode/prost/16383
+Benchmarking varint_decode/prost/16383: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/16383: Collecting 20 samples in estimated 2.0000 s (2.0B iterations)
+Benchmarking varint_decode/prost/16383: Analyzing
+varint_decode/prost/16383
+                        time:   [999.90 ps 1.0007 ns 1.0015 ns]
+                        thrpt:  [1.8599 GiB/s 1.8614 GiB/s 1.8628 GiB/s]
+                 change:
+                        time:   [−88.237% −83.879% −74.523%] (p = 0.03 < 0.05)
+                        thrpt:  [+292.51% +520.33% +750.09%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking varint_decode/proxima/16384
+Benchmarking varint_decode/proxima/16384: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/16384: Collecting 20 samples in estimated 2.0000 s (987M iterations)
+Benchmarking varint_decode/proxima/16384: Analyzing
+varint_decode/proxima/16384
+                        time:   [2.0235 ns 2.0251 ns 2.0271 ns]
+                        thrpt:  [1.3783 GiB/s 1.3797 GiB/s 1.3808 GiB/s]
+                 change:
+                        time:   [−60.365% −51.082% −36.660%] (p = 0.03 < 0.05)
+                        thrpt:  [+57.879% +104.43% +152.30%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking varint_decode/parity/16384
+Benchmarking varint_decode/parity/16384: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/16384: Collecting 20 samples in estimated 2.0000 s (1.0B iterations)
+Benchmarking varint_decode/parity/16384: Analyzing
+varint_decode/parity/16384
+                        time:   [1.9910 ns 1.9926 ns 1.9948 ns]
+                        thrpt:  [1.4006 GiB/s 1.4021 GiB/s 1.4033 GiB/s]
+                 change:
+                        time:   [−75.612% −68.155% −54.487%] (p = 0.03 < 0.05)
+                        thrpt:  [+119.72% +214.02% +310.04%]
+                        Performance has improved.
+Benchmarking varint_decode/prost/16384
+Benchmarking varint_decode/prost/16384: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/16384: Collecting 20 samples in estimated 2.0000 s (1.7B iterations)
+Benchmarking varint_decode/prost/16384: Analyzing
+varint_decode/prost/16384
+                        time:   [1.1732 ns 1.1738 ns 1.1745 ns]
+                        thrpt:  [2.3789 GiB/s 2.3803 GiB/s 2.3816 GiB/s]
+                 change:
+                        time:   [−86.413% −81.519% −71.337%] (p = 0.02 < 0.05)
+                        thrpt:  [+248.88% +441.11% +636.02%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking varint_decode/proxima/1000000
+Benchmarking varint_decode/proxima/1000000: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/1000000: Collecting 20 samples in estimated 2.0000 s (987M iterations)
+Benchmarking varint_decode/proxima/1000000: Analyzing
+varint_decode/proxima/1000000
+                        time:   [2.0238 ns 2.0247 ns 2.0261 ns]
+                        thrpt:  [1.3790 GiB/s 1.3799 GiB/s 1.3806 GiB/s]
+                 change:
+                        time:   [−61.127% −52.060% −37.885%] (p = 0.03 < 0.05)
+                        thrpt:  [+60.992% +108.59% +157.25%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking varint_decode/parity/1000000
+Benchmarking varint_decode/parity/1000000: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/1000000: Collecting 20 samples in estimated 2.0000 s (1.0B iterations)
+Benchmarking varint_decode/parity/1000000: Analyzing
+varint_decode/parity/1000000
+                        time:   [2.0104 ns 2.0184 ns 2.0300 ns]
+                        thrpt:  [1.3764 GiB/s 1.3843 GiB/s 1.3897 GiB/s]
+                 change:
+                        time:   [−76.442% −69.237% −56.147%] (p = 0.02 < 0.05)
+                        thrpt:  [+128.04% +225.07% +324.49%]
+                        Performance has improved.
+Benchmarking varint_decode/prost/1000000
+Benchmarking varint_decode/prost/1000000: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/1000000: Collecting 20 samples in estimated 2.0000 s (1.7B iterations)
+Benchmarking varint_decode/prost/1000000: Analyzing
+varint_decode/prost/1000000
+                        time:   [1.1744 ns 1.1765 ns 1.1790 ns]
+                        thrpt:  [2.3698 GiB/s 2.3747 GiB/s 2.3791 GiB/s]
+                 change:
+                        time:   [−86.666% −81.318% −71.033%] (p = 0.03 < 0.05)
+                        thrpt:  [+245.21% +435.27% +649.95%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_decode/proxima/18446744073709551615
+Benchmarking varint_decode/proxima/18446744073709551615: Warming up for 2.0000 s
+Benchmarking varint_decode/proxima/18446744073709551615: Collecting 20 samples in estimated 2.0000 s (400M iterations)
+Benchmarking varint_decode/proxima/18446744073709551615: Analyzing
+varint_decode/proxima/18446744073709551615
+                        time:   [4.9766 ns 4.9809 ns 4.9849 ns]
+                        thrpt:  [1.8683 GiB/s 1.8698 GiB/s 1.8714 GiB/s]
+                 change:
+                        time:   [−34.905% −26.652% −17.160%] (p = 0.02 < 0.05)
+                        thrpt:  [+20.715% +36.337% +53.621%]
+                        Performance has improved.
+Benchmarking varint_decode/parity/18446744073709551615
+Benchmarking varint_decode/parity/18446744073709551615: Warming up for 2.0000 s
+Benchmarking varint_decode/parity/18446744073709551615: Collecting 20 samples in estimated 2.0000 s (437M iterations)
+Benchmarking varint_decode/parity/18446744073709551615: Analyzing
+varint_decode/parity/18446744073709551615
+                        time:   [4.4451 ns 4.4604 ns 4.4719 ns]
+                        thrpt:  [2.0826 GiB/s 2.0880 GiB/s 2.0952 GiB/s]
+                 change:
+                        time:   [−60.362% −51.297% −38.464%] (p = 0.01 < 0.05)
+                        thrpt:  [+62.505% +105.33% +152.28%]
+                        Performance has improved.
+Found 5 outliers among 20 measurements (25.00%)
+  1 (5.00%) low mild
+  4 (20.00%) high severe
+Benchmarking varint_decode/prost/18446744073709551615
+Benchmarking varint_decode/prost/18446744073709551615: Warming up for 2.0000 s
+Benchmarking varint_decode/prost/18446744073709551615: Collecting 20 samples in estimated 2.0000 s (667M iterations)
+Benchmarking varint_decode/prost/18446744073709551615: Analyzing
+varint_decode/prost/18446744073709551615
+                        time:   [2.9797 ns 2.9843 ns 2.9899 ns]
+                        thrpt:  [3.1149 GiB/s 3.1208 GiB/s 3.1256 GiB/s]
+                 change:
+                        time:   [−71.024% −63.066% −49.216%] (p = 0.02 < 0.05)
+                        thrpt:  [+96.913% +170.75% +245.11%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+
+Benchmarking varint_encode/proxima/0
+Benchmarking varint_encode/proxima/0: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/0: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/0: Analyzing
+varint_encode/proxima/0 time:   [29.628 ns 29.768 ns 29.970 ns]
+                        thrpt:  [33.367 Melem/s 33.593 Melem/s 33.751 Melem/s]
+                 change:
+                        time:   [−4.1042% −2.7798% −1.1539%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.1673% +2.8593% +4.2799%]
+                        Performance has improved.
+Benchmarking varint_encode/parity/0
+Benchmarking varint_encode/parity/0: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/0: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/parity/0: Analyzing
+varint_encode/parity/0  time:   [29.853 ns 30.056 ns 30.249 ns]
+                        thrpt:  [33.059 Melem/s 33.272 Melem/s 33.498 Melem/s]
+                 change:
+                        time:   [−4.7031% −4.0028% −3.3590%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.4758% +4.1698% +4.9353%]
+                        Performance has improved.
+Benchmarking varint_encode/prost/0
+Benchmarking varint_encode/prost/0: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/0: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/prost/0: Analyzing
+varint_encode/prost/0   time:   [30.781 ns 30.862 ns 30.977 ns]
+                        thrpt:  [32.282 Melem/s 32.403 Melem/s 32.487 Melem/s]
+                 change:
+                        time:   [−17.671% −13.889% −10.104%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.240% +16.129% +21.463%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking varint_encode/proxima/1
+Benchmarking varint_encode/proxima/1: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/1: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/1: Analyzing
+varint_encode/proxima/1 time:   [29.330 ns 29.396 ns 29.489 ns]
+                        thrpt:  [33.911 Melem/s 34.018 Melem/s 34.095 Melem/s]
+                 change:
+                        time:   [−7.2880% −6.6366% −5.9878%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.3692% +7.1083% +7.8609%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking varint_encode/parity/1
+Benchmarking varint_encode/parity/1: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/1: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/parity/1: Analyzing
+varint_encode/parity/1  time:   [29.347 ns 29.451 ns 29.572 ns]
+                        thrpt:  [33.815 Melem/s 33.955 Melem/s 34.075 Melem/s]
+                 change:
+                        time:   [−2.7841% −2.3498% −1.8886%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.9250% +2.4063% +2.8639%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_encode/prost/1
+Benchmarking varint_encode/prost/1: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/1: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/prost/1: Analyzing
+varint_encode/prost/1   time:   [30.817 ns 30.990 ns 31.164 ns]
+                        thrpt:  [32.088 Melem/s 32.269 Melem/s 32.450 Melem/s]
+                 change:
+                        time:   [−19.838% −16.136% −12.423%] (p = 0.00 < 0.05)
+                        thrpt:  [+14.185% +19.241% +24.747%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking varint_encode/proxima/127
+Benchmarking varint_encode/proxima/127: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/127: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/127: Analyzing
+varint_encode/proxima/127
+                        time:   [29.487 ns 29.572 ns 29.673 ns]
+                        thrpt:  [33.701 Melem/s 33.815 Melem/s 33.913 Melem/s]
+                 change:
+                        time:   [−5.8151% −5.3423% −4.7825%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.0227% +5.6438% +6.1741%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking varint_encode/parity/127
+Benchmarking varint_encode/parity/127: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/127: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/parity/127: Analyzing
+varint_encode/parity/127
+                        time:   [29.482 ns 29.587 ns 29.740 ns]
+                        thrpt:  [33.625 Melem/s 33.799 Melem/s 33.919 Melem/s]
+                 change:
+                        time:   [−6.5570% −5.3074% −4.2602%] (p = 0.00 < 0.05)
+                        thrpt:  [+4.4498% +5.6049% +7.0171%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking varint_encode/prost/127
+Benchmarking varint_encode/prost/127: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/127: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/prost/127: Analyzing
+varint_encode/prost/127 time:   [30.852 ns 31.143 ns 31.815 ns]
+                        thrpt:  [31.432 Melem/s 32.109 Melem/s 32.413 Melem/s]
+                 change:
+                        time:   [−20.161% −14.742% −7.8792%] (p = 0.01 < 0.05)
+                        thrpt:  [+8.5531% +17.291% +25.252%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking varint_encode/proxima/128
+Benchmarking varint_encode/proxima/128: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/128: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/128: Analyzing
+varint_encode/proxima/128
+                        time:   [29.392 ns 29.462 ns 29.540 ns]
+                        thrpt:  [33.852 Melem/s 33.942 Melem/s 34.023 Melem/s]
+                 change:
+                        time:   [−5.6343% −5.2231% −4.8102%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.0533% +5.5109% +5.9707%]
+                        Performance has improved.
+Benchmarking varint_encode/parity/128
+Benchmarking varint_encode/parity/128: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/128: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/parity/128: Analyzing
+varint_encode/parity/128
+                        time:   [29.383 ns 29.423 ns 29.466 ns]
+                        thrpt:  [33.937 Melem/s 33.987 Melem/s 34.033 Melem/s]
+                 change:
+                        time:   [−6.2139% −5.7394% −5.2472%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.5377% +6.0888% +6.6257%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_encode/prost/128
+Benchmarking varint_encode/prost/128: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/128: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/prost/128: Analyzing
+varint_encode/prost/128 time:   [32.334 ns 32.422 ns 32.538 ns]
+                        thrpt:  [30.733 Melem/s 30.844 Melem/s 30.928 Melem/s]
+                 change:
+                        time:   [−24.080% −19.320% −14.390%] (p = 0.00 < 0.05)
+                        thrpt:  [+16.808% +23.947% +31.718%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking varint_encode/proxima/16383
+Benchmarking varint_encode/proxima/16383: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/16383: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/16383: Analyzing
+varint_encode/proxima/16383
+                        time:   [29.494 ns 30.670 ns 32.341 ns]
+                        thrpt:  [30.921 Melem/s 32.605 Melem/s 33.905 Melem/s]
+                 change:
+                        time:   [−3.8613% −2.1753% +0.5798%] (p = 0.12 > 0.05)
+                        thrpt:  [−0.5764% +2.2236% +4.0164%]
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking varint_encode/parity/16383
+Benchmarking varint_encode/parity/16383: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/16383: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/parity/16383: Analyzing
+varint_encode/parity/16383
+                        time:   [29.600 ns 29.758 ns 29.937 ns]
+                        thrpt:  [33.403 Melem/s 33.605 Melem/s 33.784 Melem/s]
+                 change:
+                        time:   [−3.9261% −3.2158% −2.4883%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.5518% +3.3227% +4.0865%]
+                        Performance has improved.
+Benchmarking varint_encode/prost/16383
+Benchmarking varint_encode/prost/16383: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/16383: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/prost/16383: Analyzing
+varint_encode/prost/16383
+                        time:   [32.387 ns 32.506 ns 32.634 ns]
+                        thrpt:  [30.643 Melem/s 30.764 Melem/s 30.877 Melem/s]
+                 change:
+                        time:   [−24.588% −19.765% −14.782%] (p = 0.00 < 0.05)
+                        thrpt:  [+17.346% +24.633% +32.605%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_encode/proxima/16384
+Benchmarking varint_encode/proxima/16384: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/16384: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/16384: Analyzing
+varint_encode/proxima/16384
+                        time:   [29.539 ns 29.609 ns 29.680 ns]
+                        thrpt:  [33.693 Melem/s 33.774 Melem/s 33.854 Melem/s]
+                 change:
+                        time:   [−3.3667% −2.9376% −2.5295%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.5951% +3.0265% +3.4840%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_encode/parity/16384
+Benchmarking varint_encode/parity/16384: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/16384: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/parity/16384: Analyzing
+varint_encode/parity/16384
+                        time:   [29.493 ns 29.970 ns 30.834 ns]
+                        thrpt:  [32.432 Melem/s 33.366 Melem/s 33.906 Melem/s]
+                 change:
+                        time:   [−7.4610% −4.2398% −0.0025%] (p = 0.18 > 0.05)
+                        thrpt:  [+0.0025% +4.4275% +8.0625%]
+                        No change in performance detected.
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low mild
+  2 (10.00%) high severe
+Benchmarking varint_encode/prost/16384
+Benchmarking varint_encode/prost/16384: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/16384: Collecting 20 samples in estimated 2.0000 s (29M iterations)
+Benchmarking varint_encode/prost/16384: Analyzing
+varint_encode/prost/16384
+                        time:   [33.327 ns 33.466 ns 33.598 ns]
+                        thrpt:  [29.763 Melem/s 29.881 Melem/s 30.006 Melem/s]
+                 change:
+                        time:   [−28.538% −22.214% −15.442%] (p = 0.00 < 0.05)
+                        thrpt:  [+18.262% +28.557% +39.934%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking varint_encode/proxima/1000000
+Benchmarking varint_encode/proxima/1000000: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/1000000: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/proxima/1000000: Analyzing
+varint_encode/proxima/1000000
+                        time:   [29.522 ns 29.894 ns 30.862 ns]
+                        thrpt:  [32.403 Melem/s 33.451 Melem/s 33.873 Melem/s]
+                 change:
+                        time:   [−17.306% −8.8724% +0.7591%] (p = 0.32 > 0.05)
+                        thrpt:  [−0.7534% +9.7362% +20.928%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking varint_encode/parity/1000000
+Benchmarking varint_encode/parity/1000000: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/1000000: Collecting 20 samples in estimated 2.0000 s (31M iterations)
+Benchmarking varint_encode/parity/1000000: Analyzing
+varint_encode/parity/1000000
+                        time:   [29.468 ns 29.520 ns 29.575 ns]
+                        thrpt:  [33.812 Melem/s 33.875 Melem/s 33.935 Melem/s]
+                 change:
+                        time:   [−3.0199% −2.5535% −2.0515%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.0944% +2.6205% +3.1139%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high severe
+Benchmarking varint_encode/prost/1000000
+Benchmarking varint_encode/prost/1000000: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/1000000: Collecting 20 samples in estimated 2.0000 s (29M iterations)
+Benchmarking varint_encode/prost/1000000: Analyzing
+varint_encode/prost/1000000
+                        time:   [33.551 ns 33.801 ns 34.071 ns]
+                        thrpt:  [29.351 Melem/s 29.585 Melem/s 29.806 Melem/s]
+                 change:
+                        time:   [−27.911% −21.448% −14.494%] (p = 0.00 < 0.05)
+                        thrpt:  [+16.951% +27.304% +38.717%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking varint_encode/proxima/18446744073709551615
+Benchmarking varint_encode/proxima/18446744073709551615: Warming up for 2.0000 s
+Benchmarking varint_encode/proxima/18446744073709551615: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/proxima/18446744073709551615: Analyzing
+varint_encode/proxima/18446744073709551615
+                        time:   [31.582 ns 31.652 ns 31.731 ns]
+                        thrpt:  [31.515 Melem/s 31.594 Melem/s 31.663 Melem/s]
+                 change:
+                        time:   [−7.0421% −6.1135% −5.3360%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.6368% +6.5116% +7.5756%]
+                        Performance has improved.
+Benchmarking varint_encode/parity/18446744073709551615
+Benchmarking varint_encode/parity/18446744073709551615: Warming up for 2.0000 s
+Benchmarking varint_encode/parity/18446744073709551615: Collecting 20 samples in estimated 2.0000 s (30M iterations)
+Benchmarking varint_encode/parity/18446744073709551615: Analyzing
+varint_encode/parity/18446744073709551615
+                        time:   [31.677 ns 31.734 ns 31.797 ns]
+                        thrpt:  [31.449 Melem/s 31.512 Melem/s 31.568 Melem/s]
+                 change:
+                        time:   [−3.4045% −3.0646% −2.7061%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.7814% +3.1615% +3.5245%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking varint_encode/prost/18446744073709551615
+Benchmarking varint_encode/prost/18446744073709551615: Warming up for 2.0000 s
+Benchmarking varint_encode/prost/18446744073709551615: Collecting 20 samples in estimated 2.0000 s (22M iterations)
+Benchmarking varint_encode/prost/18446744073709551615: Analyzing
+varint_encode/prost/18446744073709551615
+                        time:   [55.240 ns 56.490 ns 57.555 ns]
+                        thrpt:  [17.375 Melem/s 17.702 Melem/s 18.103 Melem/s]
+                 change:
+                        time:   [−35.138% −27.061% −17.579%] (p = 0.02 < 0.05)
+                        thrpt:  [+21.329% +37.100% +54.174%]
+                        Performance has improved.
+
+Benchmarking walk_message/proxima
+Benchmarking walk_message/proxima: Warming up for 2.0000 s
+Benchmarking walk_message/proxima: Collecting 20 samples in estimated 2.0000 s (104M iterations)
+Benchmarking walk_message/proxima: Analyzing
+walk_message/proxima    time:   [19.211 ns 19.220 ns 19.232 ns]
+                        thrpt:  [3.4382 GiB/s 3.4403 GiB/s 3.4420 GiB/s]
+                 change:
+                        time:   [−35.709% −32.370% −28.880%] (p = 0.00 < 0.05)
+                        thrpt:  [+40.608% +47.864% +55.543%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking walk_message/parity
+Benchmarking walk_message/parity: Warming up for 2.0000 s
+Benchmarking walk_message/parity: Collecting 20 samples in estimated 2.0000 s (73M iterations)
+Benchmarking walk_message/parity: Analyzing
+walk_message/parity     time:   [27.329 ns 27.337 ns 27.346 ns]
+                        thrpt:  [2.4180 GiB/s 2.4188 GiB/s 2.4195 GiB/s]
+                 change:
+                        time:   [−64.845% −56.338% −42.765%] (p = 0.02 < 0.05)
+                        thrpt:  [+74.720% +129.03% +184.45%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

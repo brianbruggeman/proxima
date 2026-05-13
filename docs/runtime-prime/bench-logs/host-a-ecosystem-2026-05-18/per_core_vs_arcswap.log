@@ -1,0 +1,364 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 30.91s
+     Running benches/per_core_vs_arcswap.rs (/tmp/cargo_target/release/deps/per_core_vs_arcswap-736438656729237c)
+Benchmarking arcswap_read_under_writer_contention/0
+Benchmarking arcswap_read_under_writer_contention/0: Warming up for 2.0000 s
+Benchmarking arcswap_read_under_writer_contention/0: Collecting 20 samples in estimated 3.0000 s (290M iterations)
+Benchmarking arcswap_read_under_writer_contention/0: Analyzing
+arcswap_read_under_writer_contention/0
+                        time:   [10.329 ns 10.338 ns 10.351 ns]
+                        thrpt:  [96.613 Melem/s 96.727 Melem/s 96.817 Melem/s]
+                 change:
+                        time:   [−1.9445% −0.3993% +1.2014%] (p = 0.67 > 0.05)
+                        thrpt:  [−1.1871% +0.4009% +1.9830%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking arcswap_read_under_writer_contention/1
+Benchmarking arcswap_read_under_writer_contention/1: Warming up for 2.0000 s
+Benchmarking arcswap_read_under_writer_contention/1: Collecting 20 samples in estimated 3.0000 s (52M iterations)
+Benchmarking arcswap_read_under_writer_contention/1: Analyzing
+arcswap_read_under_writer_contention/1
+                        time:   [52.735 ns 54.255 ns 55.840 ns]
+                        thrpt:  [17.908 Melem/s 18.432 Melem/s 18.963 Melem/s]
+                 change:
+                        time:   [+0.5532% +7.5648% +14.760%] (p = 0.20 > 0.05)
+                        thrpt:  [−12.862% −7.0327% −0.5501%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking arcswap_read_under_writer_contention/4
+Benchmarking arcswap_read_under_writer_contention/4: Warming up for 2.0000 s
+Benchmarking arcswap_read_under_writer_contention/4: Collecting 20 samples in estimated 3.0000 s (71M iterations)
+Benchmarking arcswap_read_under_writer_contention/4: Analyzing
+arcswap_read_under_writer_contention/4
+                        time:   [42.920 ns 44.002 ns 44.883 ns]
+                        thrpt:  [22.280 Melem/s 22.726 Melem/s 23.299 Melem/s]
+                 change:
+                        time:   [+5.4583% +8.1741% +11.137%] (p = 0.07 > 0.05)
+                        thrpt:  [−10.021% −7.5564% −5.1758%]
+                        No change in performance detected.
+Benchmarking arcswap_read_under_writer_contention/16
+Benchmarking arcswap_read_under_writer_contention/16: Warming up for 2.0000 s
+Benchmarking arcswap_read_under_writer_contention/16: Collecting 20 samples in estimated 3.0000 s (64M iterations)
+Benchmarking arcswap_read_under_writer_contention/16: Analyzing
+arcswap_read_under_writer_contention/16
+                        time:   [42.853 ns 52.281 ns 61.272 ns]
+                        thrpt:  [16.321 Melem/s 19.127 Melem/s 23.335 Melem/s]
+                 change:
+                        time:   [+0.9295% +13.342% +27.378%] (p = 0.18 > 0.05)
+                        thrpt:  [−21.493% −11.772% −0.9210%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking per_core_read_under_writer_traffic/0
+Benchmarking per_core_read_under_writer_traffic/0: Warming up for 2.0000 s
+Benchmarking per_core_read_under_writer_traffic/0: Collecting 20 samples in estimated 3.0000 s (1.2B iterations)
+Benchmarking per_core_read_under_writer_traffic/0: Analyzing
+per_core_read_under_writer_traffic/0
+                        time:   [2.5015 ns 2.5035 ns 2.5051 ns]
+                        thrpt:  [399.18 Melem/s 399.43 Melem/s 399.76 Melem/s]
+                 change:
+                        time:   [+2.2796% +2.4560% +2.6381%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5703% −2.3971% −2.2288%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking per_core_read_under_writer_traffic/1
+Benchmarking per_core_read_under_writer_traffic/1: Warming up for 2.0000 s
+Benchmarking per_core_read_under_writer_traffic/1: Collecting 20 samples in estimated 3.0000 s (1.2B iterations)
+Benchmarking per_core_read_under_writer_traffic/1: Analyzing
+per_core_read_under_writer_traffic/1
+                        time:   [2.5022 ns 2.5055 ns 2.5091 ns]
+                        thrpt:  [398.55 Melem/s 399.13 Melem/s 399.65 Melem/s]
+                 change:
+                        time:   [+0.8455% +1.6254% +2.4218%] (p = 0.05 > 0.05)
+                        thrpt:  [−2.3646% −1.5994% −0.8384%]
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking per_core_read_under_writer_traffic/4
+Benchmarking per_core_read_under_writer_traffic/4: Warming up for 2.0000 s
+Benchmarking per_core_read_under_writer_traffic/4: Collecting 20 samples in estimated 3.0000 s (1.2B iterations)
+Benchmarking per_core_read_under_writer_traffic/4: Analyzing
+per_core_read_under_writer_traffic/4
+                        time:   [2.5579 ns 2.6319 ns 2.7290 ns]
+                        thrpt:  [366.44 Melem/s 379.95 Melem/s 390.95 Melem/s]
+                 change:
+                        time:   [+1.9310% +3.8623% +6.5000%] (p = 0.08 > 0.05)
+                        thrpt:  [−6.1033% −3.7186% −1.8945%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking per_core_read_under_writer_traffic/16
+Benchmarking per_core_read_under_writer_traffic/16: Warming up for 2.0000 s
+Benchmarking per_core_read_under_writer_traffic/16: Collecting 20 samples in estimated 3.0000 s (363M iterations)
+Benchmarking per_core_read_under_writer_traffic/16: Analyzing
+per_core_read_under_writer_traffic/16
+                        time:   [7.0596 ns 8.1247 ns 10.006 ns]
+                        thrpt:  [99.941 Melem/s 123.08 Melem/s 141.65 Melem/s]
+                 change:
+                        time:   [+78.967% +146.85% +258.17%] (p = 0.06 > 0.05)
+                        thrpt:  [−72.081% −59.489% −44.124%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking dashmap_read_under_writer_contention/0
+Benchmarking dashmap_read_under_writer_contention/0: Warming up for 2.0000 s
+Benchmarking dashmap_read_under_writer_contention/0: Collecting 20 samples in estimated 3.0000 s (178M iterations)
+Benchmarking dashmap_read_under_writer_contention/0: Analyzing
+dashmap_read_under_writer_contention/0
+                        time:   [14.828 ns 15.018 ns 15.290 ns]
+                        thrpt:  [65.400 Melem/s 66.589 Melem/s 67.441 Melem/s]
+                 change:
+                        time:   [−5.1718% −1.5108% +2.1117%] (p = 0.50 > 0.05)
+                        thrpt:  [−2.0681% +1.5340% +5.4539%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking dashmap_read_under_writer_contention/1
+Benchmarking dashmap_read_under_writer_contention/1: Warming up for 2.0000 s
+Benchmarking dashmap_read_under_writer_contention/1: Collecting 20 samples in estimated 3.0000 s (69M iterations)
+Benchmarking dashmap_read_under_writer_contention/1: Analyzing
+dashmap_read_under_writer_contention/1
+                        time:   [50.361 ns 54.460 ns 58.391 ns]
+                        thrpt:  [17.126 Melem/s 18.362 Melem/s 19.857 Melem/s]
+                 change:
+                        time:   [−53.526% −50.335% −47.341%] (p = 0.00 < 0.05)
+                        thrpt:  [+89.901% +101.35% +115.17%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking dashmap_read_under_writer_contention/4
+Benchmarking dashmap_read_under_writer_contention/4: Warming up for 2.0000 s
+Benchmarking dashmap_read_under_writer_contention/4: Collecting 20 samples in estimated 3.0000 s (43M iterations)
+Benchmarking dashmap_read_under_writer_contention/4: Analyzing
+dashmap_read_under_writer_contention/4
+                        time:   [68.134 ns 70.542 ns 73.088 ns]
+                        thrpt:  [13.682 Melem/s 14.176 Melem/s 14.677 Melem/s]
+                 change:
+                        time:   [−43.848% −40.704% −37.532%] (p = 0.00 < 0.05)
+                        thrpt:  [+60.083% +68.644% +78.088%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking dashmap_read_under_writer_contention/16
+Benchmarking dashmap_read_under_writer_contention/16: Warming up for 2.0000 s
+Benchmarking dashmap_read_under_writer_contention/16: Collecting 20 samples in estimated 3.0000 s (16M iterations)
+Benchmarking dashmap_read_under_writer_contention/16: Analyzing
+dashmap_read_under_writer_contention/16
+                        time:   [176.11 ns 195.00 ns 209.59 ns]
+                        thrpt:  [4.7712 Melem/s 5.1281 Melem/s 5.6784 Melem/s]
+                 change:
+                        time:   [−43.074% −38.820% −34.515%] (p = 0.00 < 0.05)
+                        thrpt:  [+52.707% +63.452% +75.666%]
+                        Performance has improved.
+
+Benchmarking registry_read_only_no_writers/per_core_thread_local
+Benchmarking registry_read_only_no_writers/per_core_thread_local: Warming up for 2.0000 s
+Benchmarking registry_read_only_no_writers/per_core_thread_local: Collecting 20 samples in estimated 3.0000 s (162M iterations)
+Benchmarking registry_read_only_no_writers/per_core_thread_local: Analyzing
+registry_read_only_no_writers/per_core_thread_local
+                        time:   [17.334 ns 17.681 ns 17.993 ns]
+                        thrpt:  [55.577 Melem/s 56.559 Melem/s 57.691 Melem/s]
+                 change:
+                        time:   [−7.9398% −4.7290% −1.4847%] (p = 0.17 > 0.05)
+                        thrpt:  [+1.5071% +4.9637% +8.6246%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking registry_read_only_no_writers/arcswap_map
+Benchmarking registry_read_only_no_writers/arcswap_map: Warming up for 2.0000 s
+Benchmarking registry_read_only_no_writers/arcswap_map: Collecting 20 samples in estimated 3.0000 s (147M iterations)
+Benchmarking registry_read_only_no_writers/arcswap_map: Analyzing
+registry_read_only_no_writers/arcswap_map
+                        time:   [20.150 ns 20.269 ns 20.366 ns]
+                        thrpt:  [49.101 Melem/s 49.337 Melem/s 49.628 Melem/s]
+                 change:
+                        time:   [+3.8949% +5.0152% +6.1628%] (p = 0.03 < 0.05)
+                        thrpt:  [−5.8050% −4.7757% −3.7489%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking registry_read_only_no_writers/dashmap
+Benchmarking registry_read_only_no_writers/dashmap: Warming up for 2.0000 s
+Benchmarking registry_read_only_no_writers/dashmap: Collecting 20 samples in estimated 3.0000 s (103M iterations)
+Benchmarking registry_read_only_no_writers/dashmap: Analyzing
+registry_read_only_no_writers/dashmap
+                        time:   [28.703 ns 29.046 ns 29.371 ns]
+                        thrpt:  [34.047 Melem/s 34.428 Melem/s 34.839 Melem/s]
+                 change:
+                        time:   [−1.3051% +1.4366% +4.2309%] (p = 0.45 > 0.05)
+                        thrpt:  [−4.0592% −1.4163% +1.3223%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+
+Benchmarking registry_read_under_writer_contention/arcswap_map/1
+Benchmarking registry_read_under_writer_contention/arcswap_map/1: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/arcswap_map/1: Collecting 20 samples in estimated 3.0000 s (75M iterations)
+Benchmarking registry_read_under_writer_contention/arcswap_map/1: Analyzing
+registry_read_under_writer_contention/arcswap_map/1
+                        time:   [38.493 ns 40.119 ns 41.773 ns]
+                        thrpt:  [23.939 Melem/s 24.926 Melem/s 25.979 Melem/s]
+                 change:
+                        time:   [+5.6896% +11.451% +17.591%] (p = 0.08 > 0.05)
+                        thrpt:  [−14.960% −10.275% −5.3833%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking registry_read_under_writer_contention/dashmap/1
+Benchmarking registry_read_under_writer_contention/dashmap/1: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/dashmap/1: Collecting 20 samples in estimated 3.0000 s (71M iterations)
+Benchmarking registry_read_under_writer_contention/dashmap/1: Analyzing
+registry_read_under_writer_contention/dashmap/1
+                        time:   [40.619 ns 41.699 ns 42.844 ns]
+                        thrpt:  [23.341 Melem/s 23.981 Melem/s 24.619 Melem/s]
+                 change:
+                        time:   [+19.655% +24.358% +29.207%] (p = 0.01 < 0.05)
+                        thrpt:  [−22.605% −19.587% −16.427%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking registry_read_under_writer_contention/arcswap_map/4
+Benchmarking registry_read_under_writer_contention/arcswap_map/4: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/arcswap_map/4: Collecting 20 samples in estimated 3.0000 s (68M iterations)
+Benchmarking registry_read_under_writer_contention/arcswap_map/4: Analyzing
+registry_read_under_writer_contention/arcswap_map/4
+                        time:   [42.634 ns 43.756 ns 44.890 ns]
+                        thrpt:  [22.277 Melem/s 22.854 Melem/s 23.455 Melem/s]
+                 change:
+                        time:   [−6.3233% −2.5948% +0.8854%] (p = 0.40 > 0.05)
+                        thrpt:  [−0.8776% +2.6640% +6.7501%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking registry_read_under_writer_contention/dashmap/4
+Benchmarking registry_read_under_writer_contention/dashmap/4: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/dashmap/4: Collecting 20 samples in estimated 3.0000 s (101M iterations)
+Benchmarking registry_read_under_writer_contention/dashmap/4: Analyzing
+registry_read_under_writer_contention/dashmap/4
+                        time:   [29.462 ns 29.710 ns 29.984 ns]
+                        thrpt:  [33.351 Melem/s 33.659 Melem/s 33.942 Melem/s]
+                 change:
+                        time:   [−12.712% −11.697% −10.654%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.924% +13.247% +14.564%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking registry_read_under_writer_contention/arcswap_map/16
+Benchmarking registry_read_under_writer_contention/arcswap_map/16: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/arcswap_map/16: Collecting 20 samples in estimated 3.0000 s (27M iterations)
+Benchmarking registry_read_under_writer_contention/arcswap_map/16: Analyzing
+registry_read_under_writer_contention/arcswap_map/16
+                        time:   [95.913 ns 116.26 ns 140.41 ns]
+                        thrpt:  [7.1221 Melem/s 8.6015 Melem/s 10.426 Melem/s]
+                 change:
+                        time:   [+38.624% +68.417% +94.501%] (p = 0.09 > 0.05)
+                        thrpt:  [−48.586% −40.624% −27.862%]
+                        No change in performance detected.
+Benchmarking registry_read_under_writer_contention/dashmap/16
+Benchmarking registry_read_under_writer_contention/dashmap/16: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/dashmap/16: Collecting 20 samples in estimated 3.0000 s (26M iterations)
+Benchmarking registry_read_under_writer_contention/dashmap/16: Analyzing
+registry_read_under_writer_contention/dashmap/16
+                        time:   [105.91 ns 112.89 ns 118.88 ns]
+                        thrpt:  [8.4116 Melem/s 8.8583 Melem/s 9.4421 Melem/s]
+                 change:
+                        time:   [+261.95% +287.02% +313.10%] (p = 0.00 < 0.05)
+                        thrpt:  [−75.793% −74.162% −72.372%]
+                        Performance has regressed.
+Benchmarking registry_read_under_writer_contention/per_core_thread_local/16
+Benchmarking registry_read_under_writer_contention/per_core_thread_local/16: Warming up for 2.0000 s
+Benchmarking registry_read_under_writer_contention/per_core_thread_local/16: Collecting 20 samples in estimated 3.0000 s (62M iterations)
+Benchmarking registry_read_under_writer_contention/per_core_thread_local/16: Analyzing
+registry_read_under_writer_contention/per_core_thread_local/16
+                        time:   [37.980 ns 44.494 ns 49.257 ns]
+                        thrpt:  [20.302 Melem/s 22.475 Melem/s 26.330 Melem/s]
+                 change:
+                        time:   [+11.367% +30.879% +54.072%] (p = 0.16 > 0.05)
+                        thrpt:  [−35.095% −23.594% −10.207%]
+                        No change in performance detected.
+
+Benchmarking registry_write_under_reader_contention/arcswap_map/1
+Benchmarking registry_write_under_reader_contention/arcswap_map/1: Warming up for 2.0000 s
+Benchmarking registry_write_under_reader_contention/arcswap_map/1: Collecting 20 samples in estimated 3.0005 s (717k iterations)
+Benchmarking registry_write_under_reader_contention/arcswap_map/1: Analyzing
+registry_write_under_reader_contention/arcswap_map/1
+                        time:   [4.0102 µs 4.1640 µs 4.3119 µs]
+                        thrpt:  [231.92 Kelem/s 240.15 Kelem/s 249.37 Kelem/s]
+                 change:
+                        time:   [+13.827% +21.543% +29.660%] (p = 0.04 < 0.05)
+                        thrpt:  [−22.875% −17.725% −12.148%]
+                        Performance has regressed.
+Benchmarking registry_write_under_reader_contention/dashmap/1
+Benchmarking registry_write_under_reader_contention/dashmap/1: Warming up for 2.0000 s
+Benchmarking registry_write_under_reader_contention/dashmap/1: Collecting 20 samples in estimated 3.0000 s (16M iterations)
+Benchmarking registry_write_under_reader_contention/dashmap/1: Analyzing
+registry_write_under_reader_contention/dashmap/1
+                        time:   [180.56 ns 188.61 ns 195.89 ns]
+                        thrpt:  [5.1049 Melem/s 5.3020 Melem/s 5.5383 Melem/s]
+                 change:
+                        time:   [+17.272% +21.985% +27.101%] (p = 0.01 < 0.05)
+                        thrpt:  [−21.322% −18.023% −14.728%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking registry_write_under_reader_contention/arcswap_map/4
+Benchmarking registry_write_under_reader_contention/arcswap_map/4: Warming up for 2.0000 s
+Benchmarking registry_write_under_reader_contention/arcswap_map/4: Collecting 20 samples in estimated 3.0023 s (274k iterations)
+Benchmarking registry_write_under_reader_contention/arcswap_map/4: Analyzing
+registry_write_under_reader_contention/arcswap_map/4
+                        time:   [10.958 µs 11.008 µs 11.058 µs]
+                        thrpt:  [90.432 Kelem/s 90.843 Kelem/s 91.257 Kelem/s]
+                 change:
+                        time:   [+7.9060% +10.224% +12.667%] (p = 0.01 < 0.05)
+                        thrpt:  [−11.243% −9.2757% −7.3268%]
+                        Performance has regressed.
+Benchmarking registry_write_under_reader_contention/dashmap/4
+Benchmarking registry_write_under_reader_contention/dashmap/4: Warming up for 2.0000 s
+Benchmarking registry_write_under_reader_contention/dashmap/4: Collecting 20 samples in estimated 3.0000 s (22M iterations)
+Benchmarking registry_write_under_reader_contention/dashmap/4: Analyzing
+registry_write_under_reader_contention/dashmap/4
+                        time:   [136.81 ns 137.98 ns 139.12 ns]
+                        thrpt:  [7.1881 Melem/s 7.2476 Melem/s 7.3095 Melem/s]
+                 change:
+                        time:   [−8.4163% −4.7467% −0.9724%] (p = 0.16 > 0.05)
+                        thrpt:  [+0.9819% +4.9832% +9.1897%]
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low severe
+  1 (5.00%) high severe
+Benchmarking registry_write_under_reader_contention/arcswap_map/16
+Benchmarking registry_write_under_reader_contention/arcswap_map/16: Warming up for 2.0000 s
+Benchmarking registry_write_under_reader_contention/arcswap_map/16: Collecting 20 samples in estimated 3.0040 s (114k iterations)
+Benchmarking registry_write_under_reader_contention/arcswap_map/16: Analyzing
+registry_write_under_reader_contention/arcswap_map/16
+                        time:   [24.025 µs 27.431 µs 30.720 µs]
+                        thrpt:  [32.552 Kelem/s 36.455 Kelem/s 41.624 Kelem/s]
+                 change:
+                        time:   [−14.344% −2.4541% +11.623%] (p = 0.84 > 0.05)
+                        thrpt:  [−10.413% +2.5159% +16.746%]
+                        No change in performance detected.
+Benchmarking registry_write_under_reader_contention/dashmap/16
+Benchmarking registry_write_under_reader_contention/dashmap/16: Warming up for 2.0000 s
+Benchmarking registry_write_under_reader_contention/dashmap/16: Collecting 20 samples in estimated 3.0000 s (12M iterations)
+Benchmarking registry_write_under_reader_contention/dashmap/16: Analyzing
+registry_write_under_reader_contention/dashmap/16
+                        time:   [186.55 ns 217.11 ns 248.68 ns]
+                        thrpt:  [4.0212 Melem/s 4.6060 Melem/s 5.3605 Melem/s]
+                 change:
+                        time:   [−21.048% −1.3284% +25.738%] (p = 0.82 > 0.05)
+                        thrpt:  [−20.470% +1.3462% +26.659%]
+                        No change in performance detected.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high mild
+

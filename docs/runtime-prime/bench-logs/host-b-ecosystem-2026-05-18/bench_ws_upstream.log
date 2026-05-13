@@ -1,0 +1,35 @@
+ Downloading crates ...
+  Downloaded sha1 v0.10.6
+  Downloaded tungstenite v0.29.0
+  Downloaded async-tungstenite v0.34.1
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.0
+   Compiling cpufeatures v0.2.17
+   Compiling proxima v0.1.0 (proxima/rust)
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha1 v0.10.6
+   Compiling tungstenite v0.29.0
+   Compiling async-tungstenite v0.34.1
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 45s
+     Running benches/bench_ws_upstream.rs (proxima/target/release/deps/bench_ws_upstream-3a7866018c3d2b6b)
+Benchmarking ws_upstream_proxima/send_recv_warm_connection
+Benchmarking ws_upstream_proxima/send_recv_warm_connection: Warming up for 2.0000 s
+Benchmarking ws_upstream_proxima/send_recv_warm_connection: Collecting 20 samples in estimated 3.0039 s (125k iterations)
+Benchmarking ws_upstream_proxima/send_recv_warm_connection: Analyzing
+ws_upstream_proxima/send_recv_warm_connection
+                        time:   [25.094 µs 25.405 µs 25.857 µs]
+                        thrpt:  [151.07 KiB/s 153.76 KiB/s 155.66 KiB/s]
+
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection: Warming up for 2.0000 s
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection: Collecting 20 samples in estimated 3.0020 s (121k iterations)
+Benchmarking ws_upstream_direct_async_tungstenite/send_recv_warm_connection: Analyzing
+ws_upstream_direct_async_tungstenite/send_recv_warm_connection
+                        time:   [24.921 µs 25.354 µs 26.231 µs]
+                        thrpt:  [148.92 KiB/s 154.07 KiB/s 156.74 KiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

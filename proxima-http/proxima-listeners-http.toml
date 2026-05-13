@@ -1,0 +1,51 @@
+# build-time sizing for proxima-listeners-http.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_listeners_http_sized.rs.
+# these are the compile-time DEFAULTS. the per-process surface is config-driven:
+# the runtime conflaguration `HttpListenerConfig` (name / drain_timeout_ms /
+# quiesce_status / quiesce_retry_after / proxy_protocol_enabled) overrides
+# them via config file / env / fluent builder — that is the surface
+# deployments should use (a downstream that re-brands its own config maps it
+# onto the HttpListenerConfig API rather than setting these build vars
+# directly).
+#
+# the per-listener JSON `spec` (`ListenProtocol::serve`) is a separate,
+# dynamic per-registration override layer above these defaults — unrelated
+# to this file.
+#
+# these are also the no_std+no_alloc floor's ONLY knob: once this crate
+# lifts off std, these consts size the bare-metal listener defaults without
+# any runtime config layer.
+#
+# per-system build-time overrides via env vars:
+#
+#   PROXIMA_LISTENERS_HTTP_LISTENER_NAME=http \
+#   PROXIMA_LISTENERS_HTTP_LISTENER_DRAIN_TIMEOUT_MS=30000 \
+#   PROXIMA_LISTENERS_HTTP_LISTENER_QUIESCE_STATUS=503 \
+#   PROXIMA_LISTENERS_HTTP_LISTENER_QUIESCE_RETRY_AFTER=5 \
+#   PROXIMA_LISTENERS_HTTP_LISTENER_PROXY_PROTOCOL_ENABLED=false \
+#   PROXIMA_LISTENERS_HTTP_SERVE_PIPE_ENCODE_BUFFER_HEADROOM=128 \
+#       cargo build -p proxima-listeners-http
+
+[listener]
+# Fallback telemetry label for a listener whose spec doesn't set `name`.
+name = "http"
+# Fallback in-flight-drain timeout (ms) for a listener whose spec doesn't
+# set `drain_timeout_ms`.
+drain_timeout_ms = 30000
+# Fallback HTTP status code returned while quiescing, for a listener whose
+# spec doesn't set `quiesce_status`.
+quiesce_status = 503
+# Fallback `Retry-After` header value (seconds) returned while quiescing,
+# for a listener whose spec doesn't set `quiesce_retry_after`.
+quiesce_retry_after = "5"
+# Fallback PROXY-protocol requirement for a listener whose spec doesn't set
+# `proxy_protocol`.
+proxy_protocol_enabled = false
+
+[serve_pipe]
+# Fallback headroom (bytes) added to the response body length when
+# pre-sizing the h1 pipe-serve encode buffer's initial capacity
+# (`proxima-http/src/http1/serve_pipe.rs`'s `encode_response` /
+# `encode_error_response`). Purely a pre-size hint — never changes
+# encoded output, only whether the buffer grows once during encode.
+encode_buffer_headroom = 128

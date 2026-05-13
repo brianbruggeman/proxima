@@ -1,0 +1,20 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 25s
+     Running benches/h2_vs_pingora.rs (/tmp/cargo_target/release/deps/h2_vs_pingora-785bcbdaa0d819da)
+Benchmarking h2_vs_pingora_warm/proxima::serve_h2_connection (warm)
+Benchmarking h2_vs_pingora_warm/proxima::serve_h2_connection (warm): Warming up for 2.0000 s
+Benchmarking h2_vs_pingora_warm/proxima::serve_h2_connection (warm): Collecting 20 samples in estimated 5.0028 s (93k iterations)
+Benchmarking h2_vs_pingora_warm/proxima::serve_h2_connection (warm): Analyzing
+h2_vs_pingora_warm/proxima::serve_h2_connection (warm)
+                        time:   [53.811 µs 54.520 µs 55.303 µs]
+                        thrpt:  [18.082 Kelem/s 18.342 Kelem/s 18.584 Kelem/s]
+                 change:
+                        time:   [+37.751% +41.715% +45.383%] (p = 0.00 < 0.05)
+                        thrpt:  [−31.216% −29.436% −27.405%]
+                        Performance has regressed.
+
+thread 'main' (1780351493) panicked at ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/criterion-0.8.2/src/benchmark_group.rs:290:9:
+Benchmark IDs must be unique within a group. Encountered duplicated benchmark ID h2_vs_pingora_warm/proxima::serve_h2_connection (warm)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: bench failed, to rerun pass `--bench h2_vs_pingora`

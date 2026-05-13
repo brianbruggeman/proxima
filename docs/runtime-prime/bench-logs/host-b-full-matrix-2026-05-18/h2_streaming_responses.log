@@ -1,0 +1,8 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 08s
+     Running benches/h2_streaming_responses.rs (proxima/target/release/deps/h2_streaming_responses-5c201972deb9c217)
+streaming-response sweep — 32 chunks of 2 KiB each (64 KiB total per request), 3s window
+
+  proxima_native (default tokio)    rps=8255      mean=121.06 us   p50=117.25 us   p90=148.22 us   p99=191.23 us   p999=243.84 us   max=1.55 ms
+  hyper (default tokio)             rps=4286      mean=233.20 us   p50=223.49 us   p90=272.13 us   p99=301.57 us   p999=544.77 us   max=2.58 ms
+  pingora (default tokio)           rps=3462      mean=288.71 us   p50=281.60 us   p90=329.98 us   p99=367.10 us   p999=565.25 us   max=1.62 ms

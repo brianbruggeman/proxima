@@ -1,0 +1,20 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 51.34s
+     Running benches/h2_vs_hyper.rs (proxima/target/release/deps/h2_vs_hyper-9eace55d4fb0c13e)
+Benchmarking h2_end_to_end_warm/proxima::serve_h2_connection (warm)
+Benchmarking h2_end_to_end_warm/proxima::serve_h2_connection (warm): Warming up for 2.0000 s
+Benchmarking h2_end_to_end_warm/proxima::serve_h2_connection (warm): Collecting 20 samples in estimated 5.0009 s (151k iterations)
+Benchmarking h2_end_to_end_warm/proxima::serve_h2_connection (warm): Analyzing
+h2_end_to_end_warm/proxima::serve_h2_connection (warm)
+                        time:   [34.760 µs 35.822 µs 37.032 µs]
+                        thrpt:  [27.004 Kelem/s 27.916 Kelem/s 28.769 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking h2_end_to_end_warm/hyper::server::conn::http2 (warm)
+Benchmarking h2_end_to_end_warm/hyper::server::conn::http2 (warm): Warming up for 2.0000 s
+Benchmarking h2_end_to_end_warm/hyper::server::conn::http2 (warm): Collecting 20 samples in estimated 5.0074 s (133k iterations)
+Benchmarking h2_end_to_end_warm/hyper::server::conn::http2 (warm): Analyzing
+h2_end_to_end_warm/hyper::server::conn::http2 (warm)
+                        time:   [34.239 µs 34.354 µs 34.474 µs]
+                        thrpt:  [29.007 Kelem/s 29.108 Kelem/s 29.206 Kelem/s]
+

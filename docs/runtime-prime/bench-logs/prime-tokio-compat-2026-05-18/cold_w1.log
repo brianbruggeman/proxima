@@ -1,0 +1,42 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.29s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w1_per_core_spawn/tokio_per_core
+Benchmarking w1_per_core_spawn/tokio_per_core: Warming up for 1.0000 s
+Benchmarking w1_per_core_spawn/tokio_per_core: Collecting 15 samples in estimated 3.0569 s (1320 iterations)
+Benchmarking w1_per_core_spawn/tokio_per_core: Analyzing
+w1_per_core_spawn/tokio_per_core
+                        time:   [1.7241 ms 2.0008 ms 2.5153 ms]
+                        thrpt:  [1.5902 Melem/s 1.9992 Melem/s 2.3200 Melem/s]
+                 change:
+                        time:   [+9.2448% +39.127% +71.575%] (p = 0.02 < 0.05)
+                        thrpt:  [−41.716% −28.123% −8.4624%]
+                        Performance has regressed.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking w1_per_core_spawn/prime
+Benchmarking w1_per_core_spawn/prime: Warming up for 1.0000 s
+Benchmarking w1_per_core_spawn/prime: Collecting 15 samples in estimated 3.1460 s (2160 iterations)
+Benchmarking w1_per_core_spawn/prime: Analyzing
+w1_per_core_spawn/prime time:   [1.4078 ms 1.4188 ms 1.4301 ms]
+                        thrpt:  [2.7970 Melem/s 2.8192 Melem/s 2.8412 Melem/s]
+                 change:
+                        time:   [−20.916% −15.495% −9.8606%] (p = 0.00 < 0.05)
+                        thrpt:  [+10.939% +18.336% +26.448%]
+                        Performance has improved.
+Found 3 outliers among 15 measurements (20.00%)
+  2 (13.33%) low mild
+  1 (6.67%) high mild
+Benchmarking w1_per_core_spawn/prime_tokio_compat
+Benchmarking w1_per_core_spawn/prime_tokio_compat: Warming up for 1.0000 s
+Benchmarking w1_per_core_spawn/prime_tokio_compat: Collecting 15 samples in estimated 3.6764 s (360 iterations)
+Benchmarking w1_per_core_spawn/prime_tokio_compat: Analyzing
+w1_per_core_spawn/prime_tokio_compat
+                        time:   [9.9000 ms 10.132 ms 10.325 ms]
+                        thrpt:  [387.39 Kelem/s 394.79 Kelem/s 404.04 Kelem/s]
+                 change:
+                        time:   [+0.6327% +2.6346% +4.8667%] (p = 0.02 < 0.05)
+                        thrpt:  [−4.6409% −2.5669% −0.6288%]
+                        Change within noise threshold.
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) low mild
+

@@ -1,0 +1,21 @@
+# proxima wasm-edge profile — Cloudflare Workers / wasi sandbox.
+#
+# std + alloc, but no tokio reactor (use wasi reactor) and no QUIC.
+# TLS terminates upstream by convention.
+
+schema = 1
+
+alloc = true
+std = true
+
+executor = "tokio"
+reactor = "wasi"
+tls = "none"
+quic_enabled = false
+# quic_impl: wasi sandboxes do not get UDP socket access in the standard
+# WASI preview. QUIC stays off for this profile until a wasi UDP source
+# story lands (proxima-quic-proto sans-IO would still compile to wasm32 —
+# but there's no I/O facade to drive it here).
+quic_impl = "none"
+h3_impl = "none"
+timer = "std-thread"

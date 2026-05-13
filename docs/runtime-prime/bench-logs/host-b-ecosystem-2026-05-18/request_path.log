@@ -1,0 +1,31 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 17s
+     Running benches/request_path.rs (proxima/target/release/deps/request_path-33f70e3ca7556472)
+Benchmarking request_path/synth_only
+Benchmarking request_path/synth_only: Warming up for 2.0000 s
+Benchmarking request_path/synth_only: Collecting 20 samples in estimated 3.0000 s (8.4M iterations)
+Benchmarking request_path/synth_only: Analyzing
+request_path/synth_only time:   [358.68 ns 360.27 ns 362.18 ns]
+                        thrpt:  [2.7610 Melem/s 2.7757 Melem/s 2.7880 Melem/s]
+                 change:
+                        time:   [+7.7865% +8.4571% +9.1235%] (p = 0.00 < 0.05)
+                        thrpt:  [−8.3607% −7.7976% −7.2240%]
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking request_path/cache_hit
+Benchmarking request_path/cache_hit: Warming up for 2.0000 s
+Benchmarking request_path/cache_hit: Collecting 20 samples in estimated 3.0001 s (1.4M iterations)
+Benchmarking request_path/cache_hit: Analyzing
+request_path/cache_hit  time:   [2.1222 µs 2.1281 µs 2.1341 µs]
+                        thrpt:  [468.59 Kelem/s 469.89 Kelem/s 471.20 Kelem/s]
+                 change:
+                        time:   [+9.4492% +9.7229% +10.056%] (p = 0.00 < 0.05)
+                        thrpt:  [−9.1369% −8.8613% −8.6334%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

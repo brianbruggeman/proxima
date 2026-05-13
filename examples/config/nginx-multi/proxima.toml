@@ -1,0 +1,61 @@
+# nginx-style: multiple listeners, host-based routing, named pipes,
+# location-based mounts, LB pools — all config-only.
+#
+# Substrate composition:
+#   - 3 named pipes (api LB pool, static, admin synth)
+#   - 2 listeners on different ports
+#   - host-based + path-based routing per listener
+#
+# Run:
+#   proxima serve --config proxima.toml
+#
+# (no --addr / --mount; the [[listen]] blocks own binds.)
+
+# ───── named pipes ───────────────────────────────────────
+
+# round-robin LB pool across three "backends" (synth here for the demo).
+[[pipe]]
+name = "api"
+upstreams = [
+  { name = "be1", synth = { status = 200, body = "from-be1\n" } },
+  { name = "be2", synth = { status = 200, body = "from-be2\n" } },
+  { name = "be3", synth = { status = 200, body = "from-be3\n" } },
+]
+select = { algorithm = "round_robin" }
+
+[[pipe]]
+name = "static"
+upstreams = [
+  { fs = { root = "/var/www/static", index = "index.html" } },
+]
+
+[[pipe]]
+name = "admin"
+upstreams = [
+  { synth = { status = 200, body = "admin endpoint\n" } },
+]
+
+# ───── listeners with host + location routing ────────────
+
+[[listen]]
+type = "http"
+bind = "0.0.0.0:8080"
+[[listen.mount]]
+path = "/api/{*path}"
+pipe = "api"
+host = ["api.example.com", "localhost"]
+[[listen.mount]]
+path = "/static/{*path}"
+pipe = "static"
+[[listen.mount]]
+path = "/{*path}"
+pipe = "static"
+
+# admin port — separate listener entirely
+[[listen]]
+type = "http"
+bind = "0.0.0.0:8081"
+[[listen.mount]]
+path = "/{*path}"
+pipe = "admin"
+methods = ["GET"]

@@ -1,0 +1,184 @@
+name: no-std
+
+# First CI workflow in this repo. Convention going forward:
+#   - Profile-driven builds set PROXIMA_PROFILE=<name> as an env var.
+#   - Each crate's build.rs (via proxima_build::resolve_profile() under
+#     `if env::var("PROXIMA_PROFILE").is_ok()`) reads the profile,
+#     emits the cargo:rustc-cfg directives + generated module.
+#   - No wrapper binary; the env var IS the API.
+#   - The host-target linux-daemon profile is the floor that must
+#     always pass.
+#   - No_std cross-compile cells are continue-on-error until DC5
+#     finishes gating arc-swap / tracing / conflaguration behind std.
+
+on:
+  push:
+    branches: [main, "nostd-cliff", "nostd-tier-lift", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # Floor: the linux-daemon profile must always build green. If this
+  # breaks the whole cliff is dead.
+  linux-daemon:
+    name: PROXIMA_PROFILE=linux-daemon
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PROXIMA_PROFILE: linux-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p prime
+      - run: cargo test -p prime --lib --features runtime-prime-thread-identity
+
+  # nostd-gate.sh hygiene check — production code under prime/src/core/*
+  # must stay std-import-free except for the allow-listed TLS sites
+  # documented in the gate's allow-list.
+  nostd-gate:
+    name: nostd-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/nostd-gate.sh
+
+  # tokio-free-floor.sh — the CI gate that locks in
+  # docs/pipe-to-metal/edges.md's "tokio/futures compat-layer sweep"
+  # scoping-pass finding (2026-07-16): prime, proxima-primitives,
+  # proxima-net, proxima-runtime, proxima-protocols, proxima-core all
+  # carry zero transitive tokio at their no_std + alloc floor tier.
+  # Re-proves the invariant on every commit (principle 16) instead of
+  # relying on a scoping doc's memory. Same cargo-tree + grep shape
+  # already proven in .github/workflows/proxima-{pgwire,redis}.yml's
+  # tokio-gate jobs, matrixed over the floor crate set instead of one
+  # crate.
+  tokio-free-floor:
+    name: tokio-free-floor.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/tokio-free-floor.sh
+
+  # thumbv7m-cliff-gate.sh — every crate that claims a no_std + alloc
+  # floor tier must actually build on a real embedded target, not just
+  # under `--features alloc` on the host. Mirrors quic-h3-gate.sh's
+  # thumbv7m cells, matrixed over the whole floor crate set.
+  thumbv7m-cliff-gate:
+    name: thumbv7m-cliff-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/thumbv7m-cliff-gate.sh
+
+  # quic-h3-gate.sh — sans-IO proto crates must build at tier-1 (no_std +
+  # alloc) AND tier-3 (no_std + no_alloc) AND on the thumbv7m-none-eabi
+  # cliff. Per `proxima/docs/proxima-quic/discipline.md` A0 row.
+  # Tokio-free facade check is staged in but disabled until C41 cutover.
+  quic-h3-gate:
+    name: quic-h3-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/quic-h3-gate.sh
+
+  # tier-lift-gate.sh — re-proves the nostd-tier-lift claims (principle 16):
+  # proxima-primitives::sync::blocking / AsyncMutex (std / futex / async-mutex-on-thumbv7m,
+  # folded from proxima-lock in Workstream F), the bare-metal lifts
+  # (control-plane / shutdown / recording-core on thumbv7m), the transport
+  # fan-out dedup, and the conflaguration bridge tests. Enforced — every one
+  # of these is proven passing on the branch, so a regression is a real break.
+  tier-lift-gate:
+    name: tier-lift-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/tier-lift-gate.sh
+
+  # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
+  # build.rs can pick up the profile and emit profile-driven cfg
+  # directives. `continue-on-error: true` until DC5 finishes gating
+  # arc-swap / tracing / conflaguration runtime deps behind std —
+  # at which point flip each cell's continue-on-error to false to
+  # make the gate enforced.
+  no-std-matrix:
+    name: PROXIMA_PROFILE=${{ matrix.profile }} target=${{ matrix.target }}
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: wasm-edge
+            target: wasm32-unknown-unknown
+            features: "alloc,std"
+            blocker: "DC5 — conflaguration runtime dep needs std-gating"
+          - profile: embedded-mqtt-gateway
+            target: thumbv7em-none-eabihf
+            features: "alloc"
+            blocker: "DC5 — arc-swap + tracing + crossbeam-deque need std-gating"
+          - profile: bare-metal
+            target: thumbv7em-none-eabihf
+            features: ""
+            blocker: "DC5 + the static-pool prime variant (out of scope of woolly-watching-cupcake)"
+    env:
+      PROXIMA_PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: blocker note for this cell
+        run: |
+          echo "blocker for this cell: ${{ matrix.blocker }}"
+      - name: cargo build (features=${{ matrix.features }})
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo build -p prime --target ${{ matrix.target }} --no-default-features
+          else
+            cargo build -p prime --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+          fi

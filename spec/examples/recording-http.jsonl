@@ -1,0 +1,6 @@
+{"v":3,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts_ms":0,"proto":"http","phase":"started","ts":"2026-05-07T12:00:00Z","pipe":"origin","request":{"method":"POST","path":"/v1/chat/completions","headers":{"accept":"application/json","content-type":"application/json"}}}
+{"v":3,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts_ms":3,"proto":"http","phase":"request_chunk","b64":"eyJ4IjoxfQ=="}
+{"v":3,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts_ms":4,"proto":"http","phase":"request_ended"}
+{"v":3,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts_ms":42,"proto":"http","phase":"response_started","status":200,"headers":[["content-type","application/json"],["content-length","7"]]}
+{"v":3,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts_ms":43,"proto":"http","phase":"response_chunk","b64":"eyJ5IjoyfQ=="}
+{"v":3,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts_ms":510,"proto":"http","phase":"ended","latency_ms":468,"meta":{"cache":"miss","retries":0,"upstream":"origin","instance_id":"abc"}}

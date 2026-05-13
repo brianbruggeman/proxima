@@ -1,0 +1,53 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 35s
+     Running benches/bench_memcached.rs (proxima/target/release/deps/bench_memcached-8e9a986d37d2d160)
+Benchmarking memcached_get/proxima
+Benchmarking memcached_get/proxima: Warming up for 2.0000 s
+Benchmarking memcached_get/proxima: Collecting 20 samples in estimated 2.0000 s (178M iterations)
+Benchmarking memcached_get/proxima: Analyzing
+memcached_get/proxima   time:   [11.071 ns 11.100 ns 11.137 ns]
+                        thrpt:  [941.95 MiB/s 945.08 MiB/s 947.57 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking memcached_get/parity
+Benchmarking memcached_get/parity: Warming up for 2.0000 s
+Benchmarking memcached_get/parity: Collecting 20 samples in estimated 2.0000 s (159M iterations)
+Benchmarking memcached_get/parity: Analyzing
+memcached_get/parity    time:   [12.530 ns 12.561 ns 12.595 ns]
+                        thrpt:  [832.92 MiB/s 835.16 MiB/s 837.25 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking memcached_set/proxima
+Benchmarking memcached_set/proxima: Warming up for 2.0000 s
+Benchmarking memcached_set/proxima: Collecting 20 samples in estimated 2.0000 s (59M iterations)
+Benchmarking memcached_set/proxima: Analyzing
+memcached_set/proxima   time:   [33.812 ns 33.900 ns 33.986 ns]
+                        thrpt:  [2.3293 GiB/s 2.3351 GiB/s 2.3413 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking memcached_set/parity
+Benchmarking memcached_set/parity: Warming up for 2.0000 s
+Benchmarking memcached_set/parity: Collecting 20 samples in estimated 2.0000 s (55M iterations)
+Benchmarking memcached_set/parity: Analyzing
+memcached_set/parity    time:   [35.957 ns 36.056 ns 36.153 ns]
+                        thrpt:  [2.1896 GiB/s 2.1955 GiB/s 2.2016 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking memcached_delete/proxima
+Benchmarking memcached_delete/proxima: Warming up for 2.0000 s
+Benchmarking memcached_delete/proxima: Collecting 20 samples in estimated 2.0000 s (126M iterations)
+Benchmarking memcached_delete/proxima: Analyzing
+memcached_delete/proxima
+                        time:   [15.803 ns 15.846 ns 15.887 ns]
+                        thrpt:  [840.41 MiB/s 842.59 MiB/s 844.88 MiB/s]
+Benchmarking memcached_delete/parity
+Benchmarking memcached_delete/parity: Warming up for 2.0000 s
+Benchmarking memcached_delete/parity: Collecting 20 samples in estimated 2.0000 s (117M iterations)
+Benchmarking memcached_delete/parity: Analyzing
+memcached_delete/parity time:   [16.986 ns 17.043 ns 17.099 ns]
+                        thrpt:  [780.84 MiB/s 783.38 MiB/s 786.01 MiB/s]
+

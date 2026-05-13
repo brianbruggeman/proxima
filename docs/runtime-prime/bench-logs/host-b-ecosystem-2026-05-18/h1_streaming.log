@@ -1,0 +1,84 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.29s
+     Running benches/h1_streaming.rs (proxima/target/release/deps/h1_streaming-4db9c8f61719793f)
+Benchmarking h1_buffered_cl_256/request_to_response_to_reset
+Benchmarking h1_buffered_cl_256/request_to_response_to_reset: Warming up for 2.0000 s
+Benchmarking h1_buffered_cl_256/request_to_response_to_reset: Collecting 20 samples in estimated 3.0000 s (9.2M iterations)
+Benchmarking h1_buffered_cl_256/request_to_response_to_reset: Analyzing
+h1_buffered_cl_256/request_to_response_to_reset
+                        time:   [325.79 ns 326.15 ns 326.70 ns]
+                        thrpt:  [1.1175 GiB/s 1.1194 GiB/s 1.1206 GiB/s]
+                 change:
+                        time:   [+0.9873% +1.1888% +1.4161%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.3964% −1.1748% −0.9776%]
+                        Change within noise threshold.
+
+Benchmarking h1_streaming_cl_256/request_to_response_to_reset
+Benchmarking h1_streaming_cl_256/request_to_response_to_reset: Warming up for 2.0000 s
+Benchmarking h1_streaming_cl_256/request_to_response_to_reset: Collecting 20 samples in estimated 3.0000 s (8.5M iterations)
+Benchmarking h1_streaming_cl_256/request_to_response_to_reset: Analyzing
+h1_streaming_cl_256/request_to_response_to_reset
+                        time:   [352.31 ns 352.60 ns 353.01 ns]
+                        thrpt:  [1.0342 GiB/s 1.0354 GiB/s 1.0362 GiB/s]
+                 change:
+                        time:   [−1.1268% −0.9925% −0.8711%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.8787% +1.0025% +1.1396%]
+                        Change within noise threshold.
+
+Benchmarking h1_buffered_cl_64kib/request_to_response_to_reset
+Benchmarking h1_buffered_cl_64kib/request_to_response_to_reset: Warming up for 2.0000 s
+Benchmarking h1_buffered_cl_64kib/request_to_response_to_reset: Collecting 20 samples in estimated 3.0001 s (2.0M iterations)
+Benchmarking h1_buffered_cl_64kib/request_to_response_to_reset: Analyzing
+h1_buffered_cl_64kib/request_to_response_to_reset
+                        time:   [1.5165 µs 1.5217 µs 1.5259 µs]
+                        thrpt:  [40.083 GiB/s 40.195 GiB/s 40.331 GiB/s]
+                 change:
+                        time:   [−0.5646% −0.2915% −0.0789%] (p = 0.23 > 0.05)
+                        thrpt:  [+0.0789% +0.2924% +0.5678%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking h1_streaming_cl_64kib/request_to_response_to_reset
+Benchmarking h1_streaming_cl_64kib/request_to_response_to_reset: Warming up for 2.0000 s
+Benchmarking h1_streaming_cl_64kib/request_to_response_to_reset: Collecting 20 samples in estimated 3.0005 s (944k iterations)
+Benchmarking h1_streaming_cl_64kib/request_to_response_to_reset: Analyzing
+h1_streaming_cl_64kib/request_to_response_to_reset
+                        time:   [3.1519 µs 3.1546 µs 3.1568 µs]
+                        thrpt:  [19.375 GiB/s 19.389 GiB/s 19.405 GiB/s]
+                 change:
+                        time:   [+1.9339% +2.1300% +2.3486%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.2947% −2.0856% −1.8972%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking h1_buffered_chunked_16x4kib/request_to_response_to_reset
+Benchmarking h1_buffered_chunked_16x4kib/request_to_response_to_reset: Warming up for 2.0000 s
+Benchmarking h1_buffered_chunked_16x4kib/request_to_response_to_reset: Collecting 20 samples in estimated 3.0001 s (1.7M iterations)
+Benchmarking h1_buffered_chunked_16x4kib/request_to_response_to_reset: Analyzing
+h1_buffered_chunked_16x4kib/request_to_response_to_reset
+                        time:   [1.7827 µs 1.7845 µs 1.7863 µs]
+                        thrpt:  [34.291 GiB/s 34.326 GiB/s 34.361 GiB/s]
+                 change:
+                        time:   [−7.6968% −7.4825% −7.3558%] (p = 0.00 < 0.05)
+                        thrpt:  [+7.9398% +8.0876% +8.3387%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+
+Benchmarking h1_streaming_chunked_16x4kib/request_to_response_to_reset
+Benchmarking h1_streaming_chunked_16x4kib/request_to_response_to_reset: Warming up for 2.0000 s
+Benchmarking h1_streaming_chunked_16x4kib/request_to_response_to_reset: Collecting 20 samples in estimated 3.0004 s (733k iterations)
+Benchmarking h1_streaming_chunked_16x4kib/request_to_response_to_reset: Analyzing
+h1_streaming_chunked_16x4kib/request_to_response_to_reset
+                        time:   [4.0531 µs 4.0591 µs 4.0645 µs]
+                        thrpt:  [15.071 GiB/s 15.091 GiB/s 15.113 GiB/s]
+                 change:
+                        time:   [−2.6386% −2.4531% −2.1991%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.2486% +2.5147% +2.7101%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+

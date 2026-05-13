@@ -1,0 +1,144 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 37s
+     Running benches/bench_mqtt.rs (proxima/target/release/deps/bench_mqtt-a9e9e847b6468bca)
+Benchmarking mqtt_publish_qos0/proxima
+Benchmarking mqtt_publish_qos0/proxima: Warming up for 2.0000 s
+Benchmarking mqtt_publish_qos0/proxima: Collecting 20 samples in estimated 2.0000 s (353M iterations)
+Benchmarking mqtt_publish_qos0/proxima: Analyzing
+mqtt_publish_qos0/proxima
+                        time:   [5.6294 ns 5.6443 ns 5.6618 ns]
+                        thrpt:  [4.1123 GiB/s 4.1250 GiB/s 4.1360 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking mqtt_publish_qos0/parity
+Benchmarking mqtt_publish_qos0/parity: Warming up for 2.0000 s
+Benchmarking mqtt_publish_qos0/parity: Collecting 20 samples in estimated 2.0000 s (317M iterations)
+Benchmarking mqtt_publish_qos0/parity: Analyzing
+mqtt_publish_qos0/parity
+                        time:   [6.2862 ns 6.3021 ns 6.3201 ns]
+                        thrpt:  [3.6840 GiB/s 3.6945 GiB/s 3.7038 GiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking mqtt_publish_qos1/proxima
+Benchmarking mqtt_publish_qos1/proxima: Warming up for 2.0000 s
+Benchmarking mqtt_publish_qos1/proxima: Collecting 20 samples in estimated 2.0000 s (214M iterations)
+Benchmarking mqtt_publish_qos1/proxima: Analyzing
+mqtt_publish_qos1/proxima
+                        time:   [9.3689 ns 9.4307 ns 9.5086 ns]
+                        thrpt:  [2.6445 GiB/s 2.6664 GiB/s 2.6840 GiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking mqtt_publish_qos1/parity
+Benchmarking mqtt_publish_qos1/parity: Warming up for 2.0000 s
+Benchmarking mqtt_publish_qos1/parity: Collecting 20 samples in estimated 2.0000 s (223M iterations)
+Benchmarking mqtt_publish_qos1/parity: Analyzing
+mqtt_publish_qos1/parity
+                        time:   [9.0104 ns 9.0722 ns 9.1491 ns]
+                        thrpt:  [2.7484 GiB/s 2.7717 GiB/s 2.7907 GiB/s]
+Found 7 outliers among 20 measurements (35.00%)
+  3 (15.00%) low severe
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking mqtt_connect/proxima
+Benchmarking mqtt_connect/proxima: Warming up for 2.0000 s
+Benchmarking mqtt_connect/proxima: Collecting 20 samples in estimated 2.0000 s (223M iterations)
+Benchmarking mqtt_connect/proxima: Analyzing
+mqtt_connect/proxima    time:   [8.9980 ns 9.0525 ns 9.1184 ns]
+                        thrpt:  [2.2470 GiB/s 2.2634 GiB/s 2.2771 GiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) low mild
+  1 (5.00%) high severe
+Benchmarking mqtt_connect/parity
+Benchmarking mqtt_connect/parity: Warming up for 2.0000 s
+Benchmarking mqtt_connect/parity: Collecting 20 samples in estimated 2.0000 s (229M iterations)
+Benchmarking mqtt_connect/parity: Analyzing
+mqtt_connect/parity     time:   [8.7816 ns 8.8527 ns 8.9409 ns]
+                        thrpt:  [2.2916 GiB/s 2.3144 GiB/s 2.3332 GiB/s]
+Found 7 outliers among 20 measurements (35.00%)
+  3 (15.00%) low severe
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking mqtt_real/proxima_publish_qos0
+Benchmarking mqtt_real/proxima_publish_qos0: Warming up for 2.0000 s
+Benchmarking mqtt_real/proxima_publish_qos0: Collecting 20 samples in estimated 2.0000 s (201M iterations)
+Benchmarking mqtt_real/proxima_publish_qos0: Analyzing
+mqtt_real/proxima_publish_qos0
+                        time:   [9.9797 ns 9.9989 ns 10.022 ns]
+                        thrpt:  [2.3233 GiB/s 2.3286 GiB/s 2.3330 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking mqtt_real/mqttbytes_publish_qos0
+Benchmarking mqtt_real/mqttbytes_publish_qos0: Warming up for 2.0000 s
+Benchmarking mqtt_real/mqttbytes_publish_qos0: Collecting 20 samples in estimated 2.0000 s (17M iterations)
+Benchmarking mqtt_real/mqttbytes_publish_qos0: Analyzing
+mqtt_real/mqttbytes_publish_qos0
+                        time:   [93.614 ns 93.939 ns 94.231 ns]
+                        thrpt:  [253.01 MiB/s 253.80 MiB/s 254.68 MiB/s]
+Benchmarking mqtt_real/proxima_publish_qos1
+Benchmarking mqtt_real/proxima_publish_qos1: Warming up for 2.0000 s
+Benchmarking mqtt_real/proxima_publish_qos1: Collecting 20 samples in estimated 2.0000 s (193M iterations)
+Benchmarking mqtt_real/proxima_publish_qos1: Analyzing
+mqtt_real/proxima_publish_qos1
+                        time:   [10.363 ns 10.392 ns 10.422 ns]
+                        thrpt:  [2.2341 GiB/s 2.2405 GiB/s 2.2468 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking mqtt_real/mqttbytes_publish_qos1
+Benchmarking mqtt_real/mqttbytes_publish_qos1: Warming up for 2.0000 s
+Benchmarking mqtt_real/mqttbytes_publish_qos1: Collecting 20 samples in estimated 2.0000 s (17M iterations)
+Benchmarking mqtt_real/mqttbytes_publish_qos1: Analyzing
+mqtt_real/mqttbytes_publish_qos1
+                        time:   [96.717 ns 97.109 ns 97.441 ns]
+                        thrpt:  [244.68 MiB/s 245.52 MiB/s 246.51 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) high mild
+Benchmarking mqtt_real/proxima_connect
+Benchmarking mqtt_real/proxima_connect: Warming up for 2.0000 s
+Benchmarking mqtt_real/proxima_connect: Collecting 20 samples in estimated 2.0000 s (201M iterations)
+Benchmarking mqtt_real/proxima_connect: Analyzing
+mqtt_real/proxima_connect
+                        time:   [9.9792 ns 10.008 ns 10.039 ns]
+                        thrpt:  [2.3192 GiB/s 2.3264 GiB/s 2.3332 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking mqtt_real/mqttbytes_connect
+Benchmarking mqtt_real/mqttbytes_connect: Warming up for 2.0000 s
+Benchmarking mqtt_real/mqttbytes_connect: Collecting 20 samples in estimated 2.0000 s (13M iterations)
+Benchmarking mqtt_real/mqttbytes_connect: Analyzing
+mqtt_real/mqttbytes_connect
+                        time:   [132.41 ns 132.70 ns 133.06 ns]
+                        thrpt:  [179.18 MiB/s 179.67 MiB/s 180.06 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking mqtt_workload_route_publish/proxima
+Benchmarking mqtt_workload_route_publish/proxima: Warming up for 2.0000 s
+Benchmarking mqtt_workload_route_publish/proxima: Collecting 20 samples in estimated 2.0000 s (316M iterations)
+Benchmarking mqtt_workload_route_publish/proxima: Analyzing
+mqtt_workload_route_publish/proxima
+                        time:   [6.2940 ns 6.3072 ns 6.3243 ns]
+                        thrpt:  [3.6815 GiB/s 3.6915 GiB/s 3.6992 GiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) high mild
+Benchmarking mqtt_workload_route_publish/mqttbytes
+Benchmarking mqtt_workload_route_publish/mqttbytes: Warming up for 2.0000 s
+Benchmarking mqtt_workload_route_publish/mqttbytes: Collecting 20 samples in estimated 2.0000 s (22M iterations)
+Benchmarking mqtt_workload_route_publish/mqttbytes: Analyzing
+mqtt_workload_route_publish/mqttbytes
+                        time:   [91.313 ns 91.841 ns 92.285 ns]
+                        thrpt:  [258.35 MiB/s 259.60 MiB/s 261.10 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+

@@ -1,0 +1,32 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 03s
+     Running benches/h3_dispatch.rs (proxima/target/release/deps/h3_dispatch-c364603ae583de1e)
+Benchmarking h3_handshake_only/quic_handshake_then_drop
+Benchmarking h3_handshake_only/quic_handshake_then_drop: Warming up for 2.0000 s
+Benchmarking h3_handshake_only/quic_handshake_then_drop: Collecting 20 samples in estimated 3.0092 s (4200 iterations)
+Benchmarking h3_handshake_only/quic_handshake_then_drop: Analyzing
+h3_handshake_only/quic_handshake_then_drop
+                        time:   [708.18 µs 711.64 µs 714.51 µs]
+                        thrpt:  [1.3996 Kelem/s 1.4052 Kelem/s 1.4121 Kelem/s]
+
+Benchmarking h3_request_on_warm_connection/get_then_200_ok_on_warm_connection
+Benchmarking h3_request_on_warm_connection/get_then_200_ok_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_request_on_warm_connection/get_then_200_ok_on_warm_connection: Collecting 20 samples in estimated 5.0001 s (84k iterations)
+Benchmarking h3_request_on_warm_connection/get_then_200_ok_on_warm_connection: Analyzing
+h3_request_on_warm_connection/get_then_200_ok_on_warm_connection
+                        time:   [60.141 µs 60.625 µs 61.113 µs]
+                        thrpt:  [16.363 Kelem/s 16.495 Kelem/s 16.628 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking h3_post_with_body_on_warm_connection/post_5_bytes_then_echo_on_warm_connection
+Benchmarking h3_post_with_body_on_warm_connection/post_5_bytes_then_echo_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_post_with_body_on_warm_connection/post_5_bytes_then_echo_on_warm_connection: Collecting 20 samples in estimated 5.0013 s (79k iterations)
+Benchmarking h3_post_with_body_on_warm_connection/post_5_bytes_then_echo_on_warm_connection: Analyzing
+h3_post_with_body_on_warm_connection/post_5_bytes_then_echo_on_warm_connection
+                        time:   [62.207 µs 62.504 µs 62.854 µs]
+                        thrpt:  [15.910 Kelem/s 15.999 Kelem/s 16.075 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

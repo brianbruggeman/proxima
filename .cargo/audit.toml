@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+    # Dev-only through pingora-core 0.8.1's prometheus 0.13 dependency.
+    # Pingora is currently latest, and the benchmark path does not parse
+    # untrusted protobuf with Proxima runtime code. Remove this when Pingora
+    # releases a version that no longer pulls protobuf 2.x.
+    "RUSTSEC-2024-0437",
+]

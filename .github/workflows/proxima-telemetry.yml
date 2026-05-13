@@ -1,0 +1,111 @@
+name: proxima-telemetry
+
+# Gate for proxima-telemetry (proxima-telemetry/docs/tracing/discipline.md).
+# Re-proves the crate's correctness claims on every push without anyone's
+# memory (guiding-principle 16): the emit path, the lock-free MPSC ring, the
+# drain path, and the native-vs-OTLP byte-parity vectors. The MPSC ring
+# replaced an unsound SPSC ring (two producers raced one slot = UB); the
+# tsan job below is the memory-model proof that the replacement is race-free.
+
+on:
+  push:
+    branches: [main, "feat/telemetry-trace-bench", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # The full crate gate: build + clippy + tests + feature tiers + no_std marker.
+  telemetry-gate:
+    name: telemetry-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.telemetry == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/telemetry-gate.sh
+
+  # Loom model-check of the lock-free ring, both ends — the STABLE replacement
+  # for the old nightly ThreadSanitizer job (this was the repo's only nightly
+  # job). loom EXHAUSTIVELY explores every interleaving of the Vyukov push/dequeue
+  # CAS protocol (cap-2 ring, 2 producers + 1/2 consumers, every cell contended)
+  # and asserts no-loss / no-tear / no-dup — stronger than tsan stress (exhaustive
+  # vs random) and needs no nightly, no -Zbuild-std, no sanitizer. The recorder
+  # producer-assist test now runs in the normal suite (telemetry-gate.sh) instead
+  # of under tsan; the lock-free PRIMITIVE itself is what loom proves here.
+  ring-loom:
+    name: ring — Loom model (MPSC + MPMC)
+    needs: changes
+    if: needs.changes.outputs.telemetry == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: loom model-check (all interleavings, no data race)
+        env:
+          LOOM_MAX_PREEMPTIONS: "3"
+        run: |
+          cargo test -p proxima-telemetry --features loom \
+            --test loom_ring --release
+
+  # OTLP-over-the-wire E2E (the transport-send keystone). The OTLP codec is
+  # transport-free in the leaf crate, so the real-wire proof lives in the
+  # UMBRELLA tests, where the fluent face wires it to the prime client:
+  # #[proxima::test] drives a prime reactor, OtlpClient::http().endpoint(..)
+  # .build() lowers to OtlpHttpCodec -> H1ClientUpstream(PrimeTcpUpstream),
+  # which POSTs captured spans to a prime TcpListener collector that
+  # prost-decodes them; a second case asserts the .header()/.retry()/.timeout()
+  # axes compose (auth header on the wire). It also covers the managed-pump
+  # keystone: prime_pump_auto_exports_over_prime_wire builds a recorder from
+  # config (OtlpHttp endpoint) + spawn_prime_pump and asserts the spans reach the
+  # collector with NO manual drain (the detached prime drain task does it). And
+  # recorder_drain_async_sends_over_prime_wire proves the manual drain_async path.
+  # Without this lane the end-to-end export claim is unproven on push (principle 16).
+  otlp-wire-e2e:
+    name: otlp over the prime wire (facade E2E)
+    needs: changes
+    if: needs.changes.outputs.telemetry == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo test -p proxima --test otlp_send_prime_e2e --features \
+            "test-prime,otlp-http,http-prime,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool,tcp"
+
+  # Compare-bench (native encode vs OTLP protobuf). Records the baseline; does
+  # NOT seal the discipline row (that's a manual read of the CoV). --quick keeps
+  # CI fast.
+  compare-bench:
+    name: compare-bench (native vs otlp)
+    needs: changes
+    if: needs.changes.outputs.telemetry == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench -p proxima-telemetry --bench bench_trace_native_vs_otlp --features otlp-http -- --quick

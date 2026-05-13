@@ -1,0 +1,46 @@
+name: dpdk-stack
+
+# Gate for the DPDK userspace-stack sans-IO layer
+# (docs/inet-codec/discipline.md, docs/tcp-connection-fsm/discipline.md).
+# Re-proves the correctness claims on every push without anyone's memory
+# (guiding-principle 16): the L2-L4 wire codec (RFC 1071 checksum worked
+# examples + eth/ipv4/tcp/udp parse+build) and the RFC 793 connection control
+# FSM (the Fig 6 transition table as worked-example tests) — plus the hard
+# contract that both crates hold no_std + no-alloc on a bare-metal target.
+
+on:
+  push:
+    branches: [main, "feat/dpdk-fullstack", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # build + clippy + worked-example tests + the bare-metal no_std build, on
+  # both Linux and macOS so the codec's host-independence is a checked fact.
+  dpdk-stack-gate:
+    name: dpdk-stack-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.dpdk_stack == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/dpdk-stack-gate.sh

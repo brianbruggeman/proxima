@@ -1,0 +1,5 @@
+error: #[proxima::pipe(boxed)] is redundant on a plain `fn`: `core::future::ready` is already `Unpin` and allocates nothing. Remove `boxed`.
+ --> tests/ui/pipe_boxed_on_sync_fn.rs:6:1
+  |
+6 | fn bad(input: u64) -> Result<u64, std::convert::Infallible> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

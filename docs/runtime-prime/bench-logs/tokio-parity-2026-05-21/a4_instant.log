@@ -1,0 +1,34 @@
+   Compiling proxima v0.1.0 (proxima-tokio-parity/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 13s
+     Running benches/bench_time_instant_parity.rs (/tmp/cargo_target/release/deps/bench_time_instant_parity-e978317c746eea5f)
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout: Warming up for 3.0000 s
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout: Collecting 100 samples in estimated 8.4151 s (200 iterations)
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout: Analyzing
+time_parity_w1_timeout_backstop/proxima_time_timeout
+                        time:   [41.342 ms 41.374 ms 41.405 ms]
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 25.9s, or reduce sample count to 10.
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout: Collecting 100 samples in estimated 25.932 s (100 iterations)
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout: Analyzing
+time_parity_w1_timeout_backstop/tokio_time_timeout
+                        time:   [258.05 ms 258.82 ms 259.88 ms]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high severe
+
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep: Warming up for 3.0000 s
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep: Collecting 20 samples in estimated 7.1398 s (60 iterations)
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep: Analyzing
+time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep
+                        time:   [118.16 ms 118.42 ms 118.68 ms]
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until: Warming up for 3.0000 s
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until: Collecting 20 samples in estimated 7.1076 s (60 iterations)
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until: Analyzing
+time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until
+                        time:   [118.08 ms 118.36 ms 118.63 ms]
+

@@ -1,0 +1,172 @@
+[package]
+name = "proxima-recording"
+description = "Recording substrate for proxima: event model, source/sink traits, binary and JSONL on-disk formats, index files (base/format tier); pipe-flavored capture/replay wrappers (`pipe` feature); cassette replay-by-match-key (`replay` feature)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+# needed by every tier: the event model + the alloc-only binary::frame /
+# binary::wire / rt_fs seam pull these in directly.
+proxima-core = { workspace = true, default-features = false }
+proxima-runtime = { workspace = true, default-features = false }
+bytes = { workspace = true }
+postcard = { workspace = true, features = ["alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+serde_json = { workspace = true }
+# workspace.dependencies.time/ulid don't set default-features = false (several
+# other consumers rely on their workspace-default std feature staying on), so
+# this crate pins its own version + default-features = false directly — same
+# pattern proxima-config's schema module already uses for `time`. Isolated to this crate;
+# nothing else in the workspace is affected.
+time = { version = "0.3.47", default-features = false, features = ["macros", "serde"] }
+# no "serde" feature: InteractionId hand-rolls Serialize/Deserialize over
+# Ulid's Display/FromStr (see event.rs) rather than deriving through ulid's
+# own `serde` feature — which would pull serde's default (std) features,
+# since ulid's own manifest doesn't set default-features = false on its
+# serde edge. That single unnecessary feature request is what breaks the
+# no_std tier; dropping it costs nothing (nothing else needs it).
+ulid = { version = "1.2.1", default-features = false }
+# the sans-IO half of `replay::keying` needs a fixed-cap query-param scratch
+# vec at the alloc tier.
+smallvec = { workspace = true }
+
+# std-only: the source/index/factory layer and the format readers (BufRead,
+# PathBuf, OnceLock, zstd's C bindings). Forwarded in behind `std` below so
+# the alloc-only tier never has to compile them for a bare-metal target.
+arc-swap = { workspace = true, optional = true }
+async-stream = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+# `executor` backs `BoundedRecordingSink`'s tokio-free background drain
+# thread (`futures::executor::block_on`); `pin_mut!` needs no extra feature.
+futures = { workspace = true, optional = true, features = ["executor"] }
+thiserror = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+
+# `pipe` feature only (Pipe-flavored capture/replay wrappers): std, tokio-free
+# background drain thread (`futures::executor::block_on`, see `cap.rs`),
+# per-core causal recording. Never pulled in by the base format tier.
+proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
+crossbeam-queue = { workspace = true, optional = true }
+num_cpus = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+# `replay` feature only (cassette replay-by-match-key, `ReplayUpstream`):
+# RFC 6455 Sec-WebSocket-Accept for the ws replay handshake.
+proxima-protocols = { workspace = true, default-features = false, features = ["websocket_handshake"], optional = true }
+
+# `pipe-config` / `replay-config` features only: conflaguration is std-only
+# (guiding-principles P4 layering caveat).
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# runtime-swap parity harness: drives the same seam against the prime backend
+# (via `prime` below) and the tokio-backed proxima-runtime backend.
+proxima-runtime = { workspace = true, features = ["tokio"] }
+prime = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
+proxima-core = { workspace = true, features = ["time-driver-mock"] }
+time = { workspace = true, features = ["formatting", "parsing", "macros", "serde", "serde-human-readable"] }
+toml = { workspace = true }
+
+[features]
+default = ["std"]
+
+# Full format substrate: source/index/factory registries, bin/jsonl format
+# readers, durable-log file I/O. Everything proxima-recording-core shipped
+# historically.
+std = [
+    "alloc",
+    "proxima-core/std",
+    "proxima-runtime/std",
+    "serde/std",
+    "time/std",
+    "time/formatting",
+    "time/parsing",
+    "time/serde-human-readable",
+    "ulid/std",
+    "dep:arc-swap",
+    "dep:async-stream",
+    "dep:base64",
+    "dep:futures",
+    "dep:thiserror",
+    "dep:zstd",
+    # `pipe`'s real content (gated on this crate's own `std`) reaches into
+    # `proxima_primitives::sync::Notify`, which is itself gated behind
+    # proxima-primitives' `std` feature (formerly satisfied implicitly by
+    # proxima-sync's own workspace-default std tier, pre-merge). Only takes
+    # effect when `pipe` is also active — otherwise proxima-primitives stays
+    # at the `alloc` tier the `pipe` feature itself requests.
+    "proxima-primitives/std",
+]
+
+# The sans-IO tier: the event model, the binary block codec
+# (binary::frame + binary::wire), and the runtime-agnostic blocking-I/O
+# offload seam (rt_fs) — no file handles, no BufRead, no registries.
+# Compiles on a bare-metal no_std target (see nostd-gate). Also the tier
+# `replay::keying` / `replay::meta` compile at when `replay` is enabled
+# without `std`.
+alloc = [
+    "proxima-core/alloc",
+    "proxima-runtime/alloc",
+    "serde/alloc",
+    "time/alloc",
+]
+
+# S1 of the proxima-notify initiative: durable WAL semantics on BinSink/
+# BinSource. Adds BinSink::sync_now (fsync data + idx in the correct
+# order) and BinSource::events_from_offset (yields (offset, event) pairs
+# for at-least-once consumer drain via the offset cursor C7).
+# Default off — opt-in until the notify substrate is fully sealed.
+# See docs/proxima-notify/{discipline.md S1 row, SUBSTRATE.md S1 section}.
+durable-wal = []
+
+# Pipe-flavored recording substrate (folded from proxima-recording-pipe):
+# `LiveCaptureContext`, `BoundedRecordingSink`, `Causal` (record/replay Pipe
+# wrapper with causal index), the durable spigot terminal (`LazyFanOut`,
+# `FanOut`, `AppendLog`/`ReplayLog`), and `pipe::replay::TimedReplay` (the
+# causal-order / timing-intact recording pacer — distinct from the top-level
+# `replay` feature's `ReplayUpstream`). Real content is std-only; without
+# `std` this module compiles as a marker (matches the former crate's tier
+# behaviour).
+pipe = [
+    "dep:proxima-primitives",
+    "dep:crossbeam-queue",
+    "dep:num_cpus",
+    "dep:tracing",
+]
+
+# Cassette replay-by-match-key (folded from proxima-replay): `ReplayUpstream`,
+# `ws::WsReplayUpstream`, `ReplayPipeFactory`. The keying core
+# (`replay::keying`, `replay::meta`) is sans-IO and compiles at the `alloc`
+# tier; the cassette-loading adapter (file I/O, `Runtime`, `Pipe`/
+# `PipeFactory`) additionally needs `std`.
+replay = [
+    "dep:proxima-primitives",
+    "dep:proxima-protocols",
+]
+
+# Step 4 of the proxima workspace consolidation: RecordingConfig
+# (capacity / fail_mode / enabled) backed by conflaguration + bon.
+# default off so the raw `BoundedRecordingSink::new` /
+# `LiveCaptureContext` paths stay dependency-light.
+pipe-config = ["dep:conflaguration", "dep:bon", "pipe", "std"]
+
+# Step 4 of the proxima workspace consolidation: ReplayConfig +
+# `ReplayConfig::build()` async factory backed by conflaguration + bon.
+# default off so the raw `ReplayUpstream::from_jsonl` / `from_source`
+# constructors stay dependency-light. Requires `std`: conflaguration is
+# unconditionally std (guiding-principles P4).
+replay-config = ["dep:conflaguration", "dep:bon", "replay", "std"]
+
+[lints]
+workspace = true

@@ -1,0 +1,69 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 36s
+     Running benches/bench_dns.rs (/tmp/cargo_target/release/deps/bench_dns-f814cf178bceeed2)
+Benchmarking dns_parse_proxima/response_full
+Benchmarking dns_parse_proxima/response_full: Warming up for 2.0000 s
+Benchmarking dns_parse_proxima/response_full: Collecting 20 samples in estimated 3.0000 s (113M iterations)
+Benchmarking dns_parse_proxima/response_full: Analyzing
+dns_parse_proxima/response_full
+                        time:   [26.238 ns 26.326 ns 26.400 ns]
+                        thrpt:  [1.5875 GiB/s 1.5920 GiB/s 1.5973 GiB/s]
+                 change:
+                        time:   [+68.811% +70.047% +71.326%] (p = 0.00 < 0.05)
+                        thrpt:  [−41.632% −41.193% −40.762%]
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high mild
+
+Benchmarking dns_parse_parity/response_full
+Benchmarking dns_parse_parity/response_full: Warming up for 2.0000 s
+Benchmarking dns_parse_parity/response_full: Collecting 20 samples in estimated 3.0000 s (211M iterations)
+Benchmarking dns_parse_parity/response_full: Analyzing
+dns_parse_parity/response_full
+                        time:   [14.206 ns 14.217 ns 14.230 ns]
+                        thrpt:  [2.9451 GiB/s 2.9478 GiB/s 2.9501 GiB/s]
+                 change:
+                        time:   [−7.2163% −6.5955% −6.0197%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.4052% +7.0613% +7.7775%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking dns_parse_hickory/response_full
+Benchmarking dns_parse_hickory/response_full: Warming up for 2.0000 s
+Benchmarking dns_parse_hickory/response_full: Collecting 20 samples in estimated 3.0000 s (12M iterations)
+Benchmarking dns_parse_hickory/response_full: Analyzing
+dns_parse_hickory/response_full
+                        time:   [249.12 ns 250.06 ns 251.29 ns]
+                        thrpt:  [170.78 MiB/s 171.62 MiB/s 172.27 MiB/s]
+                 change:
+                        time:   [−1.8068% −0.7543% +0.1690%] (p = 0.26 > 0.05)
+                        thrpt:  [−0.1687% +0.7600% +1.8400%]
+                        No change in performance detected.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  3 (15.00%) high mild
+
+Benchmarking dns_workload_count_a/proxima
+Benchmarking dns_workload_count_a/proxima: Warming up for 2.0000 s
+Benchmarking dns_workload_count_a/proxima: Collecting 20 samples in estimated 3.0000 s (36M iterations)
+Benchmarking dns_workload_count_a/proxima: Analyzing
+dns_workload_count_a/proxima
+                        time:   [83.730 ns 83.814 ns 83.914 ns]
+                        thrpt:  [1.3873 GiB/s 1.3890 GiB/s 1.3904 GiB/s]
+                 change:
+                        time:   [−3.0963% −2.7854% −2.4908%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.5544% +2.8652% +3.1952%]
+                        Performance has improved.
+Benchmarking dns_workload_count_a/hickory
+Benchmarking dns_workload_count_a/hickory: Warming up for 2.0000 s
+Benchmarking dns_workload_count_a/hickory: Collecting 20 samples in estimated 3.0001 s (5.4M iterations)
+Benchmarking dns_workload_count_a/hickory: Analyzing
+dns_workload_count_a/hickory
+                        time:   [557.93 ns 558.46 ns 559.06 ns]
+                        thrpt:  [213.23 MiB/s 213.46 MiB/s 213.66 MiB/s]
+                 change:
+                        time:   [−6.1455% −5.7437% −5.3502%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.6527% +6.0937% +6.5479%]
+                        Performance has improved.
+
