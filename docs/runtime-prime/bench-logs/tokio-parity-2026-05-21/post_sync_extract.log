@@ -1,0 +1,310 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.25s
+     Running benches/bench_sync_mutex_parity.rs (/tmp/cargo_target/release/deps/bench_sync_mutex_parity-903f374b830a4338)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, or reduce sample count to 80.
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Collecting 100 samples in estimated 6.2249 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/proxima_sync_mutex
+                        time:   [61.334 ms 61.941 ms 62.866 ms]
+                        change: [−0.9523% +0.1992% +1.8142%] (p = 0.81 > 0.05)
+                        No change in performance detected.
+Found 31 outliers among 100 measurements (31.00%)
+  14 (14.00%) low mild
+  8 (8.00%) high mild
+  9 (9.00%) high severe
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.4s, or reduce sample count to 70.
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Collecting 100 samples in estimated 6.4395 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/tokio_sync_mutex
+                        time:   [61.451 ms 61.540 ms 61.634 ms]
+                        change: [−0.8200% −0.3682% +0.0002%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 23 outliers among 100 measurements (23.00%)
+  2 (2.00%) high mild
+  21 (21.00%) high severe
+
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Collecting 100 samples in estimated 5.1601 s (2200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+                        time:   [2.3285 ms 2.3494 ms 2.3802 ms]
+                        change: [−4.4680% −2.8690% −1.2707%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 15 outliers among 100 measurements (15.00%)
+  7 (7.00%) high mild
+  8 (8.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Collecting 100 samples in estimated 5.1326 s (2200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+                        time:   [2.3326 ms 2.3438 ms 2.3608 ms]
+                        change: [−1.0226% −0.2779% +0.5590%] (p = 0.52 > 0.05)
+                        No change in performance detected.
+Found 11 outliers among 100 measurements (11.00%)
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Collecting 100 samples in estimated 5.1018 s (2200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+                        time:   [2.3677 ms 2.4254 ms 2.4941 ms]
+                        change: [+0.9512% +3.6552% +6.2459%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 16 outliers among 100 measurements (16.00%)
+  4 (4.00%) high mild
+  12 (12.00%) high severe
+
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Collecting 100 samples in estimated 5.0119 s (2.0M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/proxima_sync_mutex
+                        time:   [2.4653 µs 2.4688 µs 2.4726 µs]
+                        change: [−0.6552% −0.4777% −0.3059%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Collecting 100 samples in estimated 5.0030 s (1.5M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/tokio_sync_mutex
+                        time:   [3.3504 µs 3.3859 µs 3.4373 µs]
+                        change: [−0.1165% +0.7753% +2.1219%] (p = 0.21 > 0.05)
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Collecting 100 samples in estimated 5.0065 s (2.2M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Analyzing
+mutex_parity_w3_async_write_flush/parking_lot_mutex
+                        time:   [2.3048 µs 2.3081 µs 2.3115 µs]
+                        change: [−0.2992% −0.1117% +0.0771%] (p = 0.26 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+
+     Running benches/bench_sync_once_cell_parity.rs (/tmp/cargo_target/release/deps/bench_sync_once_cell_parity-55bd5f7d2c3d908a)
+Benchmarking once_cell_parity_w1_cold_init_race/proxima_sync_once_cell
+Benchmarking once_cell_parity_w1_cold_init_race/proxima_sync_once_cell: Warming up for 3.0000 s
+Benchmarking once_cell_parity_w1_cold_init_race/proxima_sync_once_cell: Collecting 100 samples in estimated 17.262 s (10k iterations)
+Benchmarking once_cell_parity_w1_cold_init_race/proxima_sync_once_cell: Analyzing
+once_cell_parity_w1_cold_init_race/proxima_sync_once_cell
+                        time:   [1.7091 ms 1.7271 ms 1.7600 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) low severe
+  4 (4.00%) low mild
+  1 (1.00%) high severe
+Benchmarking once_cell_parity_w1_cold_init_race/tokio_sync_once_cell
+Benchmarking once_cell_parity_w1_cold_init_race/tokio_sync_once_cell: Warming up for 3.0000 s
+Benchmarking once_cell_parity_w1_cold_init_race/tokio_sync_once_cell: Collecting 100 samples in estimated 17.403 s (10k iterations)
+Benchmarking once_cell_parity_w1_cold_init_race/tokio_sync_once_cell: Analyzing
+once_cell_parity_w1_cold_init_race/tokio_sync_once_cell
+                        time:   [1.7181 ms 1.7222 ms 1.7262 ms]
+                        change: [−1.2728% +1.2146% +3.4388%] (p = 0.34 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) low severe
+  3 (3.00%) low mild
+Benchmarking once_cell_parity_w1_cold_init_race/once_cell_sync
+Benchmarking once_cell_parity_w1_cold_init_race/once_cell_sync: Warming up for 3.0000 s
+Benchmarking once_cell_parity_w1_cold_init_race/once_cell_sync: Collecting 100 samples in estimated 12.831 s (20k iterations)
+Benchmarking once_cell_parity_w1_cold_init_race/once_cell_sync: Analyzing
+once_cell_parity_w1_cold_init_race/once_cell_sync
+                        time:   [634.41 µs 634.62 µs 634.82 µs]
+                        change: [−0.1685% −0.0694% +0.0229%] (p = 0.16 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+
+Benchmarking once_cell_parity_w2_hot_warm_get/proxima_sync_once_cell
+Benchmarking once_cell_parity_w2_hot_warm_get/proxima_sync_once_cell: Warming up for 3.0000 s
+Benchmarking once_cell_parity_w2_hot_warm_get/proxima_sync_once_cell: Collecting 100 samples in estimated 6.9342 s (10k iterations)
+Benchmarking once_cell_parity_w2_hot_warm_get/proxima_sync_once_cell: Analyzing
+once_cell_parity_w2_hot_warm_get/proxima_sync_once_cell
+                        time:   [686.77 µs 687.46 µs 688.21 µs]
+                        thrpt:  [1.4530 Gelem/s 1.4546 Gelem/s 1.4561 Gelem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  7 (7.00%) low mild
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking once_cell_parity_w2_hot_warm_get/tokio_sync_once_cell
+Benchmarking once_cell_parity_w2_hot_warm_get/tokio_sync_once_cell: Warming up for 3.0000 s
+Benchmarking once_cell_parity_w2_hot_warm_get/tokio_sync_once_cell: Collecting 100 samples in estimated 6.9640 s (10k iterations)
+Benchmarking once_cell_parity_w2_hot_warm_get/tokio_sync_once_cell: Analyzing
+once_cell_parity_w2_hot_warm_get/tokio_sync_once_cell
+                        time:   [689.07 µs 689.60 µs 690.10 µs]
+                        thrpt:  [1.4491 Gelem/s 1.4501 Gelem/s 1.4512 Gelem/s]
+                 change:
+                        time:   [−2.2213% −1.9444% −1.6925%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.7217% +1.9829% +2.2718%]
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking once_cell_parity_w2_hot_warm_get/once_cell_sync
+Benchmarking once_cell_parity_w2_hot_warm_get/once_cell_sync: Warming up for 3.0000 s
+Benchmarking once_cell_parity_w2_hot_warm_get/once_cell_sync: Collecting 100 samples in estimated 6.9404 s (10k iterations)
+Benchmarking once_cell_parity_w2_hot_warm_get/once_cell_sync: Analyzing
+once_cell_parity_w2_hot_warm_get/once_cell_sync
+                        time:   [685.59 µs 686.04 µs 686.48 µs]
+                        thrpt:  [1.4567 Gelem/s 1.4576 Gelem/s 1.4586 Gelem/s]
+                 change:
+                        time:   [−1.8071% −1.3953% −1.1043%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.1166% +1.4151% +1.8404%]
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) low severe
+  2 (2.00%) low mild
+
+     Running benches/bench_sync_semaphore_parity.rs (/tmp/cargo_target/release/deps/bench_sync_semaphore_parity-3bfd64475db68780)
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/1
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/1: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 18.1s, or reduce sample count to 20.
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/1: Collecting 100 samples in estimated 18.067 s (100 iterations)
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/1: Analyzing
+semaphore_bounded_concurrency/proxima_sync_semaphore/1
+                        time:   [180.65 ms 180.78 ms 180.90 ms]
+                        thrpt:  [5.5280  elem/s 5.5317  elem/s 5.5357  elem/s]
+                 change:
+                        time:   [−3.7260% −2.3053% −1.1127%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.1253% +2.3598% +3.8702%]
+                        Performance has improved.
+Found 16 outliers among 100 measurements (16.00%)
+  6 (6.00%) low severe
+  10 (10.00%) low mild
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/1
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/1: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 18.0s, or reduce sample count to 20.
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/1: Collecting 100 samples in estimated 18.043 s (100 iterations)
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/1: Analyzing
+semaphore_bounded_concurrency/tokio_sync_semaphore/1
+                        time:   [180.50 ms 180.64 ms 180.76 ms]
+                        thrpt:  [5.5322  elem/s 5.5360  elem/s 5.5402  elem/s]
+                 change:
+                        time:   [−0.3469% −0.1179% +0.0825%] (p = 0.31 > 0.05)
+                        thrpt:  [−0.0824% +0.1181% +0.3481%]
+                        No change in performance detected.
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) low severe
+  7 (7.00%) low mild
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/1
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/1: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 16.2s, or reduce sample count to 30.
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/1: Collecting 100 samples in estimated 16.211 s (100 iterations)
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/1: Analyzing
+semaphore_bounded_concurrency/atomic_usize_cap/1
+                        time:   [162.62 ms 162.64 ms 162.66 ms]
+                        thrpt:  [6.1478  elem/s 6.1486  elem/s 6.1494  elem/s]
+                 change:
+                        time:   [−3.1100% −1.6075% −0.4555%] (p = 0.01 < 0.05)
+                        thrpt:  [+0.4576% +1.6338% +3.2099%]
+                        Change within noise threshold.
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) low severe
+  5 (5.00%) low mild
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/8
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/8: Warming up for 3.0000 s
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/8: Collecting 100 samples in estimated 6.7922 s (300 iterations)
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/8: Analyzing
+semaphore_bounded_concurrency/proxima_sync_semaphore/8
+                        time:   [22.662 ms 22.681 ms 22.697 ms]
+                        thrpt:  [352.47  elem/s 352.72  elem/s 353.02  elem/s]
+                 change:
+                        time:   [+0.8006% +0.9541% +1.1113%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.0990% −0.9451% −0.7942%]
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) low severe
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/8
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/8: Warming up for 3.0000 s
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/8: Collecting 100 samples in estimated 6.7927 s (300 iterations)
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/8: Analyzing
+semaphore_bounded_concurrency/tokio_sync_semaphore/8
+                        time:   [22.665 ms 22.679 ms 22.696 ms]
+                        thrpt:  [352.49  elem/s 352.75  elem/s 352.97  elem/s]
+                 change:
+                        time:   [+0.5161% +0.6783% +0.8493%] (p = 0.00 < 0.05)
+                        thrpt:  [−0.8422% −0.6737% −0.5134%]
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high severe
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/8
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/8: Warming up for 3.0000 s
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/8: Collecting 100 samples in estimated 6.7878 s (300 iterations)
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/8: Analyzing
+semaphore_bounded_concurrency/atomic_usize_cap/8
+                        time:   [22.639 ms 22.655 ms 22.670 ms]
+                        thrpt:  [352.90  elem/s 353.12  elem/s 353.38  elem/s]
+                 change:
+                        time:   [−1.2525% −0.7141% −0.2893%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.2902% +0.7193% +1.2684%]
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) low severe
+  1 (1.00%) low mild
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/64
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/64: Warming up for 3.0000 s
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/64: Collecting 100 samples in estimated 6.7888 s (300 iterations)
+Benchmarking semaphore_bounded_concurrency/proxima_sync_semaphore/64: Analyzing
+semaphore_bounded_concurrency/proxima_sync_semaphore/64
+                        time:   [22.643 ms 22.661 ms 22.676 ms]
+                        thrpt:  [2.8224 Kelem/s 2.8243 Kelem/s 2.8265 Kelem/s]
+                 change:
+                        time:   [−0.3989% −0.1685% +0.0261%] (p = 0.13 > 0.05)
+                        thrpt:  [−0.0261% +0.1688% +0.4005%]
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) low severe
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/64
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/64: Warming up for 3.0000 s
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/64: Collecting 100 samples in estimated 6.9476 s (300 iterations)
+Benchmarking semaphore_bounded_concurrency/tokio_sync_semaphore/64: Analyzing
+semaphore_bounded_concurrency/tokio_sync_semaphore/64
+                        time:   [22.633 ms 22.702 ms 22.817 ms]
+                        thrpt:  [2.8049 Kelem/s 2.8191 Kelem/s 2.8277 Kelem/s]
+                 change:
+                        time:   [−0.3141% +0.0813% +0.6336%] (p = 0.80 > 0.05)
+                        thrpt:  [−0.6296% −0.0812% +0.3151%]
+                        No change in performance detected.
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) low severe
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/64
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/64: Warming up for 3.0000 s
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/64: Collecting 100 samples in estimated 6.8151 s (300 iterations)
+Benchmarking semaphore_bounded_concurrency/atomic_usize_cap/64: Analyzing
+semaphore_bounded_concurrency/atomic_usize_cap/64
+                        time:   [22.667 ms 22.686 ms 22.706 ms]
+                        thrpt:  [2.8187 Kelem/s 2.8211 Kelem/s 2.8235 Kelem/s]
+                 change:
+                        time:   [−0.1484% −0.0381% +0.0802%] (p = 0.53 > 0.05)
+                        thrpt:  [−0.0801% +0.0381% +0.1486%]
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low severe
+  1 (1.00%) low mild
+  3 (3.00%) high severe
+

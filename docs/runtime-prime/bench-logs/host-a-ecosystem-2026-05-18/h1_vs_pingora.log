@@ -1,0 +1,44 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 17s
+     Running benches/h1_vs_pingora.rs (/tmp/cargo_target/release/deps/h1_vs_pingora-dbf662bd20e1897c)
+Benchmarking h1_vs_pingora_loopback/proxima::Connection (loopback)
+Benchmarking h1_vs_pingora_loopback/proxima::Connection (loopback): Warming up for 2.0000 s
+Benchmarking h1_vs_pingora_loopback/proxima::Connection (loopback): Collecting 20 samples in estimated 5.0072 s (78k iterations)
+Benchmarking h1_vs_pingora_loopback/proxima::Connection (loopback): Analyzing
+h1_vs_pingora_loopback/proxima::Connection (loopback)
+                        time:   [65.578 µs 67.967 µs 71.072 µs]
+                        thrpt:  [14.070 Kelem/s 14.713 Kelem/s 15.249 Kelem/s]
+                 change:
+                        time:   [−13.662% −9.8400% −5.1267%] (p = 0.04 < 0.05)
+                        thrpt:  [+5.4037% +10.914% +15.824%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking h1_vs_pingora_loopback/hyper::server::conn::http1 (loopback)
+Benchmarking h1_vs_pingora_loopback/hyper::server::conn::http1 (loopback): Warming up for 2.0000 s
+Benchmarking h1_vs_pingora_loopback/hyper::server::conn::http1 (loopback): Collecting 20 samples in estimated 5.0027 s (75k iterations)
+Benchmarking h1_vs_pingora_loopback/hyper::server::conn::http1 (loopback): Analyzing
+h1_vs_pingora_loopback/hyper::server::conn::http1 (loopback)
+                        time:   [68.578 µs 70.978 µs 73.587 µs]
+                        thrpt:  [13.589 Kelem/s 14.089 Kelem/s 14.582 Kelem/s]
+                 change:
+                        time:   [−9.5173% −0.0214% +18.525%] (p = 0.57 > 0.05)
+                        thrpt:  [−15.629% +0.0214% +10.518%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking h1_vs_pingora_loopback/pingora::HttpSession (loopback)
+Benchmarking h1_vs_pingora_loopback/pingora::HttpSession (loopback): Warming up for 2.0000 s
+Benchmarking h1_vs_pingora_loopback/pingora::HttpSession (loopback): Collecting 20 samples in estimated 5.0055 s (73k iterations)
+Benchmarking h1_vs_pingora_loopback/pingora::HttpSession (loopback): Analyzing
+h1_vs_pingora_loopback/pingora::HttpSession (loopback)
+                        time:   [69.273 µs 72.049 µs 75.013 µs]
+                        thrpt:  [13.331 Kelem/s 13.879 Kelem/s 14.436 Kelem/s]
+                 change:
+                        time:   [−17.883% −13.465% −8.3816%] (p = 0.03 < 0.05)
+                        thrpt:  [+9.1484% +15.560% +21.777%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

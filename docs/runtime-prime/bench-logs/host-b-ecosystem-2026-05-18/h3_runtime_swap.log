@@ -1,0 +1,19 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 02s
+     Running benches/h3_runtime_swap.rs (proxima/target/release/deps/h3_runtime_swap-7ef96fd31d39c047)
+Benchmarking h3_runtime_swap_default_tokio/get_then_200_ok_on_warm_connection
+Benchmarking h3_runtime_swap_default_tokio/get_then_200_ok_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_runtime_swap_default_tokio/get_then_200_ok_on_warm_connection: Collecting 20 samples in estimated 5.0011 s (71k iterations)
+Benchmarking h3_runtime_swap_default_tokio/get_then_200_ok_on_warm_connection: Analyzing
+h3_runtime_swap_default_tokio/get_then_200_ok_on_warm_connection
+                        time:   [73.342 µs 76.535 µs 79.789 µs]
+                        thrpt:  [12.533 Kelem/s 13.066 Kelem/s 13.635 Kelem/s]
+
+Benchmarking h3_runtime_swap_per_core/get_then_200_ok_on_warm_connection
+Benchmarking h3_runtime_swap_per_core/get_then_200_ok_on_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_runtime_swap_per_core/get_then_200_ok_on_warm_connection: Collecting 20 samples in estimated 5.0117 s (86k iterations)
+Benchmarking h3_runtime_swap_per_core/get_then_200_ok_on_warm_connection: Analyzing
+h3_runtime_swap_per_core/get_then_200_ok_on_warm_connection
+                        time:   [59.676 µs 60.039 µs 60.372 µs]
+                        thrpt:  [16.564 Kelem/s 16.656 Kelem/s 16.757 Kelem/s]
+

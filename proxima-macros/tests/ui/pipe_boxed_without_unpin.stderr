@@ -1,0 +1,5 @@
+error: `boxed` only matters when climbing to the `Unpin` tier; add `unpin`: `#[proxima::pipe(unpin, boxed)]`.
+ --> tests/ui/pipe_boxed_without_unpin.rs:7:1
+  |
+7 | async fn bad(input: u64) -> Result<u64, std::convert::Infallible> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

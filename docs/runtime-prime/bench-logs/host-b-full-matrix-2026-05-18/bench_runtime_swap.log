@@ -1,0 +1,23 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 41.59s
+     Running benches/bench_runtime_swap.rs (proxima/target/release/deps/bench_runtime_swap-bdc71d8f50c758bb)
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core: Warming up for 1.0000 s
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core: Collecting 30 samples in estimated 3.0454 s (13k iterations)
+Benchmarking runtime_swap_cross_core_spawn/tokio_per_core: Analyzing
+runtime_swap_cross_core_spawn/tokio_per_core
+                        time:   [216.20 µs 219.44 µs 222.54 µs]
+                        thrpt:  [4.4936 Melem/s 4.5571 Melem/s 4.6254 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) low severe
+  1 (3.33%) high mild
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime: Warming up for 1.0000 s
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime: Collecting 30 samples in estimated 3.0658 s (21k iterations)
+Benchmarking runtime_swap_cross_core_spawn/proxima_runtime: Analyzing
+runtime_swap_cross_core_spawn/proxima_runtime
+                        time:   [149.49 µs 151.02 µs 152.34 µs]
+                        thrpt:  [6.5643 Melem/s 6.6216 Melem/s 6.6893 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high severe
+

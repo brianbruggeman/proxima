@@ -1,0 +1,93 @@
+# build-time sizing for proxima-telemetry.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_telemetry_sized.rs.
+# these are the compile-time DEFAULTS. the per-process surface is config-driven:
+# the runtime conflaguration `TelemetryConfig` (drain_batch / assist_batch)
+# overrides them via config file / env / fluent builder — that is the surface
+# deployments should use (a downstream that re-brands its own config maps it onto
+# the TelemetryConfig API rather than setting these build vars directly).
+#
+# Per-system build-time overrides via env vars:
+#
+#   PROXIMA_TELEMETRY_DRAIN_BATCH=1024 \
+#   PROXIMA_TELEMETRY_DRAIN_ASSIST_BATCH=32 \
+#   PROXIMA_TELEMETRY_PUMP_FLUSH_INTERVAL_MICROS=500 \
+#       cargo build -p proxima-telemetry
+
+[drain]
+# Records a background drain pass moves+exports per ring per pass. Larger
+# amortizes the per-pass setup over more records (higher steady-state drain
+# throughput); the drain path sizes its buffer to actual occupancy, so this is a
+# cap, not a fixed cost. Lives off the emit hot path — tune for throughput.
+batch = 512
+
+# Records a producer drains+exports on a FULL ring (elastic producer-assist)
+# before retrying its push. This is the worst-case emit tail: the assist runs on
+# the producer/request thread, so a single overflow stalls that thread for
+# roughly `assist_batch × per-record sink latency`. Keep it SMALL and well below
+# `batch` to bound that spike (a producer frees just enough headroom to push and
+# returns to work; the background drainer does the bulk draining). Raise it only
+# when there is no background drainer and emit amortization matters more than the
+# per-emit tail.
+assist_batch = 64
+
+[pump]
+# How often the managed pump flushes when no ring fills — the TIME trigger of the
+# size-or-time pump (a full ring is the SIZE trigger). The pump sleeps between
+# flushes, so this also sets the idle wake cadence: smaller bounds export latency,
+# larger spends less CPU at idle. Microseconds. Must be > 0 (0 would hot-spin).
+flush_interval_micros = 1000
+
+[sink]
+# Preallocation (bytes) for the terminal batch buffer. The formatter accumulates
+# a whole drain batch into one buffer and writes it in a single syscall; sizing
+# this to a batch's typical total avoids reallocations mid-accumulation. At
+# no_std+no_alloc this const IS the buffer's reserved size; at std it is the
+# build-time default. Per-system override:
+# `PROXIMA_TELEMETRY_SINK_CAPACITY_BYTES=16384 cargo build`.
+capacity_bytes = 8192
+
+[instrument]
+# Unified-instrument compile-time defaults (the C0-C6 seam). At no_std+no_alloc
+# these consts ARE the config — there is no runtime InstrumentConfig below std, so
+# build.rs + this section is the only knob, exactly like `[emit] max_level`. At
+# std they seed the runtime `InstrumentConfig` (conflaguration + fluent builder),
+# which overrides via file / env / code. Per-system build override:
+# `PROXIMA_TELEMETRY_INSTRUMENT_METRICS=1 cargo build`.
+#
+# Whether a recorder consumes the span-duration metric by default (the consumer
+# gate). 0 = off: a span close records no metric until something subscribes (an
+# exporter via `enable_span_metrics`, or a C6 observer). 1 = a metric-consuming
+# deployment whose recorder auto-subscribes at build.
+metrics = 0
+
+# Default tail-sampling budget (microseconds) applied to spans with no explicit
+# `#[span(budget = ...)]`. A span overrunning this force-keeps its trace past head
+# sampling. 0 = no default budget (pure head sampling unless a span sets its own).
+default_budget_micros = 0
+
+[emit]
+# Compile-time emit severity floor. A record whose level is below this is
+# statically disabled — the `emit_statically_enabled` const folds to `false` and
+# the optimizer deletes the emit entirely, at ZERO runtime cost. This is the
+# compile-time half of the emit filter (proxima's analogue of tracing's
+# `max_level_*` features) and the ONLY filtering available at the no_std+no_alloc
+# tier, where there is no runtime CompiledEmit. Per-system override:
+# `PROXIMA_TELEMETRY_EMIT_MAX_LEVEL=warn cargo build`.
+# One of: trace | debug | info | warn | error | fatal | off. Default trace (keep all).
+max_level = "trace"
+
+[elevation]
+# Error-elevation caps (feature `elevation`). These bound the memory the
+# tail-sampled per-trace replay buffer can hold, so a flood of sampled traces
+# can never OOM. Both are the compile-time defaults; the runtime `Retention`
+# config overrides them per-process. Per-system build override, e.g.
+# `PROXIMA_TELEMETRY_ELEVATION_MAX_TRACES=2048 cargo build`.
+
+# Max concurrently-buffered traces (the hard count-cap backstop). Once reached,
+# the least-recently-touched trace's buffer is evicted so a sampled-trace flood
+# is bounded by count regardless of the root-close / TTL reclaim paths.
+max_traces = 1024
+
+# Per-trace replay ring capacity (records). A trace emitting more than this keeps
+# only the most-recent N (DropOldest) — bounds a single pathological trace.
+per_trace_ring = 256

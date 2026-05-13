@@ -1,0 +1,45 @@
+[package]
+name = "proxima-test"
+description = "Runtime harness for #[proxima::test]: tokio and prime drivers, panic capture, cassette spec, TestCtx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+proxima-core = { workspace = true }
+time = { workspace = true }
+# backs `AsyncOnce` (the `#[proxima::fixture(once)]` cell) — const-constructible,
+# no runtime coupling, unlike `tokio::sync::Mutex::const_new`.
+async-lock = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "fs", "macros", "test-util"], optional = true }
+libc = { workspace = true }
+
+prime = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+
+[features]
+default = []
+# the explicit `#[proxima::test(runtime = "tokio")]` driver + `run_tokio*`
+# entry points. The adaptive default driver (no explicit `runtime = ...`)
+# does not need this — it prefers `test-prime` when linked.
+tokio-driver = ["dep:tokio"]
+# tokio-free: the adaptive default driver on a bare prime runtime (no
+# sister-tokio Handle on the worker). Sufficient for test bodies that only
+# call proxima/prime primitives.
+test-prime = ["dep:prime", "dep:proxima-runtime",
+              "prime/runtime-prime-executor", "prime/runtime-prime-inbox-alloc",
+              "prime/runtime-prime-reactor", "prime/runtime-prime-bgpool",
+              "proxima-runtime/std"]
+# adds the sister-tokio Handle to the shared prime test runtime, for test
+# bodies that also call tokio::{time,sync,spawn}.
+test-prime-tokio-compat = ["test-prime", "tokio-driver", "prime/prime-tokio-compat"]
+
+[lints]
+workspace = true

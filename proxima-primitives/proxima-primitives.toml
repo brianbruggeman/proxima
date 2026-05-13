@@ -1,0 +1,10 @@
+# Build-time sizing for proxima-primitives::pipe. Baked into compile-time
+# consts by build.rs (mirrors proxima-quic-proto.toml). Override per-system
+# with PROXIMA_PIPE_<SECTION>_<KEY> (env-var contract kept verbatim from the
+# former proxima-pipe crate), e.g. PROXIMA_PIPE_RETRY_STATUS_CAP=16.
+
+[retry]
+# Const capacity of the no-alloc RetryRules.retry_on_status set
+# (heapless::Vec, sorted). Bounds how many distinct retryable HTTP statuses a
+# no-alloc tier can carry; the alloc tier uses an unbounded BTreeSet instead.
+status_cap = 8

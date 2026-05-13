@@ -1,0 +1,53 @@
+# build-time sizing for proxima-protocols' http3_codec module.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_h3_proto_sized.rs.
+# every const-generic cap in the server/client connection state machines
+# traces back to here.
+#
+# Per-system overrides via env vars at build time:
+#
+#   PROXIMA_PROTOCOLS_HTTP3_CODEC_SERVER_MAX_CONCURRENT_REQUESTS=64 \
+#       cargo build -p proxima-protocols
+#
+# The proxima-http facade (tier-2) syncs from prime-runtime.toml at its
+# OWN build time and either re-exports these constants or substitutes
+# them via env-var override before building proxima-protocols' http3_codec.
+
+[server]
+# Per-connection cap on concurrently-active HTTP/3 requests
+# (heapless::FnvIndexMap<StreamId, RequestEntry, MAX_CONCURRENT_REQUESTS>).
+# Must be a power of two — heapless::FnvIndexMap's hash-probe wants it.
+# 1024 matches the prime-runtime.toml [h3] default; tune down for
+# embedded.
+max_concurrent_requests = 1024
+
+[client]
+# Per-connection cap on concurrently-active in-flight requests issued
+# by the client (heapless::FnvIndexMap<StreamId, StreamEntry, MAX_CONCURRENT_REQUESTS>).
+# Must be a power of two. 1024 matches the server-side default; tune
+# down for embedded.
+max_concurrent_requests = 1024
+
+[qpack]
+# Fixed-capacity stack scratch buffer used internally by
+# qpack::decoder::decode_bounded's alloc-tier convenience wrapper
+# around decode_into, for Huffman-encoded literal output (RFC 7541
+# §5.2). Sized to comfortably exceed typical decoded HTTP header
+# values (cookies, URLs, user-agent strings). A field whose worst-case
+# Huffman expansion (<=8/5 per RFC 7541's minimum 5-bit code length)
+# exceeds this trips DecodeError::ScratchTooSmall; callers expecting
+# larger single fields should call decode_into directly with their own
+# larger caller-owned scratch instead of going through decode_bounded.
+decode_bounded_scratch_len = 8192
+# `qpack::part_source::HeaderBlockPartSource` (feature `part-source`) copies
+# every decoded field's name+value bytes once into this fixed inline arena —
+# decode_into's own Huffman `scratch` is reused (overwritten) per field, so
+# anything the source wants to yield later via `next()` must be copied out
+# at decode time (0 heap allocations, but not 0-copy — see the module docs
+# for that distinction). Sized to comfortably exceed a typical HTTP/3
+# request header set (method + path + a handful of headers).
+part_source_arena_len = 4096
+# Max number of non-pseudo header fields a single decoded block can carry
+# (`:method`/`:path` route to their own slots, not this count) before
+# `HeaderBlockPartSource::new` returns a capacity error.
+# `heapless::Vec<_, MAX>` backing store.
+part_source_max_headers = 64

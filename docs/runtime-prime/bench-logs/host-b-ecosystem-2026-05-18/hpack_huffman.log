@@ -1,0 +1,259 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.62s
+     Running benches/hpack_huffman.rs (proxima/target/release/deps/hpack_huffman-d628a9779cd13826)
+Benchmarking hpack_huffman_encode/proxima_native/www_example_com
+Benchmarking hpack_huffman_encode/proxima_native/www_example_com: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/proxima_native/www_example_com: Collecting 20 samples in estimated 3.0000 s (73M iterations)
+Benchmarking hpack_huffman_encode/proxima_native/www_example_com: Analyzing
+hpack_huffman_encode/proxima_native/www_example_com
+                        time:   [40.941 ns 40.955 ns 40.971 ns]
+                        thrpt:  [349.15 MiB/s 349.29 MiB/s 349.41 MiB/s]
+Benchmarking hpack_huffman_encode/h2_crate/www_example_com
+Benchmarking hpack_huffman_encode/h2_crate/www_example_com: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/h2_crate/www_example_com: Collecting 20 samples in estimated 3.0000 s (105M iterations)
+Benchmarking hpack_huffman_encode/h2_crate/www_example_com: Analyzing
+hpack_huffman_encode/h2_crate/www_example_com
+                        time:   [28.376 ns 28.386 ns 28.400 ns]
+                        thrpt:  [503.71 MiB/s 503.95 MiB/s 504.13 MiB/s]
+Benchmarking hpack_huffman_encode/proxima_native/no_cache
+Benchmarking hpack_huffman_encode/proxima_native/no_cache: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/proxima_native/no_cache: Collecting 20 samples in estimated 3.0000 s (143M iterations)
+Benchmarking hpack_huffman_encode/proxima_native/no_cache: Analyzing
+hpack_huffman_encode/proxima_native/no_cache
+                        time:   [21.005 ns 21.146 ns 21.253 ns]
+                        thrpt:  [358.97 MiB/s 360.80 MiB/s 363.21 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) high severe
+Benchmarking hpack_huffman_encode/h2_crate/no_cache
+Benchmarking hpack_huffman_encode/h2_crate/no_cache: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/h2_crate/no_cache: Collecting 20 samples in estimated 3.0000 s (198M iterations)
+Benchmarking hpack_huffman_encode/h2_crate/no_cache: Analyzing
+hpack_huffman_encode/h2_crate/no_cache
+                        time:   [15.117 ns 15.124 ns 15.129 ns]
+                        thrpt:  [504.27 MiB/s 504.45 MiB/s 504.69 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking hpack_huffman_encode/proxima_native/custom_value
+Benchmarking hpack_huffman_encode/proxima_native/custom_value: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/proxima_native/custom_value: Collecting 20 samples in estimated 3.0000 s (95M iterations)
+Benchmarking hpack_huffman_encode/proxima_native/custom_value: Analyzing
+hpack_huffman_encode/proxima_native/custom_value
+                        time:   [31.581 ns 31.638 ns 31.705 ns]
+                        thrpt:  [360.96 MiB/s 361.72 MiB/s 362.38 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking hpack_huffman_encode/h2_crate/custom_value
+Benchmarking hpack_huffman_encode/h2_crate/custom_value: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/h2_crate/custom_value: Collecting 20 samples in estimated 3.0000 s (134M iterations)
+Benchmarking hpack_huffman_encode/h2_crate/custom_value: Analyzing
+hpack_huffman_encode/h2_crate/custom_value
+                        time:   [22.248 ns 22.275 ns 22.307 ns]
+                        thrpt:  [513.04 MiB/s 513.76 MiB/s 514.39 MiB/s]
+Benchmarking hpack_huffman_encode/proxima_native/user_agent_chrome
+Benchmarking hpack_huffman_encode/proxima_native/user_agent_chrome: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/proxima_native/user_agent_chrome: Collecting 20 samples in estimated 3.0001 s (10.0M iterations)
+Benchmarking hpack_huffman_encode/proxima_native/user_agent_chrome: Analyzing
+hpack_huffman_encode/proxima_native/user_agent_chrome
+                        time:   [301.95 ns 302.35 ns 302.67 ns]
+                        thrpt:  [368.66 MiB/s 369.04 MiB/s 369.53 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking hpack_huffman_encode/h2_crate/user_agent_chrome
+Benchmarking hpack_huffman_encode/h2_crate/user_agent_chrome: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/h2_crate/user_agent_chrome: Collecting 20 samples in estimated 3.0000 s (15M iterations)
+Benchmarking hpack_huffman_encode/h2_crate/user_agent_chrome: Analyzing
+hpack_huffman_encode/h2_crate/user_agent_chrome
+                        time:   [205.31 ns 205.58 ns 205.74 ns]
+                        thrpt:  [542.33 MiB/s 542.75 MiB/s 543.48 MiB/s]
+Found 5 outliers among 20 measurements (25.00%)
+  3 (15.00%) low severe
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking hpack_huffman_encode/proxima_native/cookie_512b
+Benchmarking hpack_huffman_encode/proxima_native/cookie_512b: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/proxima_native/cookie_512b: Collecting 20 samples in estimated 3.0001 s (2.5M iterations)
+Benchmarking hpack_huffman_encode/proxima_native/cookie_512b: Analyzing
+hpack_huffman_encode/proxima_native/cookie_512b
+                        time:   [1.2150 µs 1.2153 µs 1.2155 µs]
+                        thrpt:  [401.72 MiB/s 401.79 MiB/s 401.89 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high severe
+Benchmarking hpack_huffman_encode/h2_crate/cookie_512b
+Benchmarking hpack_huffman_encode/h2_crate/cookie_512b: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/h2_crate/cookie_512b: Collecting 20 samples in estimated 3.0000 s (3.7M iterations)
+Benchmarking hpack_huffman_encode/h2_crate/cookie_512b: Analyzing
+hpack_huffman_encode/h2_crate/cookie_512b
+                        time:   [800.48 ns 801.70 ns 803.11 ns]
+                        thrpt:  [607.99 MiB/s 609.06 MiB/s 609.99 MiB/s]
+Benchmarking hpack_huffman_encode/proxima_native/body_chunk_4kib
+Benchmarking hpack_huffman_encode/proxima_native/body_chunk_4kib: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/proxima_native/body_chunk_4kib: Collecting 20 samples in estimated 3.0016 s (283k iterations)
+Benchmarking hpack_huffman_encode/proxima_native/body_chunk_4kib: Analyzing
+hpack_huffman_encode/proxima_native/body_chunk_4kib
+                        time:   [10.590 µs 10.602 µs 10.615 µs]
+                        thrpt:  [367.98 MiB/s 368.44 MiB/s 368.88 MiB/s]
+Benchmarking hpack_huffman_encode/h2_crate/body_chunk_4kib
+Benchmarking hpack_huffman_encode/h2_crate/body_chunk_4kib: Warming up for 2.0000 s
+Benchmarking hpack_huffman_encode/h2_crate/body_chunk_4kib: Collecting 20 samples in estimated 3.0002 s (420k iterations)
+Benchmarking hpack_huffman_encode/h2_crate/body_chunk_4kib: Analyzing
+hpack_huffman_encode/h2_crate/body_chunk_4kib
+                        time:   [7.1307 µs 7.1412 µs 7.1492 µs]
+                        thrpt:  [546.39 MiB/s 547.00 MiB/s 547.81 MiB/s]
+
+Benchmarking hpack_huffman_decode/proxima_native/www_example_com
+Benchmarking hpack_huffman_decode/proxima_native/www_example_com: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/proxima_native/www_example_com: Collecting 20 samples in estimated 3.0000 s (84M iterations)
+Benchmarking hpack_huffman_decode/proxima_native/www_example_com: Analyzing
+hpack_huffman_decode/proxima_native/www_example_com
+                        time:   [35.594 ns 35.644 ns 35.680 ns]
+                        thrpt:  [400.92 MiB/s 401.33 MiB/s 401.90 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low severe
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+Benchmarking hpack_huffman_decode/hpack_crate/www_example_com
+Benchmarking hpack_huffman_decode/hpack_crate/www_example_com: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/hpack_crate/www_example_com: Collecting 20 samples in estimated 3.0004 s (1.4M iterations)
+Benchmarking hpack_huffman_decode/hpack_crate/www_example_com: Analyzing
+hpack_huffman_decode/hpack_crate/www_example_com
+                        time:   [2.1158 µs 2.1213 µs 2.1266 µs]
+                        thrpt:  [6.7268 MiB/s 6.7436 MiB/s 6.7611 MiB/s]
+Benchmarking hpack_huffman_decode/h2_crate/www_example_com
+Benchmarking hpack_huffman_decode/h2_crate/www_example_com: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/h2_crate/www_example_com: Collecting 20 samples in estimated 3.0000 s (54M iterations)
+Benchmarking hpack_huffman_decode/h2_crate/www_example_com: Analyzing
+hpack_huffman_decode/h2_crate/www_example_com
+                        time:   [54.302 ns 54.620 ns 54.868 ns]
+                        thrpt:  [260.72 MiB/s 261.90 MiB/s 263.44 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_huffman_decode/proxima_native/no_cache
+Benchmarking hpack_huffman_decode/proxima_native/no_cache: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/proxima_native/no_cache: Collecting 20 samples in estimated 3.0000 s (165M iterations)
+Benchmarking hpack_huffman_decode/proxima_native/no_cache: Analyzing
+hpack_huffman_decode/proxima_native/no_cache
+                        time:   [18.183 ns 18.224 ns 18.262 ns]
+                        thrpt:  [417.77 MiB/s 418.65 MiB/s 419.60 MiB/s]
+Benchmarking hpack_huffman_decode/hpack_crate/no_cache
+Benchmarking hpack_huffman_decode/hpack_crate/no_cache: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/hpack_crate/no_cache: Collecting 20 samples in estimated 3.0001 s (3.1M iterations)
+Benchmarking hpack_huffman_decode/hpack_crate/no_cache: Analyzing
+hpack_huffman_decode/hpack_crate/no_cache
+                        time:   [935.43 ns 939.08 ns 943.73 ns]
+                        thrpt:  [8.0843 MiB/s 8.1243 MiB/s 8.1560 MiB/s]
+Benchmarking hpack_huffman_decode/h2_crate/no_cache
+Benchmarking hpack_huffman_decode/h2_crate/no_cache: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/h2_crate/no_cache: Collecting 20 samples in estimated 3.0000 s (94M iterations)
+Benchmarking hpack_huffman_decode/h2_crate/no_cache: Analyzing
+hpack_huffman_decode/h2_crate/no_cache
+                        time:   [31.452 ns 31.505 ns 31.555 ns]
+                        thrpt:  [241.78 MiB/s 242.17 MiB/s 242.57 MiB/s]
+Benchmarking hpack_huffman_decode/proxima_native/custom_value
+Benchmarking hpack_huffman_decode/proxima_native/custom_value: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/proxima_native/custom_value: Collecting 20 samples in estimated 3.0000 s (122M iterations)
+Benchmarking hpack_huffman_decode/proxima_native/custom_value: Analyzing
+hpack_huffman_decode/proxima_native/custom_value
+                        time:   [24.464 ns 24.945 ns 25.308 ns]
+                        thrpt:  [452.19 MiB/s 458.76 MiB/s 467.80 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking hpack_huffman_decode/hpack_crate/custom_value
+Benchmarking hpack_huffman_decode/hpack_crate/custom_value: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/hpack_crate/custom_value: Collecting 20 samples in estimated 3.0002 s (2.0M iterations)
+Benchmarking hpack_huffman_decode/hpack_crate/custom_value: Analyzing
+hpack_huffman_decode/hpack_crate/custom_value
+                        time:   [1.4868 µs 1.4926 µs 1.4997 µs]
+                        thrpt:  [7.6310 MiB/s 7.6674 MiB/s 7.6970 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_huffman_decode/h2_crate/custom_value
+Benchmarking hpack_huffman_decode/h2_crate/custom_value: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/h2_crate/custom_value: Collecting 20 samples in estimated 3.0000 s (71M iterations)
+Benchmarking hpack_huffman_decode/h2_crate/custom_value: Analyzing
+hpack_huffman_decode/h2_crate/custom_value
+                        time:   [42.400 ns 42.454 ns 42.512 ns]
+                        thrpt:  [269.20 MiB/s 269.57 MiB/s 269.91 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_huffman_decode/proxima_native/user_agent_chrome
+Benchmarking hpack_huffman_decode/proxima_native/user_agent_chrome: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/proxima_native/user_agent_chrome: Collecting 20 samples in estimated 3.0000 s (11M iterations)
+Benchmarking hpack_huffman_decode/proxima_native/user_agent_chrome: Analyzing
+hpack_huffman_decode/proxima_native/user_agent_chrome
+                        time:   [266.16 ns 266.77 ns 267.25 ns]
+                        thrpt:  [417.51 MiB/s 418.26 MiB/s 419.23 MiB/s]
+Benchmarking hpack_huffman_decode/hpack_crate/user_agent_chrome
+Benchmarking hpack_huffman_decode/hpack_crate/user_agent_chrome: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/hpack_crate/user_agent_chrome: Collecting 20 samples in estimated 3.0006 s (179k iterations)
+Benchmarking hpack_huffman_decode/hpack_crate/user_agent_chrome: Analyzing
+hpack_huffman_decode/hpack_crate/user_agent_chrome
+                        time:   [16.465 µs 16.567 µs 16.681 µs]
+                        thrpt:  [6.6891 MiB/s 6.7350 MiB/s 6.7768 MiB/s]
+Benchmarking hpack_huffman_decode/h2_crate/user_agent_chrome
+Benchmarking hpack_huffman_decode/h2_crate/user_agent_chrome: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/h2_crate/user_agent_chrome: Collecting 20 samples in estimated 3.0001 s (7.7M iterations)
+Benchmarking hpack_huffman_decode/h2_crate/user_agent_chrome: Analyzing
+hpack_huffman_decode/h2_crate/user_agent_chrome
+                        time:   [394.64 ns 395.77 ns 396.74 ns]
+                        thrpt:  [281.24 MiB/s 281.93 MiB/s 282.74 MiB/s]
+Benchmarking hpack_huffman_decode/proxima_native/cookie_512b
+Benchmarking hpack_huffman_decode/proxima_native/cookie_512b: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/proxima_native/cookie_512b: Collecting 20 samples in estimated 3.0002 s (3.1M iterations)
+Benchmarking hpack_huffman_decode/proxima_native/cookie_512b: Analyzing
+hpack_huffman_decode/proxima_native/cookie_512b
+                        time:   [959.12 ns 959.98 ns 960.90 ns]
+                        thrpt:  [508.15 MiB/s 508.64 MiB/s 509.10 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking hpack_huffman_decode/hpack_crate/cookie_512b
+Benchmarking hpack_huffman_decode/hpack_crate/cookie_512b: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/hpack_crate/cookie_512b: Collecting 20 samples in estimated 3.0011 s (62k iterations)
+Benchmarking hpack_huffman_decode/hpack_crate/cookie_512b: Analyzing
+hpack_huffman_decode/hpack_crate/cookie_512b
+                        time:   [47.840 µs 47.908 µs 48.024 µs]
+                        thrpt:  [10.167 MiB/s 10.192 MiB/s 10.206 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) high mild
+  2 (10.00%) high severe
+Benchmarking hpack_huffman_decode/h2_crate/cookie_512b
+Benchmarking hpack_huffman_decode/h2_crate/cookie_512b: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/h2_crate/cookie_512b: Collecting 20 samples in estimated 3.0003 s (2.1M iterations)
+Benchmarking hpack_huffman_decode/h2_crate/cookie_512b: Analyzing
+hpack_huffman_decode/h2_crate/cookie_512b
+                        time:   [1.4274 µs 1.4291 µs 1.4303 µs]
+                        thrpt:  [341.37 MiB/s 341.68 MiB/s 342.08 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking hpack_huffman_decode/proxima_native/body_chunk_4kib
+Benchmarking hpack_huffman_decode/proxima_native/body_chunk_4kib: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/proxima_native/body_chunk_4kib: Collecting 20 samples in estimated 3.0010 s (368k iterations)
+Benchmarking hpack_huffman_decode/proxima_native/body_chunk_4kib: Analyzing
+hpack_huffman_decode/proxima_native/body_chunk_4kib
+                        time:   [8.1139 µs 8.1165 µs 8.1191 µs]
+                        thrpt:  [481.12 MiB/s 481.27 MiB/s 481.43 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking hpack_huffman_decode/hpack_crate/body_chunk_4kib
+Benchmarking hpack_huffman_decode/hpack_crate/body_chunk_4kib: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/hpack_crate/body_chunk_4kib: Collecting 20 samples in estimated 3.0613 s (5880 iterations)
+Benchmarking hpack_huffman_decode/hpack_crate/body_chunk_4kib: Analyzing
+hpack_huffman_decode/hpack_crate/body_chunk_4kib
+                        time:   [520.36 µs 521.40 µs 522.70 µs]
+                        thrpt:  [7.4732 MiB/s 7.4918 MiB/s 7.5068 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_huffman_decode/h2_crate/body_chunk_4kib
+Benchmarking hpack_huffman_decode/h2_crate/body_chunk_4kib: Warming up for 2.0000 s
+Benchmarking hpack_huffman_decode/h2_crate/body_chunk_4kib: Collecting 20 samples in estimated 3.0018 s (222k iterations)
+Benchmarking hpack_huffman_decode/h2_crate/body_chunk_4kib: Analyzing
+hpack_huffman_decode/h2_crate/body_chunk_4kib
+                        time:   [13.644 µs 14.769 µs 15.590 µs]
+                        thrpt:  [250.56 MiB/s 264.50 MiB/s 286.29 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  3 (15.00%) high severe
+

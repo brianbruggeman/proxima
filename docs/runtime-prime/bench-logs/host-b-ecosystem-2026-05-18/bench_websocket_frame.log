@@ -1,0 +1,59 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 35s
+     Running benches/bench_websocket_frame.rs (proxima/target/release/deps/bench_websocket_frame-ca2e2a4c732541da)
+Benchmarking ws_small_text/proxima
+Benchmarking ws_small_text/proxima: Warming up for 2.0000 s
+Benchmarking ws_small_text/proxima: Collecting 20 samples in estimated 2.0000 s (758M iterations)
+Benchmarking ws_small_text/proxima: Analyzing
+ws_small_text/proxima   time:   [2.6125 ns 2.6164 ns 2.6215 ns]
+                        thrpt:  [2.4868 GiB/s 2.4917 GiB/s 2.4954 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking ws_small_text/tungstenite
+Benchmarking ws_small_text/tungstenite: Warming up for 2.0000 s
+Benchmarking ws_small_text/tungstenite: Collecting 20 samples in estimated 2.0000 s (107M iterations)
+Benchmarking ws_small_text/tungstenite: Analyzing
+ws_small_text/tungstenite
+                        time:   [18.619 ns 18.638 ns 18.663 ns]
+                        thrpt:  [357.70 MiB/s 358.18 MiB/s 358.55 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking ws_medium_masked/proxima
+Benchmarking ws_medium_masked/proxima: Warming up for 2.0000 s
+Benchmarking ws_medium_masked/proxima: Collecting 20 samples in estimated 2.0000 s (492M iterations)
+Benchmarking ws_medium_masked/proxima: Analyzing
+ws_medium_masked/proxima
+                        time:   [4.0354 ns 4.0414 ns 4.0487 ns]
+                        thrpt:  [47.847 GiB/s 47.932 GiB/s 48.004 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking ws_medium_masked/tungstenite
+Benchmarking ws_medium_masked/tungstenite: Warming up for 2.0000 s
+Benchmarking ws_medium_masked/tungstenite: Collecting 20 samples in estimated 2.0000 s (73M iterations)
+Benchmarking ws_medium_masked/tungstenite: Analyzing
+ws_medium_masked/tungstenite
+                        time:   [27.053 ns 27.098 ns 27.155 ns]
+                        thrpt:  [7.1336 GiB/s 7.1487 GiB/s 7.1605 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking ws_large/proxima
+Benchmarking ws_large/proxima: Warming up for 2.0000 s
+Benchmarking ws_large/proxima: Collecting 20 samples in estimated 2.0000 s (538M iterations)
+Benchmarking ws_large/proxima: Analyzing
+ws_large/proxima        time:   [3.7024 ns 3.7076 ns 3.7136 ns]
+                        thrpt:  [ 17558 GiB/s  17586 GiB/s  17611 GiB/s]
+Benchmarking ws_large/tungstenite
+Benchmarking ws_large/tungstenite: Warming up for 2.0000 s
+Benchmarking ws_large/tungstenite: Collecting 20 samples in estimated 2.0000 s (92M iterations)
+Benchmarking ws_large/tungstenite: Analyzing
+ws_large/tungstenite    time:   [21.325 ns 21.420 ns 21.498 ns]
+                        thrpt:  [3032.9 GiB/s 3044.0 GiB/s 3057.5 GiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  3 (15.00%) high severe
+

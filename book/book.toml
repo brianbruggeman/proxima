@@ -1,0 +1,20 @@
+[book]
+title = "proxima by example"
+description = "everything is a Pipe; big things are small things composed — the example curriculum, rendered from the compile-tested source"
+src = "src"
+language = "en"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/brianbruggeman/proxima"
+edit-url-template = "https://github.com/brianbruggeman/proxima/edit/main/book/{path}"
+git-repository-icon = "fa-github"
+
+[output.html.playground]
+runnable = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true

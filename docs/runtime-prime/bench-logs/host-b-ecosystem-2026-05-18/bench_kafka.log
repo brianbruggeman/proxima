@@ -1,0 +1,56 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 34s
+     Running benches/bench_kafka.rs (proxima/target/release/deps/bench_kafka-dae7ebcee5b24805)
+Benchmarking kafka_peek_size/proxima
+Benchmarking kafka_peek_size/proxima: Warming up for 2.0000 s
+Benchmarking kafka_peek_size/proxima: Collecting 20 samples in estimated 2.0000 s (2.1B iterations)
+Benchmarking kafka_peek_size/proxima: Analyzing
+kafka_peek_size/proxima time:   [939.21 ps 940.95 ps 943.07 ps]
+                        thrpt:  [3.9502 GiB/s 3.9591 GiB/s 3.9664 GiB/s]
+Benchmarking kafka_peek_size/parity
+Benchmarking kafka_peek_size/parity: Warming up for 2.0000 s
+Benchmarking kafka_peek_size/parity: Collecting 20 samples in estimated 2.0000 s (2.1B iterations)
+Benchmarking kafka_peek_size/parity: Analyzing
+kafka_peek_size/parity  time:   [930.29 ps 930.63 ps 931.08 ps]
+                        thrpt:  [4.0010 GiB/s 4.0030 GiB/s 4.0044 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+
+Benchmarking kafka_frame_parse/proxima
+Benchmarking kafka_frame_parse/proxima: Warming up for 2.0000 s
+Benchmarking kafka_frame_parse/proxima: Collecting 20 samples in estimated 2.0000 s (1.7B iterations)
+Benchmarking kafka_frame_parse/proxima: Analyzing
+kafka_frame_parse/proxima
+                        time:   [1.1531 ns 1.1540 ns 1.1552 ns]
+                        thrpt:  [69.330 GiB/s 69.408 GiB/s 69.458 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking kafka_frame_parse/parity
+Benchmarking kafka_frame_parse/parity: Warming up for 2.0000 s
+Benchmarking kafka_frame_parse/parity: Collecting 20 samples in estimated 2.0000 s (1.7B iterations)
+Benchmarking kafka_frame_parse/parity: Analyzing
+kafka_frame_parse/parity
+                        time:   [1.1962 ns 1.1969 ns 1.1982 ns]
+                        thrpt:  [66.844 GiB/s 66.916 GiB/s 66.957 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking kafka_header_parse/proxima
+Benchmarking kafka_header_parse/proxima: Warming up for 2.0000 s
+Benchmarking kafka_header_parse/proxima: Collecting 20 samples in estimated 2.0000 s (977M iterations)
+Benchmarking kafka_header_parse/proxima: Analyzing
+kafka_header_parse/proxima
+                        time:   [2.0447 ns 2.0457 ns 2.0469 ns]
+                        thrpt:  [37.310 GiB/s 37.331 GiB/s 37.350 GiB/s]
+Benchmarking kafka_header_parse/parity
+Benchmarking kafka_header_parse/parity: Warming up for 2.0000 s
+Benchmarking kafka_header_parse/parity: Collecting 20 samples in estimated 2.0000 s (875M iterations)
+Benchmarking kafka_header_parse/parity: Analyzing
+kafka_header_parse/parity
+                        time:   [2.2833 ns 2.2864 ns 2.2906 ns]
+                        thrpt:  [33.340 GiB/s 33.402 GiB/s 33.446 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+

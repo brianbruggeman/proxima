@@ -1,0 +1,152 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 36s
+     Running benches/h2_tail_multi_conn.rs (proxima/target/release/deps/h2_tail_multi_conn-e200a2db854b9247)
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=1
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=1: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=1: Collecting 20 samples in estimated 5.0034 s (165k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=1: Analyzing
+h2_tail_multi_conn/proxima_native_default_tokio/conn=1
+                        time:   [33.129 µs 34.308 µs 35.648 µs]
+                        thrpt:  [28.052 Kelem/s 29.148 Kelem/s 30.185 Kelem/s]
+Found 7 outliers among 20 measurements (35.00%)
+  2 (10.00%) low severe
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  2 (10.00%) high severe
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=1
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=1: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=1: Collecting 20 samples in estimated 5.0040 s (161k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=1: Analyzing
+h2_tail_multi_conn/proxima_native_per_core/conn=1
+                        time:   [29.891 µs 30.044 µs 30.193 µs]
+                        thrpt:  [33.120 Kelem/s 33.284 Kelem/s 33.455 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=1
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=1: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=1: Collecting 20 samples in estimated 5.0027 s (121k iterations)
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=1: Analyzing
+h2_tail_multi_conn/hyper_default_tokio/conn=1
+                        time:   [41.330 µs 42.918 µs 43.938 µs]
+                        thrpt:  [22.759 Kelem/s 23.300 Kelem/s 24.196 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=1
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=1: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=1: Collecting 20 samples in estimated 5.0003 s (114k iterations)
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=1: Analyzing
+h2_tail_multi_conn/pingora_default_tokio/conn=1
+                        time:   [44.541 µs 47.354 µs 49.865 µs]
+                        thrpt:  [20.054 Kelem/s 21.117 Kelem/s 22.451 Kelem/s]
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low severe
+  2 (10.00%) low mild
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=4
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=4: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=4: Collecting 20 samples in estimated 5.0063 s (50k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=4: Analyzing
+h2_tail_multi_conn/proxima_native_default_tokio/conn=4
+                        time:   [93.521 µs 121.11 µs 148.42 µs]
+                        thrpt:  [6.7378 Kelem/s 8.2568 Kelem/s 10.693 Kelem/s]
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=4
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=4: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=4: Collecting 20 samples in estimated 5.0126 s (79k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=4: Analyzing
+h2_tail_multi_conn/proxima_native_per_core/conn=4
+                        time:   [63.099 µs 66.906 µs 70.914 µs]
+                        thrpt:  [14.102 Kelem/s 14.946 Kelem/s 15.848 Kelem/s]
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=4
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=4: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=4: Collecting 20 samples in estimated 5.0258 s (37k iterations)
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=4: Analyzing
+h2_tail_multi_conn/hyper_default_tokio/conn=4
+                        time:   [92.696 µs 118.30 µs 146.53 µs]
+                        thrpt:  [6.8246 Kelem/s 8.4528 Kelem/s 10.788 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=4
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=4: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=4: Collecting 20 samples in estimated 5.0007 s (35k iterations)
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=4: Analyzing
+h2_tail_multi_conn/pingora_default_tokio/conn=4
+                        time:   [97.570 µs 126.69 µs 161.29 µs]
+                        thrpt:  [6.2001 Kelem/s 7.8932 Kelem/s 10.249 Kelem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=16
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=16: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=16: Collecting 20 samples in estimated 5.0097 s (29k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=16: Analyzing
+h2_tail_multi_conn/proxima_native_default_tokio/conn=16
+                        time:   [135.77 µs 153.56 µs 175.60 µs]
+                        thrpt:  [5.6946 Kelem/s 6.5122 Kelem/s 7.3656 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=16
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=16: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=16: Collecting 20 samples in estimated 5.0090 s (33k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=16: Analyzing
+h2_tail_multi_conn/proxima_native_per_core/conn=16
+                        time:   [138.30 µs 155.10 µs 177.36 µs]
+                        thrpt:  [5.6382 Kelem/s 6.4477 Kelem/s 7.2308 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=16
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=16: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=16: Collecting 20 samples in estimated 5.0330 s (25k iterations)
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=16: Analyzing
+h2_tail_multi_conn/hyper_default_tokio/conn=16
+                        time:   [179.38 µs 195.13 µs 209.52 µs]
+                        thrpt:  [4.7727 Kelem/s 5.1249 Kelem/s 5.5747 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=16
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=16: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=16: Collecting 20 samples in estimated 5.0417 s (25k iterations)
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=16: Analyzing
+h2_tail_multi_conn/pingora_default_tokio/conn=16
+                        time:   [193.44 µs 196.31 µs 199.60 µs]
+                        thrpt:  [5.0101 Kelem/s 5.0941 Kelem/s 5.1695 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=64
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=64: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=64: Collecting 20 samples in estimated 5.0840 s (11k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_default_tokio/conn=64: Analyzing
+h2_tail_multi_conn/proxima_native_default_tokio/conn=64
+                        time:   [438.75 µs 477.22 µs 514.31 µs]
+                        thrpt:  [1.9444 Kelem/s 2.0955 Kelem/s 2.2792 Kelem/s]
+Found 6 outliers among 20 measurements (30.00%)
+  2 (10.00%) low severe
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=64
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=64: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=64: Collecting 20 samples in estimated 5.0866 s (12k iterations)
+Benchmarking h2_tail_multi_conn/proxima_native_per_core/conn=64: Analyzing
+h2_tail_multi_conn/proxima_native_per_core/conn=64
+                        time:   [381.08 µs 421.67 µs 471.46 µs]
+                        thrpt:  [2.1211 Kelem/s 2.3715 Kelem/s 2.6241 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=64
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=64: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=64: Collecting 20 samples in estimated 5.0899 s (8400 iterations)
+Benchmarking h2_tail_multi_conn/hyper_default_tokio/conn=64: Analyzing
+h2_tail_multi_conn/hyper_default_tokio/conn=64
+                        time:   [565.69 µs 619.90 µs 668.57 µs]
+                        thrpt:  [1.4957 Kelem/s 1.6132 Kelem/s 1.7677 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=64
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=64: Warming up for 2.0000 s
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=64: Collecting 20 samples in estimated 5.0004 s (7560 iterations)
+Benchmarking h2_tail_multi_conn/pingora_default_tokio/conn=64: Analyzing
+h2_tail_multi_conn/pingora_default_tokio/conn=64
+                        time:   [570.55 µs 604.42 µs 631.37 µs]
+                        thrpt:  [1.5839 Kelem/s 1.6545 Kelem/s 1.7527 Kelem/s]
+

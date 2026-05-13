@@ -1,0 +1,14 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 01s
+     Running benches/h3_streaming_responses.rs (proxima/target/release/deps/h3_streaming_responses-ec0d3ab8edea5838)
+Benchmarking h3_streaming_responses/32x2KiB_chunks_warm_connection
+Benchmarking h3_streaming_responses/32x2KiB_chunks_warm_connection: Warming up for 2.0000 s
+Benchmarking h3_streaming_responses/32x2KiB_chunks_warm_connection: Collecting 20 samples in estimated 3.0236 s (14k iterations)
+Benchmarking h3_streaming_responses/32x2KiB_chunks_warm_connection: Analyzing
+h3_streaming_responses/32x2KiB_chunks_warm_connection
+                        time:   [188.88 ns 217.32 ns 269.91 ns]
+                        thrpt:  [226.13 GiB/s 280.86 GiB/s 323.14 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

@@ -1,0 +1,116 @@
+[package]
+name = "proxima-listen"
+description = "Listener registry + serve protocol surface for proxima: ListenProtocol trait, ListenRegistry, ServeContext, ListenerHandle, plus the preface classifier and generic byte-stream ListenProtocol adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dependencies]
+# Base (no_std + no_alloc) tier: the `admission` FSM core and the `preface`
+# classifier need only `heapless` (a fixed-cap connection table). Every
+# other dependency below belongs to the std serving layer (registry,
+# ServeContext, reuseport binding, conflaguration tuning, Offload,
+# serve_pipe_upgrades) or the `stream` byte-adapter module, and stays
+# optional so a bare-metal build never compiles it.
+heapless.workspace = true
+hashbrown = { version = "0.17.1", optional = true }
+proxima-core = { workspace = true, optional = true, default-features = false }
+proxima-primitives = { workspace = true, optional = true, default-features = false }
+proxima-runtime = { workspace = true, optional = true, default-features = false }
+arc-swap = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+futures = { workspace = true, features = ["executor", "async-await"], optional = true }
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+socket2 = { workspace = true, features = ["all"], optional = true }
+tokio = { workspace = true, features = ["sync", "net", "macros", "io-util", "rt"], optional = true }
+proxima-tls = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+# `stream` module (folded from proxima-listeners-stream); the `tokio`
+# feature of proxima-net is the folded former proxima-net-tokio crate,
+# forwarded by proxima-listen's own `tokio` feature (see [features]) —
+# `stream`'s default backend is `proxima-net/prime`.
+proxima-net = { workspace = true, optional = true, default-features = false }
+async-stream = { workspace = true, optional = true }
+# `stream` only pulls FrameCodec/FrameLimits/LengthDelimitedCodec (alloc-tier);
+# no registry/JsonCodec std surface needed here.
+proxima-codec = { workspace = true, optional = true, features = ["alloc"] }
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+rstest = { workspace = true }
+temp-env = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+async-channel = { workspace = true }
+bytes = { workspace = true }
+proxima-net = { workspace = true, features = ["tokio"] }
+
+[features]
+# Matches the incumbent resolved feature set (the pre-tiering crate always
+# compiled as if `std` were on, unconditionally) — a plain `cargo build`
+# stays behavior-identical (P14). `--no-default-features` drops to the
+# no_std+no_alloc admission core + preface classifier; add back `alloc`
+# for the no_std+alloc tier.
+default = ["std"]
+# `admission` module tier gate, folded from the former `proxima-listen-core`
+# crate's own `alloc` feature (verbatim): grows the live-connection table via
+# `hashbrown::HashMap` instead of the fixed-cap `heapless::FnvIndexMap`.
+alloc = ["dep:hashbrown"]
+# std tier: the listener registry (`ListenRegistry`/`ThreadLocalListenRegistry`),
+# `ListenProtocol`/`ServeContext`/`ServeBuilder`, `dispatch_handler`, `peer_ip`,
+# reuseport socket binding (`handle` module, tokio + socket2), the
+# conflaguration-backed `ListenTuningConfig` (`config` module), `Offload`
+# (background-thread pipe combinator), and `serve_pipe_upgrades`. Strictly
+# additive over `alloc` — the admission core and preface classifier never
+# change shape when this is enabled or disabled.
+std = [
+    "alloc",
+    "dep:socket2",
+    "dep:arc-swap",
+    "dep:bon",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:bytes",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:proxima-core",
+    "dep:proxima-primitives",
+    "dep:proxima-runtime",
+    "dep:proxima-telemetry",
+    "proxima-core/std",
+    "proxima-primitives/std",
+    "proxima-runtime/std",
+]
+# Forwarded from the umbrella so the ListenerSpec config can carry TLS
+# settings even when the actual TLS handshake lives in proxima-tls.
+tls = ["std", "dep:proxima-tls"]
+# tokio-backed legacy accept loops (`bind_reuseport_listener*`, the
+# `dispatch_handler` no-runtime fallback, `ListenerHandle`'s vestigial
+# `JoinHandle` field). Every `ListenProtocol` prefers its own
+# `AcceptorFactory` + `poll_accept` path when a runtime is injected
+# (the default, `serve-prime`, path) — this feature only restores the
+# tokio-native fallback used when no runtime is present at all.
+tokio = ["std", "dep:tokio", "proxima-net?/tokio"]
+# Generic byte-stream `ListenProtocol` adapters over a `StreamListener`.
+stream = [
+    "std",
+    "dep:tracing",
+    "dep:proxima-net",
+    "dep:async-stream",
+    "dep:proxima-codec",
+]
+
+[lints]
+workspace = true

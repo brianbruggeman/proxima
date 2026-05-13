@@ -1,0 +1,179 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 41.22s
+     Running benches/h2_native_frame.rs (proxima/target/release/deps/h2_native_frame-a872130851db59dc)
+Benchmarking h2_native_frame_header/parse
+Benchmarking h2_native_frame_header/parse: Warming up for 2.0000 s
+Benchmarking h2_native_frame_header/parse: Collecting 20 samples in estimated 3.0000 s (4.3B iterations)
+Benchmarking h2_native_frame_header/parse: Analyzing
+h2_native_frame_header/parse
+                        time:   [698.11 ps 698.44 ps 698.80 ps]
+                        thrpt:  [1.4310 Gelem/s 1.4318 Gelem/s 1.4324 Gelem/s]
+Benchmarking h2_native_frame_header/encode
+Benchmarking h2_native_frame_header/encode: Warming up for 2.0000 s
+Benchmarking h2_native_frame_header/encode: Collecting 20 samples in estimated 3.0000 s (1.0B iterations)
+Benchmarking h2_native_frame_header/encode: Analyzing
+h2_native_frame_header/encode
+                        time:   [2.9318 ns 2.9350 ns 2.9386 ns]
+                        thrpt:  [340.30 Melem/s 340.71 Melem/s 341.08 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking h2_native_frame_parse_data/64b
+Benchmarking h2_native_frame_parse_data/64b: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_data/64b: Collecting 20 samples in estimated 3.0000 s (109M iterations)
+Benchmarking h2_native_frame_parse_data/64b: Analyzing
+h2_native_frame_parse_data/64b
+                        time:   [26.494 ns 26.569 ns 26.662 ns]
+                        thrpt:  [37.507 Melem/s 37.639 Melem/s 37.744 Melem/s]
+Benchmarking h2_native_frame_parse_data/4kib
+Benchmarking h2_native_frame_parse_data/4kib: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_data/4kib: Collecting 20 samples in estimated 3.0000 s (109M iterations)
+Benchmarking h2_native_frame_parse_data/4kib: Analyzing
+h2_native_frame_parse_data/4kib
+                        time:   [26.529 ns 26.584 ns 26.653 ns]
+                        thrpt:  [37.520 Melem/s 37.617 Melem/s 37.695 Melem/s]
+Benchmarking h2_native_frame_parse_data/64kib
+Benchmarking h2_native_frame_parse_data/64kib: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_data/64kib: Collecting 20 samples in estimated 3.0000 s (109M iterations)
+Benchmarking h2_native_frame_parse_data/64kib: Analyzing
+h2_native_frame_parse_data/64kib
+                        time:   [26.604 ns 26.661 ns 26.736 ns]
+                        thrpt:  [37.402 Melem/s 37.508 Melem/s 37.589 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+
+Benchmarking h2_native_frame_parse_headers/no_priority
+Benchmarking h2_native_frame_parse_headers/no_priority: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_headers/no_priority: Collecting 20 samples in estimated 3.0000 s (107M iterations)
+Benchmarking h2_native_frame_parse_headers/no_priority: Analyzing
+h2_native_frame_parse_headers/no_priority
+                        time:   [27.548 ns 27.634 ns 27.735 ns]
+                        thrpt:  [36.055 Melem/s 36.187 Melem/s 36.301 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+Benchmarking h2_native_frame_parse_headers/with_priority
+Benchmarking h2_native_frame_parse_headers/with_priority: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_headers/with_priority: Collecting 20 samples in estimated 3.0000 s (98M iterations)
+Benchmarking h2_native_frame_parse_headers/with_priority: Analyzing
+h2_native_frame_parse_headers/with_priority
+                        time:   [30.225 ns 30.300 ns 30.396 ns]
+                        thrpt:  [32.899 Melem/s 33.004 Melem/s 33.085 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking h2_native_frame_parse_settings/1_entries
+Benchmarking h2_native_frame_parse_settings/1_entries: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_settings/1_entries: Collecting 20 samples in estimated 3.0000 s (238M iterations)
+Benchmarking h2_native_frame_parse_settings/1_entries: Analyzing
+h2_native_frame_parse_settings/1_entries
+                        time:   [12.271 ns 12.297 ns 12.320 ns]
+                        thrpt:  [81.166 Melem/s 81.320 Melem/s 81.494 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking h2_native_frame_parse_settings/6_entries
+Benchmarking h2_native_frame_parse_settings/6_entries: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_settings/6_entries: Collecting 20 samples in estimated 3.0000 s (182M iterations)
+Benchmarking h2_native_frame_parse_settings/6_entries: Analyzing
+h2_native_frame_parse_settings/6_entries
+                        time:   [16.257 ns 16.267 ns 16.277 ns]
+                        thrpt:  [61.437 Melem/s 61.475 Melem/s 61.510 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking h2_native_frame_parse_settings/16_entries
+Benchmarking h2_native_frame_parse_settings/16_entries: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_settings/16_entries: Collecting 20 samples in estimated 3.0000 s (25M iterations)
+Benchmarking h2_native_frame_parse_settings/16_entries: Analyzing
+h2_native_frame_parse_settings/16_entries
+                        time:   [119.43 ns 119.52 ns 119.62 ns]
+                        thrpt:  [8.3595 Melem/s 8.3667 Melem/s 8.3732 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking h2_native_frame_parse_lifecycle/ping
+Benchmarking h2_native_frame_parse_lifecycle/ping: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_lifecycle/ping: Collecting 20 samples in estimated 3.0000 s (335M iterations)
+Benchmarking h2_native_frame_parse_lifecycle/ping: Analyzing
+h2_native_frame_parse_lifecycle/ping
+                        time:   [8.6206 ns 8.6293 ns 8.6365 ns]
+                        thrpt:  [115.79 Melem/s 115.88 Melem/s 116.00 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking h2_native_frame_parse_lifecycle/rst_stream
+Benchmarking h2_native_frame_parse_lifecycle/rst_stream: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_lifecycle/rst_stream: Collecting 20 samples in estimated 3.0000 s (341M iterations)
+Benchmarking h2_native_frame_parse_lifecycle/rst_stream: Analyzing
+h2_native_frame_parse_lifecycle/rst_stream
+                        time:   [8.6549 ns 8.6610 ns 8.6672 ns]
+                        thrpt:  [115.38 Melem/s 115.46 Melem/s 115.54 Melem/s]
+Benchmarking h2_native_frame_parse_lifecycle/window_update
+Benchmarking h2_native_frame_parse_lifecycle/window_update: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_lifecycle/window_update: Collecting 20 samples in estimated 3.0000 s (337M iterations)
+Benchmarking h2_native_frame_parse_lifecycle/window_update: Analyzing
+h2_native_frame_parse_lifecycle/window_update
+                        time:   [8.6722 ns 8.6782 ns 8.6856 ns]
+                        thrpt:  [115.13 Melem/s 115.23 Melem/s 115.31 Melem/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking h2_native_frame_parse_lifecycle/goaway_empty_debug
+Benchmarking h2_native_frame_parse_lifecycle/goaway_empty_debug: Warming up for 2.0000 s
+Benchmarking h2_native_frame_parse_lifecycle/goaway_empty_debug: Collecting 20 samples in estimated 3.0000 s (266M iterations)
+Benchmarking h2_native_frame_parse_lifecycle/goaway_empty_debug: Analyzing
+h2_native_frame_parse_lifecycle/goaway_empty_debug
+                        time:   [11.132 ns 11.177 ns 11.238 ns]
+                        thrpt:  [88.986 Melem/s 89.470 Melem/s 89.828 Melem/s]
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) low severe
+  1 (5.00%) high mild
+
+Benchmarking h2_native_frame_encode_data/64b
+Benchmarking h2_native_frame_encode_data/64b: Warming up for 2.0000 s
+Benchmarking h2_native_frame_encode_data/64b: Collecting 20 samples in estimated 3.0000 s (453M iterations)
+Benchmarking h2_native_frame_encode_data/64b: Analyzing
+h2_native_frame_encode_data/64b
+                        time:   [6.5715 ns 6.5798 ns 6.5916 ns]
+                        thrpt:  [9.0425 GiB/s 9.0587 GiB/s 9.0701 GiB/s]
+Benchmarking h2_native_frame_encode_data/4kib
+Benchmarking h2_native_frame_encode_data/4kib: Warming up for 2.0000 s
+Benchmarking h2_native_frame_encode_data/4kib: Collecting 20 samples in estimated 3.0000 s (74M iterations)
+Benchmarking h2_native_frame_encode_data/4kib: Analyzing
+h2_native_frame_encode_data/4kib
+                        time:   [40.488 ns 40.520 ns 40.548 ns]
+                        thrpt:  [94.078 GiB/s 94.143 GiB/s 94.217 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking h2_native_frame_encode_data/64kib
+Benchmarking h2_native_frame_encode_data/64kib: Warming up for 2.0000 s
+Benchmarking h2_native_frame_encode_data/64kib: Collecting 20 samples in estimated 3.0001 s (2.3M iterations)
+Benchmarking h2_native_frame_encode_data/64kib: Analyzing
+h2_native_frame_encode_data/64kib
+                        time:   [1.2961 µs 1.2979 µs 1.2992 µs]
+                        thrpt:  [46.979 GiB/s 47.027 GiB/s 47.091 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking h2_native_frame_encode_data_vectored/64b
+Benchmarking h2_native_frame_encode_data_vectored/64b: Warming up for 2.0000 s
+Benchmarking h2_native_frame_encode_data_vectored/64b: Collecting 20 samples in estimated 3.0000 s (79M iterations)
+Benchmarking h2_native_frame_encode_data_vectored/64b: Analyzing
+h2_native_frame_encode_data_vectored/64b
+                        time:   [37.881 ns 37.921 ns 37.958 ns]
+                        thrpt:  [26.345 Melem/s 26.371 Melem/s 26.398 Melem/s]
+Benchmarking h2_native_frame_encode_data_vectored/4kib
+Benchmarking h2_native_frame_encode_data_vectored/4kib: Warming up for 2.0000 s
+Benchmarking h2_native_frame_encode_data_vectored/4kib: Collecting 20 samples in estimated 3.0000 s (79M iterations)
+Benchmarking h2_native_frame_encode_data_vectored/4kib: Analyzing
+h2_native_frame_encode_data_vectored/4kib
+                        time:   [37.917 ns 38.036 ns 38.105 ns]
+                        thrpt:  [26.243 Melem/s 26.291 Melem/s 26.374 Melem/s]
+Benchmarking h2_native_frame_encode_data_vectored/64kib
+Benchmarking h2_native_frame_encode_data_vectored/64kib: Warming up for 2.0000 s
+Benchmarking h2_native_frame_encode_data_vectored/64kib: Collecting 20 samples in estimated 3.0000 s (79M iterations)
+Benchmarking h2_native_frame_encode_data_vectored/64kib: Analyzing
+h2_native_frame_encode_data_vectored/64kib
+                        time:   [37.695 ns 37.772 ns 37.884 ns]
+                        thrpt:  [26.396 Melem/s 26.474 Melem/s 26.529 Melem/s]
+

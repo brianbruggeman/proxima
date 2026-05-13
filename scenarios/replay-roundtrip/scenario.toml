@@ -1,0 +1,27 @@
+## replay-roundtrip — uses a recorded jsonl fixture as the upstream.
+##
+## the replay upstream reassembles the response from the recording and
+## serves every request from the canned interaction. proves the recording
+## format -> replay upstream loop produces identical responses across
+## reruns (the load-bearing property for replay-driven test fixtures).
+
+mode = "in_process"
+
+[workload]
+target_pipe = "replay"
+method = "POST"
+path = "/v1/chat/completions"
+requests = 50
+concurrency = 4
+
+[[pipe]]
+name = "replay"
+replay = { source = "spec/examples/recording-http.jsonl", format = "jsonl" }
+
+[[expect]]
+kind = "success_rate_ge"
+ratio = 1.0
+
+[[expect]]
+kind = "cel"
+expression = "successes == 50 && failures == 0"

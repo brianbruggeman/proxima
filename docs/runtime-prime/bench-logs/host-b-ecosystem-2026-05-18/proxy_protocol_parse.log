@@ -1,0 +1,63 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.08s
+     Running benches/proxy_protocol_parse.rs (proxima/target/release/deps/proxy_protocol_parse-f83fa2f95d0b12c0)
+Benchmarking proxy_protocol_parse/v1_tcp4
+Benchmarking proxy_protocol_parse/v1_tcp4: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse/v1_tcp4: Collecting 20 samples in estimated 3.0000 s (21M iterations)
+Benchmarking proxy_protocol_parse/v1_tcp4: Analyzing
+proxy_protocol_parse/v1_tcp4
+                        time:   [142.59 ns 142.65 ns 142.70 ns]
+                        thrpt:  [7.0077 Melem/s 7.0104 Melem/s 7.0130 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking proxy_protocol_parse/v1_tcp6
+Benchmarking proxy_protocol_parse/v1_tcp6: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse/v1_tcp6: Collecting 20 samples in estimated 3.0000 s (13M iterations)
+Benchmarking proxy_protocol_parse/v1_tcp6: Analyzing
+proxy_protocol_parse/v1_tcp6
+                        time:   [228.81 ns 228.96 ns 229.16 ns]
+                        thrpt:  [4.3638 Melem/s 4.3676 Melem/s 4.3704 Melem/s]
+Benchmarking proxy_protocol_parse/v1_unknown
+Benchmarking proxy_protocol_parse/v1_unknown: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse/v1_unknown: Collecting 20 samples in estimated 3.0000 s (104M iterations)
+Benchmarking proxy_protocol_parse/v1_unknown: Analyzing
+proxy_protocol_parse/v1_unknown
+                        time:   [28.714 ns 28.736 ns 28.760 ns]
+                        thrpt:  [34.771 Melem/s 34.799 Melem/s 34.826 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking proxy_protocol_parse/v2_ipv4
+Benchmarking proxy_protocol_parse/v2_ipv4: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse/v2_ipv4: Collecting 20 samples in estimated 3.0000 s (347M iterations)
+Benchmarking proxy_protocol_parse/v2_ipv4: Analyzing
+proxy_protocol_parse/v2_ipv4
+                        time:   [8.6426 ns 8.6457 ns 8.6492 ns]
+                        thrpt:  [115.62 Melem/s 115.66 Melem/s 115.71 Melem/s]
+Benchmarking proxy_protocol_parse/v2_ipv6
+Benchmarking proxy_protocol_parse/v2_ipv6: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse/v2_ipv6: Collecting 20 samples in estimated 3.0000 s (335M iterations)
+Benchmarking proxy_protocol_parse/v2_ipv6: Analyzing
+proxy_protocol_parse/v2_ipv6
+                        time:   [8.8842 ns 8.8930 ns 8.9081 ns]
+                        thrpt:  [112.26 Melem/s 112.45 Melem/s 112.56 Melem/s]
+Benchmarking proxy_protocol_parse/v2_local
+Benchmarking proxy_protocol_parse/v2_local: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse/v2_local: Collecting 20 samples in estimated 3.0000 s (470M iterations)
+Benchmarking proxy_protocol_parse/v2_local: Analyzing
+proxy_protocol_parse/v2_local
+                        time:   [6.3727 ns 6.3755 ns 6.3796 ns]
+                        thrpt:  [156.75 Melem/s 156.85 Melem/s 156.92 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking proxy_protocol_parse_reject/not_proxy
+Benchmarking proxy_protocol_parse_reject/not_proxy: Warming up for 2.0000 s
+Benchmarking proxy_protocol_parse_reject/not_proxy: Collecting 20 samples in estimated 2.0000 s (608M iterations)
+Benchmarking proxy_protocol_parse_reject/not_proxy: Analyzing
+proxy_protocol_parse_reject/not_proxy
+                        time:   [3.2620 ns 3.2656 ns 3.2710 ns]
+                        thrpt:  [305.71 Melem/s 306.23 Melem/s 306.56 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

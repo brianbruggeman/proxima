@@ -1,0 +1,51 @@
+[package]
+name = "proxima-storage"
+description = "Storage substrates folded into one crate: the prime-native NVMe queue-pair engine (nvme feature) over the sans-IO proxima-protocols::nvme codec, the sans-IO persistent-memory (pmem) crash-consistency leaf (tier-3 no_std + no-alloc, unconditional), and the std DAX/file-backed mmap facade over pmem (dax feature, Linux-only fast tier). Folded from proxima-nvme + proxima-pmem + proxima-pmem-dax."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = []
+pmem = []
+std = []
+nvme = ["dep:proxima-protocols", "proxima-protocols/nvme", "dep:proxima-primitives"]
+nvme-uio = ["nvme", "std"]
+dax = ["pmem", "std", "dep:rustix", "dep:bon", "dep:conflaguration", "dep:serde", "dep:thiserror"]
+
+[dependencies]
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+proxima-primitives = { workspace = true, optional = true }
+proxima-protocols = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+prime = { workspace = true, features = ["runtime-prime-executor", "runtime-prime-inbox-alloc"] }
+proptest.workspace = true
+rstest.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[[bench]]
+name = "bench_pmem"
+harness = false
+
+[[example]]
+name = "cow_walkthrough"
+
+[[example]]
+name = "uio_rw"
+required-features = ["nvme-uio"]
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, optional = true }

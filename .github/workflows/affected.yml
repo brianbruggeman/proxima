@@ -1,0 +1,52 @@
+name: affected
+
+# Reusable change-scoping gate. Callers add a `changes` job
+# (`uses: ./.github/workflows/affected.yml`) and gate their root jobs on its
+# outputs (`if: needs.changes.outputs.<area> == 'true'`). Forces every area on
+# for release tags, manual dispatch, and first-push/diff-failure (fail safe).
+# Detection logic + the area map live in scripts/ci-affected.py + .github/ci-areas.toml.
+
+on:
+  workflow_call:
+    outputs:
+      prime_serve:
+        value: ${{ jobs.detect.outputs.prime_serve }}
+      intercept:
+        value: ${{ jobs.detect.outputs.intercept }}
+      notify:
+        value: ${{ jobs.detect.outputs.notify }}
+      pgwire:
+        value: ${{ jobs.detect.outputs.pgwire }}
+      redis:
+        value: ${{ jobs.detect.outputs.redis }}
+      telemetry:
+        value: ${{ jobs.detect.outputs.telemetry }}
+      nostd:
+        value: ${{ jobs.detect.outputs.nostd }}
+      dpdk_stack:
+        value: ${{ jobs.detect.outputs.dpdk_stack }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      prime_serve: ${{ steps.affected.outputs.prime_serve }}
+      intercept:   ${{ steps.affected.outputs.intercept }}
+      notify:      ${{ steps.affected.outputs.notify }}
+      pgwire:      ${{ steps.affected.outputs.pgwire }}
+      redis:       ${{ steps.affected.outputs.redis }}
+      telemetry:   ${{ steps.affected.outputs.telemetry }}
+      nostd:       ${{ steps.affected.outputs.nostd }}
+      dpdk_stack:  ${{ steps.affected.outputs.dpdk_stack }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - id: affected
+        env:
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          base="${{ github.event.before || github.event.pull_request.base.sha }}"
+          head="${{ github.sha }}"
+          python3 scripts/ci-affected.py --base "$base" --head "$head"

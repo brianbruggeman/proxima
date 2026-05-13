@@ -1,0 +1,75 @@
+[package]
+name = "proxima-config"
+description = "Config concern for proxima in one crate — pluggable format registry (JSON, JSON5, TOML, YAML, RON, XML with extension + content sniffing), sugar desugaring, typed schema IR (validate, describe, emit), and the k8s-style desired-state file store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+# only serde_json (already alloc-only at the workspace level) and the
+# ConfigFormatFactory trait / JsonConfigFormat compile here — the other
+# formats' upstream crates (toml/json5/serde_norway/ron/quick-xml) and
+# arc-swap (the registry's copy-on-write cell) have no alloc-only build.
+alloc = ["proxima-core/alloc"]
+std = [
+    "alloc",
+    "proxima-core/std",
+    "dep:arc-swap",
+    "dep:json5",
+    "dep:quick-xml",
+    "dep:ron",
+    "dep:serde_norway",
+    "dep:toml",
+]
+
+# pure desugar pass for the TOML/JSON pipe spec — folded in from the former
+# proxima-sugar satellite crate, alloc-tier only.
+sugar = ["alloc"]
+
+# typed schema IR — folded in from the former proxima-schema crate. `schema`
+# is the alloc floor (IR, `Describe`, json_schema/openapi emit); `schema-std`
+# adds `SchemaRegistry`, the toml emitter, and the `serde_value` escape
+# hatch; `schema-derive` adds `#[derive(Schema)]`.
+schema = ["alloc", "dep:serde", "dep:regex", "dep:time", "dep:url"]
+schema-std = ["schema", "proxima-core/std", "dep:arc-swap", "dep:toml", "dep:serde-value"]
+schema-derive = ["schema", "dep:proxima-macros"]
+
+# k8s-style desired-state file store — folded in from the former
+# proxima-state-store crate. `store` is the alloc floor (`PipeRecord` /
+# `ListenerRecord`); `store-std` adds `StateStore` itself (fs, atomic write).
+store = ["alloc", "dep:serde"]
+store-std = ["store", "proxima-core/std", "dep:toml", "dep:fastrand", "fastrand/std"]
+
+[dependencies]
+proxima-core = { workspace = true }
+serde_json = { workspace = true }
+arc-swap = { workspace = true, optional = true }
+fastrand = { version = "2.4.1", default-features = false, optional = true }
+json5 = { workspace = true, optional = true }
+proxima-macros = { workspace = true, optional = true }
+quick-xml = { workspace = true, features = ["serialize"], optional = true }
+ron = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive", "alloc"], optional = true }
+serde-value = { workspace = true, optional = true }
+serde_norway = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+# regex/time/url are pinned directly (not `workspace = true`) because the
+# workspace root declares them with implicit `default-features = true` and
+# cargo refuses a member override to `false` in that case; pin the same
+# version the workspace uses and disable their std-only default features here.
+regex = { version = "1.12.3", default-features = false, features = ["perf", "unicode"], optional = true }
+time = { version = "0.3.47", default-features = false, features = ["parsing", "macros"], optional = true }
+url = { version = "2.5.8", default-features = false, optional = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+temp-env = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

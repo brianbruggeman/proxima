@@ -1,0 +1,27 @@
+## synth fixture matching Stripe's POST /v1/charges shape — 50 requests
+## at concurrency 4, no live backend needed.
+
+mode = "in_process"
+
+[workload]
+target_pipe = "stripe_charge"
+method = "POST"
+path = "/v1/charges"
+requests = 50
+concurrency = 4
+body = "amount=2000&currency=usd&source=tok_visa"
+
+[[pipe]]
+name = "stripe_charge"
+
+[pipe.synth]
+status = 200
+body = """{"id":"ch_fake_000","object":"charge","amount":2000,"currency":"usd","status":"succeeded"}"""
+
+[[expect]]
+kind = "success_rate_ge"
+ratio = 1.0
+
+[[expect]]
+kind = "cel"
+expression = "successes == 50 && failures == 0"

@@ -1,0 +1,7 @@
+# A rekt throughput run as config — the same shape the fluent builder produces.
+# Per-key, named settings (never a positional comma-string); env overlays each
+# key as REKT_TARGET / REKT_CONNECTIONS_PER_CORE / REKT_CORES / REKT_DURATION_SECS.
+target = "http://127.0.0.1:8080/"
+connections_per_core = 25
+cores = 1
+duration_secs = 5

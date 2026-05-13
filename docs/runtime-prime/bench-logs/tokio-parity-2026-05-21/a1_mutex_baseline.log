@@ -1,0 +1,80 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.49s
+     Running benches/bench_sync_mutex_parity.rs (/tmp/cargo_target/release/deps/bench_sync_mutex_parity-b69e62bce56fbe8b)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, or reduce sample count to 80.
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Collecting 100 samples in estimated 6.2103 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/proxima_sync_mutex
+                        time:   [61.426 ms 61.537 ms 61.655 ms]
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, or reduce sample count to 80.
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Collecting 100 samples in estimated 6.2179 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/tokio_sync_mutex
+                        time:   [61.385 ms 61.501 ms 61.622 ms]
+Found 27 outliers among 100 measurements (27.00%)
+  2 (2.00%) low severe
+  1 (1.00%) low mild
+  18 (18.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Collecting 100 samples in estimated 5.0988 s (2200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+                        time:   [2.3241 ms 2.3345 ms 2.3520 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Collecting 100 samples in estimated 5.1447 s (2200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+                        time:   [2.3807 ms 2.4177 ms 2.4627 ms]
+Found 11 outliers among 100 measurements (11.00%)
+  2 (2.00%) high mild
+  9 (9.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Collecting 100 samples in estimated 5.2788 s (1200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+                        time:   [6.7763 ms 7.9230 ms 9.1515 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Collecting 100 samples in estimated 5.0198 s (1.2M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/proxima_sync_mutex
+                        time:   [3.7504 µs 3.8785 µs 4.0150 µs]
+Found 15 outliers among 100 measurements (15.00%)
+  8 (8.00%) low mild
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Collecting 100 samples in estimated 5.0161 s (904k iterations)
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/tokio_sync_mutex
+                        time:   [5.3543 µs 5.4965 µs 5.6708 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Collecting 100 samples in estimated 5.0105 s (1.4M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Analyzing
+mutex_parity_w3_async_write_flush/parking_lot_mutex
+                        time:   [3.6273 µs 3.6552 µs 3.6816 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+

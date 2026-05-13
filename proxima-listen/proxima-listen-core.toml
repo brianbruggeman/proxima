@@ -1,0 +1,28 @@
+# build-time sizing for proxima-listen-core.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_listen_core_sized.rs.
+# these are the ONLY knobs the no_std+no_alloc tier gets — the alloc/std tier
+# still honors `table_cap`/`peer_table_cap` as the fixed-cap floor's mirror
+# (the alloc tier's table grows; `per_peer_cap` is a real runtime shed
+# threshold on both tiers, not just a floor).
+#
+# `table_cap` and `peer_table_cap` back fixed-size `heapless::FnvIndexMap`s on
+# the no-alloc tier and MUST be a power of two (enforced at build time below).
+#
+# per-system build-time overrides via env vars:
+#
+#   PROXIMA_LISTEN_CORE_ADMISSION_TABLE_CAP=2048 \
+#   PROXIMA_LISTEN_CORE_ADMISSION_PEER_TABLE_CAP=512 \
+#   PROXIMA_LISTEN_CORE_ADMISSION_PER_PEER_CAP=128 \
+#       cargo build -p proxima-listen-core
+
+[admission]
+# Fixed cap on tracked live connections (no-alloc tier); alloc tier is
+# unbounded by default (`usize::MAX`) and only clamps down via
+# `ListenerCore::with_capacity`/`with_caps`.
+table_cap = 1024
+# Fixed cap on distinct peers tracked for per-peer shedding (no-alloc tier).
+peer_table_cap = 256
+# Default per-peer live-connection cap: the DoS knob. A single peer address
+# sheds with `ShedReason::PerPeerLimit` once its own live count reaches this,
+# even when the listener's global capacity has room left.
+per_peer_cap = 64

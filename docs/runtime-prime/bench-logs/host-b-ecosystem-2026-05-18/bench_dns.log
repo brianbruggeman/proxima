@@ -1,0 +1,51 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 38s
+     Running benches/bench_dns.rs (proxima/target/release/deps/bench_dns-9726b183d0c8429d)
+Benchmarking dns_parse_proxima/response_full
+Benchmarking dns_parse_proxima/response_full: Warming up for 2.0000 s
+Benchmarking dns_parse_proxima/response_full: Collecting 20 samples in estimated 3.0000 s (97M iterations)
+Benchmarking dns_parse_proxima/response_full: Analyzing
+dns_parse_proxima/response_full
+                        time:   [31.124 ns 31.163 ns 31.203 ns]
+                        thrpt:  [1.3431 GiB/s 1.3448 GiB/s 1.3465 GiB/s]
+
+Benchmarking dns_parse_parity/response_full
+Benchmarking dns_parse_parity/response_full: Warming up for 2.0000 s
+Benchmarking dns_parse_parity/response_full: Collecting 20 samples in estimated 3.0000 s (142M iterations)
+Benchmarking dns_parse_parity/response_full: Analyzing
+dns_parse_parity/response_full
+                        time:   [20.905 ns 20.957 ns 21.018 ns]
+                        thrpt:  [1.9940 GiB/s 1.9998 GiB/s 2.0048 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking dns_parse_hickory/response_full
+Benchmarking dns_parse_hickory/response_full: Warming up for 2.0000 s
+Benchmarking dns_parse_hickory/response_full: Collecting 20 samples in estimated 3.0000 s (14M iterations)
+Benchmarking dns_parse_hickory/response_full: Analyzing
+dns_parse_hickory/response_full
+                        time:   [216.16 ns 216.26 ns 216.37 ns]
+                        thrpt:  [198.34 MiB/s 198.45 MiB/s 198.54 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+Benchmarking dns_workload_count_a/proxima
+Benchmarking dns_workload_count_a/proxima: Warming up for 2.0000 s
+Benchmarking dns_workload_count_a/proxima: Collecting 20 samples in estimated 3.0000 s (30M iterations)
+Benchmarking dns_workload_count_a/proxima: Analyzing
+dns_workload_count_a/proxima
+                        time:   [98.115 ns 98.180 ns 98.259 ns]
+                        thrpt:  [1.1848 GiB/s 1.1857 GiB/s 1.1865 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking dns_workload_count_a/hickory
+Benchmarking dns_workload_count_a/hickory: Warming up for 2.0000 s
+Benchmarking dns_workload_count_a/hickory: Collecting 20 samples in estimated 3.0000 s (4.4M iterations)
+Benchmarking dns_workload_count_a/hickory: Analyzing
+dns_workload_count_a/hickory
+                        time:   [680.16 ns 682.19 ns 684.83 ns]
+                        thrpt:  [174.07 MiB/s 174.74 MiB/s 175.27 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) low mild
+

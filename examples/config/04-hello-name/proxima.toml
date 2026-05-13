@@ -1,0 +1,43 @@
+# 04-hello-name — schema + validate + templated synth in one config.
+#
+# Run:
+#   proxima serve --config examples/config/04-hello-name/proxima.toml
+# Test:
+#   curl -X POST -d '{"name":"brian"}' http://127.0.0.1:<ready-port>/
+#   → "hello, brian"
+#
+# Reject (missing name):
+#   curl -X POST -d '{}' http://127.0.0.1:<ready-port>/
+#   → 400 with validation_failed envelope
+#
+# Emit JSON Schema:
+#   proxima describe --config examples/config/04-hello-name/proxima.toml
+
+[[schema]]
+name = "User"
+
+[schema.schema]
+type = "struct"
+
+[schema.schema.value]
+name = "User"
+
+[[schema.schema.value.fields]]
+name = "name"
+schema = { type = "string", value = { min_len = 1 } }
+flags = {}
+
+[[pipe]]
+name = "hello-name"
+synth = { status = 200, body_template = "hello, {{body.name}}\n", headers = { "content-type" = "text/plain" } }
+
+[[pipe.middleware]]
+type = "validate"
+schema = "User"
+
+[[listen]]
+type = "http"
+bind = "127.0.0.1:8080"
+[[listen.mount]]
+path = "/"
+pipe = "hello-name"

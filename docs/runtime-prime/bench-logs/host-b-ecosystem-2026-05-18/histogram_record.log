@@ -1,0 +1,30 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 40.94s
+     Running benches/histogram_record.rs (proxima/target/release/deps/histogram_record-a76368fe62e178fc)
+Benchmarking histogram_record/single_thread
+Benchmarking histogram_record/single_thread: Warming up for 2.0000 s
+Benchmarking histogram_record/single_thread: Collecting 20 samples in estimated 3.0000 s (14M iterations)
+Benchmarking histogram_record/single_thread: Analyzing
+histogram_record/single_thread
+                        time:   [214.63 ns 214.86 ns 215.02 ns]
+                        thrpt:  [4.6506 Melem/s 4.6541 Melem/s 4.6591 Melem/s]
+                 change:
+                        time:   [−12.243% −11.352% −10.475%] (p = 0.00 < 0.05)
+                        thrpt:  [+11.700% +12.806% +13.951%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+
+Benchmarking histogram_record/8_workers_one_record_each
+Benchmarking histogram_record/8_workers_one_record_each: Warming up for 2.0000 s
+Benchmarking histogram_record/8_workers_one_record_each: Collecting 20 samples in estimated 3.0020 s (285k iterations)
+Benchmarking histogram_record/8_workers_one_record_each: Analyzing
+histogram_record/8_workers_one_record_each
+                        time:   [10.576 µs 10.687 µs 10.785 µs]
+                        thrpt:  [741.78 Kelem/s 748.57 Kelem/s 756.39 Kelem/s]
+                 change:
+                        time:   [+3.7232% +5.6292% +7.6457%] (p = 0.05 > 0.05)
+                        thrpt:  [−7.1026% −5.3292% −3.5895%]
+                        No change in performance detected.
+

@@ -1,0 +1,85 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling proxima v0.1.0 (proxima-tokio-parity/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 13s
+     Running benches/bench_time_interval_parity.rs (/tmp/cargo_target/release/deps/bench_time_interval_parity-7b47c1f93f864966)
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 52.7s or enable flat sampling.
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream: Collecting 10 samples in estimated 52.704 s (55 iterations)
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream: Analyzing
+interval_maintenance_50ms_x20/proxima_time_interval_stream
+                        time:   [958.30 ms 958.50 ms 958.85 ms]
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 52.6s or enable flat sampling.
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip: Collecting 10 samples in estimated 52.638 s (55 iterations)
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip: Analyzing
+interval_maintenance_50ms_x20/tokio_time_interval_skip
+                        time:   [956.99 ms 957.08 ms 957.19 ms]
+Found 4 outliers among 10 measurements (40.00%)
+  2 (20.00%) low mild
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 52.6s or enable flat sampling.
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst: Collecting 10 samples in estimated 52.643 s (55 iterations)
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst: Analyzing
+interval_maintenance_50ms_x20/tokio_time_interval_burst
+                        time:   [957.13 ms 957.55 ms 958.20 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 15.0s. You may wish to increase target time to 20.6s or enable flat sampling.
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream: Collecting 10 samples in estimated 20.630 s (55 iterations)
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream: Analyzing
+interval_slow_consumer_50ms_x5/proxima_time_interval_stream
+                        time:   [375.03 ms 375.03 ms 375.03 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 15.0s. You may wish to increase target time to 20.7s or enable flat sampling.
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip: Collecting 10 samples in estimated 20.690 s (55 iterations)
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip: Analyzing
+interval_slow_consumer_50ms_x5/tokio_time_interval_skip
+                        time:   [376.19 ms 376.25 ms 376.42 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 15.0s. You may wish to increase target time to 20.7s or enable flat sampling.
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst: Collecting 10 samples in estimated 20.690 s (55 iterations)
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst: Analyzing
+interval_slow_consumer_50ms_x5/tokio_time_interval_burst
+                        time:   [376.18 ms 376.18 ms 376.18 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 54.6s or enable flat sampling.
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream: Collecting 10 samples in estimated 54.558 s (55 iterations)
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream: Analyzing
+interval_tight_10ms_x100/proxima_time_interval_stream
+                        time:   [991.59 ms 991.69 ms 991.84 ms]
+Benchmarking interval_tight_10ms_x100/tokio_time_interval
+Benchmarking interval_tight_10ms_x100/tokio_time_interval: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 54.6s or enable flat sampling.
+Benchmarking interval_tight_10ms_x100/tokio_time_interval: Collecting 10 samples in estimated 54.570 s (55 iterations)
+Benchmarking interval_tight_10ms_x100/tokio_time_interval: Analyzing
+interval_tight_10ms_x100/tokio_time_interval
+                        time:   [992.05 ms 992.12 ms 992.19 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+

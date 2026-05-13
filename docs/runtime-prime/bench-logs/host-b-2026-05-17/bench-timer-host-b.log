@@ -1,0 +1,51 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 41.20s
+     Running benches/bench_timer.rs (target/release/deps/bench_timer-0ced21b6b66f2b4d)
+Benchmarking timer_register_throughput/proxima
+Benchmarking timer_register_throughput/proxima: Warming up for 1.0000 s
+Benchmarking timer_register_throughput/proxima: Collecting 30 samples in estimated 3.1051 s (2325 iterations)
+Benchmarking timer_register_throughput/proxima: Analyzing
+timer_register_throughput/proxima
+                        time:   [1.0208 ms 1.0220 ms 1.0237 ms]
+                        thrpt:  [9.7689 Melem/s 9.7851 Melem/s 9.7966 Melem/s]
+Benchmarking timer_register_throughput/tokio_time
+Benchmarking timer_register_throughput/tokio_time: Warming up for 1.0000 s
+Benchmarking timer_register_throughput/tokio_time: Collecting 30 samples in estimated 3.0805 s (8370 iterations)
+Benchmarking timer_register_throughput/tokio_time: Analyzing
+timer_register_throughput/tokio_time
+                        time:   [367.38 µs 367.54 µs 367.71 µs]
+                        thrpt:  [27.196 Melem/s 27.208 Melem/s 27.220 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+
+Benchmarking timer_drain_throughput/proxima
+Benchmarking timer_drain_throughput/proxima: Warming up for 1.0000 s
+Benchmarking timer_drain_throughput/proxima: Collecting 30 samples in estimated 3.5058 s (2325 iterations)
+Benchmarking timer_drain_throughput/proxima: Analyzing
+timer_drain_throughput/proxima
+                        time:   [438.05 µs 438.64 µs 439.41 µs]
+                        thrpt:  [22.758 Melem/s 22.798 Melem/s 22.828 Melem/s]
+Found 4 outliers among 30 measurements (13.33%)
+  2 (6.67%) low mild
+  2 (6.67%) high mild
+Benchmarking timer_drain_throughput/tokio_time_joinall
+Benchmarking timer_drain_throughput/tokio_time_joinall: Warming up for 1.0000 s
+
+Warning: Unable to complete 30 samples in 3.0s. You may wish to increase target time to 3.9s, or reduce sample count to 20.
+Benchmarking timer_drain_throughput/tokio_time_joinall: Collecting 30 samples in estimated 3.9318 s (30 iterations)
+Benchmarking timer_drain_throughput/tokio_time_joinall: Analyzing
+timer_drain_throughput/tokio_time_joinall
+                        time:   [130.64 ms 130.75 ms 130.86 ms]
+                        thrpt:  [76.418 Kelem/s 76.482 Kelem/s 76.548 Kelem/s]
+
+Benchmarking timer_register_then_cancel/proxima
+Benchmarking timer_register_then_cancel/proxima: Warming up for 1.0000 s
+Benchmarking timer_register_then_cancel/proxima: Collecting 30 samples in estimated 3.0968 s (3255 iterations)
+Benchmarking timer_register_then_cancel/proxima: Analyzing
+timer_register_then_cancel/proxima
+                        time:   [750.20 µs 750.37 µs 750.56 µs]
+                        thrpt:  [26.647 Melem/s 26.654 Melem/s 26.660 Melem/s]
+Found 6 outliers among 30 measurements (20.00%)
+  3 (10.00%) low mild
+  3 (10.00%) high mild
+

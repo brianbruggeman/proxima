@@ -1,0 +1,403 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 38.38s
+     Running benches/hpack_integer.rs (/tmp/cargo_target/release/deps/hpack_integer-62bdbe98f7fec07f)
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_1_10_5b
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_1_10_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_1_10_5b: Collecting 20 samples in estimated 3.0000 s (2.8B iterations)
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_1_10_5b: Analyzing
+hpack_integer_encode/proxima_native/rfc_c_1_1_10_5b
+                        time:   [1.0772 ns 1.0776 ns 1.0780 ns]
+                        thrpt:  [927.67 Melem/s 927.99 Melem/s 928.32 Melem/s]
+                 change:
+                        time:   [+1.3834% +1.8103% +2.2127%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.1648% −1.7781% −1.3645%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_1_10_5b
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_1_10_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_1_10_5b: Collecting 20 samples in estimated 3.0000 s (2.8B iterations)
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_1_10_5b: Analyzing
+hpack_integer_encode/h2_crate/rfc_c_1_1_10_5b
+                        time:   [1.0776 ns 1.0780 ns 1.0784 ns]
+                        thrpt:  [927.30 Melem/s 927.65 Melem/s 927.96 Melem/s]
+                 change:
+                        time:   [+2.4567% +2.5819% +2.7112%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.6397% −2.5169% −2.3978%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_2_1337_5b
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_2_1337_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_2_1337_5b: Collecting 20 samples in estimated 3.0000 s (1.6B iterations)
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_2_1337_5b: Analyzing
+hpack_integer_encode/proxima_native/rfc_c_1_2_1337_5b
+                        time:   [1.8244 ns 1.8252 ns 1.8261 ns]
+                        thrpt:  [547.62 Melem/s 547.89 Melem/s 548.11 Melem/s]
+                 change:
+                        time:   [+2.0780% +2.9645% +4.5293%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.3330% −2.8791% −2.0357%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_2_1337_5b
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_2_1337_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_2_1337_5b: Collecting 20 samples in estimated 3.0000 s (1.6B iterations)
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_2_1337_5b: Analyzing
+hpack_integer_encode/h2_crate/rfc_c_1_2_1337_5b
+                        time:   [1.8240 ns 1.8248 ns 1.8256 ns]
+                        thrpt:  [547.77 Melem/s 548.00 Melem/s 548.24 Melem/s]
+                 change:
+                        time:   [+1.9974% +3.2344% +5.0360%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.7946% −3.1331% −1.9583%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_3_42_8b
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_3_42_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_3_42_8b: Collecting 20 samples in estimated 3.0000 s (2.8B iterations)
+Benchmarking hpack_integer_encode/proxima_native/rfc_c_1_3_42_8b: Analyzing
+hpack_integer_encode/proxima_native/rfc_c_1_3_42_8b
+                        time:   [1.0771 ns 1.0776 ns 1.0783 ns]
+                        thrpt:  [927.39 Melem/s 927.96 Melem/s 928.45 Melem/s]
+                 change:
+                        time:   [−0.0294% +0.4327% +0.9393%] (p = 0.10 > 0.05)
+                        thrpt:  [−0.9306% −0.4308% +0.0294%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_3_42_8b
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_3_42_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_3_42_8b: Collecting 20 samples in estimated 3.0000 s (2.8B iterations)
+Benchmarking hpack_integer_encode/h2_crate/rfc_c_1_3_42_8b: Analyzing
+hpack_integer_encode/h2_crate/rfc_c_1_3_42_8b
+                        time:   [1.0775 ns 1.0780 ns 1.0784 ns]
+                        thrpt:  [927.34 Melem/s 927.66 Melem/s 928.03 Melem/s]
+                 change:
+                        time:   [−1.0690% −0.1637% +0.5308%] (p = 0.75 > 0.05)
+                        thrpt:  [−0.5280% +0.1640% +1.0805%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking hpack_integer_encode/proxima_native/zero_5b
+Benchmarking hpack_integer_encode/proxima_native/zero_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/zero_5b: Collecting 20 samples in estimated 3.0000 s (2.8B iterations)
+Benchmarking hpack_integer_encode/proxima_native/zero_5b: Analyzing
+hpack_integer_encode/proxima_native/zero_5b
+                        time:   [1.0776 ns 1.0781 ns 1.0789 ns]
+                        thrpt:  [926.91 Melem/s 927.53 Melem/s 927.96 Melem/s]
+                 change:
+                        time:   [+0.7575% +1.8014% +2.5738%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5092% −1.7696% −0.7518%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking hpack_integer_encode/h2_crate/zero_5b
+Benchmarking hpack_integer_encode/h2_crate/zero_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/zero_5b: Collecting 20 samples in estimated 3.0000 s (2.8B iterations)
+Benchmarking hpack_integer_encode/h2_crate/zero_5b: Analyzing
+hpack_integer_encode/h2_crate/zero_5b
+                        time:   [1.0778 ns 1.0782 ns 1.0785 ns]
+                        thrpt:  [927.21 Melem/s 927.48 Melem/s 927.77 Melem/s]
+                 change:
+                        time:   [+1.4849% +2.0010% +2.4277%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.3702% −1.9618% −1.4632%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking hpack_integer_encode/proxima_native/boundary_5b
+Benchmarking hpack_integer_encode/proxima_native/boundary_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/boundary_5b: Collecting 20 samples in estimated 3.0000 s (2.1B iterations)
+Benchmarking hpack_integer_encode/proxima_native/boundary_5b: Analyzing
+hpack_integer_encode/proxima_native/boundary_5b
+                        time:   [1.4196 ns 1.4214 ns 1.4230 ns]
+                        thrpt:  [702.72 Melem/s 703.51 Melem/s 704.42 Melem/s]
+                 change:
+                        time:   [+2.2629% +2.5418% +2.8108%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.7339% −2.4788% −2.2128%]
+                        Performance has regressed.
+Benchmarking hpack_integer_encode/h2_crate/boundary_5b
+Benchmarking hpack_integer_encode/h2_crate/boundary_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/boundary_5b: Collecting 20 samples in estimated 3.0000 s (2.1B iterations)
+Benchmarking hpack_integer_encode/h2_crate/boundary_5b: Analyzing
+hpack_integer_encode/h2_crate/boundary_5b
+                        time:   [1.4166 ns 1.4171 ns 1.4176 ns]
+                        thrpt:  [705.44 Melem/s 705.68 Melem/s 705.90 Melem/s]
+                 change:
+                        time:   [+2.4482% +2.6151% +2.7470%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.6735% −2.5485% −2.3897%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking hpack_integer_encode/proxima_native/boundary_7b_2byte
+Benchmarking hpack_integer_encode/proxima_native/boundary_7b_2byte: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/boundary_7b_2byte: Collecting 20 samples in estimated 3.0000 s (2.1B iterations)
+Benchmarking hpack_integer_encode/proxima_native/boundary_7b_2byte: Analyzing
+hpack_integer_encode/proxima_native/boundary_7b_2byte
+                        time:   [1.4194 ns 1.4211 ns 1.4231 ns]
+                        thrpt:  [702.69 Melem/s 703.69 Melem/s 704.52 Melem/s]
+                 change:
+                        time:   [+2.5207% +2.7889% +3.0689%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.9775% −2.7133% −2.4587%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_integer_encode/h2_crate/boundary_7b_2byte
+Benchmarking hpack_integer_encode/h2_crate/boundary_7b_2byte: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/boundary_7b_2byte: Collecting 20 samples in estimated 3.0000 s (2.0B iterations)
+Benchmarking hpack_integer_encode/h2_crate/boundary_7b_2byte: Analyzing
+hpack_integer_encode/h2_crate/boundary_7b_2byte
+                        time:   [1.4366 ns 1.5200 ns 1.6842 ns]
+                        thrpt:  [593.74 Melem/s 657.90 Melem/s 696.07 Melem/s]
+                 change:
+                        time:   [+4.4010% +10.877% +19.958%] (p = 0.00 < 0.05)
+                        thrpt:  [−16.638% −9.8097% −4.2155%]
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) high mild
+  3 (15.00%) high severe
+Benchmarking hpack_integer_encode/proxima_native/1m_5b
+Benchmarking hpack_integer_encode/proxima_native/1m_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/1m_5b: Collecting 20 samples in estimated 3.0000 s (1.1B iterations)
+Benchmarking hpack_integer_encode/proxima_native/1m_5b: Analyzing
+hpack_integer_encode/proxima_native/1m_5b
+                        time:   [2.3036 ns 2.3246 ns 2.3521 ns]
+                        thrpt:  [425.14 Melem/s 430.18 Melem/s 434.10 Melem/s]
+                 change:
+                        time:   [+4.5044% +6.1529% +9.3249%] (p = 0.00 < 0.05)
+                        thrpt:  [−8.5295% −5.7962% −4.3102%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking hpack_integer_encode/h2_crate/1m_5b
+Benchmarking hpack_integer_encode/h2_crate/1m_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/1m_5b: Collecting 20 samples in estimated 3.0000 s (1.3B iterations)
+Benchmarking hpack_integer_encode/h2_crate/1m_5b: Analyzing
+hpack_integer_encode/h2_crate/1m_5b
+                        time:   [2.2518 ns 2.2636 ns 2.2794 ns]
+                        thrpt:  [438.72 Melem/s 441.77 Melem/s 444.08 Melem/s]
+                 change:
+                        time:   [+3.2006% +4.0359% +4.8372%] (p = 0.00 < 0.05)
+                        thrpt:  [−4.6140% −3.8793% −3.1013%]
+                        Performance has regressed.
+Benchmarking hpack_integer_encode/proxima_native/u32max_8b
+Benchmarking hpack_integer_encode/proxima_native/u32max_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/proxima_native/u32max_8b: Collecting 20 samples in estimated 3.0000 s (920M iterations)
+Benchmarking hpack_integer_encode/proxima_native/u32max_8b: Analyzing
+hpack_integer_encode/proxima_native/u32max_8b
+                        time:   [3.2186 ns 3.2273 ns 3.2365 ns]
+                        thrpt:  [308.97 Melem/s 309.86 Melem/s 310.69 Melem/s]
+                 change:
+                        time:   [+0.8002% +1.9513% +2.9414%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.8573% −1.9139% −0.7939%]
+                        Change within noise threshold.
+Benchmarking hpack_integer_encode/h2_crate/u32max_8b
+Benchmarking hpack_integer_encode/h2_crate/u32max_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_encode/h2_crate/u32max_8b: Collecting 20 samples in estimated 3.0000 s (972M iterations)
+Benchmarking hpack_integer_encode/h2_crate/u32max_8b: Analyzing
+hpack_integer_encode/h2_crate/u32max_8b
+                        time:   [3.0781 ns 3.0837 ns 3.0891 ns]
+                        thrpt:  [323.72 Melem/s 324.29 Melem/s 324.88 Melem/s]
+                 change:
+                        time:   [+1.0013% +2.0664% +2.7643%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.6899% −2.0246% −0.9913%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_1_10_5b
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_1_10_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_1_10_5b: Collecting 20 samples in estimated 3.0000 s (3.1B iterations)
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_1_10_5b: Analyzing
+hpack_integer_decode/proxima_native/rfc_c_1_1_10_5b
+                        time:   [923.54 ps 936.20 ps 951.69 ps]
+                        thrpt:  [1.0508 Gelem/s 1.0681 Gelem/s 1.0828 Gelem/s]
+                 change:
+                        time:   [+2.1809% +3.9730% +5.8571%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.5330% −3.8212% −2.1344%]
+                        Performance has regressed.
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_1_10_5b
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_1_10_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_1_10_5b: Collecting 20 samples in estimated 3.0000 s (3.0B iterations)
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_1_10_5b: Analyzing
+hpack_integer_decode/h2_crate/rfc_c_1_1_10_5b
+                        time:   [985.13 ps 987.17 ps 989.98 ps]
+                        thrpt:  [1.0101 Gelem/s 1.0130 Gelem/s 1.0151 Gelem/s]
+                 change:
+                        time:   [+3.2428% +3.5966% +3.9922%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.8389% −3.4718% −3.1409%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_2_1337_5b
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_2_1337_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_2_1337_5b: Collecting 20 samples in estimated 3.0000 s (2.2B iterations)
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_2_1337_5b: Analyzing
+hpack_integer_decode/proxima_native/rfc_c_1_2_1337_5b
+                        time:   [1.3725 ns 1.3748 ns 1.3768 ns]
+                        thrpt:  [726.30 Melem/s 727.39 Melem/s 728.58 Melem/s]
+                 change:
+                        time:   [+3.0438% +3.2511% +3.4709%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.3545% −3.1488% −2.9539%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_2_1337_5b
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_2_1337_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_2_1337_5b: Collecting 20 samples in estimated 3.0000 s (1.9B iterations)
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_2_1337_5b: Analyzing
+hpack_integer_decode/h2_crate/rfc_c_1_2_1337_5b
+                        time:   [1.6149 ns 1.6173 ns 1.6201 ns]
+                        thrpt:  [617.26 Melem/s 618.31 Melem/s 619.23 Melem/s]
+                 change:
+                        time:   [+3.0664% +3.3614% +3.6711%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.5411% −3.2521% −2.9752%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_3_42_8b
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_3_42_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_3_42_8b: Collecting 20 samples in estimated 3.0000 s (3.2B iterations)
+Benchmarking hpack_integer_decode/proxima_native/rfc_c_1_3_42_8b: Analyzing
+hpack_integer_decode/proxima_native/rfc_c_1_3_42_8b
+                        time:   [934.20 ps 942.11 ps 951.48 ps]
+                        thrpt:  [1.0510 Gelem/s 1.0614 Gelem/s 1.0704 Gelem/s]
+                 change:
+                        time:   [+2.7252% +4.7990% +7.0978%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.6274% −4.5792% −2.6529%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_3_42_8b
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_3_42_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_3_42_8b: Collecting 20 samples in estimated 3.0000 s (3.0B iterations)
+Benchmarking hpack_integer_decode/h2_crate/rfc_c_1_3_42_8b: Analyzing
+hpack_integer_decode/h2_crate/rfc_c_1_3_42_8b
+                        time:   [984.30 ps 986.67 ps 989.65 ps]
+                        thrpt:  [1.0105 Gelem/s 1.0135 Gelem/s 1.0159 Gelem/s]
+                 change:
+                        time:   [−4.9851% −1.7343% +1.2563%] (p = 0.30 > 0.05)
+                        thrpt:  [−1.2407% +1.7649% +5.2466%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_integer_decode/proxima_native/zero_5b
+Benchmarking hpack_integer_decode/proxima_native/zero_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/zero_5b: Collecting 20 samples in estimated 3.0000 s (3.2B iterations)
+Benchmarking hpack_integer_decode/proxima_native/zero_5b: Analyzing
+hpack_integer_decode/proxima_native/zero_5b
+                        time:   [923.81 ps 935.90 ps 948.48 ps]
+                        thrpt:  [1.0543 Gelem/s 1.0685 Gelem/s 1.0825 Gelem/s]
+                 change:
+                        time:   [+1.3462% +3.6962% +6.1572%] (p = 0.01 < 0.05)
+                        thrpt:  [−5.8000% −3.5644% −1.3284%]
+                        Performance has regressed.
+Benchmarking hpack_integer_decode/h2_crate/zero_5b
+Benchmarking hpack_integer_decode/h2_crate/zero_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/zero_5b: Collecting 20 samples in estimated 3.0000 s (3.0B iterations)
+Benchmarking hpack_integer_decode/h2_crate/zero_5b: Analyzing
+hpack_integer_decode/h2_crate/zero_5b
+                        time:   [985.03 ps 987.08 ps 989.50 ps]
+                        thrpt:  [1.0106 Gelem/s 1.0131 Gelem/s 1.0152 Gelem/s]
+                 change:
+                        time:   [+3.0597% +3.3020% +3.5610%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.4386% −3.1964% −2.9688%]
+                        Performance has regressed.
+Benchmarking hpack_integer_decode/proxima_native/boundary_5b
+Benchmarking hpack_integer_decode/proxima_native/boundary_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/boundary_5b: Collecting 20 samples in estimated 3.0000 s (2.7B iterations)
+Benchmarking hpack_integer_decode/proxima_native/boundary_5b: Analyzing
+hpack_integer_decode/proxima_native/boundary_5b
+                        time:   [1.1230 ns 1.1244 ns 1.1263 ns]
+                        thrpt:  [887.84 Melem/s 889.38 Melem/s 890.51 Melem/s]
+                 change:
+                        time:   [+2.5740% +2.7735% +2.9697%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.8840% −2.6987% −2.5094%]
+                        Performance has regressed.
+Benchmarking hpack_integer_decode/h2_crate/boundary_5b
+Benchmarking hpack_integer_decode/h2_crate/boundary_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/boundary_5b: Collecting 20 samples in estimated 3.0000 s (2.3B iterations)
+Benchmarking hpack_integer_decode/h2_crate/boundary_5b: Analyzing
+hpack_integer_decode/h2_crate/boundary_5b
+                        time:   [1.2767 ns 1.2774 ns 1.2780 ns]
+                        thrpt:  [782.50 Melem/s 782.85 Melem/s 783.25 Melem/s]
+                 change:
+                        time:   [−2.5190% +1.0231% +2.9738%] (p = 0.72 > 0.05)
+                        thrpt:  [−2.8879% −1.0127% +2.5841%]
+                        No change in performance detected.
+Benchmarking hpack_integer_decode/proxima_native/boundary_7b_2byte
+Benchmarking hpack_integer_decode/proxima_native/boundary_7b_2byte: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/boundary_7b_2byte: Collecting 20 samples in estimated 3.0000 s (2.7B iterations)
+Benchmarking hpack_integer_decode/proxima_native/boundary_7b_2byte: Analyzing
+hpack_integer_decode/proxima_native/boundary_7b_2byte
+                        time:   [1.1197 ns 1.1205 ns 1.1215 ns]
+                        thrpt:  [891.63 Melem/s 892.42 Melem/s 893.07 Melem/s]
+                 change:
+                        time:   [+2.3329% +2.4836% +2.6468%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5785% −2.4235% −2.2797%]
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  3 (15.00%) high mild
+Benchmarking hpack_integer_decode/h2_crate/boundary_7b_2byte
+Benchmarking hpack_integer_decode/h2_crate/boundary_7b_2byte: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/boundary_7b_2byte: Collecting 20 samples in estimated 3.0000 s (2.3B iterations)
+Benchmarking hpack_integer_decode/h2_crate/boundary_7b_2byte: Analyzing
+hpack_integer_decode/h2_crate/boundary_7b_2byte
+                        time:   [1.2767 ns 1.2771 ns 1.2775 ns]
+                        thrpt:  [782.78 Melem/s 783.01 Melem/s 783.27 Melem/s]
+                 change:
+                        time:   [+1.6266% +1.8349% +2.0837%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.0411% −1.8019% −1.6006%]
+                        Performance has regressed.
+Benchmarking hpack_integer_decode/proxima_native/1m_5b
+Benchmarking hpack_integer_decode/proxima_native/1m_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/1m_5b: Collecting 20 samples in estimated 3.0000 s (1.8B iterations)
+Benchmarking hpack_integer_decode/proxima_native/1m_5b: Analyzing
+hpack_integer_decode/proxima_native/1m_5b
+                        time:   [1.6720 ns 1.6728 ns 1.6735 ns]
+                        thrpt:  [597.54 Melem/s 597.80 Melem/s 598.08 Melem/s]
+                 change:
+                        time:   [+2.6778% +2.7792% +2.8817%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.8010% −2.7040% −2.6079%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking hpack_integer_decode/h2_crate/1m_5b
+Benchmarking hpack_integer_decode/h2_crate/1m_5b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/h2_crate/1m_5b: Collecting 20 samples in estimated 3.0000 s (1.5B iterations)
+Benchmarking hpack_integer_decode/h2_crate/1m_5b: Analyzing
+hpack_integer_decode/h2_crate/1m_5b
+                        time:   [1.9529 ns 1.9535 ns 1.9541 ns]
+                        thrpt:  [511.75 Melem/s 511.91 Melem/s 512.07 Melem/s]
+                 change:
+                        time:   [+2.2472% +2.5479% +2.7943%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.7183% −2.4846% −2.1978%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_integer_decode/proxima_native/u32max_8b
+Benchmarking hpack_integer_decode/proxima_native/u32max_8b: Warming up for 2.0000 s
+Benchmarking hpack_integer_decode/proxima_native/u32max_8b: Collecting 20 samples in estimated 3.0000 s (1.2B iterations)
+Benchmarking hpack_integer_decode/proxima_native/u32max_8b: Analyzing
+hpack_integer_decode/proxima_native/u32max_8b
+                        time:   [2.5042 ns 2.5061 ns 2.5080 ns]
+                        thrpt:  [398.72 Melem/s 399.03 Melem/s 399.32 Melem/s]
+                 change:
+                        time:   [+2.8328% +2.9290% +3.0269%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.9380% −2.8457% −2.7548%]
+                        Performance has regressed.
+Benchmarking hpack_integer_decode/h2_crate/u32max_8b
+Benchmarking hpack_integer_decode/h2_crate/u32max_8b: Warming up for 2.0000 s
+
+thread 'main' (1803151520) panicked at rust/benches/hpack_integer.rs:103:18:
+decode: DecoderError
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: bench failed, to rerun pass `--bench hpack_integer`

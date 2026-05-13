@@ -1,0 +1,52 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 30s
+     Running benches/bench_compat_libraries.rs (/tmp/cargo_target/release/deps/bench_compat_libraries-45de34a9af42a6dc)
+Benchmarking compat_libs_single_stream/hyper_default_tokio
+Benchmarking compat_libs_single_stream/hyper_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/hyper_default_tokio: Collecting 15 samples in estimated 4.0048 s (85k iterations)
+Benchmarking compat_libs_single_stream/hyper_default_tokio: Analyzing
+compat_libs_single_stream/hyper_default_tokio
+                        time:   [44.817 µs 46.744 µs 49.549 µs]
+                        thrpt:  [20.182 Kelem/s 21.393 Kelem/s 22.313 Kelem/s]
+Benchmarking compat_libs_single_stream/hyper_prime_compat
+Benchmarking compat_libs_single_stream/hyper_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/hyper_prime_compat: Collecting 15 samples in estimated 4.0011 s (88k iterations)
+Benchmarking compat_libs_single_stream/hyper_prime_compat: Analyzing
+compat_libs_single_stream/hyper_prime_compat
+                        time:   [41.532 µs 43.964 µs 46.847 µs]
+                        thrpt:  [21.346 Kelem/s 22.746 Kelem/s 24.078 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_single_stream/pingora_default_tokio
+Benchmarking compat_libs_single_stream/pingora_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/pingora_default_tokio: Collecting 15 samples in estimated 4.0049 s (82k iterations)
+Benchmarking compat_libs_single_stream/pingora_default_tokio: Analyzing
+compat_libs_single_stream/pingora_default_tokio
+                        time:   [45.870 µs 47.786 µs 50.185 µs]
+                        thrpt:  [19.926 Kelem/s 20.927 Kelem/s 21.801 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high mild
+Benchmarking compat_libs_single_stream/pingora_prime_compat
+Benchmarking compat_libs_single_stream/pingora_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/pingora_prime_compat: Collecting 15 samples in estimated 4.0016 s (88k iterations)
+Benchmarking compat_libs_single_stream/pingora_prime_compat: Analyzing
+compat_libs_single_stream/pingora_prime_compat
+                        time:   [41.166 µs 41.781 µs 42.409 µs]
+                        thrpt:  [23.580 Kelem/s 23.934 Kelem/s 24.292 Kelem/s]
+Benchmarking compat_libs_single_stream/proxima_default_tokio
+Benchmarking compat_libs_single_stream/proxima_default_tokio: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/proxima_default_tokio: Collecting 15 samples in estimated 4.0035 s (107k iterations)
+Benchmarking compat_libs_single_stream/proxima_default_tokio: Analyzing
+compat_libs_single_stream/proxima_default_tokio
+                        time:   [38.170 µs 38.593 µs 38.942 µs]
+                        thrpt:  [25.679 Kelem/s 25.911 Kelem/s 26.198 Kelem/s]
+Found 1 outliers among 15 measurements (6.67%)
+  1 (6.67%) high severe
+Benchmarking compat_libs_single_stream/proxima_prime_compat
+Benchmarking compat_libs_single_stream/proxima_prime_compat: Warming up for 1.0000 s
+Benchmarking compat_libs_single_stream/proxima_prime_compat: Collecting 15 samples in estimated 4.0015 s (106k iterations)
+Benchmarking compat_libs_single_stream/proxima_prime_compat: Analyzing
+compat_libs_single_stream/proxima_prime_compat
+                        time:   [37.512 µs 37.679 µs 37.859 µs]
+                        thrpt:  [26.414 Kelem/s 26.540 Kelem/s 26.658 Kelem/s]
+

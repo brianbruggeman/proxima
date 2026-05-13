@@ -1,0 +1,37 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.80s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-bee2609cbc9cc51b)
+Benchmarking w4_mutex_contention/tokio_per_core
+Benchmarking w4_mutex_contention/tokio_per_core: Warming up for 1.0000 s
+Benchmarking w4_mutex_contention/tokio_per_core: Collecting 15 samples in estimated 4.5518 s (30 iterations)
+Benchmarking w4_mutex_contention/tokio_per_core: Analyzing
+w4_mutex_contention/tokio_per_core
+                        time:   [145.45 ms 149.45 ms 153.85 ms]
+                        thrpt:  [104.00 Kelem/s 107.06 Kelem/s 110.00 Kelem/s]
+                 change:
+                        time:   [+29.616% +35.184% +41.418%] (p = 0.00 < 0.05)
+                        thrpt:  [−29.288% −26.026% −22.849%]
+                        Performance has regressed.
+Benchmarking w4_mutex_contention/prime
+Benchmarking w4_mutex_contention/prime: Warming up for 1.0000 s
+error: bench failed, to rerun pass `-p proxima --bench bench_runtime_compat`
+
+Caused by:
+  process didn't exit successfully: `/tmp/cargo_target/release/deps/bench_runtime_compat-bee2609cbc9cc51b w4_mutex_contention --bench` (signal: 15, SIGTERM: termination signal)
+
+--- SUPPLEMENTAL: tokio_per_core isolated run (w4_mutex_contention/tokio_per_core filter) ---
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.27s
+     Running benches/bench_runtime_compat.rs
+Benchmarking w4_mutex_contention/tokio_per_core
+Benchmarking w4_mutex_contention/tokio_per_core: Warming up for 1.0000 s
+Benchmarking w4_mutex_contention/tokio_per_core: Collecting 15 samples in estimated 3.8145 s (30 iterations)
+Benchmarking w4_mutex_contention/tokio_per_core: Analyzing
+w4_mutex_contention/tokio_per_core
+                        time:   [123.91 ms 126.58 ms 130.03 ms]
+                        thrpt:  [123.04 Kelem/s 126.40 Kelem/s 129.13 Kelem/s]
+
+--- SUPPLEMENTAL: prime_tokio_compat isolated run (w4_mutex_contention/prime_tokio_compat filter) ---
+Benchmarking w4_mutex_contention/prime_tokio_compat
+Benchmarking w4_mutex_contention/prime_tokio_compat: Warming up for 1.0000 s
+HUNG: process stuck in Criterion warmup for >2 minutes, killed with SIGTERM (exit 144)
+Hang confirmed reproducible: same symptom as prime arm in three-arm run.
+Ship criterion for W4 CANNOT be evaluated — compat arm deadlocks under run_mutex_tokio.

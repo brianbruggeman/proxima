@@ -1,0 +1,59 @@
+# 05-todos — CRUD + LIST todo app, zero Rust code.
+#
+# Composition:
+#   - kv:file backs the data (durable across restarts).
+#   - validate middleware gates PUT/POST against the Todo schema.
+#   - Two mounts on one pipe: `/todos/{id}` for CRUD, `/todos` for LIST.
+#     The kv upstream uses `path_params` to distinguish single-resource
+#     from collection requests; `list_mode = true` enables the dispatch.
+#
+# Run:
+#   proxima serve --config examples/config/05-todos/proxima.toml
+# Use:
+#   curl -X POST -d '{"title":"buy milk"}' http://127.0.0.1:8080/todos/abc
+#   curl http://127.0.0.1:8080/todos/abc
+#   curl -X PUT  -d '{"title":"buy oat milk","done":false}' http://127.0.0.1:8080/todos/abc
+#   curl http://127.0.0.1:8080/todos          # → ["{title:...}","..."]
+#   curl -X DELETE http://127.0.0.1:8080/todos/abc
+
+[[schema]]
+name = "Todo"
+
+[schema.schema]
+type = "struct"
+
+[schema.schema.value]
+name = "Todo"
+
+[[schema.schema.value.fields]]
+name = "title"
+schema = { type = "string", value = { min_len = 1, max_len = 200 } }
+flags = {}
+
+[[schema.schema.value.fields]]
+name = "done"
+schema = { type = "bool" }
+flags = { optional = true }
+
+[[pipe]]
+name = "todos"
+kv = "file"
+path = "/tmp/proxima-todos"
+max_entries = 10000
+list_mode = true
+
+[[pipe.middleware]]
+type = "validate"
+schema = "Todo"
+
+[[listen]]
+type = "http"
+bind = "127.0.0.1:8080"
+
+[[listen.mount]]
+path = "/todos/{id}"
+pipe = "todos"
+
+[[listen.mount]]
+path = "/todos"
+pipe = "todos"

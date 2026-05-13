@@ -1,0 +1,15 @@
+[package]
+name = "example-hello-rest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "hello-rest"
+path = "main.rs"
+
+[dependencies]
+proxima = { path = "../../../.." }
+tokio = { version = "1", features = ["full"] }

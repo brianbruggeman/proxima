@@ -1,0 +1,57 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 51.37s
+     Running benches/h2_native_vs_h2_crate_e2e.rs (proxima/target/release/deps/h2_native_vs_h2_crate_e2e-8d825cdd0c226af4)
+Benchmarking h2_e2e_best_case_get_minimal/h2_crate
+Benchmarking h2_e2e_best_case_get_minimal/h2_crate: Warming up for 2.0000 s
+Benchmarking h2_e2e_best_case_get_minimal/h2_crate: Collecting 20 samples in estimated 5.0005 s (151k iterations)
+Benchmarking h2_e2e_best_case_get_minimal/h2_crate: Analyzing
+h2_e2e_best_case_get_minimal/h2_crate
+                        time:   [32.074 µs 32.258 µs 32.500 µs]
+                        thrpt:  [30.769 Kelem/s 31.000 Kelem/s 31.178 Kelem/s]
+Benchmarking h2_e2e_best_case_get_minimal/proxima_native
+Benchmarking h2_e2e_best_case_get_minimal/proxima_native: Warming up for 2.0000 s
+Benchmarking h2_e2e_best_case_get_minimal/proxima_native: Collecting 20 samples in estimated 5.0028 s (181k iterations)
+Benchmarking h2_e2e_best_case_get_minimal/proxima_native: Analyzing
+h2_e2e_best_case_get_minimal/proxima_native
+                        time:   [30.015 µs 32.433 µs 34.741 µs]
+                        thrpt:  [28.785 Kelem/s 30.833 Kelem/s 33.317 Kelem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking h2_e2e_balanced_browser_get/h2_crate
+Benchmarking h2_e2e_balanced_browser_get/h2_crate: Warming up for 2.0000 s
+Benchmarking h2_e2e_balanced_browser_get/h2_crate: Collecting 20 samples in estimated 5.0060 s (113k iterations)
+Benchmarking h2_e2e_balanced_browser_get/h2_crate: Analyzing
+h2_e2e_balanced_browser_get/h2_crate
+                        time:   [39.672 µs 40.746 µs 42.537 µs]
+                        thrpt:  [23.509 Kelem/s 24.542 Kelem/s 25.207 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking h2_e2e_balanced_browser_get/proxima_native
+Benchmarking h2_e2e_balanced_browser_get/proxima_native: Warming up for 2.0000 s
+Benchmarking h2_e2e_balanced_browser_get/proxima_native: Collecting 20 samples in estimated 5.0060 s (140k iterations)
+Benchmarking h2_e2e_balanced_browser_get/proxima_native: Analyzing
+h2_e2e_balanced_browser_get/proxima_native
+                        time:   [34.395 µs 35.149 µs 36.406 µs]
+                        thrpt:  [27.468 Kelem/s 28.451 Kelem/s 29.074 Kelem/s]
+
+Benchmarking h2_e2e_worst_case_post_echo_32kib/h2_crate
+Benchmarking h2_e2e_worst_case_post_echo_32kib/h2_crate: Warming up for 2.0000 s
+Benchmarking h2_e2e_worst_case_post_echo_32kib/h2_crate: Collecting 20 samples in estimated 5.0029 s (73k iterations)
+Benchmarking h2_e2e_worst_case_post_echo_32kib/h2_crate: Analyzing
+h2_e2e_worst_case_post_echo_32kib/h2_crate
+                        time:   [67.685 µs 67.944 µs 68.135 µs]
+                        thrpt:  [458.65 MiB/s 459.94 MiB/s 461.70 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking h2_e2e_worst_case_post_echo_32kib/proxima_native
+Benchmarking h2_e2e_worst_case_post_echo_32kib/proxima_native: Warming up for 2.0000 s
+Benchmarking h2_e2e_worst_case_post_echo_32kib/proxima_native: Collecting 20 samples in estimated 5.0109 s (77k iterations)
+Benchmarking h2_e2e_worst_case_post_echo_32kib/proxima_native: Analyzing
+h2_e2e_worst_case_post_echo_32kib/proxima_native
+                        time:   [64.269 µs 64.718 µs 65.111 µs]
+                        thrpt:  [479.95 MiB/s 482.86 MiB/s 486.23 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+

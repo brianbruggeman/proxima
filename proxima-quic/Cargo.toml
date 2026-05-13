@@ -1,0 +1,64 @@
+[package]
+name = "proxima-quic"
+description = "Runtime-agnostic QUIC I/O facade over proxima-protocols::quic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["quinn-compat", "native"]
+# Native facade — Future-shaped Endpoint+Connection over
+# proxima-protocols::quic. The runtime-agnostic poll_* APIs work with
+# any executor (prime in production, tokio via `tokio-compat` feature,
+# etc.).
+native = [
+    "dep:proxima-protocols",
+    "proxima-protocols/quic-alloc",
+    "dep:rand",
+    "dep:prime",
+]
+# tokio-compat: glue allowing the native facade to be driven from tokio.
+# OFF by default per the workspace tokio-free-production rule.
+tokio-compat = ["native", "dep:tokio"]
+# Quinn-compat shim — the original quinn-wrapped Endpoint/Connection
+# kept available until the Phase D2 cutover so proxima-http's http3 module + listeners
+# don't break in this transition.
+quinn-compat = ["dep:quinn", "dep:quinn-proto", "dep:rustls", "dep:rcgen", "dep:tokio-util"]
+
+[dependencies]
+proxima-core = { workspace = true }
+proxima-primitives = { workspace = true, features = ["std"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+# Native path.
+proxima-protocols = { workspace = true, optional = true }
+prime = { workspace = true, optional = true, features = [
+    "runtime-prime-reactor",
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-bgpool",
+] }
+rand = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["net", "rt", "macros"] }
+# Quinn compat shim (kept until Phase D2 cutover).
+quinn = { workspace = true, optional = true, features = ["rustls-aws-lc-rs", "runtime-tokio"] }
+quinn-proto = { workspace = true, optional = true, features = ["rustls-aws-lc-rs"] }
+rustls = { workspace = true, optional = true, features = ["std", "aws_lc_rs", "tls12"] }
+rcgen = { workspace = true, optional = true, features = ["aws_lc_rs", "pem"] }
+tokio-util = { workspace = true, optional = true, features = ["compat"] }
+serde = { workspace = true, features = ["derive"] }
+arrayvec.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+proxima-protocols = { workspace = true, features = ["quic-alloc", "quic-mock-tls"] }
+proxima-runtime.workspace = true
+toml.workspace = true

@@ -1,0 +1,28 @@
+# build-time sizing for proxima-log-buffer.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_log_buffer_sized.rs.
+# these are the compile-time DEFAULTS. the per-process surface is config-driven:
+# the runtime conflaguration `LogBufferConfig` (capacity / live_tail_channel_capacity)
+# overrides them via config file / env / fluent builder — that is the surface
+# deployments should use (a downstream that re-brands its own config maps it onto
+# the LogBufferConfig API rather than setting these build vars directly).
+#
+# these are also the no_std+no_alloc floor's ONLY knob: once this crate lifts off
+# std (blocked today on proxima-sync::Notify's no_std support), these consts size
+# the bare-metal ring without any runtime config layer.
+#
+# per-system build-time overrides via env vars:
+#
+#   PROXIMA_LOG_BUFFER_BUFFER_CAPACITY=2048 \
+#   PROXIMA_LOG_BUFFER_LIVE_TAIL_CHANNEL_CAPACITY=512 \
+#       cargo build -p proxima-log-buffer
+
+[buffer]
+# Retained ring-buffer capacity (lines) for a `LogBuffer`. Oldest line is
+# evicted once full — the ring is the system of record for late readers.
+capacity = 1024
+
+[live_tail]
+# Per-subscriber live-tail queue capacity. A slow subscriber whose queue fills
+# has its newest line dropped (best-effort fanout; the retained ring buffer
+# above remains authoritative).
+channel_capacity = 256

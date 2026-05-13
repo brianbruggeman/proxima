@@ -1,0 +1,80 @@
+[package]
+name = "proxima-tls"
+description = "TLS configuration + rustls integration for proxima: TlsConfig, self-signed dev certs, SNI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+proxima-core = { workspace = true, features = ["alloc"] }
+base64 = { workspace = true, optional = true }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"], optional = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"], optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"], optional = true }
+futures-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"], optional = true }
+proxima-primitives = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+proxima-net = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"] }
+temp-env = { workspace = true }
+
+[features]
+default = ["std"]
+# `std` gates the entire TlsConfig + TlsAcceptor surface (PathBuf-based
+# cert/key paths, tokio-rustls integration). Under no_std + alloc the
+# crate is a tier marker. A clean no_std + alloc rustls wrap
+# (proxima-tls-rustls-core taking byte-payload cert/key) is the
+# DC-TLS-CORE follow-on plan.
+std = [
+    "dep:base64",
+    "dep:rcgen",
+    "dep:rustls",
+    "dep:serde_json",
+]
+# Forwarded from the umbrella so ALPN advertises h1/h2 only when those
+# protocols are actually enabled downstream.
+http1 = ["std"]
+http2 = ["std"]
+# `tokio` gates `build_acceptor` (a `tokio_rustls::TlsAcceptor`-returning
+# constructor) for callers still on a tokio-native socket. The default,
+# tokio-free path is `build_acceptor_futures_io` under the `futures-io`
+# feature — same `rustls::ServerConfig` underneath, different async adapter.
+tokio = ["std", "dep:tokio-rustls"]
+
+# `futures-io` enables `build_acceptor_futures_io` which returns a
+# `futures_rustls::TlsAcceptor`. Use this for backends that speak
+# `futures::io::AsyncRead + AsyncWrite` natively (proxima-primitives::stream,
+# DPDK, glommio, io_uring direct). Default off; tokio-rustls is the default
+# adapter today.
+# the client `TlsStreamUpstream` lives here; it ships a P4 config +
+# bon builder, so the futures-io feature pulls bon + conflaguration too.
+# `proxima-primitives/std`: the workspace entry sets default-features =
+# false; proxima-primitives folds in the former proxima-stream, whose own
+# workspace entry had no such override (implicit std by default) — this
+# keeps that behaviour.
+futures-io = [
+    "std",
+    "dep:futures-rustls",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+    "dep:webpki-roots",
+    "dep:futures",
+    "futures/std",
+    "dep:bon",
+    "dep:conflaguration",
+]
+
+[lints]
+workspace = true

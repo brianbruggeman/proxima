@@ -1,0 +1,21 @@
+# A small DAG of three stages that exercises every demo verb. Each
+# stage is `/bin/sh -c …` for portability; substitute richer commands
+# (cargo bench, etc.) for the actual host-b run.
+name = "remote-pipeline-demo"
+
+[[stages]]
+name = "fetch"
+command = "/bin/sh"
+args = ["-c", "echo 'fetched sources' > sources.txt; sleep 0.1; echo fetch ok"]
+
+[[stages]]
+name = "build"
+command = "/bin/sh"
+args = ["-c", "echo 'built artifact' > artifact.bin; sleep 0.1; echo build ok"]
+depends_on = ["fetch"]
+
+[[stages]]
+name = "bench"
+command = "/bin/sh"
+args = ["-c", "echo 'bench report' > criterion.html; sleep 0.1; echo bench ok"]
+depends_on = ["build"]

@@ -1,0 +1,5 @@
+error: #[span] cannot be applied to const fn
+ --> tests/ui/span_on_const_fn.rs:5:1
+  |
+5 | const fn bad() -> u32 {
+  | ^^^^^

@@ -1,0 +1,33 @@
+## cached-origin — proves the fallthrough + write-back pattern under load.
+##
+## a synth "origin" replies 200 with the canned response. a kv:cache
+## sits in front. the first request misses, populates the cache via
+## write_back; every subsequent request hits the cache. the cel expectation
+## asserts the cache write fired at least once across 100 requests.
+
+mode = "in_process"
+
+[workload]
+target_pipe = "cached_origin"
+method = "POST"
+path = "/v1/chat/completions"
+requests = 100
+concurrency = 4
+body = "{\"model\":\"gpt-4\"}"
+
+[[pipe]]
+name = "cached_origin"
+upstreams = [
+  { name = "cache", kv = "cache", max_entries = 1024 },
+  { name = "origin", synth = { status = 200, body = "{\"id\":\"chatcmpl-fake\",\"object\":\"chat.completion\",\"choices\":[]}" } },
+]
+select = { algorithm = "fallthrough", miss_on = ["no_data"] }
+write_back = [["origin", "cache"]]
+
+[[expect]]
+kind = "success_rate_ge"
+ratio = 1.0
+
+[[expect]]
+kind = "cel"
+expression = "counter['proxima.write_back.writes_total'] >= 1"

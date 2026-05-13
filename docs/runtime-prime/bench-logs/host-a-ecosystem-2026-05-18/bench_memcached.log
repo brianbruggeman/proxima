@@ -1,0 +1,78 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 33s
+     Running benches/bench_memcached.rs (/tmp/cargo_target/release/deps/bench_memcached-ada17e04d3aaa23c)
+Benchmarking memcached_get/proxima
+Benchmarking memcached_get/proxima: Warming up for 2.0000 s
+Benchmarking memcached_get/proxima: Collecting 20 samples in estimated 2.0000 s (212M iterations)
+Benchmarking memcached_get/proxima: Analyzing
+memcached_get/proxima   time:   [9.2886 ns 9.2944 ns 9.3008 ns]
+                        thrpt:  [1.1015 GiB/s 1.1022 GiB/s 1.1029 GiB/s]
+                 change:
+                        time:   [+3.3808% +3.5649% +3.7349%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.6004% −3.4422% −3.2702%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking memcached_get/parity
+Benchmarking memcached_get/parity: Warming up for 2.0000 s
+Benchmarking memcached_get/parity: Collecting 20 samples in estimated 2.0000 s (223M iterations)
+Benchmarking memcached_get/parity: Analyzing
+memcached_get/parity    time:   [8.9459 ns 8.9501 ns 8.9548 ns]
+                        thrpt:  [1.1440 GiB/s 1.1446 GiB/s 1.1452 GiB/s]
+                 change:
+                        time:   [+3.4104% +3.5803% +3.7300%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.5959% −3.4565% −3.2979%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking memcached_set/proxima
+Benchmarking memcached_set/proxima: Warming up for 2.0000 s
+Benchmarking memcached_set/proxima: Collecting 20 samples in estimated 2.0000 s (82M iterations)
+Benchmarking memcached_set/proxima: Analyzing
+memcached_set/proxima   time:   [24.512 ns 24.539 ns 24.564 ns]
+                        thrpt:  [3.2227 GiB/s 3.2260 GiB/s 3.2295 GiB/s]
+                 change:
+                        time:   [+0.7123% +0.8780% +1.0312%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.0206% −0.8704% −0.7073%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking memcached_set/parity
+Benchmarking memcached_set/parity: Warming up for 2.0000 s
+Benchmarking memcached_set/parity: Collecting 20 samples in estimated 2.0000 s (75M iterations)
+Benchmarking memcached_set/parity: Analyzing
+memcached_set/parity    time:   [26.506 ns 26.519 ns 26.538 ns]
+                        thrpt:  [2.9830 GiB/s 2.9851 GiB/s 2.9866 GiB/s]
+                 change:
+                        time:   [+3.4047% +3.5707% +3.7223%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.5887% −3.4476% −3.2926%]
+                        Performance has regressed.
+
+Benchmarking memcached_delete/proxima
+Benchmarking memcached_delete/proxima: Warming up for 2.0000 s
+Benchmarking memcached_delete/proxima: Collecting 20 samples in estimated 2.0000 s (151M iterations)
+Benchmarking memcached_delete/proxima: Analyzing
+memcached_delete/proxima
+                        time:   [13.252 ns 13.262 ns 13.274 ns]
+                        thrpt:  [1005.9 MiB/s 1006.7 MiB/s 1007.5 MiB/s]
+                 change:
+                        time:   [+3.5938% +3.7143% +3.8428%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.7005% −3.5812% −3.4691%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking memcached_delete/parity
+Benchmarking memcached_delete/parity: Warming up for 2.0000 s
+Benchmarking memcached_delete/parity: Collecting 20 samples in estimated 2.0000 s (134M iterations)
+Benchmarking memcached_delete/parity: Analyzing
+memcached_delete/parity time:   [14.898 ns 14.916 ns 14.935 ns]
+                        thrpt:  [893.95 MiB/s 895.09 MiB/s 896.21 MiB/s]
+                 change:
+                        time:   [+2.9097% +3.1669% +3.4145%] (p = 0.00 < 0.05)
+                        thrpt:  [−3.3017% −3.0697% −2.8274%]
+                        Performance has regressed.
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low mild
+  2 (10.00%) high mild
+

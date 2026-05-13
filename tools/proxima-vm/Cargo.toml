@@ -1,0 +1,34 @@
+[package]
+name = "proxima-vm"
+description = "Minimal VM-backed proxima Pipe proof surface for scratch guests over KVM or Hypervisor.framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+# proxima-primitives::pipe alloc tier drags in proxima-primitives::transport
+# -> parking_lot (no no_std path)
+std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std"]
+alloc = []
+
+[dependencies]
+bytes.workspace = true
+futures.workspace = true
+proxima-core = { workspace = true, features = ["alloc"] }
+proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
+proxima-protocols = { workspace = true, features = ["process"] }
+
+[[bin]]
+name = "hello"
+required-features = ["std"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = "1.2.62"

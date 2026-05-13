@@ -1,0 +1,28 @@
+# build-time sizing for proxima-listen.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_listen_sized.rs.
+# these are the compile-time DEFAULTS. the per-process surface is config-driven:
+# the runtime conflaguration `ListenTuningConfig` (backlog / drain_timeout_ms)
+# overrides them via config file / env / fluent builder — that is the surface
+# deployments should use (a downstream that re-brands its own config maps it
+# onto the ListenTuningConfig API rather than setting these build vars
+# directly).
+#
+# the `http_handler_spread` flag is runtime-only (a policy toggle, not a
+# size) and is NOT part of this sized floor; it lives in `ListenTuningConfig`
+# alone, read from `PROXIMA_HTTP_HANDLER_SPREAD`.
+#
+# these are also the no_std+no_alloc floor's ONLY knob: once this crate lifts
+# off std, these consts size the bare-metal listen queue / drain window
+# without any runtime config layer.
+#
+# per-system build-time overrides via env vars:
+#
+#   PROXIMA_LISTEN_LISTENER_BACKLOG=1024 \
+#   PROXIMA_LISTEN_LISTENER_DRAIN_TIMEOUT_MS=30000 \
+#       cargo build -p proxima-listen
+
+[listener]
+# TCP listen() backlog (SYN accept queue depth) for reuseport-bound sockets.
+backlog = 1024
+# Default graceful-drain timeout (ms) used by `ShutdownPolicy::drain_30s()`.
+drain_timeout_ms = 30000

@@ -1,0 +1,35 @@
+## echo — minimal scenario.
+##
+## one synth pipe replies 200 with a static body. the workload drives 200
+## requests at concurrency 8. expectations assert full success and tight
+## p99 latency. the load-bearing baseline scenario; perf gates run against
+## this in scenario-driven CI.
+
+mode = "in_process"
+
+[workload]
+target_pipe = "echo"
+method = "GET"
+path = "/"
+requests = 200
+concurrency = 8
+
+[[pipe]]
+name = "echo"
+
+[pipe.synth]
+status = 200
+body = "echo"
+
+[[expect]]
+kind = "success_rate_ge"
+ratio = 1.0
+
+[[expect]]
+kind = "histogram_p99_le_ms"
+metric = "proxima.upstream.latency_ms"
+max_ms = 50.0
+
+[[expect]]
+kind = "cel"
+expression = "successes == 200 && failures == 0"

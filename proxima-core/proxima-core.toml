@@ -1,0 +1,31 @@
+# Build-time sizing for proxima-core. Read by build.rs; emitted as consts
+# into $OUT_DIR/proxima_core_sized.rs and surfaced via `pub mod sized`.
+# ONLY the no_std + no-alloc tier is bounded by these values — the alloc
+# tier uses Vec and grows dynamically (no fixed cap to overflow).
+#
+# Env-var overrides at build time: PROXIMA_CORE_<SECTION>_<KEY>
+# e.g. PROXIMA_CORE_BATCH_RECV_INITIAL_CAP=8 for an embedded target.
+
+[batch]
+# Bytes per receive slot — the iovec target size for one datagram. Must be
+# >= the path MTU; 2048 covers a 1500-byte Ethernet MTU with coalescing /
+# GRO headroom. Drop to 256 on sensors that never carry full datagrams.
+recv_slot_bytes = 2048
+# Pre-allocated receive slot count. The alloc tier grows past this to drain a
+# burst to empty; the no-alloc tier is HARD-capped here (a burst exceeding it
+# stays in the kernel buffer and is drained next iteration — bounded, documented).
+recv_initial_cap = 32
+# Send-staging arena byte capacity. Alloc tier grows to the high-water mark and
+# retains it; no-alloc tier is fixed at this size.
+send_arena_initial_bytes = 65536
+# Max outbound datagrams staged per flush. Alloc tier's span Vec grows; no-alloc
+# tier is fixed here. 256 covers a burst-then-echo serve pattern at scale.
+send_span_cap = 256
+
+[signal]
+# Inline (no-heap-alloc) capacity for one Level's concurrent waker registrations
+# — a SmallVec<[Arc<WakerSlot>; N]>. Typical case is 1 waiter per scope level
+# (one connection/request awaiting cancellation); this absorbs a small select!-
+# loop burst without spilling. A burst beyond N spills to a heap-allocated Vec
+# (unbounded, same as before this cap existed) — no waiter is ever refused.
+waiters_inline_cap = 4

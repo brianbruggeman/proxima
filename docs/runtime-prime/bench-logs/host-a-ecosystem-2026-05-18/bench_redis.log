@@ -1,0 +1,290 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 34s
+     Running benches/bench_redis.rs (/tmp/cargo_target/release/deps/bench_redis-22a4e0a96e8f9e7d)
+Benchmarking redis_parse_proxima/simple_string
+Benchmarking redis_parse_proxima/simple_string: Warming up for 2.0000 s
+Benchmarking redis_parse_proxima/simple_string: Collecting 20 samples in estimated 3.0000 s (603M iterations)
+Benchmarking redis_parse_proxima/simple_string: Analyzing
+redis_parse_proxima/simple_string
+                        time:   [4.9702 ns 4.9714 ns 4.9726 ns]
+                        thrpt:  [958.94 MiB/s 959.16 MiB/s 959.40 MiB/s]
+                 change:
+                        time:   [+1.5952% +1.9143% +2.2457%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.1964% −1.8784% −1.5701%]
+                        Performance has regressed.
+Benchmarking redis_parse_proxima/error
+Benchmarking redis_parse_proxima/error: Warming up for 2.0000 s
+Benchmarking redis_parse_proxima/error: Collecting 20 samples in estimated 3.0000 s (232M iterations)
+Benchmarking redis_parse_proxima/error: Analyzing
+redis_parse_proxima/error
+                        time:   [12.917 ns 12.929 ns 12.941 ns]
+                        thrpt:  [2.0871 GiB/s 2.0890 GiB/s 2.0909 GiB/s]
+                 change:
+                        time:   [−1.1035% +0.6735% +1.7331%] (p = 0.33 > 0.05)
+                        thrpt:  [−1.7036% −0.6690% +1.1158%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high mild
+Benchmarking redis_parse_proxima/integer
+Benchmarking redis_parse_proxima/integer: Warming up for 2.0000 s
+Benchmarking redis_parse_proxima/integer: Collecting 20 samples in estimated 3.0000 s (459M iterations)
+Benchmarking redis_parse_proxima/integer: Analyzing
+redis_parse_proxima/integer
+                        time:   [6.5196 ns 6.5233 ns 6.5271 ns]
+                        thrpt:  [730.55 MiB/s 730.97 MiB/s 731.39 MiB/s]
+                 change:
+                        time:   [+1.1133% +1.3903% +1.6761%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.6485% −1.3713% −1.1011%]
+                        Performance has regressed.
+Benchmarking redis_parse_proxima/blob_short
+Benchmarking redis_parse_proxima/blob_short: Warming up for 2.0000 s
+Benchmarking redis_parse_proxima/blob_short: Collecting 20 samples in estimated 3.0000 s (463M iterations)
+Benchmarking redis_parse_proxima/blob_short: Analyzing
+redis_parse_proxima/blob_short
+                        time:   [6.4872 ns 6.5372 ns 6.6257 ns]
+                        thrpt:  [1.5462 GiB/s 1.5671 GiB/s 1.5792 GiB/s]
+                 change:
+                        time:   [+0.5304% +1.0544% +1.7310%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.7015% −1.0434% −0.5276%]
+                        Change within noise threshold.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking redis_parse_proxima/array_of_blobs
+Benchmarking redis_parse_proxima/array_of_blobs: Warming up for 2.0000 s
+Benchmarking redis_parse_proxima/array_of_blobs: Collecting 20 samples in estimated 3.0000 s (70M iterations)
+Benchmarking redis_parse_proxima/array_of_blobs: Analyzing
+redis_parse_proxima/array_of_blobs
+                        time:   [42.895 ns 42.927 ns 42.962 ns]
+                        thrpt:  [488.36 MiB/s 488.75 MiB/s 489.12 MiB/s]
+                 change:
+                        time:   [−2.2296% +0.1174% +1.5013%] (p = 0.64 > 0.05)
+                        thrpt:  [−1.4791% −0.1173% +2.2804%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking redis_parse_proxima/blob_1kb
+Benchmarking redis_parse_proxima/blob_1kb: Warming up for 2.0000 s
+Benchmarking redis_parse_proxima/blob_1kb: Collecting 20 samples in estimated 3.0000 s (317M iterations)
+Benchmarking redis_parse_proxima/blob_1kb: Analyzing
+redis_parse_proxima/blob_1kb
+                        time:   [9.4520 ns 9.4596 ns 9.4672 ns]
+                        thrpt:  [101.62 GiB/s 101.70 GiB/s 101.78 GiB/s]
+                 change:
+                        time:   [+0.7979% +1.1519% +1.5176%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.4949% −1.1388% −0.7916%]
+                        Change within noise threshold.
+
+Benchmarking redis_parse_parity_baseline/simple_string
+Benchmarking redis_parse_parity_baseline/simple_string: Warming up for 2.0000 s
+Benchmarking redis_parse_parity_baseline/simple_string: Collecting 20 samples in estimated 3.0000 s (714M iterations)
+Benchmarking redis_parse_parity_baseline/simple_string: Analyzing
+redis_parse_parity_baseline/simple_string
+                        time:   [3.9714 ns 3.9740 ns 3.9769 ns]
+                        thrpt:  [1.1709 GiB/s 1.1718 GiB/s 1.1725 GiB/s]
+                 change:
+                        time:   [−18.509% −8.8365% −1.5032%] (p = 0.37 > 0.05)
+                        thrpt:  [+1.5261% +9.6930% +22.713%]
+                        No change in performance detected.
+Benchmarking redis_parse_parity_baseline/error
+Benchmarking redis_parse_parity_baseline/error: Warming up for 2.0000 s
+Benchmarking redis_parse_parity_baseline/error: Collecting 20 samples in estimated 3.0000 s (251M iterations)
+Benchmarking redis_parse_parity_baseline/error: Analyzing
+redis_parse_parity_baseline/error
+                        time:   [11.920 ns 11.926 ns 11.931 ns]
+                        thrpt:  [2.2637 GiB/s 2.2647 GiB/s 2.2658 GiB/s]
+                 change:
+                        time:   [+0.4544% +0.8023% +1.1433%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.1304% −0.7959% −0.4523%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking redis_parse_parity_baseline/integer
+Benchmarking redis_parse_parity_baseline/integer: Warming up for 2.0000 s
+Benchmarking redis_parse_parity_baseline/integer: Collecting 20 samples in estimated 3.0000 s (393M iterations)
+Benchmarking redis_parse_parity_baseline/integer: Analyzing
+redis_parse_parity_baseline/integer
+                        time:   [7.6282 ns 7.6379 ns 7.6483 ns]
+                        thrpt:  [623.46 MiB/s 624.31 MiB/s 625.10 MiB/s]
+                 change:
+                        time:   [−4.2544% −3.7392% −3.3183%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.4322% +3.8845% +4.4434%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking redis_parse_parity_baseline/blob_short
+Benchmarking redis_parse_parity_baseline/blob_short: Warming up for 2.0000 s
+Benchmarking redis_parse_parity_baseline/blob_short: Collecting 20 samples in estimated 3.0000 s (431M iterations)
+Benchmarking redis_parse_parity_baseline/blob_short: Analyzing
+redis_parse_parity_baseline/blob_short
+                        time:   [6.9592 ns 6.9644 ns 6.9688 ns]
+                        thrpt:  [1.4701 GiB/s 1.4710 GiB/s 1.4721 GiB/s]
+                 change:
+                        time:   [−2.8284% −1.2144% +0.0933%] (p = 0.48 > 0.05)
+                        thrpt:  [−0.0932% +1.2293% +2.9107%]
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) low mild
+Benchmarking redis_parse_parity_baseline/array_of_blobs
+Benchmarking redis_parse_parity_baseline/array_of_blobs: Warming up for 2.0000 s
+Benchmarking redis_parse_parity_baseline/array_of_blobs: Collecting 20 samples in estimated 3.0000 s (66M iterations)
+Benchmarking redis_parse_parity_baseline/array_of_blobs: Analyzing
+redis_parse_parity_baseline/array_of_blobs
+                        time:   [45.382 ns 45.426 ns 45.477 ns]
+                        thrpt:  [461.35 MiB/s 461.87 MiB/s 462.32 MiB/s]
+                 change:
+                        time:   [+0.9969% +1.3077% +1.6219%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.5961% −1.2908% −0.9871%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking redis_parse_parity_baseline/blob_1kb
+Benchmarking redis_parse_parity_baseline/blob_1kb: Warming up for 2.0000 s
+Benchmarking redis_parse_parity_baseline/blob_1kb: Collecting 20 samples in estimated 3.0000 s (251M iterations)
+Benchmarking redis_parse_parity_baseline/blob_1kb: Analyzing
+redis_parse_parity_baseline/blob_1kb
+                        time:   [11.933 ns 11.938 ns 11.942 ns]
+                        thrpt:  [80.559 GiB/s 80.590 GiB/s 80.622 GiB/s]
+                 change:
+                        time:   [+0.6307% +0.8830% +1.1316%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.1190% −0.8753% −0.6268%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking redis_parse_redis_protocol/simple_string
+Benchmarking redis_parse_redis_protocol/simple_string: Warming up for 2.0000 s
+Benchmarking redis_parse_redis_protocol/simple_string: Collecting 20 samples in estimated 3.0000 s (46M iterations)
+Benchmarking redis_parse_redis_protocol/simple_string: Analyzing
+redis_parse_redis_protocol/simple_string
+                        time:   [65.597 ns 65.645 ns 65.704 ns]
+                        thrpt:  [72.574 MiB/s 72.639 MiB/s 72.692 MiB/s]
+                 change:
+                        time:   [−1.1428% −0.8465% −0.5444%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.5474% +0.8537% +1.1560%]
+                        Change within noise threshold.
+Benchmarking redis_parse_redis_protocol/error
+Benchmarking redis_parse_redis_protocol/error: Warming up for 2.0000 s
+Benchmarking redis_parse_redis_protocol/error: Collecting 20 samples in estimated 3.0000 s (37M iterations)
+Benchmarking redis_parse_redis_protocol/error: Analyzing
+redis_parse_redis_protocol/error
+                        time:   [81.956 ns 82.053 ns 82.139 ns]
+                        thrpt:  [336.70 MiB/s 337.06 MiB/s 337.46 MiB/s]
+                 change:
+                        time:   [+0.8636% +1.2335% +1.6344%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.6081% −1.2185% −0.8562%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking redis_parse_redis_protocol/integer
+Benchmarking redis_parse_redis_protocol/integer: Warming up for 2.0000 s
+Benchmarking redis_parse_redis_protocol/integer: Collecting 20 samples in estimated 3.0000 s (60M iterations)
+Benchmarking redis_parse_redis_protocol/integer: Analyzing
+redis_parse_redis_protocol/integer
+                        time:   [49.799 ns 49.849 ns 49.903 ns]
+                        thrpt:  [95.552 MiB/s 95.656 MiB/s 95.752 MiB/s]
+                 change:
+                        time:   [+0.3807% +0.6980% +1.0143%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.0041% −0.6931% −0.3793%]
+                        Change within noise threshold.
+Benchmarking redis_parse_redis_protocol/blob_short
+Benchmarking redis_parse_redis_protocol/blob_short: Warming up for 2.0000 s
+Benchmarking redis_parse_redis_protocol/blob_short: Collecting 20 samples in estimated 3.0000 s (38M iterations)
+Benchmarking redis_parse_redis_protocol/blob_short: Analyzing
+redis_parse_redis_protocol/blob_short
+                        time:   [79.278 ns 79.344 ns 79.420 ns]
+                        thrpt:  [132.09 MiB/s 132.21 MiB/s 132.32 MiB/s]
+                 change:
+                        time:   [+0.8876% +1.1356% +1.3972%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.3779% −1.1229% −0.8797%]
+                        Change within noise threshold.
+Benchmarking redis_parse_redis_protocol/array_of_blobs
+Benchmarking redis_parse_redis_protocol/array_of_blobs: Warming up for 2.0000 s
+Benchmarking redis_parse_redis_protocol/array_of_blobs: Collecting 20 samples in estimated 3.0000 s (7.9M iterations)
+Benchmarking redis_parse_redis_protocol/array_of_blobs: Analyzing
+redis_parse_redis_protocol/array_of_blobs
+                        time:   [376.08 ns 376.89 ns 377.77 ns]
+                        thrpt:  [55.539 MiB/s 55.668 MiB/s 55.788 MiB/s]
+                 change:
+                        time:   [+1.7546% +2.1930% +2.6294%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.5620% −2.1460% −1.7244%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking redis_parse_redis_protocol/blob_1kb
+Benchmarking redis_parse_redis_protocol/blob_1kb: Warming up for 2.0000 s
+Benchmarking redis_parse_redis_protocol/blob_1kb: Collecting 20 samples in estimated 3.0000 s (30M iterations)
+Benchmarking redis_parse_redis_protocol/blob_1kb: Analyzing
+redis_parse_redis_protocol/blob_1kb
+                        time:   [101.25 ns 101.35 ns 101.46 ns]
+                        thrpt:  [9.4820 GiB/s 9.4923 GiB/s 9.5020 GiB/s]
+                 change:
+                        time:   [−2.3106% −2.0582% −1.7968%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.8297% +2.1015% +2.3653%]
+                        Performance has improved.
+
+Benchmarking redis_round_trip_proxima/simple_string
+Benchmarking redis_round_trip_proxima/simple_string: Warming up for 2.0000 s
+Benchmarking redis_round_trip_proxima/simple_string: Collecting 20 samples in estimated 3.0000 s (104M iterations)
+Benchmarking redis_round_trip_proxima/simple_string: Analyzing
+redis_round_trip_proxima/simple_string
+                        time:   [28.817 ns 28.835 ns 28.852 ns]
+                        change: [−66.832% −64.732% −62.785%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking redis_round_trip_proxima/integer
+Benchmarking redis_round_trip_proxima/integer: Warming up for 2.0000 s
+Benchmarking redis_round_trip_proxima/integer: Collecting 20 samples in estimated 3.0000 s (93M iterations)
+Benchmarking redis_round_trip_proxima/integer: Analyzing
+redis_round_trip_proxima/integer
+                        time:   [32.384 ns 32.406 ns 32.430 ns]
+                        change: [−9.3008% −8.8165% −8.3757%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking redis_round_trip_proxima/blob_short
+Benchmarking redis_round_trip_proxima/blob_short: Warming up for 2.0000 s
+Benchmarking redis_round_trip_proxima/blob_short: Collecting 20 samples in estimated 3.0000 s (53M iterations)
+Benchmarking redis_round_trip_proxima/blob_short: Analyzing
+redis_round_trip_proxima/blob_short
+                        time:   [56.555 ns 56.599 ns 56.633 ns]
+                        change: [−49.036% −46.062% −43.909%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking redis_round_trip_proxima/array_of_blobs
+Benchmarking redis_round_trip_proxima/array_of_blobs: Warming up for 2.0000 s
+Benchmarking redis_round_trip_proxima/array_of_blobs: Collecting 20 samples in estimated 3.0000 s (15M iterations)
+Benchmarking redis_round_trip_proxima/array_of_blobs: Analyzing
+redis_round_trip_proxima/array_of_blobs
+                        time:   [197.61 ns 198.11 ns 198.65 ns]
+                        change: [−22.826% −22.330% −21.832%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking redis_workload_classify_command/proxima
+Benchmarking redis_workload_classify_command/proxima: Warming up for 2.0000 s
+Benchmarking redis_workload_classify_command/proxima: Collecting 20 samples in estimated 2.0000 s (44M iterations)
+Benchmarking redis_workload_classify_command/proxima: Analyzing
+redis_workload_classify_command/proxima
+                        time:   [45.741 ns 45.778 ns 45.813 ns]
+                        thrpt:  [457.97 MiB/s 458.31 MiB/s 458.69 MiB/s]
+                 change:
+                        time:   [+2.4784% +2.6371% +2.7881%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.7124% −2.5693% −2.4185%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low severe
+  1 (5.00%) high mild
+Benchmarking redis_workload_classify_command/redis_protocol
+Benchmarking redis_workload_classify_command/redis_protocol: Warming up for 2.0000 s
+Benchmarking redis_workload_classify_command/redis_protocol: Collecting 20 samples in estimated 2.0000 s (5.3M iterations)
+Benchmarking redis_workload_classify_command/redis_protocol: Analyzing
+redis_workload_classify_command/redis_protocol
+                        time:   [378.74 ns 380.06 ns 381.28 ns]
+                        thrpt:  [55.027 MiB/s 55.204 MiB/s 55.397 MiB/s]
+                 change:
+                        time:   [−2.1770% −1.0345% −0.1275%] (p = 0.21 > 0.05)
+                        thrpt:  [+0.1277% +1.0453% +2.2254%]
+                        No change in performance detected.
+

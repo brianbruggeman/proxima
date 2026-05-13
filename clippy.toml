@@ -1,0 +1,14 @@
+# the backend-forcing edge drivers are banned so app/lib code stays
+# backend-agnostic. reach for `#[proxima::main]` at the entry point, the
+# adaptive `proxima::runtime::run` (or `run!(fut)`) when you must boot inline,
+# or `proxima::runtime::block_on` / `block_on!(rt, fut)` to drive on a runtime
+# you already hold. benches/examples that DELIBERATELY compare backends carry a
+# scoped `#[allow(clippy::disallowed_methods)]` with a one-line why.
+disallowed-methods = [
+    { path = "proxima::runtime::run_prime", reason = "forces the prime backend — use #[proxima::main], `run`, or `block_on`" },
+    # `run_tokio` is gated behind the `tokio` feature (off by default since the
+    # tokio-optional migration), so this path isn't reachable in a default
+    # build — allow-invalid keeps clippy quiet there while still catching
+    # forbidden calls whenever `tokio` is enabled.
+    { path = "proxima::runtime::run_tokio", reason = "forces the tokio backend — use #[proxima::main], `run`, or `block_on`", allow-invalid = true },
+]

@@ -1,0 +1,190 @@
+[package]
+name = "prime"
+description = "From-scratch per-core async runtime: bounded SPSC inbox, typed-future fast path, reactor + executor + timer + background pool primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+toml = { workspace = true }
+proxima-build = { workspace = true }
+
+[dev-dependencies]
+proxima = { path = "..", default-features = false, features = ["test-support", "http1", "http2"] }
+criterion = { workspace = true }
+embassy-sync = "0.8"
+heapless = "0.8"
+proxima-core = { workspace = true, features = ["time-driver-prime-wheel"] }
+
+[dependencies]
+proxima-core = { workspace = true }
+proxima-runtime = { workspace = true }
+arc-swap = { workspace = true, optional = true }
+crossbeam-deque = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true }
+crossbeam-utils = { workspace = true }
+fastrand = { workspace = true, optional = true }
+atomic-waker = { workspace = true }
+futures = { workspace = true, optional = true, features = ["async-await", "std"] }
+num_cpus = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net"] }
+tracing = { workspace = true }
+conflaguration = { workspace = true, optional = true, features = ["derive", "toml"] }
+core_affinity = { workspace = true, optional = true }
+# `runtime-prime-config`'s override-TOML reader (src/os/sizing.rs) needs this
+# at the library level; the build-dependencies `toml` above is build.rs-only
+# and invisible to src/.
+toml = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true, features = ["all"] }
+proxima-primitives = { workspace = true, features = ["alloc", "async-mutex"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true, optional = true }
+tokio-uring = { workspace = true, optional = true }
+
+[features]
+default = ["std", "runtime-prime"]
+std = [
+    "alloc",
+    "proxima-core/std",
+    "proxima-runtime/std",
+    "dep:parking_lot",
+    "dep:num_cpus",
+    "dep:socket2",
+    "dep:crossbeam-deque",
+    "dep:futures",
+    "dep:conflaguration",
+    "dep:arc-swap",
+    "dep:fastrand",
+]
+alloc = ["proxima-core/alloc", "proxima-runtime/alloc"]
+runtime-prime             = []
+runtime-prime-thread-identity = ["runtime-prime"]
+runtime-prime-inbox-alloc = ["runtime-prime"]
+runtime-prime-inbox-const = ["runtime-prime"]
+# dynamic inbox: lane registry grows on demand (no NoLanes/exhaustion = no task
+# loss) and each lane ring allocates lazily on first claim (memory tracks active
+# producers, not num_lanes). N-lane floor allocated eagerly. default-off until
+# benched vs the inbox-alloc incumbent on the single-producer hot path.
+runtime-prime-inbox-dynamic = ["runtime-prime", "std"]
+runtime-prime-timer       = ["runtime-prime"]
+runtime-prime-reactor     = ["runtime-prime", "std", "dep:libc", "dep:core_affinity"]
+runtime-prime-reactor-harvest-io = ["runtime-prime-reactor"]
+runtime-prime-reactor-trace = ["runtime-prime-reactor"]
+runtime-prime-executor    = ["runtime-prime-timer"]
+runtime-prime-bgpool      = ["runtime-prime", "std", "dep:core_affinity"]
+runtime-prime-bgpool-rayon = ["runtime-prime-bgpool", "dep:rayon"]
+runtime-prime-bgpool-par   = ["runtime-prime-bgpool"]
+# the async job arm's per-worker tokio current-thread runtime
+# (background.rs) needs `dep:tokio` — carried by `prime-tokio-compat`
+# rather than unconditionally, so the default `runtime-prime-bgpool`
+# combo (the sync fast path + typed spawn) stays tokio-free.
+runtime-prime-bgpool-async = ["runtime-prime-bgpool", "prime-tokio-compat"]
+runtime-prime-config       = ["runtime-prime", "dep:toml"]
+io-uring = ["std", "dep:tokio-uring", "dep:io-uring"]
+rayon = ["dep:rayon", "proxima-runtime/rayon"]
+# wasm: the no_std + alloc core executor (run-queue, timer wheel, inbox) with
+# NO os reactor, NO tokio, NO threads — `prime::core` only, never `prime::os`.
+# The single-core `LocalExecutor` runs `?Send` futures, which is the shape a
+# browser / wasi host wants. Drive I/O by pairing with a host reactor source
+# (wasi poll_oneoff, browser event loop) and a bound `proxima_core::time` clock.
+# Builds on wasm32-unknown-unknown: `cargo build -p prime
+# --target wasm32-unknown-unknown --no-default-features --features wasm`.
+wasm = ["alloc", "runtime-prime-executor", "runtime-prime-inbox-alloc"]
+# the sole entry point for `dep:tokio` (see docs/pipe-to-metal/edges.md,
+# "prime-tokio-feature-split (task #8 remainder)"): `std` no longer pulls
+# tokio unconditionally, so anything that genuinely needs it (the sister/
+# inverted runtime paths in os/tokio_compat.rs + os/core_shard.rs,
+# os/runtime.rs's compat constructors, the tokio-backed `PrimeJoinSet` +
+# `RuntimeFactory` impl in os/primitives.rs, background.rs's async job
+# arm) forwards through this feature instead.
+prime-tokio-compat = ["std", "dep:tokio"]
+# inverted compat (design D2): prime stays the host but each worker owns its
+# OWN sister tokio current-thread runtime and runs the executor tick inside
+# `sister.block_on(...)`, so raw `tokio::spawn` from a prime task takes tokio's
+# LOCAL fast path (no per-spawn driver.unpark/kevent). implies the compat
+# module's deps; default-off.
+prime-tokio-compat-inverted = ["prime-tokio-compat"]
+runtime-prime-full = ["proxima-runtime/runtime-prime-full"]
+
+[[bench]]
+name = "bench_thread_identity"
+harness = false
+required-features = ["runtime-prime-thread-identity"]
+
+[[bench]]
+name = "bench_inbox_const"
+harness = false
+required-features = ["runtime-prime-inbox-const"]
+
+[[bench]]
+name = "bench_local_primitives"
+harness = false
+# compares prime's native primitives against tokio's as the incumbent
+# baseline (principle 14) — needs `dep:tokio` for the comparison arms,
+# carried by `prime-tokio-compat` now that `std` no longer pulls it.
+required-features = [
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+    "prime-tokio-compat",
+]
+
+[[bench]]
+name = "bench_inbox_dynamic"
+harness = false
+required-features = ["runtime-prime-inbox-dynamic"]
+
+[[bench]]
+name = "bench_timer_driver"
+harness = false
+required-features = [
+    "runtime-prime-timer",
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+]
+
+[[bench]]
+name = "bench_reactor_wakeup"
+harness = false
+# compares prime's reactor against a tokio-driven equivalent (principle
+# 14 incumbent baseline) — needs `dep:tokio`, carried by
+# `prime-tokio-compat` now that `std` no longer pulls it.
+required-features = [
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "prime-tokio-compat",
+]
+
+[[test]]
+name = "prime_wheel_linkage"
+required-features = [
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+]
+
+# inbox disassembly / spike probes — inner #![cfg] empties the file (no main)
+# unless the inbox features are present, so gate the targets explicitly.
+[[example]]
+name = "inbox_hotloop"
+required-features = ["runtime-prime-inbox-alloc", "runtime-prime-inbox-dynamic"]
+
+[[example]]
+name = "inbox_spike"
+required-features = ["runtime-prime-inbox-dynamic"]
+
+[lints]
+workspace = true

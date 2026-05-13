@@ -1,0 +1,182 @@
+# build-time sizing for proxima-quic-proto.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_quic_proto_sized.rs.
+# every const-generic cap in src/streams/ and src/connection/ traces back to here.
+#
+# Per-system overrides via env vars at build time:
+#
+#   PROXIMA_QUIC_PROTO_STREAMS_MAX_CONCURRENT_BIDI=64 \
+#       cargo build -p proxima-quic-proto
+#
+# The proxima-quic facade (tier-2) syncs from prime-runtime.toml at its
+# OWN build time and either re-exports these constants or substitutes
+# them via env-var override before building proxima-quic-proto.
+
+[streams]
+# Per-connection cap on concurrently-active bidirectional streams. The
+# `EstablishedState` carries an inline `StreamTable<MAX_BIDI, MAX_UNI>`,
+# so raising this also raises the connection's stack footprint by
+# roughly `(send + recv) × MAX` bytes. Conservative default keeps the
+# per-Connection size under ~32 KB.
+max_concurrent_bidi = 8
+# Per-connection cap on concurrently-active unidirectional streams.
+max_concurrent_uni = 8
+# Inline send-buffer bytes per stream. Tune up for bulk-throughput
+# workloads; tune down for low-memory embedded.
+send_buffer_inline_bytes = 1024
+# Inline recv-buffer bytes per stream (contiguous-bytes head of the
+# reassembly window).
+recv_buffer_inline_bytes = 1024
+# Maximum out-of-order fragments held per stream while waiting for
+# the gap-causing bytes to arrive. Each fragment carries its offset
+# + up to `reassembly_fragment_inline_bytes` bytes. Total per-stream
+# reassembly cost = `reassembly_max_fragments` * (varint + bytes-cap).
+reassembly_max_fragments = 8
+# Maximum bytes per out-of-order fragment. Fragments longer than this
+# at insert time are split internally (the head is buffered; the tail
+# is silently dropped — the peer retransmits per RFC 9002).
+reassembly_fragment_inline_bytes = 256
+
+[connection]
+# CID queue cap per side (RFC 9000 §18.2 active_connection_id_limit
+# floor). The proxima default per `prime-runtime.toml [quic]` is 4;
+# 8 here leaves runway for path migration where the active set
+# briefly exceeds the limit during retirement.
+cid_queue_cap = 8
+# Maximum offered-versions list capacity in a Version Negotiation
+# packet (RFC 9000 §17.2.1). No formal RFC cap; practical impls
+# limit ~8-16.
+vn_max_offered_versions = 16
+
+[ack]
+# Maximum ACK ranges per range set (drop-oldest on overflow per
+# RFC 9000 §13.2.4 + the C13 design doc).
+max_ranges = 32
+# Default max_ack_delay in microseconds (RFC 9000 §18.2 default 25 ms).
+# This is the ADVERTISED upper bound (transport parameter) — the peer's PTO
+# budget. It is NOT how long we actually hold an ACK.
+default_max_ack_delay_micros = 25000
+# (There is no ACK emission-delay knob: we never delay ACK emission. A lone
+# ack-eliciting packet is acked on the next transmit opportunity — the serve
+# loop calls poll_transmit in the same iteration that drained the recv burst,
+# so a burst coalesces into one ACK and a lone packet is acked immediately. A
+# hold timer would only ADD request/response latency.)
+
+[loss]
+# Per-epoch sent-packet queue cap (`SentPacketQueue<MAX_SENT_PACKETS>`).
+# Loss detection over a queue with dropped entries may produce slightly-
+# optimistic results under sustained loss.
+max_sent_packets = 1024
+# Max packets reported in a single LossOutcome (one detect_losses call).
+max_loss_burst = 64
+
+[key_update]
+# Minimum interval (microseconds) between consecutive client-initiated
+# key updates BEYOND the RFC-mandated "MUST have received an ACK for
+# the current key phase" precondition. Floor at 1 s by default —
+# conservative; production tunes via env override
+# PROXIMA_QUIC_PROTO_KEY_UPDATE_MIN_INITIATION_INTERVAL_MICROS.
+min_initiation_interval_micros = 1_000_000
+
+[path]
+# Maximum outstanding PATH_CHALLENGE tokens per path (RFC 9000 §8.2).
+# RFC doesn't mandate; quinn uses ~8.
+max_outstanding_challenges = 8
+
+[endpoint]
+# Fixed cap on tracked connection IDs for the NO-ALLOC tier ONLY. The
+# alloc/std tier uses a growable BTreeMap that scales with the live
+# connection count (no cap to overflow), so this value never bounds a std
+# server. It bounds only bare no_std+no_alloc embedded targets, where a
+# small fixed table is the point. Each connection holds TWO entries during
+# its handshake (client ODCID + our SCID), so size for ~2x the peak
+# concurrent handshakes the embedded target must survive. MUST be a power
+# of two (heapless::FnvIndexMap hash-probe modulus). Tune via env override
+# PROXIMA_QUIC_PROTO_ENDPOINT_DCID_TABLE_CAP.
+dcid_table_cap = 256
+# max_udp_payload_size (RFC 9000 §18.2, transport parameter 0x03) — the largest
+# UDP payload this endpoint will RECEIVE, advertised to the peer (which MUST NOT
+# send larger). It is the SINGLE source of truth for three things that must
+# never drift: (1) the advertised transport parameter, (2) the connection's
+# inbound packet buffer, (3) the I/O recv buffers. The spec default is 65527
+# (the max); we advertise it explicitly rather than rely on that default,
+# because the default only stays safe on paths with a small MTU — on loopback
+# (64K MTU) a non-advertising endpoint inherits a 64K obligation and a smaller
+# recv buffer SILENTLY TRUNCATES the peer's datagrams (mangled AEAD tag ->
+# DecryptFailed mid-connection). 65527 = never truncate any UDP datagram. Lower
+# it for memory-constrained targets (the recv/parse buffers size from this);
+# >=1200 per spec. Tune via PROXIMA_QUIC_PROTO_ENDPOINT_MAX_UDP_PAYLOAD_SIZE.
+max_udp_payload_size = 65527
+
+[bbr]
+# BBR.MinRTTFilterLen per draft-ietf-ccwg-bbr-05 §2.13.1 — 10 seconds.
+# Window length over which the BBR min-RTT filter retains the
+# smallest observed RTT sample before expiry.
+min_rtt_filter_window_micros = 10_000_000
+
+[zero_rtt]
+# Maximum length of a server-issued NewSessionTicket carried as the
+# client's resumption credential. TLS 1.3 tickets are typically
+# 100-300 bytes; 1024 leaves headroom for extension data.
+max_resumption_ticket_len = 1024
+
+[multipath]
+# Per-connection cap on tracked paths per draft-ietf-quic-multipath-21
+# §2.1 (initial_max_path_id). The draft caps the path ID at 2^32-1
+# but real deployments use 2-8 concurrent paths. 4 is the conservative
+# starting point matching quinn's typical setting.
+max_paths_per_connection = 4
+
+[retry_token]
+# Maximum length of a server-private address-validation token wire body
+# (RFC 9000 §8.1.3). The server is the only entity that issues and
+# consumes these — format is private. Upper-bounds plaintext (version
+# + kind + issued_at + 3 length-prefixed byte strings) + nonce + tag.
+#
+# Default 256 leaves headroom over the worst-case plaintext (113 bytes
+# at MAX_CLIENT_ADDR_LEN=32 + ODCID=20 + RSCID=20) for future schema
+# extension without re-tuning callers.
+max_token_len = 256
+# Maximum bytes of opaque client-address material a token may bind.
+# Caller serializes its own address (IPv4 = 6 bytes incl. port,
+# IPv6 = 18, NAT-extended up to 32). Tier-3 has no SocketAddr; the
+# facade does the serialization.
+max_client_addr_len = 32
+# Maximum bytes of a Connection ID embedded in the token. RFC 9000
+# §5.1.1 caps QUIC v1 CIDs at 20 bytes; we mirror that.
+max_cid_len = 20
+
+[datagram]
+# Per-direction unreliable-DATAGRAM queue caps per RFC 9221 (no formal
+# cap mandated; matches quinn-proto's typical bound).
+send_queue_cap = 256
+recv_queue_cap = 256
+# Local-advertised max_datagram_frame_size in transport parameters
+# (RFC 9221 §3). 0 disables DATAGRAM advertisement entirely.
+local_max_datagram_frame_size = 1200
+
+[handshake]
+# Memory budget (bytes) for 1-RTT datagrams buffered during the handshake.
+# A peer can send short-header 1-RTT packets before handshake completion;
+# we buffer them to replay immediately after the Handshake→Established
+# transition (avoiding the ~25 ms Application-PTO stall). This cap limits
+# the per-connection memory a misbehaving peer can force us to hold.
+# Excess datagrams are dropped; the peer retransmits post-handshake.
+early_data_max_bytes = 65536
+# Count safety net on the same buffer — caps the number of datagrams
+# regardless of their individual sizes. Drop-then-retransmit semantics.
+early_data_max_datagrams = 64
+# Lifetime of the early-data buffer in microseconds. If the handshake has
+# not completed within this window after the first buffered datagram,
+# the buffer is dropped (memory freed). The connection continues; if the
+# handshake later completes the peer retransmits the data.
+# Default 100 ms — tight enough to reclaim memory before a slow/stalled
+# handshake accumulates buffer churn; loose enough that fast legit peers
+# always fall well under it.
+early_data_hold_micros = 100_000
+# Maximum time (microseconds) from connection creation before we drop an
+# incomplete handshake entirely. This is the half-open connection defence:
+# connections that never finish the TLS exchange are freed after this
+# deadline rather than holding a slot until the idle timeout (30 s default).
+# Default 10 s — tighter than idle (30 s) but lenient enough for high-RTT
+# and CPU-loaded peers on the legit path. Tune down for high-churn servers.
+handshake_completion_micros = 10_000_000

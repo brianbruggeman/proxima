@@ -1,0 +1,1602 @@
+[workspace]
+members = [
+    ".",
+    "examples/plugin-skeleton",
+    "examples/new-platform",
+    "examples/no-std",
+    "examples/wasm",
+    "prime",
+    "proxima-auth",
+    "proxima-build",
+    "proxima-codec",
+    "proxima-config",
+    "proxima-core",
+    "proxima-http",
+    "proxima-storage",
+    "proxima-listen",
+    "proxima-macros",
+    "proxima-patterns",
+    "proxima-test",
+    "proxima-net",
+    "proxima-pgwire",
+    "proxima-primitives",
+    "proxima-process",
+    "proxima-protocols",
+    "proxima-quic",
+    "proxima-recording",
+    "proxima-redis",
+    "proxima-runtime",
+    "proxima-telemetry",
+    "proxima-intercept",
+    "proxima-tls",
+    "tools/proxima-cli",
+    "tools/proxima-vm",
+    "tools/rekt",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/brianbruggeman/proxima"
+homepage = "https://github.com/brianbruggeman/proxima"
+readme = "README.md"
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# we use `impl Future + Send` explicitly in traits to keep DynService dyn-compatible
+manual_async_fn = "allow"
+
+[workspace.dependencies]
+prime = { path = "prime" }
+proxima = { path = "." }
+proxima-auth = { path = "proxima-auth", default-features = false }
+proxima-build = { path = "proxima-build" }
+proxima-codec = { path = "proxima-codec", default-features = false }
+proxima-config = { path = "proxima-config", default-features = false }
+proxima-core = { path = "proxima-core", default-features = false }
+proxima-http = { path = "proxima-http", default-features = false }
+proxima-listen = { path = "proxima-listen" }
+proxima-macros = { path = "proxima-macros" }
+proxima-patterns = { path = "proxima-patterns", default-features = false }
+proxima-test = { path = "proxima-test" }
+proxima-net = { path = "proxima-net", default-features = false }
+proxima-pgwire = { path = "proxima-pgwire" }
+proxima-primitives = { path = "proxima-primitives", default-features = false }
+proxima-protocols = { path = "proxima-protocols", default-features = false }
+proxima-quic = { path = "proxima-quic", default-features = false }
+proxima-recording = { path = "proxima-recording" }
+proxima-redis = { path = "proxima-redis" }
+proxima-runtime = { path = "proxima-runtime", default-features = false }
+proxima-telemetry = { path = "proxima-telemetry" }
+proxima-tls = { path = "proxima-tls" }
+
+amq-protocol = "7"
+arc-swap = { version = "1.7", default-features = false }
+async-broadcast = { version = "0.7", default-features = false }
+async-channel = { version = "2", default-features = false }
+aes = { version = "0.8", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
+arrayvec = { version = "0.7.6", default-features = false }
+async-lock = { version = "3.4", default-features = false }
+async-stream = "0.3.6"
+async-tungstenite = { version = "0.34.1", default-features = false }
+atomic-waker = "1.1"
+atomic-wait = "1.1"
+aws-lc-rs = { version = "1.14.0", default-features = false }
+chacha20 = { version = "0.9", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false }
+base64 = "0.22.1"
+blake3 = "1.8.5"
+bon = "3.9.1"
+bumpalo = { version = "3.16", default-features = false }
+bytes = { version = "1.7", default-features = false }
+cel-interpreter = "0.10.0"
+clap = "4.5"
+conflaguration = { version = "2.0.0", git = "https://github.com/brianbruggeman/conflaguration.git", rev = "3eb325d84fc291df35528e6781b5b814884e2d28" }
+core_affinity = "0.8.3"
+criterion = { version = "0.8.2", default-features = false }
+crossbeam-deque = "0.8.6"
+crossbeam-queue = { version = "0.3.12", default-features = false, features = ["alloc"] }
+crossbeam-utils = { version = "0.8", default-features = false }
+dashmap = "6.1"
+event-listener = { version = "5.4", default-features = false }
+faster-hex = "0.10.0"
+fastrand = "2.4.1"
+flume = "0.12.0"
+futures = { version = "0.3", default-features = false }
+futures-rustls = { version = "0.26", default-features = false }
+futures-timer = "3"
+h2 = "0.4.14"
+h3 = { version = "0.0.8", default-features = false }
+h3-quinn = { version = "0.0.10", default-features = false }
+hdrhistogram = "7.5"
+heapless = { version = "0.9.3", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+memchr = { version = "2.7", default-features = false }
+hmac = { version = "0.12", default-features = false }
+hex = "0.4.3"
+hickory-proto = { version = "0.26.1", default-features = false }
+http = "1.1"
+http-body = "1"
+http-body-util = "0.1"
+httparse = { version = "1.10", default-features = false }
+hyper = "1.5"
+hyper-rustls = { version = "0.27.9", default-features = false }
+hyper-util = "0.1"
+io-uring = "0.7.12"
+json5 = "0.4"
+kafka-protocol = { version = "0.17", default-features = false }
+libc = "0.2"
+log = "0.4.29"
+loom = "0.7"
+metrics = "0.24.6"
+mimalloc = { version = "0.1", default-features = false }
+mqttbytes = "0.6"
+num_cpus = "1.17.0"
+opentelemetry = "0.32.0"
+opentelemetry-proto = "0.32.0"
+opentelemetry_sdk = "0.32.0"
+parking_lot = "0.12.5"
+lock_api = "0.4.14"
+pin-project-lite = "0.2"
+portable-atomic = { version = "1.13", default-features = false }
+pingora-core = { version = "0.8.0", default-features = false }
+pingora-http = { version = "0.8.0", default-features = false }
+postcard = { version = "1.1.3", default-features = false }
+proc-macro2 = "1"
+prometheus = "0.14.0"
+prost = { version = "0.14", default-features = false }
+quick-xml = "0.41"
+quinn = { version = "0.11.9", default-features = false }
+quinn-proto = { version = "0.11.14", default-features = false }
+quote = "1"
+rand = "0.10.1"
+proptest = "1.11"
+rayon = "1.12.0"
+rcgen = { version = "0.14.7", default-features = false }
+redis-protocol = "6.0.0"
+regex = "1.12.3"
+ron = "0.8"
+rstest = "0.26"
+rustix = { version = "1.1", default-features = false, features = ["std", "mm"] }
+rustc-hash = { version = "2.1.2", default-features = false }
+rustls = { version = "0.23.40", default-features = false }
+serde = { version = "1", default-features = false }
+serde-value = "0.7.0"
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde_norway = "0.9.42"
+sha2 = { version = "0.10", default-features = false }
+simd-json = "0.17"
+slog = "2.7"
+smallvec = { version = "1.15.1", default-features = false }
+socket2 = "0.5"
+syn = "2"
+temp-env = "0.3.6"
+tempfile = "3"
+thiserror = { version = "2", default-features = false }
+thread_local = "1.1.9"
+time = "0.3.47"
+tokio = "1"
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+tokio-rustls = { version = "0.26.4", default-features = false }
+tokio-uring = "0.5"
+tokio-util = { version = "0.7.18", default-features = false }
+toml = "0.8"
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = "0.3"
+trybuild = "1"
+tungstenite = { version = "0.24", default-features = false }
+ulid = "1.2.1"
+url = "2.5.8"
+webpki-roots = "1"
+xxhash-rust = "0.8"
+zstd = "0.13.3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+# ===== umbrella `proxima` package (formerly rust/Cargo.toml) =====
+[package]
+name = "proxima"
+description = "Config-driven proxy and middleware runtime for faking, replaying, caching, or fronting dependencies from composable pipe specs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+libc = { workspace = true, optional = true }
+proxima-macros = { workspace = true, optional = true }
+proxima-test = { workspace = true }
+proxima-core = { workspace = true }
+proxima-primitives = { workspace = true, features = ["std"] }
+proxima-runtime = { workspace = true, features = ["std"] }
+proxima-net = { workspace = true, features = ["std"] }
+proxima-pgwire = { workspace = true, optional = true }
+proxima-tls = { workspace = true, optional = true }
+proxima-http = { workspace = true }
+proxima-quic = { workspace = true, optional = true }
+proxima-recording = { workspace = true, features = ["pipe", "replay"] }
+proxima-protocols = { workspace = true, features = ["proxy_protocol-std"] }
+proxima-redis = { workspace = true, optional = true }
+proxima-telemetry = { workspace = true }
+prime = { workspace = true, optional = true }
+proxima-listen = { workspace = true }
+proxima-patterns = { workspace = true, features = ["balancer", "middleware", "control_plane", "kv"] }
+proxima-codec = { workspace = true, features = ["std"] }
+proxima-config = { workspace = true, features = ["std", "schema", "schema-std", "store", "store-std", "sugar"] }
+arc-swap.workspace = true
+async-stream = { workspace = true }
+async-tungstenite = { workspace = true, features = ["handshake", "futures-03-sink", "tokio-runtime"], optional = true }
+base64 = { workspace = true }
+bumpalo = { workspace = true, features = ["collections"] }
+futures-timer = { workspace = true, optional = true }
+bytes.workspace = true
+cel-interpreter = { workspace = true }
+core_affinity = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true }
+dashmap.workspace = true
+fastrand = { workspace = true }
+flume = { workspace = true, optional = true }
+# `executor` backs the tokio-free `sync::task` JoinSet AND test_support's
+# `futures::executor::block_on` test driver (no tokio runtime needed to
+# drive a plain `#[test]` async body).
+futures = { workspace = true, features = ["executor"] }
+hdrhistogram.workspace = true
+http.workspace = true
+http-body.workspace = true
+# httparse: sans-io HTTP/1.x head parser used by hyper. SIMD-validated,
+# zero-copy, battle-tested. We do NOT reimplement what it does — only
+# the connection state machine + body decoder + response writer + any
+# protocol semantics httparse doesn't cover.
+httparse = { workspace = true }
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["http1", "http2", "client", "server"], optional = true }
+hyper-rustls = { workspace = true, features = ["http1", "http2", "native-tokio", "aws-lc-rs", "webpki-tokio"], optional = true }
+hyper-util = { workspace = true, features = ["tokio", "client", "client-legacy", "server", "server-auto"], optional = true }
+json5 = { workspace = true }
+num_cpus = { workspace = true }
+pin-project-lite.workspace = true
+# proxima-patterns::kv's CacheEntry exposes a portable_atomic::AtomicU64 field this crate constructs directly.
+portable-atomic = { workspace = true, default-features = false }
+postcard = { workspace = true, features = ["alloc"] }
+quick-xml = { workspace = true, features = ["serialize"] }
+quinn = { workspace = true, features = ["rustls-aws-lc-rs", "runtime-tokio"], optional = true }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"], optional = true }
+regex = { workspace = true }
+ron = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"], optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_norway = { workspace = true }
+simd-json.workspace = true
+smallvec = { workspace = true }
+# socket2: low-level socket construction for SO_REUSEPORT per-core
+# accept lanes. Lets us bind N TcpListeners to the same address so
+# the kernel hash-distributes incoming connections across cores.
+socket2 = { workspace = true, features = ["all"] }
+tempfile.workspace = true
+thiserror.workspace = true
+thread_local = { workspace = true }
+time = { workspace = true, features = ["formatting", "parsing", "macros", "serde", "serde-human-readable"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util", "fs", "io-std", "process"], optional = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"], optional = true }
+tokio-util = { workspace = true, features = ["rt", "compat", "io"], optional = true }
+toml.workspace = true
+tracing.workspace = true
+ulid = { workspace = true, features = ["serde"] }
+url = { workspace = true }
+xxhash-rust = { workspace = true, features = ["xxh3"] }
+zstd = { workspace = true }
+webpki-roots = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+h2 = { workspace = true, features = ["unstable"], optional = true }
+rustc-hash = { workspace = true }
+bon = { workspace = true }
+conflaguration = { workspace = true, features = ["derive", "toml"] }
+h3 = { workspace = true, optional = true }
+quinn-proto = { workspace = true, features = ["rustls-aws-lc-rs"], optional = true }
+h3-quinn = { workspace = true, optional = true }
+crossbeam-deque = { workspace = true }
+blake3 = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-utils = { workspace = true }
+# prod-optional: pulled in by the `c10-out-otlp-http` telemetry sub-flag for
+# OTLP request encoding. Dev-deps also carry prost 0.14 as the P9b baseline.
+prost = { workspace = true, features = ["std", "derive"], optional = true }
+
+[dependencies.tracing-subscriber]
+workspace = true
+features = ["env-filter"]
+optional = true
+
+# `tokio-uring` swaps epoll for io_uring on Linux. Optional, gated by
+# the `io-uring` feature + `cfg(target_os = "linux")`. macOS/Windows
+# builds compile without it; the per-core worker stays on the default
+# tokio current-thread runtime when the feature is on but the target
+# isn't Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true, optional = true }
+tokio-uring = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
+loom = { workspace = true }
+proxima-macros = { workspace = true }
+# codec-trait e2e composition bench (C11) — dev-only, gated by feature.
+proxima-protocols = { workspace = true, features = ["websocket_frame-codec-trait", "http1_codec-codec-trait"] }
+# bench_codec_e2e only drives the `FrameCodec` trait (alloc-tier); no
+# registry/JsonCodec std surface needed here.
+proxima-codec = { workspace = true, features = ["alloc"] }
+# serve_parity integration test drives both acceptor factories directly
+# (proxima_net::tokio::TokioAcceptorFactory + proxima_net::prime::PrimeAcceptorFactory).
+# proxima-net is already a non-optional [dependencies] entry above with the
+# `tokio` feature on; `prime` + `runtime-prime-inbox-alloc` come from the
+# default `http-prime-deps` feature, so no separate dev-dependency is needed.
+http-body-util.workspace = true
+pingora-core = { workspace = true }
+pingora-http = { workspace = true }
+# baseline for P5 — RESP3 parser comparison only, dev-only.
+redis-protocol = { workspace = true }
+# baseline for P9b — protobuf varint codec comparison only, dev-only.
+# bumped 0.13 → 0.14 to align with opentelemetry-proto 0.32's prost requirement.
+prost = { workspace = true, features = ["std", "derive"] }
+# baselines for the telemetry component benches (c1-c12) — dev-only.
+faster-hex = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true }
+metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["logs", "metrics"] }
+opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "trace", "logs", "metrics"] }
+prometheus = { workspace = true }
+rand = { workspace = true }
+slog = { workspace = true }
+flume = { workspace = true }
+# baseline for P11 — WebSocket frame codec comparison only, dev-only.
+tungstenite = { workspace = true }
+# baseline for P1 — DNS message parser comparison only, dev-only.
+hickory-proto = { workspace = true }
+# baseline for P2 — MQTT v3.1.1 packet parser comparison only, dev-only.
+mqttbytes = { workspace = true }
+# baseline for P3 — AMQP 0-9-1 frame parser comparison only, dev-only.
+amq-protocol = { workspace = true }
+# baseline for P4 — Kafka wire-protocol header decode comparison
+# only, dev-only. Scope-mismatched reference (kafka-protocol returns
+# owned RequestHeader with IndexMap of tagged fields; proxima borrows
+# from &[u8]). Same shape as prost-vs-proxima in P9b: incumbent does
+# strictly more work; the delta includes scope reduction, not pure
+# parser-shape advantage. Earlier comment ("0.13 fails to build")
+# was resolved upstream by 0.14; 0.17 builds cleanly.
+kafka-protocol = { workspace = true }
+rstest.workspace = true
+temp-env = { workspace = true }
+trybuild = { workspace = true }
+tempfile.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+once_cell = "1.21.4"
+
+[lints]
+workspace = true
+
+[features]
+
+# Default features list every dep explicitly — no rollups. Callers who
+# want a thinner build switch `default-features = false` and add back
+# the wire versions they need.
+default = [
+    # `serve-prime` makes PrimeRuntime the default serve+chain runtime —
+    # tokio is NOT in the default dependency graph at all (verify with
+    # `cargo tree -e normal -i tokio`). `http2`/`http3` resolve to the
+    # native, tokio-free drivers. Opt into the tokio-backed capability
+    # set (sister-tokio serve runtime, hyper, quinn-compat h3, h1) with
+    # `--features tokio`; `http1` specifically needs `tokio` because its
+    # connection driver has no sans-IO implementation yet (h2/h3 do).
+    "serve-prime",
+    "http2", "http3",
+    "histogram", "macros",
+    # prime is the DEFAULT `http` upstream backend. The dep bundle is
+    # always pulled (proxima_net::prime is empty on non-unix via its own
+    # `#![cfg]`, so it links everywhere); the registration sites pick prime
+    # on unix and fall back to the hyper factory on non-unix or when the
+    # `http-hyper` opt-out is on. (Also reachable transitively via
+    # `serve-prime`; listed explicitly for clarity.) See load.rs / app_builder.rs.
+    "http-prime-deps",
+]
+# runtime-prime-full dropped from default after the prime crate extraction:
+# the workspace resolver lifts proxima-runtime's runtime-prime-full feature
+# across all members, which left the prime crate's standalone build seeing
+# a 2-arg SpawnRequest while its own feature was off — type mismatch.
+# Enable explicitly via `--features runtime-prime-full` when you need
+# cross-core span propagation.
+loom = []
+tracing-init = ["dep:tracing-subscriber", "proxima-telemetry/tracing-init"]
+
+# S3 of the proxima-notify initiative: producer-graph schema in
+# ProximaSettings. Adds a `producers:` map registered alongside listeners /
+# upstreams / middlewares / pipes; producers resolve through
+# `LoadContext::source_registry` (a `SourceFactory` registry) into
+# `App::source` entries, which `App::run_until_signal` now drives
+# unconditionally (proxima-primitives::pipe TARGET 4 — sources run once registered, the
+# same way a handler serves once mounted; no separate opt-in flag needed).
+# Default off — opt-in until the substrate is sealed.
+# See docs/proxima-notify/discipline.md S3 row.
+producer-graph-config = []
+
+# `sync-wrappers` adds the runtime-agnostic `proxima::sync` + `proxima::time`
+# module surfaces (mpsc, watch, broadcast, Notify, Mutex/RwLock/Semaphore/oneshot
+# re-exports, sleep/timeout/interval). Default off — the surfaces are intended
+# to be folded into their own crates during the workspace decomposition
+# (see the cached-tumbling-starlight plan). Until
+# then they live as dead-code modules behind this feature so they're available
+# for the decomposition without affecting default builds.
+sync-wrappers = [
+    "dep:futures-timer",
+]
+
+# HTTP wire version gates. `http1` is the ALPN h1(+h2+tls) combiner
+# listener — its connection driver (proxima-http's `http1::serve`) has
+# no sans-IO implementation yet, so it requires `tokio`. `http2` is the
+# native h2c listener (no `tokio`, no external `h2` crate — server.rs /
+# client.rs / listener.rs's factory path are all futures-io). `http3` is
+# the native sans-IO QUIC+H3 stack (no `tokio`, no quinn). No rollup —
+# pick the wire versions you actually use.
+http1 = ["tokio", "proxima-http/http-listener"]
+http2 = ["proxima-http/http2-native"]
+http3 = ["quic-native", "proxima-http/http3-native"]
+# `tls` enables https upstreams (rustls + hyper-rustls) AND https
+# listener termination for the h1/ALPN combiner (tokio-rustls + rcgen
+# for self-signed dev certs). Off by default; enable for either side.
+# Plan-locked crypto backend: aws-lc-rs. Coupled to the h1 combiner
+# today (proxima-http/tls -> http-listener -> http1), so it requires
+# `tokio` the same way `http1` does; h2/h3-native don't need it to
+# serve plaintext/h2c or QUIC+TLS (which carries its own rustls path).
+tls = [
+    "tokio",
+    "dep:proxima-tls",
+    "proxima-http/http1-tls",
+    "proxima-listen/tls",
+    "proxima-http/tls",
+    "dep:rustls",
+    "dep:hyper-rustls",
+    "dep:tokio-rustls",
+    "dep:rcgen",
+]
+
+# `http-prime-deps` pulls the prime-native HTTP/1.1 client stack
+# (proxima-http `http1-stream-client`: prime TCP + client TLS + the h1
+# client — no hyper, no tokio in the request path). This is part of
+# `default`, so prime is the DEFAULT `"http"` upstream backend: the
+# registration sites (load.rs / app_builder.rs) register
+# `PrimeHttpPipeFactory` for `"http"` on unix, and fall back to the
+# hyper `HttpPipeFactory` on non-unix (proxima_net::prime is macOS/Linux
+# only) or when `http-hyper` is on. `http-prime` is kept as an alias
+# for callers / docs that referenced the old opt-in name.
+http-prime-deps = [
+    "proxima-http/http1-stream-client",
+    "proxima-net/prime",
+    # proxima_net::prime is empty without this (see its module cfg gate in
+    # proxima-net/src/lib.rs — `prime::os::net` needs the alloc-backed inbox,
+    # not the mutually exclusive `runtime-prime-inbox-const`); without it
+    # proxima-http's `prime_upstream` module fails to resolve
+    # `PrimeTcpUpstream` / `ConnectTunneledUpstream`.
+    "runtime-prime-inbox-alloc",
+    "dep:proxima-tls",
+    "proxima-tls/futures-io",
+]
+http-prime = ["http-prime-deps"]
+
+# `pgwire-client` registers the `pgwire` protocol factory so `proxima::Client`
+# speaks PostgreSQL — `{"type":"pgwire", "dsn": "postgres://..."}` or the
+# `.pgwire(dsn)` builder sugar. Pulls the pgwire client over the prime TCP
+# transport (http-prime-deps brings proxima_net::prime / PrimeTcpUpstream).
+pgwire-client = ["http-prime", "dep:proxima-pgwire", "proxima-pgwire/client"]
+
+# `redis-client` registers the `redis` protocol factory so `proxima::Client`
+# speaks Redis/Valkey — `{"type":"redis", "dsn": "redis://..."}` or the
+# `.redis(dsn)` / `.valkey(dsn)` builder sugar. Pulls the redis client over the
+# prime TCP transport (http-prime-deps brings proxima_net::prime /
+# PrimeTcpUpstream). Valkey shares the factory — same RESP wire protocol.
+redis-client = ["http-prime", "dep:proxima-redis", "proxima-redis/client"]
+
+# `http-hyper` is the OPT-OUT: it restores the hyper-backed `HttpPipeFactory`
+# as the registered `"http"` backend even on unix. Hyper is not required for
+# the default build, but it stays reachable for callers who want it (e.g.
+# parity benchmarks, or environments where the prime reactor is undesirable).
+http-hyper = ["tokio", "http1", "dep:hyper", "dep:hyper-util", "tokio-runtime"]
+
+# `tokio-runtime` enables the tokio-backed listener / upstream impls.
+# the trait surface itself (`stream::StreamListener` etc.) is runtime-
+# neutral via futures::io; this feature only gates the tokio-specific
+# implementations under listeners::tokio_stream and upstreams::tokio_stream.
+tokio-runtime = []
+
+# The single opt-in that restores the ENTIRE tokio capability set: the
+# `tokio`/`tokio-util` deps themselves (non-optional in every prior build
+# of this crate; optional now), `tokio::process` child-process upstreams +
+# scenario orchestration, the MCP stdio/socket listener, OS signal handling
+# in `Server`'s `wait_for_signal`, `block_on_tokio`, the tokio-native
+# legacy accept-loop fallbacks in proxima-listen/proxima-http/proxima-tls
+# (used when no `AcceptorFactory` is injected or no sans-IO driver exists —
+# h1's driver, notably), and the sister-tokio-compat prime worker handle.
+# Everything downstream that genuinely needs a tokio runtime (http1, tls,
+# tcp/udp/unix, quic, websocket, http-hyper, io-uring) requires this
+# feature explicitly rather than the reverse, so enabling e.g. `http2`
+# alone never pulls tokio in.
+tokio = [
+    "tokio-runtime",
+    "dep:tokio",
+    "dep:tokio-util",
+    # the external `h2` crate: only used by benches/e2e tests comparing
+    # proxima's native h2 driver against it (never by proxima's own code —
+    # `crate::h2` is the native module). Tokio-coupled (needs
+    # `tokio::io::{AsyncRead,AsyncWrite}`), so it rides this feature.
+    "dep:h2",
+    "proxima-listen/tokio",
+    "proxima-tls?/tokio",
+    "proxima-net/tokio",
+    "proxima-primitives/runtime-tokio",
+    "proxima-protocols/proxy_protocol-tokio-runtime",
+    # restores the sister-tokio-compat prime worker (each prime worker
+    # enters a tokio Handle so user pipes calling tokio::{time,sync,spawn}
+    # keep working) — the original default behaviour before this crate's
+    # tokio-optional migration. `prime/prime-tokio-compat` is the `prime`
+    # crate's own feature, NOT the umbrella `prime-tokio-compat` rollup
+    # (which also flips the serve runtime to tokio via `runtime-tokio`).
+    "prime?/prime-tokio-compat",
+    "run-prime-tokio-compat",
+    # restores the sister-tokio Handle on `#[proxima::test]`'s shared prime
+    # test runtime too (see `serve-prime`'s `proxima-test/test-prime`).
+    "proxima-test/test-prime-tokio-compat",
+]
+
+# byte-stream protocols. the only backend today (`proxima_net::tokio`)
+# is tokio-native — no prime equivalent exists yet for the generic
+# pipe-passthrough `StreamListener`/`StreamUpstream` surface — so these
+# require `tokio` explicitly. Layered separately so a future prime/DPDK
+# backend can compose tcp without pulling tokio listeners.
+tcp = ["tokio", "tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std"]
+unix = ["tokio", "tokio-runtime", "proxima-listen/stream"]
+websocket = ["tokio", "tokio-runtime", "tcp", "dep:async-tungstenite", "proxima-http/websocket"]
+# proxima-side outbound WebSocket upstream (P8 in docs/protocol-gap/discipline.md).
+# pulls in the same async-tungstenite the listener uses; client-side handshake +
+# message exchange wrapped in a `Pipe`-compatible upstream. default off.
+websocket-upstream = ["websocket"]
+# RESP3 (Redis Serialization Protocol v3) listener (P5). sans-IO parser
+# + minimal TCP wire-up. Compared against `redis-protocol` crate in the
+# bench harness — that's the named baseline in
+# docs/protocol-gap/discipline.md.
+redis-listener = ["dep:proxima-redis", "tokio-runtime", "tcp"]
+# DNS substrate (P1) — sans-IO RFC 1035 / RFC 3596 parser. minimum
+# viable resolver target. compared against `hickory-proto::Message`
+# scope-mismatched + a parity-scoped hand-rolled baseline in the
+# bench harness so the Compare-bench gate cell passes honestly.
+dns-substrate = ["proxima-protocols/dns"]
+# proxima-side outbound HTTP/3 upstream (P7 in docs/protocol-gap/discipline.md).
+# pulls in the same h3 + h3-quinn the listener uses, plus webpki-roots for
+# default trust roots. compared in the bench harness against a hand-rolled
+# h3-quinn parity baseline. default off.
+h3-upstream = ["http3", "http3-quinn-compat", "dep:webpki-roots"]
+# proxima-side outbound HTTP/3 upstream over the NATIVE sans-IO QUIC + H3
+# stack (C42, docs/proxima-quic/discipline.md) — the dual-surface peer of
+# `h3-upstream` (P7, quinn), selectable side-by-side per the C41 ruling.
+# Default off (disciplined-component gate-1 firewall until C43's
+# compare-bench vs the quinn upstream seals it). The native upstream facade
+# itself uses a `tokio::sync::Mutex` today, so this still needs `tokio`.
+h3-native-upstream = ["http3", "tokio", "proxima-http/http3-native-upstream", "dep:webpki-roots"]
+# Routes the native h3 CLIENT response path (rekt_h3_load's part-source
+# arm) through `proxima_primitives::pipe::part::PartSource` instead of the owned
+# `H3ClientEvent::ResponseHeaders` event (design doc step 3, h3 first —
+# `docs/proxima-pipe/part-source-sink-design.md`). Requires
+# `h3-native-upstream`. Default off.
+h3-part-source = ["h3-native-upstream", "proxima-http/http3-part-source"]
+# gRPC framing primitive (P9 in docs/protocol-gap/discipline.md).
+# sans-IO 5-byte length-prefix codec: 1-byte compression flag + u32 BE
+# message length + message payload. Listener-/upstream-agnostic; the
+# h2 wire (which is what gRPC rides) is delegated to existing http2.
+# compared in the bench harness against a hand-rolled parity baseline
+# AND `prost`'s framing for a scope-mismatched reference. default off.
+grpc-framing = ["proxima-protocols/grpc_framing"]
+# Protobuf wire-format primitive (P9b in docs/protocol-gap/discipline.md).
+# sans-IO varint codec + wire-type / tag dispatch / field iterator. Schema-
+# agnostic — proxima middleware can route/inspect protobuf messages by tag
+# without compiling .proto files. Compared in the bench harness against
+# both a hand-rolled parity baseline AND `prost::encoding::decode_varint`
+# as a scope-matched reference (prost is the standard Rust protobuf crate).
+# default off.
+protobuf-wire = ["proxima-protocols/protobuf_wire"]
+# Memcached text-protocol listener (P6 in docs/protocol-gap/discipline.md).
+# sans-IO parser for the ASCII protocol (get / set / delete / incr / decr /
+# flush_all / version / quit / stats / touch). Binary protocol is a follow-up.
+# Compared in the bench harness against a hand-rolled parity baseline.
+# default off.
+memcached-listener = ["proxima-protocols/memcached", "tokio-runtime", "tcp"]
+# MQTT v3.1.1 listener (P2 in docs/protocol-gap/discipline.md). sans-IO
+# parser for the binary packet format: 1-byte type+flags + 1-4 byte varint
+# remaining length + variable header + payload. Covers the routing-critical
+# subset (CONNECT, PUBLISH, SUBSCRIBE, etc.). v5 is a follow-up sibling.
+# Compared in the bench harness against a hand-rolled parity baseline.
+# default off.
+mqtt-listener = ["proxima-protocols/mqtt", "tokio-runtime", "tcp"]
+# AMQP 0-9-1 listener (P3 in docs/protocol-gap/discipline.md). sans-IO
+# parser for the binary frame format used by RabbitMQ + native AMQP brokers.
+# Fixed 7-byte header (type/channel/length) + payload + trailing 0xCE.
+# Method frames decode class_id + method_id for routing. Sub-flag default off.
+amqp-listener = ["proxima-protocols/amqp", "tokio-runtime", "tcp"]
+# Kafka wire-format listener (P4 in docs/protocol-gap/discipline.md).
+# sans-IO parser for the 4-byte length-prefix framing + request header
+# (api_key + api_version + correlation_id + client_id). Schema-agnostic
+# enough that substrate middleware can route by API key without
+# compiling .schema files. Sub-flag default off.
+kafka-listener = ["proxima-protocols/kafka", "tokio-runtime", "tcp"]
+# WebSocket sans-IO frame codec (P11 in docs/protocol-gap/discipline.md).
+# RFC 6455 frame parsing/encoding decoupled from async-tungstenite so
+# substrate middleware can inspect frames without round-tripping through
+# the io layer. Compared in the bench harness against
+# `tungstenite::protocol::frame::FrameHeader` as the scope-matched
+# reference. default off.
+websocket-frame = ["proxima-protocols/websocket_frame"]
+# `quic-native` is proxima-quic's tokio-free sans-IO facade (prime-driven).
+# `quic` is the legacy quinn-compat shim over the upstream quinn/quinn-proto
+# crates — genuinely tokio (quinn itself requires `runtime-tokio`), so it
+# requires `tokio`. `http3` (default) only needs `quic-native`;
+# `http3-quinn-compat` layers the quinn backend back in under `tokio`.
+quic-native = ["dep:proxima-quic", "proxima-quic/native", "dep:rustls", "dep:rcgen"]
+quic = ["tokio", "tokio-runtime", "dep:proxima-quic", "dep:quinn", "dep:rustls", "dep:rcgen", "proxima-quic/quinn-compat"]
+# proxima-quic ships two independently-gated surfaces (native sans-IO facade,
+# quinn-compat shim over the upstream quinn/quinn-proto crates); `stream_listener`
+# and its listener types only exist under the crate's own `quinn-compat` feature.
+# `quic` forwards into it explicitly rather than riding proxima-quic's defaults,
+# so the listener re-exports in `src/listeners/mod.rs` don't silently break if
+# those defaults ever change.
+quinn-compat = ["quic"]
+# Legacy h3 backend (`h3` + `h3-quinn` crates over `quic`'s quinn transport).
+# `http3` (default) is native-only; this restores the original quinn-based
+# `H3ListenProtocol` / `Http3Upstream` behind `tokio`.
+http3-quinn-compat = ["http3", "tokio", "quic", "proxima-http/http3-quinn-compat", "dep:quinn-proto", "dep:h3", "dep:h3-quinn"]
+
+# packet protocols. tokio is the only backend today; afxdp is linux-only
+# kernel-bypass; dpdk is the skeleton backend (returns Unsupported).
+udp = ["tokio", "tokio-runtime"]
+xdp = ["proxima-net/xdp"]
+dpdk = ["proxima-net/dpdk"]
+tokio-rustls = ["tokio", "dep:tokio-rustls"]
+# the default `Runtime` impl: N tokio current-thread runtimes pinned per core.
+# Pulls in `core_affinity` for OS-level CPU pinning and `flume` for cross-core
+# task dispatch. Enables the `runtime::tokio_per_core` module.
+runtime-tokio = ["tokio-runtime", "proxima-runtime/tokio", "dep:core_affinity", "dep:flume"]
+
+# `io-uring` enables the completion-based io_uring backend on Linux ≥6.x.
+# Composes with either runtime feature; the active runtime selects the
+# backend crate at cfg-time:
+#   - runtime-tokio + io-uring → tokio current-thread + tokio-uring
+#   - runtime-prime + io-uring → prime workers + bare io-uring crate
+# Linux-only deps via target-gated [dependencies]; macOS/Windows builds
+# accept the feature flag but fall back to the readiness path.
+io-uring = ["dep:tokio-uring", "dep:io-uring", "dep:webpki-roots", "proxima-http/http1-io-uring"]
+rayon = ["dep:rayon", "proxima-runtime/rayon", "prime?/rayon"]
+quinn-proto = ["dep:quinn-proto"]
+h3 = ["dep:h3"]
+h3-quinn = ["dep:h3-quinn"]
+
+# experimental from-scratch per-core runtime (see docs/runtime-prime/).
+# layered so each component can be exercised in isolation. Sub-flags
+# exist so individual primitives (inbox, timer, reactor, executor, bgpool)
+# can be built/tested/benched alone. No "-full" rollup; call sites that
+# want "everything prime" list the four primitives explicitly:
+# `runtime-prime-{executor, inbox-alloc, reactor, bgpool}`.
+# core/ submodule is no_std + alloc; os/ submodule is std + libc.
+runtime-prime             = ["dep:prime", "prime/runtime-prime"]
+runtime-prime-inbox-alloc = ["runtime-prime", "prime/runtime-prime-inbox-alloc", "proxima-net/runtime-prime-inbox-alloc"]
+runtime-prime-inbox-const = ["runtime-prime", "prime/runtime-prime-inbox-const", "proxima-net/runtime-prime-inbox-const"]
+runtime-prime-inbox-dynamic = ["runtime-prime", "prime/runtime-prime-inbox-dynamic"]
+runtime-prime-timer       = ["runtime-prime", "prime/runtime-prime-timer"]
+runtime-prime-reactor     = ["runtime-prime", "dep:libc", "prime/runtime-prime-reactor"]
+runtime-prime-executor    = ["runtime-prime-timer", "prime/runtime-prime-executor"]
+runtime-prime-bgpool      = ["runtime-prime", "prime/runtime-prime-bgpool"]
+# marker feature gating the optional span-carry arms of bench_c15_prime_hooks
+c15-prime-hooks           = []
+# the full prime runtime needed to serve on prime sockets: executor + inbox +
+# reactor + bgpool, plus the prime `http` upstream dep bundle. This is what the
+# default build pulls so PrimeRuntime is the serve+chain runtime out of the box.
+serve-prime = [
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+    "http-prime-deps",
+    # `#[proxima::test]`'s adaptive-default driver (no explicit `runtime =
+    # ...`) picks prime whenever `proxima-test/test-prime` is linked, tokio
+    # otherwise (proxima-test's own default). Without this, every bare
+    # `#[proxima::test]` in the tree — including this crate's own — falls
+    # back to tokio and needs the `tokio` feature just to compile.
+    "proxima-test/test-prime",
+    # NOTE: the sister-tokio-compat forwarding (`prime/prime-tokio-compat` +
+    # `run-prime-tokio-compat`) that used to live in this default bundle now
+    # rides the `tokio` feature instead (see its block below) — `prime`'s own
+    # `prime-tokio-compat` feature pulls `dep:tokio`, so forwarding it from a
+    # `default` feature would link tokio into every default build, defeating
+    # the tokio-optional migration (`cargo tree -e normal -i tokio` must stay
+    # empty here).
+]
+# rayon-backed variant of BackgroundPool. enables the typed spawn<F,T>
+# fast-path on RayonBackgroundPool, gated separately so M1 builds can
+# keep the proxima default without pulling rayon's work-stealing threads.
+runtime-prime-bgpool-rayon = ["runtime-prime-bgpool", "dep:rayon", "prime/runtime-prime-bgpool-rayon"]
+# recursive-split parallel reduce / map on ProximaBackgroundPool. competes
+# with rayon's `par_iter` shape — adaptive splitting + tree-shaped reduce —
+# without adding work-stealing to the executor. data showed proxima at
+# par_iter parity on flat 16-chunk dispatch; this layer goes further.
+runtime-prime-bgpool-par   = ["runtime-prime-bgpool", "prime/runtime-prime-bgpool-par"]
+# polling-worker mode: each worker thread also owns a tokio current_thread
+# runtime used to `block_on` `Job::Async` futures. unlocks `spawn_async`
+# on the pool and the `map_async` family on `ProximaParIter`. without this
+# feature, par_iter is sync-closure-only.
+runtime-prime-bgpool-async = ["runtime-prime-bgpool", "prime/runtime-prime-bgpool-async"]
+# optional runtime override of compiled-in sizing — point `PROXIMA_RUNTIME_CONFIG`
+# at a TOML using the same schema as prime-runtime.toml; missing keys fall back
+# to compiled. Per-machine tuning without a rebuild.
+runtime-prime-config      = ["runtime-prime", "prime/runtime-prime-config"]
+# internal marker for `run_prime` (the relocated former
+# proxima-runtime-prime crate, now `src/runtime.rs`): selects
+# `PrimeRuntime::new_with_tokio_compat` over the plain `PrimeRuntime::new` for
+# the one-core runtime it boots. Deliberately separate from the
+# `prime-tokio-compat` rollup below — that feature also pulls `runtime-tokio`
+# (flips the SERVE runtime to tokio), which `serve-prime` forwarding into this
+# marker must not do. Self-sufficient: pulls the `prime` crate feature its own
+# `PrimeRuntime::new_with_tokio_compat` needs, regardless of what forwards it.
+run-prime-tokio-compat = ["prime/prime-tokio-compat"]
+# P2 of the tokio-elimination plan: optional nested-tokio compat mode
+# for users who want to keep their `tokio::{spawn, sync, time}` imports
+# while running on prime. Off by default; only ships once the bench
+# matrix in `docs/runtime-prime/discipline-prime-tokio-compat.md`
+# clears the plan's ship criteria. No rollup — call sites that want
+# "everything prime" list the four primitives explicitly.
+prime-tokio-compat = [
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+    "dep:core_affinity",
+    "runtime-tokio",
+    "prime/prime-tokio-compat",
+]
+
+# inverted compat (design D2): each prime worker owns its own sister tokio
+# current-thread runtime and ticks the prime executor inside `sister.block_on`,
+# so raw `tokio::spawn` from a prime task is LOCAL (no per-spawn kevent). Forwards
+# to `prime/prime-tokio-compat-inverted`; mirrors `prime-tokio-compat` above.
+prime-tokio-compat-inverted = [
+    "prime-tokio-compat",
+    "prime/prime-tokio-compat-inverted",
+]
+
+# telemetry substrate is structural (always-on). only consumer-facing toggles
+# that change the dependency closure remain as features.
+histogram   = ["proxima-telemetry/histogram"]
+otlp-http   = ["proxima-telemetry/otlp-http", "dep:prost"]
+otlp-grpc   = ["proxima-telemetry/otlp-grpc", "otlp-http"]
+macros      = ["proxima-telemetry/macros", "proxima-telemetry/std", "proxima-telemetry/emit", "dep:proxima-macros"]
+# unified-instrument seam: a #[instrument]/#[span] close also records its
+# duration into a per-name histogram, so one annotation yields a trace span AND
+# a duration metric. Compile-time default-off firewall, forwarded from
+# proxima-telemetry (see its Cargo.toml for the full discipline-gate note).
+instrument-metrics = ["proxima-telemetry/instrument-metrics"]
+# opt into the recorder's size-trigger pump wait (Recorder::pump_wait) for
+# spawn_prime_pump (src/otlp.rs); without it the pump falls back to a plain
+# flush-interval sleep, which is equivalent when no producer ever parks.
+lossless-backpressure = ["proxima-telemetry/lossless-backpressure"]
+# #[proxima::test] harness. test-support exposes the test_support module +
+# the test attribute, and is RUNTIME-AGNOSTIC: it does NOT pull `runtime-tokio`.
+# A test harness must not force the tokio SERVE runtime onto every co-built
+# crate — via cargo feature-unification that flipped proxima's own serve runtime
+# to tokio while the http upstream stayed prime, breaking the prime TcpStream
+# connect (CURRENT_REACTOR null -> 502). `test-prime` is the explicit prime
+# execution path; crates that genuinely need a tokio serve runtime opt into
+# `runtime-tokio` themselves. Serve stays prime-first regardless (see
+# App::default_runtime: serve-prime wins over a merely-linked runtime-tokio).
+test-support = ["macros"]
+test-prime   = ["test-support", "prime-tokio-compat", "prime/prime-tokio-compat", "proxima-test/test-prime"]
+runtime-prime-full    = ["proxima-primitives/runtime-prime-full", "proxima-runtime/runtime-prime-full", "prime?/runtime-prime-full", "proxima-net/runtime-prime-full"]
+# perf knobs (compose with sub-flags)
+simd-hex     = []
+simd-varint  = []
+
+[[bench]]
+name = "bench_inbox"
+harness = false
+required-features = ["runtime-prime-inbox-alloc", "runtime-tokio"]
+
+[[bench]]
+name = "bench_ws_upstream"
+harness = false
+required-features = ["websocket-upstream"]
+
+
+
+[[bench]]
+name = "bench_h3_upstream"
+harness = false
+required-features = ["h3-upstream"]
+
+# proxima-notify S2: ProducerLifecycle vs spawn_snapshot_ticker incumbent.
+# See docs/proxima-notify/discipline.md S2 row + bench file header for
+# per-arm design-favors labels.
+[[bench]]
+name = "bench_proxima_notify_s2_producer_lifecycle"
+harness = false
+required-features = ["runtime-tokio"]
+
+
+
+
+
+
+
+
+[[bench]]
+name = "bench_timer"
+harness = false
+required-features = ["runtime-prime-timer", "runtime-tokio"]
+
+[[bench]]
+name = "bench_reactor"
+harness = false
+required-features = ["runtime-prime-reactor", "runtime-tokio"]
+
+[[bench]]
+name = "bench_local_executor"
+harness = false
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-tokio"]
+
+[[bench]]
+name = "bench_background_pool"
+harness = false
+required-features = ["runtime-prime-bgpool-rayon", "rayon", "runtime-tokio"]
+[[bench]]
+name = "stream_no_block"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-bgpool", "runtime-prime-bgpool-rayon", "rayon"]
+
+[[bench]]
+name = "bench_open_loop_driver"
+harness = false
+required-features = ["runtime-tokio"]
+
+[[bench]]
+name = "bench_runtime_swap"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+[[bench]]
+name = "bench_spawn_burst"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+[[bench]]
+name = "bench_h2_spawn_blocking"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http2", "tcp", "http1"]
+
+[[bench]]
+name = "bench_fairness_imbalanced"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http2", "tcp", "http1"]
+
+[[bench]]
+name = "bench_runtime_compat"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http2", "tcp", "http1", "http-hyper"]
+
+[[bench]]
+name = "bench_compat_libraries"
+harness = false
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "prime-tokio-compat", "http2", "tcp", "http1"]
+
+[[bench]]
+name = "request_path"
+harness = false
+
+[[bench]]
+name = "histogram_record"
+harness = false
+
+[[bench]]
+name = "simd_json_decode"
+harness = false
+
+[[bench]]
+name = "perf_audit"
+harness = false
+
+[[bench]]
+name = "substrate_dispatch"
+harness = false
+
+[[bench]]
+name = "network_throughput"
+harness = false
+required-features = ["http1", "tcp", "http-hyper"]
+
+[[bench]]
+name = "per_core_vs_arcswap"
+harness = false
+
+[[bench]]
+name = "h1_dispatch"
+path = "benches/http/h1_dispatch.rs"
+harness = false
+
+[[bench]]
+name = "h1_vs_hyper"
+path = "benches/http/h1_vs_hyper.rs"
+harness = false
+required-features = ["http-hyper"]
+
+[[bench]]
+name = "h1_streaming"
+path = "benches/http/h1_streaming.rs"
+harness = false
+required-features = ["http-hyper"]
+
+[[bench]]
+name = "h2_dispatch"
+path = "benches/http/h2_dispatch.rs"
+harness = false
+required-features = ["http2", "tls"]
+
+[[bench]]
+name = "h2_streaming"
+path = "benches/http/h2_streaming.rs"
+harness = false
+required-features = ["http2", "tls"]
+
+[[bench]]
+name = "h2_vs_hyper"
+path = "benches/http/h2_vs_hyper.rs"
+harness = false
+required-features = ["http2", "tls"]
+
+[[bench]]
+name = "h2_vs_pingora"
+path = "benches/http/h2_vs_pingora.rs"
+harness = false
+required-features = ["http2", "tls"]
+
+[[bench]]
+name = "h2_tail_vs_incumbents"
+path = "benches/http/h2_tail_vs_incumbents.rs"
+harness = false
+required-features = ["http2", "tls"]
+
+[[bench]]
+name = "h2_native_frame"
+path = "benches/http/h2_native_frame.rs"
+harness = false
+required-features = ["http2", "tokio"]
+
+[[bench]]
+name = "h2_native_vs_h2_crate"
+path = "benches/http/h2_native_vs_h2_crate.rs"
+harness = false
+required-features = ["http2", "tokio"]
+
+[[bench]]
+name = "h2_native_vs_h2_crate_e2e"
+path = "benches/http/h2_native_vs_h2_crate_e2e.rs"
+harness = false
+required-features = ["http2", "tokio", "http1"]
+
+[[bench]]
+name = "h2_native_vs_h2_crate_tail"
+path = "benches/http/h2_native_vs_h2_crate_tail.rs"
+harness = false
+required-features = ["http2", "tokio", "http1"]
+
+[[bench]]
+name = "h2_native_vs_h2_crate_alloc"
+path = "benches/http/h2_native_vs_h2_crate_alloc.rs"
+harness = false
+required-features = ["http2", "tokio", "http-hyper"]
+
+[[bench]]
+name = "h2_runtime_swap"
+path = "benches/h2_runtime_swap.rs"
+harness = false
+required-features = ["http2", "runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-hyper"]
+
+[[bench]]
+name = "h2_tail_scaling"
+path = "benches/http/h2_tail_scaling.rs"
+harness = false
+required-features = ["http2", "runtime-tokio", "http-hyper"]
+
+[[bench]]
+name = "h2_tail_multi_conn"
+path = "benches/http/h2_tail_multi_conn.rs"
+harness = false
+required-features = ["http2", "runtime-tokio", "http-hyper"]
+
+[[bench]]
+name = "h2_streaming_responses"
+path = "benches/http/h2_streaming_responses.rs"
+harness = false
+required-features = ["http2", "runtime-tokio", "http-hyper"]
+
+[[bench]]
+name = "h3_dispatch"
+path = "benches/http/h3_dispatch.rs"
+harness = false
+required-features = ["http3", "http3-quinn-compat"]
+
+[[bench]]
+name = "h3_streaming"
+path = "benches/http/h3_streaming.rs"
+harness = false
+required-features = ["http3", "http3-quinn-compat"]
+
+[[bench]]
+name = "h3_streaming_responses"
+path = "benches/http/h3_streaming_responses.rs"
+harness = false
+required-features = ["http3", "runtime-tokio", "http3-quinn-compat"]
+
+[[bench]]
+name = "h3_runtime_swap"
+path = "benches/h3_runtime_swap.rs"
+harness = false
+required-features = ["http3", "runtime-tokio", "http3-quinn-compat"]
+
+[[bench]]
+name = "h3_tail_scaling"
+path = "benches/http/h3_tail_scaling.rs"
+harness = false
+required-features = ["http3", "runtime-tokio", "http3-quinn-compat"]
+
+[[bench]]
+name = "h3_tail_multi_conn"
+path = "benches/http/h3_tail_multi_conn.rs"
+harness = false
+required-features = ["http3", "runtime-tokio", "http3-quinn-compat"]
+
+[[bench]]
+name = "h3_native_vs_quinn"
+path = "benches/h3_native_vs_quinn.rs"
+harness = false
+required-features = ["h3-native-upstream", "h3-upstream"]
+
+[[bench]]
+name = "proxy_protocol_parse"
+harness = false
+
+[[bench]]
+name = "hot_apply_build"
+harness = false
+
+# hpack benches (4) moved to proxima-protocols/benches/
+
+[[bench]]
+name = "swap_under_load"
+harness = false
+
+[[bench]]
+name = "capture_drain"
+harness = false
+
+[[bench]]
+name = "causal_record"
+harness = false
+
+[[bench]]
+name = "record_dispatch"
+harness = false
+required-features = ["runtime-tokio"]
+
+[[bench]]
+name = "tee_backpressure"
+harness = false
+
+[[bench]]
+name = "h1_vs_pingora"
+path = "benches/http/h1_vs_pingora.rs"
+harness = false
+required-features = ["http-hyper"]
+
+[[bench]]
+name = "h1_tail_vs_incumbents"
+path = "benches/http/h1_tail_vs_incumbents.rs"
+harness = false
+required-features = ["http-hyper"]
+
+[[bench]]
+name = "causal_record_primitives"
+harness = false
+
+[[bench]]
+name = "recording_sink_primitives"
+harness = false
+
+[[bench]]
+name = "tee_sink_primitives"
+harness = false
+
+# telemetry components c1..c14 live in `proxima-telemetry/benches/`.
+# runtime-prime-full bench stays here because it engages `proxima::runtime::prime::*` types.
+[[bench]]
+name = "bench_c15_prime_hooks"
+harness = false
+required-features = ["runtime-prime-full", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+[[bench]]
+name = "bench_e2e_composition"
+harness = false
+required-features = ["otlp-http", "runtime-prime-full"]
+
+[[bench]]
+name = "bench_codec_e2e"
+harness = false
+
+[[example]]
+name = "telemetry_pipe"
+path = "examples/telemetry_pipe.rs"
+
+# logging is fan-out + filter + gate applied to log events: real macros +
+# RUST_LOG level discipline, fan_exporters to console+file with a per-sink
+# level filter, and an explicit lossless-vs-lossy bounded-queue choice in
+# front of a sink. See examples/logs/README.md.
+[[example]]
+name = "logs"
+path = "examples/logs/main.rs"
+required-features = ["macros"]
+
+# the "gate pipe" pattern: readiness/backpressure composed from DemandGate +
+# Filter/Demand/FanIn — proxima's answer to tower's poll_ready. See
+# examples/gate/README.md.
+[[example]]
+name = "gate"
+path = "examples/gate/main.rs"
+
+# fan-out: one request broadcast to N sink Pipes via FanOut — the dual of
+# fan-in. See examples/fan_out/README.md.
+[[example]]
+name = "fan_out"
+path = "examples/fan_out/main.rs"
+
+# fan-out affinity: route one record to ONE of N partitions by key (Kafka's
+# producer partitioner) — same key, same partition. Shows the keying PIPE vs the
+# distribution STRATEGY split, and a caller-defined `Sticky` strategy the library
+# never heard of. See examples/fan_out_affinity/README.md.
+[[example]]
+name = "fan_out_affinity"
+path = "examples/fan_out_affinity/main.rs"
+
+# fan-in: N pollable sources merged into one stream via FanIn, pull-based —
+# only a source with an item ready right now is drained. The plain merge;
+# `gate`'s BALANCE shape composes a DemandGate on top of exactly this. See
+# examples/fan_in/README.md.
+[[example]]
+name = "fan_in"
+path = "examples/fan_in/main.rs"
+
+[[example]]
+name = "w4_mutex_repro"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+# micro benchmark: measure prime process boot time decomposition.
+[[example]]
+name = "boot_time"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+# #[proxima::main] end-to-end on the tokio runtime — sibling to hello (prime).
+# run_tokio itself is unconditional, but the #[proxima::main] attribute
+# macro is gated behind `macros`.
+[[example]]
+name = "proxima_main_tokio_demo"
+required-features = ["macros", "tokio"]
+
+# #[proxima::main(runtime = "prime")] end-to-end — needs the prime runtime
+# features (default has them via serve-prime; gate so a feature-stripped
+# `--examples` build doesn't trip the prime compile_error). The tokio sibling
+# `proxima_main_tokio_demo` needs no features (run_tokio is unconditional).
+[[example]]
+name = "proxima_main_demo"
+required-features = ["macros", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+# flagship composite-runtime proof — prime + tokio serving concurrently in one
+# process on the same sans-IO pipe. runtime-tokio is opt-in (see runtime-tokio
+# above); the prime side is covered by serve-prime's default bundle, listed
+# explicitly so a feature-stripped `--examples` build still gates correctly.
+# also needs the full `tokio` feature: `proxima_net::tokio::TokioAcceptorFactory`
+# lives behind that gate, not the narrower `runtime-tokio` marker.
+[[example]]
+name = "multi_runtime"
+path = "examples/multi_runtime/main.rs"
+required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+[[example]]
+name = "hello"
+path = "examples/hello/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+[[example]]
+name = "runtime_select"
+path = "examples/runtime_select/main.rs"
+# needs BOTH: `runtime-tokio` for `TokioPerCoreRuntime`, `tokio` for
+# `proxima_net::tokio::TokioAcceptorFactory` (that module is gated on the
+# full `tokio` feature, not the narrower `runtime-tokio` marker).
+required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+# unified instrument: one #[instrument] annotation -> span (trace) + duration
+# metric, read back from an in-memory capture AND a stdout exporter. macros for
+# the attribute itself; instrument-metrics for the metric pillar (default-off
+# firewall — see examples/instrument/README.md for exactly what fires without it).
+[[example]]
+name = "instrument"
+path = "examples/instrument/main.rs"
+required-features = ["macros", "instrument-metrics"]
+
+# distributed-trace capstone: two prime App instances in one process, A
+# forwards to B over a real TCP/HTTP hop with an injected traceparent. Prime
+# side is covered by serve-prime's default bundle (http-prime-deps for the
+# blocking forward, macros for #[instrument]); listed explicitly so a
+# feature-stripped `--examples` build still gates correctly.
+[[example]]
+name = "distributed_trace"
+path = "examples/distributed_trace/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "macros", "tokio"]
+
+# backoff: retry with exponential backoff and jitter across transient failures.
+[[example]]
+name = "backoff"
+path = "examples/backoff/main.rs"
+
+# backpressure: bounded queue between a batch source and a downstream pipe,
+# demonstrating lossy vs lossless queue choices for flow control.
+[[example]]
+name = "backpressure"
+path = "examples/backpressure/main.rs"
+
+# cache: KV caching strategy with selection-based upstream wiring.
+[[example]]
+name = "cache"
+path = "examples/cache/main.rs"
+required-features = ["tokio"]
+
+# cancellation: driving request lifecycle out via Signal across pipe boundaries.
+[[example]]
+name = "cancellation"
+path = "examples/cancellation/main.rs"
+
+# chaos engineering: injecting failures to validate resilience properties.
+[[example]]
+name = "chaos"
+path = "examples/chaos/main.rs"
+
+# circuit_breaker: fail-fast on degraded backends with half-open recovery.
+[[example]]
+name = "circuit_breaker"
+path = "examples/circuit_breaker/main.rs"
+
+# clock: time abstraction for deterministic testing across pipe stages.
+[[example]]
+name = "clock"
+path = "examples/clock/main.rs"
+
+# typed config with conflaguration: layered fluent builder, serialize <-> deserialize round trip.
+[[example]]
+name = "config"
+path = "examples/config/main.rs"
+
+# deadline: time-bounded execution with per-hop timeout discipline.
+[[example]]
+name = "deadline"
+path = "examples/deadline/main.rs"
+
+# differential testing: compare native h1 frame parser behavior under varying limits.
+[[example]]
+name = "differential"
+path = "examples/differential/main.rs"
+
+# OTLP/HTTP export: write trace/metric payloads to a collector endpoint.
+[[example]]
+name = "export"
+path = "examples/export/main.rs"
+required-features = ["otlp-http", "tracing-init"]
+
+# fallback: graceful degradation when a pipe branch rejects or fails.
+[[example]]
+name = "fallback"
+path = "examples/fallback/main.rs"
+
+# filter: predicate-based passthrough/reject discipline across streams.
+[[example]]
+name = "filter"
+path = "examples/filter/main.rs"
+
+# fuzzing codec boundaries with length-delimited framing limits.
+[[example]]
+name = "fuzz"
+path = "examples/fuzz/main.rs"
+
+# metrics: recording counter, gauge, histogram telemetry via proxima_telemetry.
+[[example]]
+name = "metrics"
+path = "examples/metrics/main.rs"
+required-features = ["histogram"]
+
+# rate_limit: per-key token-bucket rate limiting across pipe stages.
+[[example]]
+name = "rate_limit"
+path = "examples/rate_limit/main.rs"
+
+# record: streaming request payloads to disk with PrimeRuntime dispatch.
+[[example]]
+name = "record"
+path = "examples/record/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tokio"]
+
+# replay: reconstruct request payloads from record files for testing.
+[[example]]
+name = "replay"
+path = "examples/replay/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+# retry: simple exponential-backoff retry with configurable rules.
+[[example]]
+name = "retry"
+path = "examples/retry/main.rs"
+
+# send: forwarding a request body to an upstream sink pipe.
+[[example]]
+name = "send"
+path = "examples/send/main.rs"
+required-features = ["tokio"]
+
+# signal: lifecycle management for async request cancellation across pipe boundaries.
+[[example]]
+name = "signal"
+path = "examples/signal/main.rs"
+required-features = ["tokio"]
+
+# traces: in-memory trace recording and validation via proxima telemetry.
+[[example]]
+name = "traces"
+path = "examples/traces/main.rs"
+required-features = ["tokio"]
+
+# transform: data transformation applied across pipe stages.
+# #[proxima::main(runtime = "tokio")] end-to-end — needs `tokio`.
+[[example]]
+name = "transform"
+path = "examples/transform/main.rs"
+required-features = ["tokio"]
+
+# builds a TokioPerCoreRuntime explicitly and installs it via with_runtime;
+# tokio-specific, so gate it now that tokio is no longer in the default graph.
+# needs BOTH: `runtime-tokio` for `TokioPerCoreRuntime`, `tokio` for the raw
+# `tokio::{spawn,time,net,io}` calls and `#[proxima::main(runtime = "tokio")]`
+# (`block_on_tokio` is gated on the full `tokio` feature).
+[[example]]
+name = "listener_throughput"
+required-features = ["macros", "runtime-tokio", "tokio"]
+
+# prime-driven UDP echo over a dpdk net_tap PMD — proves DpdkPacketListener live.
+[[example]]
+name = "dpdk_udp_echo"
+required-features = ["dpdk"]
+
+# prime-driven TCP echo over a dpdk net_tap PMD — proves DpdkStreamListener live.
+[[example]]
+name = "dpdk_tcp_echo"
+required-features = ["dpdk"]
+
+# active-open TCP client over a dpdk net_tap PMD — proves DpdkStreamUpstream live.
+[[example]]
+name = "dpdk_tcp_connect"
+required-features = ["dpdk"]
+
+# native h3 bench server: OkHandler over H3NativeListenProtocol + prime runtime.
+[[example]]
+name = "bench_server_h3"
+required-features = ["http3", "tracing-init"]
+
+# native h3 client probe: drives bench_multiplexed against a real h3 server.
+[[example]]
+name = "rekt_h3_probe"
+required-features = ["h3-native-upstream", "tracing-init"]
+
+# raw-prime static-200 h1 floor server — apples-to-apples baseline for proxima h1.
+[[example]]
+name = "rust_floor_h1"
+required-features = ["http3", "tracing-init"]
+
+# multi-connection native h3 load driver — drives multi-core reuseport h3 servers.
+[[example]]
+name = "rekt_h3_load"
+required-features = ["h3-native-upstream", "tracing-init"]
+
+# applied rungs — forward/serve on prime, so they need the prime runtime bundle
+# (default has it via serve-prime; gated so a feature-stripped --examples build
+# skips them instead of tripping the prime compile_error).
+[[example]]
+name = "proxy"
+path = "examples/proxy/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "tokio"]
+
+[[example]]
+name = "gateway"
+path = "examples/gateway/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "tokio"]
+
+[[example]]
+name = "load-balance"
+path = "examples/load-balance/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "tokio"]
+
+[[example]]
+name = "crud"
+path = "examples/crud/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+[[example]]
+name = "integration"
+path = "examples/integration/main.rs"
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tokio"]
+
+# the `units` binary bundles 15 test modules into one link target (see
+# tests/units.rs); 3 of them (scenario_smoke, settings_to_app,
+# thread_local_composition) use #[proxima::test], which only exists behind
+# `macros` — declared explicitly since autodiscovered tests can't carry
+# required-features otherwise.
+[[test]]
+name = "units"
+required-features = ["macros"]
+
+[[test]]
+name = "e2e"
+required-features = ["macros", "http-hyper", "http3-quinn-compat"]
+
+# integration tests that name TokioPerCoreRuntime at top-level need the tokio
+# runtime in the graph. autodiscovered tests can't carry required-features, so
+# declare them explicitly. (runtime_conformance.rs cfg-gates its tokio module
+# internally, so it stays autodiscovered.)
+[[test]]
+name = "framed_app"
+required-features = ["macros", "runtime-tokio"]
+
+# tokio-hosts-proxima (P-TU slice 1B): a bare thread drives proxima::Client
+# over an injected TokioPerCoreRuntime — needs the tokio runtime + hyper path.
+[[test]]
+name = "ptu_tokio_host"
+required-features = ["runtime-tokio", "http-hyper", "http1", "http2"]
+
+# P-TU slice 2 + latency probe: both wires in one build, so both dial paths
+# need the tokio transport + hyper backend present alongside the prime default.
+[[test]]
+name = "ptu_both_wires"
+required-features = ["runtime-tokio", "http-hyper"]
+
+[[test]]
+name = "ptu_bench"
+required-features = ["runtime-tokio", "http-hyper"]
+
+# concurrent-connect reliability harness for PrimeServeExt::serve_http
+# (relocated from the former proxima-runtime-prime crate's own test suite —
+# FOLD 2 of the runtime backend consolidation). Needs PrimeServeExt itself
+# (http1 + the four bgpool primitives).
+[[test]]
+name = "concurrent_accept"
+required-features = ["http1", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+
+# prime-vs-tokio comparison test: drives both servers, so it needs the tokio
+# runtime AND the full prime runtime present together.
+[[test]]
+name = "prime_vs_tokio_h2_native_client"
+required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http2", "http1", "tcp"]
+
+# OTLP over the prime wire by composing the facade (telemetry codec ∘ prime h1
+# client). needs the prime runtime present, http-prime (h1 client + prime tcp),
+# otlp-http (the codec), and test-prime (#[proxima::test]).
+[[test]]
+name = "otlp_send_prime_e2e"
+required-features = ["test-prime", "otlp-http", "http-prime", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tcp"]
+
+# Native h2 CLIENT (H2ClientUpstream) <-> native h2 server over the prime wire.
+[[test]]
+name = "h2_client_prime_e2e"
+required-features = ["test-prime", "http-prime", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tcp"]
+
+# OTLP/gRPC export: proxima::Client (grpc spec key -> h2 client) POSTs grpc-framed
+# OTLP to a prime h2 collector that prost-decodes it.
+[[test]]
+name = "otlp_grpc_prime_e2e"
+required-features = ["test-prime", "otlp-grpc", "http-prime", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tcp"]
+
+# proxima::sync vs tokio::sync — primitive-level shootout (Phase E.0/E.2/E.5)
+# and home-turf retrofits (Phase E.HT). All require the sync-wrappers feature
+# since they exercise `proxima::sync::*` and `proxima::time::*` surfaces.
+[[bench]]
+name = "bench_sync_compat"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_tail"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_e2e"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_time"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_reexports"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_mutex_parity"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_semaphore_parity"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_sync_once_cell_parity"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_time_instant_parity"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_time_interval_parity"
+harness = false
+required-features = ["sync-wrappers"]
+
+[[bench]]
+name = "bench_task_join_set_parity"
+harness = false
+
+# prime-default serve compare-bench gate: drives HttpListenProtocol::serve
+# on both backends (tokio LocalSet + prime CoreShard), loopback 64 KiB GET.
+[[bench]]
+name = "bench_serve_prime_vs_tokio"
+harness = false
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
+
+# Concurrent aggregate throughput on PrimeServeExt::serve_http (the daemon
+# :9091 path): cores=1 (pre-round-robin single-core) vs cores=10 (round-robin
+# fan-out) at 1/8/32 kept-alive connections. Proves the round-robin scales
+# concurrency rather than regressing it.
+[[bench]]
+name = "bench_serve_http_concurrent"
+harness = false
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]

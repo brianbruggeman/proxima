@@ -1,0 +1,29 @@
+# `proxima replay --verify` policy for the remote_pipeline_demo
+# recording. Exercises the verify-CLI substrate against the
+# pipeline's `recording.jsonl` that proximad writes under
+# `$STATE_DIR/<pipeline_id>/`.
+#
+# Two rules are the meat:
+#
+# - `unauthorized_upstream_call` — every pipe name touched in the
+#   recording must appear in `allowed_upstreams`. The demo pipeline
+#   has exactly three stages: fetch → build → bench.
+# - `inferred_not_recorded` — events for these three pipes must
+#   have `RecordMeta.source != Inferred`. criterion #4 in `run.sh`
+#   asserts the same thing via shell grep; this rule expresses it
+#   in policy form.
+#
+# `replay.terminated_cleanly` and `replay.recording_summary`
+# additionally PASS by construction (every Started has an Ended;
+# summary is informational).
+#
+# `byte_drift` and `idempotence_contract` PASS trivially —
+# `byte_identical_pipes` is empty (pipeline stages are
+# subprocess-shaped, not reproducible via proxima Spec dispatch)
+# and no stage is declared `idempotent = false`.
+
+[shared]
+
+[replay]
+allowed_upstreams = ["fetch", "build", "bench"]
+must_derive_from_record = ["fetch", "build", "bench"]

@@ -1,0 +1,44 @@
+# Full-PrimeRuntime tests each spin up a runtime plus ~16 client threads. Several
+# running at once oversubscribe the box (4x that = ~64 threads on 8 cores) and
+# starve each other to a nextest timeout — the code is correct, the scheduling is
+# not. Serialize them relative to EACH OTHER only; the rest of the suite stays
+# parallel. Each is sub-second, so group-serial costs a few seconds, not the
+# global --test-threads=1 penalty. New heavy-runtime tests join by matching here.
+[test-groups]
+heavy-runtime = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(proxima) and binary(concurrent_accept)'
+test-group = "heavy-runtime"
+
+# fs control-plane tests each spawn a real /bin/sh pipeline subprocess plus a
+# runtime; several at once on a 2-core CI runner starve each other's subprocess
+# scheduling past the wait_for_terminal ceiling (the code is correct, the
+# scheduling is not — same failure mode as the heavy-runtime group above).
+# heavy-runtime serializes them against each other; retries absorb the residual
+# starvation from the rest of the suite (a real hang still fails every attempt,
+# a load-starved run passes once the batch drains).
+[[profile.default.overrides]]
+filter = 'package(proxima) and test(pipelines::fs_control_plane::tests::)'
+test-group = "heavy-runtime"
+retries = 3
+
+# Scoped timeout for the lossless-backpressure tests: elastic producer-assist
+# guarantees forward progress, so these complete in well under a second. If a
+# regression reintroduces the hang-on-full-ring failure mode, terminate-after
+# fails the run fast instead of blocking the CI runner forever (guiding-principle
+# 16: every claim mechanically re-proven, including "it does not deadlock").
+[[profile.default.overrides]]
+filter = 'test(/block_no_drainer_self_progresses_no_hang|block_policy_never_drops_under_saturation|managed_drainer_pumps_without_manual_drain|pump_active_parks_producers_losslessly|pump_time_trigger_flushes_light_load/)'
+slow-timeout = { period = "20s", terminate-after = 2 }
+
+# spread_blocking_handler_runs_off_executor_threads holds N `/hold`
+# requests parked on a Barrier with no client-side read timeout (a timeout
+# would mask the deterministic thread-id proof with a misleading "read
+# timed out" error). If `SpreadToPeers` regresses to running blocking
+# handlers on the executor cores instead of the background pool, this
+# genuinely deadlocks (proven: reverting the fix hangs past nextest's
+# default slow-test threshold). Fail fast instead of hanging CI.
+[[profile.default.overrides]]
+filter = 'test(spread_blocking_handler_runs_off_executor_threads)'
+slow-timeout = { period = "10s", terminate-after = 2 }

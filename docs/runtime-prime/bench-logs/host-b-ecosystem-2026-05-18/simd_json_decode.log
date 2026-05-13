@@ -1,0 +1,28 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 30.96s
+     Running benches/simd_json_decode.rs (proxima/target/release/deps/simd_json_decode-73c735e7cfc948f5)
+Benchmarking json_decode/serde_json_from_slice
+Benchmarking json_decode/serde_json_from_slice: Warming up for 2.0000 s
+Benchmarking json_decode/serde_json_from_slice: Collecting 20 samples in estimated 3.0004 s (396k iterations)
+Benchmarking json_decode/serde_json_from_slice: Analyzing
+json_decode/serde_json_from_slice
+                        time:   [7.4512 µs 7.4630 µs 7.4786 µs]
+                        thrpt:  [462.39 MiB/s 463.36 MiB/s 464.09 MiB/s]
+                 change:
+                        time:   [−10.413% −9.1740% −7.9118%] (p = 0.01 < 0.05)
+                        thrpt:  [+8.5915% +10.101% +11.624%]
+                        Performance has improved.
+Benchmarking json_decode/simd_json_from_slice
+Benchmarking json_decode/simd_json_from_slice: Warming up for 2.0000 s
+Benchmarking json_decode/simd_json_from_slice: Collecting 20 samples in estimated 3.0002 s (437k iterations)
+Benchmarking json_decode/simd_json_from_slice: Analyzing
+json_decode/simd_json_from_slice
+                        time:   [6.8234 µs 6.8270 µs 6.8306 µs]
+                        thrpt:  [506.25 MiB/s 506.52 MiB/s 506.79 MiB/s]
+                 change:
+                        time:   [+5.3307% +5.6529% +5.9733%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.6366% −5.3505% −5.0609%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

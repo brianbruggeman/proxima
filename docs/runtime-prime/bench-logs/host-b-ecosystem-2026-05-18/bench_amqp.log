@@ -1,0 +1,109 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 41s
+     Running benches/bench_amqp.rs (proxima/target/release/deps/bench_amqp-b42b6c4ba800259f)
+Benchmarking amqp_method/proxima
+Benchmarking amqp_method/proxima: Warming up for 2.0000 s
+Benchmarking amqp_method/proxima: Collecting 20 samples in estimated 2.0000 s (340M iterations)
+Benchmarking amqp_method/proxima: Analyzing
+amqp_method/proxima     time:   [5.8508 ns 5.8605 ns 5.8719 ns]
+                        thrpt:  [1.9033 GiB/s 1.9070 GiB/s 1.9101 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking amqp_method/parity
+Benchmarking amqp_method/parity: Warming up for 2.0000 s
+Benchmarking amqp_method/parity: Collecting 20 samples in estimated 2.0000 s (602M iterations)
+Benchmarking amqp_method/parity: Analyzing
+amqp_method/parity      time:   [3.2579 ns 3.2598 ns 3.2634 ns]
+                        thrpt:  [3.4246 GiB/s 3.4284 GiB/s 3.4304 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking amqp_body/proxima
+Benchmarking amqp_body/proxima: Warming up for 2.0000 s
+Benchmarking amqp_body/proxima: Collecting 20 samples in estimated 2.0000 s (1.5B iterations)
+Benchmarking amqp_body/proxima: Analyzing
+amqp_body/proxima       time:   [1.2933 ns 1.2960 ns 1.2992 ns]
+                        thrpt:  [189.25 GiB/s 189.71 GiB/s 190.11 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking amqp_body/parity
+Benchmarking amqp_body/parity: Warming up for 2.0000 s
+Benchmarking amqp_body/parity: Collecting 20 samples in estimated 2.0000 s (1.2B iterations)
+Benchmarking amqp_body/parity: Analyzing
+amqp_body/parity        time:   [1.6296 ns 1.6310 ns 1.6331 ns]
+                        thrpt:  [150.55 GiB/s 150.75 GiB/s 150.88 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking amqp_heartbeat/proxima
+Benchmarking amqp_heartbeat/proxima: Warming up for 2.0000 s
+Benchmarking amqp_heartbeat/proxima: Collecting 20 samples in estimated 2.0000 s (367M iterations)
+Benchmarking amqp_heartbeat/proxima: Analyzing
+amqp_heartbeat/proxima  time:   [5.4509 ns 5.4622 ns 5.4706 ns]
+                        thrpt:  [1.3619 GiB/s 1.3640 GiB/s 1.3668 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking amqp_heartbeat/parity
+Benchmarking amqp_heartbeat/parity: Warming up for 2.0000 s
+Benchmarking amqp_heartbeat/parity: Collecting 20 samples in estimated 2.0000 s (840M iterations)
+Benchmarking amqp_heartbeat/parity: Analyzing
+amqp_heartbeat/parity   time:   [2.3627 ns 2.3673 ns 2.3733 ns]
+                        thrpt:  [3.1393 GiB/s 3.1473 GiB/s 3.1534 GiB/s]
+
+Benchmarking amqp_real/proxima_method
+Benchmarking amqp_real/proxima_method: Warming up for 2.0000 s
+Benchmarking amqp_real/proxima_method: Collecting 20 samples in estimated 2.0000 s (349M iterations)
+Benchmarking amqp_real/proxima_method: Analyzing
+amqp_real/proxima_method
+                        time:   [5.6932 ns 5.7069 ns 5.7158 ns]
+Benchmarking amqp_real/amq_protocol_method
+Benchmarking amqp_real/amq_protocol_method: Warming up for 2.0000 s
+Benchmarking amqp_real/amq_protocol_method: Collecting 20 samples in estimated 2.0000 s (56M iterations)
+Benchmarking amqp_real/amq_protocol_method: Analyzing
+amqp_real/amq_protocol_method
+                        time:   [35.653 ns 35.701 ns 35.787 ns]
+Benchmarking amqp_real/proxima_body
+Benchmarking amqp_real/proxima_body: Warming up for 2.0000 s
+Benchmarking amqp_real/proxima_body: Collecting 20 samples in estimated 2.0000 s (366M iterations)
+Benchmarking amqp_real/proxima_body: Analyzing
+amqp_real/proxima_body  time:   [5.4745 ns 5.4905 ns 5.5034 ns]
+Benchmarking amqp_real/amq_protocol_body
+Benchmarking amqp_real/amq_protocol_body: Warming up for 2.0000 s
+Benchmarking amqp_real/amq_protocol_body: Collecting 20 samples in estimated 2.0000 s (65M iterations)
+Benchmarking amqp_real/amq_protocol_body: Analyzing
+amqp_real/amq_protocol_body
+                        time:   [30.660 ns 30.779 ns 30.892 ns]
+Benchmarking amqp_real/proxima_heartbeat
+Benchmarking amqp_real/proxima_heartbeat: Warming up for 2.0000 s
+Benchmarking amqp_real/proxima_heartbeat: Collecting 20 samples in estimated 2.0000 s (366M iterations)
+Benchmarking amqp_real/proxima_heartbeat: Analyzing
+amqp_real/proxima_heartbeat
+                        time:   [5.4866 ns 5.4963 ns 5.5048 ns]
+Benchmarking amqp_real/amq_protocol_heartbeat
+Benchmarking amqp_real/amq_protocol_heartbeat: Warming up for 2.0000 s
+Benchmarking amqp_real/amq_protocol_heartbeat: Collecting 20 samples in estimated 2.0000 s (101M iterations)
+Benchmarking amqp_real/amq_protocol_heartbeat: Analyzing
+amqp_real/amq_protocol_heartbeat
+                        time:   [19.998 ns 20.149 ns 20.261 ns]
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) high severe
+
+Benchmarking amqp_workload_classify_method/proxima
+Benchmarking amqp_workload_classify_method/proxima: Warming up for 2.0000 s
+Benchmarking amqp_workload_classify_method/proxima: Collecting 20 samples in estimated 2.0000 s (1.1B iterations)
+Benchmarking amqp_workload_classify_method/proxima: Analyzing
+amqp_workload_classify_method/proxima
+                        time:   [1.8702 ns 1.8747 ns 1.8799 ns]
+                        thrpt:  [5.9449 GiB/s 5.9615 GiB/s 5.9756 GiB/s]
+Benchmarking amqp_workload_classify_method/amq_protocol
+Benchmarking amqp_workload_classify_method/amq_protocol: Warming up for 2.0000 s
+Benchmarking amqp_workload_classify_method/amq_protocol: Collecting 20 samples in estimated 2.0000 s (58M iterations)
+Benchmarking amqp_workload_classify_method/amq_protocol: Analyzing
+amqp_workload_classify_method/amq_protocol
+                        time:   [34.555 ns 34.574 ns 34.596 ns]
+                        thrpt:  [330.80 MiB/s 331.01 MiB/s 331.18 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+

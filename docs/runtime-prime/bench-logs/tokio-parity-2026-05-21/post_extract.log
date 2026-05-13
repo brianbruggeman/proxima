@@ -1,0 +1,264 @@
+   Compiling proxima-time v0.1.0 (proxima/proxima-time)
+   Compiling proxima v0.1.0 (proxima/rust)
+   Compiling proxima-task v0.1.0 (proxima/proxima-task)
+   Compiling proxima-pipe v0.1.0 (proxima/proxima-pipe)
+   Compiling proxima-stream v0.1.0 (proxima/proxima-stream)
+   Compiling proxima-runtime v0.1.0 (proxima/proxima-runtime)
+   Compiling proxima-compose v0.1.0 (proxima/proxima-compose)
+   Compiling proxima-kv v0.1.0 (proxima/proxima-kv)
+   Compiling proxima-control-plane v0.1.0 (proxima/proxima-control-plane)
+   Compiling proxima-replay v0.1.0 (proxima/proxima-replay)
+   Compiling proxima-telemetry v0.1.0 (proxima/proxima-telemetry)
+   Compiling proxima-recording-pipe v0.1.0 (proxima/proxima-recording-pipe)
+   Compiling proxima-quic v0.1.0 (proxima/proxima-quic)
+   Compiling proxima-net-tokio v0.1.0 (proxima/proxima-net-tokio)
+   Compiling proxima-framing-json v0.1.0 (proxima/proxima-framing-json)
+   Compiling proxima-listen v0.1.0 (proxima/proxima-listen)
+   Compiling proxima-runtime-tokio v0.1.0 (proxima/proxima-runtime-tokio)
+   Compiling proxima-shutdown v0.1.0 (proxima/proxima-shutdown)
+   Compiling proxima-h1 v0.1.0 (proxima/proxima-h1)
+   Compiling proxima-h2 v0.1.0 (proxima/proxima-h2)
+   Compiling proxima-listeners-stream v0.1.0 (proxima/proxima-listeners-stream)
+   Compiling proxima-selection v0.1.0 (proxima/proxima-selection)
+   Compiling proxima-middleware v0.1.0 (proxima/proxima-middleware)
+   Compiling proxima-h3 v0.1.0 (proxima/proxima-h3)
+   Compiling proxima-listeners-http v0.1.0 (proxima/proxima-listeners-http)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 31s
+     Running benches/bench_sync_mutex_parity.rs (/tmp/cargo_target/release/deps/bench_sync_mutex_parity-65812ef475eccaad)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, or reduce sample count to 80.
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Collecting 100 samples in estimated 6.2425 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/proxima_sync_mutex
+                        time:   [61.577 ms 61.818 ms 62.135 ms]
+                        change: [−2.1830% −0.7491% +0.4046%] (p = 0.30 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.3s, or reduce sample count to 70.
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Collecting 100 samples in estimated 6.2625 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/tokio_sync_mutex
+                        time:   [61.564 ms 61.767 ms 62.038 ms]
+                        change: [−2.8594% −1.2511% −0.0220%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Collecting 100 samples in estimated 5.0794 s (2100 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+                        time:   [2.3950 ms 2.4188 ms 2.4516 ms]
+                        change: [−4.4816% −2.0629% +0.1826%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Collecting 100 samples in estimated 5.0439 s (2100 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+                        time:   [2.3389 ms 2.3504 ms 2.3627 ms]
+                        change: [−32.378% −21.593% −11.605%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Collecting 100 samples in estimated 5.1507 s (2200 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+                        time:   [2.3314 ms 2.3399 ms 2.3490 ms]
+                        change: [−1.0756% −0.5097% +0.0549%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Collecting 100 samples in estimated 5.0066 s (2.0M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/proxima_sync_mutex
+                        time:   [2.4734 µs 2.4762 µs 2.4795 µs]
+                        change: [−3.0009% −2.1606% −1.5671%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Collecting 100 samples in estimated 5.0084 s (1.5M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/tokio_sync_mutex
+                        time:   [3.3538 µs 3.3563 µs 3.3587 µs]
+                        change: [−6.1825% −3.8954% −2.0952%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low severe
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Collecting 100 samples in estimated 5.0028 s (2.2M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Analyzing
+mutex_parity_w3_async_write_flush/parking_lot_mutex
+                        time:   [2.3053 µs 2.3088 µs 2.3131 µs]
+                        change: [−2.6414% −2.2950% −1.9716%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) low mild
+  6 (6.00%) high mild
+  1 (1.00%) high severe
+
+     Running benches/bench_time_instant_parity.rs (/tmp/cargo_target/release/deps/bench_time_instant_parity-bed256ade9987ebe)
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout: Warming up for 3.0000 s
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout: Collecting 100 samples in estimated 8.3702 s (200 iterations)
+Benchmarking time_parity_w1_timeout_backstop/proxima_time_timeout: Analyzing
+time_parity_w1_timeout_backstop/proxima_time_timeout
+                        time:   [41.082 ms 41.104 ms 41.127 ms]
+                        change: [−0.7444% −0.6509% −0.5592%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 25.9s, or reduce sample count to 10.
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout: Collecting 100 samples in estimated 25.852 s (100 iterations)
+Benchmarking time_parity_w1_timeout_backstop/tokio_time_timeout: Analyzing
+time_parity_w1_timeout_backstop/tokio_time_timeout
+                        time:   [257.45 ms 258.98 ms 261.13 ms]
+                        change: [−0.6727% +0.0607% +0.9681%] (p = 0.90 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high severe
+
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep: Warming up for 3.0000 s
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep: Collecting 20 samples in estimated 7.1247 s (60 iterations)
+Benchmarking time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep: Analyzing
+time_parity_w2_sleep_until_quiesce/proxima_time_sleep_until_via_sleep
+                        time:   [118.16 ms 118.41 ms 118.65 ms]
+                        change: [−0.3097% −0.0155% +0.2793%] (p = 0.92 > 0.05)
+                        No change in performance detected.
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until: Warming up for 3.0000 s
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until: Collecting 20 samples in estimated 7.1080 s (60 iterations)
+Benchmarking time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until: Analyzing
+time_parity_w2_sleep_until_quiesce/tokio_time_sleep_until
+                        time:   [118.11 ms 118.46 ms 118.81 ms]
+                        change: [−0.2817% +0.0845% +0.4802%] (p = 0.67 > 0.05)
+                        No change in performance detected.
+
+     Running benches/bench_time_interval_parity.rs (/tmp/cargo_target/release/deps/bench_time_interval_parity-a0cbb9f12e21425a)
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 52.7s or enable flat sampling.
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream: Collecting 10 samples in estimated 52.748 s (55 iterations)
+Benchmarking interval_maintenance_50ms_x20/proxima_time_interval_stream: Analyzing
+interval_maintenance_50ms_x20/proxima_time_interval_stream
+                        time:   [958.93 ms 959.32 ms 959.69 ms]
+                        change: [−0.0553% +0.0390% +0.1188%] (p = 0.43 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 52.6s or enable flat sampling.
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip: Collecting 10 samples in estimated 52.641 s (55 iterations)
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_skip: Analyzing
+interval_maintenance_50ms_x20/tokio_time_interval_skip
+                        time:   [957.04 ms 957.07 ms 957.12 ms]
+                        change: [−0.0252% −0.0046% +0.0126%] (p = 0.68 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 52.6s or enable flat sampling.
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst: Collecting 10 samples in estimated 52.639 s (55 iterations)
+Benchmarking interval_maintenance_50ms_x20/tokio_time_interval_burst: Analyzing
+interval_maintenance_50ms_x20/tokio_time_interval_burst
+                        time:   [957.00 ms 957.04 ms 957.13 ms]
+                        change: [−0.1038% −0.0489% −0.0092%] (p = 0.05 > 0.05)
+                        No change in performance detected.
+
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 15.0s. You may wish to increase target time to 20.6s or enable flat sampling.
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream: Collecting 10 samples in estimated 20.627 s (55 iterations)
+Benchmarking interval_slow_consumer_50ms_x5/proxima_time_interval_stream: Analyzing
+interval_slow_consumer_50ms_x5/proxima_time_interval_stream
+                        time:   [375.03 ms 375.03 ms 375.04 ms]
+                        change: [−0.0012% +0.0005% +0.0021%] (p = 0.59 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 15.0s. You may wish to increase target time to 20.7s or enable flat sampling.
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip: Collecting 10 samples in estimated 20.691 s (55 iterations)
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_skip: Analyzing
+interval_slow_consumer_50ms_x5/tokio_time_interval_skip
+                        time:   [376.18 ms 376.19 ms 376.20 ms]
+                        change: [−0.0537% −0.0177% +0.0017%] (p = 0.40 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 15.0s. You may wish to increase target time to 20.7s or enable flat sampling.
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst: Collecting 10 samples in estimated 20.690 s (55 iterations)
+Benchmarking interval_slow_consumer_50ms_x5/tokio_time_interval_burst: Analyzing
+interval_slow_consumer_50ms_x5/tokio_time_interval_burst
+                        time:   [376.16 ms 376.61 ms 377.36 ms]
+                        change: [−0.0096% +0.0513% +0.1604%] (p = 0.53 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low severe
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 54.6s or enable flat sampling.
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream: Collecting 10 samples in estimated 54.559 s (55 iterations)
+Benchmarking interval_tight_10ms_x100/proxima_time_interval_stream: Analyzing
+interval_tight_10ms_x100/proxima_time_interval_stream
+                        time:   [991.79 ms 991.95 ms 992.10 ms]
+                        change: [−0.0624% −0.0145% +0.0175%] (p = 0.52 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low severe
+Benchmarking interval_tight_10ms_x100/tokio_time_interval
+Benchmarking interval_tight_10ms_x100/tokio_time_interval: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 30.0s. You may wish to increase target time to 54.6s or enable flat sampling.
+Benchmarking interval_tight_10ms_x100/tokio_time_interval: Collecting 10 samples in estimated 54.569 s (55 iterations)
+Benchmarking interval_tight_10ms_x100/tokio_time_interval: Analyzing
+interval_tight_10ms_x100/tokio_time_interval
+                        time:   [991.99 ms 992.04 ms 992.11 ms]
+                        change: [−0.0159% −0.0006% +0.0150%] (p = 0.95 > 0.05)
+                        No change in performance detected.
+

@@ -1,0 +1,10 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 26.59s
+     Running benches/h2_native_vs_h2_crate_alloc.rs (/tmp/cargo_target/release/deps/h2_native_vs_h2_crate_alloc-3a8108c838b0fa22)
+allocation cost per h2 request — counting global allocator, 3s steady-state window
+(allocator wrapper adds ~2 atomic ops per allocation; absolute numbers slightly inflated, deltas meaningful)
+
+h2 server, warm client, minimal GET workload:
+  proxima_h2_crate      rps=18755     bytes/req=1473    allocs/req=19.0    total_bytes=79.1 MiB  total_allocs=1069516
+  proxima_native        rps=23116     bytes/req=2354    allocs/req=20.0    total_bytes=155.7 MiB  total_allocs=1387486
+  hyper_http2           rps=19633     bytes/req=2006    allocs/req=16.0    total_bytes=112.7 MiB  total_allocs=942612

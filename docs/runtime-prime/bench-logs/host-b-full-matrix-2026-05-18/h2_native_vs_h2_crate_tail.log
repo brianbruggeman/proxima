@@ -1,0 +1,17 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 24.16s
+     Running benches/h2_native_vs_h2_crate_tail.rs (proxima/target/release/deps/h2_native_vs_h2_crate_tail-d6a0d93f1bbe2208)
+tail-latency sweep — warm h2 client, 3s per scenario, minimal GET workload
+
+concurrency=1:
+  h2_crate                       count=107843   mean=27.75 us   p50=27.47 us   p90=28.67 us   p99=32.02 us   p999=52.13 us   max=2.10 ms
+  proxima_native                 count=126984   mean=23.56 us   p50=23.36 us   p90=24.22 us   p99=27.02 us   p999=36.29 us   max=95.68 us
+
+concurrency=10:
+  h2_crate                       count=401140   mean=74.70 us   p50=78.46 us   p90=85.38 us   p99=119.87 us  p999=175.36 us  max=1.12 ms
+  proxima_native                 count=370186   mean=80.94 us   p50=77.82 us   p90=110.66 us  p99=139.65 us  p999=168.83 us  max=376.32 us
+
+concurrency=100:
+  h2_crate                       count=418557   mean=716.27 us  p50=717.82 us  p90=744.96 us  p99=806.40 us  p999=926.21 us  max=3.81 ms
+  proxima_native                 count=564997   mean=530.76 us  p50=532.99 us  p90=700.41 us  p99=871.42 us  p999=1.09 ms    max=2.21 ms
+

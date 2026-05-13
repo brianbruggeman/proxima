@@ -1,0 +1,47 @@
+[package]
+name = "proxima-codec"
+description = "Pluggable codec registry for proxima — request/response body marshalling with JSON + bytes-passthrough defaults"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+proxima-core = { workspace = true, default-features = false }
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+arc-swap = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+simd-json = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+# Tier-1: no_std + alloc. The FrameCodec/MessageCodec/Datagram traits,
+# Addressed, FrameLimits, LengthDelimitedCodec (alloc-free hot path), and
+# BytesPassthrough live here.
+alloc = ["proxima-core/alloc"]
+# Tier-2: std. Adds JsonCodec (simd-json) and the codec registry/factory
+# (arc-swap, serde_json, base64).
+std = [
+    "alloc",
+    "proxima-core/std",
+    "bytes/std",
+    "serde/std",
+    "serde_json/std",
+    "dep:arc-swap",
+    "dep:base64",
+    "dep:serde_json",
+    "dep:simd-json",
+]
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+rstest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

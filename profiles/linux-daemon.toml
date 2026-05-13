@@ -1,0 +1,20 @@
+# proxima linux-daemon profile — the current default.
+#
+# std + alloc + tokio + rustls + full HTTP stack including HTTP/3.
+# This is what proximad ships with on Linux.
+
+schema = 1
+
+alloc = true
+std = true
+
+executor = "tokio"
+reactor = "tokio-epoll"
+tls = "rustls"
+quic_enabled = false
+# quic_impl: explicit. When quic_enabled flips to true, this becomes "quinn"
+# (today) or "native" (after C41 cutover in proxima-quic-rewrite plan).
+quic_impl = "none"
+# h3_impl: mirrors quic_impl. "h3-quinn" today; "native" after C41.
+h3_impl = "none"
+timer = "std-thread"

@@ -1,0 +1,45 @@
+[package]
+name = "proxima-example-no-std"
+description = "frontier example: proxima's sans-IO Pipe compiles no_std + no-alloc; config becomes build-time constants via build.rs — the no-runtime tier of conflaguration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+
+[lib]
+name = "proxima_example_no_std"
+path = "src/lib.rs"
+
+# std-only driver: prints the demo trace. Gated so the default (no_std)
+# build never touches it — a bare-metal target has no `println!` to link.
+[[bin]]
+name = "no-std-demo"
+path = "src/main.rs"
+required-features = ["std"]
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dependencies]
+proxima-primitives.workspace = true
+# proc-macro crates compile and run on the host at build time; adding this
+# dependency does not pull anything into the OUTPUT crate's no_std/no-alloc
+# target build — only the tokens `#[proxima_macros::pipe]` expands to do,
+# and those are checked by this crate's own `#![no_std]` compile (see
+# `ring_capacity` below).
+proxima-macros.workspace = true
+
+[features]
+default = []
+# enables the crate's own std-mode compilation (drops #![no_std]) so
+# `cargo test` has a libtest harness to run in, and the `no-std-demo`
+# binary can `println!`. The pipe/config logic never changes between
+# the two modes — only this attribute and the demo wrapper do.
+std = []
+
+[lints]
+workspace = true

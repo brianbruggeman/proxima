@@ -1,0 +1,82 @@
+name: prime-serve
+
+# Gate for the prime-default serve runtime (docs/prime-serve/discipline.md).
+# The default `cargo build -p proxima` runs the serve stack on prime; tokio
+# is a first-class opt-out (runtime-tokio / http-hyper). This workflow proves
+# the default flip holds, the opt-out still builds, and the parity +
+# reactor-absence proofs pass.
+
+on:
+  push:
+    branches: [main, "feat/prime-default-runtime", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # The full gate: default-prime build + clippy, tokio opt-out build,
+  # minimal build, serve_parity proofs, and the full umbrella suite.
+  prime-serve-gate:
+    name: prime-serve-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.prime_serve == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/prime-serve-gate.sh
+
+  # Feature-combo build matrix — each cell must compile. Catches a flip
+  # that builds default-prime but breaks an opt-out / minimal combo.
+  feature-matrix:
+    name: build ${{ matrix.label }}
+    needs: changes
+    if: needs.changes.outputs.prime_serve == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: default-prime
+            flags: ""
+          - label: tokio-optout
+            flags: "--no-default-features --features runtime-tokio,http-hyper,tcp,udp,http1,http2,histogram,macros"
+          - label: prime-tls
+            flags: "--features tls"
+          - label: prime-lean
+            flags: "--no-default-features --features serve-prime,tcp,http1,http2,histogram,macros"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p proxima ${{ matrix.flags }}
+
+  # Compare-bench (prime-serve vs tokio-serve). Records the baseline; does
+  # NOT seal the discipline row (that's a manual read of the CoV). Runs
+  # --quick so CI stays fast.
+  compare-bench:
+    name: compare-bench (prime vs tokio serve)
+    needs: changes
+    if: needs.changes.outputs.prime_serve == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --bench bench_serve_prime_vs_tokio -- --quick

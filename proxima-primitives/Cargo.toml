@@ -1,0 +1,247 @@
+[package]
+name = "proxima-primitives"
+description = "Wave D Phase 3 fold of proxima-pipe + proxima-stream + proxima-sync + proxima-transport: the Pipe/SendPipe form family, Handler, SourcePipe, Body, HeaderList, sans-IO byte-stream traits, runtime-agnostic concurrency primitives, and the Replay/GenericStream transport seam — one crate, no more pipe<->stream<->transport dependency cycle."
+build = "build.rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+# no_std + alloc tier floor: pipe's core forms (Pipe/SendPipe/Series, capture_surface,
+# capabilities, batch_source, drain_sink/drain_source, fan_in, header_name, method,
+# resilience, retry_rules, sink_front, when) plus sync's shutdown::ResourceRegistry
+# compile here. proxima-stream's traits are irreducibly std (futures-io); this tier
+# carries only its tier-agnostic BindAddr/PeerInfo re-export and TcpBindOptions.
+# proxima-transport's Replay/GenericStream are also irreducibly std (std Mutex/Vec).
+alloc = [
+    "proxima-core/alloc",
+    "proxima-core/time-alloc",
+    "dep:proxima-runtime",
+    "proxima-runtime/alloc",
+    # backs sync::notify (re-gated from std, see sync/mod.rs) — event-listener
+    # supports no_std + alloc, so Notify never needs proxima-primitives/std.
+    "dep:event-listener",
+]
+std = [
+    "alloc",
+    "proxima-core/std",
+    "proxima-core/registry",
+    "proxima-core/live",
+    "proxima-core/time-std",
+    "proxima-core/time-driver-std-thread",
+    "bytes/std",
+    "futures/std",
+    "serde/std",
+    "serde_json/std",
+    "dep:arc-swap",
+    "dep:tracing",
+    # `futures::executor::block_on` backs the tokio-free `sync::task::JoinSet`
+    # (see sync/task.rs's `portable_join_set`) — real background progress via
+    # one OS thread per spawned task, no runtime dependency.
+    "futures/executor",
+    "fastrand/std",
+    "dep:proxima-config",
+    "proxima-config/schema-std",
+    "rustc-hash/std",
+    "dep:regex",
+    "dep:bon",
+    "dep:conflaguration",
+    "conflaguration/toml",
+    "dep:arrayvec",
+    "dep:async-broadcast",
+    "dep:async-channel",
+    "dep:async-lock",
+    "dep:parking_lot",
+]
+# Retained for cargo-feature-graph compatibility: several downstream crates'
+# own `runtime-prime-full` feature still forwards into
+# `proxima-primitives/runtime-prime-full` (see the workspace root Cargo.toml).
+# The former proxima-pipe itself had nothing left to gate behind it -- the typed
+# `RequestContext.typed_trace_id` field this used to enable moved out with
+# trace ownership to the telemetry substrate (`establish_trace_context` +
+# `RequestContext::adopt_trace_context`).
+runtime-prime-full = []
+# concurrent fan combinators (Race/ScatterGather) over futures::select_all/
+# join_all. Default-off (disciplined-component firewall) — opt in explicitly.
+fan-concurrent = ["alloc"]
+bon = ["dep:bon"]
+conflaguration = ["dep:conflaguration"]
+# the layered conflaguration file/env loader for FilterRegistryConfig (the
+# composition boundary). std-tier; default-off keeps the base lean — the
+# serde config mirror + from_config/to_config are always available under
+# `std`.
+config = ["std", "dep:conflaguration"]
+# The `Part` primitive + degenerate Source/Sink Pipes (default-off, disciplined-
+# component firewall). `part` itself is `core`-only (tier-3); `Request::from_source`
+# (the opt-in materialization drain) additionally needs `alloc` for `Request`.
+# See `docs/proxima-pipe/part-source-sink-design.md`.
+part-source = []
+# R3 of the runtime-shaped initiative: `Mutex<T, R: RuntimeFactory>`
+# generic over the runtime that supplies the underlying lock.
+# default off so existing `use proxima_primitives::sync::Mutex;` call sites
+# resolve to the async-lock-backed Mutex unchanged. opt-in for code
+# that needs to thread runtime selection through its types.
+# see `docs/runtime-shaped/discipline.md`.
+runtime-shaped-mutex = ["std", "dep:proxima-runtime", "proxima-runtime/tokio"]
+# sync::blocking::Mutex no_std+OS tier — lock_api futex mutex over atomic-wait
+# (Linux futex, macOS __ulock, Windows WaitOnAddress). No bare-metal (no-OS)
+# backend by design — a blocking lock needs an OS wait primitive; see
+# `async-mutex` for the tier that reaches bare metal.
+blocking = ["dep:atomic-wait", "dep:lock_api"]
+# sync::AsyncMutex — waker-based async gate mutex that reaches bare-metal
+# no_std + alloc (no futex, no OS wait primitive). crossbeam-queue is a
+# non-optional dependency (see [dependencies] below), so this feature is a
+# pure source-level cfg gate with no dependency toggle.
+async-mutex = []
+# sync::task::JoinSet — thin newtype over tokio::task::JoinSet. sync::task::yield_now
+# is unconditional (no_std-clean, no feature required).
+runtime-tokio = ["std", "dep:tokio"]
+# pipe::stream_bridge's direct RingSource/RingSink AsyncRead/AsyncWrite impls,
+# forwarding proxima-core's own no_std+alloc `io-async` seam (never
+# std::io::Error) — no tokio-util, no std required; reaches T0/T1.
+io-async = ["proxima-core/io-async"]
+# pipe::stream_bridge's `.into_reader()`/`.into_writer()` lift onto
+# `tokio_util::io::{StreamReader, SinkWriter, CopyToBytes}` — std-tier only
+# (tokio-util's io traits are std::io::Error-shaped), so this stays off the
+# default `std` feature and opts in explicitly (disciplined-component firewall).
+io-bridge = ["std", "dep:tokio-util"]
+
+[dependencies]
+proxima-core    = { workspace = true, default-features = false }
+arc-swap        = { workspace = true, optional = true }
+bytes           = { workspace = true, default-features = false }
+futures         = { workspace = true, default-features = false, features = ["alloc", "async-await"] }
+serde           = { workspace = true, features = ["derive", "alloc"] }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+tracing         = { workspace = true, optional = true }
+# direct, not workspace-inherited: the workspace entry locks default-features
+# on, whose `std` feature pulls std; no_std+alloc needs it off. fastrand is
+# used by pipe's mutate/delay/retry across all tiers, so it is non-optional.
+fastrand = { version = "2.4.1", default-features = false }
+proxima-config = { workspace = true, optional = true, default-features = false }
+rustc-hash = { workspace = true, default-features = false }
+regex = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+heapless.workspace = true
+arrayvec = { workspace = true, optional = true }
+# sync's async primitives
+async-broadcast = { workspace = true, optional = true }
+async-channel = { workspace = true, optional = true }
+async-lock = { workspace = true, optional = true }
+atomic-wait = { workspace = true, optional = true }
+# non-optional (not `dep:crossbeam-queue` gated): transport::replay's Replay
+# ring buffer needs it unconditionally under `std` (mirrors the former
+# proxima-transport's own non-optional dependency); sync's async-mutex
+# feature above rides the same always-present crate.
+crossbeam-queue = { workspace = true }
+event-listener = { workspace = true, optional = true }
+lock_api = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, optional = true }
+# `io` for StreamReader/SinkWriter/CopyToBytes (`tokio::io::{AsyncRead,
+# AsyncWrite,ReadBuf}` are unconditional in tokio itself, so `io-util`'s extra
+# `tokio/rt` pull is unneeded here — the `std` feature this rides on already
+# turns on `tokio/rt` via the `runtime-tokio`-independent `dep:tokio` line
+# above). `compat` crosses tokio's native AsyncRead/AsyncWrite onto the
+# workspace's canonical std-tier trait, `futures::io` — see
+# `stream_bridge::reader_writer`'s module doc.
+tokio-util = { workspace = true, features = ["io", "compat"], optional = true }
+
+[dependencies.portable-atomic]
+workspace = true
+default-features = false
+features = ["fallback"]
+
+[dev-dependencies]
+criterion.workspace = true
+rand = { workspace = true }
+rstest = { workspace = true }
+# incumbent arm for the bucket_table bench (P14): dashmap is no longer a runtime dep.
+dashmap = { workspace = true }
+proxima-core = { workspace = true, features = ["time-driver-mock", "std", "time-driver-std-thread"] }
+smallvec.workspace = true
+arrayvec.workspace = true
+async-lock = { workspace = true }
+futures = { workspace = true, features = ["std", "executor", "thread-pool"] }
+proxima-macros.workspace = true
+
+[target."cfg(loom)".dependencies]
+async-lock = { workspace = true, features = ["loom"] }
+event-listener = { workspace = true, features = ["loom"] }
+loom = { workspace = true, features = ["futures"] }
+
+# tokio itself and the `proxima` facade (which pulls tokio transitively) live
+# here (not in the plain [dependencies]/[dev-dependencies] tables above) so
+# `--cfg loom` builds never resolve tokio into the graph, regardless of which
+# feature set is active. The tokio-backed runtime (formerly the standalone
+# proxima-runtime-tokio crate, now `proxima_runtime::tokio` behind
+# proxima-runtime's own `tokio` feature) is pulled via `runtime-shaped-mutex`
+# activating `proxima-runtime/tokio` on the always-present `proxima-runtime`
+# dependency declared in the plain [dependencies] table above.
+[target."cfg(not(loom))".dependencies]
+tokio = { workspace = true, features = ["macros", "rt"], optional = true }
+
+[target."cfg(not(loom))".dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+proxima-runtime = { workspace = true, features = ["tokio"] }
+# tests use tokio::time::{sleep, timeout, advance, start_paused} for cancel-token
+# race + paused-clock interval tests, plus JoinSet/LocalSet swap-registry tests.
+tokio = { workspace = true, features = ["macros", "sync", "rt", "rt-multi-thread", "time", "test-util"] }
+
+[[bench]]
+name = "pipe_bench_http_construction"
+harness = false
+
+[[bench]]
+name = "pipe_bench_bucket_table"
+harness = false
+
+[[bench]]
+name = "pipe_fanout_parity"
+harness = false
+
+[[bench]]
+name = "pipe_bounded_batch_parity"
+harness = false
+
+[[bench]]
+name = "pipe_fanin_merge"
+harness = false
+
+[[bench]]
+name = "pipe_sink_zerocopy"
+harness = false
+
+[[bench]]
+name = "pipe_sink_perop"
+harness = false
+
+[[bench]]
+name = "stream_bench_datagram_batch"
+harness = false
+
+[[bench]]
+name = "sync_bench_runtime_shaped"
+harness = false
+required-features = ["runtime-shaped-mutex"]
+
+[lints.rust]
+warnings = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# we use `impl Future + Send` explicitly in traits to keep DynService dyn-compatible
+manual_async_fn = "allow"
+
+[build-dependencies]
+proxima-build.workspace = true
+toml.workspace = true

@@ -1,0 +1,36 @@
+# build-time sizing for proxima-notify-proto.
+# Read by build.rs, emitted as consts into OUT_DIR/proxima_notify_proto_sized.rs.
+# Every const-generic cap in src/ traces back to here per principle 12.
+#
+# Per-system overrides via env vars at build time:
+#
+#   PROXIMA_NOTIFY_PROTO_ALERT_LABELS_MAX=32 \
+#       cargo build -p proxima-notify-proto
+#
+# Tier-3 caps: changing these directly affects stack footprint of every
+# AlertEvent / GuidanceQuestion / GuidanceAnswer instance.
+
+[alert]
+# Max bytes per label KEY (e.g. "host", "service"). UTF-8 strings.
+label_key_max = 64
+# Max bytes per label VALUE.
+label_val_max = 256
+# Max number of label entries per AlertEvent. MUST be a power of 2 —
+# heapless::FnvIndexMap requirement.
+labels_max = 16
+# Max bytes per AlertEvent::kind (e.g. "heartbeat", "threshold_breach").
+kind_max = 64
+# Max bytes per AlertEvent::payload (opaque, intended for postcard-encoded
+# domain-specific data).
+payload_max = 4096
+
+[guidance]
+# Max bytes per GuidanceQuestion::question text.
+question_max = 4096
+# Max bytes per GuidanceAnswer::content text.
+answer_max = 4096
+# Max bytes per GuidanceQuestion::context (postcard-encoded, opaque).
+context_max = 4096
+# Max bytes per GuidanceAnswer::responder identifier (e.g. "stdin",
+# "telegram:chat_id=12345", "agent:agent_id=01HF...").
+responder_max = 128

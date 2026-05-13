@@ -1,0 +1,70 @@
+[package]
+name = "proxima-redis"
+description = "Redis/Valkey client facade: the async client Pipe and blocking driver over the sans-IO RESP2/RESP3 codec (ClientSession), so proxima::Client speaks Redis/Valkey. The codec itself lives in proxima-protocols::redis."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+# the sans-IO RESP2/RESP3 codec (Frame/ParseError/RespValue/parse/encode)
+# and the RESP-over-Pipe contract — see proxima_protocols::redis docs.
+proxima-protocols = { workspace = true, default-features = false, features = ["redis"] }
+# the async client Pipe + sans-IO ClientSession. `alloc` (no std) keeps the
+# bare codec graph tokio-free; the `client` feature lifts proxima-primitives
+# to std (the ResponseStream / futures-io edges the driver needs).
+proxima-primitives = { workspace = true, default-features = false, features = ["alloc"], optional = true }
+proxima-core = { workspace = true, default-features = false, optional = true }
+async-channel = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+futures = { workspace = true, features = ["std", "async-await"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+# plaintext password + ACL credentials zeroized on drop — connection-level
+# AUTH/HELLO secrets get the same hygiene pgwire gives SCRAM key material.
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"], optional = true }
+
+[features]
+default = ["std"]
+std = []
+# the async client `Pipe` + `PipeFactory` driving the sans-IO ClientSession over
+# a `StreamUpstream`, so `proxima::Client` speaks Redis/Valkey as a registered
+# protocol. `--no-default-features` leaves the bare sans-IO codec with zero
+# tokio in the dependency graph for bare-metal embedding.
+client = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:async-channel",
+    "dep:bon",
+    "dep:bytes",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:thiserror",
+    "dep:tracing",
+    "dep:zeroize",
+]
+
+[dev-dependencies]
+proxima-net = { workspace = true, features = ["tokio"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
+rstest = { workspace = true }
+temp-env = { workspace = true }
+proxima = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
+
+[[example]]
+name = "capture_realredis"
+required-features = ["client"]

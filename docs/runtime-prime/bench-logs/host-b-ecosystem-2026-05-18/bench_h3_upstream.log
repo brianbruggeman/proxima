@@ -1,0 +1,20 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 59s
+     Running benches/bench_h3_upstream.rs (proxima/target/release/deps/bench_h3_upstream-73e529fa0c608a94)
+Benchmarking h3_upstream_proxima/call
+Benchmarking h3_upstream_proxima/call: Warming up for 2.0000 s
+Benchmarking h3_upstream_proxima/call: Collecting 20 samples in estimated 3.0070 s (54k iterations)
+Benchmarking h3_upstream_proxima/call: Analyzing
+h3_upstream_proxima/call
+                        time:   [56.085 µs 56.335 µs 56.663 µs]
+                        thrpt:  [17.648 Kelem/s 17.751 Kelem/s 17.830 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking h3_upstream_parity/call
+Benchmarking h3_upstream_parity/call: Warming up for 2.0000 s
+Benchmarking h3_upstream_parity/call: Collecting 20 samples in estimated 3.0055 s (53k iterations)
+Benchmarking h3_upstream_parity/call: Analyzing
+h3_upstream_parity/call time:   [56.163 µs 56.762 µs 57.384 µs]
+                        thrpt:  [17.427 Kelem/s 17.617 Kelem/s 17.805 Kelem/s]
+

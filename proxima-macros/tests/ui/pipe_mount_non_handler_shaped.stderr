@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `MountTarget: From<increment>` is not satisfied
+  --> tests/ui/pipe_mount_non_handler_shaped.rs:15:42
+   |
+15 |     let _target: MountTarget = increment.into();
+   |                                          ^^^^ the trait `From<increment>` is not implemented for `MountTarget`
+   |
+help: `MountTarget` implements trait `From<T>`
+  --> $WORKSPACE/src/app.rs
+   |
+   | impl From<PipeHandle> for MountTarget {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<std::sync::Arc<dyn SendDynPipe<proxima::Request<proxima::Bytes>, proxima::Response<proxima::Bytes>>>>`
+...
+   | impl From<&str> for MountTarget {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<&str>`
+...
+   | impl From<String> for MountTarget {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<std::string::String>`
+   = note: required for `increment` to implement `Into<MountTarget>`

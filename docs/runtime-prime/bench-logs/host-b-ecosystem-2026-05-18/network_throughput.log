@@ -1,0 +1,27 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 35s
+     Running benches/network_throughput.rs (proxima/target/release/deps/network_throughput-e2a841d31c426a64)
+Benchmarking network_http_listener/synth_200_keepalive
+Benchmarking network_http_listener/synth_200_keepalive: Warming up for 2.0000 s
+Benchmarking network_http_listener/synth_200_keepalive: Collecting 20 samples in estimated 5.0071 s (115k iterations)
+Benchmarking network_http_listener/synth_200_keepalive: Analyzing
+network_http_listener/synth_200_keepalive
+                        time:   [43.174 µs 44.019 µs 45.036 µs]
+                        thrpt:  [22.204 Kelem/s 22.717 Kelem/s 23.162 Kelem/s]
+                 change:
+                        time:   [−86.271% −85.869% −85.452%] (p = 0.00 < 0.05)
+                        thrpt:  [+587.40% +607.67% +628.37%]
+                        Performance has improved.
+
+Benchmarking network_tcp_listener/connect_write_read_short
+Benchmarking network_tcp_listener/connect_write_read_short: Warming up for 2.0000 s
+Benchmarking network_tcp_listener/connect_write_read_short: Collecting 20 samples in estimated 5.0118 s (78k iterations)
+Benchmarking network_tcp_listener/connect_write_read_short: Analyzing
+network_tcp_listener/connect_write_read_short
+                        time:   [59.697 µs 59.970 µs 60.133 µs]
+                        thrpt:  [16.630 Kelem/s 16.675 Kelem/s 16.751 Kelem/s]
+                 change:
+                        time:   [−81.238% −81.108% −80.979%] (p = 0.00 < 0.05)
+                        thrpt:  [+425.72% +429.32% +432.98%]
+                        Performance has improved.
+

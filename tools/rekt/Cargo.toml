@@ -1,0 +1,97 @@
+[package]
+name = "rekt"
+version = "0.1.0"
+edition = "2024"
+description = "command your rest api to get wrecked — a load tester on proxima"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "rek"
+path = "src/main.rs"
+
+[features]
+# the prime-backed engine + the scheduler primitive. default-off firewall: with
+# this off, nothing pulls proxima. test-prime is bundled so `#[proxima::test]`
+# resolves only when the feature is opted into, keeping plain `cargo build` and
+# `cargo test` free of the whole proxima tree.
+scheduler = ["dep:proxima", "dep:proxima-runtime", "dep:bytes", "dep:futures", "dep:conflaguration", "dep:bon", "dep:proxima-net", "proxima-net/prime", "proxima-net/runtime-prime-inbox-alloc", "dep:rustls"]
+redis-client = ["scheduler", "proxima/redis-client"]
+pgwire-client = ["scheduler", "proxima/pgwire-client"]
+h3-native-upstream = ["scheduler", "proxima/h3-native-upstream"]
+all-client-protocols = ["redis-client", "pgwire-client", "h3-native-upstream"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# first-class config surface for the throughput run (P4): conflaguration gives
+# the typed env + TOML loader, bon the fluent builder — pulled with the engine.
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+bon = { version = "3.9.1", optional = true }
+# proxima's default features (serve-prime + http-prime-deps + http1/2/3 + macros)
+# are the supported config; its lib.rs re-exports them unconditionally, so a
+# default-features=false slim build does not compile. add only test-prime for the
+# `#[proxima::test]` harness on top of the defaults.
+proxima = { path = "../..", optional = true, features = ["test-prime", "h3-native-upstream"] }
+# the adaptive per-core concurrency knob + controller. lives in proxima-runtime
+# so one crate carries the primitive; the `concurrency` feature is default-off.
+proxima-runtime = { path = "../../proxima-runtime", optional = true, features = ["concurrency"] }
+# prime acceptor factory for serving h2c on prime (the bench_server_h2 example)
+proxima-net = { path = "../../proxima-net", optional = true, default-features = false }
+rustls = { version = "0.23", optional = true }
+bytes = { version = "1", optional = true }
+futures = { version = "0.3.32", optional = true }
+proxima-telemetry = { version = "0.1.0", path = "../../proxima-telemetry", features = ["tracing-init"] }
+
+[dev-dependencies]
+bytes = "1"
+temp-env = "0.3.6"
+axum = "0.8"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net"] }
+
+[[bench]]
+name = "bench_scheduler"
+harness = false
+required-features = ["scheduler"]
+
+[[bench]]
+name = "bench_engine"
+harness = false
+required-features = ["scheduler"]
+
+[[example]]
+name = "rekt_load"
+required-features = ["scheduler"]
+
+[[example]]
+name = "rekt_plan"
+required-features = ["scheduler"]
+
+[[example]]
+name = "bench_server"
+required-features = ["scheduler"]
+
+[[example]]
+name = "bench_server_h2"
+required-features = ["scheduler"]
+
+[[example]]
+name = "rekt_h2"
+required-features = ["scheduler"]
+
+[[example]]
+name = "bench_server_h3"
+required-features = ["scheduler"]
+
+[[example]]
+name = "rekt_h3"
+required-features = ["scheduler"]
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

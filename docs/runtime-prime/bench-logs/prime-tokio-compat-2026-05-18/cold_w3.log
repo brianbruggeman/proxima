@@ -1,0 +1,40 @@
+    Blocking waiting for file lock on artifact directory
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 09s
+     Running benches/bench_runtime_compat.rs (/tmp/cargo_target/release/deps/bench_runtime_compat-7ac1e2452133610d)
+Benchmarking w3_streaming_response/tokio_per_core
+Benchmarking w3_streaming_response/tokio_per_core: Warming up for 3.0000 s
+Benchmarking w3_streaming_response/tokio_per_core: Collecting 15 samples in estimated 4.0048 s (39k iterations)
+Benchmarking w3_streaming_response/tokio_per_core: Analyzing
+w3_streaming_response/tokio_per_core
+                        time:   [115.21 µs 133.46 µs 143.68 µs]
+                        thrpt:  [434.99 MiB/s 468.31 MiB/s 542.50 MiB/s]
+                 change:
+                        time:   [−19.819% −10.829% −2.4096%] (p = 0.03 < 0.05)
+                        thrpt:  [+2.4691% +12.144% +24.718%]
+                        Performance has improved.
+Benchmarking w3_streaming_response/prime
+Benchmarking w3_streaming_response/prime: Warming up for 3.0000 s
+Benchmarking w3_streaming_response/prime: Collecting 15 samples in estimated 4.0091 s (30k iterations)
+Benchmarking w3_streaming_response/prime: Analyzing
+w3_streaming_response/prime
+                        time:   [121.12 µs 132.06 µs 147.59 µs]
+                        thrpt:  [423.46 MiB/s 473.28 MiB/s 516.03 MiB/s]
+                 change:
+                        time:   [−27.090% −22.732% −17.571%] (p = 0.00 < 0.05)
+                        thrpt:  [+21.316% +29.419% +37.156%]
+                        Performance has improved.
+Found 2 outliers among 15 measurements (13.33%)
+  1 (6.67%) high mild
+  1 (6.67%) high severe
+Benchmarking w3_streaming_response/prime_tokio_compat
+Benchmarking w3_streaming_response/prime_tokio_compat: Warming up for 3.0000 s
+Benchmarking w3_streaming_response/prime_tokio_compat: Collecting 15 samples in estimated 4.0143 s (27k iterations)
+Benchmarking w3_streaming_response/prime_tokio_compat: Analyzing
+w3_streaming_response/prime_tokio_compat
+                        time:   [109.64 µs 118.81 µs 126.90 µs]
+                        thrpt:  [492.50 MiB/s 526.05 MiB/s 570.05 MiB/s]
+                 change:
+                        time:   [−29.925% −24.775% −19.340%] (p = 0.00 < 0.05)
+                        thrpt:  [+23.978% +32.934% +42.705%]
+                        Performance has improved.
+

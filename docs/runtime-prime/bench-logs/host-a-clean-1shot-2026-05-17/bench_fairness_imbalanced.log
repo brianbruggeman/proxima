@@ -1,0 +1,25 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.26s
+     Running benches/bench_fairness_imbalanced.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_fairness_imbalanced-ccd67668c77f0f89)
+Benchmarking fairness_imbalanced/tokio_multi_thread
+Benchmarking fairness_imbalanced/tokio_multi_thread: Warming up for 2.0000 s
+Benchmarking fairness_imbalanced/tokio_multi_thread: Collecting 20 samples in estimated 10.014 s (630 iterations)
+Benchmarking fairness_imbalanced/tokio_multi_thread: Analyzing
+fairness_imbalanced/tokio_multi_thread
+                        time:   [17.003 ms 18.902 ms 20.405 ms]
+                        thrpt:  [9.8014 Kelem/s 10.581 Kelem/s 11.763 Kelem/s]
+                 change:
+                        time:   [+5.9149% +12.852% +20.833%] (p = 0.00 < 0.05)
+                        thrpt:  [−17.241% −11.388% −5.5846%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking fairness_imbalanced/prime_round_robin_fanout
+Benchmarking fairness_imbalanced/prime_round_robin_fanout: Warming up for 2.0000 s
+Benchmarking fairness_imbalanced/prime_round_robin_fanout: Collecting 20 samples in estimated 8.9775 s (420 iterations)
+Benchmarking fairness_imbalanced/prime_round_robin_fanout: Analyzing
+fairness_imbalanced/prime_round_robin_fanout
+                        time:   [21.673 ms 23.223 ms 25.186 ms]
+                        thrpt:  [7.9410 Kelem/s 8.6122 Kelem/s 9.2279 Kelem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+

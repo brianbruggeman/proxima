@@ -1,0 +1,91 @@
+[package]
+name = "proxima-intercept"
+description = "MITM interception pipe for proxima: TLS-terminating CONNECT proxy with per-host cert generation, pluggable request transforms; heavy TLS/cert-gen deps live here only (not in proxima-recording)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+bytes.workspace = true
+proxima-core = { workspace = true, features = ["alloc"] }
+proxima-protocols = { workspace = true, default-features = false, features = ["websocket_frame", "http1_codec"] }
+proxima-primitives = { path = "../proxima-primitives" }
+proxima-tls = { path = "../proxima-tls", features = ["std"] }
+pem = "3"
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem", "x509-parser"] }
+rustls = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "fs", "macros"] }
+tokio-rustls = { workspace = true }
+futures = { workspace = true }
+flate2 = "1"
+serde_json.workspace = true
+tracing.workspace = true
+webpki-roots.workspace = true
+# unconditional so dep-graph readers see the recording substrate without
+# chasing feature flags. functionality stays behind the `intercept-capture` /
+# `intercept-replay` cfg gates.
+proxima-recording = { version = "0.1.0", path = "../proxima-recording", features = ["pipe", "replay"] }
+blake3 = { workspace = true, optional = true }
+# non-optional: ca.rs (always compiled) sets cert validity windows with it.
+time = { workspace = true, features = ["macros"] }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+bon = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+proxima-http = { workspace = true, optional = true, features = ["http3-native"] }
+zstd.workspace = true
+brotli = "8.0.3"
+
+[dev-dependencies]
+proxima = { path = "..", features = ["tcp", "test-support"] }
+criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
+rstest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+toml.workspace = true
+proxima-protocols = { workspace = true, default-features = false, features = ["http2_codec"] }
+rand.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+intercept-capture = [ "dep:blake3"]
+intercept-replay = ["intercept-capture"]
+intercept-config = ["intercept-capture", "dep:conflaguration", "dep:bon", "dep:serde"]
+# transparent QUIC/h3 intercept (observe): forged-cert termination + h3 decode.
+# the QUIC stack stays out of the default TCP build.
+quic-intercept = ["dep:proxima-http", "proxima-protocols/http3_codec-alloc", "proxima-protocols/quic-tls-rustls"]
+# proxima-primitives (folds in the former proxima-sync) is always-on
+# post-merge; delta-tee is now purely a source-level cfg gate (see
+# src/pipe.rs, src/tee.rs), no dependency toggle needed.
+delta-tee = []
+
+[[example]]
+name = "vscode-proxy-capture"
+required-features = ["intercept-capture"]
+
+[[example]]
+name = "quic-capture"
+required-features = ["quic-intercept"]
+
+[[example]]
+name = "inspect-capture"
+required-features = ["intercept-capture"]
+
+[[example]]
+name = "replay-capture"
+required-features = ["intercept-capture", "intercept-replay"]
+
+[[bench]]
+name = "bench_intercept_capture"
+harness = false
+required-features = ["intercept-capture"]
+
+[[example]]
+name = "transparent-capture"

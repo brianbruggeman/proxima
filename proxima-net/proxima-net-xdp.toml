@@ -1,0 +1,34 @@
+# Build-time sizing for the AF_XDP datapath (principle 12). Single source of
+# truth for the ring depths + UMEM geometry + RX drain batch. Override any key
+# at build time via PROXIMA_NET_XDP_<SECTION>_<KEY>
+# (e.g. `PROXIMA_NET_XDP_RINGS_RX=4096 cargo build`).
+
+[rings]
+# Entries in each AF_XDP ring. MUST be a power of two — the SPSC index math masks
+# with size-1. Deeper rings absorb a larger burst before the kernel/app drops
+# frames (fewer RX drops under load) at the cost of more pinned descriptor memory
+# and worse cache locality; shallower rings save memory but drop sooner.
+fill = 2048
+completion = 2048
+rx = 2048
+tx = 2048
+
+[umem]
+# Number of frames in the UMEM pool. Must comfortably exceed the frames in flight
+# across fill+rx+tx+completion or the fill ring starves and RX stalls. Larger =
+# more burst headroom, at frame_count*frame_size bytes of pinned memory.
+frame_count = 4096
+# Bytes per frame (chunk). Must hold the largest L2 frame (kernel headroom + the
+# 1514-byte MTU). 2048 is half a page; raising it wastes memory per frame,
+# lowering it below the MTU truncates frames.
+frame_size = 2048
+# Extra per-frame headroom reserved before the packet, on top of the kernel's
+# fixed XDP_PACKET_HEADROOM. 0 unless a use case prepends encapsulation.
+headroom = 0
+
+[batch]
+# Descriptors moved per batched ring op in the RX drain — one atomic counter
+# store per batch instead of one per descriptor. Larger amortizes the atomics
+# over more packets (higher throughput) but adds on-stack scratch and a little
+# latency to the first packet of a burst; must not exceed the rx ring size.
+rx_drain = 64

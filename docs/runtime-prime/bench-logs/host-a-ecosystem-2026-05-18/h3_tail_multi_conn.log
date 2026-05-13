@@ -1,0 +1,32 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 00s
+     Running benches/h3_tail_multi_conn.rs (/tmp/cargo_target/release/deps/h3_tail_multi_conn-c830101adaaad389)
+Benchmarking h3_tail_multi_conn_n1/one_request_per_connection_p50_ns
+Benchmarking h3_tail_multi_conn_n1/one_request_per_connection_p50_ns: Warming up for 2.0000 s
+Benchmarking h3_tail_multi_conn_n1/one_request_per_connection_p50_ns: Collecting 20 samples in estimated 3.0128 s (37k iterations)
+Benchmarking h3_tail_multi_conn_n1/one_request_per_connection_p50_ns: Analyzing
+h3_tail_multi_conn_n1/one_request_per_connection_p50_ns
+                        time:   [27.321 ns 31.202 ns 38.238 ns]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking h3_tail_multi_conn_n4/one_request_per_connection_p50_ns
+Benchmarking h3_tail_multi_conn_n4/one_request_per_connection_p50_ns: Warming up for 2.0000 s
+Benchmarking h3_tail_multi_conn_n4/one_request_per_connection_p50_ns: Collecting 20 samples in estimated 3.0124 s (21k iterations)
+Benchmarking h3_tail_multi_conn_n4/one_request_per_connection_p50_ns: Analyzing
+h3_tail_multi_conn_n4/one_request_per_connection_p50_ns
+                        time:   [73.080 ns 83.512 ns 102.71 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+
+Benchmarking h3_tail_multi_conn_n16/one_request_per_connection_p50_ns
+Benchmarking h3_tail_multi_conn_n16/one_request_per_connection_p50_ns: Warming up for 2.0000 s
+Benchmarking h3_tail_multi_conn_n16/one_request_per_connection_p50_ns: Collecting 20 samples in estimated 3.0269 s (6720 iterations)
+Benchmarking h3_tail_multi_conn_n16/one_request_per_connection_p50_ns: Analyzing
+h3_tail_multi_conn_n16/one_request_per_connection_p50_ns
+                        time:   [735.51 ns 837.04 ns 1.0258 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+

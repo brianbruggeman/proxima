@@ -1,0 +1,61 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 58s
+     Running benches/bench_local_executor.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_local_executor-5d0e0c8af41be40c)
+Benchmarking local_exec_ready_throughput/proxima
+Benchmarking local_exec_ready_throughput/proxima: Warming up for 1.0000 s
+Benchmarking local_exec_ready_throughput/proxima: Collecting 30 samples in estimated 3.5480 s (1860 iterations)
+Benchmarking local_exec_ready_throughput/proxima: Analyzing
+local_exec_ready_throughput/proxima
+                        time:   [367.20 µs 370.24 µs 373.94 µs]
+                        thrpt:  [26.742 Melem/s 27.010 Melem/s 27.233 Melem/s]
+                 change:
+                        time:   [−45.853% −39.157% −32.754%] (p = 0.00 < 0.05)
+                        thrpt:  [+48.708% +64.357% +84.684%]
+                        Performance has improved.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking local_exec_ready_throughput/tokio_localset
+Benchmarking local_exec_ready_throughput/tokio_localset: Warming up for 1.0000 s
+Benchmarking local_exec_ready_throughput/tokio_localset: Collecting 30 samples in estimated 3.4539 s (2325 iterations)
+Benchmarking local_exec_ready_throughput/tokio_localset: Analyzing
+local_exec_ready_throughput/tokio_localset
+                        time:   [1.4783 ms 1.4794 ms 1.4804 ms]
+                        thrpt:  [6.7547 Melem/s 6.7595 Melem/s 6.7646 Melem/s]
+                 change:
+                        time:   [−39.569% −29.198% −18.080%] (p = 0.00 < 0.05)
+                        thrpt:  [+22.071% +41.240% +65.478%]
+                        Performance has improved.
+Found 4 outliers among 30 measurements (13.33%)
+  2 (6.67%) low mild
+  2 (6.67%) high mild
+
+Benchmarking local_exec_yield_pingpong/proxima
+Benchmarking local_exec_yield_pingpong/proxima: Warming up for 1.0000 s
+Benchmarking local_exec_yield_pingpong/proxima: Collecting 30 samples in estimated 3.0507 s (26k iterations)
+Benchmarking local_exec_yield_pingpong/proxima: Analyzing
+local_exec_yield_pingpong/proxima
+                        time:   [117.15 µs 117.74 µs 118.35 µs]
+                        thrpt:  [84.495 Melem/s 84.934 Melem/s 85.364 Melem/s]
+                 change:
+                        time:   [−14.895% −13.693% −12.586%] (p = 0.00 < 0.05)
+                        thrpt:  [+14.399% +15.865% +17.502%]
+                        Performance has improved.
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) high mild
+  2 (6.67%) high severe
+Benchmarking local_exec_yield_pingpong/tokio_localset
+Benchmarking local_exec_yield_pingpong/tokio_localset: Warming up for 1.0000 s
+Benchmarking local_exec_yield_pingpong/tokio_localset: Collecting 30 samples in estimated 3.1322 s (2790 iterations)
+Benchmarking local_exec_yield_pingpong/tokio_localset: Analyzing
+local_exec_yield_pingpong/tokio_localset
+                        time:   [1.1088 ms 1.1119 ms 1.1150 ms]
+                        thrpt:  [8.9688 Melem/s 8.9933 Melem/s 9.0189 Melem/s]
+                 change:
+                        time:   [−54.723% −41.158% −26.322%] (p = 0.00 < 0.05)
+                        thrpt:  [+35.726% +69.945% +120.86%]
+                        Performance has improved.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) low mild
+  1 (3.33%) high mild
+

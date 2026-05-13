@@ -1,0 +1,14 @@
+[target.client]
+synth = { status = 200, body = "ok" }
+
+[request]
+method = "GET"
+path = "/"
+
+[[stage]]
+rate = "10/s"
+duration = "1s"
+
+[threshold]
+p99 = "250ms"
+error_rate = "0%"

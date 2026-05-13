@@ -1,0 +1,143 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.24s
+     Running benches/hpack_static_table.rs (proxima/target/release/deps/hpack_static_table-9714336f6b14028f)
+Benchmarking hpack_static_lookup/proxima_native/method_get
+Benchmarking hpack_static_lookup/proxima_native/method_get: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/method_get: Collecting 20 samples in estimated 2.0000 s (497M iterations)
+Benchmarking hpack_static_lookup/proxima_native/method_get: Analyzing
+hpack_static_lookup/proxima_native/method_get
+                        time:   [3.9591 ns 3.9644 ns 3.9727 ns]
+Benchmarking hpack_static_lookup/h2_crate/method_get
+Benchmarking hpack_static_lookup/h2_crate/method_get: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/method_get: Collecting 20 samples in estimated 2.0000 s (415M iterations)
+Benchmarking hpack_static_lookup/h2_crate/method_get: Analyzing
+hpack_static_lookup/h2_crate/method_get
+                        time:   [4.7725 ns 4.7754 ns 4.7784 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking hpack_static_lookup/proxima_native/method_delete
+Benchmarking hpack_static_lookup/proxima_native/method_delete: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/method_delete: Collecting 20 samples in estimated 2.0000 s (549M iterations)
+Benchmarking hpack_static_lookup/proxima_native/method_delete: Analyzing
+hpack_static_lookup/proxima_native/method_delete
+                        time:   [3.6392 ns 3.6399 ns 3.6407 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_static_lookup/h2_crate/method_delete
+Benchmarking hpack_static_lookup/h2_crate/method_delete: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/method_delete: Collecting 20 samples in estimated 2.0000 s (465M iterations)
+Benchmarking hpack_static_lookup/h2_crate/method_delete: Analyzing
+hpack_static_lookup/h2_crate/method_delete
+                        time:   [4.2984 ns 4.3028 ns 4.3084 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_static_lookup/proxima_native/status_200
+Benchmarking hpack_static_lookup/proxima_native/status_200: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/status_200: Collecting 20 samples in estimated 2.0000 s (352M iterations)
+Benchmarking hpack_static_lookup/proxima_native/status_200: Analyzing
+hpack_static_lookup/proxima_native/status_200
+                        time:   [5.6843 ns 5.6862 ns 5.6883 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_static_lookup/h2_crate/status_200
+Benchmarking hpack_static_lookup/h2_crate/status_200: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/status_200: Collecting 20 samples in estimated 2.0000 s (352M iterations)
+Benchmarking hpack_static_lookup/h2_crate/status_200: Analyzing
+hpack_static_lookup/h2_crate/status_200
+                        time:   [5.6839 ns 5.6849 ns 5.6863 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_static_lookup/proxima_native/accept_encoding_gz
+Benchmarking hpack_static_lookup/proxima_native/accept_encoding_gz: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/accept_encoding_gz: Collecting 20 samples in estimated 2.0000 s (363M iterations)
+Benchmarking hpack_static_lookup/proxima_native/accept_encoding_gz: Analyzing
+hpack_static_lookup/proxima_native/accept_encoding_gz
+                        time:   [5.5098 ns 5.5157 ns 5.5214 ns]
+Benchmarking hpack_static_lookup/h2_crate/accept_encoding_gz
+Benchmarking hpack_static_lookup/h2_crate/accept_encoding_gz: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/accept_encoding_gz: Collecting 20 samples in estimated 2.0000 s (329M iterations)
+Benchmarking hpack_static_lookup/h2_crate/accept_encoding_gz: Analyzing
+hpack_static_lookup/h2_crate/accept_encoding_gz
+                        time:   [6.0865 ns 6.0955 ns 6.1037 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking hpack_static_lookup/proxima_native/content_type
+Benchmarking hpack_static_lookup/proxima_native/content_type: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/content_type: Collecting 20 samples in estimated 2.0000 s (444M iterations)
+Benchmarking hpack_static_lookup/proxima_native/content_type: Analyzing
+hpack_static_lookup/proxima_native/content_type
+                        time:   [4.5448 ns 4.5503 ns 4.5570 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking hpack_static_lookup/h2_crate/content_type
+Benchmarking hpack_static_lookup/h2_crate/content_type: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/content_type: Collecting 20 samples in estimated 2.0000 s (440M iterations)
+Benchmarking hpack_static_lookup/h2_crate/content_type: Analyzing
+hpack_static_lookup/h2_crate/content_type
+                        time:   [4.5469 ns 4.5478 ns 4.5491 ns]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_static_lookup/proxima_native/user_agent
+Benchmarking hpack_static_lookup/proxima_native/user_agent: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/user_agent: Collecting 20 samples in estimated 2.0000 s (489M iterations)
+Benchmarking hpack_static_lookup/proxima_native/user_agent: Analyzing
+hpack_static_lookup/proxima_native/user_agent
+                        time:   [4.0868 ns 4.0893 ns 4.0912 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking hpack_static_lookup/h2_crate/user_agent
+Benchmarking hpack_static_lookup/h2_crate/user_agent: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/user_agent: Collecting 20 samples in estimated 2.0000 s (490M iterations)
+Benchmarking hpack_static_lookup/h2_crate/user_agent: Analyzing
+hpack_static_lookup/h2_crate/user_agent
+                        time:   [4.0699 ns 4.0751 ns 4.0792 ns]
+Benchmarking hpack_static_lookup/proxima_native/www_authenticate
+Benchmarking hpack_static_lookup/proxima_native/www_authenticate: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/www_authenticate: Collecting 20 samples in estimated 2.0000 s (385M iterations)
+Benchmarking hpack_static_lookup/proxima_native/www_authenticate: Analyzing
+hpack_static_lookup/proxima_native/www_authenticate
+                        time:   [5.2079 ns 5.2120 ns 5.2165 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low severe
+Benchmarking hpack_static_lookup/h2_crate/www_authenticate
+Benchmarking hpack_static_lookup/h2_crate/www_authenticate: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/www_authenticate: Collecting 20 samples in estimated 2.0000 s (372M iterations)
+Benchmarking hpack_static_lookup/h2_crate/www_authenticate: Analyzing
+hpack_static_lookup/h2_crate/www_authenticate
+                        time:   [5.3906 ns 5.3941 ns 5.3980 ns]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking hpack_static_lookup/proxima_native/unknown_short
+Benchmarking hpack_static_lookup/proxima_native/unknown_short: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/unknown_short: Collecting 20 samples in estimated 2.0000 s (799M iterations)
+Benchmarking hpack_static_lookup/proxima_native/unknown_short: Analyzing
+hpack_static_lookup/proxima_native/unknown_short
+                        time:   [2.5031 ns 2.5048 ns 2.5062 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking hpack_static_lookup/h2_crate/unknown_short
+Benchmarking hpack_static_lookup/h2_crate/unknown_short: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/unknown_short: Collecting 20 samples in estimated 2.0000 s (798M iterations)
+Benchmarking hpack_static_lookup/h2_crate/unknown_short: Analyzing
+hpack_static_lookup/h2_crate/unknown_short
+                        time:   [2.5013 ns 2.5027 ns 2.5041 ns]
+Benchmarking hpack_static_lookup/proxima_native/unknown_long
+Benchmarking hpack_static_lookup/proxima_native/unknown_long: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/proxima_native/unknown_long: Collecting 20 samples in estimated 2.0000 s (965M iterations)
+Benchmarking hpack_static_lookup/proxima_native/unknown_long: Analyzing
+hpack_static_lookup/proxima_native/unknown_long
+                        time:   [2.0691 ns 2.0717 ns 2.0757 ns]
+Benchmarking hpack_static_lookup/h2_crate/unknown_long
+Benchmarking hpack_static_lookup/h2_crate/unknown_long: Warming up for 2.0000 s
+Benchmarking hpack_static_lookup/h2_crate/unknown_long: Collecting 20 samples in estimated 2.0000 s (1.1B iterations)
+Benchmarking hpack_static_lookup/h2_crate/unknown_long: Analyzing
+hpack_static_lookup/h2_crate/unknown_long
+                        time:   [1.8422 ns 1.8446 ns 1.8478 ns]
+

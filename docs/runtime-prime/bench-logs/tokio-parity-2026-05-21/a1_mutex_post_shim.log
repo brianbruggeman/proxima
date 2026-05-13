@@ -1,0 +1,99 @@
+   Compiling proxima v0.1.0 (proxima-tokio-parity/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 15s
+     Running benches/bench_sync_mutex_parity.rs (/tmp/cargo_target/release/deps/bench_sync_mutex_parity-eb754b6e28a9ba37)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.3s, or reduce sample count to 70.
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Collecting 100 samples in estimated 6.2543 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/proxima_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/proxima_sync_mutex
+                        time:   [61.665 ms 62.285 ms 63.160 ms]
+                        change: [+0.2276% +1.2154% +2.6949%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.4s, or reduce sample count to 70.
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Collecting 100 samples in estimated 6.3846 s (100 iterations)
+Benchmarking mutex_parity_w1_io_serializing/tokio_sync_mutex: Analyzing
+mutex_parity_w1_io_serializing/tokio_sync_mutex
+                        time:   [61.851 ms 62.550 ms 63.569 ms]
+                        change: [+0.5433% +1.7052% +3.4105%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Collecting 100 samples in estimated 5.1274 s (2000 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/proxima_sync_mutex
+                        time:   [2.4265 ms 2.4697 ms 2.5271 ms]
+                        change: [+3.8063% +5.7939% +8.3885%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Collecting 100 samples in estimated 5.2861 s (1800 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/tokio_sync_mutex
+                        time:   [2.6573 ms 2.9977 ms 3.4808 ms]
+                        change: [+9.2924% +23.986% +41.371%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 19 outliers among 100 measurements (19.00%)
+  1 (1.00%) high mild
+  18 (18.00%) high severe
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Collecting 100 samples in estimated 5.1030 s (2100 iterations)
+Benchmarking mutex_parity_w2_hot_read_admin_write/parking_lot_mutex: Analyzing
+mutex_parity_w2_hot_read_admin_write/parking_lot_mutex
+                        time:   [2.3426 ms 2.3519 ms 2.3621 ms]
+                        change: [−74.341% −70.316% −65.230%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Collecting 100 samples in estimated 5.0127 s (2.0M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/proxima_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/proxima_sync_mutex
+                        time:   [2.5205 µs 2.5486 µs 2.5904 µs]
+                        change: [−37.700% −36.444% −35.129%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Collecting 100 samples in estimated 5.0155 s (1.5M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/tokio_sync_mutex: Analyzing
+mutex_parity_w3_async_write_flush/tokio_sync_mutex
+                        time:   [3.4408 µs 3.5370 µs 3.6493 µs]
+                        change: [−37.170% −35.626% −33.946%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) high mild
+  8 (8.00%) high severe
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Warming up for 3.0000 s
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Collecting 100 samples in estimated 5.0047 s (1.9M iterations)
+Benchmarking mutex_parity_w3_async_write_flush/parking_lot_mutex: Analyzing
+mutex_parity_w3_async_write_flush/parking_lot_mutex
+                        time:   [2.3404 µs 2.3447 µs 2.3496 µs]
+                        change: [−35.428% −34.887% −34.365%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+

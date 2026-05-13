@@ -1,0 +1,12 @@
+# Build-time sizing for the no-std example's RingSink. This is the no-runtime
+# tier of conflaguration: there is no loader that reads this file while the
+# program runs — build.rs reads it exactly once, at compile time, and bakes
+# the values into `pub const`s (see build.rs). The compiled #![no_std] binary
+# never sees a TOML parser, a filesystem, or this file again.
+#
+# Mirrors proxima-primitives.toml's [retry] section, the production version
+# of this same pattern (RETRY_STATUS_CAP baked into RetryRules::StatusSet).
+
+[ring]
+slots = 4
+slot_bytes = 16

@@ -1,0 +1,40 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 41.29s
+     Running benches/bench_local_executor.rs (proxima/target/release/deps/bench_local_executor-98955bd7017d1ddf)
+Benchmarking local_exec_ready_throughput/proxima
+Benchmarking local_exec_ready_throughput/proxima: Warming up for 1.0000 s
+Benchmarking local_exec_ready_throughput/proxima: Collecting 30 samples in estimated 3.1527 s (2325 iterations)
+Benchmarking local_exec_ready_throughput/proxima: Analyzing
+local_exec_ready_throughput/proxima
+                        time:   [283.25 µs 283.99 µs 284.75 µs]
+                        thrpt:  [35.119 Melem/s 35.212 Melem/s 35.304 Melem/s]
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) low mild
+  1 (3.33%) high mild
+Benchmarking local_exec_ready_throughput/tokio_localset
+Benchmarking local_exec_ready_throughput/tokio_localset: Warming up for 1.0000 s
+Benchmarking local_exec_ready_throughput/tokio_localset: Collecting 30 samples in estimated 3.2959 s (1860 iterations)
+Benchmarking local_exec_ready_throughput/tokio_localset: Analyzing
+local_exec_ready_throughput/tokio_localset
+                        time:   [1.7719 ms 1.7741 ms 1.7766 ms]
+                        thrpt:  [5.6288 Melem/s 5.6365 Melem/s 5.6438 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+
+Benchmarking local_exec_yield_pingpong/proxima
+Benchmarking local_exec_yield_pingpong/proxima: Warming up for 1.0000 s
+Benchmarking local_exec_yield_pingpong/proxima: Collecting 30 samples in estimated 3.0614 s (18k iterations)
+Benchmarking local_exec_yield_pingpong/proxima: Analyzing
+local_exec_yield_pingpong/proxima
+                        time:   [168.40 µs 168.56 µs 168.72 µs]
+                        thrpt:  [59.270 Melem/s 59.327 Melem/s 59.381 Melem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking local_exec_yield_pingpong/tokio_localset
+Benchmarking local_exec_yield_pingpong/tokio_localset: Warming up for 1.0000 s
+Benchmarking local_exec_yield_pingpong/tokio_localset: Collecting 30 samples in estimated 3.1593 s (3255 iterations)
+Benchmarking local_exec_yield_pingpong/tokio_localset: Analyzing
+local_exec_yield_pingpong/tokio_localset
+                        time:   [968.41 µs 970.13 µs 972.02 µs]
+                        thrpt:  [10.288 Melem/s 10.308 Melem/s 10.326 Melem/s]
+

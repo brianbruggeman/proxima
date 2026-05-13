@@ -1,0 +1,48 @@
+# nginx-style: static + cache + fallback in one config.
+#
+# composition (top to bottom in fallthrough order):
+#   1. cache  (kv:cache) — first request misses, subsequent hit
+#   2. static (fs)        — serves /var/www/static/<path>
+#   3. fallback (synth)   — placeholder; replace with `http = "..."` for real backends
+#
+# select.miss_on declares which upstream responses count as "miss":
+#   - "no_data": kv miss
+#   - "404":    static file not found
+# either condition advances to the next upstream.
+#
+# write_back: any successful fallback response populates the cache,
+# so the SECOND identical request hits the cache.
+#
+# run:
+#   mkdir -p /var/www/static
+#   echo "<h1>hello</h1>" > /var/www/static/index.html
+#   proxima serve --config proxima.toml --mount '/{*path}' --addr 127.0.0.1:8080
+#
+# test:
+#   curl http://127.0.0.1:8080/index.html         # static
+#   curl http://127.0.0.1:8080/api/anything       # synth fallback
+#   curl http://127.0.0.1:8080/api/anything       # cache hit (same response)
+#
+# zero glue code. swap synth for `http = "http://backend"` to get a
+# real reverse-proxy + static + cache config.
+
+name = "nginx-style"
+
+[[upstreams]]
+name = "cache"
+kv = "cache"
+max_entries = 1024
+
+[[upstreams]]
+name = "static"
+fs = { root = "/var/www/static", index = "index.html" }
+
+[[upstreams]]
+name = "fallback"
+synth = { status = 200, body = "from fallback (replace with real http upstream)\n" }
+
+[select]
+algorithm = "fallthrough"
+miss_on = ["no_data", "404"]
+
+write_back = [["fallback", "cache"]]

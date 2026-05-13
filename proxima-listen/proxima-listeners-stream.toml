@@ -1,0 +1,29 @@
+# build-time sizing for proxima-listeners-stream.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_listeners_stream_sized.rs.
+# these are the compile-time DEFAULTS. the per-process surface is config-driven:
+# the runtime conflaguration `ListenerStreamConfig` (method / path / chunk_bytes)
+# overrides them via config file / env / fluent builder — that is the surface
+# deployments should use (a downstream that re-brands its own config maps it onto
+# the ListenerStreamConfig API rather than setting these build vars directly).
+#
+# the per-listener JSON `spec` (`ListenProtocol::serve`) is a separate, dynamic
+# per-registration override layer above these defaults — unrelated to this file.
+#
+# these are also the no_std+no_alloc floor's ONLY knob: once this crate lifts off
+# std, this const sizes the bare-metal read-chunk buffer without any runtime
+# config layer.
+#
+# per-system build-time overrides via env vars:
+#
+#   PROXIMA_LISTENERS_STREAM_LISTENER_METHOD=STREAM \
+#   PROXIMA_LISTENERS_STREAM_LISTENER_PATH=/ \
+#   PROXIMA_LISTENERS_STREAM_LISTENER_CHUNK_BYTES=65536 \
+#       cargo build -p proxima-listeners-stream
+
+[listener]
+# Synthetic request method assigned to every accepted stream connection.
+method = "STREAM"
+# Synthetic request path assigned to every accepted stream connection.
+path = "/"
+# Read-buffer chunk size (bytes) used to stream a connection's body.
+chunk_bytes = 65536

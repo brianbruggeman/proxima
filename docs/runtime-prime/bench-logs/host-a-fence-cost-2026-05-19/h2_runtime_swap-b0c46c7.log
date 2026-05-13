@@ -1,0 +1,56 @@
+   Compiling proxima v0.1.0 (proxima-no-fences/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 2m 40s
+     Running benches/h2_runtime_swap.rs (/tmp/cargo_target/release/deps/h2_runtime_swap-48e3f4df9f7a74f0)
+Benchmarking h2_load_5way/pingora
+Benchmarking h2_load_5way/pingora: Warming up for 3.0000 s
+Benchmarking h2_load_5way/pingora: Collecting 100 samples in estimated 5.1566 s (76k iterations)
+Benchmarking h2_load_5way/pingora: Analyzing
+h2_load_5way/pingora    time:   [44.672 µs 50.269 µs 58.874 µs]
+                        thrpt:  [16.986 Kelem/s 19.893 Kelem/s 22.386 Kelem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  9 (9.00%) high mild
+  2 (2.00%) high severe
+Benchmarking h2_load_5way/tokio_hyper
+Benchmarking h2_load_5way/tokio_hyper: Warming up for 3.0000 s
+Benchmarking h2_load_5way/tokio_hyper: Collecting 100 samples in estimated 5.0166 s (126k iterations)
+Benchmarking h2_load_5way/tokio_hyper: Analyzing
+h2_load_5way/tokio_hyper
+                        time:   [41.305 µs 42.962 µs 44.621 µs]
+                        thrpt:  [22.411 Kelem/s 23.277 Kelem/s 24.210 Kelem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking h2_load_5way/proxima_on_tokio
+Benchmarking h2_load_5way/proxima_on_tokio: Warming up for 3.0000 s
+Benchmarking h2_load_5way/proxima_on_tokio: Collecting 100 samples in estimated 5.0805 s (141k iterations)
+Benchmarking h2_load_5way/proxima_on_tokio: Analyzing
+h2_load_5way/proxima_on_tokio
+                        time:   [35.677 µs 35.924 µs 36.197 µs]
+                        thrpt:  [27.627 Kelem/s 27.837 Kelem/s 28.029 Kelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking h2_load_5way/proxima_on_flume
+Benchmarking h2_load_5way/proxima_on_flume: Warming up for 3.0000 s
+Benchmarking h2_load_5way/proxima_on_flume: Collecting 100 samples in estimated 5.1446 s (152k iterations)
+Benchmarking h2_load_5way/proxima_on_flume: Analyzing
+h2_load_5way/proxima_on_flume
+                        time:   [34.345 µs 35.142 µs 36.475 µs]
+                        thrpt:  [27.416 Kelem/s 28.456 Kelem/s 29.117 Kelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking h2_load_5way/proxima_on_prime
+Benchmarking h2_load_5way/proxima_on_prime: Warming up for 3.0000 s
+Benchmarking h2_load_5way/proxima_on_prime: Collecting 100 samples in estimated 5.0603 s (126k iterations)
+Benchmarking h2_load_5way/proxima_on_prime: Analyzing
+h2_load_5way/proxima_on_prime
+                        time:   [38.974 µs 39.595 µs 40.389 µs]
+                        thrpt:  [24.760 Kelem/s 25.256 Kelem/s 25.658 Kelem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  8 (8.00%) high severe
+

@@ -1,0 +1,40 @@
+[package]
+name = "proxima-cli"
+description = "Command-line interface for proxima: call, serve, describe, daemon control, hot-swap, verification, replay, and pipeline commands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "proxima"
+path = "src/main.rs"
+
+[[bin]]
+name = "proximad"
+path = "src/daemon.rs"
+
+[dependencies]
+proxima = { workspace = true, features = ["runtime-tokio"] }
+clap = { workspace = true, features = ["derive", "env"] }
+mimalloc.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["signal", "process", "macros"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+postcard = { workspace = true, features = ["alloc"] }
+toml.workspace = true
+futures.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+time.workspace = true
+bytes.workspace = true
+
+[lints]
+workspace = true

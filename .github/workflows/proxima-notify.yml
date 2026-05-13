@@ -1,0 +1,313 @@
+name: proxima-notify
+
+# CI substrate for the proxima-notify initiative (principle 16: execution
+# must not outrun proof). Every component row seals only when this workflow
+# is GREEN on the seal commit. Sealed rows re-prove their claim on every
+# commit thereafter; drift unseals the row.
+#
+# Bootstrap mode: validates bootstrap artifacts (discipline.md present,
+# mapping TOML parseable, ai_docs records valid). Component jobs are
+# guarded so they only run when the component's package actually exists
+# in the workspace.
+
+on:
+  push:
+    branches: [main, "feat/proxima-notify"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  bootstrap:
+    name: bootstrap artifacts present
+    needs: changes
+    if: needs.changes.outputs.notify == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: discipline log present
+        run: test -f docs/proxima-notify/discipline.md
+
+      - name: architecture doc present
+        run: test -f docs/proxima-notify/ARCHITECTURE.md
+
+      - name: substrate doc present
+        run: test -f docs/proxima-notify/SUBSTRATE.md
+
+      - name: alert event schema doc present
+        run: test -f docs/proxima-notify/ALERT_EVENT_SCHEMA.md
+
+      - name: gate script executable
+        run: test -x scripts/notify-component-gate.sh
+
+      - name: mapping TOML parses and has all 13 components
+        run: |
+          python3 - <<'PY'
+          import tomllib, pathlib, sys
+          data = tomllib.loads(pathlib.Path('scripts/notify-component-gate.toml').read_text())
+          expected = ['S1','S2','S3','C1','C2','C3','C4','C5','C6','C7','C8','C9','C10']
+          missing = [c for c in expected if c not in data]
+          if missing:
+              sys.exit(f'missing components in mapping: {missing}')
+          for c, row in data.items():
+              if c == 'description':
+                  continue
+              required = {'package','feature','bench','tier'}
+              gap = required - row.keys()
+              if gap:
+                  sys.exit(f'component {c} missing keys: {gap}')
+              if row['tier'] not in {'tier-1','tier-2','tier-3'}:
+                  sys.exit(f'component {c} bad tier: {row["tier"]}')
+          print(f'mapping OK: {len(expected)} components')
+          PY
+
+      - name: ai_docs records load via jq
+        run: |
+          for f in ai_docs/index.jsonl ai_docs/task-routes.jsonl ai_docs/invariants.jsonl; do
+            test -f "$f" || (echo "missing $f"; exit 1)
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "$line" | jq -e . > /dev/null || (echo "bad jsonl line in $f: $line"; exit 1)
+            done < "$f"
+          done
+
+      - name: proxima-notify ai_docs route exists
+        run: |
+          jq -e 'select(.task == "proxima-notify")' ai_docs/task-routes.jsonl > /dev/null \
+            || (echo "ai_docs/task-routes.jsonl missing proxima-notify route"; exit 1)
+
+  detect:
+    name: detect present components
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    outputs:
+      recording_core_sink: ${{ steps.check.outputs.recording_core_sink }}
+      notify_proto: ${{ steps.check.outputs.notify_proto }}
+      telegram_proto: ${{ steps.check.outputs.telegram_proto }}
+      notify: ${{ steps.check.outputs.notify }}
+      recording_pipe: ${{ steps.check.outputs.recording_pipe }}
+      telegram: ${{ steps.check.outputs.telegram }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check component paths
+        id: check
+        run: |
+          test -f proxima-recording/src/binary/sink.rs \
+            && echo "recording_core_sink=true" >> "$GITHUB_OUTPUT" \
+            || echo "recording_core_sink=false" >> "$GITHUB_OUTPUT"
+          test -f proxima-notify-proto/Cargo.toml \
+            && echo "notify_proto=true" >> "$GITHUB_OUTPUT" \
+            || echo "notify_proto=false" >> "$GITHUB_OUTPUT"
+          test -f proxima-telegram-proto/Cargo.toml \
+            && echo "telegram_proto=true" >> "$GITHUB_OUTPUT" \
+            || echo "telegram_proto=false" >> "$GITHUB_OUTPUT"
+          test -f proxima-patterns/Cargo.toml \
+            && echo "notify=true" >> "$GITHUB_OUTPUT" \
+            || echo "notify=false" >> "$GITHUB_OUTPUT"
+          test -f proxima-recording/Cargo.toml \
+            && echo "recording_pipe=true" >> "$GITHUB_OUTPUT" \
+            || echo "recording_pipe=false" >> "$GITHUB_OUTPUT"
+          test -f proxima-telegram/Cargo.toml \
+            && echo "telegram=true" >> "$GITHUB_OUTPUT" \
+            || echo "telegram=false" >> "$GITHUB_OUTPUT"
+
+  # Per-component gates — each is conditionally enabled by the presence of
+  # the component's package directory. Components not yet created skip
+  # silently (IN-FLIGHT). Sealed components re-prove their gate on every
+  # commit.
+  gate-S1:
+    name: gate S1 (durable WAL upgrade)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.recording_core_sink == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          # only run gate if S1 feature is wired
+          if grep -q '"durable-wal"' proxima-recording/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh S1
+          else
+            echo "S1 not yet sealed; skipping gate run"
+          fi
+
+  gate-S2:
+    name: gate S2 (producer-lifecycle driver)
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"producer-lifecycle"' Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh S2
+          else
+            echo "S2 not yet sealed; skipping gate run"
+          fi
+
+  gate-S3:
+    name: gate S3 (producer-graph config schema)
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"producer-graph-config"' Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh S3
+          else
+            echo "S3 not yet sealed; skipping gate run"
+          fi
+
+  gate-C1:
+    name: gate C1 (proxima-notify-proto, tier-3)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.notify_proto == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/notify-component-gate.sh C1
+      - name: tier-3 NoStd gate (no alloc, no std)
+        run: cargo build -p proxima-notify-proto --no-default-features
+
+  gate-C2:
+    name: gate C2 (proxima-telegram-proto, tier-3)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.telegram_proto == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/notify-component-gate.sh C2
+      - name: tier-3 NoStd gate (no alloc, no std)
+        run: cargo build -p proxima-telegram-proto --no-default-features
+
+  gate-C3:
+    name: gate C3 (ScheduledTriggerPipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.notify == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"alert"' proxima-patterns/Cargo.toml && grep -q '"scheduled-trigger"' proxima-patterns/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C3
+          else
+            echo "C3 not yet sealed; skipping gate run"
+          fi
+
+  gate-C4:
+    name: gate C4 (StdoutAlertPipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.notify == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"alert"' proxima-patterns/Cargo.toml && grep -q '"stdout-alert"' proxima-patterns/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C4
+          else
+            echo "C4 not yet sealed; skipping gate run"
+          fi
+
+  gate-C5:
+    name: gate C5 (StdioGuidancePipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.notify == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"alert"' proxima-patterns/Cargo.toml && grep -q '"stdio-guidance"' proxima-patterns/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C5
+          else
+            echo "C5 not yet sealed; skipping gate run"
+          fi
+
+  gate-C6:
+    name: gate C6 (WebhookOutPipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.notify == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"webhook-out"' proxima-notify/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C6
+          else
+            echo "C6 not yet sealed; skipping gate run"
+          fi
+
+  gate-C7:
+    name: gate C7 (OffsetCursor)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.recording_pipe == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"offset-cursor"' proxima-recording/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C7
+          else
+            echo "C7 not yet sealed; skipping gate run"
+          fi
+
+  gate-C8:
+    name: gate C8 (DurableConsumerPipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.recording_pipe == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"durable-consumer"' proxima-recording/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C8
+          else
+            echo "C8 not yet sealed; skipping gate run"
+          fi
+
+  gate-C9:
+    name: gate C9 (TelegramOutPipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.telegram == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"telegram-out"' proxima-telegram/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C9
+          else
+            echo "C9 not yet sealed; skipping gate run"
+          fi
+
+  gate-C10:
+    name: gate C10 (TelegramGuidancePipe)
+    needs: [bootstrap, detect]
+    runs-on: ubuntu-latest
+    if: needs.detect.outputs.telegram == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          if grep -q '"telegram-guidance"' proxima-telegram/Cargo.toml 2>/dev/null; then
+            bash scripts/notify-component-gate.sh C10
+          else
+            echo "C10 not yet sealed; skipping gate run"
+          fi

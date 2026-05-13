@@ -1,0 +1,31 @@
+# open-loop-smoke — smallest credible `proxima load` exercise.
+#
+# Drives an in-memory `synth` pipe at 50 rps for 2 seconds via the
+# open-loop driver (Runtime::timer_at-paced cadence, atomic in-flight
+# cap, per-second MetricsSnapshot windows, CO-corrected latency
+# recorded as `proxima.workload.co_latency_ms`).
+#
+# Used by:
+#   - rust/tests/open_loop_scenario.rs — programmatic via run_scenario
+#   - tools/proxima-cli/tests/load_smoke.rs — `proxima load` binary path
+#   - CI bench harness (when #5b lands)  — compare-bench baseline
+
+[workload]
+target_pipe = "echo"
+target_rps  = 50
+duration    = "2s"
+concurrency = 16
+
+[[pipe]]
+name = "echo"
+[pipe.synth]
+status = 200
+body   = "ok"
+
+[[expect]]
+kind  = "success_rate_ge"
+ratio = 0.95
+
+[[expect]]
+kind       = "cel"
+expression = "completed >= 25"

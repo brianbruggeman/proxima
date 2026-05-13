@@ -1,0 +1,233 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 52.98s
+     Running benches/bench_inbox.rs (/tmp/cargo_target_proxima_runtime/release/deps/bench_inbox-2eb12d6f207e3149)
+Benchmarking inbox_spsc_throughput/proxima
+Benchmarking inbox_spsc_throughput/proxima: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/proxima: Collecting 30 samples in estimated 3.4498 s (3255 iterations)
+Benchmarking inbox_spsc_throughput/proxima: Analyzing
+inbox_spsc_throughput/proxima
+                        time:   [1.0426 ms 1.1808 ms 1.4604 ms]
+                        thrpt:  [13.695 Melem/s 16.938 Melem/s 19.182 Melem/s]
+                 change:
+                        time:   [+46.815% +86.870% +153.81%] (p = 0.00 < 0.05)
+                        thrpt:  [−60.600% −46.487% −31.887%]
+                        Performance has regressed.
+Found 3 outliers among 30 measurements (10.00%)
+  3 (10.00%) high severe
+Benchmarking inbox_spsc_throughput/flume_unbounded
+Benchmarking inbox_spsc_throughput/flume_unbounded: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/flume_unbounded: Collecting 30 samples in estimated 3.1230 s (4185 iterations)
+Benchmarking inbox_spsc_throughput/flume_unbounded: Analyzing
+inbox_spsc_throughput/flume_unbounded
+                        time:   [712.12 µs 718.37 µs 725.48 µs]
+                        thrpt:  [27.568 Melem/s 27.841 Melem/s 28.085 Melem/s]
+                 change:
+                        time:   [−5.2983% −2.0949% +0.3477%] (p = 0.18 > 0.05)
+                        thrpt:  [−0.3465% +2.1397% +5.5948%]
+                        No change in performance detected.
+Found 3 outliers among 30 measurements (10.00%)
+  3 (10.00%) high mild
+Benchmarking inbox_spsc_throughput/flume_bounded
+Benchmarking inbox_spsc_throughput/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/flume_bounded: Collecting 30 samples in estimated 3.4603 s (3255 iterations)
+Benchmarking inbox_spsc_throughput/flume_bounded: Analyzing
+inbox_spsc_throughput/flume_bounded
+                        time:   [947.77 µs 1.2192 ms 1.5729 ms]
+                        thrpt:  [12.716 Melem/s 16.405 Melem/s 21.102 Melem/s]
+                 change:
+                        time:   [−31.096% −16.630% +0.2485%] (p = 0.07 > 0.05)
+                        thrpt:  [−0.2479% +19.947% +45.130%]
+                        No change in performance detected.
+Found 6 outliers among 30 measurements (20.00%)
+  2 (6.67%) low severe
+  1 (3.33%) low mild
+  1 (3.33%) high mild
+  2 (6.67%) high severe
+Benchmarking inbox_spsc_throughput/std_sync_mpsc
+Benchmarking inbox_spsc_throughput/std_sync_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/std_sync_mpsc: Collecting 30 samples in estimated 3.0605 s (8370 iterations)
+Benchmarking inbox_spsc_throughput/std_sync_mpsc: Analyzing
+inbox_spsc_throughput/std_sync_mpsc
+                        time:   [355.50 µs 359.90 µs 365.60 µs]
+                        thrpt:  [54.705 Melem/s 55.571 Melem/s 56.258 Melem/s]
+                 change:
+                        time:   [−5.4085% −2.0834% +1.3525%] (p = 0.25 > 0.05)
+                        thrpt:  [−1.3344% +2.1277% +5.7177%]
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking inbox_spsc_throughput/tokio_mpsc
+Benchmarking inbox_spsc_throughput/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_spsc_throughput/tokio_mpsc: Collecting 30 samples in estimated 3.2370 s (1395 iterations)
+Benchmarking inbox_spsc_throughput/tokio_mpsc: Analyzing
+inbox_spsc_throughput/tokio_mpsc
+                        time:   [2.3651 ms 2.3969 ms 2.4340 ms]
+                        thrpt:  [8.2170 Melem/s 8.3443 Melem/s 8.4561 Melem/s]
+                 change:
+                        time:   [+27.699% +31.198% +34.688%] (p = 0.00 < 0.05)
+                        thrpt:  [−25.754% −23.780% −21.691%]
+                        Performance has regressed.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+
+Benchmarking inbox_mpsc_fanin_4/proxima
+Benchmarking inbox_mpsc_fanin_4/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_4/proxima: Collecting 30 samples in estimated 3.0221 s (4650 iterations)
+Benchmarking inbox_mpsc_fanin_4/proxima: Analyzing
+inbox_mpsc_fanin_4/proxima
+                        time:   [626.45 µs 645.51 µs 670.12 µs]
+                        thrpt:  [29.846 Melem/s 30.983 Melem/s 31.926 Melem/s]
+                 change:
+                        time:   [−59.102% −56.040% −52.509%] (p = 0.00 < 0.05)
+                        thrpt:  [+110.57% +127.48% +144.51%]
+                        Performance has improved.
+Found 5 outliers among 30 measurements (16.67%)
+  1 (3.33%) low mild
+  4 (13.33%) high severe
+Benchmarking inbox_mpsc_fanin_4/flume_bounded
+Benchmarking inbox_mpsc_fanin_4/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_4/flume_bounded: Collecting 30 samples in estimated 3.5973 s (1860 iterations)
+Benchmarking inbox_mpsc_fanin_4/flume_bounded: Analyzing
+inbox_mpsc_fanin_4/flume_bounded
+                        time:   [1.5775 ms 1.7784 ms 2.1365 ms]
+                        thrpt:  [9.3609 Melem/s 11.246 Melem/s 12.678 Melem/s]
+                 change:
+                        time:   [−24.610% +11.903% +70.988%] (p = 0.76 > 0.05)
+                        thrpt:  [−41.517% −10.637% +32.643%]
+                        No change in performance detected.
+Found 5 outliers among 30 measurements (16.67%)
+  1 (3.33%) high mild
+  4 (13.33%) high severe
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc: Collecting 30 samples in estimated 3.8690 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_4/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_4/tokio_mpsc
+                        time:   [3.9936 ms 4.1585 ms 4.3333 ms]
+                        thrpt:  [4.6154 Melem/s 4.8094 Melem/s 5.0080 Melem/s]
+                 change:
+                        time:   [−9.3015% −6.2296% −2.8189%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.9007% +6.6435% +10.255%]
+                        Performance has improved.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) low severe
+  1 (3.33%) high mild
+
+Benchmarking inbox_mpsc_fanin_8/proxima
+Benchmarking inbox_mpsc_fanin_8/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_8/proxima: Collecting 30 samples in estimated 3.0612 s (6045 iterations)
+Benchmarking inbox_mpsc_fanin_8/proxima: Analyzing
+inbox_mpsc_fanin_8/proxima
+                        time:   [512.65 µs 555.94 µs 598.08 µs]
+                        thrpt:  [33.440 Melem/s 35.975 Melem/s 39.013 Melem/s]
+                 change:
+                        time:   [−5.0416% +1.4208% +7.9693%] (p = 0.68 > 0.05)
+                        thrpt:  [−7.3811% −1.4009% +5.3093%]
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking inbox_mpsc_fanin_8/flume_bounded
+Benchmarking inbox_mpsc_fanin_8/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_8/flume_bounded: Collecting 30 samples in estimated 3.3955 s (1395 iterations)
+Benchmarking inbox_mpsc_fanin_8/flume_bounded: Analyzing
+inbox_mpsc_fanin_8/flume_bounded
+                        time:   [2.1112 ms 2.2527 ms 2.4051 ms]
+                        thrpt:  [8.3156 Melem/s 8.8781 Melem/s 9.4734 Melem/s]
+                 change:
+                        time:   [−38.774% −34.277% −28.768%] (p = 0.00 < 0.05)
+                        thrpt:  [+40.386% +52.155% +63.329%]
+                        Performance has improved.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc: Collecting 30 samples in estimated 4.1763 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_8/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_8/tokio_mpsc
+                        time:   [4.6813 ms 5.0962 ms 5.6765 ms]
+                        thrpt:  [3.5233 Melem/s 3.9245 Melem/s 4.2723 Melem/s]
+                 change:
+                        time:   [−18.250% −11.913% −3.5528%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.6837% +13.524% +22.324%]
+                        Performance has improved.
+Found 3 outliers among 30 measurements (10.00%)
+  3 (10.00%) high severe
+
+Benchmarking inbox_mpsc_fanin_16/proxima
+Benchmarking inbox_mpsc_fanin_16/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_16/proxima: Collecting 30 samples in estimated 3.1534 s (7905 iterations)
+Benchmarking inbox_mpsc_fanin_16/proxima: Analyzing
+inbox_mpsc_fanin_16/proxima
+                        time:   [386.77 µs 390.93 µs 396.07 µs]
+                        thrpt:  [50.496 Melem/s 51.161 Melem/s 51.710 Melem/s]
+                 change:
+                        time:   [−1.0270% +0.2158% +1.5466%] (p = 0.75 > 0.05)
+                        thrpt:  [−1.5230% −0.2153% +1.0377%]
+                        No change in performance detected.
+Benchmarking inbox_mpsc_fanin_16/flume_bounded
+Benchmarking inbox_mpsc_fanin_16/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_16/flume_bounded: Collecting 30 samples in estimated 3.8240 s (1395 iterations)
+Benchmarking inbox_mpsc_fanin_16/flume_bounded: Analyzing
+inbox_mpsc_fanin_16/flume_bounded
+                        time:   [2.5099 ms 2.5907 ms 2.6924 ms]
+                        thrpt:  [7.4282 Melem/s 7.7199 Melem/s 7.9685 Melem/s]
+                 change:
+                        time:   [−37.761% −35.325% −32.619%] (p = 0.00 < 0.05)
+                        thrpt:  [+48.410% +54.618% +60.670%]
+                        Performance has improved.
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc: Collecting 30 samples in estimated 4.6225 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_16/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_16/tokio_mpsc
+                        time:   [5.3739 ms 6.3860 ms 7.6060 ms]
+                        thrpt:  [2.6295 Melem/s 3.1319 Melem/s 3.7217 Melem/s]
+                 change:
+                        time:   [−28.897% −12.204% +11.041%] (p = 0.29 > 0.05)
+                        thrpt:  [−9.9435% +13.901% +40.641%]
+                        No change in performance detected.
+Found 5 outliers among 30 measurements (16.67%)
+  2 (6.67%) high mild
+  3 (10.00%) high severe
+
+Benchmarking inbox_mpsc_fanin_32/proxima
+Benchmarking inbox_mpsc_fanin_32/proxima: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_32/proxima: Collecting 30 samples in estimated 3.2882 s (4650 iterations)
+Benchmarking inbox_mpsc_fanin_32/proxima: Analyzing
+inbox_mpsc_fanin_32/proxima
+                        time:   [869.67 µs 978.99 µs 1.1267 ms]
+                        thrpt:  [17.751 Melem/s 20.429 Melem/s 22.997 Melem/s]
+                 change:
+                        time:   [−51.390% −36.251% −14.114%] (p = 0.01 < 0.05)
+                        thrpt:  [+16.433% +56.864% +105.72%]
+                        Performance has improved.
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high severe
+Benchmarking inbox_mpsc_fanin_32/flume_bounded
+Benchmarking inbox_mpsc_fanin_32/flume_bounded: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_32/flume_bounded: Collecting 30 samples in estimated 3.2572 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_32/flume_bounded: Analyzing
+inbox_mpsc_fanin_32/flume_bounded
+                        time:   [3.4791 ms 4.7200 ms 7.3214 ms]
+                        thrpt:  [2.7317 Melem/s 4.2373 Melem/s 5.7486 Melem/s]
+                 change:
+                        time:   [−12.089% +3.4253% +30.592%] (p = 0.84 > 0.05)
+                        thrpt:  [−23.426% −3.3118% +13.751%]
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high severe
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc: Warming up for 1.0000 s
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc: Collecting 30 samples in estimated 5.4562 s (930 iterations)
+Benchmarking inbox_mpsc_fanin_32/tokio_mpsc: Analyzing
+inbox_mpsc_fanin_32/tokio_mpsc
+                        time:   [5.2056 ms 5.3009 ms 5.4489 ms]
+                        thrpt:  [3.6705 Melem/s 3.7730 Melem/s 3.8420 Melem/s]
+                 change:
+                        time:   [+5.1629% +8.4108% +12.199%] (p = 0.00 < 0.05)
+                        thrpt:  [−10.872% −7.7583% −4.9094%]
+                        Performance has regressed.
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high severe
+

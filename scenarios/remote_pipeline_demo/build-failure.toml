@@ -1,0 +1,7 @@
+# Drop-in replacement for the `build` stage used by `--substitute` in
+# the demo's replay leg. Exits non-zero to demonstrate strict-failure
+# propagation: bench skips when build fails on the replay.
+name = "build"
+command = "/bin/sh"
+args = ["-c", "echo 'simulated build failure' 1>&2; exit 3"]
+depends_on = ["fetch"]

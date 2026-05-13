@@ -1,0 +1,76 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 34s
+     Running benches/bench_websocket_frame.rs (/tmp/cargo_target/release/deps/bench_websocket_frame-987d155da190154d)
+Benchmarking ws_small_text/proxima
+Benchmarking ws_small_text/proxima: Warming up for 2.0000 s
+Benchmarking ws_small_text/proxima: Collecting 20 samples in estimated 2.0000 s (1.2B iterations)
+Benchmarking ws_small_text/proxima: Analyzing
+ws_small_text/proxima   time:   [1.6529 ns 1.6552 ns 1.6576 ns]
+                        thrpt:  [3.9329 GiB/s 3.9387 GiB/s 3.9441 GiB/s]
+                 change:
+                        time:   [+0.9631% +1.3253% +1.6818%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.6540% −1.3079% −0.9539%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking ws_small_text/tungstenite
+Benchmarking ws_small_text/tungstenite: Warming up for 2.0000 s
+Benchmarking ws_small_text/tungstenite: Collecting 20 samples in estimated 2.0000 s (126M iterations)
+Benchmarking ws_small_text/tungstenite: Analyzing
+ws_small_text/tungstenite
+                        time:   [14.896 ns 15.259 ns 15.591 ns]
+                        thrpt:  [428.18 MiB/s 437.49 MiB/s 448.16 MiB/s]
+                 change:
+                        time:   [−11.733% −9.3591% −6.8599%] (p = 0.00 < 0.05)
+                        thrpt:  [+7.3652% +10.325% +13.292%]
+                        Performance has improved.
+
+Benchmarking ws_medium_masked/proxima
+Benchmarking ws_medium_masked/proxima: Warming up for 2.0000 s
+Benchmarking ws_medium_masked/proxima: Collecting 20 samples in estimated 2.0000 s (947M iterations)
+Benchmarking ws_medium_masked/proxima: Analyzing
+ws_medium_masked/proxima
+                        time:   [2.1089 ns 2.1118 ns 2.1147 ns]
+                        thrpt:  [91.606 GiB/s 91.731 GiB/s 91.855 GiB/s]
+                 change:
+                        time:   [+1.6615% +1.8589% +2.0620%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.0203% −1.8250% −1.6344%]
+                        Performance has regressed.
+Benchmarking ws_medium_masked/tungstenite
+Benchmarking ws_medium_masked/tungstenite: Warming up for 2.0000 s
+Benchmarking ws_medium_masked/tungstenite: Collecting 20 samples in estimated 2.0000 s (154M iterations)
+Benchmarking ws_medium_masked/tungstenite: Analyzing
+ws_medium_masked/tungstenite
+                        time:   [12.762 ns 12.810 ns 12.860 ns]
+                        thrpt:  [15.063 GiB/s 15.122 GiB/s 15.179 GiB/s]
+                 change:
+                        time:   [−0.4050% +0.5953% +1.6138%] (p = 0.29 > 0.05)
+                        thrpt:  [−1.5881% −0.5917% +0.4066%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking ws_large/proxima
+Benchmarking ws_large/proxima: Warming up for 2.0000 s
+Benchmarking ws_large/proxima: Collecting 20 samples in estimated 2.0000 s (999M iterations)
+Benchmarking ws_large/proxima: Analyzing
+ws_large/proxima        time:   [1.9879 ns 1.9910 ns 1.9948 ns]
+                        thrpt:  [ 32685 GiB/s  32749 GiB/s  32800 GiB/s]
+                 change:
+                        time:   [+1.3434% +1.6542% +1.9605%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.9228% −1.6272% −1.3256%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking ws_large/tungstenite
+Benchmarking ws_large/tungstenite: Warming up for 2.0000 s
+Benchmarking ws_large/tungstenite: Collecting 20 samples in estimated 2.0000 s (100M iterations)
+Benchmarking ws_large/tungstenite: Analyzing
+ws_large/tungstenite    time:   [16.550 ns 18.014 ns 19.130 ns]
+                        thrpt:  [3408.4 GiB/s 3619.5 GiB/s 3939.8 GiB/s]
+                 change:
+                        time:   [−2.4657% +3.0123% +8.6001%] (p = 0.28 > 0.05)
+                        thrpt:  [−7.9191% −2.9242% +2.5280%]
+                        No change in performance detected.
+

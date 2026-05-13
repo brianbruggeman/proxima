@@ -1,0 +1,131 @@
+[package]
+name = "proxima-core"
+description = "Foundation types for the proxima workspace (error)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+# buffer::BufferPool leans on thread_local::ThreadLocal (OS thread identity),
+# so it rides the std feature rather than its own toggle (folded in from
+# the former proxima-io satellite crate).
+std = [
+    "alloc",
+    "thiserror/std",
+    "dep:bytes",
+    "bytes/std",
+    "dep:thread_local",
+    "dep:crossbeam-queue",
+    "crossbeam-queue/std",
+    "time-std",
+    "time-driver-std-thread",
+]
+alloc = ["time-alloc"]
+# time (folded from the former proxima-time crate) tiers — namespaced so they
+# compose under this crate's own std/alloc without clobbering them. A default
+# `std` build here still gets the runtime-agnostic timer's std-thread driver
+# automatically, preserving proxima-time's own former `default = ["std",
+# "driver-std-thread"]`.
+time-alloc = ["futures/alloc"]
+time-std = ["time-alloc", "futures/std"]
+time-driver-std-thread = ["time-std", "dep:futures-timer"]
+time-driver-mock = ["time-std"]
+time-driver-wasm = ["time-alloc"]
+time-driver-prime-wheel = ["time-std"]
+# io-async: poll-based AsyncRead/AsyncWrite over an associated Error type — the
+# no_std + no_alloc async IO seam (futures::io is std via std::io::Error). Pure
+# core::{pin,task}, zero deps; compiles at every tier incl bare metal. default-off.
+io-async = []
+# io-async-compat: std-tier bridge from the futures-io ecosystem to the io-async
+# seam (FromFutures newtype), so a std futures::io reader can feed an io_async
+# adapter. futures-io is the traits-only crate (no tokio, no futures-util). std.
+io-async-compat = ["std", "io-async", "dep:futures-io"]
+# io-async-compat-tokio: std-tier bridge from tokio::io to the io-async seam
+# (FromTokio/IntoTokio newtypes), so a tokio socket can feed an io_async
+# adapter and the result can be handed back to a tokio-driven caller. Separate
+# from io-async-compat (futures-io) since pulling tokio in is heavier; default-off.
+io-async-compat-tokio = ["std", "io-async", "dep:tokio", "tokio/io-util"]
+# loom: swap atomics+UnsafeCell to loom's for the ring model-check (tests/loom_ring).
+loom = ["dep:loom"]
+# park: SlotPark, the futex wait-for-a-freed-slot primitive (lossless backpressure).
+# no_std + no-alloc, but OS-backed (a futex / WaitOnAddress / __ulock_wait syscall
+# via atomic-wait) — so it is opt-in, absent from bare-metal no-OS targets.
+park = ["dep:atomic-wait"]
+# the generic FactoryRegistry<F> (arc-swap copy-on-write, register/get/names) —
+# the shared shape of every name->thing registry in the workspace. std-tier
+# (arc-swap), tokio-free, so it builds for wasm; default-off keeps the base lean.
+registry = ["std", "dep:arc-swap"]
+# the config-as-composition surface for the registry (recursive FactorySpec with
+# a fluent bon builder + a conflaguration layered loader). std-tier; default-off.
+config = ["registry", "dep:bon", "dep:conflaguration", "dep:serde", "dep:serde_json"]
+# Live<T>: a lock-free, live-swappable value split into read + control halves
+# (arc-swap). The "hot readers, rare control-plane writes" shape. std-tier
+# (arc-swap), tokio-free; default-off keeps the base lean.
+live = ["std", "dep:arc-swap"]
+
+[dependencies]
+arc-swap = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+serde = { workspace = true, features = ["derive", "alloc"], optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+loom = { workspace = true, optional = true }
+atomic-wait = { workspace = true, optional = true }
+futures-io = { version = "0.3.32", optional = true }
+tokio = { workspace = true, optional = true, features = ["io-util"] }
+bytes = { workspace = true, optional = true }
+thread_local = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true, optional = true }
+# unconditional (matching the former proxima-time crate's own always-on
+# dependency spec) so `time` compiles at every tier, including bare
+# no_std + no-alloc — see the `time-*` feature block above.
+futures = { workspace = true, default-features = false, features = ["alloc", "async-await"] }
+pin-project-lite = { workspace = true }
+futures-timer = { workspace = true, optional = true }
+smallvec.workspace = true
+
+[dev-dependencies]
+# ring model-check + parameterized ring tests moved in with the ring primitive.
+rstest = { workspace = true }
+criterion = { workspace = true }
+flume = { workspace = true }
+crossbeam-queue = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
+loom = { workspace = true }
+# time/mod.rs tests use futures::executor::block_on (folded from proxima-time)
+futures = { workspace = true, features = ["std", "executor"] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+proxima-build.workspace = true
+toml.workspace = true
+
+[[bench]]
+name = "bench_ring"
+harness = false
+
+[[bench]]
+name = "bench_ring_decompose"
+harness = false
+
+[[bench]]
+name = "bench_io_async"
+harness = false
+required-features = ["io-async"]
+
+[[bench]]
+name = "bench_signal_alloc"
+harness = false
+required-features = ["std"]
+
+[[test]]
+name = "loom_signal"
+required-features = ["loom", "std"]

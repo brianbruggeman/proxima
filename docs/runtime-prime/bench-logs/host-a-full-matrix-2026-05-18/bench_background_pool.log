@@ -1,0 +1,83 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+   Compiling rayon-core v1.13.0
+   Compiling rayon v1.12.0
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 38s
+     Running benches/bench_background_pool.rs (/tmp/cargo_target/release/deps/bench_background_pool-71bb552403571c02)
+Benchmarking bg_pool_tiny_jobs/proxima_dyn
+Benchmarking bg_pool_tiny_jobs/proxima_dyn: Warming up for 1.0000 s
+Benchmarking bg_pool_tiny_jobs/proxima_dyn: Collecting 30 samples in estimated 3.8258 s (1860 iterations)
+Benchmarking bg_pool_tiny_jobs/proxima_dyn: Analyzing
+bg_pool_tiny_jobs/proxima_dyn
+                        time:   [2.1150 ms 2.1378 ms 2.1524 ms]
+                        thrpt:  [464.59 Kelem/s 467.78 Kelem/s 472.81 Kelem/s]
+                 change:
+                        time:   [+29.131% +35.865% +42.809%] (p = 0.00 < 0.05)
+                        thrpt:  [−29.976% −26.397% −22.559%]
+                        Performance has regressed.
+Found 3 outliers among 30 measurements (10.00%)
+  3 (10.00%) low severe
+Benchmarking bg_pool_tiny_jobs/proxima_typed
+Benchmarking bg_pool_tiny_jobs/proxima_typed: Warming up for 1.0000 s
+Benchmarking bg_pool_tiny_jobs/proxima_typed: Collecting 30 samples in estimated 3.4865 s (2790 iterations)
+Benchmarking bg_pool_tiny_jobs/proxima_typed: Analyzing
+bg_pool_tiny_jobs/proxima_typed
+                        time:   [1.2718 ms 1.2855 ms 1.2980 ms]
+                        thrpt:  [770.41 Kelem/s 777.94 Kelem/s 786.26 Kelem/s]
+                 change:
+                        time:   [+20.729% +38.406% +58.765%] (p = 0.00 < 0.05)
+                        thrpt:  [−37.014% −27.749% −17.170%]
+                        Performance has regressed.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+Benchmarking bg_pool_tiny_jobs/rayon
+Benchmarking bg_pool_tiny_jobs/rayon: Warming up for 1.0000 s
+Benchmarking bg_pool_tiny_jobs/rayon: Collecting 30 samples in estimated 3.0550 s (2325 iterations)
+Benchmarking bg_pool_tiny_jobs/rayon: Analyzing
+bg_pool_tiny_jobs/rayon time:   [1.2364 ms 1.2592 ms 1.2848 ms]
+                        thrpt:  [778.34 Kelem/s 794.17 Kelem/s 808.80 Kelem/s]
+                 change:
+                        time:   [+13.203% +16.389% +19.407%] (p = 0.00 < 0.05)
+                        thrpt:  [−16.253% −14.081% −11.663%]
+                        Performance has regressed.
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) low mild
+  2 (6.67%) high mild
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed: Warming up for 1.0000 s
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed: Collecting 30 samples in estimated 3.0491 s (4185 iterations)
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed: Analyzing
+bg_pool_tiny_jobs/proxima_rayon_backed
+                        time:   [714.06 µs 745.59 µs 773.49 µs]
+                        thrpt:  [1.2928 Melem/s 1.3412 Melem/s 1.4004 Melem/s]
+                 change:
+                        time:   [−14.831% −5.4752% +4.5337%] (p = 0.31 > 0.05)
+                        thrpt:  [−4.3371% +5.7923% +17.413%]
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed_dyn
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed_dyn: Warming up for 1.0000 s
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed_dyn: Collecting 30 samples in estimated 3.1230 s (2325 iterations)
+Benchmarking bg_pool_tiny_jobs/proxima_rayon_backed_dyn: Analyzing
+bg_pool_tiny_jobs/proxima_rayon_backed_dyn
+                        time:   [1.3517 ms 1.3679 ms 1.3839 ms]
+                        thrpt:  [722.61 Kelem/s 731.04 Kelem/s 739.78 Kelem/s]
+                 change:
+                        time:   [−5.1444% −0.3247% +4.3451%] (p = 0.89 > 0.05)
+                        thrpt:  [−4.1642% +0.3257% +5.4234%]
+                        No change in performance detected.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) low severe
+  1 (3.33%) low mild
+Benchmarking bg_pool_tiny_jobs/tokio_spawn_blocking
+Benchmarking bg_pool_tiny_jobs/tokio_spawn_blocking: Warming up for 1.0000 s
+Benchmarking bg_pool_tiny_jobs/tokio_spawn_blocking: Collecting 30 samples in estimated 3.1333 s (2325 iterations)
+Benchmarking bg_pool_tiny_jobs/tokio_spawn_blocking: Analyzing
+bg_pool_tiny_jobs/tokio_spawn_blocking
+                        time:   [1.3719 ms 1.4136 ms 1.4532 ms]
+                        thrpt:  [688.13 Kelem/s 707.40 Kelem/s 728.92 Kelem/s]
+                 change:
+                        time:   [+9.6976% +12.606% +15.416%] (p = 0.00 < 0.05)
+                        thrpt:  [−13.357% −11.195% −8.8403%]
+                        Performance has regressed.
+

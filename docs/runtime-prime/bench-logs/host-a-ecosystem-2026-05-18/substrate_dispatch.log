@@ -1,0 +1,113 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 22s
+     Running benches/substrate_dispatch.rs (/tmp/cargo_target/release/deps/substrate_dispatch-f2a269676d45ae40)
+Benchmarking substrate_dispatch/noop_mw_x0
+Benchmarking substrate_dispatch/noop_mw_x0: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x0: Collecting 20 samples in estimated 3.0001 s (5.1M iterations)
+Benchmarking substrate_dispatch/noop_mw_x0: Analyzing
+substrate_dispatch/noop_mw_x0
+                        time:   [579.24 ns 582.72 ns 586.45 ns]
+                        thrpt:  [1.7052 Melem/s 1.7161 Melem/s 1.7264 Melem/s]
+                 change:
+                        time:   [−0.5329% +1.4850% +3.5879%] (p = 0.45 > 0.05)
+                        thrpt:  [−3.4636% −1.4633% +0.5357%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking substrate_dispatch/noop_mw_x1
+Benchmarking substrate_dispatch/noop_mw_x1: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x1: Collecting 20 samples in estimated 3.0001 s (4.4M iterations)
+Benchmarking substrate_dispatch/noop_mw_x1: Analyzing
+substrate_dispatch/noop_mw_x1
+                        time:   [674.73 ns 677.52 ns 680.55 ns]
+                        thrpt:  [1.4694 Melem/s 1.4760 Melem/s 1.4821 Melem/s]
+                 change:
+                        time:   [+1.3413% +2.0131% +2.7077%] (p = 0.04 < 0.05)
+                        thrpt:  [−2.6363% −1.9734% −1.3235%]
+                        Performance has regressed.
+Benchmarking substrate_dispatch/noop_mw_x3
+Benchmarking substrate_dispatch/noop_mw_x3: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x3: Collecting 20 samples in estimated 3.0000 s (3.5M iterations)
+Benchmarking substrate_dispatch/noop_mw_x3: Analyzing
+substrate_dispatch/noop_mw_x3
+                        time:   [860.52 ns 862.77 ns 865.63 ns]
+                        thrpt:  [1.1552 Melem/s 1.1591 Melem/s 1.1621 Melem/s]
+                 change:
+                        time:   [+3.8248% +4.5032% +5.1722%] (p = 0.01 < 0.05)
+                        thrpt:  [−4.9178% −4.3092% −3.6839%]
+                        Performance has regressed.
+Benchmarking substrate_dispatch/noop_mw_x5
+Benchmarking substrate_dispatch/noop_mw_x5: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x5: Collecting 20 samples in estimated 3.0000 s (2.8M iterations)
+Benchmarking substrate_dispatch/noop_mw_x5: Analyzing
+substrate_dispatch/noop_mw_x5
+                        time:   [1.0533 µs 1.0563 µs 1.0601 µs]
+                        thrpt:  [943.29 Kelem/s 946.71 Kelem/s 949.43 Kelem/s]
+                 change:
+                        time:   [+4.5158% +5.5878% +6.6666%] (p = 0.01 < 0.05)
+                        thrpt:  [−6.2499% −5.2921% −4.3207%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking substrate_dispatch/noop_mw_x10
+Benchmarking substrate_dispatch/noop_mw_x10: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x10: Collecting 20 samples in estimated 3.0003 s (1.9M iterations)
+Benchmarking substrate_dispatch/noop_mw_x10: Analyzing
+substrate_dispatch/noop_mw_x10
+                        time:   [1.5357 µs 1.5403 µs 1.5451 µs]
+                        thrpt:  [647.20 Kelem/s 649.21 Kelem/s 651.15 Kelem/s]
+                 change:
+                        time:   [+1.6410% +2.7745% +3.9192%] (p = 0.04 < 0.05)
+                        thrpt:  [−3.7714% −2.6996% −1.6145%]
+                        Performance has regressed.
+
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_1
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_1: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_1: Collecting 20 samples in estimated 3.0031 s (150k iterations)
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_1: Analyzing
+substrate_dispatch/noop_mw_x3_concurrent_1
+                        time:   [19.834 µs 20.097 µs 20.379 µs]
+                        thrpt:  [49.070 Kelem/s 49.759 Kelem/s 50.420 Kelem/s]
+                 change:
+                        time:   [+163.45% +171.80% +180.31%] (p = 0.00 < 0.05)
+                        thrpt:  [−64.325% −63.208% −62.042%]
+                        Performance has regressed.
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_4
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_4: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_4: Collecting 20 samples in estimated 3.0036 s (118k iterations)
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_4: Analyzing
+substrate_dispatch/noop_mw_x3_concurrent_4
+                        time:   [25.278 µs 25.376 µs 25.491 µs]
+                        thrpt:  [156.92 Kelem/s 157.63 Kelem/s 158.24 Kelem/s]
+                 change:
+                        time:   [+89.825% +95.018% +100.56%] (p = 0.00 < 0.05)
+                        thrpt:  [−50.140% −48.723% −47.320%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_16
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_16: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_16: Collecting 20 samples in estimated 3.0060 s (67k iterations)
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_16: Analyzing
+substrate_dispatch/noop_mw_x3_concurrent_16
+                        time:   [44.493 µs 44.734 µs 44.945 µs]
+                        thrpt:  [355.99 Kelem/s 357.67 Kelem/s 359.61 Kelem/s]
+                 change:
+                        time:   [+42.201% +44.374% +46.600%] (p = 0.00 < 0.05)
+                        thrpt:  [−31.787% −30.735% −29.677%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) low mild
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_64
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_64: Warming up for 2.0000 s
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_64: Collecting 20 samples in estimated 3.0085 s (30k iterations)
+Benchmarking substrate_dispatch/noop_mw_x3_concurrent_64: Analyzing
+substrate_dispatch/noop_mw_x3_concurrent_64
+                        time:   [99.263 µs 100.02 µs 100.92 µs]
+                        thrpt:  [634.15 Kelem/s 639.89 Kelem/s 644.75 Kelem/s]
+                 change:
+                        time:   [+16.575% +20.082% +23.712%] (p = 0.01 < 0.05)
+                        thrpt:  [−19.167% −16.724% −14.218%]
+                        Performance has regressed.
+

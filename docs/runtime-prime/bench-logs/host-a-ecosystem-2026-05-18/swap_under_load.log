@@ -1,0 +1,43 @@
+   Compiling proxima v0.1.0 (proxima/rust)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 39.20s
+     Running benches/swap_under_load.rs (/tmp/cargo_target/release/deps/swap_under_load-c37756125fd8d2e7)
+Benchmarking swap_under_load_current/uncontended_load
+Benchmarking swap_under_load_current/uncontended_load: Warming up for 2.0000 s
+Benchmarking swap_under_load_current/uncontended_load: Collecting 20 samples in estimated 3.0000 s (177M iterations)
+Benchmarking swap_under_load_current/uncontended_load: Analyzing
+swap_under_load_current/uncontended_load
+                        time:   [16.968 ns 16.976 ns 16.983 ns]
+                        thrpt:  [58.881 Melem/s 58.905 Melem/s 58.936 Melem/s]
+                 change:
+                        time:   [+0.9712% +1.5558% +2.1460%] (p = 0.02 < 0.05)
+                        thrpt:  [−2.1009% −1.5320% −0.9618%]
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking swap_under_load_swap/uncontended_swap
+Benchmarking swap_under_load_swap/uncontended_swap: Warming up for 2.0000 s
+Benchmarking swap_under_load_swap/uncontended_swap: Collecting 20 samples in estimated 3.0000 s (27M iterations)
+Benchmarking swap_under_load_swap/uncontended_swap: Analyzing
+swap_under_load_swap/uncontended_swap
+                        time:   [107.21 ns 108.83 ns 110.38 ns]
+                        thrpt:  [9.0594 Melem/s 9.1890 Melem/s 9.3278 Melem/s]
+                 change:
+                        time:   [−1.9754% −0.2591% +1.4307%] (p = 0.99 > 0.05)
+                        thrpt:  [−1.4105% +0.2598% +2.0152%]
+                        No change in performance detected.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+
+Benchmarking swap_under_load_dispatch_during_storm/read_then_dispatch
+Benchmarking swap_under_load_dispatch_during_storm/read_then_dispatch: Warming up for 2.0000 s
+Benchmarking swap_under_load_dispatch_during_storm/read_then_dispatch: Collecting 20 samples in estimated 3.0001 s (3.4M iterations)
+Benchmarking swap_under_load_dispatch_during_storm/read_then_dispatch: Analyzing
+swap_under_load_dispatch_during_storm/read_then_dispatch
+                        time:   [850.24 ns 879.95 ns 905.49 ns]
+                        thrpt:  [1.1044 Melem/s 1.1364 Melem/s 1.1761 Melem/s]
+                 change:
+                        time:   [−2.4409% +3.4731% +9.2446%] (p = 0.41 > 0.05)
+                        thrpt:  [−8.4623% −3.3565% +2.5019%]
+                        No change in performance detected.
+
