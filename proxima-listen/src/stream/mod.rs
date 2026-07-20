@@ -385,3 +385,6 @@ pub use framed_listener::{ConnTransform, FramedListenProtocol};
 
 pub mod datagram_listener;
 pub use datagram_listener::DatagramListenProtocol;
+
+pub mod datagram_protocol_listener;
+pub use datagram_protocol_listener::{DatagramProtocol, DatagramProtocolListenProtocol};
