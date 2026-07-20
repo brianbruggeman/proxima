@@ -205,7 +205,7 @@ impl ListenProtocol for DatagramListenProtocol {
 /// Stage one reply into the send batch, flushing first if the send arena is
 /// full so a burst larger than one arena still ships. A single reply too large
 /// for an empty arena is dropped with a warning — it can never fit.
-async fn stage_reply(
+pub(crate) async fn stage_reply(
     socket: &mut Box<dyn proxima_primitives::stream::DatagramSocket>,
     batch: &mut DefaultDatagramBatch,
     reply: &[u8],
@@ -224,7 +224,7 @@ async fn stage_reply(
 
 /// Fully ship the staged send burst, parking on backpressure via the waker the
 /// inner send already registered (mirrors the native h3 listener's flush).
-async fn flush_send(
+pub(crate) async fn flush_send(
     socket: &mut Box<dyn proxima_primitives::stream::DatagramSocket>,
     batch: &mut DefaultDatagramBatch,
     label: &str,
