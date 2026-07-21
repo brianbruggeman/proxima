@@ -38,7 +38,7 @@ all — same source, same behavior, just a different attribute on the crate.
 `ring_capacity` is the same claim made about `#[proxima::piped]`
 (`00-foundations.md` section 7): the macro's generated struct is always a
 fieldless ZST and always derives `Clone` unconditionally, so it has to hold
-even where there is no allocator to fall back on. `#[proxima_macros::pipe]`
+even where there is no allocator to fall back on. `#[proxima_macros::piped]`
 on a plain `fn` (no `send`, no `async`) expands to a `struct ring_capacity;`
 with `#[derive(::core::clone::Clone)]` plus an `impl UnpinPipe for
 ring_capacity`, wrapping the call in `core::future::ready` — the whole

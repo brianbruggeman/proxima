@@ -28,7 +28,7 @@ toml = { workspace = true }
 proxima-primitives.workspace = true
 # proc-macro crates compile and run on the host at build time; adding this
 # dependency does not pull anything into the OUTPUT crate's no_std/no-alloc
-# target build — only the tokens `#[proxima_macros::pipe]` expands to do,
+# target build — only the tokens `#[proxima_macros::piped]` expands to do,
 # and those are checked by this crate's own `#![no_std]` compile (see
 # `ring_capacity` below).
 proxima-macros.workspace = true

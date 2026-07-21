@@ -89,8 +89,11 @@ impl SendPipe for FrontPipe {
 /// `adopt_trace_context` on ingress (see `proxima-http/src/http1/serve.rs`), so
 /// `request.context.trace_id` reflects
 /// whatever the inbound `traceparent` carried, restamped with B's own span id.
-/// Stateless, so `#[proxima::piped]` writes the `SendPipe` impl.
-#[proxima::piped(send)]
+/// A bare `async fn` mounts directly, no attribute needed. No `#[proxima::instrument]`
+/// here on purpose: `origin_hop` below already opens the one span this example
+/// measures (`name == "origin"`, parent-linked by hand); an auto-span on the
+/// handler itself would add an untested, un-parented span next to it and
+/// change the exact `spans().len()` this example's proof depends on.
 async fn origin_pipe(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     let origin_traceparent = request
         .context
