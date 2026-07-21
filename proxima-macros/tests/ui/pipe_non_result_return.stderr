@@ -1,4 +1,4 @@
-error: #[proxima::pipe] fns must return Result<Out, Err>
+error: #[proxima::piped] fns must return Result<Out, Err>
  --> tests/ui/pipe_non_result_return.rs:5:23
   |
 5 | fn bad(input: u64) -> u64 {

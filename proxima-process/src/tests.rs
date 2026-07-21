@@ -32,6 +32,8 @@ use super::path::{AbsolutePath, AbsolutePathError};
 use super::protocol::{ChildRequest, ChildResponse, ReadResponse, WriteResponse};
 use super::taint::{Tainted, sanitize_absolute_path, trust_const_path};
 use futures::executor::block_on;
+use proxima_primitives::pipe::Pipe;
+use proxima_primitives::pipe::PipeExt;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 
@@ -985,6 +987,20 @@ impl SendPipe for ExtractPath {
     }
 }
 
+// base-tier mirror, delegating straight through — every pipe implements the
+// root `Pipe` too, which is what lets `PipeExt::and_then` reach it.
+impl Pipe for ExtractPath {
+    type In = ChildRequest;
+    type Out = String;
+    type Err = ProximaError;
+    fn call(
+        &self,
+        request: Self::In,
+    ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> {
+        SendPipe::call(self, request)
+    }
+}
+
 /// Pairs with ExtractPath to test AndThen with intermediate type.
 struct LengthOnly;
 
@@ -998,6 +1014,18 @@ impl SendPipe for LengthOnly {
     ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> + Send {
         let len = input.len();
         async move { Ok(len) }
+    }
+}
+
+impl Pipe for LengthOnly {
+    type In = String;
+    type Out = usize;
+    type Err = ProximaError;
+    fn call(
+        &self,
+        input: Self::In,
+    ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> {
+        SendPipe::call(self, input)
     }
 }
 
@@ -1027,6 +1055,18 @@ impl SendPipe for IntoBytes {
     ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> + Send {
         let bytes = input.to_le_bytes().to_vec();
         async move { Ok(bytes) }
+    }
+}
+
+impl Pipe for IntoBytes {
+    type In = usize;
+    type Out = Vec<u8>;
+    type Err = ProximaError;
+    fn call(
+        &self,
+        input: Self::In,
+    ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> {
+        SendPipe::call(self, input)
     }
 }
 

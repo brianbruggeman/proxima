@@ -14,9 +14,12 @@ use proc_macro::TokenStream;
 
 mod describe;
 mod error_derive;
+mod fan_bang;
+mod filter_bang;
 mod fixture_attr;
 mod main_attr;
 mod pipe_attr;
+mod pipe_bang;
 mod runtime_args;
 mod span_attr;
 mod span_carrier;
@@ -90,7 +93,7 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
 /// `sig.asyncness` decides the `Unpin` axis for free: `async fn` emits
 /// [`Pipe`] (RPITIT passthrough); a plain `fn` emits `UnpinPipe`, wrapping
 /// the call in `core::future::ready` (whose future IS `Unpin`). `Send` is
-/// never inferred — only `#[proxima::pipe(send)]` climbs to `SendPipe` /
+/// never inferred — only `#[proxima::piped(send)]` climbs to `SendPipe` /
 /// `UnpinSendPipe`. The generated struct is always fieldless, so it always
 /// derives `Clone` unconditionally.
 ///
@@ -112,22 +115,22 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
 /// # Examples
 ///
 /// ```ignore
-/// #[proxima::pipe]
+/// #[proxima::piped]
 /// async fn double(input: u64) -> Result<u64, Infallible> { Ok(input * 2) }
 /// // -> struct double; impl Pipe for double { .. }
 ///
-/// #[proxima::pipe]
+/// #[proxima::piped]
 /// fn ring_pop(_: ()) -> Result<u8, Exhausted> { Ok(7) }
 /// // -> struct ring_pop; impl UnpinPipe for ring_pop { .. }
 ///
-/// #[proxima::pipe(send)]
+/// #[proxima::piped(send)]
 /// async fn fetch(url: String) -> Result<Bytes, Error> { .. }
 /// // -> struct fetch; impl SendPipe for fetch { .. }
 ///
 /// // stateful form: `Client` already exists, with its own field.
 /// struct Proxy { client: Client }
 ///
-/// #[proxima::pipe(send)]
+/// #[proxima::piped(send)]
 /// impl Proxy {
 ///     async fn call(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
 ///         self.client.clone().call(request).await
@@ -138,8 +141,103 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// [`Pipe`]: https://docs.rs/proxima-primitives/latest/proxima_primitives/pipe/trait.Pipe.html
 #[proc_macro_attribute]
-pub fn pipe(args: TokenStream, item: TokenStream) -> TokenStream {
+pub fn piped(args: TokenStream, item: TokenStream) -> TokenStream {
     pipe_attr::expand(args.into(), item.into())
+        .unwrap_or_else(|err| err.to_compile_error())
+        .into()
+}
+
+/// Function-like leaf-lift sibling of `#[proxima::piped]`: `pipe!(closure)`
+/// mints a `Pipe`/`SendPipe`/`UnpinPipe`/`UnpinSendPipe` value INLINE from a
+/// closure literal, at an expression position, instead of requiring a named
+/// top-level `fn`. Its own name, `pipe!`: a bang macro and an attribute
+/// macro can't share one identifier while both exist (`#[pipe]` vs
+/// `pipe!(..)` still collide in Rust's macro namespace, E0428) — which is
+/// exactly why the attribute macro above is `#[proxima::piped]`, freeing
+/// `pipe!` for this one.
+///
+/// Same tier vocabulary as the attribute macro minus its `boxed` escape
+/// hatch — this bridge is zero-box by construction: `send`/`unpin` as a
+/// trailing comma-separated tail (`name = ..` does not apply — nothing
+/// needs to move aside for a name). A plain closure reaches every tier; an
+/// `async` closure reaches `Pipe` only, never `UnpinPipe` (would need
+/// `Box::pin`) or `send` (see `pipe_bang`'s module doc — the latter is a
+/// genuine stable-Rust limitation, not a missing feature). Either refusal
+/// points at `#[proxima::piped(unpin, boxed)]`/`#[proxima::piped(send)]` on a
+/// hand-written `async fn` as the escape hatch. Passing an expression that
+/// is not a closure literal passes it through unchanged.
+///
+/// ```ignore
+/// let doubled = pipe!(|input: u64| -> Result<u64, Infallible> { Ok(input * 2) });
+/// let piped = pipe!(doubled).and_then(pipe!(|input: u64| -> Result<u64, Infallible> { Ok(input + 1) }));
+/// ```
+#[proc_macro]
+pub fn pipe(input: TokenStream) -> TokenStream {
+    pipe_bang::expand(input.into())
+        .unwrap_or_else(|err| err.to_compile_error())
+        .into()
+}
+
+/// `filter!(predicate closure)` — lift a closure into the decision-pipe
+/// shape `filter.rs`'s own module doc names as the point of that file:
+/// `In -> Result<In, Err>` (`Ok` admits, returning the input unchanged;
+/// `Err` rejects). The SAME leaf-lift bridge `pipe!` builds, with one
+/// extra macro-time check: the closure's admit type must equal its input
+/// type. No collision with an existing attribute macro, so this one keeps
+/// its natural name.
+///
+/// ```ignore
+/// let gate = filter!(|input: u64| -> Result<u64, &'static str> {
+///     if input < 100 { Ok(input) } else { Err("too big") }
+/// });
+/// ```
+#[proc_macro]
+pub fn filter(input: TokenStream) -> TokenStream {
+    filter_bang::expand(input.into())
+        .unwrap_or_else(|err| err.to_compile_error())
+        .into()
+}
+
+/// `fanout!(a, b, ..)` — variadic: build a [`FanOut`](proxima_primitives::pipe::FanOut)
+/// over N arms in one call. Each arm is either a closure literal (leaf-lifted
+/// the same way `pipe!` does) or an already-built pipe expression,
+/// passed through. Variadic arity is the whole point: N closures are N
+/// distinct, unnameable types, reconciled into `FanOut`'s single homogeneous
+/// sink type via a macro-generated enum (one variant per arm) — zero boxes,
+/// see `fan_bang`'s module doc for the full mechanism.
+///
+/// ```ignore
+/// let fan = fanout!(
+///     |input: u64| -> Result<(), Infallible> { println!("a: {input}"); Ok(()) },
+///     |input: u64| -> Result<(), Infallible> { println!("b: {input}"); Ok(()) },
+/// );
+/// ```
+#[proc_macro]
+pub fn fanout(input: TokenStream) -> TokenStream {
+    fan_bang::expand_fanout(input.into())
+        .unwrap_or_else(|err| err.to_compile_error())
+        .into()
+}
+
+/// `fanin!(a, b, ..)` — variadic: build a [`FanIn`](proxima_primitives::pipe::FanIn)
+/// over N arms in one call, merged with [`Select::RoundRobin`](proxima_primitives::pipe::Select).
+/// Same enum-of-arms mechanism as `fanout!`, with one extra restriction
+/// `FanIn` itself imposes: each arm must be `UnpinPipe<In = (), Err =
+/// Exhausted> + DropSafe` — a synchronous, never-suspending source — so a
+/// closure-literal arm must be a plain (non-`async`) closure. An async
+/// source can still participate: lift it first with
+/// `#[proxima::piped(unpin, boxed)]` on a hand-written `async fn` and pass
+/// the result in as a pass-through arm.
+///
+/// ```ignore
+/// let merged = fanin!(
+///     |(): ()| -> Result<u8, Exhausted> { Ok(1) },
+///     |(): ()| -> Result<u8, Exhausted> { Ok(2) },
+/// );
+/// ```
+#[proc_macro]
+pub fn fanin(input: TokenStream) -> TokenStream {
+    fan_bang::expand_fanin(input.into())
         .unwrap_or_else(|err| err.to_compile_error())
         .into()
 }

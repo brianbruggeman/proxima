@@ -9,7 +9,7 @@
 //! genuinely `#![no_std]` with no allocator: no heap, no OS, no executor.
 //! `FrameStore` is a plain [`Pipe`]; the `RingSink` it writes into is a fixed
 //! array sized by the two baked constants. `ring_capacity` is the same
-//! floor claim for `#[proxima::pipe]`'s codegen instead of a hand-written
+//! floor claim for `#[proxima::piped]`'s codegen instead of a hand-written
 //! `impl Pipe`: the generated struct + its unconditional `Clone` derive +
 //! its `UnpinPipe` impl all have to compile with zero allocator too. The
 //! `std` feature exists only to give `cargo test` a libtest harness and the
@@ -75,7 +75,7 @@ impl Pipe for FrameStore {
     }
 }
 
-/// `#[proxima::pipe]`'s auto-`Clone`, proven at the floor: this fn expands to
+/// `#[proxima::piped]`'s auto-`Clone`, proven at the floor: this fn expands to
 /// a fieldless `struct ring_capacity;` carrying `#[derive(::core::clone::Clone)]`
 /// plus an `impl UnpinPipe for ring_capacity`, and the whole thing has to
 /// compile under this crate's default (zero-feature, genuinely `#![no_std]`,
@@ -83,10 +83,10 @@ impl Pipe for FrameStore {
 /// proof)" section. Cloning the generated struct copies zero bytes: no
 /// heap, no `alloc` crate, nothing to move because the type has no fields.
 /// A plain `fn` (not `async fn`)
-/// lands on `UnpinPipe`, the tier `#[proxima::pipe]` reaches by wrapping the
+/// lands on `UnpinPipe`, the tier `#[proxima::piped]` reaches by wrapping the
 /// call in `core::future::ready` — itself `Unpin` unconditionally, so no
 /// heap allocation is needed to reach that tier either.
-#[proxima_macros::pipe]
+#[proxima_macros::piped]
 fn ring_capacity() -> Result<usize, core::convert::Infallible> {
     Ok(RING_SLOTS)
 }

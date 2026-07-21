@@ -1,0 +1,5 @@
+error: `send` cannot be combined with an async closure lifted this way: proving the closure's own returned future is `Send` requires naming `AsyncFnMut::CallRefFuture`, which is `#[unstable(feature = "async_fn_traits")]` on stable Rust. Two ways around it: (1) write a plain (non-`async`) closure instead — it reaches every tier, including `send`; or (2) hand-write an `async fn` and lift it with `#[proxima::piped(send)]`, whose `Send`-ness the compiler checks directly against the concrete generated state machine.
+ --> tests/ui/pipe_bang_async_send.rs:8:9
+  |
+8 |         async move |input: u64| -> Result<u64, std::convert::Infallible> { Ok(input) },
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -22,9 +22,9 @@ use core::str;
 
 use bytes::Bytes;
 
-use crate::pipe::SendPipe;
 use crate::pipe::capabilities::KeyOf;
 use crate::pipe::live_filter::{FilterControl, IdSet, LiveFilter, live_filter_ids};
+use crate::pipe::{Pipe, SendPipe};
 
 use crate::pipe::rate_limit::KeyExtractor;
 use crate::pipe::request::Request;
@@ -103,6 +103,26 @@ where
     }
 }
 
+// Base-tier mirror of the `SendPipe` impl above, delegating straight through
+// — same pattern as `FilterConfig`/`Predicate` (`pipe::filter`): every pipe
+// implements the root `Pipe` so `PipeExt`'s `.and_then` reaches it too.
+impl<Extractor> Pipe for KeyedLiveFilter<Extractor>
+where
+    Extractor: Send + Sync + 'static,
+    Request<Bytes>: KeyOf<Extractor>,
+{
+    type In = Request<Bytes>;
+    type Out = Request<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        input: Request<Bytes>,
+    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> {
+        SendPipe::call(self, input)
+    }
+}
+
 // `#[proxima::test]` pulls in the `proxima` dev-dependency, which the
 // loom build keeps out of the graph (see
 // `[target.'cfg(not(loom))'.dev-dependencies]` in Cargo.toml); these
@@ -112,9 +132,10 @@ where
 mod tests {
     use std::future::Future;
 
+    use crate::pipe::SendPipe;
+    use crate::pipe::ext::PipeExt;
     use bytes::Bytes;
     use proxima_core::ProximaError;
-    use crate::pipe::SendPipe;
 
     use super::*;
     use crate::pipe::handler::{PipeHandle, into_handle};

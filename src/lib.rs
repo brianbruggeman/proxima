@@ -202,10 +202,35 @@ pub use proxima_macros::main;
 #[cfg(any(feature = "macros", test))]
 pub use proxima_macros::fixture;
 
-/// `#[proxima::pipe]` — generates a `Pipe`/`SendPipe`/`UnpinPipe`/
-/// `UnpinSendPipe` impl from a plain function. See `proxima_macros::pipe`.
+/// `#[proxima::piped]` — generates a `Pipe`/`SendPipe`/`UnpinPipe`/
+/// `UnpinSendPipe` impl from a plain function. See `proxima_macros::piped`.
+#[cfg(any(feature = "macros", test))]
+pub use proxima_macros::piped;
+
+/// `pipe!(closure)` — the function-like leaf-lift sibling of
+/// `#[proxima::piped]`, for an expression position. The attribute macro is
+/// named `piped` (not `pipe`) precisely so this bang macro can keep the bare
+/// `pipe` identifier — Rust's macro namespace does not distinguish `#[pipe]`
+/// from `pipe!(..)` by invocation syntax, so the two would still collide
+/// (E0428) if both were exported under it. See `proxima_macros::pipe`.
 #[cfg(any(feature = "macros", test))]
 pub use proxima_macros::pipe;
+
+/// `filter!(predicate closure)` — lift a closure into the decision-pipe
+/// shape (`In -> Result<In, Err>`) `pipe::filter`'s module doc describes.
+/// See `proxima_macros::filter`.
+#[cfg(any(feature = "macros", test))]
+pub use proxima_macros::filter;
+
+/// `fanout!(a, b, ..)` — variadic `FanOut` builder over closure and/or
+/// pipe-expression arms. See `proxima_macros::fanout`.
+#[cfg(any(feature = "macros", test))]
+pub use proxima_macros::fanout;
+
+/// `fanin!(a, b, ..)` — variadic `FanIn` builder over closure and/or
+/// pipe-expression arms. See `proxima_macros::fanin`.
+#[cfg(any(feature = "macros", test))]
+pub use proxima_macros::fanin;
 
 /// Runtime + cassette plumbing the `#[proxima::test]` expansion calls into.
 #[cfg(any(test, feature = "test-support", feature = "macros"))]

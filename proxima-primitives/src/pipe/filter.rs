@@ -4,8 +4,9 @@ use core::future::Future;
 use portable_atomic::{AtomicU64, Ordering};
 
 use crate::pipe::SendPipe;
+use crate::pipe::ext::PipeExt;
 use crate::pipe::handler::{PipeHandle, into_handle};
-use crate::pipe::primitives::Pipe;
+use crate::pipe::primitives::{Pipe, UnpinPipe, UnpinSendPipe};
 use crate::pipe::when::When;
 use serde::{Deserialize, Serialize};
 
@@ -140,6 +141,46 @@ impl Pipe for Predicate {
     }
 }
 
+// `admits()` resolves synchronously (a plain in-memory decision, no `.await`
+// anywhere in the real body above) — `core::future::ready` is the exact
+// future that describes that, and it's `Unpin` unconditionally, so no
+// hand-written poll struct is needed for a leaf pipe that never suspends.
+impl UnpinPipe for Predicate {
+    type In = Request<Bytes>;
+    type Out = Request<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        input: Request<Bytes>,
+    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Unpin {
+        let admits = self.admits();
+        core::future::ready(if admits {
+            Ok(input)
+        } else {
+            Err(ProximaError::Forbidden("forbidden".into()))
+        })
+    }
+}
+
+impl UnpinSendPipe for Predicate {
+    type In = Request<Bytes>;
+    type Out = Request<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        input: Request<Bytes>,
+    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Send + Unpin {
+        let admits = self.admits();
+        core::future::ready(if admits {
+            Ok(input)
+        } else {
+            Err(ProximaError::Forbidden("forbidden".into()))
+        })
+    }
+}
+
 /// What error a rejected call produces — a rename of the former `OnReject`,
 /// same two variants, same JSON strings. It selects WHICH `ProximaError`
 /// [`FilterConfig::call`] builds on reject; it is plain data read once per
@@ -214,6 +255,47 @@ impl Pipe for FilterConfig {
     }
 }
 
+// same rationale as `Predicate`'s `UnpinPipe`/`UnpinSendPipe` impls: the
+// decision is synchronous, so `core::future::ready` is the exact future,
+// unconditionally `Unpin`.
+impl UnpinPipe for FilterConfig {
+    type In = Request<Bytes>;
+    type Out = Request<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        input: Request<Bytes>,
+    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Unpin {
+        let admits = self.predicate.admits();
+        let on_reject = self.on_reject;
+        core::future::ready(if admits {
+            Ok(input)
+        } else {
+            Err(reject_error(on_reject))
+        })
+    }
+}
+
+impl UnpinSendPipe for FilterConfig {
+    type In = Request<Bytes>;
+    type Out = Request<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        input: Request<Bytes>,
+    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Send + Unpin {
+        let admits = self.predicate.admits();
+        let on_reject = self.on_reject;
+        core::future::ready(if admits {
+            Ok(input)
+        } else {
+            Err(reject_error(on_reject))
+        })
+    }
+}
+
 impl FilterConfig {
     /// Compose the decision in front of `inner` and erase — `predicate.
     /// and_then(inner)` in one call, matching every other `into_*` factory
@@ -221,7 +303,7 @@ impl FilterConfig {
     /// into_transform`, ...).
     #[must_use]
     pub fn into_filter(self, inner: PipeHandle) -> PipeHandle {
-        into_handle(SendPipe::and_then(self, inner))
+        into_handle(PipeExt::and_then(self, inner))
     }
 
     #[cfg(feature = "std")]
@@ -576,6 +658,21 @@ mod tests {
         }
     }
 
+    // base-tier mirror, delegating straight through — every pipe implements
+    // the root `Pipe` too, which is what lets `PipeExt::and_then` reach it.
+    impl Pipe for Threshold {
+        type In = SensorReading;
+        type Out = SensorReading;
+        type Err = SensorReading;
+
+        fn call(
+            &self,
+            reading: SensorReading,
+        ) -> impl Future<Output = Result<SensorReading, SensorReading>> {
+            SendPipe::call(self, reading)
+        }
+    }
+
     #[derive(Clone)]
     struct ReadingSink;
 
@@ -596,6 +693,19 @@ mod tests {
         }
     }
 
+    impl Pipe for ReadingSink {
+        type In = SensorReading;
+        type Out = SensorReading;
+        type Err = SensorReading;
+
+        fn call(
+            &self,
+            input: SensorReading,
+        ) -> impl Future<Output = Result<SensorReading, SensorReading>> {
+            SendPipe::call(self, input)
+        }
+    }
+
     #[proxima::test]
     async fn filter_is_generic_over_a_non_http_payload() {
         let stack = Threshold { max_celsius: 100 }.and_then(ReadingSink);
@@ -605,5 +715,70 @@ mod tests {
 
         let dropped = SendPipe::call(&stack, SensorReading { celsius: 250 }).await;
         assert_eq!(dropped, Err(SensorReading { celsius: i32::MIN }));
+    }
+
+    // ── UnpinPipe / UnpinSendPipe tier (Stage 2) ────────────────────────────
+
+    fn poll_ready<F: Future + core::marker::Unpin>(mut future: F) -> F::Output {
+        let waker = core::task::Waker::noop();
+        let mut cx = core::task::Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut cx) {
+            core::task::Poll::Ready(output) => output,
+            core::task::Poll::Pending => {
+                panic!("Predicate/FilterConfig never suspend; expected Ready")
+            }
+        }
+    }
+
+    #[test]
+    fn predicate_unpin_pipe_matches_send_pipe_on_admit_and_reject() {
+        let admits = Predicate::Always;
+        let rejects = Predicate::Never;
+
+        assert!(
+            poll_ready(UnpinPipe::call(&admits, build_request())).is_ok(),
+            "Always admits"
+        );
+        assert!(
+            matches!(
+                poll_ready(UnpinPipe::call(&rejects, build_request())),
+                Err(ProximaError::Forbidden(_))
+            ),
+            "Never rejects with Forbidden"
+        );
+    }
+
+    #[test]
+    fn predicate_unpin_send_pipe_is_send_and_unpin() {
+        fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
+        let predicate = Predicate::Always;
+        let call = UnpinSendPipe::call(&predicate, build_request());
+        needs_send_unpin(&call);
+    }
+
+    #[test]
+    fn filter_config_unpin_pipe_matches_send_pipe_on_admit_and_reject() {
+        let admits = FilterConfig {
+            predicate: Predicate::Always,
+            on_reject: RejectMode::Drop,
+        };
+        let rejects = FilterConfig {
+            predicate: Predicate::Never,
+            on_reject: RejectMode::Error,
+        };
+
+        assert!(poll_ready(UnpinPipe::call(&admits, build_request())).is_ok());
+        assert!(matches!(
+            poll_ready(UnpinPipe::call(&rejects, build_request())),
+            Err(ProximaError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn filter_config_unpin_send_pipe_is_send_and_unpin() {
+        fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
+        let config = FilterConfig::default();
+        let call = UnpinSendPipe::call(&config, build_request());
+        needs_send_unpin(&call);
     }
 }

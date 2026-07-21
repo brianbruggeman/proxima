@@ -12,6 +12,8 @@
 
 use core::fmt::Debug;
 use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 /// Core-tier root form: typed In/Out/Err, no `Send` bound on `Self` or the
 /// returned future. The minimal contract a pipe must satisfy; usable on a
@@ -97,18 +99,6 @@ pub trait Pipe {
 
     /// Apply the pipe. The returned future is NOT required to be `Send`.
     fn call(&self, input: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>>;
-
-    /// Fluent composition: chain `next` onto `self` into a two-stage
-    /// [`AndThen`]. `self.and_then(next)` IS `AndThen::new(self, next)` — this
-    /// method exists purely so chains read left-to-right at the call site.
-    fn and_then<Next>(self, next: Next) -> AndThen<Self, Next>
-    where
-        Self: Sized,
-        Next: Pipe<In = Self::Out>,
-        Next::Err: From<Self::Err>,
-    {
-        AndThen::new(self, next)
-    }
 }
 
 /// Additive cross-core form: the pipe and its returned future are `Send`, so it
@@ -131,19 +121,6 @@ pub trait SendPipe: Send + Sync + 'static {
 
     /// Apply the pipe. The returned future IS `Send`.
     fn call(&self, input: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> + Send;
-
-    /// Fluent composition: chain `next` onto `self` into a two-stage
-    /// [`AndThen`]. Mirrors [`Pipe::and_then`] for the cross-core form; the
-    /// `First::In: Send` bound matches `impl SendPipe for AndThen` exactly.
-    fn and_then<Next>(self, next: Next) -> AndThen<Self, Next>
-    where
-        Self: Sized,
-        Next: SendPipe<In = Self::Out>,
-        Next::Err: From<Self::Err>,
-        Self::In: Send,
-    {
-        AndThen::new(self, next)
-    }
 }
 
 /// Additive in-place form: the returned future is `Unpin`, so a caller can poll
@@ -262,6 +239,130 @@ where
     }
 }
 
+/// Hand-written poll state machine backing `AndThen`'s [`UnpinPipe`]/
+/// [`UnpinSendPipe`] impls — no `Box::pin`, no `async move` (a compiler-
+/// generated async block is not provably `Unpin`, which is the entire reason
+/// this tier needs a hand-written `Future` in the first place). Two states,
+/// `First` then `Second`, matching the two pipe stages.
+///
+/// The second stage's future type is RPITIT — unnameable from outside its own
+/// impl — so it cannot be a field of `First` the way `future: FirstFut` is.
+/// `next` carries it instead, as a closure produced but not yet CALLED
+/// (`Option` so `poll` can move it out once, on the `First -> Second`
+/// transition). This is exactly [`start_and_then`]'s reason for existing: see
+/// its doc for how `SecondFut` gets resolved with no named type anywhere.
+enum AndThenUnpinCall<FirstFut, Next, SecondFut> {
+    First {
+        future: FirstFut,
+        next: Option<Next>,
+    },
+    Second {
+        future: SecondFut,
+    },
+}
+
+/// Construct [`AndThenUnpinCall`]'s `First` state. A free fn, not a bare
+/// struct literal, because `SecondFut` appears in NEITHER argument here —
+/// only in the `next: FnOnce(Intermediate) -> SecondFut` bound below — and a
+/// struct literal gives the compiler nothing to solve a missing field's type
+/// from. A function-level generic parameter does: `next`'s CONCRETE closure
+/// type uniquely determines `SecondFut` via its own `FnOnce` impl (the same
+/// mechanism that lets `Option::map`/`Iterator::map` infer their output type
+/// from a closure with no type annotation anywhere).
+fn start_and_then<FirstFut, Intermediate, FirstErr, Next, SecondFut>(
+    future: FirstFut,
+    next: Next,
+) -> AndThenUnpinCall<FirstFut, Next, SecondFut>
+where
+    FirstFut: Future<Output = Result<Intermediate, FirstErr>>,
+    Next: FnOnce(Intermediate) -> SecondFut,
+{
+    AndThenUnpinCall::First {
+        future,
+        next: Some(next),
+    }
+}
+
+impl<FirstFut, Intermediate, FirstErr, Next, SecondFut, SecondOut, SecondErr> Future
+    for AndThenUnpinCall<FirstFut, Next, SecondFut>
+where
+    FirstFut: Future<Output = Result<Intermediate, FirstErr>> + Unpin,
+    Next: FnOnce(Intermediate) -> SecondFut + Unpin,
+    SecondFut: Future<Output = Result<SecondOut, SecondErr>> + Unpin,
+    SecondErr: From<FirstErr>,
+{
+    type Output = Result<SecondOut, SecondErr>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // `Self: Unpin` follows structurally from the bounds above (every
+        // field is `Unpin`), so `get_mut` needs no `unsafe` pin projection.
+        let this = self.get_mut();
+        loop {
+            match this {
+                AndThenUnpinCall::First { future, next } => {
+                    match Pin::new(future).poll(cx) {
+                        Poll::Ready(Ok(intermediate)) => {
+                            // `next` is `None` only if this future is polled
+                            // again after already resolving — not a memory
+                            // safety issue, so parking here (rather than
+                            // panicking) is the house style for that case.
+                            let Some(next) = next.take() else {
+                                return Poll::Pending;
+                            };
+                            *this = AndThenUnpinCall::Second {
+                                future: next(intermediate),
+                            };
+                            // loop: the Second stage may already be ready.
+                        }
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(SecondErr::from(err))),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AndThenUnpinCall::Second { future } => return Pin::new(future).poll(cx),
+            }
+        }
+    }
+}
+
+impl<First, Second> UnpinPipe for AndThen<First, Second>
+where
+    First: UnpinPipe,
+    Second: UnpinPipe<In = First::Out>,
+    Second::Err: From<First::Err>,
+{
+    type In = First::In;
+    type Out = Second::Out;
+    type Err = Second::Err;
+
+    fn call(&self, input: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> + Unpin {
+        let second = &self.second;
+        start_and_then(self.first.call(input), move |intermediate| {
+            second.call(intermediate)
+        })
+    }
+}
+
+impl<First, Second> UnpinSendPipe for AndThen<First, Second>
+where
+    First: UnpinSendPipe,
+    Second: UnpinSendPipe<In = First::Out>,
+    Second::Err: From<First::Err>,
+{
+    type In = First::In;
+    type Out = Second::Out;
+    type Err = Second::Err;
+
+    fn call(
+        &self,
+        input: Self::In,
+    ) -> impl Future<Output = Result<Self::Out, Self::Err>> + Send + Unpin {
+        let second = &self.second;
+        start_and_then(self.first.call(input), move |intermediate| {
+            second.call(intermediate)
+        })
+    }
+}
+
 // Marker propagation — an `AndThen` carries a marker only when BOTH stages do.
 // AND-composition via blanket impls (mirrors the legacy proxima-process
 // operators.rs and proxima-core's marker doc: OR-propagation would need
@@ -301,6 +402,7 @@ mod marker_propagation {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{AndThen, Pipe, SendPipe};
+    use crate::pipe::ext::PipeExt;
     use core::convert::Infallible;
     use core::future::Future;
     use core::marker::PhantomData;
@@ -484,10 +586,10 @@ mod tests {
 
     #[test]
     fn series_pipes_identity_through_identity() {
-        // Identity implements BOTH Pipe and SendPipe, and both traits are
-        // in scope here — `.and_then()` is ambiguous (E0034) without a
-        // fully-qualified `Pipe::and_then`/`SendPipe::and_then` call, which
-        // reads worse than the explicit constructor. Left as AndThen::new.
+        // Identity implements BOTH Pipe and SendPipe, so `.and_then()` would be
+        // ambiguous (E0034) between PipeExt and SendPipeExt without a
+        // fully-qualified call, which reads worse than the explicit
+        // constructor. Left as AndThen::new.
         let chain = AndThen::new(Identity::<u64>::new(), Identity::<u64>::new());
         let out = block_on(Pipe::call(&chain, 41)).expect("infallible identity chain");
         assert_eq!(out, 41);
@@ -609,7 +711,7 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod unpin_tier_tests {
-    use super::{UnpinPipe, UnpinSendPipe};
+    use super::{AndThen, UnpinPipe, UnpinSendPipe};
     use core::convert::Infallible;
     use core::future::Future;
     use core::pin::Pin;
@@ -677,5 +779,147 @@ mod unpin_tier_tests {
             needs_send_unpin(&call);
         }
         assert_send_unpin(&Ring(1));
+    }
+
+    // second-stage probe: doubles, always immediately ready — an Unpin pipe
+    // that never suspends, the ring-pop shape `core::future::ready` gives for
+    // free.
+    struct Doubler;
+    impl UnpinPipe for Doubler {
+        type In = u8;
+        type Out = u16;
+        type Err = Infallible;
+        fn call(&self, input: u8) -> impl Future<Output = Result<u16, Infallible>> + Unpin {
+            core::future::ready(Ok(u16::from(input) * 2))
+        }
+    }
+    impl UnpinSendPipe for Doubler {
+        type In = u8;
+        type Out = u16;
+        type Err = Infallible;
+        fn call(&self, input: u8) -> impl Future<Output = Result<u16, Infallible>> + Send + Unpin {
+            core::future::ready(Ok(u16::from(input) * 2))
+        }
+    }
+
+    #[test]
+    fn and_then_unpin_chain_composes_two_pipes_without_a_box() {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let chain = AndThen::new(Ring(21), Doubler);
+        let mut call = UnpinPipe::call(&chain, ());
+        match Pin::new(&mut call).poll(&mut cx) {
+            Poll::Ready(Ok(value)) => assert_eq!(value, 42, "21 -> ring pop -> double -> 42"),
+            other => panic!("expected ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn and_then_unpin_send_chain_is_send_and_unpin() {
+        fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
+        let chain = AndThen::new(Ring(5), Doubler);
+        let call = UnpinSendPipe::call(&chain, ());
+        needs_send_unpin(&call);
+    }
+
+    // first-stage probe: reports `Pending` exactly once (registering the
+    // waker), `Ready` on every poll after — proves the AndThen state machine
+    // genuinely resumes across separate `poll()` calls (not just when both
+    // stages resolve on the first poll) without re-running the first stage.
+    struct PendOnceThenReady {
+        value: u8,
+        polled_once: core::cell::Cell<bool>,
+    }
+    impl Future for PendOnceThenReady {
+        type Output = Result<u8, Infallible>;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.polled_once.replace(true) {
+                Poll::Ready(Ok(self.value))
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    struct SlowRing(u8);
+    impl UnpinPipe for SlowRing {
+        type In = ();
+        type Out = u8;
+        type Err = Infallible;
+        fn call(&self, (): ()) -> impl Future<Output = Result<u8, Infallible>> + Unpin {
+            PendOnceThenReady {
+                value: self.0,
+                polled_once: core::cell::Cell::new(false),
+            }
+        }
+    }
+
+    #[test]
+    fn and_then_unpin_chain_resumes_across_polls_without_rerunning_first_stage() {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let chain = AndThen::new(SlowRing(21), Doubler);
+        let mut call = UnpinPipe::call(&chain, ());
+        assert_eq!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Pending,
+            "first stage not ready yet"
+        );
+        match Pin::new(&mut call).poll(&mut cx) {
+            Poll::Ready(Ok(value)) => {
+                assert_eq!(value, 42, "second poll resumes at First, then runs Second");
+            }
+            other => panic!("expected ready on the second poll, got {other:?}"),
+        }
+    }
+
+    // first-stage probe that always fails — proves the Unpin chain
+    // short-circuits before the second stage exactly like the async-block
+    // `Pipe`/`SendPipe` forms do.
+    #[derive(Debug, PartialEq, Eq)]
+    struct RingError;
+
+    struct FailingRing;
+    impl UnpinPipe for FailingRing {
+        type In = ();
+        type Out = u8;
+        type Err = RingError;
+        fn call(&self, (): ()) -> impl Future<Output = Result<u8, RingError>> + Unpin {
+            core::future::ready(Err(RingError))
+        }
+    }
+
+    struct CountingDoubler {
+        calls: core::cell::Cell<u32>,
+    }
+    impl UnpinPipe for CountingDoubler {
+        type In = u8;
+        type Out = u16;
+        type Err = RingError;
+        fn call(&self, input: u8) -> impl Future<Output = Result<u16, RingError>> + Unpin {
+            self.calls.set(self.calls.get() + 1);
+            core::future::ready(Ok(u16::from(input) * 2))
+        }
+    }
+
+    #[test]
+    fn and_then_unpin_chain_short_circuits_before_the_second_stage() {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let second = CountingDoubler {
+            calls: core::cell::Cell::new(0),
+        };
+        let chain = AndThen::new(FailingRing, second);
+        let mut call = UnpinPipe::call(&chain, ());
+        match Pin::new(&mut call).poll(&mut cx) {
+            Poll::Ready(Err(RingError)) => {}
+            other => panic!("expected the first stage's error, got {other:?}"),
+        }
+        assert_eq!(
+            chain.second.calls.get(),
+            0,
+            "second stage must not run after first stage errors"
+        );
     }
 }

@@ -18,8 +18,8 @@ the same shape `transform` taught. Broadcasting moves the input into the
 last arm and clones it into the earlier ones, so N arms cost N-1 clones,
 not N; for reference-counted payloads that's a refcount bump, not a copy.
 
-Each arm here (`CapturingSink`) is written as `#[pipe(send)] impl CapturingSink
-{ async fn call(&self, ..) -> .. }` — the stateful form of `#[proxima::pipe]`
+Each arm here (`CapturingSink`) is written as `#[piped(send)] impl CapturingSink
+{ async fn call(&self, ..) -> .. }` — the stateful form of `#[proxima::piped]`
 (`00-foundations.md` section 7): the struct holds real fields (`label`,
 `log: Arc<Mutex<Vec<String>>>`), so it can't be the fieldless struct the
 macro's free-function form generates, and the macro only writes the trait

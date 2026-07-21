@@ -89,8 +89,8 @@ impl SendPipe for FrontPipe {
 /// `adopt_trace_context` on ingress (see `proxima-http/src/http1/serve.rs`), so
 /// `request.context.trace_id` reflects
 /// whatever the inbound `traceparent` carried, restamped with B's own span id.
-/// Stateless, so `#[proxima::pipe]` writes the `SendPipe` impl.
-#[proxima::pipe(send)]
+/// Stateless, so `#[proxima::piped]` writes the `SendPipe` impl.
+#[proxima::piped(send)]
 async fn origin_pipe(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     let origin_traceparent = request
         .context

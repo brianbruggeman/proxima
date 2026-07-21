@@ -16,7 +16,7 @@ use core::task::{Context, Poll, Waker};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::{Pipe, PipeExt, SendPipe};
 
 fn main() {
     println!("filter: pass or drop by a predicate\n");
@@ -165,6 +165,18 @@ impl SendPipe for Ledger {
     }
 }
 
+// base-tier mirror, delegating straight through — every pipe implements the
+// root `Pipe` too, which is what lets `PipeExt::and_then` reach it.
+impl Pipe for Ledger {
+    type In = Order;
+    type Out = Outcome;
+    type Err = Outcome;
+
+    fn call(&self, order: Order) -> impl Future<Output = Result<Outcome, Outcome>> {
+        SendPipe::call(self, order)
+    }
+}
+
 // ── the gate: the whole filter surface, a decision pipe ────────────────────
 
 #[derive(Clone)]
@@ -189,5 +201,15 @@ impl SendPipe for MinAmount {
                 Err(Outcome::Dropped { id: order.id })
             }
         }
+    }
+}
+
+impl Pipe for MinAmount {
+    type In = Order;
+    type Out = Order;
+    type Err = Outcome;
+
+    fn call(&self, order: Order) -> impl Future<Output = Result<Order, Outcome>> {
+        SendPipe::call(self, order)
     }
 }

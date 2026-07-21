@@ -295,8 +295,8 @@ impl Retryable for Response {
 /// The healthy system under test. It never fails on its own — every failure
 /// downstream examples observe comes from the `Chaos` wrapper in front of it,
 /// which is the whole point: chaos is injected at the seam, not baked into
-/// the service. Stateless, so `#[proxima::pipe]` writes the `Pipe` impl.
-#[proxima::pipe]
+/// the service. Stateless, so `#[proxima::piped]` writes the `Pipe` impl.
+#[proxima::piped]
 async fn upstream_service(request: Request) -> Result<Response, Infallible> {
     Ok(Response {
         id: request.id,

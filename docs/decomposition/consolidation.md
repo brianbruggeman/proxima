@@ -45,7 +45,7 @@ fold. No blank cells; deviations documented in the row.
   cycle constraint hit in B*.
 - **I** combinator dedup: ~27 dual-body sites (SendPipe + local-tier copy-paste)
   → shared-fn pattern (`retry.rs` is the one correct exemplar), THEN a
-  `#[proxima::pipe]` macro as sugar (user: "both: macro built on shared-fn").
+  `#[proxima::piped]` macro as sugar (user: "both: macro built on shared-fn").
   Also generalize `retry_exec::Retry`→`Replayable`; share circuit-breaker rules
   with balancer `OutlierPolicy` (partial — keep the lock-free hot path per
   AGENTS.md). Design-heavy (macro) → held.

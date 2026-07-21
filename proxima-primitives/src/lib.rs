@@ -39,3 +39,7 @@ pub mod sync;
 pub mod transport;
 
 pub use driver::block_on;
+// Fluent combinator sugar (`.and_then`/`.filter`/`.fanout`/`.fanin`) over the
+// pipe algebra — no prelude in this crate, so callers reach it via an
+// explicit `use proxima_primitives::PipeExt`.
+pub use pipe::PipeExt;
