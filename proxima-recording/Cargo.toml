@@ -68,7 +68,7 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 proxima = { workspace = true, features = ["test-support"] }
 rstest = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "fs"] }
 # runtime-swap parity harness: drives the same seam against the prime backend
 # (via `prime` below) and the tokio-backed proxima-runtime backend.
 proxima-runtime = { workspace = true, features = ["tokio"] }

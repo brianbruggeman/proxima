@@ -304,10 +304,33 @@ mod tests {
         assert_eq!(cap_sink.dropped(), 1);
     }
 
+    // `BoundedRecordingSink::new` spawns a background worker that drains the
+    // queue concurrently. `DropOldest`'s eviction path wakes that worker
+    // (`pending_wakeup.notify_one()` in `enqueue`), so a manual dequeue loop
+    // right after `append` races the worker for the same items — the test
+    // then observes however the scheduler happened to split them. Build the
+    // sink without spawning the worker so this test alone owns the queue.
+    fn sink_without_worker(
+        backend: DynRecordingSink,
+        capacity: usize,
+        fail_mode: FailMode,
+    ) -> BoundedRecordingSink {
+        let inner = Arc::new(BoundedInner {
+            backend,
+            queue: BoundedQueue::new(capacity, fail_mode),
+            pending_wakeup: Notify::new(),
+            progress_signal: Notify::new(),
+            counters: SinkCounters::new(),
+            telemetry: Arc::new(NoopTelemetry),
+            drop_labels: Labels::empty(),
+        });
+        BoundedRecordingSink { inner }
+    }
+
     #[proxima::test]
     async fn drop_oldest_evicts_oldest_event_when_queue_is_full() {
         let backend: Arc<MemorySink> = Arc::new(MemorySink::default());
-        let cap_sink = BoundedRecordingSink::new(backend.clone(), 1, FailMode::DropOldest);
+        let cap_sink = sink_without_worker(backend.clone(), 1, FailMode::DropOldest);
         fill_to_capacity(&cap_sink);
         let capacity = cap_sink.capacity() as u64;
         cap_sink
