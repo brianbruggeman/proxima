@@ -529,63 +529,17 @@ impl App {
         removed > 0
     }
 
-    /// Mount a `Handler`-shaped pipe directly at `path`, folding in the
-    /// `into_handle` erasure step so the caller skips the manual two-step
-    /// (`app.mount(path, into_handle(handler))` collapses to one call).
-    ///
-    /// Not a `MountTarget` `From` impl: `PipeHandle` itself satisfies
-    /// `Handler` (`Arc<dyn SendDynPipe<..>>` forwards `SendPipe`, see
-    /// `pipe::alloc_tier`), so a blanket `impl<H: Handler> From<H> for
-    /// MountTarget` would coherence-conflict (E0119) with the existing
-    /// `impl From<PipeHandle> for MountTarget` below — both would apply to a
-    /// `PipeHandle` argument. This method erases internally instead, so
-    /// `mount`'s by-name/by-handle paths, and `MountTarget`'s `From` family,
-    /// are untouched. The erasure is the SAME `into_handle` boundary `mount`
-    /// already crosses for a `PipeHandle` target — not a new box.
-    pub fn mount_pipe<H>(&self, path: &str, handler: H) -> Result<(), ProximaError>
+    /// Mount a pipe at `path`. Accepts anything [`IntoMountTarget`] covers —
+    /// a handler-shaped pipe (`H: Handler`, e.g. a `#[proxima::piped(send)]`
+    /// struct or a [`PipeHandle`]), a bare request-shaped `async fn`, a
+    /// registered pipe name (`&str`/`String`), or an already-built
+    /// [`MountTarget`]. `Via` is inferred and never named at the call site —
+    /// see [`IntoMountTarget`]'s doc for why the three shapes don't collide.
+    pub fn mount<Target, Via>(&self, path: &str, target: Target) -> Result<(), ProximaError>
     where
-        H: Handler + 'static,
+        Target: IntoMountTarget<Via>,
     {
-        self.mount(path, into_handle(handler))
-    }
-
-    /// [`mount_pipe`](Self::mount_pipe), with the method-filter argument
-    /// [`mount_with_methods`](Self::mount_with_methods) takes.
-    pub fn mount_pipe_with_methods<H>(
-        &self,
-        path: &str,
-        handler: H,
-        methods: MethodFilter,
-    ) -> Result<(), ProximaError>
-    where
-        H: Handler + 'static,
-    {
-        self.mount_with_methods(path, into_handle(handler), methods)
-    }
-
-    /// [`mount_pipe`](Self::mount_pipe), with the method-filter and
-    /// host-filter arguments [`mount_full`](Self::mount_full) takes.
-    pub fn mount_pipe_full<H>(
-        &self,
-        path: &str,
-        handler: H,
-        methods: MethodFilter,
-        host: crate::mount::HostFilter,
-    ) -> Result<(), ProximaError>
-    where
-        H: Handler + 'static,
-    {
-        self.mount_full(path, into_handle(handler), methods, host)
-    }
-
-    /// Mount a pipe at `path`. Accepts anything convertible into a
-    /// [`MountTarget`] — a [`PipeHandle`] (e.g. `into_handle(pipe)`), a
-    /// registered pipe name (`&str`/`String`), or a `#[proxima::piped(send)]`
-    /// struct whose fn is Handler-shaped (`Request<Bytes> -> Response<Bytes>`,
-    /// `Err = ProximaError`) — the macro emits the `From` impl for that case.
-    /// For any OTHER `Handler`-shaped pipe, see [`mount_pipe`](Self::mount_pipe).
-    pub fn mount(&self, path: &str, target: impl Into<MountTarget>) -> Result<(), ProximaError> {
-        let target = target.into();
+        let target = target.into_mount_target();
         let mount = match target {
             MountTarget::Handle(handle) => Mount::new(path, handle),
             MountTarget::Named(name) => {
@@ -601,13 +555,16 @@ impl App {
         Ok(())
     }
 
-    pub fn mount_with_methods(
+    pub fn mount_with_methods<Target, Via>(
         &self,
         path: &str,
-        target: impl Into<MountTarget>,
+        target: Target,
         methods: MethodFilter,
-    ) -> Result<(), ProximaError> {
-        let target = target.into();
+    ) -> Result<(), ProximaError>
+    where
+        Target: IntoMountTarget<Via>,
+    {
+        let target = target.into_mount_target();
         let mount = match target {
             MountTarget::Handle(handle) => Mount::new(path, handle).with_methods(methods),
             MountTarget::Named(name) => {
@@ -625,14 +582,17 @@ impl App {
         Ok(())
     }
 
-    pub fn mount_full(
+    pub fn mount_full<Target, Via>(
         &self,
         path: &str,
-        target: impl Into<MountTarget>,
+        target: Target,
         methods: MethodFilter,
         host: crate::mount::HostFilter,
-    ) -> Result<(), ProximaError> {
-        let target = target.into();
+    ) -> Result<(), ProximaError>
+    where
+        Target: IntoMountTarget<Via>,
+    {
+        let target = target.into_mount_target();
         let mount = match target {
             MountTarget::Handle(handle) => Mount::new(path, handle)
                 .with_methods(methods)
@@ -1178,21 +1138,100 @@ pub enum MountTarget {
     Named(String),
 }
 
-impl From<PipeHandle> for MountTarget {
-    fn from(handle: PipeHandle) -> Self {
-        Self::Handle(handle)
+/// Disjoint-dispatch marker for [`IntoMountTarget`]'s registered-pipe-name
+/// arm (`&str` / `String`).
+pub struct ViaName;
+
+/// Disjoint-dispatch marker for the handler-shaped-pipe arm (`H: Handler`) —
+/// covers a `#[proxima::piped(send)]` struct, a [`PipeHandle`], or any other
+/// hand-written `Handler` impl.
+pub struct ViaPipe;
+
+/// Disjoint-dispatch marker for the bare request-shaped `async fn` arm —
+/// `Fn(Request<Bytes>) -> Fut`, no `#[proxima::piped]` involved.
+pub struct ViaFn;
+
+/// Disjoint-dispatch marker for an already-built [`MountTarget`] passed
+/// through unchanged (`MountTarget::Handle(..)` / `MountTarget::Named(..)`
+/// constructed directly, e.g. by the daemon control plane).
+pub struct ViaTarget;
+
+/// What [`App::mount`] (and its `_with_methods`/`_full` siblings) accept.
+/// `Via` is a phantom marker parameter, never named by a caller — it exists
+/// so the four input shapes below are DISJOINT trait instantiations
+/// (`IntoMountTarget<ViaName>` vs. `IntoMountTarget<ViaPipe>` vs. ...) rather
+/// than one blanket impl per shape competing for the same `Self`, which
+/// would coherence-conflict (E0119) the moment a `PipeHandle` (itself a
+/// `Handler`) tried to satisfy both a by-name and a by-handle blanket at
+/// once. Because each `Via` is a distinct concrete type, the compiler never
+/// needs to prove non-overlap between the impls below — it's true by
+/// construction.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` can't be mounted: expected a request handler — an `async fn(Request<Bytes>) -> Result<Response<Bytes>, ProximaError>`, a handler-shaped pipe, or a registered pipe name",
+    label = "not something `App::mount` can dispatch to"
+)]
+pub trait IntoMountTarget<Via> {
+    fn into_mount_target(self) -> MountTarget;
+}
+
+impl IntoMountTarget<ViaName> for &str {
+    fn into_mount_target(self) -> MountTarget {
+        MountTarget::Named(self.to_string())
     }
 }
 
-impl From<&str> for MountTarget {
-    fn from(name: &str) -> Self {
-        Self::Named(name.to_string())
+impl IntoMountTarget<ViaName> for String {
+    fn into_mount_target(self) -> MountTarget {
+        MountTarget::Named(self)
     }
 }
 
-impl From<String> for MountTarget {
-    fn from(name: String) -> Self {
-        Self::Named(name)
+impl IntoMountTarget<ViaTarget> for MountTarget {
+    fn into_mount_target(self) -> MountTarget {
+        self
+    }
+}
+
+impl<Implementor> IntoMountTarget<ViaPipe> for Implementor
+where
+    Implementor: Handler + 'static,
+{
+    fn into_mount_target(self) -> MountTarget {
+        MountTarget::Handle(into_handle(self))
+    }
+}
+
+/// Wraps a bare `Fn(Request<Bytes>) -> Fut` in the [`SendPipe`] shape so
+/// [`IntoMountTarget`]'s `ViaFn` arm can erase it the same way `ViaPipe`
+/// erases a handler-shaped pipe. The sanctioned narrow app-edge blanket this
+/// design needs (never library machinery) — a plain fn item or closure has
+/// no other way to reach `Handler` without a struct to carry it.
+struct FnHandler<Implementor>(Implementor);
+
+impl<Implementor, Fut> SendPipe for FnHandler<Implementor>
+where
+    Implementor: Fn(Request<Bytes>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Response<Bytes>, ProximaError>> + Send + 'static,
+{
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        (self.0)(request)
+    }
+}
+
+impl<Implementor, Fut> IntoMountTarget<ViaFn> for Implementor
+where
+    Implementor: Fn(Request<Bytes>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Response<Bytes>, ProximaError>> + Send + 'static,
+{
+    fn into_mount_target(self) -> MountTarget {
+        MountTarget::Handle(into_handle(FnHandler(self)))
     }
 }
 
@@ -1524,8 +1563,7 @@ mod tests {
     }
 
     // a hand-written `Handler`-shaped pipe (not macro-generated, not
-    // pre-erased) — the exact shape `mount_pipe` exists to skip the manual
-    // `into_handle(..)` step for.
+    // pre-erased) — the `ViaPipe` arm's target shape.
     struct Echo;
 
     impl SendPipe for Echo {
@@ -1546,9 +1584,9 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn mount_pipe_erases_and_mounts_a_handler_shaped_pipe_in_one_call() {
+    async fn mount_erases_and_mounts_a_handler_shaped_pipe_in_one_call() {
         let app = App::new().expect("app");
-        app.mount_pipe("/echo", Echo).expect("mount_pipe");
+        app.mount("/echo", Echo).expect("mount");
 
         let dispatch = app.router_handle();
         let request = Request::builder()
@@ -1561,14 +1599,14 @@ mod tests {
 
         assert_eq!(response.status, 200);
         let body = response.collect_body().await.expect("body");
-        assert_eq!(&body[..], b"hello", "mount_pipe reaches the erased handler");
+        assert_eq!(&body[..], b"hello", "mount reaches the erased handler");
     }
 
     #[proxima::test]
-    async fn mount_pipe_with_methods_restricts_the_route_like_mount_with_methods() {
+    async fn mount_with_methods_restricts_a_handler_shaped_pipe() {
         let app = App::new().expect("app");
-        app.mount_pipe_with_methods("/echo", Echo, MethodFilter::only(["POST".to_string()]))
-            .expect("mount_pipe_with_methods");
+        app.mount_with_methods("/echo", Echo, MethodFilter::only(["POST".to_string()]))
+            .expect("mount_with_methods");
 
         let dispatch = app.router_handle();
         let response = SendPipe::call(&dispatch, build_request("GET", "/echo"))
@@ -1578,6 +1616,34 @@ mod tests {
             response.status, 404,
             "GET is outside the mounted method filter"
         );
+    }
+
+    // bare request-shaped `async fn`, no `#[proxima::piped]` involved — the
+    // `ViaFn` arm's target shape. Proves the same `mount` call that accepts
+    // `Echo` (a pipe) and `"cache"` (a name, see the tests above) also
+    // accepts this third, disjoint shape.
+    async fn echo_fn(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+        let (_, body) = request.body_bytes().await?;
+        Ok(Response::ok(body))
+    }
+
+    #[proxima::test]
+    async fn mount_erases_and_mounts_a_bare_async_fn() {
+        let app = App::new().expect("app");
+        app.mount("/echo-fn", echo_fn).expect("mount");
+
+        let dispatch = app.router_handle();
+        let request = Request::builder()
+            .method("POST")
+            .path("/echo-fn")
+            .body(Bytes::from_static(b"world"))
+            .build()
+            .expect("builder");
+        let response = SendPipe::call(&dispatch, request).await.expect("dispatch");
+
+        assert_eq!(response.status, 200);
+        let body = response.collect_body().await.expect("body");
+        assert_eq!(&body[..], b"world", "mount reaches the bare fn via ViaFn");
     }
 
     #[proxima::test]

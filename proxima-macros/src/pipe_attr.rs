@@ -313,70 +313,6 @@ pub(crate) fn pipe_trait_path(trait_ident: &Ident) -> TokenStream {
     pipe_path(quote!(#trait_ident))
 }
 
-/// Resolve `…::pipe::into_handle` — same fallback chain as `pipe_trait_path`,
-/// used only to build the `MountTarget` `From` impl body (see
-/// `mount_target_path`).
-fn into_handle_path() -> TokenStream {
-    pipe_path(quote!(into_handle))
-}
-
-/// Resolve `…::MountTarget`, reachable only through the `proxima` umbrella
-/// crate — `proxima-primitives` alone never defines it (that would pull the
-/// umbrella's HTTP surface into a no_std/no-alloc build). `None` when the
-/// invoking crate has no path to `proxima`, so `#[proxima::piped]` still works
-/// unchanged for a `proxima-primitives`-only crate: it just never gets a
-/// `MountTarget` impl to be reachable from.
-///
-/// Unlike `pipe_path`, this never emits `crate::MountTarget` for the
-/// `FoundCrate::Itself` case: `Itself` only means "the crate being compiled
-/// has package name `proxima`", which is equally true for the lib target AND
-/// for that package's own examples/tests — and those are separate
-/// compilation units where `crate::` does NOT reach the lib's items, only
-/// `::proxima::` does (they link the lib as an ordinary extern dependency).
-/// `::proxima::MountTarget` resolves in both cases because `src/lib.rs`
-/// declares `extern crate self as proxima;`, aliasing the lib to its own
-/// package name.
-fn mount_target_path() -> Option<TokenStream> {
-    match crate_name("proxima") {
-        Ok(FoundCrate::Itself) => Some(quote!(::proxima::MountTarget)),
-        Ok(FoundCrate::Name(name)) => {
-            let krate = Ident::new(&name, Span::call_site());
-            Some(quote!(::#krate::MountTarget))
-        }
-        Err(_) => None,
-    }
-}
-
-/// True when `ty`'s trailing path segment is named `expected`. Proc macros
-/// never resolve full type paths (no type-checking at expansion time), so
-/// this is the same syntax-level check `extract_result_types` already uses
-/// to spot `Result<..>` by name — good enough to gate the `MountTarget`
-/// `From` impl: a false positive only costs a compile error at the
-/// `into_handle` call inside the generated impl, never a silent miscompile.
-fn type_ends_with(ty: &Type, expected: &str) -> bool {
-    match ty {
-        Type::Path(type_path) => type_path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == expected),
-        _ => false,
-    }
-}
-
-/// Whether this fn's signature is shaped like [`Handler`](proxima_primitives::pipe::Handler):
-/// `In` reads as `Request<..>`, `Out` as `Response<..>`, `Err` as
-/// `ProximaError`. `into_handle` only accepts exactly this shape, so the
-/// `MountTarget` `From` impl is only worth emitting when the fn matches it —
-/// emitting it unconditionally would break every other `#[proxima::piped(send)]`
-/// fn (e.g. a plain `u64 -> u64` transform) with a compile error inside code
-/// the caller never wrote.
-fn is_handler_shaped(in_type: &Type, out_type: &Type, err_type: &Type) -> bool {
-    type_ends_with(in_type, "Request")
-        && type_ends_with(out_type, "Response")
-        && type_ends_with(err_type, "ProximaError")
-}
-
 /// Which of the four standalone tiers this fn maps to. `asyncness` decides
 /// the `Unpin` axis for free (see module doc); `send` is read from the
 /// explicit `#[proxima::piped(send)]` opt-in only.
@@ -611,29 +547,6 @@ fn expand_fn_form(args: TokenStream, item: TokenStream) -> Result<TokenStream, E
         FutureShape::Passthrough | FutureShape::ReadyWrapped => quote!(),
     };
 
-    // `into_handle` only accepts `SendPipe` — every fn that opts into `send`
-    // now implements it (as part of the downward closure above), so the
-    // `MountTarget` impl only needs the `send` opt-in plus the Handler shape,
-    // not the OVERALL tier the fn otherwise climbed to (a `send`-sync fn
-    // implements `SendPipe` too now, alongside `UnpinSendPipe`).
-    // `mount_target_path` is `None` for a `proxima-primitives`-only crate (no
-    // umbrella to reach `MountTarget` through); the Handler shape check keeps
-    // a non-HTTP `SendPipe` fn (e.g. `u64 -> u64`) from getting an impl whose
-    // body can't type-check.
-    let mount_target_impl = match (pipe_args.send, mount_target_path()) {
-        (true, Some(mount_target_path)) if is_handler_shaped(&in_type, &out_type, &err_type) => {
-            let into_handle_path = into_handle_path();
-            quote! {
-                impl ::core::convert::From<#struct_name> for #mount_target_path {
-                    fn from(pipe: #struct_name) -> Self {
-                        #into_handle_path(pipe).into()
-                    }
-                }
-            }
-        }
-        _ => quote!(),
-    };
-
     // the struct is named for a snake_case fn on purpose; the lint is right in
     // general and wrong here.
     let case_allow = if wears_fn_name {
@@ -677,8 +590,6 @@ fn expand_fn_form(args: TokenStream, item: TokenStream) -> Result<TokenStream, E
         #vis struct #struct_name;
 
         #(#tier_impls)*
-
-        #mount_target_impl
     })
 }
 
@@ -1203,68 +1114,6 @@ mod tests {
         // ...and `double` is now the pipe, calling it.
         assert!(expanded.contains("struct double"));
         assert!(expanded.contains("__proxima_pipe_double (__proxima_pipe_input)"));
-    }
-
-    // ---- MountTarget: only the exact SendPipe/Handler-shaped combination
-    // gets a generated `From<Struct> for MountTarget` impl ----
-
-    #[test]
-    fn handler_shaped_send_async_fn_emits_mount_target_from_impl() {
-        let expanded = expand_ok(
-            "send",
-            "async fn hello(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> \
-             { Ok(Response::ok(\"hi\")) }",
-        );
-        assert!(expanded.contains(": pipe :: SendPipe for hello"));
-        assert!(
-            expanded.contains(
-                "impl :: core :: convert :: From < hello > for :: proxima :: MountTarget"
-            )
-        );
-        assert!(expanded.contains("fn from (pipe : hello) -> Self"));
-        assert!(expanded.contains(": pipe :: into_handle (pipe) . into ()"));
-    }
-
-    #[test]
-    fn non_handler_shaped_send_async_fn_gets_no_mount_target_impl() {
-        let expanded = expand_ok(
-            "send",
-            "async fn increment(input: u64) -> Result<u64, MyErr> { Ok(input + 1) }",
-        );
-        assert!(expanded.contains(": pipe :: SendPipe for increment"));
-        assert!(!expanded.contains("MountTarget"));
-    }
-
-    #[test]
-    fn handler_shaped_sync_send_fn_gets_a_mount_target_impl() {
-        // `send` on a plain `fn` climbs to the full downward closure — `Pipe`,
-        // `SendPipe`, `UnpinPipe`, AND `UnpinSendPipe` — so it implements
-        // `SendPipe` too now (not just `UnpinSendPipe`), and `into_handle`
-        // (which only ever accepts `SendPipe` exactly) can reach it.
-        let expanded = expand_ok(
-            "send",
-            "fn hello(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> \
-             { Ok(Response::ok(\"hi\")) }",
-        );
-        assert!(expanded.contains(": pipe :: SendPipe for hello"));
-        assert!(expanded.contains(": pipe :: UnpinSendPipe for hello"));
-        assert!(
-            expanded.contains(
-                "impl :: core :: convert :: From < hello > for :: proxima :: MountTarget"
-            )
-        );
-    }
-
-    #[test]
-    fn handler_shaped_async_fn_without_send_gets_no_mount_target_impl() {
-        // no `send` climbs to the local `Pipe` tier, never `SendPipe`.
-        let expanded = expand_ok(
-            "",
-            "async fn hello(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> \
-             { Ok(Response::ok(\"hi\")) }",
-        );
-        assert!(expanded.contains(": pipe :: Pipe for hello"));
-        assert!(!expanded.contains("MountTarget"));
     }
 
     // ---- affordance A: auto-Clone on the generated struct ----

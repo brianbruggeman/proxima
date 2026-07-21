@@ -1,18 +1,33 @@
-error[E0277]: the trait bound `MountTarget: From<increment>` is not satisfied
-  --> tests/ui/pipe_mount_non_handler_shaped.rs:15:42
+error[E0277]: `increment` can't be mounted: expected a request handler — an `async fn(Request<Bytes>) -> Result<Response<Bytes>, ProximaError>`, a handler-shaped pipe, or a registered pipe name
+  --> tests/ui/pipe_mount_non_handler_shaped.rs:18:20
    |
-15 |     let _target: MountTarget = increment.into();
-   |                                          ^^^^ the trait `From<increment>` is not implemented for `MountTarget`
+18 |     app.mount("/", increment).expect("mount");
+   |         -----      ^^^^^^^^^ not something `App::mount` can dispatch to
+   |         |
+   |         required by a bound introduced by this call
    |
-help: `MountTarget` implements trait `From<T>`
+help: the trait `IntoMountTarget<_>` is not implemented for `increment`
+  --> tests/ui/pipe_mount_non_handler_shaped.rs:11:1
+   |
+11 | #[piped(send)]
+   | ^^^^^^^^^^^^^^
+help: the following other types implement trait `IntoMountTarget<Via>`
   --> $WORKSPACE/src/app.rs
    |
-   | impl From<PipeHandle> for MountTarget {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<std::sync::Arc<dyn SendDynPipe<proxima::Request<proxima::Bytes>, proxima::Response<proxima::Bytes>>>>`
+   | impl IntoMountTarget<ViaName> for &str {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `IntoMountTarget<ViaName>`
 ...
-   | impl From<&str> for MountTarget {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<&str>`
+   | impl IntoMountTarget<ViaName> for String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::string::String` implements `IntoMountTarget<ViaName>`
 ...
-   | impl From<String> for MountTarget {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<std::string::String>`
-   = note: required for `increment` to implement `Into<MountTarget>`
+   | impl IntoMountTarget<ViaTarget> for MountTarget {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MountTarget` implements `IntoMountTarget<ViaTarget>`
+note: required by a bound in `App::mount`
+  --> $WORKSPACE/src/app.rs
+   |
+   |     pub fn mount<Target, Via>(&self, path: &str, target: Target) -> Result<(), ProximaError>
+   |            ----- required by a bound in this associated function
+   |     where
+   |         Target: IntoMountTarget<Via>,
+   |                 ^^^^^^^^^^^^^^^^^^^^ required by this bound in `App::mount`
+   = note: this error originates in the attribute macro `piped` (in Nightly builds, run with -Z macro-backtrace for more info)
