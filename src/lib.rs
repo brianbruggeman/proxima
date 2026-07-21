@@ -207,6 +207,19 @@ pub use proxima_macros::fixture;
 #[cfg(any(feature = "macros", test))]
 pub use proxima_macros::piped;
 
+/// `#[proxima::instrument]` — the unified observability annotation: one
+/// attribute yields a trace span, its duration histogram (behind
+/// `instrument-metrics`), and a log line, all from the same expansion. Use
+/// this on a handler instead of hand-rolling any of the three. See
+/// `proxima_macros::instrument`.
+#[cfg(any(feature = "macros", test))]
+pub use proxima_macros::instrument;
+
+/// `#[proxima::span]` — open a span without the metric/log framing
+/// `#[proxima::instrument]` adds. See `proxima_macros::span`.
+#[cfg(any(feature = "macros", test))]
+pub use proxima_macros::span;
+
 /// `pipe!(closure)` — the function-like leaf-lift sibling of
 /// `#[proxima::piped]`, for an expression position. The attribute macro is
 /// named `piped` (not `pipe`) precisely so this bang macro can keep the bare
