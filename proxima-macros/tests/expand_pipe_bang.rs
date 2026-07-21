@@ -105,7 +105,7 @@ async fn pipe_mounts_and_dispatches_through_the_real_router() {
         },
         send
     );
-    app.mount_pipe("/", handler).expect("mount_pipe");
+    app.mount("/", handler).expect("mount");
 
     let dispatch = app.router_handle();
     let request = Request::builder()

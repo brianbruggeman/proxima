@@ -157,7 +157,7 @@ pub mod pipelines;
 pub mod upstreams;
 pub mod verify;
 
-pub use app::{App, AppPipeBuilder, MountTarget, RunConfig, Shutdown, offline_runtime};
+pub use app::{App, AppPipeBuilder, IntoMountTarget, MountTarget, RunConfig, Shutdown, offline_runtime};
 pub use causality::{ByteRange, Causal, CausalEdge, CausalIndex};
 pub use determinism::check_determinism;
 #[cfg(feature = "rayon")]
