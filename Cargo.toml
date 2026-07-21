@@ -1240,7 +1240,13 @@ required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtim
 [[example]]
 name = "hello"
 path = "examples/hello/main.rs"
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+# `http1` is the h1+h2 ALPN-multiplexed listener `RunConfig::http`/`App::serve`
+# register under the name "http" (`AppBuilder::with_defaults`) — h1 has no
+# sans-IO driver yet, so `http1` pulls in `tokio` itself (see the `tokio`
+# feature's own doc comment above). Without it, `App::serve(RunConfig::http(..))`
+# fails at runtime with `Registry("no listen protocol named 'http'")`, not a
+# compile error, hence `required-features` here rather than relying on default.
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
 
 [[example]]
 name = "runtime_select"

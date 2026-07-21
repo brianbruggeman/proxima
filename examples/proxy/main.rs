@@ -29,12 +29,12 @@ use proxima_macros::piped;
 const ORIGIN_BIND: &str = "127.0.0.1:8081";
 const PROXY_BIND: &str = "127.0.0.1:8080";
 
-/// The upstream. A trivial pipe returning a known status, header, and body —
+/// The upstream. A trivial handler returning a known status, header, and body —
 /// deliberately distinct from a plain 200 so the proxy's forwarded response
 /// can be checked field-by-field against something a passthrough couldn't
-/// fake by accident. Stateless, so `#[proxima::piped]` writes the `SendPipe`
-/// impl.
-#[proxima::piped(send)]
+/// fake by accident. A bare `async fn` mounts directly, no attribute needed;
+/// `#[proxima::instrument]` traces every call.
+#[proxima::instrument]
 async fn origin_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::new(201)
         .with_header("x-origin", "proxima-origin")
