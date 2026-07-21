@@ -28,7 +28,7 @@ use core::task::{Context, Poll};
 use std::sync::Arc;
 
 use proxima_core::signal::Signal;
-use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::{Pipe, PipeExt, SendPipe};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -191,8 +191,8 @@ impl SendPipe for Watch {
 // rejection reason on reject) — reusing `Observed` as the reject payload
 // needs no separate sentinel type, and it is what makes
 // `is_terminal.and_then(FireOnTerminal)` type-check. Stateless, so
-// `#[proxima::pipe]` writes the `SendPipe` impl.
-#[proxima::pipe(send)]
+// `#[proxima::piped]` writes the `SendPipe` impl.
+#[proxima::piped(send)]
 async fn is_terminal(item: StreamItem) -> Result<StreamItem, Observed> {
     if item.terminal {
         Ok(item)
@@ -222,5 +222,17 @@ impl SendPipe for FireOnTerminal {
     fn call(&self, item: StreamItem) -> impl Future<Output = Result<Observed, Observed>> + Send {
         self.signal.fire();
         async move { Ok(Observed::Watched { seq: item.seq }) }
+    }
+}
+
+// base-tier mirror, delegating straight through — every pipe implements the
+// root `Pipe` too, which is what lets `PipeExt::and_then` reach it.
+impl Pipe for FireOnTerminal {
+    type In = StreamItem;
+    type Out = Observed;
+    type Err = Observed;
+
+    fn call(&self, item: StreamItem) -> impl Future<Output = Result<Observed, Observed>> {
+        SendPipe::call(self, item)
     }
 }

@@ -1,4 +1,4 @@
-// integration tests for #[proxima::pipe] macro expansion: each generated
+// integration tests for #[proxima::piped] macro expansion: each generated
 // struct is actually called, awaited/polled, and asserted on — not just
 // checked for the right tokens.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -13,7 +13,7 @@ use std::task::{Context, Poll, Waker};
 use proxima::error::markers::DropSafe;
 use proxima::pipe::{Exhausted, FanIn, Pipe, Select, SendPipe, UnpinPipe, UnpinSendPipe};
 use proxima::{App, Bytes, ProximaError, Request, Response};
-use proxima_macros::pipe;
+use proxima_macros::piped;
 
 fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
     let mut pinned = std::pin::pin!(future);
@@ -31,7 +31,7 @@ fn assert_unpin<Type: Unpin>(_: &Type) {}
 
 // ---- Pipe: async fn, no args required beyond the ladder's root ----
 
-#[pipe]
+#[piped]
 async fn double(input: u64) -> Result<u64, Infallible> {
     Ok(input * 2)
 }
@@ -44,7 +44,7 @@ fn async_fn_generates_a_working_pipe() {
 
 // ---- UnpinPipe: plain fn, wrapped in core::future::ready, pollable in place ----
 
-#[pipe]
+#[piped]
 fn halve(input: u64) -> Result<u64, &'static str> {
     if input.is_multiple_of(2) {
         Ok(input / 2)
@@ -77,9 +77,9 @@ fn ready_future_from_a_generated_unpin_pipe_is_unpin() {
     assert_unpin(&call);
 }
 
-// ---- SendPipe: #[pipe(send)] on an async fn ----
+// ---- SendPipe: #[piped(send)] on an async fn ----
 
-#[pipe(send)]
+#[piped(send)]
 async fn increment(input: u64) -> Result<u64, &'static str> {
     input.checked_add(1).ok_or("overflow")
 }
@@ -96,9 +96,9 @@ fn send_pipe_future_is_actually_send() {
     assert_send(&future);
 }
 
-// ---- UnpinSendPipe: #[pipe(send)] on a plain fn ----
+// ---- UnpinSendPipe: #[piped(send)] on a plain fn ----
 
-#[pipe(send)]
+#[piped(send)]
 fn triple(input: u64) -> Result<u64, &'static str> {
     input.checked_mul(3).ok_or("overflow")
 }
@@ -118,7 +118,7 @@ fn unpin_send_pipe_future_is_send_and_unpin() {
 
 // ---- name = Ident override ----
 
-#[pipe(name = CustomName)]
+#[piped(name = CustomName)]
 fn identity_fn(input: u64) -> Result<u64, Infallible> {
     Ok(input)
 }
@@ -140,7 +140,7 @@ fn an_explicitly_named_pipe_leaves_the_fn_callable() {
 
 // ---- zero-arg fn: the source form, In = () ----
 
-#[pipe]
+#[piped]
 fn always_seven() -> Result<u64, Infallible> {
     Ok(7)
 }
@@ -151,9 +151,9 @@ fn zero_arg_fn_generates_a_source_pipe() {
     assert_eq!(out, 7);
 }
 
-// ---- #[pipe(unpin)] on a sync fn: redundant assertion, not an error ----
+// ---- #[piped(unpin)] on a sync fn: redundant assertion, not an error ----
 
-#[pipe(unpin)]
+#[piped(unpin)]
 fn negate(input: bool) -> Result<bool, Infallible> {
     Ok(!input)
 }
@@ -172,7 +172,7 @@ fn explicit_unpin_on_sync_fn_still_compiles_and_runs() {
 
 static COUNTER_SOURCE_CALLS: AtomicU8 = AtomicU8::new(0);
 
-#[pipe]
+#[piped]
 fn counter_source(_: ()) -> Result<u8, Exhausted> {
     let value = COUNTER_SOURCE_CALLS.fetch_add(1, Ordering::Relaxed);
     if value < 6 { Ok(value) } else { Err(Exhausted) }
@@ -207,12 +207,12 @@ fn generated_unpin_pipe_composes_into_the_real_fan_in() {
     );
 }
 
-// ---- proof this is useful, part two: a Handler-shaped `#[pipe(send)]` fn
+// ---- proof this is useful, part two: a Handler-shaped `#[piped(send)]` fn
 // also gets `impl From<Struct> for MountTarget`, so it mounts directly — no
 // `MountTarget::Handle(into_handle(..))` wrapper. Dispatched through the
 // real `App`/router, not a mock of one, same bar as the FanIn proof above.
 
-#[pipe(send)]
+#[piped(send)]
 async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello, proxima\n"))
 }
@@ -240,7 +240,7 @@ async fn handler_shaped_send_pipe_mounts_directly_and_dispatches() {
 // (RateLimit, Retry, Delay, Isolate, Diff, Transform, Validate) with no
 // hand-rolled struct+impl. ----
 
-#[pipe(send)]
+#[piped(send)]
 async fn always_ok(_input: u64) -> Result<u64, Infallible> {
     Ok(1)
 }
@@ -262,7 +262,7 @@ struct Multiplier {
 
 // async-fn shape: `In -> Result<Out, Err>`, relocated verbatim into
 // `async move { .. }`, landing on SendPipe via `send`.
-#[pipe(send)]
+#[piped(send)]
 impl Multiplier {
     async fn call(&self, input: u64) -> Result<u64, Infallible> {
         Ok(input * self.factor)
@@ -291,7 +291,7 @@ struct FixedQueue {
     remaining: Cell<u8>,
 }
 
-#[pipe]
+#[piped]
 impl FixedQueue {
     fn call(&self, (): ()) -> impl Future<Output = Result<u8, Exhausted>> + Unpin {
         let value = self.remaining.get();
@@ -337,7 +337,7 @@ struct WithHelper {
     base: u64,
 }
 
-#[pipe]
+#[piped]
 impl WithHelper {
     fn call(&self, input: u64) -> impl Future<Output = Result<u64, Infallible>> + Unpin {
         ready(Ok(self.scaled(input)))

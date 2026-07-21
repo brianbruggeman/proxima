@@ -29,11 +29,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proxima_core::markers::DropSafe;
-use proxima_macros::pipe;
+use proxima_macros::piped;
 use proxima_primitives::pipe::{
     Admission, AlwaysArmed, AtomicGate, Demand, DemandGate, DropReason,
 };
-use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, SendPipe, UnpinPipe};
+use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, PipeExt, Select, SendPipe, UnpinPipe};
 
 fn main() {
     println!("shed: a filter reading the gate");
@@ -70,9 +70,9 @@ struct Job {
 
 // the ledger's `Err` is `Admission`, matching the gate's reject payload — the
 // same vocabulary a SinkFront would use to report a shed item — so
-// `Gated(gate).and_then(ingest)` type-checks. Stateless, so `#[proxima::pipe]`
+// `Gated(gate).and_then(ingest)` type-checks. Stateless, so `#[proxima::piped]`
 // writes the `SendPipe` impl.
-#[proxima::pipe(send)]
+#[proxima::piped(send)]
 async fn ingest(job: Job) -> Result<Admission, Admission> {
     println!("  ingest processing job {}", job.id);
     Ok(Admission::Accepted)
@@ -118,6 +118,18 @@ impl<G: DemandGate + Send + Sync + 'static> SendPipe for Gated<G> {
                 Err(Admission::Dropped(DropReason::Refused))
             }
         }
+    }
+}
+
+// base-tier mirror, delegating straight through — every pipe implements the
+// root `Pipe` too, which is what lets `PipeExt::and_then` reach it.
+impl<G: DemandGate + Send + Sync + 'static> Pipe for Gated<G> {
+    type In = Job;
+    type Out = Job;
+    type Err = Admission;
+
+    fn call(&self, job: Job) -> impl Future<Output = Result<Job, Admission>> {
+        SendPipe::call(self, job)
     }
 }
 
@@ -244,7 +256,7 @@ struct BackendQueue {
 
 impl DropSafe for BackendQueue {}
 
-#[pipe]
+#[piped]
 impl BackendQueue {
     fn call(&self, (): ()) -> impl Future<Output = Result<(&'static str, u32), Exhausted>> + Unpin {
         match self.items.borrow_mut().pop_front() {

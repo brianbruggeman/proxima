@@ -1,0 +1,7 @@
+error: expected at least one arm, e.g. `fanout!(a, b)` / `fanin!(a, b)`
+ --> tests/ui/fanout_bang_empty.rs:6:16
+  |
+6 |     let _bad = fanout!();
+  |                ^^^^^^^^^
+  |
+  = note: this error originates in the macro `fanout` (in Nightly builds, run with -Z macro-backtrace for more info)

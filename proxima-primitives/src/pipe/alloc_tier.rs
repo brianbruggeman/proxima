@@ -108,6 +108,20 @@ impl<In: 'static, Out: 'static> SendPipe for dyn SendDynPipe<In, Out> {
     }
 }
 
+// The base-tier mirror of the impl above: every `SendPipe` is also required
+// to be usable as a plain `Pipe` (the additive tiers never replace the root
+// form), so `PipeHandle` (`Arc<dyn SendDynPipe<..>>`) reaches `PipeExt`'s
+// `.and_then`/`.filter` sugar the same as any other pipe.
+impl<In: 'static, Out: 'static> Pipe for dyn SendDynPipe<In, Out> {
+    type In = In;
+    type Out = Out;
+    type Err = ProximaError;
+
+    fn call(&self, input: In) -> impl Future<Output = Result<Out, ProximaError>> {
+        self.call_dyn(input)
+    }
+}
+
 impl<In, Out> Pipe for dyn DynPipe<In, Out> {
     type In = In;
     type Out = Out;

@@ -37,9 +37,9 @@ const TOKIO_BIND: &str = "127.0.0.1:8084";
 
 /// Runtime-neutral, same as `hello`'s pipe: no socket, no runtime handle,
 /// just `Request -> Response`. That's what makes swapping the runtime under
-/// it a config change, not a rewrite. Stateless, so `#[proxima::pipe]` writes
+/// it a config change, not a rewrite. Stateless, so `#[proxima::piped]` writes
 /// the `SendPipe` impl — exactly `hello`'s own idiom.
-#[proxima::pipe(send)]
+#[proxima::piped(send)]
 async fn select_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello from whichever runtime is listening\n"))
 }

@@ -1,0 +1,5 @@
+error: `boxed` is not supported here: this leaf-lift bridge is zero-box by construction, unlike `#[proxima::piped]`'s opt-in `unpin, boxed` escape hatch. If a boxed `Unpin` climb is genuinely needed, hand-write the closure as an `async fn` and lift it with `#[proxima::piped(unpin, boxed)]` instead.
+ --> tests/ui/pipe_bang_boxed_refused.rs:8:9
+  |
+8 |         |input: u64| -> Result<u64, std::convert::Infallible> { Ok(input) },
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -56,6 +56,7 @@ pub mod filter;
 pub mod filter_registry;
 pub mod drain_sink;
 pub mod drain_source;
+pub mod ext;
 pub mod fan_in;
 pub mod stream_bridge;
 #[cfg(feature = "alloc")]
@@ -169,6 +170,12 @@ pub use swap_surface::{StreamFramer, SwapSurface, Turn};
 // `SourcePipe` are the served-HTTP and background-producer instantiations;
 // everything else in this crate composes over the root forms directly.
 pub use primitives::{AndThen, Pipe, SendPipe, UnpinPipe, UnpinSendPipe};
+// Fluent combinator sugar over the root form — `.and_then`/`.filter`/
+// `.fanout`/`.fanin` at the call site instead of the bare constructors. One
+// blanket impl over `Pipe` reaches every pipe (see `pipe::ext`'s module doc);
+// the resulting combinator values still carry whatever higher tiers their own
+// stages qualify for.
+pub use ext::PipeExt;
 #[cfg(feature = "alloc")]
 pub use alloc_tier::{
     BoxFuture, DynPipe, LocalPipeHandle, SendBoxFuture, SendDynPipe, into_local_handle,

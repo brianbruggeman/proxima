@@ -1,8 +1,8 @@
-use proxima_macros::pipe;
+use proxima_macros::piped;
 
-// #[pipe(unpin)] on an async fn must be a compile error: its future is a
+// #[piped(unpin)] on an async fn must be a compile error: its future is a
 // compiler-generated state machine, which is `!Unpin`.
-#[pipe(unpin)]
+#[piped(unpin)]
 async fn bad(input: u64) -> Result<u64, std::convert::Infallible> {
     Ok(input)
 }

@@ -45,7 +45,7 @@ round-trip proving the response crossed a real socket — see
 [`examples/hello/`](examples/hello/main.rs) for all of it):
 
 ```rust
-#[proxima::pipe(send)]
+#[proxima::piped(send)]
 async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello, proxima\n"))
 }
@@ -67,7 +67,7 @@ async fn main() -> Result<(), ProximaError> {
 }
 ```
 
-`#[proxima::pipe(send)]` reads `hello`'s signature and makes `hello` itself
+`#[proxima::piped(send)]` reads `hello`'s signature and makes `hello` itself
 the pipe — the name you mount is the function you wrote (`send` is the one
 thing the macro never infers; crossing a core is a cost you opt into). The
 same macro also emits `impl From<hello> for MountTarget`, which is why

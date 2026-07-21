@@ -56,7 +56,7 @@ use core::task::{Context, Poll};
 
 use proxima_core::markers::DropSafe;
 
-use crate::pipe::primitives::{Pipe, UnpinPipe};
+use crate::pipe::primitives::{Pipe, UnpinPipe, UnpinSendPipe};
 
 /// A source's `call` will never produce again — the merge's termination
 /// signal. Replaces the old `PollSource::poll_next` returning `Ready(None)`:
@@ -219,6 +219,56 @@ where
     }
 }
 
+/// The `UnpinSendPipe`-tier mirror of [`FanInCall`] — same one-scan-pass
+/// algorithm, calling `UnpinSendPipe::call` instead of `UnpinPipe::call`. A
+/// separate type, not a second `impl Future` on `FanInCall`: `UnpinPipe` and
+/// `UnpinSendPipe` are standalone traits (a source can implement one, both,
+/// or neither), so a source satisfying both would make two `Future` impls on
+/// the same concrete `FanInCall` overlap (E0119) — coherence needs its own
+/// struct per tier, same as `AndThen`'s and `FanOut`'s separate `Pipe`/
+/// `SendPipe` impl bodies.
+struct FanInSendCall<'fan, S, Strategy, const N: usize> {
+    fan: &'fan FanIn<S, Strategy, N>,
+}
+
+impl<S, Strategy, const N: usize> Future for FanInSendCall<'_, S, Strategy, N>
+where
+    S: UnpinSendPipe<In = (), Err = Exhausted>,
+    Strategy: FanInStrategy,
+{
+    type Output = Result<S::Out, Exhausted>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let fan = self.fan;
+        if fan.remaining.load(Ordering::Relaxed) == 0 {
+            return Poll::Ready(Err(Exhausted));
+        }
+        let cursor = fan.cursor.load(Ordering::Relaxed);
+        for step in 0..N {
+            let index = fan.strategy.index(step, cursor, N);
+            if !fan.live[index].load(Ordering::Relaxed) {
+                continue;
+            }
+            let mut call = UnpinSendPipe::call(&fan.sources[index], ());
+            match Pin::new(&mut call).poll(cx) {
+                Poll::Ready(Ok(item)) => {
+                    fan.cursor.store((index + 1) % N, Ordering::Relaxed);
+                    return Poll::Ready(Ok(item));
+                }
+                Poll::Ready(Err(Exhausted)) => {
+                    fan.live[index].store(false, Ordering::Relaxed);
+                    let remaining = fan.remaining.fetch_sub(1, Ordering::Relaxed) - 1;
+                    if remaining == 0 {
+                        return Poll::Ready(Err(Exhausted));
+                    }
+                }
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    }
+}
+
 impl<S, Strategy, const N: usize> Pipe for FanIn<S, Strategy, N>
 where
     S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
@@ -244,6 +294,20 @@ where
 
     fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Unpin {
         FanInCall { fan: self }
+    }
+}
+
+impl<S, Strategy, const N: usize> UnpinSendPipe for FanIn<S, Strategy, N>
+where
+    S: UnpinSendPipe<In = (), Err = Exhausted> + DropSafe,
+    Strategy: FanInStrategy + Send + Sync + 'static,
+{
+    type In = ();
+    type Out = S::Out;
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Send + Unpin {
+        FanInSendCall { fan: self }
     }
 }
 
@@ -307,6 +371,29 @@ mod tests {
         type Err = Exhausted;
 
         fn call(&self, (): ()) -> impl Future<Output = Result<u32, Exhausted>> + Unpin {
+            let pos = self.pos.load(Ordering::Relaxed);
+            if pos >= M {
+                return ScriptCall(Poll::Ready(Err(Exhausted)));
+            }
+            let step = self.steps[pos];
+            self.pos.store(pos + 1, Ordering::Relaxed);
+            match step {
+                Step::Yield(value) => ScriptCall(Poll::Ready(Ok(value))),
+                Step::Pend => ScriptCall(Poll::Pending),
+                Step::Done => ScriptCall(Poll::Ready(Err(Exhausted))),
+            }
+        }
+    }
+
+    // `ScriptCall` only ever holds a `Poll<Result<u32, Exhausted>>` value —
+    // trivially `Send` — so `Script` reaches the `UnpinSendPipe` tier too,
+    // proving `FanIn::UnpinSendPipe` (this file's Stage 2 addition).
+    impl<const M: usize> UnpinSendPipe for Script<M> {
+        type In = ();
+        type Out = u32;
+        type Err = Exhausted;
+
+        fn call(&self, (): ()) -> impl Future<Output = Result<u32, Exhausted>> + Send + Unpin {
             let pos = self.pos.load(Ordering::Relaxed);
             if pos >= M {
                 return ScriptCall(Poll::Ready(Err(Exhausted)));
@@ -393,7 +480,11 @@ mod tests {
     struct StickyThen(usize);
     impl FanInStrategy for StickyThen {
         fn index(&self, step: usize, start: usize, n: usize) -> usize {
-            if step == 0 { self.0 % n } else { (start + step) % n }
+            if step == 0 {
+                self.0 % n
+            } else {
+                (start + step) % n
+            }
         }
     }
 
@@ -410,7 +501,10 @@ mod tests {
         let mut buf = [0u32; 8];
         let count = drain(fan, &mut buf);
         assert_eq!(count, 3, "every source still drains");
-        assert_eq!(buf[0], 20, "the caller's own strategy picked source #2 first");
+        assert_eq!(
+            buf[0], 20,
+            "the caller's own strategy picked source #2 first"
+        );
     }
 
     #[test]
@@ -430,7 +524,11 @@ mod tests {
             [buf[0], buf[1], buf[2]]
         }
 
-        assert_eq!(drain_with(Select::Fifo), [0, 10, 20], "earliest source first");
+        assert_eq!(
+            drain_with(Select::Fifo),
+            [0, 10, 20],
+            "earliest source first"
+        );
         assert_eq!(drain_with(Select::Lifo), [20, 10, 0], "latest source first");
         assert_eq!(
             drain_with(Select::RoundRobin),
@@ -441,14 +539,20 @@ mod tests {
 
     #[test]
     fn all_done_terminates_immediately() {
-        let fan = FanIn::new([Script::new([Step::Done]), Script::new([Step::Done])], Select::RoundRobin);
+        let fan = FanIn::new(
+            [Script::new([Step::Done]), Script::new([Step::Done])],
+            Select::RoundRobin,
+        );
         let mut buf = [0u32; 4];
         assert_eq!(drain(fan, &mut buf), 0);
     }
 
     #[test]
     fn pending_source_is_not_drained() {
-        let fan = FanIn::new([Script::new([Step::Pend, Step::Yield(7), Step::Done])], Select::RoundRobin);
+        let fan = FanIn::new(
+            [Script::new([Step::Pend, Step::Yield(7), Step::Done])],
+            Select::RoundRobin,
+        );
         let mut buf = [0u32; 4];
         let count = drain(fan, &mut buf);
         assert_eq!(
@@ -460,7 +564,10 @@ mod tests {
 
     #[test]
     fn live_count_tracks_draining() {
-        let fan = FanIn::new([Script::new([Step::Yield(1)]), Script::new([Step::Yield(2)])], Select::RoundRobin);
+        let fan = FanIn::new(
+            [Script::new([Step::Yield(1)]), Script::new([Step::Yield(2)])],
+            Select::RoundRobin,
+        );
         assert_eq!(fan.live_count(), 2);
     }
 
@@ -481,6 +588,65 @@ mod tests {
         let count = drain(outer, &mut buf);
         let got = &mut buf[..count];
         got.sort_unstable();
-        assert_eq!(got, &[1, 2], "both nested fan-ins drain through the outer merge");
+        assert_eq!(
+            got,
+            &[1, 2],
+            "both nested fan-ins drain through the outer merge"
+        );
+    }
+
+    // ── UnpinSendPipe tier (Stage 2) ────────────────────────────────────────
+
+    // `UnpinSendPipe::call`'s merge loop is `FanInSendCall`, a separate type
+    // from `FanInCall` (coherence: `UnpinPipe`/`UnpinSendPipe` are standalone
+    // traits, see its doc) — drive it through the `Send` entry point
+    // specifically, not `Pipe`/`UnpinPipe`, to prove that path for real.
+    fn drain_send<S, Strategy, const N: usize>(fan: FanIn<S, Strategy, N>, out: &mut [u32]) -> usize
+    where
+        S: UnpinSendPipe<In = (), Out = u32, Err = Exhausted> + DropSafe,
+        Strategy: FanInStrategy + Send + Sync + 'static,
+    {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut count = 0;
+        for _ in 0..10_000 {
+            let mut call = UnpinSendPipe::call(&fan, ());
+            match Pin::new(&mut call).poll(&mut cx) {
+                Poll::Ready(Ok(value)) => {
+                    out[count] = value;
+                    count += 1;
+                }
+                Poll::Ready(Err(Exhausted)) => break,
+                Poll::Pending => {}
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn unpin_send_pipe_merges_all_sources_in_round_robin_order() {
+        let fan = FanIn::new(
+            [
+                Script::new([Step::Yield(0), Step::Yield(1), Step::Done]),
+                Script::new([Step::Yield(10), Step::Yield(11), Step::Done]),
+                Script::new([Step::Yield(20), Step::Yield(21), Step::Done]),
+            ],
+            Select::RoundRobin,
+        );
+        let mut buf = [0u32; 16];
+        let count = drain_send(fan, &mut buf);
+        assert_eq!(
+            &buf[..count],
+            &[0, 10, 20, 1, 11, 21],
+            "same round-robin fairness as the UnpinPipe tier"
+        );
+    }
+
+    #[test]
+    fn unpin_send_pipe_future_is_send_and_unpin() {
+        fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
+        let fan = FanIn::new([Script::new([Step::Yield(1), Step::Done])], Select::Fifo);
+        let call = UnpinSendPipe::call(&fan, ());
+        needs_send_unpin(&call);
     }
 }

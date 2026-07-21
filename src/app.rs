@@ -19,7 +19,7 @@ use crate::listeners::http::HttpListenProtocol;
 use crate::listeners::mcp::McpListenProtocol;
 use crate::load::{LoadContext, ResolvedSpec, Spec, load};
 use crate::mount::{MethodFilter, Mount, Router};
-use crate::pipe::{PipeHandle, into_handle};
+use crate::pipe::{Handler, PipeHandle, into_handle};
 use crate::request::{Request, Response};
 use crate::runtime::Runtime;
 use crate::telemetry::{Metrics, TelemetryHandle};
@@ -148,8 +148,9 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
         any(target_os = "linux", target_os = "macos")
     ))]
     {
-        let runtime: Arc<dyn Runtime> =
-            Arc::new(crate::runtime::PrimeRuntime::new(resolve_cores(cores_override)?)?);
+        let runtime: Arc<dyn Runtime> = Arc::new(crate::runtime::PrimeRuntime::new(
+            resolve_cores(cores_override)?,
+        )?);
         let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
         return Ok((Some(runtime), Some(factory)));
     }
@@ -420,7 +421,11 @@ impl App {
     /// a source is never mounted on a listener — `run_until_signal` spawns
     /// every registered source onto a fresh `ProducerLifecycle` once the
     /// listener is bound, and `Shutdown::drain` folds their drain report in.
-    pub fn source(&mut self, name: impl Into<String>, source: impl Into<proxima_primitives::pipe::SourceHandle>) {
+    pub fn source(
+        &mut self,
+        name: impl Into<String>,
+        source: impl Into<proxima_primitives::pipe::SourceHandle>,
+    ) {
         self.sources.insert(name.into(), source.into());
     }
 
@@ -524,19 +529,69 @@ impl App {
         removed > 0
     }
 
+    /// Mount a `Handler`-shaped pipe directly at `path`, folding in the
+    /// `into_handle` erasure step so the caller skips the manual two-step
+    /// (`app.mount(path, into_handle(handler))` collapses to one call).
+    ///
+    /// Not a `MountTarget` `From` impl: `PipeHandle` itself satisfies
+    /// `Handler` (`Arc<dyn SendDynPipe<..>>` forwards `SendPipe`, see
+    /// `pipe::alloc_tier`), so a blanket `impl<H: Handler> From<H> for
+    /// MountTarget` would coherence-conflict (E0119) with the existing
+    /// `impl From<PipeHandle> for MountTarget` below — both would apply to a
+    /// `PipeHandle` argument. This method erases internally instead, so
+    /// `mount`'s by-name/by-handle paths, and `MountTarget`'s `From` family,
+    /// are untouched. The erasure is the SAME `into_handle` boundary `mount`
+    /// already crosses for a `PipeHandle` target — not a new box.
+    pub fn mount_pipe<H>(&self, path: &str, handler: H) -> Result<(), ProximaError>
+    where
+        H: Handler + 'static,
+    {
+        self.mount(path, into_handle(handler))
+    }
+
+    /// [`mount_pipe`](Self::mount_pipe), with the method-filter argument
+    /// [`mount_with_methods`](Self::mount_with_methods) takes.
+    pub fn mount_pipe_with_methods<H>(
+        &self,
+        path: &str,
+        handler: H,
+        methods: MethodFilter,
+    ) -> Result<(), ProximaError>
+    where
+        H: Handler + 'static,
+    {
+        self.mount_with_methods(path, into_handle(handler), methods)
+    }
+
+    /// [`mount_pipe`](Self::mount_pipe), with the method-filter and
+    /// host-filter arguments [`mount_full`](Self::mount_full) takes.
+    pub fn mount_pipe_full<H>(
+        &self,
+        path: &str,
+        handler: H,
+        methods: MethodFilter,
+        host: crate::mount::HostFilter,
+    ) -> Result<(), ProximaError>
+    where
+        H: Handler + 'static,
+    {
+        self.mount_full(path, into_handle(handler), methods, host)
+    }
+
     /// Mount a pipe at `path`. Accepts anything convertible into a
     /// [`MountTarget`] — a [`PipeHandle`] (e.g. `into_handle(pipe)`), a
-    /// registered pipe name (`&str`/`String`), or a `#[proxima::pipe(send)]`
+    /// registered pipe name (`&str`/`String`), or a `#[proxima::piped(send)]`
     /// struct whose fn is Handler-shaped (`Request<Bytes> -> Response<Bytes>`,
     /// `Err = ProximaError`) — the macro emits the `From` impl for that case.
+    /// For any OTHER `Handler`-shaped pipe, see [`mount_pipe`](Self::mount_pipe).
     pub fn mount(&self, path: &str, target: impl Into<MountTarget>) -> Result<(), ProximaError> {
         let target = target.into();
         let mount = match target {
             MountTarget::Handle(handle) => Mount::new(path, handle),
             MountTarget::Named(name) => {
-                let pipe = self
-                    .lookup_pipe(&name)
-                    .ok_or_else(|| ProximaError::NotFound(format!("no pipe registered as '{name}'")))?;
+                let pipe = self.lookup_pipe(&name).ok_or_else(|| {
+                    ProximaError::NotFound(format!("no pipe registered as '{name}'"))
+                })?;
                 Mount::new(path, pipe).named(name.clone())
             }
         };
@@ -556,10 +611,12 @@ impl App {
         let mount = match target {
             MountTarget::Handle(handle) => Mount::new(path, handle).with_methods(methods),
             MountTarget::Named(name) => {
-                let pipe = self
-                    .lookup_pipe(&name)
-                    .ok_or_else(|| ProximaError::NotFound(format!("no pipe registered as '{name}'")))?;
-                Mount::new(path, pipe).with_methods(methods).named(name.clone())
+                let pipe = self.lookup_pipe(&name).ok_or_else(|| {
+                    ProximaError::NotFound(format!("no pipe registered as '{name}'"))
+                })?;
+                Mount::new(path, pipe)
+                    .with_methods(methods)
+                    .named(name.clone())
             }
         };
         let mut router = (*self.router.load_full()).clone();
@@ -577,13 +634,13 @@ impl App {
     ) -> Result<(), ProximaError> {
         let target = target.into();
         let mount = match target {
-            MountTarget::Handle(handle) => {
-                Mount::new(path, handle).with_methods(methods).with_host(host)
-            }
+            MountTarget::Handle(handle) => Mount::new(path, handle)
+                .with_methods(methods)
+                .with_host(host),
             MountTarget::Named(name) => {
-                let pipe = self
-                    .lookup_pipe(&name)
-                    .ok_or_else(|| ProximaError::NotFound(format!("no pipe registered as '{name}'")))?;
+                let pipe = self.lookup_pipe(&name).ok_or_else(|| {
+                    ProximaError::NotFound(format!("no pipe registered as '{name}'"))
+                })?;
                 Mount::new(path, pipe)
                     .with_methods(methods)
                     .with_host(host)
@@ -1413,7 +1470,6 @@ impl SendPipe for RouterDispatch {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1465,6 +1521,63 @@ mod tests {
         let app = App::new().expect("app");
         let outcome = app.mount("/foo", "missing");
         assert!(matches!(outcome, Err(ProximaError::NotFound(_))));
+    }
+
+    // a hand-written `Handler`-shaped pipe (not macro-generated, not
+    // pre-erased) — the exact shape `mount_pipe` exists to skip the manual
+    // `into_handle(..)` step for.
+    struct Echo;
+
+    impl SendPipe for Echo {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            request: Request<Bytes>,
+        ) -> impl std::future::Future<Output = Result<Response<Bytes>, ProximaError>> + Send
+        {
+            async move {
+                let (_, body) = request.body_bytes().await?;
+                Ok(Response::ok(body))
+            }
+        }
+    }
+
+    #[proxima::test]
+    async fn mount_pipe_erases_and_mounts_a_handler_shaped_pipe_in_one_call() {
+        let app = App::new().expect("app");
+        app.mount_pipe("/echo", Echo).expect("mount_pipe");
+
+        let dispatch = app.router_handle();
+        let request = Request::builder()
+            .method("POST")
+            .path("/echo")
+            .body(Bytes::from_static(b"hello"))
+            .build()
+            .expect("builder");
+        let response = SendPipe::call(&dispatch, request).await.expect("dispatch");
+
+        assert_eq!(response.status, 200);
+        let body = response.collect_body().await.expect("body");
+        assert_eq!(&body[..], b"hello", "mount_pipe reaches the erased handler");
+    }
+
+    #[proxima::test]
+    async fn mount_pipe_with_methods_restricts_the_route_like_mount_with_methods() {
+        let app = App::new().expect("app");
+        app.mount_pipe_with_methods("/echo", Echo, MethodFilter::only(["POST".to_string()]))
+            .expect("mount_pipe_with_methods");
+
+        let dispatch = app.router_handle();
+        let response = SendPipe::call(&dispatch, build_request("GET", "/echo"))
+            .await
+            .expect("dispatch");
+        assert_eq!(
+            response.status, 404,
+            "GET is outside the mounted method filter"
+        );
     }
 
     #[proxima::test]

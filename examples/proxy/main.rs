@@ -24,7 +24,7 @@ use proxima::shutdown::ShutdownBarrier;
 use proxima::{
     App, Client, ListenerSpec, PipeHandle, ProximaError, Request, Response, SendPipe, into_handle,
 };
-use proxima_macros::pipe;
+use proxima_macros::piped;
 
 const ORIGIN_BIND: &str = "127.0.0.1:8081";
 const PROXY_BIND: &str = "127.0.0.1:8080";
@@ -32,9 +32,9 @@ const PROXY_BIND: &str = "127.0.0.1:8080";
 /// The upstream. A trivial pipe returning a known status, header, and body —
 /// deliberately distinct from a plain 200 so the proxy's forwarded response
 /// can be checked field-by-field against something a passthrough couldn't
-/// fake by accident. Stateless, so `#[proxima::pipe]` writes the `SendPipe`
+/// fake by accident. Stateless, so `#[proxima::piped]` writes the `SendPipe`
 /// impl.
-#[proxima::pipe(send)]
+#[proxima::piped(send)]
 async fn origin_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::new(201)
         .with_header("x-origin", "proxima-origin")
@@ -52,7 +52,7 @@ struct ProxyPipe {
     client: Client,
 }
 
-#[pipe(send)]
+#[piped(send)]
 impl ProxyPipe {
     async fn call(&self, request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
         let client = self.client.clone();

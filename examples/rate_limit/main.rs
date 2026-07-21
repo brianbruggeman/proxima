@@ -33,7 +33,7 @@ use core::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use proxima_macros::pipe;
+use proxima_macros::piped;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::capabilities::Clock;
 use proxima_primitives::pipe::rate_limit::{CapsConfig, KeyConfig, RateLimitConfig};
@@ -76,11 +76,11 @@ fn request(path: &str) -> Request<bytes::Bytes> {
         .expect("request builder")
 }
 
-// `#[pipe(send)]` generates the struct AND its `SendPipe` impl, deriving
+// `#[piped(send)]` generates the struct AND its `SendPipe` impl, deriving
 // `Clone` unconditionally — the one bound `RateLimit::new`'s `Inner: Clone`
 // needs. `name = Backend` keeps the generated struct's name matching every
 // call site below, while the fn itself stays named for what it does.
-#[pipe(send, name = Backend)]
+#[piped(send, name = Backend)]
 async fn respond_ok(
     _request: Request<bytes::Bytes>,
 ) -> Result<Response<bytes::Bytes>, ProximaError> {

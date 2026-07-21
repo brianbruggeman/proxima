@@ -20,10 +20,10 @@ use proxima::{App, ProximaError, Request, Response, RunConfig};
 /// The service is a pipe: typed request in, typed response out, nothing more.
 /// It never touches a socket — the listener owns that; the pipe only answers.
 ///
-/// `#[proxima::pipe(send)]` makes this function the pipe: `In`/`Out`/`Err` come
+/// `#[proxima::piped(send)]` makes this function the pipe: `In`/`Out`/`Err` come
 /// from the signature, and `send` is the rung — named, because crossing a core
 /// is a cost you opt into. The name you mount below is this function.
-#[proxima::pipe(send)]
+#[proxima::piped(send)]
 async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello, proxima\n"))
 }

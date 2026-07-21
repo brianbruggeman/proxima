@@ -35,7 +35,7 @@ need: running `cargo test`, and `println!`-ing the pipe's output from
 `no-std-demo`. Turning `std` on doesn't change `FrameStore` or `block_on` at
 all — same source, same behavior, just a different attribute on the crate.
 
-`ring_capacity` is the same claim made about `#[proxima::pipe]`
+`ring_capacity` is the same claim made about `#[proxima::piped]`
 (`00-foundations.md` section 7): the macro's generated struct is always a
 fieldless ZST and always derives `Clone` unconditionally, so it has to hold
 even where there is no allocator to fall back on. `#[proxima_macros::pipe]`

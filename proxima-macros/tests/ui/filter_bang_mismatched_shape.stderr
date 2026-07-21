@@ -1,0 +1,5 @@
+error: filter! requires a decision shape `In -> Result<In, Err>` (Ok admits, returning the SAME value) — this closure's input is `u64` but its admit type is `bool`. Use `pipe!` directly for a general transform, or change the closure to return `Ok(input)` unchanged on admit.
+ --> tests/ui/filter_bang_mismatched_shape.rs:7:24
+  |
+7 |     let _bad = filter!(|input: u64| -> Result<bool, &'static str> { Ok(input > 0) });
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

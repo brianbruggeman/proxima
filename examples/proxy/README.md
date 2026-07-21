@@ -15,7 +15,7 @@ is itself a `SendPipe<In = Request<Bytes>, Out = Response<Bytes>>` (the same sha
 this curriculum has been), so `ProxyPipe`'s entire `call` body is one line:
 
 ```rust
-#[pipe(send)]
+#[piped(send)]
 impl ProxyPipe {
     async fn call(&self, request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
         let client = self.client.clone();
@@ -25,7 +25,7 @@ impl ProxyPipe {
 ```
 
 `ProxyPipe` holds state (`client: Client`), so it can't be the fieldless struct
-`#[proxima::pipe]`'s free-function form generates — this is that macro's other
+`#[proxima::piped]`'s free-function form generates — this is that macro's other
 form instead: a plain `impl ProxyPipe { .. }` block (no trait named) with one
 method called `call`. `ProxyPipe` itself is unchanged, hand-written exactly as
 before; what the macro removes is the trait header (`impl SendPipe for ProxyPipe

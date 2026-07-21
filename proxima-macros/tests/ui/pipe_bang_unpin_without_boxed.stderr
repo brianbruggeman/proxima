@@ -1,0 +1,5 @@
+error: `unpin` cannot be applied to an async closure as-is: its body compiles to a compiler-generated state machine, which is `!Unpin`, so it can't be polled in place, and this bridge does not offer the `boxed` escape hatch (zero-box is a hard constraint here). Use a plain closure instead, or hand-write an `async fn` and lift it with `#[proxima::piped(unpin, boxed)]`.
+ --> tests/ui/pipe_bang_unpin_without_boxed.rs:7:9
+  |
+7 |         async move |input: u64| -> Result<u64, std::convert::Infallible> { Ok(input) },
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

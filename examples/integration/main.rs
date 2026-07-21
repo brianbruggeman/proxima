@@ -41,8 +41,8 @@ const VENDOR_BODY: &str = "{\"symbol\":\"ACME\",\"price\":42.17}\n";
 
 /// Stand-in for a real third-party API: a fixed status, header, and body so
 /// the capture-then-replay proof has a known payload to check against.
-/// Stateless, so `#[proxima::pipe]` writes the `SendPipe` impl.
-#[proxima::pipe(send)]
+/// Stateless, so `#[proxima::piped]` writes the `SendPipe` impl.
+#[proxima::piped(send)]
 async fn third_party_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::new(200)
         .with_header(VENDOR_HEADER, VENDOR_ID)

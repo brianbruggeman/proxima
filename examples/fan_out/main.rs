@@ -18,7 +18,7 @@ use core::future::Future;
 use core::task::{Context, Poll, Waker};
 use std::sync::{Arc, Mutex};
 
-use proxima_macros::pipe;
+use proxima_macros::piped;
 use proxima_primitives::pipe::FanOut;
 use proxima_primitives::pipe::SendPipe;
 
@@ -93,7 +93,7 @@ struct CapturingSink {
     log: Arc<Mutex<Vec<String>>>,
 }
 
-#[pipe(send)]
+#[piped(send)]
 impl CapturingSink {
     async fn call(&self, message: Message) -> Result<(), Infallible> {
         let log = Arc::clone(&self.log);

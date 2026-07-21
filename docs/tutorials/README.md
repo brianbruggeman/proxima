@@ -10,7 +10,7 @@ Sections are **self-contained**: each states its prerequisites up front and can 
 
 ## Start here
 
-- **[Foundations: the Pipe](./00-foundations.md)** — the base. `Pipe` · the four roles · errors · `and_then`/`AndThen` · the four tiers (`Pipe`/`SendPipe`/`UnpinPipe`/`UnpinSendPipe`) · `#[proxima::pipe]` (stateless free-fn form + stateful `impl` form — you almost never hand-write `impl Pipe` anymore) · the pipe algebra (filter, fan-out, fan-in, gate, signal) · the served `Pipe` · `into_handle` · serve. Everything else stands on this.
+- **[Foundations: the Pipe](./00-foundations.md)** — the base. `Pipe` · the four roles · errors · `and_then`/`AndThen` · the four tiers (`Pipe`/`SendPipe`/`UnpinPipe`/`UnpinSendPipe`) · `#[proxima::piped]` (stateless free-fn form + stateful `impl` form — you almost never hand-write `impl Pipe` anymore) · the pipe algebra (filter, fan-out, fan-in, gate, signal) · the served `Pipe` · `into_handle` · serve. Everything else stands on this.
 
 ## Build a ... (each project is complete in itself)
 

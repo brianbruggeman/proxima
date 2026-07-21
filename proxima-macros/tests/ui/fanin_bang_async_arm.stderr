@@ -1,0 +1,5 @@
+error: fanin! arms must be plain (non-`async`) closures: FanIn's merge loop polls each source synchronously in place and requires a genuinely `Unpin`, never-suspending future. Lift an async source with `#[proxima::piped(unpin, boxed)]` on a hand-written `async fn` first and pass the resulting value in as a pass-through arm instead.
+ --> tests/ui/fanin_bang_async_arm.rs:8:9
+  |
+8 |         async move |(): ()| -> Result<u8, proxima::pipe::Exhausted> { Ok(1) },
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

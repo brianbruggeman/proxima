@@ -1,4 +1,4 @@
-//! Proof that `#[proxima::pipe(unpin, boxed)]` — the third exit from the
+//! Proof that `#[proxima::piped(unpin, boxed)]` — the third exit from the
 //! `unpin`-on-`async fn` refusal — actually works and composes into the
 //! real merge.
 //!
@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use proxima_core::markers::DropSafe;
-use proxima_macros::pipe;
+use proxima_macros::piped;
 use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
 
 // a stateless handle onto a shared counter — the same shape a real `async fn
@@ -46,7 +46,7 @@ use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
 // poll struct, is to pay the box.
 static RECV_CALLS: AtomicU8 = AtomicU8::new(0);
 
-#[pipe(unpin, boxed)]
+#[piped(unpin, boxed)]
 async fn recv(_: ()) -> Result<u8, Exhausted> {
     let value = RECV_CALLS.fetch_add(1, Ordering::Relaxed);
     if value < 4 { Ok(value) } else { Err(Exhausted) }
