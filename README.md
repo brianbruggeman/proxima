@@ -1,5 +1,12 @@
 # proxima
 
+> ## WORK IN PROGRESS — EXPERIMENTAL
+>
+> **proxima is under heavy active development: not stable, not production-ready.**
+> APIs, behavior, semantics, and internals change without notice or a migration
+> path, and whole subsystems may be reworked or removed. Do not depend on it in
+> production. Use at your own risk.
+
 **A sans-IO substrate where everything is a `Pipe`, and big things are small
 things composed.** One trait — async `In -> Result<Out, Err>` — and four roles
 (source, sink, transform, observe) express every part. A proxy, a gateway, a cache,
