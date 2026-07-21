@@ -3,20 +3,31 @@
 //! unit-struct-plus-impl boilerplate every leaf pipe otherwise repeats.
 //!
 //! The macro adds NO noun to the pipe algebra (still exactly four tiers,
-//! `proxima-primitives/src/pipe/primitives.rs`) — it only picks which one
-//! tier a given function belongs to and writes the impl:
+//! `proxima-primitives/src/pipe/primitives.rs`) — it only picks the
+//! DOWNWARD CLOSURE of tiers a given function's shape qualifies for, and
+//! writes one impl block per tier (`Tier::plan`, below):
 //!
 //! - `sig.asyncness` decides the `Unpin` axis for free: an `async fn`'s
-//!   future is a compiler-generated state machine (`!Unpin`), so it emits
-//!   [`Pipe`]; a plain `fn` is wrapped in `core::future::ready`, whose future
-//!   IS `Unpin`, so it emits [`UnpinPipe`].
+//!   future is a compiler-generated state machine (`!Unpin`), so its closure
+//!   stops at [`Pipe`] (plus [`SendPipe`] under `send`); a plain `fn` is
+//!   wrapped in `core::future::ready`, whose future IS `Unpin`, so its
+//!   closure reaches [`UnpinPipe`] too (plus [`UnpinSendPipe`] under `send`).
 //! - `Send` is NEVER inferred — only `#[proxima::piped(send)]` climbs to
 //!   [`SendPipe`] / [`UnpinSendPipe`]. Climbing tiers because the types
 //!   happened to allow it would charge a cost the caller never asked for
 //!   (see `examples/send/README.md`).
-//! - Exactly one tier is emitted per function. A type implementing two tiers
-//!   at once makes every call site ambiguous (E0034) — that is not a
-//!   convenience, it is breakage.
+//! - A pipe implements EVERY tier in its closure at once — never just one —
+//!   because the higher tiers are additive constraints on the same root
+//!   contract, not a replacement for it
+//!   (`proxima_primitives::pipe::primitives`'s own module doc says this of
+//!   the trait family directly). `#[proxima::piped(send)]` on a plain `fn`
+//!   therefore emits all four impls in one expansion: `Pipe`, `SendPipe`,
+//!   `UnpinPipe`, `UnpinSendPipe`. What IS ambiguous, and needs a
+//!   fully-qualified call to resolve, is invoking the shared method name
+//!   `call` by plain dot-syntax on a value whose type implements more than
+//!   one of these traits — `Pipe::call(&value, ..)` / `SendPipe::call(&value,
+//!   ..)` disambiguates; this is a call-site spelling question, not a reason
+//!   to withhold a tier the shape already qualifies for.
 //! - `#[proxima::piped(unpin)]` on a bare `async fn` is refused at compile
 //!   time: a compiler-generated async block future is never `Unpin`. But
 //!   `Unpin` constrains how the future is SPELLED, not whether it awaits —

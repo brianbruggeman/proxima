@@ -1194,6 +1194,14 @@ path = "examples/fan_out_affinity/main.rs"
 name = "fan_in"
 path = "examples/fan_in/main.rs"
 
+# the ergonomic sugar over the pipe algebra: PipeExt (.and_then/.filter/
+# .fanout/.fanin), the leaf macros (pipe!/filter!/fanout!/fanin!), and
+# #[proxima::piped]'s impl-all tier closure, wired into App::mount's four
+# accepted shapes. See docs/tutorials/01-ergonomics.md.
+[[example]]
+name = "pipe_ergonomics"
+path = "examples/pipe_ergonomics/main.rs"
+
 [[example]]
 name = "w4_mutex_repro"
 required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]

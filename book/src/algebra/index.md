@@ -59,13 +59,15 @@ source.and_then(transform).and_then(sink)
 ```
 
 `and_then` is not a separate type you have to import and learn. It is a
-*default method on the pipe trait itself* — every pipe can already chain,
-because chaining is part of what being a pipe means. The result of a chain is
-just another pipe, so chains nest and keep composing without limit.
+method every pipe gets for free, from one blanket sugar trait (`PipeExt`)
+over the root `Pipe` — chaining is not part of the `Pipe` contract itself,
+but nothing gates on it either, so it reads as if it were. The result of a
+chain is just another pipe, so chains nest and keep composing without limit.
 
-→ **Source:** `Pipe::and_then` in `proxima_primitives::pipe`. It
-returns a two-stage pipe; the type system checks that the first pipe's `Out`
-matches the second's `In`, and bridges the error channel for you.
+→ **Source:** `PipeExt::and_then` in `proxima_primitives::pipe`
+(`proxima-primitives/src/pipe/ext.rs`). It returns a two-stage pipe; the type
+system checks that the first pipe's `Out` matches the second's `In`, and
+bridges the error channel for you.
 
 ## 3. Primitive — small reusable pipes built *on* the pipe
 

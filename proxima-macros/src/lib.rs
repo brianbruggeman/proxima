@@ -86,14 +86,18 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Generates a [`Pipe`]/`SendPipe`/`UnpinPipe`/`UnpinSendPipe` impl from a
 /// plain function, removing the hand-written unit-struct-plus-impl
-/// boilerplate. Picks exactly one of the four standalone tiers
-/// (`proxima-primitives/src/pipe/primitives.rs`) — it adds no new noun to
-/// the pipe algebra.
+/// boilerplate. Emits every tier in the downward closure the function's
+/// shape qualifies for (`Tier::plan` in `proxima-macros/src/pipe_attr.rs`) —
+/// never just one — because the higher tiers are additive constraints on
+/// the same root contract, not a replacement for it. It adds no new noun to
+/// the pipe algebra: still exactly four standalone traits
+/// (`proxima-primitives/src/pipe/primitives.rs`).
 ///
-/// `sig.asyncness` decides the `Unpin` axis for free: `async fn` emits
-/// [`Pipe`] (RPITIT passthrough); a plain `fn` emits `UnpinPipe`, wrapping
-/// the call in `core::future::ready` (whose future IS `Unpin`). `Send` is
-/// never inferred — only `#[proxima::piped(send)]` climbs to `SendPipe` /
+/// `sig.asyncness` decides the `Unpin` axis for free: `async fn` reaches
+/// [`Pipe`] (RPITIT passthrough), plus `SendPipe` under `send`; a plain `fn`
+/// is wrapped in `core::future::ready` (whose future IS `Unpin`), reaching
+/// `UnpinPipe` as well, plus `UnpinSendPipe` under `send`. `Send` is never
+/// inferred — only `#[proxima::piped(send)]` climbs to `SendPipe` /
 /// `UnpinSendPipe`. The generated struct is always fieldless, so it always
 /// derives `Clone` unconditionally.
 ///
