@@ -8,29 +8,38 @@
 //! pre-existing, real bind/protocol/spec/dispatch/shutdown carrier
 //! (`proxima-listen/src/handle.rs`, produced by `ListenerSpec::attach(dispatch)`,
 //! run via `Listener::run_with_runtime`). This module does NOT define a
-//! second `Listener` type. `Listener::builder()` reaches [`ListenerBuilder`]
-//! through the [`ListenerBuilderEntry`] trait
+//! second `Listener` type. `Listener::builder()` / `Listener::http(bind)`
+//! reach [`ListenerBuilder`] through the [`ListenerBuilderEntry`] trait
 //! defined in [`handle`] — a foreign-type extension, not a peer type, since
 //! Rust's orphan rule forbids this crate from adding an inherent method to a
 //! type it doesn't own. Import the trait alongside `Listener` to unlock the
-//! static method: `use proxima::{Listener, ListenerBuilderEntry};`.
+//! static methods: `use proxima::{Listener, ListenerBuilderEntry};`.
 //!
-//! Both builders impl the one [`SpecBuilder`](crate::SpecBuilder) seam, but
-//! they are NOT symmetric in which axes actually do something — a listener
-//! needs cert material a client never carries, and has no listener-side
-//! `.h3()`/`.proxy()` wiring at all today:
+//! Both builders impl the SAME [`SpecBuilder`](crate::SpecBuilder) seam and
+//! thereby get the SAME [`ProtocolSugar`](crate::ProtocolSugar) /
+//! [`TransportSugar`](crate::TransportSugar) axes — no listener-specific
+//! per-wire methods (`.h1()`/`.h2()`/`.h3_native()` would fork the sugar
+//! instead of mirroring it; the wire is picked by the shared `.tcp()`/
+//! `.tls()`/`.h3()`/`.grpc()` axes, resolved to a concrete `ListenProtocol`
+//! by `resolve_listen_protocol` — the listen-side mirror of `load.rs`'s
+//! client-side factory dispatch). Two axes are honestly asymmetric and shadow
+//! the blanket method with an inherent one carrying more than a client ever
+//! needs — a listener needs cert material a client never carries, and has no
+//! url to dial:
 //!
 //! | axis | client (`ClientBuilder`) | listener (`ListenerBuilder`) |
 //! | --- | --- | --- |
-//! | `.tcp()` | real (`TransportSugar`) | real (`TransportSugar`) |
-//! | `.tls()` | real, url-carrying (`TransportSugar`) | shadowed: inherent `.tls(TlsConfig)` — real cert material required |
-//! | `.h3()` / `.proxy(url)` | real / real | no listener wiring — `.serve()` hard-errors if requested |
-//! | `.http(url)` / `.https(url)` | real (dials the url) | inert marker if called — `.http()` needs no call, it's the implicit default |
-//! | `.grpc(url)` / `.grpc()` | real, url-carrying | shadowed: inherent url-less `.grpc()` — listener dispatches to `.handle(pipe)`, not a url |
+//! | `.tcp()` / `.auto()` | real (`TransportSugar`) | real — resolves to the h1+h2 ALPN combiner (`"http"`) |
+//! | `.tls()` | real, url-carrying (`TransportSugar`) | shadowed: inherent `.tls(TlsConfig)` — real cert material required; resolves to the SAME `"http"` combiner (TLS is spec data, not a different protocol) |
+//! | `.h3()` | real (`TransportSugar`) | real — resolves to `"h3-native"`, self-registered onto the fresh `App` (not in `App::new()`'s default set) |
+//! | `.proxy(url)` | real | no listener meaning — `.serve()` hard-errors if present |
+//! | `.http(url)` / `.https(url)` | real (dials the url) | real — carries the BIND address (`bind.to_string()`), read by `resolve_bind` when `.bind(addr)` wasn't called directly |
+//! | `.grpc(url)` / `.grpc()` | real, url-carrying | shadowed: inherent url-less `.grpc()` — listener dispatches to `.handle(pipe)`, not a url; resolves to `"h2"` (gRPC rides h2), self-registered like `.h3()` |
 //!
-//! `use proxima::TransportSugar` still brings `.tcp()`/`.auto()` into scope on
-//! `ListenerBuilder`. There is no separate listener DSL — one `SpecBuilder`
-//! seam, honestly asymmetric axes.
+//! `use proxima::TransportSugar` still brings `.tcp()`/`.auto()`/`.h3()` into
+//! scope on `ListenerBuilder`. There is no separate listener DSL — one
+//! `SpecBuilder` seam, one resolver mirroring `load.rs`, honestly asymmetric
+//! axes only where a listener's inputs genuinely differ from a client's.
 //!
 //! ```ignore
 //! use proxima::{Listener, ListenerBuilderEntry, TransportSugar, into_handle};
@@ -42,6 +51,12 @@
 //!     .serve()
 //!     .await?;
 //! server.run_until_signal().await;
+//!
+//! // mirrors `Client::http(url)`:
+//! let server = Listener::http("127.0.0.1:8080".parse()?)
+//!     .handle(into_handle(my_pipe))
+//!     .serve()
+//!     .await?;
 //! ```
 
 pub mod handle;

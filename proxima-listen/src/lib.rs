@@ -13,6 +13,8 @@
 pub mod handle;
 #[cfg(feature = "std")]
 pub use handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
+#[cfg(feature = "tls")]
+pub use handle::TlsListenProtocol;
 
 #[cfg(feature = "std")]
 mod config;

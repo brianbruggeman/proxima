@@ -54,8 +54,26 @@ pub struct ListenerSpec {
     pub protocol_name: String,
     pub shutdown: ShutdownPolicy,
     pub spec: Value,
-    #[cfg(feature = "tls")]
-    pub tls: Option<proxima_tls::TlsConfig>,
+    /// A protocol resolved at construction time instead of by name through
+    /// the [`ListenRegistry`] at serve time. Populated by [`Self::protocol`]
+    /// (the escape hatch below), and by the umbrella `proxima` crate's
+    /// `ListenerBuilder::serve` when its shared `ProtocolSugar`/
+    /// `TransportSugar` spec resolves to a protocol outside `App::new()`'s
+    /// default set (`h2`/`h3-native`) — see `resolve_listen_protocol` in
+    /// `src/listener/handle.rs` — so a fluent caller's choice can never
+    /// desync from `protocol_name`. `None` for the registry-lookup path
+    /// (`ListenerSpec::http`, or any spec built from config/deserialization)
+    /// — [`Listener::run_with_runtime`] falls back to
+    /// `registry.get(&self.protocol_name)` exactly as before.
+    ///
+    /// This is also how TLS composes: there is deliberately no `tls` field
+    /// on this struct (a typed `Option<TlsConfig>` slot would make TLS a
+    /// property of every protocol variant — a protocol × tls matrix). TLS
+    /// termination is instead [`TlsListenProtocol`], a `ListenProtocol`
+    /// DECORATOR that wraps whatever concrete protocol is carried here —
+    /// on/off is the presence of that wrapper, composed the same way any
+    /// other concrete protocol reaches this field: through [`Self::protocol`].
+    pub protocol: Option<Arc<dyn ListenProtocol>>,
 }
 
 impl ListenerSpec {
@@ -66,8 +84,28 @@ impl ListenerSpec {
             protocol_name: "http".into(),
             shutdown: ShutdownPolicy::drain_30s(),
             spec: Value::Null,
-            #[cfg(feature = "tls")]
-            tls: None,
+            protocol: None,
+        }
+    }
+
+    /// Escape hatch for any concrete [`ListenProtocol`] — h1/h2/h3-native
+    /// (whose types live in `proxima-http`, a crate that already depends on
+    /// this one, so this crate cannot host named per-protocol constructors
+    /// for them without a cyclic dependency), or a caller's own out-of-crate
+    /// impl. The mirror of the client's `.protocol(impl ClientProtocol)`
+    /// escape hatch. Sets `protocol_name` from
+    /// [`ListenProtocol::name`] so the wire/serialized string always
+    /// matches the carried `Arc`, and carries the `Arc` itself so
+    /// [`Listener::run_with_runtime`] resolves it directly instead of a
+    /// registry lookup by name.
+    #[must_use]
+    pub fn protocol(bind: SocketAddr, protocol: Arc<dyn ListenProtocol>) -> Self {
+        Self {
+            bind,
+            protocol_name: protocol.name().to_string(),
+            shutdown: ShutdownPolicy::drain_30s(),
+            spec: Value::Null,
+            protocol: Some(protocol),
         }
     }
 
@@ -83,25 +121,13 @@ impl ListenerSpec {
         self
     }
 
-    /// Terminate TLS at this listener. Available under the `tls`
-    /// feature; the listener serializes the config into the spec
-    /// JSON so the HTTP protocol picks it up and wraps accepted
-    /// sockets with a `TlsAcceptor` before they reach hyper.
-    #[cfg(feature = "tls")]
-    #[must_use]
-    pub fn with_tls(mut self, tls: proxima_tls::TlsConfig) -> Self {
-        self.tls = Some(tls);
-        self
-    }
-
     pub fn attach(self, dispatch: PipeHandle) -> Listener {
         Listener {
             bind: self.bind,
             protocol_name: self.protocol_name,
             shutdown: self.shutdown,
             spec: self.spec,
-            #[cfg(feature = "tls")]
-            tls: self.tls,
+            protocol: self.protocol,
             dispatch,
         }
     }
@@ -112,8 +138,7 @@ pub struct Listener {
     pub protocol_name: String,
     pub shutdown: ShutdownPolicy,
     pub spec: Value,
-    #[cfg(feature = "tls")]
-    pub tls: Option<proxima_tls::TlsConfig>,
+    pub protocol: Option<Arc<dyn ListenProtocol>>,
     pub dispatch: PipeHandle,
 }
 
@@ -147,15 +172,22 @@ impl Listener {
                     .into(),
             )
         })?;
-        let protocol = registry.get(&self.protocol_name)?;
+        // A carried `Arc` (from `.protocol(bind, ..)`, a composed
+        // `TlsListenProtocol` wrapper, or the umbrella crate's fluent
+        // sugar) resolves directly — the fluent path never round-trips
+        // through a typo-able registry lookup. Absent (registry-driven /
+        // deserialized specs), fall back to the by-name lookup exactly as
+        // before. TLS is NOT a field read here — a `TlsListenProtocol`
+        // (if `self.protocol` carries one) injects its own marker into the
+        // spec it hands its wrapped inner protocol, inside its own `serve`.
+        let protocol = match self.protocol {
+            Some(protocol) => protocol,
+            None => registry.get(&self.protocol_name)?,
+        };
         let dispatch = self.dispatch;
         let mut spec = self.spec.clone();
         let policy = self.shutdown.clone();
         attach_shutdown_to_spec(&mut spec, &policy);
-        #[cfg(feature = "tls")]
-        if let Some(tls_config) = self.tls.as_ref() {
-            attach_tls_to_spec(&mut spec, tls_config);
-        }
         let resolved_addr = resolve_listen_port(self.bind)?;
         attach_reuseport_flag(&mut spec);
 
@@ -448,6 +480,61 @@ fn attach_tls_to_spec(spec: &mut Value, tls: &proxima_tls::TlsConfig) {
     );
 }
 
+/// Composes TLS termination in FRONT of an inner [`ListenProtocol`] — the
+/// on/off toggle for TLS is the PRESENCE of this wrapper, not a struct field
+/// on [`ListenerSpec`]/[`Listener`]. A `tls: Option<TlsConfig>` field there
+/// would make TLS a property of every protocol variant, forcing a protocol
+/// × tls matrix as new wire protocols land; a decorator composes onto ANY
+/// [`ListenProtocol`] uniformly, the same way [`Offload`](crate::Offload)
+/// composes a background-pool hop onto any [`PipeHandle`] — no new
+/// mechanism, same shape.
+///
+/// `serve` clones the spec it's handed, stamps the `__proxima_tls` marker
+/// [`attach_tls_to_spec`] always used, and hands THAT to the wrapped
+/// protocol's own `serve` — the wrapped protocol (e.g. `HttpListenProtocol`)
+/// reads the identical marker key it always has; no change on that side.
+/// `name()` delegates to the inner protocol so identity checks that key off
+/// the wire name (e.g. the `is_http` SO_REUSEPORT-spread pick in
+/// `Listener::run_with_runtime`) see straight through the wrapper.
+#[cfg(feature = "tls")]
+pub struct TlsListenProtocol {
+    inner: Arc<dyn ListenProtocol>,
+    tls: proxima_tls::TlsConfig,
+}
+
+#[cfg(feature = "tls")]
+impl TlsListenProtocol {
+    #[must_use]
+    pub fn new(inner: Arc<dyn ListenProtocol>, tls: proxima_tls::TlsConfig) -> Self {
+        Self { inner, tls }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl ListenProtocol for TlsListenProtocol {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn serve(
+        &self,
+        bind: SocketAddr,
+        dispatch: PipeHandle,
+        spec: &Value,
+        context: ServeContext,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+        let mut spec_with_tls = spec.clone();
+        attach_tls_to_spec(&mut spec_with_tls, &self.tls);
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            inner
+                .serve(bind, dispatch, &spec_with_tls, context, shutdown)
+                .await
+        })
+    }
+}
+
 fn attach_shutdown_to_spec(spec: &mut Value, policy: &ShutdownPolicy) {
     if !matches!(spec, Value::Object(_)) {
         *spec = Value::Object(serde_json::Map::new());
@@ -592,6 +679,16 @@ impl ListenerConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bytes::Bytes;
+    use proxima_primitives::pipe::SendPipe;
+    use proxima_primitives::pipe::handler::into_handle;
+    use proxima_primitives::pipe::request::{Request, Response};
+    use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
+    use proxima_runtime::{BackgroundHandle, CoreId, Runtime, SpawnError};
+
     use super::*;
 
     #[test]
@@ -609,5 +706,288 @@ mod tests {
             ShutdownPolicy::Drain { timeout } => assert_eq!(timeout, Duration::from_secs(30)),
             _ => panic!("expected drain policy"),
         }
+    }
+
+    struct StubProto {
+        registered_name: &'static str,
+    }
+
+    impl ListenProtocol for StubProto {
+        fn name(&self) -> &str {
+            self.registered_name
+        }
+
+        fn serve(
+            &self,
+            _bind: SocketAddr,
+            _dispatch: PipeHandle,
+            _spec: &Value,
+            _context: ServeContext,
+            _shutdown: oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    /// Captures whatever `spec: &Value` it's handed, then answers `Ok(())`
+    /// immediately — used to prove [`TlsListenProtocol::serve`] stamps the
+    /// TLS marker into the spec it hands its wrapped inner protocol.
+    #[cfg(feature = "tls")]
+    struct SpecCapturingProto {
+        captured: Arc<std::sync::Mutex<Option<Value>>>,
+    }
+
+    #[cfg(feature = "tls")]
+    impl ListenProtocol for SpecCapturingProto {
+        fn name(&self) -> &str {
+            "captured"
+        }
+
+        fn serve(
+            &self,
+            _bind: SocketAddr,
+            _dispatch: PipeHandle,
+            spec: &Value,
+            _context: ServeContext,
+            _shutdown: oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+            *self.captured.lock().expect("lock spec capture cell") = Some(spec.clone());
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_listen_protocol_name_delegates_to_inner() {
+        let inner: Arc<dyn ListenProtocol> = Arc::new(StubProto {
+            registered_name: "stub",
+        });
+        let wrapped = TlsListenProtocol::new(inner, proxima_tls::TlsConfig::self_signed());
+        assert_eq!(wrapped.name(), "stub");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_listen_protocol_stamps_the_marker_into_the_spec_it_hands_the_inner_protocol() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let inner: Arc<dyn ListenProtocol> = Arc::new(SpecCapturingProto {
+            captured: captured.clone(),
+        });
+        let wrapped = TlsListenProtocol::new(inner, proxima_tls::TlsConfig::self_signed());
+
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let context = ServeContext::new(Arc::new(NoopTelemetry));
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        futures::executor::block_on(wrapped.serve(
+            bind,
+            null_dispatch(),
+            &Value::Null,
+            context,
+            shutdown_rx,
+        ))
+        .expect("serve resolves");
+
+        let spec = captured
+            .lock()
+            .expect("lock spec capture cell")
+            .clone()
+            .expect("inner protocol's serve was called");
+        assert!(
+            spec.get(proxima_tls::SPEC_KEY).is_some(),
+            "expected {} in {spec:?}",
+            proxima_tls::SPEC_KEY
+        );
+    }
+
+    #[test]
+    fn http_constructor_carries_no_protocol_and_falls_back_to_registry() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let spec = ListenerSpec::http(bind);
+        assert_eq!(spec.protocol_name, "http");
+        assert!(
+            spec.protocol.is_none(),
+            "http() is the registry-driven constructor; it must not carry an Arc"
+        );
+    }
+
+    #[test]
+    fn protocol_constructor_sets_name_and_carries_protocol() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let protocol: Arc<dyn ListenProtocol> = Arc::new(StubProto {
+            registered_name: "stub",
+        });
+        let spec = ListenerSpec::protocol(bind, protocol);
+        assert_eq!(spec.protocol_name, "stub");
+        let carried = spec.protocol.as_ref().expect("protocol() must carry Arc");
+        assert_eq!(carried.name(), "stub");
+    }
+
+    #[test]
+    fn protocol_survives_attach_onto_listener() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let protocol: Arc<dyn ListenProtocol> = Arc::new(StubProto {
+            registered_name: "stub",
+        });
+        let spec = ListenerSpec::protocol(bind, protocol);
+        let listener = spec.attach(null_dispatch());
+        assert_eq!(listener.protocol_name, "stub");
+        let carried = listener
+            .protocol
+            .as_ref()
+            .expect("attach() must carry the protocol through");
+        assert_eq!(carried.name(), "stub");
+    }
+
+    /// Trivial `SendPipe` for the `dispatch` a `Listener` requires but the
+    /// resolution tests below never actually invoke — the fake protocol's
+    /// `serve` never calls into it.
+    struct NullPipe;
+
+    impl SendPipe for NullPipe {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            _request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+            async move { Ok(Response::new(200)) }
+        }
+    }
+
+    fn null_dispatch() -> PipeHandle {
+        into_handle(NullPipe)
+    }
+
+    /// Fake protocol whose `serve` signals readiness immediately and then
+    /// blocks on the shutdown channel — no socket, no accept loop — so the
+    /// `run_with_runtime` resolution test below stays a unit test instead
+    /// of a real end-to-end bind.
+    struct ReadySignalProtocol {
+        served: Arc<AtomicBool>,
+    }
+
+    impl ListenProtocol for ReadySignalProtocol {
+        fn name(&self) -> &str {
+            "ready-signal-fake"
+        }
+
+        fn serve(
+            &self,
+            _bind: SocketAddr,
+            _dispatch: PipeHandle,
+            _spec: &Value,
+            context: ServeContext,
+            shutdown: oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+            self.served.store(true, Ordering::SeqCst);
+            Box::pin(async move {
+                if let Some(sender) = context.ready_signal {
+                    let _ = sender.send(());
+                }
+                let _ = shutdown.await;
+                Ok(())
+            })
+        }
+    }
+
+    /// Every spawn hands its future to a real `std::thread` running a
+    /// single-future executor — genuinely concurrent with the caller
+    /// blocking on `run_with_runtime`'s ready-ack recv, without pulling in
+    /// tokio or prime as a dev-dependency. Methods `run_with_runtime`
+    /// never calls panic loudly instead of silently no-op'ing.
+    struct ThreadRuntime;
+
+    impl Runtime for ThreadRuntime {
+        fn spawn_on_current_core(&self, _future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            unreachable!("run_with_runtime never calls spawn_on_current_core")
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: CoreId,
+            future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), SpawnError> {
+            std::thread::spawn(move || futures::executor::block_on(future));
+            Ok(())
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: CoreId,
+            factory: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), SpawnError> {
+            std::thread::spawn(move || futures::executor::block_on(factory()));
+            Ok(())
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn Any + Send>, ProximaError> + Send>,
+        ) -> BackgroundHandle<Box<dyn Any + Send>> {
+            unreachable!("run_with_runtime never calls spawn_background_blocking")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("run_with_runtime never calls timer_at")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> CoreId {
+            CoreId(0)
+        }
+    }
+
+    #[test]
+    fn run_with_runtime_resolves_carried_protocol_without_registry_entry() {
+        let served = Arc::new(AtomicBool::new(false));
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let protocol: Arc<dyn ListenProtocol> = Arc::new(ReadySignalProtocol {
+            served: served.clone(),
+        });
+        let listener = ListenerSpec::protocol(bind, protocol)
+            .attach(null_dispatch());
+
+        // Empty registry — proves resolution never reaches `registry.get`.
+        let registry = ListenRegistry::new();
+        let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime);
+
+        let handle = listener
+            .run_with_runtime(&registry, telemetry, Some(runtime), None, None)
+            .expect("carried protocol resolves without a registry entry");
+        assert!(served.load(Ordering::SeqCst), "carried protocol never served");
+        futures::executor::block_on(handle.stop());
+    }
+
+    #[test]
+    fn run_with_runtime_still_uses_registry_when_no_protocol_carried() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let listener = ListenerSpec::http(bind).attach(null_dispatch());
+        assert!(listener.protocol.is_none());
+
+        let registry = ListenRegistry::new();
+        let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime);
+
+        let outcome = listener.run_with_runtime(&registry, telemetry, Some(runtime), None, None);
+        let error = match outcome {
+            Ok(_) => panic!("http() with nothing registered under \"http\" must still fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("http"),
+            "expected the registry miss to name the protocol, got: {message}"
+        );
     }
 }
