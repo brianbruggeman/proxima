@@ -325,14 +325,9 @@ fn parse_f64(buf: &[u8]) -> Result<f64, ParseError> {
 }
 
 fn find_crlf(buf: &[u8]) -> Result<usize, ParseError> {
-    let mut index = 0;
-    while index + 1 < buf.len() {
-        if buf[index] == b'\r' && buf[index + 1] == b'\n' {
-            return Ok(index);
-        }
-        index += 1;
-    }
-    Err(ParseError::NeedMore)
+    // SIMD `\r\n` scan; RESP is CRLF-delimited and this runs per frame, so the
+    // scalar byte-at-a-time loop was hot. Mirrors the pgwire codec's memchr use.
+    memchr::memmem::find(buf, b"\r\n").ok_or(ParseError::NeedMore)
 }
 
 /// Encode a command as a RESP array of bulk strings — the canonical
