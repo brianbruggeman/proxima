@@ -534,7 +534,7 @@ impl App {
     /// struct or a [`PipeHandle`]), a bare request-shaped `async fn`, a
     /// registered pipe name (`&str`/`String`), or an already-built
     /// [`MountTarget`]. `Via` is inferred and never named at the call site —
-    /// see [`IntoMountTarget`]'s doc for why the three shapes don't collide.
+    /// see [`IntoMountTarget`]'s doc for why the four shapes don't collide.
     pub fn mount<Target, Via>(&self, path: &str, target: Target) -> Result<(), ProximaError>
     where
         Target: IntoMountTarget<Via>,

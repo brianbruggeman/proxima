@@ -52,7 +52,7 @@ round-trip proving the response crossed a real socket — see
 [`examples/hello/`](examples/hello/main.rs) for all of it):
 
 ```rust
-#[proxima::piped(send)]
+#[proxima::instrument]
 async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello, proxima\n"))
 }
@@ -74,17 +74,18 @@ async fn main() -> Result<(), ProximaError> {
 }
 ```
 
-`#[proxima::piped(send)]` reads `hello`'s signature and makes `hello` itself
-the pipe — the name you mount is the function you wrote (`send` is the one
-thing the macro never infers; crossing a core is a cost you opt into). The
-same macro also emits `impl From<hello> for MountTarget`, which is why
-`app.mount("/", hello)` compiles: any pipe of the matching shape mounts by
-name, no manual boxing.
+`hello` is just an `async fn` — no attribute makes it a pipe. `App::mount`
+takes a bare `async fn(Request<Bytes>) -> Result<Response<Bytes>, ProximaError>`
+directly (via `IntoMountTarget`), so `app.mount("/", hello)` compiles with no
+wrapper type and no manual boxing. `#[proxima::instrument]` is orthogonal: it
+wraps the handler in a span so every call is traced — one attribute yields
+trace + metric + log. Reach for `#[proxima::piped]` only when you want a
+*named*, reusable pipe type instead of a one-off handler.
 `#[proxima::main]` boots the runtime that `App::new()` then adopts; `app.serve(...)`
 spawns the listener and returns only once it is actually accepting.
 
 ```bash
-cargo run --example hello
+cargo run --example hello --features http1
 ```
 
 ```

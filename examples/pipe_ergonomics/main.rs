@@ -122,7 +122,7 @@ async fn piped_impl_all_demo() {
     println!("#[proxima::piped(send)] on a sync fn: reaches Pipe+SendPipe+UnpinPipe+UnpinSendPipe");
 }
 
-// ---- 7. App::mount accepts a handler pipe, a bare async fn, and a name ----
+// ---- 7. App::mount accepts a handler pipe and a bare async fn ----
 #[proxima::piped(send)]
 async fn echo(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     let (_, body) = request.body_bytes().await?;

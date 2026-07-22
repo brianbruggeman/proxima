@@ -400,24 +400,26 @@ impl from a plain function, removing the hand-written unit-struct-plus-impl
 boilerplate every leaf pipe otherwise repeats.
 ```
 
-`examples/hello/main.rs:32–35` uses it — this is the whole pipe, macro and all:
+`examples/runtime_select/main.rs:42–45` uses it — this is the whole pipe, macro and all:
 
 ```rust
 #[proxima::piped(send)]
-async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
-    Ok(Response::ok("hello, proxima\n"))
+async fn select_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    Ok(Response::ok("hello from whichever runtime is listening\n"))
 }
 ```
 
-This makes `hello` — the function you just wrote — into the pipe itself, giving it the `SendPipe` impl the function's own signature implies: `In = Request<Bytes>` (its one parameter), `Out = Response<Bytes>` and `Err = ProximaError` (from its `Result<Out, Err>` return type). It adds **no** new noun to the pipe algebra — it picks the *downward closure* of tiers from section 6 a given function's shape qualifies for, and writes one impl block per tier in that closure. **Not just one tier**: since the higher tiers are additive constraints on the same root contract, never a replacement for it (section 6), a pipe implements every tier it qualifies for at once. `hello`'s `async fn` plus `#[proxima::piped(send)]` puts it at `Pipe` *and* `SendPipe` both (a plain `fn` with `send` reaches all four — [Foundations, part 2](./01-ergonomics.md) proves this by compiling four separate trait-bound assertions against one macro-generated type). The rule the macro follows to compute that closure, exactly as its own module doc states it (`proxima-macros/src/pipe_attr.rs:9–24`, the closure itself computed by `Tier::plan`):
+(`examples/hello/main.rs`'s own handler is deliberately the *other* shape — a bare `async fn` with no macro at all, mounted directly; section 13 shows it and explains why. `#[proxima::piped]` earns its keep when a handler needs to be a *named*, reusable pipe type — `select_pipe` above is exactly that case, since `examples/runtime_select/main.rs` mounts the same `PipeHandle` under two different runtimes.)
+
+This makes `select_pipe` — the function you just wrote — into the pipe itself, giving it the `SendPipe` impl the function's own signature implies: `In = Request<Bytes>` (its one parameter), `Out = Response<Bytes>` and `Err = ProximaError` (from its `Result<Out, Err>` return type). It adds **no** new noun to the pipe algebra — it picks the *downward closure* of tiers from section 6 a given function's shape qualifies for, and writes one impl block per tier in that closure. **Not just one tier**: since the higher tiers are additive constraints on the same root contract, never a replacement for it (section 6), a pipe implements every tier it qualifies for at once. `select_pipe`'s `async fn` plus `#[proxima::piped(send)]` puts it at `Pipe` *and* `SendPipe` both (a plain `fn` with `send` reaches all four — [Foundations, part 2](./01-ergonomics.md) proves this by compiling four separate trait-bound assertions against one macro-generated type). The rule the macro follows to compute that closure, exactly as its own module doc states it (`proxima-macros/src/pipe_attr.rs:9–24`, the closure itself computed by `Tier::plan`):
 
 - **whether the function is `async fn` decides the `Unpin` axis for free**: an `async fn`'s future is a compiler-generated state machine (`!Unpin`), so the macro emits `Pipe` (or `SendPipe`); a plain `fn` gets wrapped in `core::future::ready`, whose future *is* `Unpin` unconditionally and costs nothing, so the macro emits `UnpinPipe` (or `UnpinSendPipe`).
 - **`send` is never inferred.** Only writing `#[proxima::piped(send)]` explicitly climbs to `SendPipe`/`UnpinSendPipe`. Nothing about your function's types is inspected to guess whether you "could" be `Send` — climbing a tier is a cost (see section 6) and the macro will not charge it to you without being asked.
 - `#[proxima::piped(unpin, boxed)]` is how an `async fn` reaches the `Unpin` tier anyway: it wraps the call in `Box::pin`, which is `Unpin` for any future because a `Box` is a fixed heap address, not a self-referential state machine. That costs one heap allocation per call — and, like `send`, `boxed` is never inferred; you always ask for it explicitly.
-- **the generated struct always derives `Clone`.** Every pipe the free-function form generates is a fieldless unit struct — like `Double` in section 2, it holds no data — so cloning it costs nothing: no heap, no allocator, not even a `memcpy` of anything but zero bytes. `#[proxima::piped]` puts `#[derive(::core::clone::Clone)]` on that struct unconditionally (`pipe_attr.rs:634`; the module doc states the reason at `pipe_attr.rs:29–33`), because `Clone` is the one bound a *combinator* — a pipe that wraps another pipe to add behavior like chaining, retrying, or rate-limiting; section 5's `AndThen` is the one you already met — commonly needs on the pipe it wraps. There is no `derive(...)` argument to opt in or out of this — it is always there.
-- **the pipe wears the function's name, and the function itself moves aside.** `hello` *is* the pipe now — that is the `hello` in `app.mount("/", hello)`. There is one consequence worth knowing before it surprises you: a unit struct and a function both live in Rust's *value* namespace, so both cannot be called `hello`. The macro renames your function body out of the way (to `__proxima_pipe_hello`) and the pipe takes the name, so `hello(request)` is no longer a call you can write. If you want the plain function *and* a pipe, name the pipe yourself — `#[proxima::piped(send, name = Greet)]` leaves `hello` callable and makes `Greet` the pipe.
+- **the generated struct always derives `Clone`.** Every pipe the free-function form generates is a fieldless unit struct — like `Double` in section 2, it holds no data — so cloning it costs nothing: no heap, no allocator, not even a `memcpy` of anything but zero bytes. `#[proxima::piped]` puts `#[derive(::core::clone::Clone)]` on that struct unconditionally (`pipe_attr.rs:600`; the module doc states the reason at `pipe_attr.rs:40–44`), because `Clone` is the one bound a *combinator* — a pipe that wraps another pipe to add behavior like chaining, retrying, or rate-limiting; section 5's `AndThen` is the one you already met — commonly needs on the pipe it wraps. There is no `derive(...)` argument to opt in or out of this — it is always there.
+- **the pipe wears the function's name, and the function itself moves aside.** `select_pipe` *is* the pipe now — that is the `select_pipe` in `into_handle(select_pipe)`. There is one consequence worth knowing before it surprises you: a unit struct and a function both live in Rust's *value* namespace, so both cannot be called `select_pipe`. The macro renames your function body out of the way (to `__proxima_pipe_select_pipe`) and the pipe takes the name, so `select_pipe(request)` is no longer a call you can write. If you want the plain function *and* a pipe, name the pipe yourself — `#[proxima::piped(send, name = Greet)]` leaves `select_pipe` callable and makes `Greet` the pipe.
 
-`hello` above is `async fn` plus `send`, so `Tier::plan`'s downward closure (`pipe_attr.rs`) puts it at `Pipe` *and* `SendPipe` — the async body never reaches the `Unpin` tier without the separate `unpin, boxed` opt-in (section 6), so those two are the whole closure here. `SendPipe` is the tier section 6 said an HTTP service needs, since a real server dispatches requests across many worker threads; `Pipe` comes along in the same expansion because `SendPipe` is additive on top of it, never a replacement for it.
+`select_pipe` above is `async fn` plus `send`, so `Tier::plan`'s downward closure (`pipe_attr.rs`) puts it at `Pipe` *and* `SendPipe` — the async body never reaches the `Unpin` tier without the separate `unpin, boxed` opt-in (section 6), so those two are the whole closure here. `SendPipe` is the tier section 6 said an HTTP service needs, since a real server dispatches requests across many worker threads; `Pipe` comes along in the same expansion because `SendPipe` is additive on top of it, never a replacement for it.
 
 **Auto-`Clone` is easiest to see paying for itself in a real example.** `RateLimit<Inner, Extractor, Clk>` (`proxima-primitives/src/pipe/rate_limit.rs`) wraps an inner pipe with a token-bucket admission check; every call clones `self.inner` to move it into the future that actually runs it, so its `SendPipe` impl requires `Inner: SendPipe + Clone + Send + Sync + 'static` (`rate_limit.rs:438–440`). Before this affordance existed, satisfying that bound meant writing the `Clone` derive yourself, alongside the struct and the impl — this is `examples/rate_limit/main.rs` as it read before `#[proxima::piped]` grew this affordance (the shape at commit `9f63d35b`, the base both `main` and this macro's branch built from — `main.rs:78–92` there):
 
@@ -452,7 +454,7 @@ async fn respond_ok(
 
 Same tier (`SendPipe`, from `async fn` plus `send`), same `Clone` bound satisfied — the explicit `#[derive(Clone)]` is gone because the macro writes it unconditionally now, on every generated struct, whether or not the call site in front of you happens to need it yet. `name = Backend` is here for the ordinary reason the naming bullet above already covered: `respond_ok` says what the function does, but `RateLimit::new(Backend, ...)` and every other call site in the file already expect a type named `Backend`, so the function keeps the descriptive name and the generated pipe keeps the name the rest of the example uses.
 
-**A real pipe often needs to hold onto something between calls — a client handle, a connection pool, a counter — and a fieldless struct can't do that.** `#[proxima::piped]` covers this shape too, by accepting a second, different kind of input: not a free function, but a plain `impl Foo { .. }` block naming no trait (Rust calls this an *inherent* impl — methods attached directly to a type, as opposed to `impl SomeTrait for Foo`). The macro tells the two shapes apart by grammar alone, before it inspects anything else — `impl ... { ... }` and `fn ... { ... }` never overlap, so trying the impl-block parse first can never mis-route an ordinary function (`pipe_attr.rs:477–487`):
+**A real pipe often needs to hold onto something between calls — a client handle, a connection pool, a counter — and a fieldless struct can't do that.** `#[proxima::piped]` covers this shape too, by accepting a second, different kind of input: not a free function, but a plain `impl Foo { .. }` block naming no trait (Rust calls this an *inherent* impl — methods attached directly to a type, as opposed to `impl SomeTrait for Foo`). The macro tells the two shapes apart by grammar alone, before it inspects anything else — `impl ... { ... }` and `fn ... { ... }` never overlap, so trying the impl-block parse first can never mis-route an ordinary function (`pipe_attr.rs:450–455`):
 
 ```rust
 pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
@@ -465,7 +467,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
 
 (This is the macro's own source, not code you ever write — `TokenStream` is the proc-macro crate's name for "a chunk of Rust source not yet parsed," and `ItemImpl` is what a successfully-parsed `impl` block turns into. The only thing to take from it: the impl-block shape is tried first, and it can never accidentally swallow a plain function, so both forms coexist under the one attribute name with no ambiguity.)
 
-For this shape the macro **generates no struct at all** — `Foo` already exists, with whatever fields you gave it, so `Foo` itself is relocated unchanged into `impl #trait for Foo`. The block must hold exactly one method named `call`, taking `&self` (never `&mut self` or `self` by value — a pipe is always called through a shared handle, so a call that needed exclusive access could never be satisfied) and exactly one parameter after it, the same `In`/`Out`/`Err` contract as always, just read off a method signature instead of a free function's (`pipe_attr.rs:685–701, 703–733, 742`). Anything else the block carries (a helper method) survives untouched, relocated into a plain leftover `impl Foo { .. }` next to the trait impl.
+For this shape the macro **generates no struct at all** — `Foo` already exists, with whatever fields you gave it, so `Foo` itself is relocated unchanged into `impl #trait for Foo`. The block must hold exactly one method named `call`, taking `&self` (never `&mut self` or `self` by value — a pipe is always called through a shared handle, so a call that needed exclusive access could never be satisfied) and exactly one parameter after it, the same `In`/`Out`/`Err` contract as always, just read off a method signature instead of a free function's (`pipe_attr.rs:637–653, 660–685, 731–736`). Anything else the block carries (a helper method) survives untouched, relocated into a plain leftover `impl Foo { .. }` next to the trait impl.
 
 `examples/proxy/main.rs`'s `ProxyPipe` is exactly this shape — `client: Client` is state the free-function form has nowhere to put. Before (`main.rs:64–80` at `9f63d35b`):
 
@@ -489,7 +491,7 @@ impl SendPipe for ProxyPipe {
 }
 ```
 
-Today (`examples/proxy/main.rs:63–73`):
+Today (`examples/proxy/main.rs:51–61`):
 
 ```rust
 struct ProxyPipe {
@@ -505,9 +507,9 @@ impl ProxyPipe {
 }
 ```
 
-The struct is untouched — it was never the boilerplate. What disappeared is the trait header (`impl SendPipe for ProxyPipe { type In = ..; type Out = ..; type Err = ..; }`) and the `async move { .. }` wrapper the hand-written form needed to turn a plain `Result` into a `Future`: the macro reads `In`/`Out`/`Err` straight off `call`'s own signature, the same way it does for the free-function form, and — because `call` here is `async fn` — passes the relocated body straight through as its own future (wrapped only in `async move { .. }`, `pipe_attr.rs:868`), the same zero-cost RPITIT passthrough section 6 already described for `Pipe`/`SendPipe`.
+The struct is untouched — it was never the boilerplate. What disappeared is the trait header (`impl SendPipe for ProxyPipe { type In = ..; type Out = ..; type Err = ..; }`) and the `async move { .. }` wrapper the hand-written form needed to turn a plain `Result` into a `Future`: the macro reads `In`/`Out`/`Err` straight off `call`'s own signature, the same way it does for the free-function form, and — because `call` here is `async fn` — passes the relocated body straight through as its own future (wrapped only in `async move { .. }`, `pipe_attr.rs:817`), the same zero-cost RPITIT passthrough section 6 already described for `Pipe`/`SendPipe`.
 
-The sync half of this form has a real, `UnpinPipe`-tier example too, in section 11's gate curriculum: `BackendQueue` holds a `RefCell<VecDeque<u32>>` (state), and its `call` was always hand-written to return `impl Future<..> + Unpin` directly, without `async`/`.await` — the same shape as `Ring`/`RingPop` back in section 6. Before (`examples/gate/main.rs:255–265` at `9f63d35b`):
+The sync half of this form has a real, `UnpinPipe`-tier example too, in section 11's gate curriculum: `BackendQueue` holds a `RefCell<VecDeque<u32>>` (state), and its `call` was always hand-written to return `impl Future<..> + Unpin` directly, without `async`/`.await` — the same shape as `Ring`/`RingPop` back in section 6. Before (`examples/gate/main.rs:255–266` at `9f63d35b`):
 
 ```rust
 impl UnpinPipe for BackendQueue {
@@ -524,7 +526,7 @@ impl UnpinPipe for BackendQueue {
 }
 ```
 
-Today (`examples/gate/main.rs:256–264`):
+Today (`examples/gate/main.rs:259–267`):
 
 ```rust
 #[piped]
@@ -538,11 +540,11 @@ impl BackendQueue {
 }
 ```
 
-No `async` anywhere in either version — this `call` already returns the future it needs to return, so the macro relocates the body exactly as written, with no wrapper at all (`ImplShape::Direct`, `pipe_attr.rs:812`): there is nothing here for the macro to change but the trait header.
+No `async` anywhere in either version — this `call` already returns the future it needs to return, so the macro relocates the body exactly as written, with no wrapper at all (`ImplShape::Direct`, `pipe_attr.rs:818`): there is nothing here for the macro to change but the trait header.
 
 **Put the two forms together and the rule is: you almost never write `impl Pipe for X` by hand anymore.** A stateless pipe — no fields, nothing to remember between calls — is a free function under `#[proxima::piped]`. A stateful pipe — a client, a pool, a counter, anything living in `&self` — is an inherent `impl Foo { fn call(..) { .. } }` under the same attribute. Both write the same four-tier impl section 6 describes; neither adds a fifth. What is left to hand-write is the tier-selection logic itself, plus a small, mechanical set of pipes the macro's own rules put out of scope — and that boundary is worth being precise about, because it is not "when the macro feels too heavy," it is a compile error with a name:
 
-- `#[proxima::piped]` refuses a **generic** function or impl outright — `"#[proxima::piped] does not support a generic fn"` / `"...does not support a generic impl"` (`pipe_attr.rs:493–497, 753–757`) — because a macro that reads one concrete `In`/`Out`/`Err` off a signature has nothing to read when the types are still parameters. Every **combinator** in this codebase (a pipe generic over another pipe it wraps) is disqualified by this rule alone: `RateLimit<Inner, Extractor, Clk>` (`rate_limit.rs:113`), `Retry<Inner, Clk>` (`retry.rs:135`), `Delay<Inner, Clk>` (`delay.rs:88`), `Isolate<Inner>` (`isolate.rs:39`), `Diff<Inner>` (`diff.rs:31`), `Transform<Inner, InOp, OutOp>` (`transform.rs:38`), `Validate<Inner, Op>` (`validate.rs:43`) — plus `FanOut<S, Policy>` (`fanout.rs:69`) and `FanIn<S, Strategy, N>` (`fan_in.rs:131`), section 9 and section 10's own primitives. All nine hand-roll their `Pipe`/`SendPipe`/`UnpinPipe` impls, and will keep doing so until some future, generic form of this macro can express "one impl, over a type parameter" — a materially different job than "one impl, over one concrete function or method."
+- `#[proxima::piped]` refuses a **generic** function or impl outright — `"#[proxima::piped] does not support a generic fn"` / `"...does not support a generic impl"` (`pipe_attr.rs:461–466, 705–709`) — because a macro that reads one concrete `In`/`Out`/`Err` off a signature has nothing to read when the types are still parameters. Every **combinator** in this codebase (a pipe generic over another pipe it wraps) is disqualified by this rule alone: `RateLimit<Inner, Extractor, Clk>` (`rate_limit.rs:113`), `Retry<Inner, Clk>` (`retry.rs:135`), `Delay<Inner, Clk>` (`delay.rs:88`), `Isolate<Inner>` (`isolate.rs:39`), `Diff<Inner>` (`diff.rs:31`), `Transform<Inner, InOp, OutOp>` (`transform.rs:38`), `Validate<Inner, Op>` (`validate.rs:43`) — plus `FanOut<S, Policy>` (`fanout.rs:71`) and `FanIn<S, Strategy, N>` (`fan_in.rs:131`), section 9 and section 10's own primitives. All nine hand-roll their `Pipe`/`SendPipe`/`UnpinPipe` impls, and will keep doing so until some future, generic form of this macro can express "one impl, over a type parameter" — a materially different job than "one impl, over one concrete function or method."
 - The algebra-teaching examples this tutorial has already shown you — `Double`/`Always`/`Discard`/`Echo`/`Counter` (sections 2–3), `Ring`/`RingPop` (section 6) — stay hand-written **on purpose**, not because the macro can't reach them. They exist to show you the trait itself, one field at a time, before section 7 existed for you. Teaching the shortcut before the shape it shortcuts would leave you unable to read the four-tier ladder in section 6, or debug what the macro generates when something doesn't type-check.
 - Inside `examples/fan_out/main.rs`, the `CapturingSink` *arms* plugged into `FanOut` are themselves ordinary stateful pipes (`examples/fan_out/main.rs:96–106`) — the macro applies to them exactly as it does to `ProxyPipe`. It is `FanOut<S, Policy>` itself, the generic combinator that holds the arms, that stays hand-rolled — for the reason just given. Both things are true in the same file: the leaf pipes are macro-written, the combinator they are wired into is not, because "generic over what it wraps" and "one concrete pipe" are different jobs, and the macro only ever does the second one.
 
@@ -733,12 +735,20 @@ That is the whole algebra: **`and_then` (chain), filter, fan-out, fan-in, gate, 
 
 ## 13. A pipe that answers web requests, and how to serve it
 
-To answer HTTP, a pipe's input is an HTTP request and its output an HTTP response. `Handler` (`proxima-primitives/src/pipe/handler.rs:73`) is exactly that shape, pinned down: it is a trait, but you never implement it yourself — it is *blanket*-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>` (`handler.rs:75–78`). So the moment section 7's `hello` function satisfies that `SendPipe` signature, it is already a `Handler` — there is no second trait to opt into and nothing more to write.
+To answer HTTP, a pipe's input is an HTTP request and its output an HTTP response. `Handler` (`proxima-primitives/src/pipe/handler.rs:73`) is exactly that shape, pinned down: it is a trait, but you never implement it yourself — it is *blanket*-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>` (`handler.rs:75–78`). Section 7's `select_pipe` reaches `Handler` this way directly, since `#[proxima::piped(send)]` already gave it that `SendPipe` impl.
 
-`hello`, the exact macro-generated pipe from section 7, mounted and served — this is `examples/hello/main.rs`, in full:
+A *bare* `async fn` — no `#[proxima::piped]` at all — reaches the server through an adjacent seam: `App::mount` accepts one directly via `IntoMountTarget<ViaFn>` (`src/app.rs:1228–1236`), which wraps the function in a small private `SendPipe` impl, `FnHandler` (`src/app.rs:1209`, `1211–1226`), before erasing it into a `Handler` the same way `select_pipe` was. This is the shape `hello` uses — mounted and served, this is `examples/hello/main.rs`, in full:
 
 ```rust
-#[proxima::piped(send)]
+/// A handler is just an `async fn`: typed request in, typed response out, nothing
+/// more. It never touches a socket — the listener owns that; the handler answers.
+///
+/// No attribute is needed to mount it: `App::mount` takes a bare
+/// `async fn(Request<Bytes>) -> Result<Response<Bytes>, ProximaError>` directly.
+/// `#[proxima::instrument]` wraps it in a span so every call is traced — one
+/// attribute yields trace + metric + log. Reach for `#[proxima::piped]` only when
+/// you want a *named*, reusable pipe type instead of a one-off handler.
+#[proxima::instrument]
 async fn hello(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello, proxima\n"))
 }
@@ -760,15 +770,15 @@ async fn main() -> Result<(), ProximaError> {
 
 Three real pieces, each grounded in source:
 
-- **`App::new()`** (`src/app.rs:214–215`) builds the app with a runtime already set up — the engine that actually drives async work. Under a bare `#[proxima::main]`, `App::new()` adopts that same runtime rather than building a second, independent one.
-- **`app.mount("/", hello)`** (`mount` at `src/app.rs:514`) attaches your pipe at a path. `mount` takes `impl Into<MountTarget>`, and `#[proxima::piped(send)]` emits a `From<hello> for MountTarget` alongside the pipe impl — so the pipe goes straight in by name. Underneath, that conversion runs `into_handle` (`proxima-primitives/src/pipe/handler.rs:86`), which wraps `hello` — a specific, concrete Rust type — into a `PipeHandle`, one uniform type that can hold *any* handler. That is what lets `App` store handlers of different concrete types side by side, and mount several at different paths.
-- **`app.serve(RunConfig::http(bind))`** (`serve` at `src/app.rs:750`) spawns the listener and returns a `Server` handle *only once the socket is genuinely accepting* — no polling, no sleeping, no discovering `ECONNREFUSED` the hard way.
+- **`App::new()`** (`src/app.rs:232–233`) builds the app with a runtime already set up — the engine that actually drives async work. Under a bare `#[proxima::main]`, `App::new()` adopts that same runtime rather than building a second, independent one.
+- **`app.mount("/", hello)`** (`mount` at `src/app.rs:538`) attaches your handler at a path. `mount` takes anything [`IntoMountTarget`] covers (`src/app.rs:1173`) — a handler-shaped pipe, a bare async fn, a registered pipe name, or an already-built `MountTarget`; `hello` here dispatches through the bare-fn arm just described. Underneath, that arm's own conversion runs `into_handle` (`proxima-primitives/src/pipe/handler.rs:86`), which wraps the erased `FnHandler` into a `PipeHandle`, one uniform type that can hold *any* handler. That is what lets `App` store handlers of different concrete types side by side, and mount several at different paths.
+- **`app.serve(RunConfig::http(bind))`** (`serve` at `src/app.rs:785`) spawns the listener and returns a `Server` handle *only once the socket is genuinely accepting* — no polling, no sleeping, no discovering `ECONNREFUSED` the hard way.
 - **`server.run_until_signal()`** (`src/server.rs:94`) blocks until SIGINT/SIGTERM (or a `stop()` from any clone), then stops accepting and lets in-flight requests drain. That one line is the entire shutdown story — no `ShutdownBarrier` ceremony to hand-roll.
 
-Run it and, in another shell, curl it:
+Run it and, in another shell, curl it. `http1` is required, not default — h1 has no sans-IO driver yet, so the h1+h2 listener `RunConfig::http` names pulls in `tokio` underneath it (`examples/hello/main.rs`'s own module doc explains this; h2/h3 alone have native, tokio-free drivers):
 
 ```
-$ cargo run --example hello
+$ cargo run --example hello --features http1
 listening on http://127.0.0.1:8080
 
 $ curl http://127.0.0.1:8080/
