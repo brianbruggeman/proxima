@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # proxima-pgwire-gate.sh
-# Mechanical gate for the proxima-pgwire stack (docs/proxima-pgwire/discipline.md).
+# Mechanical gate for the proxima-pgwire stack.
 # Re-proves every discipline-log row from the artifact alone, without anyone's
 # memory (guiding-principle 16): the sans-IO codec + session FSM, the Pipe-native
 # facade (driver / connection-pipe upgrade / auth / COPY / LISTEN-NOTIFY / portal

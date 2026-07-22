@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # telemetry-gate.sh
-# Disciplined-component gate for proxima-telemetry
-# (proxima-telemetry/docs/tracing/discipline.md). Re-proves the crate's
+# Disciplined-component gate for proxima-telemetry. Re-proves the crate's
 # correctness claims from scratch — the emit path (SpanSink, no per-span box),
 # the lock-free MPSC ring (no-loss/no-tear stress test), the drain path, and the
 # native-vs-OTLP byte-parity vectors — plus the feature tiers compile.

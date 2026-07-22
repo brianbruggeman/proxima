@@ -98,7 +98,7 @@ pub struct ProximaSettings {
     /// are self-starting Pipes — they declare continuous-loop work via
     /// `Pipe::background_tasks()` and are NOT mounted on any listener.
     ///
-    /// S3 of the proxima-notify initiative (see `docs/proxima-notify/SUBSTRATE.md`).
+    /// S3 of the proxima-notify initiative.
     /// Active only when the `producer-graph-config` feature is enabled on
     /// proxima; without it, this map is ignored at `App::apply_settings`
     /// time but still parses from TOML (forward-compatible with future

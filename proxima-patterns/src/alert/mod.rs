@@ -22,9 +22,7 @@
 //! Integrations are TOML compositions of existing primitives:
 //! `HttpUpstream`, `Transform` (with body-template DSL), `Validate`
 //! (with proxima-config's schema module contracts), `Retry`, and `Isolate`. No
-//! per-integration Rust required. See `docs/proxima-notify/examples/`
-//! for the canonical configs (real and sim variants) and
-//! `docs/proxima-notify/SUBSTRATE.md` for the architectural rationale.
+//! per-integration Rust required.
 
 #![deny(missing_docs)]
 

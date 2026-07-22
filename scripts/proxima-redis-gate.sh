@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # proxima-redis-gate.sh
-# Mechanical gate for the proxima-redis stack (docs/proxima-redis/discipline.md).
+# Mechanical gate for the proxima-redis stack.
 # Re-proves every discipline-log row from the artifact alone, without anyone's
 # memory (guiding-principle 16): the sans-IO RESP codec, the client session FSM
 # + config + Pipe, the vendored real-server corpus (parity vs the canonical

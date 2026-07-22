@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # dpdk-stack-gate.sh
-# Disciplined-component gate for the DPDK userspace-stack sans-IO layer
-# (docs/inet-codec/discipline.md, docs/tcp-connection-fsm/discipline.md).
+# Disciplined-component gate for the DPDK userspace-stack sans-IO layer.
 # Re-proves the correctness claims from scratch (guiding-principle 16), with no
 # one's memory: the L2-L4 wire codec (RFC 1071 checksum worked examples, eth/
 # ipv4/tcp/udp parse+build) and the RFC 793 connection control FSM (the Fig 6

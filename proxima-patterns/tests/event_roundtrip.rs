@@ -183,6 +183,6 @@ fn alert_event_as_json_shape_matches_documented_schema_fixture() {
     });
     assert_eq!(
         actual, expected,
-        "AlertEvent JSON shape must match docs/proxima-notify/ALERT_EVENT_SCHEMA.md fixture"
+        "AlertEvent JSON shape must match the documented fixture"
     );
 }

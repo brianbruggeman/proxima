@@ -1,10 +1,5 @@
 //! Generic MITM intercept pipeline: TLS-terminating CONNECT proxy that forwards,
 //! captures, and replays traffic for any host, with no vendor knowledge.
-//!
-//! Design docs live in `docs/intercept-pipeline/`:
-//! - `landscape.md` — the clients × axes map.
-//! - `discipline.md` — the per-component discipline log (the contract).
-//! - `edges.md` — resolved contested design decisions.
 
 pub mod ca;
 #[cfg(feature = "intercept-capture")]
