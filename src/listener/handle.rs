@@ -138,7 +138,7 @@ impl ListenerBuilder {
     /// dial an upstream url, so this inherent 0-arg method shadows the
     /// blanket 1-arg trait method and just flips the same `"grpc"` marker key
     /// [`resolve_listen_protocol`] reads (mirroring `load.rs`'s
-    /// `value.get("grpc")` dispatch, `src/load.rs:455`). Resolves to the
+    /// `value.get("grpc")` dispatch, `src/load.rs:499`). Resolves to the
     /// `h2` listen protocol — gRPC rides h2.
     #[must_use]
     pub fn grpc(mut self) -> Self {
@@ -198,7 +198,7 @@ impl ListenerBuilder {
     /// wrapper. No new TLS mechanism underneath: the decorator still stamps
     /// the identical `proxima_tls::SPEC_KEY` (`"__proxima_tls"`) marker
     /// `HttpListenProtocol::serve_default` reads
-    /// (`proxima-http/src/listener/mod.rs:195`) to build its
+    /// (`proxima-http/src/listener/mod.rs:451`) to build its
     /// `tokio_rustls::TlsAcceptor` — only WHERE that marker gets attached
     /// moved, from this builder's spec map to the decorator's own `serve`.
     /// This inherent `(Self, TlsConfig)` signature shadows the blanket 0-arg
@@ -228,7 +228,7 @@ impl ListenerBuilder {
     /// the builder. No new serve loop.
     ///
     /// Mounts at `"/{*path}"` (the catch-all convention `App::bind_listener`
-    /// also uses at `src/app.rs:925,981`) so every path routes to
+    /// also uses at `src/app.rs:1055,1111`) so every path routes to
     /// `.handle(pipe)`, not just the literal root.
     ///
     /// Readiness race: unlike `proxima_listen::handle::Listener::run_with_runtime`
@@ -341,7 +341,7 @@ fn tls_marker_present(_spec: &serde_json::Map<String, Value>) -> bool {
 
 /// The listen-side protocol pick — the mirror of `load.rs`'s
 /// `value.get("http") ... else if value.get("grpc")` factory dispatch
-/// (`src/load.rs:455`), extended with the `transport` axis so `.h3()`
+/// (`src/load.rs:488,499`), extended with the `transport` axis so `.h3()`
 /// resolves too (the client side doesn't need this extension: its `h3`
 /// transport rides the SAME `http`-keyed factory, selected by ALPN, not a
 /// different registry entry), and with `.h2()`/`.pgwire(query)`, which have

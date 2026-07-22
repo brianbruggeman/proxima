@@ -44,16 +44,18 @@ under the same `PipeHandle`.
 ## Run
 
 ```sh
-cargo run --example hello --features http1
+cargo run --example hello --features http1-native
 # in another shell:
 curl http://127.0.0.1:8080/     # -> hello, proxima
 # ctrl-c the server to drain and exit.
 ```
 
-`http1` is required, not default: h1 has no sans-IO driver yet, so the h1+h2
-listener `RunConfig::http` names (`AppBuilder::with_defaults`) pulls in `tokio`
-underneath it. h2/h3 alone have native, tokio-free drivers — see the `tokio`
-feature's own doc comment in `Cargo.toml`.
+`http1-native` is required, not default: it registers the h1+h2 listener
+`RunConfig::http` names (`AppBuilder::with_defaults`), over the tokio-free
+sans-IO h1 driver (`serve_connection`/`serve_h1_connection` in
+`proxima-http`). This example is tokio-free end to end — the legacy
+hyper/tokio h1 stack (`http1`, layered on top of `http1-native`) is not
+needed here. See the `tokio` feature's own doc comment in `Cargo.toml`.
 
 ## What you'll see
 

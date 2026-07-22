@@ -30,10 +30,10 @@
 //! | axis | client (`ClientBuilder`) | listener (`ListenerBuilder`) |
 //! | --- | --- | --- |
 //! | `.tcp()` / `.auto()` | real (`TransportSugar`) | real — resolves to the h1+h2 ALPN combiner (`"http"`) |
-//! | `.tls()` | real, url-carrying (`TransportSugar`) | shadowed: inherent `.tls(TlsConfig)` — real cert material required; resolves to the SAME `"http"` combiner (TLS is spec data, not a different protocol) |
+//! | `.tls()` | real, zero-arg (`TransportSugar`) — the dial url comes from a separately-chained `.http(url)` | shadowed: inherent `.tls(TlsConfig)` — real cert material required; resolves to the SAME `"http"` combiner (TLS is spec data, not a different protocol) |
 //! | `.h3()` | real (`TransportSugar`) | real — resolves to `"h3-native"`, self-registered onto the fresh `App` (not in `App::new()`'s default set) |
 //! | `.proxy(url)` | real | no listener meaning — `.serve()` hard-errors if present |
-//! | `.http(url)` / `.https(url)` | real (dials the url) | real — carries the BIND address (`bind.to_string()`), read by `resolve_bind` when `.bind(addr)` wasn't called directly |
+//! | `.http(url)` / `.https(url)` | real (dials the url) | real — carries the BIND address (`bind.to_string()`), read by `bind_from_spec` when `.bind(addr)` wasn't called directly |
 //! | `.grpc(url)` / `.grpc()` | real, url-carrying | shadowed: inherent url-less `.grpc()` — listener dispatches to `.handle(pipe)`, not a url; resolves to `"h2"` (gRPC rides h2), self-registered like `.h3()` |
 //! | (no client twin) | — | inherent `.h2()` — the other name for the same shared `"h2"` protocol |
 //! | (no client twin) | — | inherent `.pgwire(query)` (feature `pgwire`) — carries a typed SQL query engine, self-registered fresh on every `.serve()` |
