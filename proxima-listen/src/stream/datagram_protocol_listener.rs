@@ -12,15 +12,23 @@
 //! [`crate::ListenProtocol`] that drives it — binds the socket via the
 //! injected [`crate::ServeContext::datagram_factory`] (exactly like
 //! `DatagramListenProtocol`), and every tick races the batched recv, the
-//! protocol's own [`DatagramProtocol::next_deadline`], and shutdown (exactly
-//! like the native H3 listener's per-connection deadline race in
-//! `proxima-http/src/http3/native/listen.rs`). The recv/send batching and
-//! backpressure flush (`datagram_listener`'s `stage_reply` / `flush_send`,
-//! crate-private) are reused verbatim rather than duplicated.
+//! protocol's own [`DatagramProtocol::next_deadline`], and shutdown
+//! (mirroring `DatagramListenProtocol`'s two-way race, plus a timer arm).
+//! The recv/send batching and backpressure flush (`datagram_listener`'s
+//! `stage_reply` / `flush_send`, crate-private) are reused verbatim rather
+//! than duplicated.
+//!
+//! A protocol that dispatches work concurrently (e.g. H3-over-QUIC's
+//! per-connection request handlers) owns ITS OWN loop and races its own
+//! completion source alongside recv/timer/shutdown there — see
+//! `H3NativeListenProtocol::serve` in
+//! `proxima-http/src/http3/native/listen.rs`. This generic driver stays
+//! minimal: genuinely connectionless protocols have no background
+//! dispatch to race.
 //!
 //! No fixed tick: the reactor arms the EXACT next protocol deadline, or
 //! nothing when [`DatagramProtocol::next_deadline`] returns `None` — an idle
-//! state machine costs zero wakeups. [`DatagramProtocol::poll_transmit`]
+//! state machine costs zero wakeups. [`DatagramProtocol::transmit`]
 //! drains unconditionally every iteration (after either arm wakes), so a
 //! reply staged by `on_datagram` and a retransmit staged by `on_timeout`
 //! both ship through the identical send path.
@@ -66,24 +74,48 @@ const TRANSMIT_SCRATCH_BYTES: usize = 2048;
 pub trait DatagramProtocol {
     /// Protocol-level failure. Logged and the offending call skipped — a
     /// malformed datagram or a failed transmit must never tear down a
-    /// connectionless listener.
-    type Err: Debug;
+    /// connectionless listener. `'static` because the async methods below
+    /// return an opaque RPITIT future — without an explicit outlives bound
+    /// on the associated type, the compiler cannot prove `Self::Err` is
+    /// well-formed for the elided per-call borrow those futures capture.
+    /// Every error type used with this trait is already owned/`'static` in
+    /// practice (`Infallible`, `ListenerError`, …), so this is not a new
+    /// restriction.
+    type Err: Debug + 'static;
 
-    /// Feed one received datagram from `peer`.
-    fn on_datagram(&mut self, now: Instant, peer: SocketAddr, datagram: &[u8]) -> Result<(), Self::Err>;
+    /// Feed one received datagram from `peer`. Async (RPITIT, explicit
+    /// `Send` bound) so an implementor can await dispatch inline — e.g. an
+    /// H3-over-QUIC protocol driving a request handler to completion before
+    /// staging its reply — without the driver boxing the protocol's future
+    /// or reopening the 4-tier Send/Unpin split. The explicit `+ Send` is
+    /// deliberate: it forces every implementor's future Send, which is
+    /// correct for the multi-threaded datagram runtime this trait serves.
+    /// No explicit `'_` on the return type — edition-2024 RPITIT captures
+    /// every in-scope lifetime by default (both `&mut self`'s and
+    /// `datagram`'s); writing a single `'_` here would instead invoke the
+    /// older self-only elision rule and produce a future whose captured
+    /// `datagram` borrow the trait signature never promised, which fails
+    /// to typecheck at every impl site.
+    fn on_datagram(&mut self, now: Instant, peer: SocketAddr, datagram: &[u8]) -> impl Future<Output = Result<(), Self::Err>> + Send;
 
-    /// Fire the elapsed timer.
-    fn on_timeout(&mut self, now: Instant) -> Result<(), Self::Err>;
+    /// Fire the elapsed timer. Async for the same reason as
+    /// [`on_datagram`](Self::on_datagram).
+    fn on_timeout(&mut self, now: Instant) -> impl Future<Output = Result<(), Self::Err>> + Send;
 
     /// Earliest deadline at which [`on_timeout`](Self::on_timeout) must be
     /// called, if any. `None` means the state machine is quiescent — the
-    /// serve loop arms no timer and parks on recv + shutdown alone.
+    /// serve loop arms no timer and parks on recv + shutdown alone. Stays
+    /// SYNC — a pure query over already-held state, no I/O or dispatch to
+    /// await.
     fn next_deadline(&self) -> Option<Instant>;
 
     /// Drain one pending outbound datagram into `buf`. `Ok(Some((len,
     /// peer)))` for a datagram to ship, `Ok(None)` once drained for this
     /// tick. Called in a loop every tick regardless of which race arm woke.
-    fn poll_transmit(&mut self, now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Self::Err>;
+    /// Async for the same reason as [`on_datagram`](Self::on_datagram) —
+    /// named `transmit` rather than `poll_transmit` now that it awaits
+    /// rather than polls.
+    fn transmit(&mut self, now: Instant, buf: &mut [u8]) -> impl Future<Output = Result<Option<(usize, SocketAddr)>, Self::Err>> + Send;
 }
 
 fn instant_now<Clk: Clock>(clock: &Clk) -> Instant {
@@ -190,17 +222,37 @@ where
                 let next_delay = proto
                     .next_deadline()
                     .map(|deadline| deadline.saturating_duration_since(tick_start));
-                let timer = async {
-                    match next_delay {
-                        Some(delay) => clock.delay(delay).await,
-                        None => future::pending::<()>().await,
+                // The race yields an `Either<Either<..>,..>` whose
+                // unresolved arms hold pinned borrows of `socket` /
+                // `batch.recv` — those borrows must end before the match
+                // body below touches those same values again. Collapsing
+                // to this small owned enum INSIDE the scoped block
+                // (rather than matching on the raw `Either` outside it)
+                // is what lets the borrows drop at the block's end
+                // instead of needing to outlive it.
+                enum RaceEvent {
+                    Recv(std::io::Result<usize>),
+                    Timeout,
+                    Shutdown,
+                }
+                let event = {
+                    let timer = async {
+                        match next_delay {
+                            Some(delay) => clock.delay(delay).await,
+                            None => future::pending::<()>().await,
+                        }
+                    };
+                    let recv = poll_fn(|cx| socket.poll_fill_recv_batch(cx, &mut batch.recv));
+                    futures::pin_mut!(recv, timer);
+                    match select(select(recv, timer), &mut shutdown).await {
+                        Either::Left((Either::Left((result, _)), _)) => RaceEvent::Recv(result),
+                        Either::Left((Either::Right(((), _)), _)) => RaceEvent::Timeout,
+                        Either::Right(_) => RaceEvent::Shutdown,
                     }
                 };
-                let recv = poll_fn(|cx| socket.poll_fill_recv_batch(cx, &mut batch.recv));
-                futures::pin_mut!(recv, timer);
 
-                match select(select(recv, timer), &mut shutdown).await {
-                    Either::Left((Either::Left((result, _)), _)) => {
+                match event {
+                    RaceEvent::Recv(result) => {
                         let filled = result.map_err(|err| {
                             ProximaError::Io(io::Error::other(format!("{label} recv: {err}")))
                         })?;
@@ -208,7 +260,7 @@ where
                             socket.drain_recv_to_empty(&mut batch.recv);
                             let now = instant_now(&clock);
                             for view in batch.recv.filled_datagrams() {
-                                if let Err(error) = proto.on_datagram(now, view.peer, view.bytes) {
+                                if let Err(error) = proto.on_datagram(now, view.peer, view.bytes).await {
                                     warn!(
                                         ?error,
                                         label = %label,
@@ -220,13 +272,13 @@ where
                             batch.recv.clear();
                         }
                     }
-                    Either::Left((Either::Right(((), _)), _)) => {
+                    RaceEvent::Timeout => {
                         let now = instant_now(&clock);
-                        if let Err(error) = proto.on_timeout(now) {
+                        if let Err(error) = proto.on_timeout(now).await {
                             warn!(?error, label = %label, "datagram protocol on_timeout failed");
                         }
                     }
-                    Either::Right(_) => {
+                    RaceEvent::Shutdown => {
                         debug!(label = %label, "datagram protocol listener shutting down");
                         return Ok(());
                     }
@@ -234,10 +286,10 @@ where
 
                 let now = instant_now(&clock);
                 loop {
-                    let transmit = proto.poll_transmit(now, &mut transmit_scratch).map_err(|error| {
-                        warn!(?error, label = %label, "datagram protocol poll_transmit failed");
+                    let outcome = proto.transmit(now, &mut transmit_scratch).await.map_err(|error| {
+                        warn!(?error, label = %label, "datagram protocol transmit failed");
                     });
-                    match transmit {
+                    match outcome {
                         Ok(Some((len, peer))) => {
                             stage_reply(&mut socket, &mut batch, &transmit_scratch[..len], peer, &label).await?;
                         }
@@ -366,11 +418,11 @@ mod tests {
     impl DatagramProtocol for TimerDrivenProto {
         type Err = Infallible;
 
-        fn on_datagram(&mut self, _now: Instant, _peer: SocketAddr, _datagram: &[u8]) -> Result<(), Infallible> {
+        async fn on_datagram(&mut self, _now: Instant, _peer: SocketAddr, _datagram: &[u8]) -> Result<(), Infallible> {
             Ok(())
         }
 
-        fn on_timeout(&mut self, _now: Instant) -> Result<(), Infallible> {
+        async fn on_timeout(&mut self, _now: Instant) -> Result<(), Infallible> {
             self.timer_fired = true;
             self.on_timeout_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -380,7 +432,7 @@ mod tests {
             if self.emitted { None } else { Some(Instant::from_monotonic(Duration::ZERO)) }
         }
 
-        fn poll_transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
+        async fn transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
             if !self.timer_fired || self.emitted {
                 return Ok(None);
             }
@@ -404,13 +456,13 @@ mod tests {
     impl DatagramProtocol for EchoAckProto {
         type Err = Infallible;
 
-        fn on_datagram(&mut self, _now: Instant, peer: SocketAddr, datagram: &[u8]) -> Result<(), Infallible> {
+        async fn on_datagram(&mut self, _now: Instant, peer: SocketAddr, datagram: &[u8]) -> Result<(), Infallible> {
             self.received.lock().unwrap().push((datagram.to_vec(), peer));
             self.pending_reply = Some(peer);
             Ok(())
         }
 
-        fn on_timeout(&mut self, _now: Instant) -> Result<(), Infallible> {
+        async fn on_timeout(&mut self, _now: Instant) -> Result<(), Infallible> {
             Ok(())
         }
 
@@ -418,7 +470,7 @@ mod tests {
             None
         }
 
-        fn poll_transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
+        async fn transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
             match self.pending_reply.take() {
                 Some(peer) => {
                     let payload = b"ack";
@@ -439,11 +491,11 @@ mod tests {
     impl DatagramProtocol for NeverTimeoutProto {
         type Err = Infallible;
 
-        fn on_datagram(&mut self, _now: Instant, _peer: SocketAddr, _datagram: &[u8]) -> Result<(), Infallible> {
+        async fn on_datagram(&mut self, _now: Instant, _peer: SocketAddr, _datagram: &[u8]) -> Result<(), Infallible> {
             Ok(())
         }
 
-        fn on_timeout(&mut self, _now: Instant) -> Result<(), Infallible> {
+        async fn on_timeout(&mut self, _now: Instant) -> Result<(), Infallible> {
             self.on_timeout_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -452,7 +504,7 @@ mod tests {
             None
         }
 
-        fn poll_transmit(&mut self, _now: Instant, _buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
+        async fn transmit(&mut self, _now: Instant, _buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
             Ok(None)
         }
     }
@@ -591,4 +643,5 @@ mod tests {
         let _ = shutdown_tx.send(());
         assert!(poll_n(&mut serve, &mut cx, 4), "shutdown ends serve()");
     }
+
 }
