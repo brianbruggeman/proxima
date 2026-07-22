@@ -5,6 +5,7 @@
 # Start here
 
 - [hello](start/hello.md)
+- [dial, serve, run — the three faces](start/interfaces.md)
 
 # The pipe algebra
 
