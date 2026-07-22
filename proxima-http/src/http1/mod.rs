@@ -4,8 +4,13 @@
 //!
 //! Lives behind feature gates in `proxima-http`'s `[features]` table:
 //!
-//! - `http1` enables the wire parser + connection state machine
-//! - `http1-tls` enables the https-capable `shared_http` connector
+//! - `http1-native` enables the sans-IO wire parser + connection state
+//!   machine + the tokio-free `serve` driver (`serve_connection` /
+//!   `serve_h1_connection`) — no hyper, no tokio.
+//! - `http1` layers the legacy hyper/tokio client stack
+//!   (`upstream`/`shared_http`/`client`) and the `H1ListenProtocol`
+//!   sibling's tokio accept loop on top of `http1-native`.
+//! - `http1-tls` enables the https-capable `shared_http` connector.
 //!
 //! Listeners are in the umbrella's `listeners/http.rs` for now (they
 //! depend on the listener registry); a follow-on extraction pulls them
@@ -31,7 +36,7 @@ pub mod prime_upstream;
 // pure config types carried by the always-compiled `upstream` module, so they
 // live outside the `http1-stream-client`-gated `client` module.
 pub mod response_config;
-#[cfg(feature = "http1")]
+#[cfg(feature = "http1-native")]
 pub mod serve;
 #[cfg(feature = "http1")]
 pub mod shared_http;
@@ -50,7 +55,7 @@ pub use prime_upstream::PrimeHttpPipeFactory;
 pub use response_config::{
     ResponseBodyMode, ResponseHandling, ResponseHandlingConfig, ResponseHeaderMode,
 };
-#[cfg(feature = "http1")]
+#[cfg(feature = "http1-native")]
 pub use serve::{HttpListenerSpec, serve_connection, serve_h1_connection};
 #[cfg(feature = "http1")]
 pub use upstream::{HttpPipeFactory, HttpUpstream};

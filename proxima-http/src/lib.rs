@@ -13,13 +13,18 @@
 /// renders identically regardless of which protocol served it.
 #[cfg(any(
     feature = "http1",
+    feature = "http1-native",
     feature = "http2-native",
     feature = "http3-native",
     feature = "http3-quinn-compat"
 ))]
 mod error_render;
 
-#[cfg(any(feature = "http1", feature = "http1-stream-client"))]
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "http1-stream-client"
+))]
 pub mod http1;
 #[cfg(any(feature = "http2", feature = "http2-native"))]
 pub mod http2;

@@ -2,7 +2,7 @@
 pub mod dpdk_packet;
 #[cfg(feature = "dpdk")]
 pub mod dpdk_stream;
-#[cfg(feature = "http1")]
+#[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use proxima_http::listener as http;
 #[cfg(all(target_os = "linux", feature = "io-uring", feature = "http1"))]
 pub mod http_uring;
@@ -50,7 +50,7 @@ pub use dpdk_packet::DpdkPacketListener;
 pub use dpdk_stream::{DpdkStreamConnection, DpdkStreamListener, DpdkStreamUpstream};
 #[cfg(feature = "http1")]
 pub use h1::H1ListenProtocol;
-#[cfg(feature = "http1")]
+#[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use http::{HttpListenProtocol, HttpListenerSpec, serve_h1_connection};
 #[cfg(feature = "tokio")]
 pub use mcp::McpListenProtocol;

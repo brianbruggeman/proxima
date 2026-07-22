@@ -105,7 +105,7 @@ pub fn installed_runtime() -> Option<InstalledRuntime> {
 // agnostic listener stack instead of a bespoke accept loop.
 
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -114,7 +114,7 @@ pub fn installed_runtime() -> Option<InstalledRuntime> {
 use std::net::SocketAddr;
 
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -122,7 +122,7 @@ use std::net::SocketAddr;
 ))]
 use proxima_http::listener::HttpListenProtocol;
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -130,7 +130,7 @@ use proxima_http::listener::HttpListenProtocol;
 ))]
 use proxima_listen::handle::ListenerHandle;
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -138,7 +138,7 @@ use proxima_listen::handle::ListenerHandle;
 ))]
 use proxima_listen::{ListenRegistry, ListenerSpec};
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -146,7 +146,7 @@ use proxima_listen::{ListenRegistry, ListenerSpec};
 ))]
 use proxima_primitives::pipe::handler::PipeHandle;
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -155,7 +155,7 @@ use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
 
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -187,7 +187,7 @@ pub trait PrimeServeExt {
 }
 
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",
@@ -200,7 +200,7 @@ fn make_http_registry() -> Result<ListenRegistry, ProximaError> {
 }
 
 #[cfg(all(
-    feature = "http1",
+    any(feature = "http1", feature = "http1-native"),
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-reactor",

@@ -12,12 +12,17 @@
 //! + upstream" file mapping). The umbrella combiner keeps the ALPN
 //!   multiplex, TLS termination, UDS, and SO_REUSEPORT orchestration.
 
+use std::future::{Future, poll_fn};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::Poll;
 
 use bytes::Bytes;
 use futures::FutureExt;
+use futures::SinkExt;
 use futures::StreamExt;
+use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, error};
@@ -89,6 +94,26 @@ where
         runtime,
     )
     .await
+}
+
+/// Outcome of the hand-rolled biased poll racing the buffered-path
+/// dispatch future against socket-EOF detection in
+/// [`serve_connection`] — the tokio-free equivalent of
+/// `tokio::select!`.
+enum DispatchRace {
+    Response(Result<Response<Bytes>, ProximaError>),
+    Read(std::io::Result<usize>),
+}
+
+/// Outcome of the hand-rolled biased poll racing a streaming-path
+/// pending response against socket-EOF detection in
+/// [`dispatch_streaming_request`]. `Response(None)` only ever comes
+/// from the runtime-spawned arm (the spawned task dropped its
+/// `oneshot` sender without replying); the in-task-joined arm always
+/// resolves to `Some`.
+enum StreamDispatchRace {
+    Response(Option<Result<Response<Bytes>, ProximaError>>),
+    Read(std::io::Result<usize>),
 }
 
 /// `http1::Builder::serve_connection`. Uses our `Connection` state
@@ -334,43 +359,50 @@ where
         // client disconnects mid-dispatch, the read returns 0; we
         // fire `cancel.fire()` and then poll the dispatch future
         // to completion so the Pipe has a chance to observe the
-        // cancellation and clean up.
-        let dispatch_future = dispatch_request(&dispatch, request);
-        tokio::pin!(dispatch_future);
+        // cancellation and clean up. Hand-rolled biased poll —
+        // tokio-free equivalent of `tokio::select!` (see
+        // `http2::server::SelectOutcome`'s doc for the pattern).
+        let mut dispatch_future = pin!(dispatch_request(&dispatch, request));
         let mut watch_buf = [0_u8; 1];
-        let outcome = tokio::select! {
-            response = &mut dispatch_future => response,
-            read = reader.read(&mut watch_buf) => {
-                match read {
-                    Ok(0) => {
-                        debug!("client disconnected during dispatch");
-                        cancel.fire();
-                        // Give the Pipe a poll cycle to observe
-                        // the cancel signal before we drop its
-                        // future. Without this, drop happens before
-                        // the cancelled arm executes and the
-                        // Pipe's cleanup code never runs.
-                        let _ = (&mut dispatch_future).await;
-                        in_flight.fetch_sub(1, Ordering::Relaxed);
-                        return Ok(());
-                    }
-                    Ok(_n) => {
-                        // Pipelined bytes from the client. Buffer
-                        // the byte by feeding it back into
-                        // Connection; the next iteration's poll
-                        // picks up the trailing request after this
-                        // one's response is written.
-                        connection.feed_bytes(&watch_buf[..1]);
-                        (&mut dispatch_future).await
-                    }
-                    Err(error) => {
-                        debug!(?error, "read error during dispatch");
-                        cancel.fire();
-                        let _ = (&mut dispatch_future).await;
-                        in_flight.fetch_sub(1, Ordering::Relaxed);
-                        return Ok(());
-                    }
-                }
+        let race = poll_fn(|cx| {
+            if let Poll::Ready(response) = dispatch_future.as_mut().poll(cx) {
+                return Poll::Ready(DispatchRace::Response(response));
+            }
+            if let Poll::Ready(read) = Pin::new(&mut reader).poll_read(cx, &mut watch_buf) {
+                return Poll::Ready(DispatchRace::Read(read));
+            }
+            Poll::Pending
+        })
+        .await;
+        let outcome = match race {
+            DispatchRace::Response(response) => response,
+            DispatchRace::Read(Ok(0)) => {
+                debug!("client disconnected during dispatch");
+                cancel.fire();
+                // Give the Pipe a poll cycle to observe
+                // the cancel signal before we drop its
+                // future. Without this, drop happens before
+                // the cancelled arm executes and the
+                // Pipe's cleanup code never runs.
+                let _ = dispatch_future.await;
+                in_flight.fetch_sub(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            DispatchRace::Read(Ok(_n)) => {
+                // Pipelined bytes from the client. Buffer
+                // the byte by feeding it back into
+                // Connection; the next iteration's poll
+                // picks up the trailing request after this
+                // one's response is written.
+                connection.feed_bytes(&watch_buf[..1]);
+                dispatch_future.await
+            }
+            DispatchRace::Read(Err(error)) => {
+                debug!(?error, "read error during dispatch");
+                cancel.fire();
+                let _ = dispatch_future.await;
+                in_flight.fetch_sub(1, Ordering::Relaxed);
+                return Ok(());
             }
         };
         in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -461,16 +493,101 @@ enum StreamingOutcome {
     Upgrade(proxima_primitives::pipe::upgrade::UpgradeHandler),
 }
 
+/// Outcome of the in-task join between the dispatch future and the
+/// body pump — reached only when no `Runtime` is available to spawn
+/// onto. The tokio-free replacement for `tokio::task::spawn_local`:
+/// h1 carries exactly one request per connection, so a single named
+/// dispatch future polled alongside the pump is enough — no
+/// `FuturesUnordered` fan-out needed (contrast with h2's
+/// per-stream `handlers` set in `http2::server`).
+enum StreamJoinOutcome {
+    DispatchDone(Result<Response<Bytes>, ProximaError>),
+    PumpDone(Result<(), PumpError>),
+}
+
+/// Publish chunked request trailers into the stream's slot. Called
+/// after the body pump finishes, before the channel closes, so the
+/// Pipe's drain completes only after the trailers are visible
+/// (deterministic — no read-before-publish race).
+fn publish_pending_trailers(
+    connection: &mut Connection,
+    trailers_slot: &proxima_primitives::pipe::body::TrailersSlot,
+) {
+    let captured_trailers = connection.take_trailers();
+    if captured_trailers.is_empty() {
+        return;
+    }
+    let mut trailers = proxima_primitives::pipe::header_list::HeaderList::new();
+    for (name, value) in captured_trailers {
+        trailers.insert(name, value);
+    }
+    if let Ok(mut guard) = trailers_slot.lock() {
+        *guard = Some(trailers);
+    }
+}
+
+/// Write the streaming path's final response (or rendered error) and
+/// decide keep-alive vs. close. Shared tail for both the
+/// runtime-spawned and in-task-joined dispatch paths in
+/// [`dispatch_streaming_request`] — everything upstream of this
+/// differs only in HOW the response was obtained, never in how it's
+/// written.
+async fn finish_streaming_response<W>(
+    writer: &mut W,
+    out: &mut Vec<u8>,
+    connection: &mut Connection,
+    trace_id: Option<&[u8]>,
+    response_result: Result<Response<Bytes>, ProximaError>,
+) -> Result<StreamingOutcome, ProximaError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let upgrade_after_write = match response_result {
+        Ok(response) => write_response(writer, out, connection, response, trace_id).await?,
+        Err(error) => {
+            error!(?error, "streaming request handling failed");
+            let status = http_status_for(&error);
+            let body_bytes = error_response_body(&error);
+            let body_len = body_bytes.len();
+            let error_headers = vec![("content-type".to_string(), "text/plain".to_string())];
+            out.clear();
+            let response_writer = connection.begin_response(
+                status,
+                "",
+                &error_headers,
+                BodyFraming::ContentLength(body_len as u64),
+                out,
+            );
+            response_writer.write_chunk(&body_bytes, out);
+            response_writer.end_response(out);
+            writer.write_all(out).await.map_err(io_err)?;
+            None
+        }
+    };
+
+    if let Some(handler) = upgrade_after_write {
+        return Ok(StreamingOutcome::Upgrade(handler));
+    }
+    if connection.keep_alive() {
+        Ok(StreamingOutcome::KeepAlive)
+    } else {
+        Ok(StreamingOutcome::Close)
+    }
+}
+
 /// Streaming-mode dispatch path. Reached when the connection's
 /// auto-stream policy fires (chunked transfer or large
-/// Content-Length). Builds a mpsc-backed `Body`, spawns
-/// `Pipe::call` on the current core's local set so it runs
-/// concurrently with body ingestion, pumps body chunks into the
-/// channel (backpressure: `send().await` parks when full), and on
-/// `BodyEnd` drops the sender to signal end-of-stream. Then awaits
-/// the response from a oneshot, racing it against a single-byte
-/// reader.read for client-disconnect detection (mirrors the
-/// buffered path's cancel-token race).
+/// Content-Length). Builds an mpsc-backed `Body`; with a `Runtime`,
+/// spawns `Pipe::call` on the current core so it runs concurrently
+/// with body ingestion (mirrors h2/h3, no tokio involved); with no
+/// runtime, drives the dispatch future and the body pump together
+/// in this task via a hand-rolled biased poll (tokio-free — no
+/// `LocalSet` required). Pumps body chunks into the channel
+/// (backpressure: `send().await` parks when full), and on `BodyEnd`
+/// drops the sender to signal end-of-stream. Then awaits the
+/// response, racing it against a single-byte reader.read for
+/// client-disconnect detection (mirrors the buffered path's
+/// cancel-token race).
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_streaming_request<R, W>(
     connection: &mut Connection,
@@ -545,8 +662,7 @@ where
     let cancel = proxima_core::signal::Signal::new();
     let cancel_guard = cancel.clone().guard();
 
-    let (body_tx, body_rx) =
-        tokio::sync::mpsc::channel::<Result<Bytes, ProximaError>>(BODY_CHANNEL_DEPTH);
+    let (mut body_tx, body_rx) = mpsc::channel::<Result<Bytes, ProximaError>>(BODY_CHANNEL_DEPTH);
 
     let (mut request, request_trailers_slot) = build_streaming_request(connection, spec, body_rx);
     request.context.cancel = cancel.clone();
@@ -559,140 +675,235 @@ where
         in_flight_now as i64,
     );
 
-    let (resp_tx, mut resp_rx) = oneshot::channel::<Result<Response<Bytes>, ProximaError>>();
     let dispatch_clone = dispatch.clone();
-    let pipe_task = async move {
-        let response = dispatch_request(&dispatch_clone, request).await;
-        let _ = resp_tx.send(response);
-    };
+
     match runtime {
-        Some(rt) => rt.spawn_on_current_core(Box::pin(pipe_task)),
-        None => {
-            tokio::task::spawn_local(pipe_task);
-        }
-    }
+        Some(rt) => {
+            // Spawns the Pipe onto the runtime's current-core queue,
+            // so it runs concurrently with the body pump below (the
+            // Pipe drains `body_rx` as fast as the pump fills it,
+            // bounded backpressure both ways). Mirrors h2/h3 — no
+            // tokio involved, `Runtime` is the substrate's own
+            // executor handle.
+            let (resp_tx, mut resp_rx) =
+                oneshot::channel::<Result<Response<Bytes>, ProximaError>>();
+            let pipe_task = async move {
+                let response = dispatch_request(&dispatch_clone, request).await;
+                let _ = resp_tx.send(response);
+            };
+            rt.spawn_on_current_core(Box::pin(pipe_task));
 
-    // Pump body chunks → bounded mpsc. Backpressure is implicit:
-    // body_tx.send().await parks when the channel is full, which
-    // pauses reader.read and lets the kernel TCP window close on the
-    // peer.
-    let pump_outcome = pump_body_stream(connection, reader, read_buf, &body_tx, &cancel).await;
-    // Publish chunked request trailers into the stream's slot BEFORE
-    // closing the channel, so the Pipe's drain completes only after the
-    // trailers are visible (deterministic — no read-before-publish race).
-    let captured_trailers = connection.take_trailers();
-    if !captured_trailers.is_empty() {
-        let mut trailers = proxima_primitives::pipe::header_list::HeaderList::new();
-        for (name, value) in captured_trailers {
-            trailers.insert(name, value);
-        }
-        if let Ok(mut guard) = request_trailers_slot.lock() {
-            *guard = Some(trailers);
-        }
-    }
-    drop(body_tx);
+            let pump_outcome =
+                pump_body_stream(connection, reader, read_buf, &mut body_tx, &cancel).await;
+            publish_pending_trailers(connection, &request_trailers_slot);
+            drop(body_tx);
 
-    match pump_outcome {
-        Ok(()) | Err(PumpError::PipeDroppedBody) => {}
-        Err(PumpError::ClientEof | PumpError::ConnectionClosed | PumpError::Cancelled) => {
-            cancel.fire();
-            // Give the Pipe a poll cycle to observe cancel before
-            // dropping its task — mirrors the buffered path's
-            // dispatch_future-then-poll pattern.
-            let _ = resp_rx.await;
-            in_flight.fetch_sub(1, Ordering::Relaxed);
-            return Ok(StreamingOutcome::Close);
-        }
-        Err(PumpError::Decode) => {
-            // Body decoder rejected the wire bytes — fire cancel and
-            // surface a 400 to the client.
-            cancel.fire();
-            let _ = resp_rx.await;
-            in_flight.fetch_sub(1, Ordering::Relaxed);
-            write_minimal_error(writer, out, 400, "Bad Request").await?;
-            return Ok(StreamingOutcome::Close);
-        }
-        Err(PumpError::Io(error)) => {
-            cancel.fire();
-            let _ = resp_rx.await;
-            in_flight.fetch_sub(1, Ordering::Relaxed);
-            return Err(ProximaError::Io(error));
-        }
-    }
-
-    // Response phase — race resp_rx against socket EOF detection so a
-    // disconnect during a slow Pipe still triggers cancel and
-    // tears down cleanly.
-    let mut watch_buf = [0_u8; 1];
-    let outcome = tokio::select! {
-        response = &mut resp_rx => response,
-        read = reader.read(&mut watch_buf) => {
-            match read {
-                Ok(0) => {
-                    debug!("client disconnected during streaming dispatch");
+            match pump_outcome {
+                Ok(()) | Err(PumpError::PipeDroppedBody) => {}
+                Err(PumpError::ClientEof | PumpError::ConnectionClosed | PumpError::Cancelled) => {
                     cancel.fire();
-                    let _ = (&mut resp_rx).await;
+                    // Give the Pipe a poll cycle to observe cancel
+                    // before dropping its task — mirrors the
+                    // buffered path's dispatch_future-then-poll
+                    // pattern.
+                    let _ = resp_rx.await;
                     in_flight.fetch_sub(1, Ordering::Relaxed);
                     return Ok(StreamingOutcome::Close);
                 }
-                Ok(_n) => {
-                    // First byte of a pipelined request — queue it.
-                    connection.feed_bytes(&watch_buf[..1]);
-                    (&mut resp_rx).await
-                }
-                Err(error) => {
-                    debug!(?error, "read error during streaming dispatch");
+                Err(PumpError::Decode) => {
                     cancel.fire();
-                    let _ = (&mut resp_rx).await;
+                    let _ = resp_rx.await;
                     in_flight.fetch_sub(1, Ordering::Relaxed);
+                    write_minimal_error(writer, out, 400, "Bad Request").await?;
                     return Ok(StreamingOutcome::Close);
+                }
+                Err(PumpError::Io(error)) => {
+                    cancel.fire();
+                    let _ = resp_rx.await;
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    return Err(ProximaError::Io(error));
                 }
             }
-        }
-    };
-    in_flight.fetch_sub(1, Ordering::Relaxed);
-    cancel_guard.disarm();
 
-    let response_result = match outcome {
-        Ok(response) => response,
-        Err(_recv) => {
-            error!("streaming dispatch task dropped response sender");
-            return Ok(StreamingOutcome::Close);
+            // Response phase — race resp_rx against socket EOF
+            // detection so a disconnect during a slow Pipe still
+            // triggers cancel and tears down cleanly. Hand-rolled
+            // biased poll, the tokio-free equivalent of
+            // `tokio::select!`.
+            let mut watch_buf = [0_u8; 1];
+            let race = poll_fn(|cx| {
+                if let Poll::Ready(response) = Pin::new(&mut resp_rx).poll(cx) {
+                    return Poll::Ready(StreamDispatchRace::Response(response.ok()));
+                }
+                if let Poll::Ready(read) = Pin::new(&mut *reader).poll_read(cx, &mut watch_buf) {
+                    return Poll::Ready(StreamDispatchRace::Read(read));
+                }
+                Poll::Pending
+            })
+            .await;
+            let response_result = match race {
+                StreamDispatchRace::Response(None) => {
+                    error!("streaming dispatch task dropped response sender");
+                    return Ok(StreamingOutcome::Close);
+                }
+                StreamDispatchRace::Response(Some(response)) => response,
+                StreamDispatchRace::Read(Ok(0)) => {
+                    debug!("client disconnected during streaming dispatch");
+                    cancel.fire();
+                    let _ = resp_rx.await;
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    return Ok(StreamingOutcome::Close);
+                }
+                StreamDispatchRace::Read(Ok(_n)) => {
+                    // First byte of a pipelined request — queue it.
+                    connection.feed_bytes(&watch_buf[..1]);
+                    match resp_rx.await {
+                        Ok(response) => response,
+                        Err(_canceled) => {
+                            error!("streaming dispatch task dropped response sender");
+                            return Ok(StreamingOutcome::Close);
+                        }
+                    }
+                }
+                StreamDispatchRace::Read(Err(error)) => {
+                    debug!(?error, "read error during streaming dispatch");
+                    cancel.fire();
+                    let _ = resp_rx.await;
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    return Ok(StreamingOutcome::Close);
+                }
+            };
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+            cancel_guard.disarm();
+            finish_streaming_response(writer, out, connection, trace_id.as_deref(), response_result)
+                .await
         }
-    };
+        None => {
+            // No executor to spawn onto — drive the dispatch future
+            // and the body pump together in this task via a
+            // hand-rolled biased poll (the tokio-free replacement
+            // for `tokio::task::spawn_local`). Same concurrency as
+            // the spawned-task arm above: the Pipe drains `body_rx`
+            // as the pump fills it.
+            let mut dispatch_future =
+                pin!(async move { dispatch_request(&dispatch_clone, request).await });
+            let mut dispatch_done: Option<Result<Response<Bytes>, ProximaError>> = None;
+            let pump_outcome = {
+                let mut pump_future =
+                    pin!(pump_body_stream(connection, reader, read_buf, &mut body_tx, &cancel));
+                // `dispatch_pending` (a plain bool, checked OUTSIDE the
+                // poll_fn closure) gates whether the closure below even
+                // touches `dispatch_future` — reading `dispatch_done`
+                // from inside the closure would force `Response<Bytes>`
+                // (it carries a `Box<dyn Stream + Send>`, not `Sync`) to
+                // be `Sync` for the closure to stay `Send`. A bool has
+                // no such bound.
+                let mut dispatch_pending = true;
+                loop {
+                    let outcome = if dispatch_pending {
+                        poll_fn(|cx| {
+                            if let Poll::Ready(response) = dispatch_future.as_mut().poll(cx) {
+                                return Poll::Ready(StreamJoinOutcome::DispatchDone(response));
+                            }
+                            if let Poll::Ready(result) = pump_future.as_mut().poll(cx) {
+                                return Poll::Ready(StreamJoinOutcome::PumpDone(result));
+                            }
+                            Poll::Pending
+                        })
+                        .await
+                    } else {
+                        StreamJoinOutcome::PumpDone(
+                            poll_fn(|cx| pump_future.as_mut().poll(cx)).await,
+                        )
+                    };
+                    match outcome {
+                        StreamJoinOutcome::DispatchDone(response) => {
+                            dispatch_done = Some(response);
+                            dispatch_pending = false;
+                        }
+                        StreamJoinOutcome::PumpDone(result) => break result,
+                    }
+                }
+            };
+            publish_pending_trailers(connection, &request_trailers_slot);
+            drop(body_tx);
 
-    let upgrade_after_write = match response_result {
-        Ok(response) => {
-            write_response(writer, out, connection, response, trace_id.as_deref()).await?
-        }
-        Err(error) => {
-            error!(?error, "streaming request handling failed");
-            let status = http_status_for(&error);
-            let body_bytes = error_response_body(&error);
-            let body_len = body_bytes.len();
-            let error_headers = vec![("content-type".to_string(), "text/plain".to_string())];
-            out.clear();
-            let response_writer = connection.begin_response(
-                status,
-                "",
-                &error_headers,
-                BodyFraming::ContentLength(body_len as u64),
-                out,
-            );
-            response_writer.write_chunk(&body_bytes, out);
-            response_writer.end_response(out);
-            writer.write_all(out).await.map_err(io_err)?;
-            None
-        }
-    };
+            match pump_outcome {
+                Ok(()) | Err(PumpError::PipeDroppedBody) => {}
+                Err(PumpError::ClientEof | PumpError::ConnectionClosed | PumpError::Cancelled) => {
+                    cancel.fire();
+                    if dispatch_done.is_none() {
+                        let _ = dispatch_future.await;
+                    }
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    return Ok(StreamingOutcome::Close);
+                }
+                Err(PumpError::Decode) => {
+                    cancel.fire();
+                    if dispatch_done.is_none() {
+                        let _ = dispatch_future.await;
+                    }
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    write_minimal_error(writer, out, 400, "Bad Request").await?;
+                    return Ok(StreamingOutcome::Close);
+                }
+                Err(PumpError::Io(error)) => {
+                    cancel.fire();
+                    if dispatch_done.is_none() {
+                        let _ = dispatch_future.await;
+                    }
+                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    return Err(ProximaError::Io(error));
+                }
+            }
 
-    if let Some(handler) = upgrade_after_write {
-        return Ok(StreamingOutcome::Upgrade(handler));
-    }
-    if connection.keep_alive() {
-        Ok(StreamingOutcome::KeepAlive)
-    } else {
-        Ok(StreamingOutcome::Close)
+            let response_result = match dispatch_done {
+                Some(response) => response,
+                None => {
+                    // Response phase — race the dispatch future
+                    // against socket EOF detection, same shape as
+                    // the spawned-task arm's resp_rx race.
+                    let mut watch_buf = [0_u8; 1];
+                    let race = poll_fn(|cx| {
+                        if let Poll::Ready(response) = dispatch_future.as_mut().poll(cx) {
+                            return Poll::Ready(DispatchRace::Response(response));
+                        }
+                        if let Poll::Ready(read) =
+                            Pin::new(&mut *reader).poll_read(cx, &mut watch_buf)
+                        {
+                            return Poll::Ready(DispatchRace::Read(read));
+                        }
+                        Poll::Pending
+                    })
+                    .await;
+                    match race {
+                        DispatchRace::Response(response) => response,
+                        DispatchRace::Read(Ok(0)) => {
+                            debug!("client disconnected during streaming dispatch");
+                            cancel.fire();
+                            let _ = dispatch_future.await;
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                            return Ok(StreamingOutcome::Close);
+                        }
+                        DispatchRace::Read(Ok(_n)) => {
+                            connection.feed_bytes(&watch_buf[..1]);
+                            dispatch_future.await
+                        }
+                        DispatchRace::Read(Err(error)) => {
+                            debug!(?error, "read error during streaming dispatch");
+                            cancel.fire();
+                            let _ = dispatch_future.await;
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                            return Ok(StreamingOutcome::Close);
+                        }
+                    }
+                }
+            };
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+            cancel_guard.disarm();
+            finish_streaming_response(writer, out, connection, trace_id.as_deref(), response_result)
+                .await
+        }
     }
 }
 
@@ -713,6 +924,21 @@ enum PumpError {
     Io(std::io::Error),
 }
 
+/// Outcome of the hand-rolled biased poll racing a body-chunk send
+/// against cancellation in [`pump_body_stream`] — the tokio-free
+/// equivalent of `tokio::select!`.
+enum BodySendOutcome {
+    Sent(Result<(), mpsc::SendError>),
+    Cancelled,
+}
+
+/// Outcome of the hand-rolled biased poll racing a socket read
+/// against cancellation in [`pump_body_stream`].
+enum BodyReadOutcome {
+    Read(std::io::Result<usize>),
+    Cancelled,
+}
+
 /// Drive the connection's body decoder, copying each emitted chunk
 /// into the bounded `body_tx`. Returns on `BodyEnd` (success) or on
 /// any of the `PumpError` conditions. The caller is responsible for
@@ -721,7 +947,7 @@ async fn pump_body_stream<R>(
     connection: &mut Connection,
     reader: &mut R,
     read_buf: &mut [u8],
-    body_tx: &tokio::sync::mpsc::Sender<Result<Bytes, ProximaError>>,
+    body_tx: &mut mpsc::Sender<Result<Bytes, ProximaError>>,
     cancel: &proxima_core::signal::Signal,
 ) -> Result<(), PumpError>
 where
@@ -744,25 +970,44 @@ where
                     Some(chunk) => chunk,
                     None => continue,
                 };
-                tokio::select! {
-                    send = body_tx.send(Ok(chunk)) => {
-                        if send.is_err() {
-                            return Err(PumpError::PipeDroppedBody);
-                        }
+                let mut send_future = pin!(body_tx.send(Ok(chunk)));
+                let mut fired = cancel.fired();
+                let send_outcome = poll_fn(|cx| {
+                    if let Poll::Ready(result) = send_future.as_mut().poll(cx) {
+                        return Poll::Ready(BodySendOutcome::Sent(result));
                     }
-                    () = cancel.fired() => return Err(PumpError::Cancelled),
+                    if let Poll::Ready(()) = Pin::new(&mut fired).poll(cx) {
+                        return Poll::Ready(BodySendOutcome::Cancelled);
+                    }
+                    Poll::Pending
+                })
+                .await;
+                match send_outcome {
+                    BodySendOutcome::Sent(Ok(())) => {}
+                    BodySendOutcome::Sent(Err(_send_error)) => {
+                        return Err(PumpError::PipeDroppedBody);
+                    }
+                    BodySendOutcome::Cancelled => return Err(PumpError::Cancelled),
                 }
             }
             ConnPoll::BodyEnd => return Ok(()),
             ConnPoll::NeedInput => {
-                let read = tokio::select! {
-                    read = reader.read(read_buf) => read,
-                    () = cancel.fired() => return Err(PumpError::Cancelled),
-                };
-                match read {
-                    Ok(0) => return Err(PumpError::ClientEof),
-                    Ok(n) => connection.feed_bytes(&read_buf[..n]),
-                    Err(error) => return Err(PumpError::Io(error)),
+                let mut fired = cancel.fired();
+                let read_outcome = poll_fn(|cx| {
+                    if let Poll::Ready(read) = Pin::new(&mut *reader).poll_read(cx, read_buf) {
+                        return Poll::Ready(BodyReadOutcome::Read(read));
+                    }
+                    if let Poll::Ready(()) = Pin::new(&mut fired).poll(cx) {
+                        return Poll::Ready(BodyReadOutcome::Cancelled);
+                    }
+                    Poll::Pending
+                })
+                .await;
+                match read_outcome {
+                    BodyReadOutcome::Read(Ok(0)) => return Err(PumpError::ClientEof),
+                    BodyReadOutcome::Read(Ok(n)) => connection.feed_bytes(&read_buf[..n]),
+                    BodyReadOutcome::Read(Err(error)) => return Err(PumpError::Io(error)),
+                    BodyReadOutcome::Cancelled => return Err(PumpError::Cancelled),
                 }
             }
             ConnPoll::Close => return Err(PumpError::ConnectionClosed),
@@ -778,12 +1023,13 @@ where
 }
 
 /// Build a `proxima::Request` for the streaming dispatch path. The
-/// body is a stream wrapping the bounded mpsc receiver — chunks flow
-/// from the listener's pump task to the Pipe as they arrive.
+/// body is the bounded mpsc receiver itself — `futures::channel::mpsc`
+/// receivers already implement `Stream`, so chunks flow from the
+/// listener's pump loop to the Pipe as they arrive with no adapter.
 fn build_streaming_request(
     connection: &Connection,
     _spec: &HttpListenerSpec,
-    body_rx: tokio::sync::mpsc::Receiver<Result<Bytes, ProximaError>>,
+    body_rx: mpsc::Receiver<Result<Bytes, ProximaError>>,
 ) -> (Request<Bytes>, proxima_primitives::pipe::body::TrailersSlot) {
     let path_bytes = connection.path();
     let (path, query) = split_path_and_query(path_bytes);
@@ -798,9 +1044,6 @@ fn build_streaming_request(
     let mut context = RequestContext::default();
     let (trace_id, baggage) = proxima_telemetry::propagation::establish_trace_context(&headers);
     context.adopt_trace_context(trace_id, baggage);
-    let body_stream = futures::stream::unfold(body_rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    });
     // Trailers slot the chunked decoder populates at body-end; the Pipe's
     // `body_bytes()` folds it into `headers` after draining (RFC 7230
     // §4.1.2 request trailers on the streaming path).
@@ -811,7 +1054,7 @@ fn build_streaming_request(
         query,
         metadata: headers,
         payload: Bytes::new(),
-        stream: Some(RequestStream::new(body_stream).with_trailers_slot(trailers_slot.clone())),
+        stream: Some(RequestStream::new(body_rx).with_trailers_slot(trailers_slot.clone())),
         context,
     };
     (request, trailers_slot)
@@ -1208,15 +1451,29 @@ mod tests {
         input: Vec<u8>,
         read_pos: usize,
         writes: Arc<Mutex<Vec<Vec<u8>>>>,
+        /// Once the canned input is drained: `Pending` forever (client
+        /// waiting on the response — the default, used by the
+        /// response-shape tests) or `Ready(Ok(0))` (simulated peer
+        /// disconnect — used by the mid-dispatch cancellation test).
+        eof_after_input: bool,
     }
 
     impl TestSocket {
         fn new(request: &[u8]) -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
+            Self::with_config(request, false)
+        }
+
+        fn new_with_eof_after_input(request: &[u8]) -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
+            Self::with_config(request, true)
+        }
+
+        fn with_config(request: &[u8], eof_after_input: bool) -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
             let writes = Arc::new(Mutex::new(Vec::new()));
             let socket = Self {
                 input: request.to_vec(),
                 read_pos: 0,
                 writes: writes.clone(),
+                eof_after_input,
             };
             (socket, writes)
         }
@@ -1230,7 +1487,11 @@ mod tests {
         ) -> Poll<std::io::Result<usize>> {
             let this = self.get_mut();
             if this.read_pos >= this.input.len() {
-                return Poll::Pending;
+                return if this.eof_after_input {
+                    Poll::Ready(Ok(0))
+                } else {
+                    Poll::Pending
+                };
             }
             let take = (this.input.len() - this.read_pos).min(buf.len());
             buf[..take].copy_from_slice(&this.input[this.read_pos..this.read_pos + take]);
@@ -1274,6 +1535,78 @@ mod tests {
         ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
             let response = (self.response)();
             async move { Ok(response) }
+        }
+    }
+
+    /// Drains the request body (streamed or buffered — `body_bytes`
+    /// handles both) and echoes it back as the response body. Used to
+    /// prove chunked/streamed request bodies actually reach the Pipe.
+    struct EchoBodyPipe;
+
+    impl SendPipe for EchoBodyPipe {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        #[allow(clippy::manual_async_fn)]
+        fn call(
+            &self,
+            request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+            async move {
+                let (_request, body) = request.body_bytes().await?;
+                Ok(Response::new(200).with_body(body))
+            }
+        }
+    }
+
+    /// Resolves `Pending` exactly once (waking itself immediately), then
+    /// `Ready`. Gives the disconnect-detection race below a genuine
+    /// window to observe a peer close while a Pipe is mid-flight,
+    /// instead of the Pipe resolving synchronously before the race
+    /// ever gets a turn.
+    struct Yield {
+        polled: bool,
+    }
+
+    impl Future for Yield {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.polled {
+                Poll::Ready(())
+            } else {
+                self.polled = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Yields once, then records whether `request.context.cancel` had
+    /// fired by that point — proving the disconnect race fired cancel
+    /// AND gave the Pipe a poll cycle to observe it before dropping.
+    struct CancelObservingPipe {
+        cancel_seen: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SendPipe for CancelObservingPipe {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+            let cancel_seen = self.cancel_seen.clone();
+            async move {
+                Yield { polled: false }.await;
+                if request.context.cancel.is_fired() {
+                    cancel_seen.store(true, Ordering::SeqCst);
+                }
+                Ok(Response::new(200).with_body(Bytes::new()))
+            }
         }
     }
 
@@ -1385,6 +1718,238 @@ mod tests {
         assert_eq!(
             tail_write, "3\r\nllo\r\n0\r\n\r\n",
             "final chunk and terminator share the last write"
+        );
+    }
+
+    /// Byte queue shared by one direction of [`test_duplex`]. Dropping
+    /// the writing half marks `closed` and wakes the reader — the
+    /// same "peer closed" signal a real socket gives on drop.
+    #[derive(Default)]
+    struct DuplexBuf {
+        bytes: std::collections::VecDeque<u8>,
+        closed: bool,
+        waker: Option<std::task::Waker>,
+    }
+
+    /// One half of a hand-rolled, tokio-free in-memory duplex stream:
+    /// two independent `DuplexBuf` queues, one per direction. Exists
+    /// because `futures` (unlike `tokio`) ships no `io::duplex` —
+    /// this is the minimal `AsyncRead + AsyncWrite` pair needed to
+    /// drive `serve_connection`'s "client" and "server" sides as two
+    /// genuinely interleaved futures under one `block_on`.
+    struct DuplexHalf {
+        read_buf: Arc<Mutex<DuplexBuf>>,
+        write_buf: Arc<Mutex<DuplexBuf>>,
+    }
+
+    fn test_duplex() -> (DuplexHalf, DuplexHalf) {
+        let a_to_b = Arc::new(Mutex::new(DuplexBuf::default()));
+        let b_to_a = Arc::new(Mutex::new(DuplexBuf::default()));
+        (
+            DuplexHalf {
+                read_buf: b_to_a.clone(),
+                write_buf: a_to_b.clone(),
+            },
+            DuplexHalf {
+                read_buf: a_to_b,
+                write_buf: b_to_a,
+            },
+        )
+    }
+
+    impl AsyncRead for DuplexHalf {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut guard = self.read_buf.lock().unwrap();
+            if guard.bytes.is_empty() {
+                if guard.closed {
+                    return Poll::Ready(Ok(0));
+                }
+                guard.waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            let take = guard.bytes.len().min(buf.len());
+            for slot in buf.iter_mut().take(take) {
+                *slot = guard.bytes.pop_front().expect("checked len above");
+            }
+            Poll::Ready(Ok(take))
+        }
+    }
+
+    impl AsyncWrite for DuplexHalf {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut guard = self.write_buf.lock().unwrap();
+            guard.bytes.extend(buf.iter().copied());
+            if let Some(waker) = guard.waker.take() {
+                waker.wake();
+            }
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let mut guard = self.write_buf.lock().unwrap();
+            guard.closed = true;
+            if let Some(waker) = guard.waker.take() {
+                waker.wake();
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Drop for DuplexHalf {
+        fn drop(&mut self) {
+            let mut guard = self.write_buf.lock().unwrap();
+            guard.closed = true;
+            if let Some(waker) = guard.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// The tokio-freedom proof: `serve_connection` driven entirely by
+    /// `futures::executor::block_on` over an in-memory duplex — no
+    /// tokio runtime, no `LocalSet`, anywhere in this test. The
+    /// "client" and "server" halves run as two futures joined under
+    /// one `block_on` call, so the exchange is a genuine two-sided
+    /// round trip, not a pre-buffered canned input.
+    #[test]
+    fn serve_connection_completes_over_an_in_memory_duplex_with_no_tokio_runtime() {
+        let (server_half, mut client_half) = test_duplex();
+        let spec = Arc::new(HttpListenerSpec::default());
+        let in_flight = Arc::new(AtomicU64::new(0));
+        let quiescing = Arc::new(AtomicBool::new(false));
+        let quiesce_response = Arc::new(QuiesceResponse {
+            status: 503,
+            retry_after: "1".into(),
+        });
+
+        let server = serve_connection(
+            server_half,
+            into_handle(FixedResponse {
+                response: || Response::new(200).with_body(Bytes::from_static(b"pong")),
+            }),
+            spec,
+            in_flight,
+            quiescing,
+            quiesce_response,
+            None,
+            None,
+        );
+
+        let client = async move {
+            client_half
+                .write_all(b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("client write");
+            let mut response = Vec::new();
+            client_half
+                .read_to_end(&mut response)
+                .await
+                .expect("client read");
+            response
+        };
+
+        let (server_result, response) = block_on(futures::future::join(server, client));
+        server_result.expect("serve_connection should complete with no tokio runtime present");
+        let wire = String::from_utf8(response).expect("response should be utf8");
+        assert!(wire.starts_with("HTTP/1.1 200"), "response head: {wire}");
+        assert!(wire.ends_with("pong"), "response body: {wire}");
+    }
+
+    #[test]
+    fn expect_100_continue_is_accepted_before_the_body_is_read() {
+        const EXPECT_CONTINUE_POST: &[u8] =
+            b"POST /submit HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\nhello";
+        let (socket, writes) = TestSocket::new(EXPECT_CONTINUE_POST);
+        block_on(serve_h1_connection(socket, into_handle(EchoBodyPipe), None, None))
+            .expect("serve should complete cleanly on connection: close");
+        let writes = writes.lock().unwrap();
+        let wire = joined(&writes);
+        assert!(
+            writes.first().is_some_and(|first| {
+                String::from_utf8_lossy(first).starts_with("HTTP/1.1 100")
+            }),
+            "interim 100 Continue must be written before the final response: {wire}"
+        );
+        assert!(
+            wire.contains("HTTP/1.1 200"),
+            "final response follows the interim: {wire}"
+        );
+        assert!(wire.ends_with("hello"), "body read after continue: {wire}");
+    }
+
+    #[test]
+    fn keep_alive_serves_two_pipelined_requests_on_one_connection() {
+        const TWO_REQUESTS: &[u8] =
+            b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nGET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        let (socket, writes) = TestSocket::new(TWO_REQUESTS);
+        block_on(serve_h1_connection(
+            socket,
+            into_handle(FixedResponse {
+                response: || Response::new(200).with_body(Bytes::from_static(b"ok")),
+            }),
+            None,
+            None,
+        ))
+        .expect("serve should complete cleanly once the second request closes");
+        let writes = writes.lock().unwrap();
+        let wire = joined(&writes);
+        assert_eq!(
+            wire.matches("HTTP/1.1 200").count(),
+            2,
+            "both pipelined requests get a response on the same connection: {wire}"
+        );
+    }
+
+    /// Proves the streaming dispatch path (`dispatch_streaming_request`'s
+    /// no-runtime, in-task join between the body pump and the dispatch
+    /// future) delivers a chunked request body to the Pipe with no
+    /// tokio runtime — `serve_h1_connection` is called with
+    /// `runtime = None`, so the old code's `tokio::task::spawn_local`
+    /// would have panicked ("not currently running on a Tokio
+    /// LocalSet") the moment the chunked body triggered auto-stream.
+    #[test]
+    fn chunked_request_body_streams_through_pipe_without_tokio_runtime() {
+        const CHUNKED_POST: &[u8] = b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let (socket, writes) = TestSocket::new(CHUNKED_POST);
+        block_on(serve_h1_connection(socket, into_handle(EchoBodyPipe), None, None))
+            .expect("serve should complete cleanly on connection: close");
+        let wire = joined(&writes.lock().unwrap());
+        assert!(wire.starts_with("HTTP/1.1 200"), "response head: {wire}");
+        assert!(
+            wire.ends_with("hello world"),
+            "chunked body reassembled and echoed: {wire}"
+        );
+    }
+
+    /// The client disconnecting mid-dispatch (read returns 0 while the
+    /// Pipe is still running) must fire `request.context.cancel` and
+    /// give the Pipe a poll cycle to observe it — the buffered path's
+    /// race, now a hand-rolled `poll_fn` instead of `tokio::select!`.
+    #[test]
+    fn mid_dispatch_peer_close_fires_cancel_and_is_observed_by_the_pipe() {
+        const SINGLE_GET: &[u8] = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        let (socket, _writes) = TestSocket::new_with_eof_after_input(SINGLE_GET);
+        let cancel_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pipe = CancelObservingPipe {
+            cancel_seen: cancel_seen.clone(),
+        };
+        block_on(serve_h1_connection(socket, into_handle(pipe), None, None))
+            .expect("serve should close cleanly once the peer disconnects mid-dispatch");
+        assert!(
+            cancel_seen.load(Ordering::SeqCst),
+            "the Pipe must observe the cancel signal fired by the disconnect race"
         );
     }
 }

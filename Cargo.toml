@@ -450,14 +450,20 @@ sync-wrappers = [
     "dep:futures-timer",
 ]
 
-# HTTP wire version gates. `http1` is the ALPN h1(+h2+tls) combiner
-# listener — its connection driver (proxima-http's `http1::serve`) has
-# no sans-IO implementation yet, so it requires `tokio`. `http2` is the
-# native h2c listener (no `tokio`, no external `h2` crate — server.rs /
-# client.rs / listener.rs's factory path are all futures-io). `http3` is
-# the native sans-IO QUIC+H3 stack (no `tokio`, no quinn). No rollup —
-# pick the wire versions you actually use.
-http1 = ["tokio", "proxima-http/http-listener"]
+# HTTP wire version gates. `http1-native` is the tokio-free base: the
+# ALPN h1(+h2) combiner listener (`HttpListenProtocol`) served through an
+# injected `AcceptorFactory` (prime by default — see `PrimeServeExt::
+# serve_http` in runtime.rs) — its connection driver (proxima-http's
+# `http1::serve`) is sans-IO, no tokio anywhere in that path. `http1`
+# layers the legacy tokio fallback (bind without a factory, the hyper
+# upstream client, the strict-h1 `H1ListenProtocol` sibling) on top —
+# see proxima-http's `http1`/`http1-native` doc for the exact split.
+# `http2` is the native h2c listener (no `tokio`, no external `h2` crate
+# — server.rs / client.rs / listener.rs's factory path are all
+# futures-io). `http3` is the native sans-IO QUIC+H3 stack (no `tokio`,
+# no quinn). No rollup — pick the wire versions you actually use.
+http1-native = ["proxima-http/http-listener"]
+http1 = ["tokio", "http1-native", "proxima-http/http1"]
 http2 = ["proxima-http/http2-native"]
 http3 = ["quic-native", "proxima-http/http3-native"]
 # `tls` enables https upstreams (rustls + hyper-rustls) AND https
@@ -1156,6 +1162,22 @@ harness = false
 name = "telemetry_pipe"
 path = "examples/telemetry_pipe.rs"
 
+# tokio-freedom proof for the h1 listener: `ListenerSpec::http` served over
+# the prime runtime's `AcceptorFactory` with zero tokio in the build. See
+# the file's own doc comment for the exact `cargo tree -i tokio` command.
+[[example]]
+name = "h1_native_prime_round_trip"
+path = "examples/h1_native_prime_round_trip.rs"
+required-features = [
+    "http1-native",
+    "serve-prime",
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+    "macros",
+]
+
 # logging is fan-out + filter + gate applied to log events: real macros +
 # RUST_LOG level discipline, fan_exporters to console+file with a per-sink
 # level filter, and an explicit lossless-vs-lossy bounded-queue choice in
@@ -1488,6 +1510,21 @@ required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "run
 [[test]]
 name = "units"
 required-features = ["macros"]
+
+# tokio-free proof for the h1 listener: `HttpListenProtocol` served via
+# `PrimeServeExt::serve_http` (prime `AcceptorFactory`), asserted with a
+# plain `#[test]` + blocking `std::net::TcpStream` client — no tokio
+# feature, no `#[tokio::test]`. Deliberately NOT part of the `e2e` binary
+# below, which requires `http1` (the tokio-coupled legacy feature).
+[[test]]
+name = "h1_native_prime"
+required-features = [
+    "http1-native",
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+]
 
 [[test]]
 name = "e2e"

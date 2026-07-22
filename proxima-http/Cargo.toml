@@ -68,7 +68,7 @@ proxima = { workspace = true, features = ["test-support"] }
 proxima-core = { workspace = true, features = ["time-driver-mock", "std"] }
 rstest = { workspace = true }
 toml = { workspace = true }
-proxima-net = { workspace = true, features = ["tokio"] }
+proxima-net = { workspace = true, features = ["prime", "tokio"] }
 proxima-protocols = { workspace = true, features = ["quic-tls-rustls", "quic-mock-tls"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"] }
 rcgen = { workspace = true, features = ["aws_lc_rs", "pem"] }
@@ -87,8 +87,22 @@ tempfile = { workspace = true }
 [features]
 default = ["http1"]
 
-http1 = [
+# `http1-native` is the tokio-free base: the sans-IO codec
+# (proxima-protocols::http1_codec) + the futures-io connection driver
+# (`http1::serve` — `serve_connection`/`serve_h1_connection`), mirroring
+# `http2-native`. `http1` layers the legacy hyper/tokio client stack
+# (`upstream`/`shared_http`/`client`'s hyper transport), the
+# `H1ListenProtocol` sibling's tokio `TcpListener` accept loop, and the
+# umbrella `listener` module's legacy no-`AcceptorFactory` accept loop
+# on top. The umbrella `HttpListenProtocol`'s `AcceptorFactory`-driven
+# accept path (`listener::serve_via_factory`) calls the same tokio-free
+# `serve_connection` and needs only `http1-native` + `http-listener` —
+# see `http-listener`'s doc below.
+http1-native = [
     "proxima-protocols/http1_codec",
+]
+http1 = [
+    "http1-native",
     "dep:http-body",
     "dep:http-body-util",
     "dep:hyper",
@@ -96,6 +110,14 @@ http1 = [
     "dep:tokio",
     "dep:tokio-util",
     "dep:xxhash-rust",
+    # `listener/mod.rs`'s legacy no-`AcceptorFactory` accept loop (only
+    # compiled when `http-listener` is also enabled) needs the tokio-io
+    # compat bridge, the tokio proxy-protocol reader, and proxima-listen's
+    # tokio-backed SO_REUSEPORT bind — see that module's internal
+    # `#[cfg(feature = "http1")]` split.
+    "proxima-core/io-async-compat-tokio",
+    "proxima-protocols/proxy_protocol-tokio-runtime",
+    "proxima-listen/tokio",
 ]
 http1-tls = ["http1", "dep:hyper-rustls"]
 # tokio-free: the prime-native h1 client (client.rs/prime_upstream.rs) needs
@@ -155,15 +177,21 @@ websocket = ["dep:async-tungstenite", "dep:proxima-net", "proxima-net/tokio", "d
 # ALPN-multiplexed h1+h2 listener combiner (`listener` module), folded in
 # from the former `proxima-listeners-http` crate: drives this crate's own
 # http1/http2 stacks over a `proxima-listen::ListenProtocol`.
+#
+# `http-listener` alone (on top of `http1-native`) is the tokio-free base:
+# `HttpListenProtocol`'s `AcceptorFactory`-driven accept path
+# (`serve_via_factory`) plus its shared config/dispatch/TLS-acceptor setup
+# compile and serve with zero tokio, exactly like `http2-native`/h3.
+# Without an injected `AcceptorFactory` in that build, `serve` returns
+# `ProximaError::Config` instead of falling back to a tokio bind (mirrors
+# `H2ListenProtocol`'s non-native arm). Add `http1` on top to restore the
+# legacy tokio `TcpListener`/UDS accept loop for when no factory is
+# available — see `listener/mod.rs`'s internal `#[cfg(feature = "http1")]`
+# split.
 http-listener = [
-    "http1",
+    "http1-native",
     "proxima-core/io-async-compat",
-    "proxima-core/io-async-compat-tokio",
-    "proxima-protocols/proxy_protocol-tokio-runtime",
-    # the combiner's legacy (no-`AcceptorFactory`) accept loop uses
-    # proxima-listen's tokio-native reuseport bind; see
-    # proxima-listen/src/handle.rs's `tokio` feature.
-    "proxima-listen/tokio",
+    "proxima-protocols/proxy_protocol-std",
 ]
 # TLS termination for the `listener` module (folded from the former
 # `proxima-listeners-http` crate's own `tls` feature).
