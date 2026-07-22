@@ -35,10 +35,9 @@ proto = ["dep:heapless", "dep:postcard", "dep:ulid"]
 # types (AlertEvent/GuidanceAnswer/GuidanceQuestion).
 alloc-shim = ["alloc", "postcard?/alloc", "dep:serde_json"]
 
-# json-shape: render an AlertEvent into the documented JSON shape per
-# docs/proxima-notify/ALERT_EVENT_SCHEMA.md. Alloc-bound. Used by the
-# parity tests and by std facade Pipes (e.g. stdout-alert) when
-# `OutputFormat::Json` is selected.
+# json-shape: render an AlertEvent into the documented JSON shape (see
+# alert::event::json_shape). Alloc-bound. Used by the parity tests and by
+# std facade Pipes (e.g. stdout-alert) when `OutputFormat::Json` is selected.
 json-shape = ["alloc-shim"]
 
 # C3: ScheduledTriggerPipe (interval-driven producer Pipe).

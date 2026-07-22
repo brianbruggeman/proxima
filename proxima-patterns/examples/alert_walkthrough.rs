@@ -13,8 +13,7 @@
 //! Constructs an [`AlertEvent`] by hand, encodes it via postcard, prints
 //! the byte breakdown, decodes back, and asserts byte-exact round-trip.
 //!
-//! Also exercises the documented `as_json_shape()` mapping helper from
-//! `docs/proxima-notify/ALERT_EVENT_SCHEMA.md`. Run with:
+//! Also exercises the documented `as_json_shape()` mapping helper. Run with:
 //!
 //! ```text
 //! cargo run --example alert_walkthrough -p proxima-notify-proto \
@@ -102,7 +101,7 @@ fn main() {
     {
         use proxima_patterns::alert::event::json_shape::alert_event_to_json;
         let json_shape = alert_event_to_json(&event);
-        println!("Documented JSON shape (matches docs/proxima-notify/ALERT_EVENT_SCHEMA.md):");
+        println!("Documented JSON shape:");
         println!(
             "{}",
             serde_json::to_string_pretty(&json_shape).expect("json pretty")

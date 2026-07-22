@@ -1,5 +1,5 @@
 //! no_std + alloc layer. files in this module use `core::*` and `alloc::*` only,
-//! never `std::*`. discipline-enforced by component-gate.sh.
+//! never `std::*`.
 
 pub mod sized;
 

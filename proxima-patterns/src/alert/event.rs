@@ -174,8 +174,7 @@ impl Severity {
         self as u8
     }
 
-    /// Lowercase name, matching the JSON shape in
-    /// `docs/proxima-notify/ALERT_EVENT_SCHEMA.md`.
+    /// Lowercase name, matching the documented JSON shape.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -385,8 +384,7 @@ pub fn decode_guidance_answer(bytes: &[u8]) -> Result<GuidanceAnswer, CodecError
     postcard::from_bytes(bytes).map_err(CodecError::Decode)
 }
 
-/// Conversion to the documented JSON shape (per
-/// `docs/proxima-notify/ALERT_EVENT_SCHEMA.md`). Used by C1's parity test.
+/// Conversion to the documented JSON shape. Used by C1's parity test.
 ///
 /// Requires `alloc` (via `serde_json`). NOT available in tier-3 builds.
 #[cfg(feature = "json-shape")]

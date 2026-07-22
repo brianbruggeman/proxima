@@ -7,22 +7,6 @@
 packages = ["proxima"]
 paths = ["scripts/prime-serve-gate.sh", ".github/workflows/prime-serve.yml"]
 
-[area.intercept]
-packages = ["proxima-intercept"]
-paths = [
-    "scripts/intercept-component-gate.sh",
-    "scripts/bench-intercept-capture.sh",
-    ".github/workflows/proxima-intercept.yml",
-]
-
-[area.notify]
-packages = ["proxima-patterns", "proxima-recording"]
-paths = [
-    "scripts/notify-component-gate.sh",
-    "scripts/notify-component-gate.toml",
-    ".github/workflows/proxima-notify.yml",
-]
-
 [area.pgwire]
 packages = ["proxima-pgwire"]
 paths = ["scripts/proxima-pgwire-gate.sh", ".github/workflows/proxima-pgwire.yml"]

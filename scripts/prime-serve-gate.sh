@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # prime-serve-gate.sh
-# Disciplined-component gate for the prime-default serve runtime
-# (docs/prime-serve/discipline.md). Verifies the default flip holds and
-# the tokio opt-out still works, then runs the parity + reactor-absence
-# proofs.
+# Disciplined-component gate for the prime-default serve runtime.
+# Verifies the default flip holds and the tokio opt-out still works,
+# then runs the parity + reactor-absence proofs.
 #
 # usage: bash scripts/prime-serve-gate.sh
 #

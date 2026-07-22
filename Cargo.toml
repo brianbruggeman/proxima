@@ -440,7 +440,6 @@ tracing-init = ["dep:tracing-subscriber", "proxima-telemetry/tracing-init"]
 # unconditionally (proxima-primitives::pipe TARGET 4 — sources run once registered, the
 # same way a handler serves once mounted; no separate opt-in flag needed).
 # Default off — opt-in until the substrate is sealed.
-# See docs/proxima-notify/discipline.md S3 row.
 producer-graph-config = []
 
 # `sync-wrappers` adds the runtime-agnostic `proxima::sync` + `proxima::time`
@@ -869,8 +868,7 @@ harness = false
 required-features = ["h3-upstream"]
 
 # proxima-notify S2: ProducerLifecycle vs spawn_snapshot_ticker incumbent.
-# See docs/proxima-notify/discipline.md S2 row + bench file header for
-# per-arm design-favors labels.
+# See bench file header for per-arm design-favors labels.
 [[bench]]
 name = "bench_proxima_notify_s2_producer_lifecycle"
 harness = false

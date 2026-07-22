@@ -11,10 +11,6 @@ on:
     outputs:
       prime_serve:
         value: ${{ jobs.detect.outputs.prime_serve }}
-      intercept:
-        value: ${{ jobs.detect.outputs.intercept }}
-      notify:
-        value: ${{ jobs.detect.outputs.notify }}
       pgwire:
         value: ${{ jobs.detect.outputs.pgwire }}
       redis:
@@ -31,8 +27,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       prime_serve: ${{ steps.affected.outputs.prime_serve }}
-      intercept:   ${{ steps.affected.outputs.intercept }}
-      notify:      ${{ steps.affected.outputs.notify }}
       pgwire:      ${{ steps.affected.outputs.pgwire }}
       redis:       ${{ steps.affected.outputs.redis }}
       telemetry:   ${{ steps.affected.outputs.telemetry }}

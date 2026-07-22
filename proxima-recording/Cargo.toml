@@ -127,7 +127,6 @@ alloc = [
 # order) and BinSource::events_from_offset (yields (offset, event) pairs
 # for at-least-once consumer drain via the offset cursor C7).
 # Default off — opt-in until the notify substrate is fully sealed.
-# See docs/proxima-notify/{discipline.md S1 row, SUBSTRATE.md S1 section}.
 durable-wal = []
 
 # Pipe-flavored recording substrate (folded from proxima-recording-pipe):

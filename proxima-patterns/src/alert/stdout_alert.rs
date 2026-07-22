@@ -34,8 +34,7 @@ use crate::alert::pipes::AlertRequest;
 pub enum OutputFormat {
     /// One line per event: `[severity] kind { labels } payload=<n bytes>`.
     Human,
-    /// One line per event: the documented `AlertEvent` JSON shape per
-    /// `docs/proxima-notify/ALERT_EVENT_SCHEMA.md`.
+    /// One line per event: the documented `AlertEvent` JSON shape.
     Json,
 }
 
