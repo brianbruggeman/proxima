@@ -44,6 +44,8 @@ pub mod listen;
 pub mod md5;
 #[cfg(feature = "listen")]
 pub mod pipe;
+#[cfg(feature = "listen")]
+pub mod any_protocol;
 pub mod pipe_contract;
 pub mod pipes;
 #[cfg(feature = "scram")]
@@ -79,6 +81,8 @@ pub use handler::ErrorInfo;
 pub use listen::PgWireListenProtocol;
 #[cfg(feature = "listen")]
 pub use pipe::PgWireConnectionPipe;
+#[cfg(feature = "listen")]
+pub use any_protocol::PgWireAnyProtocol;
 pub use pipe_contract::{
     CancelToken, ColumnDesc, DescribeReply, ErrorReply, NoticeReply, PgReply, QueryReply,
     QueryRequest, RowStream, SqlValue, TxStatus, verb,

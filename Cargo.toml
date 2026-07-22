@@ -518,13 +518,19 @@ http-prime = ["http-prime-deps"]
 # transport (http-prime-deps brings proxima_net::prime / PrimeTcpUpstream).
 pgwire-client = ["http-prime", "dep:proxima-pgwire", "proxima-pgwire/client"]
 
-# `pgwire` is the SERVER-side sibling: mounts `PgWireListenProtocol` so
+# `pgwire` is the SERVER-side sibling: mounts `PgWireAnyProtocol` so
 # `Listener::builder().pgwire(query).bind(addr).serve()` speaks PostgreSQL.
 # Pulls `proxima-pgwire`'s own `listen` feature (default: TCP + TLS upgrade
 # over the runtime-matched `AcceptorFactory`, scram + md5 auth) — no
 # `http-prime-deps` needed, the listener consumes `ServeContext`'s acceptor
 # factory abstractly, same as h1/h2/h3-native.
-pgwire = ["dep:proxima-pgwire", "proxima-pgwire/listen"]
+# `proxima-http/http-listener` pulls in `AnyListenProtocol` (the ONE bind +
+# accept loop `.pgwire(query)` now resolves onto for real ListenerCore/
+# ConnAdmission admission + graceful drain — see `PgWireAnyProtocol`'s doc)
+# WITHOUT turning on the umbrella's own `http1`/`http1-native` user-facing
+# axis (`.http()` stays unregistered unless a caller separately enables
+# one of those) — a `--features pgwire` build gets pgwire, not HTTP.
+pgwire = ["dep:proxima-pgwire", "proxima-pgwire/listen", "proxima-http/http-listener"]
 
 # `redis-client` registers the `redis` protocol factory so `proxima::Client`
 # speaks Redis/Valkey — `{"type":"redis", "dsn": "redis://..."}` or the

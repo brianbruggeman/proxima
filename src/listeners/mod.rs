@@ -6,20 +6,26 @@ pub mod dpdk_stream;
 pub use proxima_http::listener as http;
 // `Listener::any()` scaffolding: h1/h2-prior-knowledge `AnyProtocol`
 // candidates + `AnyListenProtocol`, the ONE bind+accept loop every
-// TCP-stream listener now drives through: `.any()`, `.http()`'s reshape, the
-// registry-driven `.h2()`/`.grpc()` axis (since `H2ListenProtocol`'s
-// retirement), AND `.redis(handler)`'s own single-candidate mount (since a
-// standalone redis listener is likewise never a thing — redis's listen-side
-// surface has always been an `AnyProtocol` candidate). `proxima_http::any_listener`
+// TCP-stream listener now drives through: `.any()`, `.http()`'s reshape,
+// the registry-driven `.h2()`/`.grpc()` axis (since `H2ListenProtocol`'s
+// retirement), AND `.pgwire(query)`/`.redis(handler)`'s own single-candidate
+// mounts (since `PgWireListenProtocol`/a standalone redis listener are
+// likewise retired onto it / never a thing). `proxima_http::any_listener`
 // itself is gated on `http-listener` (which pulls `http1-native`) since its
 // H1 candidate is unconditional inside the module — the umbrella's
-// `redis-listener` feature pulls `proxima-http/http-listener` transitively
-// (see its own Cargo.toml doc) precisely so `--features redis-listener`
-// alone still resolves this module without also turning on the umbrella's
-// user-facing `http1` axis.
+// `pgwire`/`redis-listener` features pull `proxima-http/http-listener`
+// transitively (see their own Cargo.toml doc) precisely so `--features
+// pgwire` alone still resolves this module without also turning on the
+// umbrella's user-facing `http1` axis. "http2 without http1-native and
+// without pgwire/redis-listener" is the one combination that can no longer
+// reach `.h2()`/`.grpc()` through this module (a real, narrow regression
+// from the standalone `H2ListenProtocol`; see `h2_listen_protocol`'s doc in
+// `src/listener/handle.rs` for the graceful-error fallback it gets instead
+// of a build failure).
 #[cfg(any(
     feature = "http1",
     feature = "http1-native",
+    feature = "pgwire",
     feature = "redis-listener"
 ))]
 pub use proxima_http::any_listener as any;
@@ -72,6 +78,7 @@ pub use http::{HttpListenProtocol, HttpListenerSpec, serve_h1_connection};
 #[cfg(any(
     feature = "http1",
     feature = "http1-native",
+    feature = "pgwire",
     feature = "redis-listener"
 ))]
 pub use any::{AnyListenProtocol, H1AnyProtocol, RejectHook};
