@@ -180,15 +180,13 @@ impl AnyProtocol for H1AnyProtocol {
             let dispatch: PipeHandle =
                 (*downcast_handler::<PipeHandle>(self.name(), &handler)?).clone();
             let listener_spec = Arc::new(HttpListenerSpec { max_body_bytes });
-            // Bridge onto the SAME shared in-flight counter / quiescing flag
-            // `admission` owns — h1's existing per-request loop already
-            // checks `quiescing` and increments/decrements `in_flight`
-            // itself (its own inline equivalent of `request_admit`); driving
-            // it with the admission-owned atomics (not fresh per-connection
-            // ones) is what makes quiesce/drain listener-wide instead of a
-            // no-op each connection ran in isolation.
-            let in_flight = admission.in_flight_counter();
-            let quiescing = admission.quiescing_flag();
+            // h1's per-request loop calls `request_admit`/`request_release`
+            // directly at its own request boundary now (mirrors h2 native's
+            // per-stream call in `proxima-http/src/http2/server.rs`) — the
+            // SAME listener-wide `ConnAdmission` clone every candidate gets,
+            // not a bridged copy, so quiesce/drain/`max_in_flight_requests`
+            // are listener-wide instead of a no-op each connection ran in
+            // isolation.
             let quiesce_response = Arc::new(proxima_primitives::pipe::quiesce::QuiesceResponse {
                 status: quiesce_status,
                 retry_after: quiesce_retry_after,
@@ -197,8 +195,7 @@ impl AnyProtocol for H1AnyProtocol {
                 stream,
                 dispatch,
                 listener_spec,
-                in_flight,
-                quiescing,
+                admission.clone(),
                 quiesce_response,
                 peer,
                 None,
