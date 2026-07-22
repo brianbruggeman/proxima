@@ -50,6 +50,10 @@ tokio = { workspace = true, optional = true, features = ["sync", "rt", "io-util"
 tokio-util = { workspace = true, optional = true, features = ["compat", "io"] }
 tokio-uring = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true, features = ["aws_lc_rs", "tls12"] }
+# AnyListenProtocol's factory-driven (futures-io) accept loop terminates TLS
+# with the futures-io sibling of tokio-rustls — same rustls::ServerConfig,
+# different async adapter (mirrors proxima-pgwire's own `tls` feature).
+futures-rustls = { workspace = true, optional = true, features = ["aws_lc_rs", "tls12"] }
 webpki-roots = { workspace = true }
 url = { workspace = true, optional = true }
 async-tungstenite = { workspace = true, optional = true, features = ["handshake", "futures-03-sink", "tokio-runtime"] }
@@ -200,7 +204,9 @@ tls = [
     "http1-tls",
     "dep:proxima-tls",
     "proxima-tls/tokio",
+    "proxima-tls/futures-io",
     "dep:tokio-rustls",
+    "dep:futures-rustls",
     "proxima-listen/tls",
 ]
 thiserror = ["dep:thiserror"]

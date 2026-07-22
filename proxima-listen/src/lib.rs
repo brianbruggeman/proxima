@@ -34,7 +34,7 @@ mod offload;
 pub use offload::Offload;
 
 #[cfg(feature = "std")]
-mod serve_pipe;
+pub mod serve_pipe;
 #[cfg(feature = "std")]
 pub use serve_pipe::serve_pipe_upgrades;
 
@@ -68,6 +68,8 @@ pub use admission::{
     Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenerCore, Phase, ReleaseOutcome,
     Route, ShedReason,
 };
+#[cfg(feature = "std")]
+pub use admission::{ConnAdmission, RequestAdmit};
 
 /// Open universal listener classification primitives: [`AnyProtocol`],
 /// [`AnyRegistry`], [`Classifier`] — the scaffolding `Listener::any()`

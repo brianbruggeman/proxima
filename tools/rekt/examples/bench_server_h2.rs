@@ -1,8 +1,11 @@
 //! The h2 sibling of `bench_server`: proxima's HTTP/2 (h2c, prior-knowledge)
 //! server on PRIME — same per-core SO_REUSEPORT serving path as the h1
-//! `bench_server`, just `H2ListenProtocol` instead of `HttpListenProtocol`. No
-//! tokio: the listener runs on prime's per-core executor via `PrimeAcceptorFactory`
-//! (this is exactly what `PrimeServeExt::serve_http` does internally).
+//! `bench_server`, just the single-candidate `AnyListenProtocol` "h2" instead
+//! of `HttpListenProtocol` (`H2ListenProtocol` is retired onto
+//! `AnyListenProtocol`'s single bind+accept loop — see
+//! `proxima_http::http2`'s module doc). No tokio: the listener runs on
+//! prime's per-core executor via `PrimeAcceptorFactory` (this is exactly
+//! what `PrimeServeExt::serve_http` does internally).
 //!
 //!   cargo run --release --features scheduler --example bench_server_h2 -- 127.0.0.1:8090 [cores]
 
@@ -10,7 +13,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use proxima::h2::H2ListenProtocol;
+use proxima::listeners::{AnyListenProtocol, H2PriorKnowledgeAnyProtocol};
 use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::runtime::{PrimeRuntime, Runtime};
@@ -50,7 +53,10 @@ fn main() -> Result<(), ProximaError> {
     // mirror PrimeServeExt::serve_http, but register the h2c listener and select
     // it by protocol name. The acceptor factory keeps the accept loop on prime.
     let registry = ListenRegistry::new();
-    registry.register(Arc::new(H2ListenProtocol::new()))?;
+    registry.register(Arc::new(AnyListenProtocol::single_candidate(
+        "h2",
+        Arc::new(H2PriorKnowledgeAnyProtocol::new()),
+    )))?;
     let runtime_dyn: Arc<dyn Runtime> = runtime.clone();
     let acceptor = Arc::new(PrimeAcceptorFactory);
     let mut spec = ListenerSpec::http(addr);

@@ -44,7 +44,13 @@ fn connect_request() -> Request<Bytes> {
 /// CONNECT request, take the returned upgrade, and invoke it against the
 /// socket wrapped as a `HijackedSocket` (the accepted connection is
 /// already `futures::io`, so it boxes straight to `Box<dyn HijackStream>`).
-async fn handle_connection(
+///
+/// `pub` — the ONE connection-layer accept-to-upgrade driver. Before the
+/// AnyListenProtocol lift, `proxima-pgwire` and `proxima-redis` each carried
+/// a byte-identical private copy of this exact function for their own
+/// legacy tokio-compat accept loop; both now call this one instead
+/// (workspace principle 1: dedup by pointing at the canonical primitive).
+pub async fn handle_connection(
     conn: Box<dyn StreamConnection>,
     pipe: PipeHandle,
 ) -> Result<(), ProximaError> {

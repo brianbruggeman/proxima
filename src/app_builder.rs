@@ -10,8 +10,6 @@ use crate::config_format::{ConfigFormatRegistry, default_config_format_registry}
 use crate::error::ProximaError;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
 use crate::listeners::http::HttpListenProtocol;
-#[cfg(feature = "http2")]
-use crate::listeners::H2ListenProtocol;
 #[cfg(feature = "http3")]
 use crate::listeners::H3NativeListenProtocol;
 #[cfg(feature = "tokio")]
@@ -107,9 +105,22 @@ impl AppBuilder {
         #[cfg(any(feature = "http1", feature = "http1-native"))]
         self.listen_registry
             .register(Arc::new(HttpListenProtocol::new()))?;
-        #[cfg(feature = "http2")]
-        self.listen_registry
-            .register(Arc::new(H2ListenProtocol::new()))?;
+        // `H2ListenProtocol` is retired — the registry-driven "h2" name now
+        // resolves to a single-candidate `AnyListenProtocol` (see
+        // `proxima_http::http2::mod`'s doc for why). `AnyListenProtocol`
+        // needs `http1`/`http1-native` in addition to `http2` (its H1
+        // candidate is unconditional inside the module it lives in) — an
+        // `http2`-only build (no http1 at all) simply doesn't register "h2"
+        // here any more (a real, narrow regression from the retired
+        // standalone listener; see `h2_listen_protocol`'s doc in
+        // `src/listener/handle.rs`).
+        #[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
+        self.listen_registry.register(Arc::new(
+            crate::listeners::AnyListenProtocol::single_candidate(
+                "h2",
+                Arc::new(crate::listeners::H2PriorKnowledgeAnyProtocol::new()),
+            ),
+        ))?;
         #[cfg(feature = "http3")]
         self.listen_registry
             .register(Arc::new(H3NativeListenProtocol::new()))?;

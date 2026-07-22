@@ -560,10 +560,34 @@ fn resolve_listen_protocol(
     Ok(("http".to_string(), None))
 }
 
-#[cfg(feature = "http2")]
+// `H2ListenProtocol` is retired onto `AnyListenProtocol`'s single bind +
+// accept loop (real `ListenerCore`/`ConnAdmission` admission, graceful
+// drain) — see `proxima_http::http2`'s module doc for why. `AnyListenProtocol`
+// itself is gated on `http-listener` (which pulls `http1-native`) in
+// proxima-http, since its H1 candidate is unconditional inside that module —
+// so unlike the retired standalone listener, `.h2()`/`.grpc()` now ALSO needs
+// `http1`/`http1-native` compiled in. This is a real, narrow regression
+// (documented, not silent): the middle arm below is what a `http2`-only
+// build (no http1 at all) now gets instead of a build failure.
+#[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
 fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
-    let protocol: Arc<dyn ListenProtocol> = Arc::new(crate::listeners::H2ListenProtocol::new());
+    let protocol: Arc<dyn ListenProtocol> = Arc::new(
+        crate::listeners::AnyListenProtocol::single_candidate(
+            "h2",
+            Arc::new(crate::listeners::H2PriorKnowledgeAnyProtocol::new()),
+        ),
+    );
     Ok(("h2".to_string(), Some(protocol)))
+}
+
+#[cfg(all(feature = "http2", not(any(feature = "http1", feature = "http1-native"))))]
+fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
+    Err(ProximaError::Config(
+        "Listener::builder(): .grpc()/.h2() needs `http1` or `http1-native` in addition to \
+         `http2` since the AnyListenProtocol lift (H2ListenProtocol standalone is retired); \
+         enable one"
+            .into(),
+    ))
 }
 
 #[cfg(not(feature = "http2"))]

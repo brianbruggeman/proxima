@@ -15,14 +15,11 @@
 #![cfg(feature = "http2")]
 
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use bytes::Bytes;
 use proxima::ResponseStream;
 use proxima::error::ProximaError;
 use proxima::h2::serve_h2_connection;
-use proxima::listeners::http::QuiesceResponse;
 use proxima::pipe::{PipeHandle, into_handle};
 use proxima::request::{Request, Response};
 use proxima_primitives::pipe::SendPipe;
@@ -158,19 +155,13 @@ impl SendPipe for EchoBodyPipe {
 async fn spawn_native_server(dispatch: PipeHandle) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
-    let in_flight = Arc::new(AtomicU64::new(0));
-    let quiesce_response = Arc::new(QuiesceResponse {
-        status: 503,
-        retry_after: "1".into(),
-    });
-    let in_flight_for_server = in_flight.clone();
+    let admission = proxima_listen::admission::ConnAdmission::unbounded();
     tokio::spawn(async move {
         let (socket, peer) = listener.accept().await.expect("accept tcp");
         let _ = serve_h2_connection(
             socket.compat(),
             dispatch,
-            in_flight_for_server,
-            quiesce_response,
+            admission,
             Some(proxima::stream::PeerInfo::Tcp(peer)),
         )
         .await;

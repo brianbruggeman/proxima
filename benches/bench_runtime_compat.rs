@@ -54,7 +54,7 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,6 @@ use hyper::service::service_fn as pipe_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use proxima::error::ProximaError;
 use proxima::h2::serve_h2_connection;
-use proxima::listeners::http::QuiesceResponse;
 use proxima::pipe::{PipeHandle, into_handle};
 use proxima::request::{Request, Response};
 use proxima::runtime::prime::os::net::TcpListener as ProximaTcpListener;
@@ -513,14 +512,13 @@ fn start_h2_tokio(pipe: PipeHandle) -> std::net::SocketAddr {
             let _ = socket.set_nodelay(true);
             let pipe_for_conn = pipe.clone();
             tokio::spawn(async move {
-                let in_flight = Arc::new(AtomicU64::new(0));
-                let quiesce = Arc::new(QuiesceResponse {
-                    status: 503,
-                    retry_after: "1".into(),
-                });
-                let _ =
-                    serve_h2_connection(socket.compat(), pipe_for_conn, in_flight, quiesce, None)
-                        .await;
+                let _ = serve_h2_connection(
+                    socket.compat(),
+                    pipe_for_conn,
+                    proxima_listen::admission::ConnAdmission::unbounded(),
+                    None,
+                )
+                .await;
             });
         }
     });
@@ -551,13 +549,13 @@ fn start_h2_prime(pipe: PipeHandle) -> std::net::SocketAddr {
                         let pipe = pipe.clone();
                         proxima::runtime::prime::os::core_shard::spawn_on_current_core(Box::pin(
                             async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
-                                let _ = serve_h2_connection(socket, pipe, in_flight, quiesce, None)
-                                    .await;
+                                let _ = serve_h2_connection(
+                                    socket,
+                                    pipe,
+                                    proxima_listen::admission::ConnAdmission::unbounded(),
+                                    None,
+                                )
+                                .await;
                             },
                         ));
                     }
@@ -613,16 +611,10 @@ fn start_h2_prime_tokio_compat(pipe: PipeHandle) -> std::net::SocketAddr {
                         // future runs on the sister OS thread, not this prime
                         // worker thread.
                         tokio::spawn(async move {
-                            let in_flight = Arc::new(AtomicU64::new(0));
-                            let quiesce = Arc::new(QuiesceResponse {
-                                status: 503,
-                                retry_after: "1".into(),
-                            });
                             let _ = serve_h2_connection(
                                 socket.compat(),
                                 pipe,
-                                in_flight,
-                                quiesce,
+                                proxima_listen::admission::ConnAdmission::unbounded(),
                                 None,
                             )
                             .await;
@@ -673,16 +665,10 @@ fn start_h2_prime_tokio_compat_inverted(pipe: PipeHandle) -> std::net::SocketAdd
                         // tokio::spawn from a prime task on the inverted worker
                         // is LOCAL (runs as a sister task driven in-thread).
                         tokio::spawn(async move {
-                            let in_flight = Arc::new(AtomicU64::new(0));
-                            let quiesce = Arc::new(QuiesceResponse {
-                                status: 503,
-                                retry_after: "1".into(),
-                            });
                             let _ = serve_h2_connection(
                                 socket.compat(),
                                 pipe,
-                                in_flight,
-                                quiesce,
+                                proxima_listen::admission::ConnAdmission::unbounded(),
                                 None,
                             )
                             .await;

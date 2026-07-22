@@ -44,7 +44,6 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -54,7 +53,6 @@ use proxima::h2::frame::{
     parse_payload,
 };
 use proxima::h2::serve_h2_connection;
-use proxima::listeners::http::QuiesceResponse;
 use proxima::pipe::{PipeHandle, into_handle};
 use proxima::request::{Request, Response};
 use proxima::runtime::prime::os::net::TcpListener as ProximaTcpListener;
@@ -197,13 +195,10 @@ fn start_prime_server() -> SocketAddr {
                         let dispatch = dispatch.clone();
                         proxima::runtime::prime::os::core_shard::spawn_on_current_core(Box::pin(
                             async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
+                                let admission =
+                                    proxima_listen::admission::ConnAdmission::unbounded();
                                 let _ =
-                                    serve_h2_connection(socket, dispatch, in_flight, quiesce, None)
+                                    serve_h2_connection(socket, dispatch, admission, None)
                                         .await;
                             },
                         ));
@@ -237,16 +232,11 @@ fn start_tokio_server() -> SocketAddr {
                         let _ = socket.set_nodelay(true);
                         let dispatch = dispatch.clone();
                         tokio::task::spawn_local(async move {
-                            let in_flight = Arc::new(AtomicU64::new(0));
-                            let quiesce = Arc::new(QuiesceResponse {
-                                status: 503,
-                                retry_after: "1".into(),
-                            });
+                            let admission = proxima_listen::admission::ConnAdmission::unbounded();
                             let _ = serve_h2_connection(
                                 socket.compat(),
                                 dispatch,
-                                in_flight,
-                                quiesce,
+                                admission,
                                 None,
                             )
                             .await;
