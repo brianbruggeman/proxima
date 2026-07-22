@@ -14,7 +14,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use proxima_core::ProximaError;
-use proxima_primitives::stream::AcceptorFactory;
+use proxima_primitives::stream::{AcceptorFactory, DatagramFactory};
 
 #[cfg(feature = "runtime-prime")]
 pub use prime;
@@ -62,20 +62,29 @@ static INSTALLED_RUNTIME: OnceLock<InstalledRuntime> = OnceLock::new();
 /// A runtime + the acceptor factory that matches its transport (prime pairs
 /// with `PrimeAcceptorFactory`, tokio with `TokioAcceptorFactory`) —
 /// published together so an adopter never ends up with one backend's
-/// runtime and another's acceptor.
+/// runtime and another's acceptor. `datagram_factory` is the UDP sibling
+/// (paired for h3-native's QUIC socket) — `None` when the installed backend
+/// has no matching `DatagramFactory` (e.g. tokio, which has no
+/// `DatagramFactory` impl yet — see `proxima_net::tokio`).
 #[derive(Clone)]
 pub struct InstalledRuntime {
     pub runtime: Arc<dyn Runtime>,
     pub acceptor_factory: Arc<dyn AcceptorFactory>,
+    pub datagram_factory: Option<Arc<dyn DatagramFactory>>,
 }
 
 /// Publish the runtime `#[proxima::main]` (or any other `run*` driver)
 /// booted, so `App::new()` can adopt it instead of building an independent
 /// second runtime. Set-once — a later call is ignored.
-pub fn install_runtime(runtime: Arc<dyn Runtime>, acceptor_factory: Arc<dyn AcceptorFactory>) {
+pub fn install_runtime(
+    runtime: Arc<dyn Runtime>,
+    acceptor_factory: Arc<dyn AcceptorFactory>,
+    datagram_factory: Option<Arc<dyn DatagramFactory>>,
+) {
     let _ = INSTALLED_RUNTIME.set(InstalledRuntime {
         runtime,
         acceptor_factory,
+        datagram_factory,
     });
 }
 
@@ -538,7 +547,8 @@ fn install_prime_ambient(inner: &Arc<PrimeRuntime>, visible_cores: usize) {
         visible_cores,
     });
     let acceptor_factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-    install_runtime(runtime, acceptor_factory);
+    let datagram_factory: Arc<dyn DatagramFactory> = Arc::new(proxima_net::prime::PrimeDatagramFactory);
+    install_runtime(runtime, acceptor_factory, Some(datagram_factory));
 }
 
 #[cfg(all(

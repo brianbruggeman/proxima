@@ -67,16 +67,20 @@ impl ListenerBuilderEntry for Listener {
 /// (`.http`/`.https`/`.grpc`) and
 /// [`TransportSugar`](proxima_config::sugar::TransportSugar)
 /// (`.auto`/`.tcp`/`.tls`/`.h3`/`.proxy`) axes `ClientBuilder` gets — no
-/// listener-specific per-wire methods (`.h1()`/`.h2()`/`.h3_native()`
-/// would be a fork of the sugar, not a mirror of it). Two axes are honestly
-/// asymmetric and shadow the blanket method with an inherent one carrying
-/// more than a client ever needs: `.tls(TlsConfig)` (real cert material) and
-/// `.grpc()` (url-less — a listener dispatches to a `.handle(pipe)` already
-/// on hand, it doesn't dial out). `.proxy(url)` remains reachable through the
-/// blanket import (no negative impl exists to hide it) but `.serve()`
-/// hard-errors if it's present — see `reject_dead_axes`. `.bind()`/`.handle()`
-/// are the listener-specific axes, where the client instead has a url baked
-/// into `.http(url)` plus `.auth()`.
+/// listener-specific per-wire methods would fork the sugar rather than
+/// mirror it, EXCEPT where the wire genuinely has no client-side twin to
+/// mirror: `.h2()` (h2 has no url-carrying client axis the way `.tls()`/
+/// `.h3()` do) and `.pgwire(query)` (a typed SQL engine, not a wire pick at
+/// all). A few axes are honestly asymmetric and shadow or extend the
+/// blanket method with an inherent one carrying more than a client ever
+/// needs: `.tls(TlsConfig)` (real cert material), `.grpc()` (url-less — a
+/// listener dispatches to a `.handle(pipe)` already on hand, it doesn't dial
+/// out), `.h2()`, and `.pgwire(query)` (real query engine — see its own
+/// doc). `.proxy(url)` remains reachable through the blanket import (no
+/// negative impl exists to hide it) but `.serve()` hard-errors if it's
+/// present — see `reject_dead_axes`. `.bind()`/`.handle()` are the
+/// listener-specific axes, where the client instead has a url baked into
+/// `.http(url)` plus `.auth()`.
 #[derive(Default)]
 pub struct ListenerBuilder {
     spec: serde_json::Map<String, Value>,
@@ -89,15 +93,23 @@ pub struct ListenerBuilder {
     /// See [`Self::tls`].
     #[cfg(feature = "tls")]
     tls: Option<proxima_tls::TlsConfig>,
+    /// The typed SQL engine `.pgwire(query)` carries — accumulated
+    /// separately from `spec` for the same reason `tls` is: a
+    /// `proxima_pgwire::PgPipeHandle` doesn't fit a `serde_json::Value` spec
+    /// key, it's a real handle `.serve()` needs in hand. See
+    /// [`Self::pgwire`].
+    #[cfg(feature = "pgwire")]
+    pgwire_query: Option<proxima_pgwire::PgPipeHandle>,
 }
 
 impl ListenerBuilder {
     // `.auto()`/`.tcp()`/`.h3()` (`TransportSugar`) and `.http(url)`/
     // `.https(url)` (`ProtocolSugar`) are real, unmodified blanket methods —
     // `resolve_listen_protocol` below reads the same `transport`/`grpc` spec
-    // keys `load.rs` reads on the client side. `.tls()`/`.grpc()` are NOT
-    // blanket sugar here: both are redefined below (inherent, shadowing the
-    // blanket version) because a listener needs cert material / has no url
+    // keys `load.rs` reads on the client side. `.tls()`/`.grpc()`/`.h2()`/
+    // `.pgwire(query)` are NOT blanket sugar here: all are inherent (the
+    // last two have no blanket twin at all) because a listener needs cert
+    // material / a query engine / has no url
     // to dial. `use proxima::{ProtocolSugar, TransportSugar}` brings the rest
     // into scope.
 
@@ -131,6 +143,46 @@ impl ListenerBuilder {
     #[must_use]
     pub fn grpc(mut self) -> Self {
         self.spec.insert("grpc".to_string(), Value::Bool(true));
+        self
+    }
+
+    /// Select h2 (h2c, prior-knowledge, no ALPN, no TLS) as the listen
+    /// protocol — the url-less counterpart of a client's transport pick: a
+    /// listener dispatches to a `.handle(pipe)` already on hand rather than
+    /// dialing an upstream url, so this is an inherent 0-arg method (there
+    /// is no blanket `TransportSugar::h2()` to shadow — h2 has no
+    /// client-side url-carrying twin the way `.tls()`/`.h3()` do). Resolves
+    /// to the exact same `h2` listen protocol `.grpc()` resolves to (see its
+    /// doc) — `.grpc()` and `.h2()` are the same wire, self-registered onto
+    /// the fresh `App` at `.serve()` time.
+    #[must_use]
+    pub fn h2(mut self) -> Self {
+        self.spec.insert("h2".to_string(), Value::Bool(true));
+        self
+    }
+
+    /// Select PostgreSQL wire protocol as the listen protocol, carrying the
+    /// SQL engine directly — the one axis that genuinely needs more than a
+    /// marker key: `query` is the same typed
+    /// [`PgPipeHandle`](proxima_pgwire::PgPipeHandle)
+    /// [`PgWireListenProtocol::new`](proxima_pgwire::PgWireListenProtocol::new)
+    /// takes, matching a SQL verb `Request`/`Response` pair no generic
+    /// `.handle(pipe)` (`Request<Bytes>`/`Response<Bytes>`) can carry. This
+    /// is the same asymmetry `.tls(TlsConfig)` has against the client's bare
+    /// `.tls()`: a listener needs real material a client-side axis never
+    /// does. Unlike `.h2()`/`.h3()` (which resolve to one shared instance
+    /// self-registered onto the fresh `App`), `.serve()` constructs a fresh
+    /// `PgWireListenProtocol` carrying THIS exact `query` every call —
+    /// `App::new()` cannot pre-register a protocol it doesn't yet have a
+    /// query engine for. `.handle(pipe)` is still required before `.serve()`
+    /// (the one validation path stays uniform across axes) even though
+    /// `PgWireListenProtocol::serve` never calls it once a
+    /// constructor-supplied `query` is present.
+    #[cfg(feature = "pgwire")]
+    #[must_use]
+    pub fn pgwire(mut self, query: proxima_pgwire::PgPipeHandle) -> Self {
+        self.pgwire_query = Some(query);
+        self.spec.insert("pgwire_axis".to_string(), Value::Bool(true));
         self
     }
 
@@ -191,6 +243,15 @@ impl ListenerBuilder {
     /// `tests/e2e/listener_client_interop.rs`'s `wait_until_listening`).
     pub async fn serve(self) -> Result<Server, ProximaError> {
         reject_dead_axes(&self.spec)?;
+        #[cfg(all(feature = "tls", feature = "pgwire"))]
+        if self.tls.is_some() && self.pgwire_query.is_some() {
+            return Err(ProximaError::Config(
+                "Listener::builder(): .pgwire(query) manages its own TLS upgrade \
+                 (proxima-pgwire's `listen` feature); .tls(config) would double-wrap it \
+                 with the wrong (http) protocol underneath — drop one"
+                    .into(),
+            ));
+        }
         let bind = self.bind.or_else(|| bind_from_spec(&self.spec)).ok_or_else(|| {
             ProximaError::Config(
                 "Listener::builder(): .bind(addr) (or .http(bind.to_string())) is required before .serve()".into(),
@@ -201,12 +262,24 @@ impl ListenerBuilder {
                 "Listener::builder(): .handle(pipe) is required before .serve()".into(),
             )
         })?;
+        #[cfg(feature = "pgwire")]
+        let pgwire_query = self.pgwire_query;
         let (protocol, extra_protocol) = resolve_listen_protocol(&self.spec)?;
         #[cfg(feature = "tls")]
         let (protocol, extra_protocol) = compose_tls(self.tls, protocol, extra_protocol)?;
         let app = App::new()?;
         if let Some(protocol) = extra_protocol {
             app.register_listen_protocol(protocol)?;
+        }
+        // `.pgwire(query)` carries a typed query engine `App::new()`'s
+        // static registration set cannot know about ahead of time —
+        // register a fresh instance carrying it now, before `.serve()`
+        // resolves `protocol` ("pgwire") against the registry.
+        #[cfg(feature = "pgwire")]
+        if let Some(query) = pgwire_query {
+            app.register_listen_protocol(Arc::new(proxima_pgwire::PgWireListenProtocol::new(
+                "pgwire", query,
+            )))?;
         }
         app.mount("/{*path}", MountTarget::Handle(dispatch))?;
         let config = RunConfig {
@@ -271,17 +344,26 @@ fn tls_marker_present(_spec: &serde_json::Map<String, Value>) -> bool {
 /// (`src/load.rs:455`), extended with the `transport` axis so `.h3()`
 /// resolves too (the client side doesn't need this extension: its `h3`
 /// transport rides the SAME `http`-keyed factory, selected by ALPN, not a
-/// different registry entry). Returns the registry name to put in
+/// different registry entry), and with `.h2()`/`.pgwire(query)`, which have
+/// no client-side twin at all. Returns the registry name to put in
 /// `RunConfig::protocol`, and — when that name is one `App::new()` doesn't
 /// register by default — the concrete protocol `ListenerBuilder::serve`
-/// registers onto its fresh `App` first. `.grpc()` takes priority over
-/// `transport` (mirrors `load.rs`'s `if http ... else if grpc`, which never
-/// consults `transport` either): a listener that calls both `.grpc()` and
-/// `.h3()` gets gRPC-over-h2, since no gRPC-over-h3 listen protocol exists.
+/// registers onto its fresh `App` first. `.pgwire(query)` is checked FIRST
+/// (it carries a typed query engine no other axis combination can produce,
+/// so it always wins) and never returns an extra protocol here — `.serve()`
+/// registers its own fresh `PgWireListenProtocol` directly, since it needs
+/// the `query` handle this spec-only function never sees. `.grpc()`/`.h2()`
+/// take priority over `transport` next (mirrors `load.rs`'s `if http ...
+/// else if grpc`, which never consults `transport` either): a listener that
+/// calls both `.grpc()` and `.h3()` gets gRPC-over-h2, since no
+/// gRPC-over-h3 listen protocol exists.
 fn resolve_listen_protocol(
     spec: &serde_json::Map<String, Value>,
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
-    if spec.contains_key("grpc") {
+    if spec.contains_key("pgwire_axis") {
+        return Ok(("pgwire".to_string(), None));
+    }
+    if spec.contains_key("grpc") || spec.contains_key("h2") {
         return h2_listen_protocol();
     }
     if spec.get("transport").and_then(Value::as_str) == Some("h3") {
@@ -497,6 +579,40 @@ mod tests {
         assert_eq!(carried.name(), "h3-native");
     }
 
+    #[cfg(feature = "http2")]
+    #[test]
+    fn h2_axis_resolves_to_the_same_shared_h2_protocol_as_grpc() {
+        let h2 = ListenerBuilder::default().h2();
+        let (name, extra) = resolve_listen_protocol(&h2.spec).expect("h2 resolves");
+        assert_eq!(name, "h2");
+        let carried = extra.expect(".h2() must carry a protocol to self-register");
+        assert_eq!(carried.name(), "h2");
+    }
+
+    #[cfg(feature = "pgwire")]
+    #[test]
+    fn pgwire_axis_resolves_to_pgwire_and_carries_nothing_here() {
+        // `.pgwire(query)` self-registers directly in `.serve()` (the query
+        // handle never reaches `resolve_listen_protocol`, which only sees
+        // the `pgwire_axis` marker key) — see `serve`'s own registration.
+        let pgwire = ListenerBuilder::default().spec("pgwire_axis", json!(true));
+        let (name, extra) = resolve_listen_protocol(&pgwire.spec).expect("pgwire resolves");
+        assert_eq!(name, "pgwire");
+        assert!(extra.is_none());
+    }
+
+    #[cfg(feature = "pgwire")]
+    #[test]
+    fn pgwire_axis_takes_priority_over_grpc_and_h3() {
+        let mixed = ListenerBuilder::default()
+            .spec("pgwire_axis", json!(true))
+            .spec("grpc", json!(true))
+            .spec("transport", json!("h3"));
+        let (name, extra) = resolve_listen_protocol(&mixed.spec).expect("pgwire wins");
+        assert_eq!(name, "pgwire");
+        assert!(extra.is_none());
+    }
+
     #[test]
     fn listener_builder_mirrors_client_builder_axis_keys() {
         // The same `ProtocolSugar`/`TransportSugar` method calls a
@@ -608,5 +724,32 @@ mod tests {
         let (name, extra) = compose_tls(None, "http".to_string(), None).expect("compose_tls");
         assert_eq!(name, "http");
         assert!(extra.is_none());
+    }
+
+    #[cfg(all(feature = "tls", feature = "pgwire"))]
+    #[test]
+    fn pgwire_and_tls_together_hard_error_instead_of_wrapping_the_wrong_protocol() {
+        use proxima_primitives::pipe::SendPipe;
+
+        struct NeverCalled;
+        impl SendPipe for NeverCalled {
+            type In = proxima_pgwire::PgRequest;
+            type Out = proxima_pgwire::PgResponse;
+            type Err = ProximaError;
+
+            async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
+                unreachable!("guard must reject before the query engine is ever dispatched to")
+            }
+        }
+
+        let builder = ListenerBuilder::default()
+            .tls(proxima_tls::TlsConfig::self_signed())
+            .pgwire(proxima_pgwire::into_pg_handle(NeverCalled));
+        let err = match futures::executor::block_on(builder.serve()) {
+            Ok(_) => panic!(".pgwire(query) + .tls(config) must not silently compose"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains(".pgwire"), "got: {err}");
+        assert!(format!("{err}").contains(".tls"), "got: {err}");
     }
 }

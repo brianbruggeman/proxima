@@ -25,7 +25,7 @@ use crate::runtime::Runtime;
 use crate::telemetry::{Metrics, TelemetryHandle};
 use proxima_listen::ListenRegistry;
 use proxima_listen::handle::{ListenerHandle, ListenerSpec};
-use proxima_primitives::stream::AcceptorFactory;
+use proxima_primitives::stream::{AcceptorFactory, DatagramFactory};
 
 pub struct App {
     pipes: BTreeMap<String, PipeHandle>,
@@ -54,6 +54,12 @@ pub struct App {
     /// runtime (default), `TokioAcceptorFactory` under `runtime-tokio`. `None`
     /// leaves the protocol to its built-in accept path.
     acceptor_factory: Option<Arc<dyn AcceptorFactory>>,
+    /// UDP sibling of `acceptor_factory` — the datagram socket source the
+    /// h3-native listener binds its QUIC UDP socket through. Only the prime
+    /// backend has a matching `DatagramFactory` today (`None` under
+    /// `runtime-tokio`; see `proxima_net::tokio`, which has no `DatagramFactory`
+    /// impl yet), so an h3-native listener currently requires the prime runtime.
+    datagram_factory: Option<Arc<dyn DatagramFactory>>,
 }
 
 /// Pick the default serve+chain runtime and its matching acceptor factory.
@@ -93,7 +99,11 @@ fn resolve_cores(explicit: Option<usize>) -> Result<usize, ProximaError> {
 
 /// The default runtime plus its matching acceptor factory. `None` when no
 /// runtime backend is compiled in (e.g. non-unix without prime).
-type RuntimeAndFactory = (Option<Arc<dyn Runtime>>, Option<Arc<dyn AcceptorFactory>>);
+type RuntimeAndFactory = (
+    Option<Arc<dyn Runtime>>,
+    Option<Arc<dyn AcceptorFactory>>,
+    Option<Arc<dyn DatagramFactory>>,
+);
 
 // cfg-arm returns: exactly one arm compiles per build, so the early `return`
 // is that arm's natural exit. needless_return is a false positive under the
@@ -109,7 +119,11 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
     // — two runtimes, contradictory core counts, one process. See
     // `crate::runtime::install_runtime` / `installed_runtime`.
     if let Some(installed) = crate::runtime::installed_runtime() {
-        return Ok((Some(installed.runtime), Some(installed.acceptor_factory)));
+        return Ok((
+            Some(installed.runtime),
+            Some(installed.acceptor_factory),
+            installed.datagram_factory,
+        ));
     }
 
     // PRIME-FIRST: when `serve-prime` is set (the default) and the prime reactor
@@ -136,7 +150,9 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
             crate::runtime::PrimeRuntime::new_with_tokio_compat(resolve_cores(cores_override)?)?,
         );
         let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-        return Ok((Some(runtime), Some(factory)));
+        let datagram_factory: Arc<dyn DatagramFactory> =
+            Arc::new(proxima_net::prime::PrimeDatagramFactory);
+        return Ok((Some(runtime), Some(factory), Some(datagram_factory)));
     }
     // tokio-free default: same prime transport, no sister tokio Handle on
     // each worker (see the `tokio`-gated arm above for that variant). User
@@ -152,7 +168,9 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
             resolve_cores(cores_override)?,
         )?);
         let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-        return Ok((Some(runtime), Some(factory)));
+        let datagram_factory: Arc<dyn DatagramFactory> =
+            Arc::new(proxima_net::prime::PrimeDatagramFactory);
+        return Ok((Some(runtime), Some(factory), Some(datagram_factory)));
     }
     #[cfg(all(
         feature = "runtime-tokio",
@@ -167,7 +185,9 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
             resolve_cores(cores_override)?,
         )?);
         let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::tokio::TokioAcceptorFactory);
-        return Ok((Some(runtime), Some(factory)));
+        // no tokio-backed DatagramFactory exists yet (see the struct field
+        // doc on `App::datagram_factory`) — h3-native has no bind path here.
+        return Ok((Some(runtime), Some(factory), None));
     }
     #[cfg(all(
         not(feature = "runtime-tokio"),
@@ -179,7 +199,7 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
     ))]
     {
         let _ = cores_override;
-        Ok((None, None))
+        Ok((None, None, None))
     }
 }
 
@@ -234,6 +254,13 @@ impl App {
         let listen_registry = Arc::new(ListenRegistry::new());
         #[cfg(any(feature = "http1", feature = "http1-native"))]
         listen_registry.register(Arc::new(HttpListenProtocol::new()))?;
+        // h2/h3-native/pgwire are NOT pre-registered here — `ListenerBuilder`
+        // (`src/listener/handle.rs`) self-registers each onto its OWN fresh
+        // `App::new()` at `.serve()` time (`.h2()`/`.h3()`/`.grpc()` share one
+        // instance; `.pgwire(query)` builds a fresh one per call, since it
+        // carries a caller-supplied query engine this constructor never has).
+        // Pre-registering them here too would double-register and error the
+        // moment any of those axes tried to self-register.
         #[cfg(feature = "tokio")]
         listen_registry.register(Arc::new(McpListenProtocol::new()))?;
         #[cfg(feature = "tcp")]
@@ -247,7 +274,7 @@ impl App {
         // on the chain path). Users may override the runtime with
         // `.with_runtime(...)`, or size the fallback default with
         // `App::builder().with_runtime_config(...)`.
-        let (runtime, acceptor_factory) = default_runtime(None)?;
+        let (runtime, acceptor_factory, datagram_factory) = default_runtime(None)?;
 
         let load_context = LoadContext::with_default_registry()?;
         // arm the recording spigot with the App's runtime so a directly-called
@@ -270,6 +297,7 @@ impl App {
             listen_registry,
             runtime,
             acceptor_factory,
+            datagram_factory,
         })
     }
 
@@ -292,6 +320,17 @@ impl App {
     #[must_use]
     pub fn with_acceptor_factory(mut self, factory: Arc<dyn AcceptorFactory>) -> Self {
         self.acceptor_factory = Some(factory);
+        self
+    }
+
+    #[must_use]
+    pub fn datagram_factory(&self) -> Option<Arc<dyn DatagramFactory>> {
+        self.datagram_factory.clone()
+    }
+
+    #[must_use]
+    pub fn with_datagram_factory(mut self, factory: Arc<dyn DatagramFactory>) -> Self {
+        self.datagram_factory = Some(factory);
         self
     }
 
@@ -626,7 +665,7 @@ impl App {
         router: Arc<ArcSwap<Router>>,
         cores_override: Option<usize>,
     ) -> Result<Self, ProximaError> {
-        let (runtime, acceptor_factory) = default_runtime(cores_override)?;
+        let (runtime, acceptor_factory, datagram_factory) = default_runtime(cores_override)?;
         // arm the recording spigot at build (see App::new) — a builder-made App
         // whose `record` upstream is called directly still pumps.
         if let Some(rt) = &runtime {
@@ -644,6 +683,7 @@ impl App {
             listen_registry,
             runtime,
             acceptor_factory,
+            datagram_factory,
         })
     }
 
@@ -701,6 +741,7 @@ impl App {
             .set_runtime(runtime.clone());
         let runtime_for_factory = runtime.clone();
         let acceptor_factory = self.acceptor_factory.clone();
+        let datagram_factory = self.datagram_factory.clone();
         // drain_notify: listener fires this when its serve() future
         // returns (after quiesce + drain). `Shutdown::drain` awaits
         // it BEFORE broadcast_drop so per-core drop hooks run only
@@ -727,6 +768,9 @@ impl App {
                         .with_ready_signal(ready_tx);
                     if let Some(factory) = acceptor_factory {
                         context = context.with_acceptor_factory(factory);
+                    }
+                    if let Some(factory) = datagram_factory {
+                        context = context.with_datagram_factory(factory);
                     }
                     Box::pin(async move {
                         if let Err(error) = protocol
@@ -865,7 +909,7 @@ impl App {
             self.load_context.telemetry.clone(),
             self.runtime.clone(),
             self.acceptor_factory.clone(),
-            None,
+            self.datagram_factory.clone(),
         )
     }
 
@@ -981,7 +1025,7 @@ impl App {
             self.load_context.telemetry.clone(),
             self.runtime.clone(),
             self.acceptor_factory.clone(),
-            None,
+            self.datagram_factory.clone(),
         )
     }
 
