@@ -68,6 +68,30 @@ pub type RuntimeHandle = Option<std::sync::Arc<dyn proxima_runtime::Runtime>>;
 #[cfg(not(feature = "listen"))]
 pub type RuntimeHandle = Option<()>;
 
+/// The listener's per-connection request-admission FSM, threaded down to
+/// the simple-query dispatch boundary so a quiesce/drain/capacity policy
+/// can shed a query before it reaches the engine. With `listen` it is the
+/// real `proxima_listen::admission::ConnAdmission`; without it there is no
+/// listener and therefore nothing to shed against, so it collapses to
+/// `()` — mirrors the `RuntimeHandle`/`TlsAcceptor = ()` idiom above.
+#[cfg(feature = "listen")]
+pub type AdmissionHandle = proxima_listen::admission::ConnAdmission;
+#[cfg(not(feature = "listen"))]
+pub type AdmissionHandle = Option<()>;
+
+/// The never-shedding admission handle `serve_session` hands to
+/// `serve_session_admitted` for every pre-existing caller (this crate's
+/// test suite, `differential_realpg.rs`, `client_smoke.rs`) that predates
+/// admission awareness.
+#[cfg(feature = "listen")]
+fn unbounded_admission() -> AdmissionHandle {
+    proxima_listen::admission::ConnAdmission::unbounded()
+}
+#[cfg(not(feature = "listen"))]
+fn unbounded_admission() -> AdmissionHandle {
+    None
+}
+
 /// The identity reported in BackendKeyData and matched by CancelRequest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendKey {
@@ -1016,6 +1040,7 @@ pub async fn serve_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let admission = unbounded_admission();
     serve_session_admitted(
         stream,
         session,
@@ -1027,7 +1052,7 @@ where
         registry,
         broker,
         runtime,
-        proxima_listen::admission::ConnAdmission::unbounded(),
+        admission,
     )
     .await
 }
@@ -1049,7 +1074,7 @@ pub async fn serve_session_admitted<S>(
     registry: Option<Arc<CancelRegistry>>,
     broker: Option<Arc<NotifyBroker>>,
     runtime: RuntimeHandle,
-    admission: proxima_listen::admission::ConnAdmission,
+    admission: AdmissionHandle,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1620,7 +1645,7 @@ async fn main_loop<S>(
     query: &PgPipeHandle,
     config: &PgServerConfig,
     mut notify_rx: UnboundedReceiver<Notification>,
-    admission: &proxima_listen::admission::ConnAdmission,
+    admission: &AdmissionHandle,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1816,11 +1841,15 @@ async fn dispatch<S>(
     state: &mut ConnState,
     query: &PgPipeHandle,
     config: &PgServerConfig,
-    admission: &proxima_listen::admission::ConnAdmission,
+    admission: &AdmissionHandle,
 ) -> Result<DispatchOutcome, ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    // without `listen` there is no listener admission policy to consult —
+    // the handle is threaded but unused
+    #[cfg(not(feature = "listen"))]
+    let _ = admission;
     match message {
         FrontendMessage::Query { sql } => {
             state.portals.remove("");
@@ -1844,6 +1873,9 @@ where
             // window, hard drain, or a configured in-flight cap) renders as
             // a real `ErrorResponse` (57P03, cannot_connect_now) instead —
             // the connection stays alive and ready for the next query.
+            // Without `listen` there is no listener admission policy, so
+            // there is nothing to shed against.
+            #[cfg(feature = "listen")]
             if let proxima_listen::admission::RequestAdmit::Shed { reason } =
                 admission.request_admit()
             {
@@ -1859,6 +1891,7 @@ where
             }
             let request = build_request(verb::QUERY, sql_text, state.request());
             let response = SendPipe::call(query.as_ref(), request).await;
+            #[cfg(feature = "listen")]
             admission.request_release();
             let response = response?;
             match downcast_reply(response)? {
