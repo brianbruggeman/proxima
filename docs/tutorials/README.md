@@ -15,6 +15,14 @@ Sections are **self-contained**: each states its prerequisites up front and can 
 - **[Foundations, part 3: the Listener builder, mirrored from the Client](./02-listener-builder.md)** — `Listener::builder()`/`Listener::http(bind)`, the serve-side mirror of `Client::builder()`/`Client::http(url)`, built from the same `SpecBuilder`/`ProtocolSugar`/`TransportSugar` seam · `resolve_listen_protocol` (`.tcp()`/`.h3()`/`.grpc()`/`.h2()`/`.pgwire(query)` resolved to one concrete `ListenProtocol`) · `TlsListenProtocol`, TLS as a composed decorator instead of a spec field · `ListenerSpec::protocol`, the escape hatch for an out-of-crate wire · the two places a listener's builder honestly cannot mirror the client's. Read after Foundations part 2 if you are about to hand-roll `App::new()` + manual `RunConfig` wiring more than once.
 - **[The native runtime: serving real HTTP with zero tokio](./03-native-runtime.md)** — the `Runtime` trait · `http1` vs. `http1-native` (tokio-coupled vs. tokio-free h1) · `#[proxima::main]`'s ambient-runtime seam and the collapse it causes if you don't opt out with `.with_runtime`/`.with_acceptor_factory` · `ShutdownBarrier` · a runtime shared on purpose (`deferred_runtime`) vs. adopted by accident. Walks `proxy` → `gateway` → `load-balance` → `integration` → `distributed_trace`, all served tokio-free, then contrasts `multi_runtime`/`runtime_select` where tokio is deliberately opted into.
 
+## Listener on-ramp (a faster path to a running listener)
+
+A standalone, self-contained 3-page series for a reader who wants to stand up and grow a real listener WITHOUT first reading Foundations end to end — the reader only needs to be comfortable with Rust and `async`/`.await`, and to have built an HTTP server in some other framework before. Cross-links to Foundations and to [02-listener-builder.md](./02-listener-builder.md) where the deeper story lives, but does not require reading them first.
+
+- **[Part 1: hello](./04-listener-hello.md)** — the smallest complete proxima service: one handler, `App::mount`, `app.serve`, one real `curl` round trip.
+- **[Part 2: the universal listener](./05-listener-universal.md)** — `Listener::builder()` · `.any()` (stop picking a protocol, let the listener sniff it) · `.accept(name)`/`.accepts([...])` (narrow back down to one wire).
+- **[Part 3: growing it into production](./06-listener-production.md)** — telemetry (console + file + a real counter) · `.deny(name, literal)` + `.blacklist(config)` (a DoS-blacklisted accept/deny allowlist) · `max_in_flight_requests` + `ConnAdmission`/`ShedReason` (request-level admission rendered on the wire) · client-side `RateLimit`+`Retry`/`Backoff` (composed, not a new type) · `BlacklistConfig::layered()` (conflaguration as first-class) · same-port-vs-separate-port, side by side.
+
 ## Build a ... (each project is complete in itself)
 
 ### Wave 1 — the core services
@@ -63,7 +71,15 @@ graph TD
   GW --> CACHE["Build a caching reverse proxy"]
   GW --> REC["Build a record/replay harness"]
   GW --> LB["Build a load balancer"]
+  ONRAMP1["Listener on-ramp, part 1: hello"] --> ONRAMP2["part 2: the universal listener"]
+  ONRAMP2 --> ONRAMP3["part 3: production"]
+  ONRAMP3 -.-> LB
+  ONRAMP3 -.-> BASE
 ```
+
+The listener on-ramp series is intentionally standalone (no arrow INTO it) —
+it does not require Foundations first. The dashed arrows OUT of part 3 are
+"read next if you want more," not prerequisites.
 
 Suggested reading order: Foundations → Gateway (broadest coverage) → then any project. The proxy-based projects (caching proxy, record/replay, load balancer) read most smoothly after the Gateway.
 

@@ -178,6 +178,8 @@ assert_eq!(fluent.spec.get("transport").and_then(Value::as_str), Some("tls"));
 
 Two of the original rows say "shadowed" — Rust lets an inherent method on a type hide a trait method of the same name reached via blanket impl, so `.tls(cfg)`/`.grpc()` on `ListenerBuilder` are real, `#[cfg]`-gated inherent methods (`src/listener/handle.rs:144–147` for `.grpc()`, `:207–212` for `.tls()`) that take priority over the same-named `TransportSugar`/`ProtocolSugar` trait methods. `.h2()`/`.pgwire(query)` don't shadow anything — there is no blanket `TransportSugar::h2()` or `ProtocolSugar::pgwire()` to shadow in the first place, so they are plain inherent methods with no trait-method collision to resolve. §10 explains why `.tls()`/`.grpc()`, specifically, had to diverge from the client.
 
+> **Drift note (added after `.any()`/`.deny()`/`.blacklist()` landed, `86c9302f`):** this document's axis table above predates that landing and does not list `.any()`/`.accept(name)`/`.accepts([...])`/`.any_handler(name, handler)`/`.any_on_reject(hook)`/`.deny(name, literal)`/`.denies([...])`/`.blacklist(config)` (all `#[cfg(any(feature = "http1", feature = "http1-native"))]`, `src/listener/handle.rs:259–398`) — a real, silent gap in this table, not a redesign of anything it already says. The listener on-ramp series (`docs/tutorials/04-listener-hello.md` onward) is the maintained teaching surface for that whole axis; [part 2](./05-listener-universal.md) covers `.any()`/`.accept()`/`.accepts()`, [part 3](./06-listener-production.md) covers `.deny()`/`.blacklist()` and everything built on top of them.
+
 ## 5. From spec to a concrete protocol: `resolve_listen_protocol`
 
 One term this section needs before its code makes sense: a `ListenProtocol` (`proxima-listen`) is the listen-side trait each wire implementation — `HttpListenProtocol` (h1+h2), `H2ListenProtocol`, `H3NativeListenProtocol` — implements; a `ListenRegistry` looks these up by name. (If you've read [Build a plugin](./build-a-plugin.md), this is structurally the listen-side twin of that tutorial's `PipeFactory`/registry pattern — not a prerequisite for this document, just a pointer if the shape looks familiar.)
@@ -543,6 +545,7 @@ I'd suggest promoting a trimmed version of this — probably folded into `exampl
 
 ## 12. Where to go next
 
+- [Listener on-ramp, part 2: the universal listener](./05-listener-universal.md) and [part 3](./06-listener-production.md) — the `.any()`/`.accept()`/`.accepts()`/`.deny()`/`.blacklist()` axis this document's own table (§4) predates; see the drift note after §4's table.
 - [Foundations, part 2](./01-ergonomics.md) §8, if `IntoMountTarget`'s four shapes (referenced in §11 above) weren't already solid.
 - [Build an API gateway](./build-an-api-gateway.md) for `Client::http`/`Client::builder` used against a real upstream, end to end.
 - `examples/h2_native_server.rs` and `examples/pgwire_server.rs` (§11) — the two real, runnable examples exercising `.h2()` and `.pgwire(query)` through `Listener::builder()` against a real client, if the scratch three-way comparison in §11 left the shape wanting a shipped, `cargo run`-able reference.

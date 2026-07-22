@@ -1501,6 +1501,34 @@ required-features = ["http3", "tracing-init"]
 name = "h2_native_server"
 required-features = ["http2"]
 
+# `.any()`/`.accept(name)` through `Listener::builder()`: one bind that
+# sniffs h1 vs h2, and a second bind hard-pinned to h2 only — same-port vs
+# separate-port, side by side.
+[[example]]
+name = "any_listener"
+required-features = ["http1-native"]
+
+# The `.any()` listener grown into a production shape: telemetry,
+# accept/deny/blacklist, request-level admission rendering a real
+# ShedReason on the wire, and same-port vs separate-port.
+[[example]]
+name = "any_listener_production"
+required-features = ["http1-native", "http2"]
+
+# Client-side resilience composed from real primitives (RateLimit,
+# Retry+Backoff over the real TimeClock) around a real H2ClientUpstream —
+# and why FanIn is deliberately NOT used to race a live dial.
+[[example]]
+name = "any_listener_client_resilience"
+required-features = ["http1-native", "http2"]
+
+# Conflaguration as first-class: `.blacklist(config)` driven by a real TOML
+# file (`BlacklistConfig::layered().from_path`), plus the flat-vs-nested
+# gotcha against the build-time sizing TOML's own shape.
+[[example]]
+name = "any_listener_conflag"
+required-features = ["http1-native"]
+
 # `.pgwire(query)` through Listener::builder(): native PgWireListenProtocol +
 # a real PgClient (blocking, sans-IO session) round trip, no tokio-postgres.
 [[example]]

@@ -164,6 +164,19 @@ SQL wire; a client only ever *picks* a transport for a url it already has) —
 on why TLS composes as a decorator rather than a spec field, and on the two
 places the mirror is honestly asymmetric.
 
+A listener can also skip picking a protocol entirely: `.any()` binds one
+socket and classifies each connection's own leading bytes against every
+registered candidate (h1, h2 prior-knowledge by default), routing each
+connection to whichever one matches — `.accept(name)`/`.accepts([...])`
+narrow that same classifier back down to one wire or a named subset when
+you want that instead. `docs/tutorials/05-listener-universal.md` teaches
+`.any()` from zero; `docs/tutorials/06-listener-production.md` grows it
+into a production shape — a scanner deny-list backed by a real DoS
+blacklist (`.deny(name, literal)` + `.blacklist(config)`), request-level
+admission that renders a real 503 on the wire, and the same-port-vs-
+separate-port decision this chapter's `Listener` section doesn't otherwise
+answer.
+
 ## `App` — compose + run
 
 `hello`'s entire wiring, again (`examples/hello/main.rs:48,49,53,58`):
@@ -212,3 +225,7 @@ inside it adopts, unless each app opts out explicitly.
 - `docs/tutorials/03-native-runtime.md` — the deep dive on `App`'s runtime
   seam: the `Runtime` trait, `http1` vs. `http1-native`, and the
   ambient-runtime adoption rule.
+- `docs/tutorials/04-listener-hello.md` onward — a standalone, faster
+  on-ramp straight to a running `Listener`, for a reader who wants to skip
+  straight to `.any()`/`.accept()`/`.deny()`/`.blacklist()` without reading
+  Foundations first.
