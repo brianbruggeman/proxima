@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use bytes::Bytes;
+use proxima::prime::PrimeRuntime;
 use proxima::shutdown::ShutdownBarrier;
 use proxima::{
     App, Client, ListenerHandle, ListenerSpec, PipeHandle, ProximaError, Request, Response,
@@ -124,10 +125,15 @@ impl SendPipe for LoadBalancerPipe {
 }
 
 
-// each app below builds its own independent runtime (no ambient one is
-// installed here — `runtime = "tokio"` just gives `main` an async context
-// to `.await` on), so `runtime = "tokio"` rather than `worker_threads`.
-#[proxima::main(runtime = "tokio")]
+// `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
+// to give `main` an async context to `.await` on (no tokio anywhere in the
+// build). That boot publishes an AMBIENT runtime (`crate::runtime::
+// install_runtime`), which `App::builder().build()` would otherwise
+// silently adopt — collapsing the four apps below onto ONE shared runtime
+// instead of each having its own. Each app opts back OUT of that adoption
+// with an explicit `.with_runtime(...)` + `.with_acceptor_factory(...)`,
+// the same override `multi_runtime` demonstrates for the identical reason.
+#[proxima::main(cores = 1)]
 async fn main() -> Result<(), ProximaError> {
     let origin_a_bind = parse_addr(ORIGIN_A_BIND)?;
     let origin_b_bind = parse_addr(ORIGIN_B_BIND)?;
@@ -194,12 +200,12 @@ fn spin_up_origin(
 ) -> Result<(App, ListenerHandle, Arc<AtomicU32>), ProximaError> {
     let hits = Arc::new(AtomicU32::new(0));
     // one core per app is enough for one listener answering one request at
-    // a time — set explicitly via the builder, no env var, no
-    // build-and-discard.
+    // a time — an explicit prime runtime, independent of the other apps'.
     let app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     let pipe: PipeHandle = into_handle(OriginPipe {
         backend_id,
         hits: hits.clone(),
@@ -245,9 +251,10 @@ fn spin_up_load_balancer(
     backends: Vec<Backend>,
 ) -> Result<(App, ListenerHandle), ProximaError> {
     let app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     let pipe: PipeHandle = into_handle(LoadBalancerPipe::new(backends));
     app.mount("/", pipe)?;
     // blocks until the accept lane has acked ready — no polling, no sleeping.

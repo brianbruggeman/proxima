@@ -21,6 +21,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use proxima::prime::PrimeRuntime;
 use proxima::shutdown::ShutdownBarrier;
 use proxima::telemetry::id::parse_traceparent;
 use proxima::telemetry::pipes::{FormatterPipe, InMemoryPipe, LogFormat, TelemetryRequest};
@@ -154,10 +155,16 @@ impl SendPipe for DualSinkPipe {
     }
 }
 
-// both apps below build their own independent runtime (no ambient one is
-// installed here — `runtime = "tokio"` just gives `main` an async context
-// to `.await` on), so `runtime = "tokio"` rather than `worker_threads`.
-#[proxima::main(runtime = "tokio")]
+// `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
+// to give `main` an async context to `.await` on (no tokio anywhere in the
+// build). That boot publishes an AMBIENT runtime (`crate::runtime::
+// install_runtime`), which `App::builder().build()` would otherwise
+// silently adopt — collapsing the two apps below onto ONE shared, 1-core
+// runtime instead of each having its own 2-core one. Each app opts back
+// OUT of that adoption with an explicit `.with_runtime(...)` +
+// `.with_acceptor_factory(...)`, the same override `multi_runtime`
+// demonstrates for the identical reason.
+#[proxima::main(cores = 1)]
 async fn main() -> Result<(), ProximaError> {
     let memory = InMemoryPipe::new();
     let dual_sink = DualSinkPipe {
@@ -173,15 +180,17 @@ async fn main() -> Result<(), ProximaError> {
     let origin_bind: SocketAddr = ORIGIN_BIND.parse().expect("valid socket addr");
 
     let origin_app = App::builder()
-        .with_runtime_cores(2)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(2)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     origin_app.mount("/", origin_pipe)?;
 
     let front_app = App::builder()
-        .with_runtime_cores(2)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(2)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     let front_pipe: PipeHandle = into_handle(FrontPipe {
         origin_addr: origin_bind,
     });
