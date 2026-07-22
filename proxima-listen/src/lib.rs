@@ -65,6 +65,17 @@ pub mod stream;
 /// `proxima-listen-core` crate.
 pub mod admission;
 pub use admission::{
-    Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenerCore, Phase,
-    ReleaseOutcome, Route, ShedReason,
+    Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenerCore, Phase, ReleaseOutcome,
+    Route, ShedReason,
+};
+
+/// Open universal listener classification primitives: [`AnyProtocol`],
+/// [`AnyRegistry`], [`Classifier`] — the scaffolding `Listener::any()`
+/// dispatches through. `std`-tier only (see the module's own doc for why).
+#[cfg(feature = "std")]
+pub mod any;
+#[cfg(feature = "std")]
+pub use any::{
+    AnyHandler, AnyProtocol, AnyRegistry, Classifier, ClassifyOutcome, ProbeVerdict, RejectReason,
+    downcast_handler, erase_handler,
 };

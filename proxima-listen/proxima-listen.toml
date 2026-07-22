@@ -26,3 +26,13 @@
 backlog = 1024
 # Default graceful-drain timeout (ms) used by `ShutdownPolicy::drain_30s()`.
 drain_timeout_ms = 30000
+
+[any]
+# Global cap (bytes) on how many leading bytes of a fresh connection the
+# open `Listener::any()` classifier will accumulate before giving up
+# (`ClassifyOutcome::PrefixBoundExceeded`) — bounds a peer that never sends
+# enough bytes to resolve a candidate protocol (a slow-loris-style stall).
+# 256 covers every candidate this crate ships against today (h2's 24-byte
+# preface, h1's longest method line) with generous headroom for future
+# candidates with longer fixed prefixes.
+max_probe_prefix_bytes = 256

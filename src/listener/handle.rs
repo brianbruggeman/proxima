@@ -100,6 +100,34 @@ pub struct ListenerBuilder {
     /// [`Self::pgwire`].
     #[cfg(feature = "pgwire")]
     pgwire_query: Option<proxima_pgwire::PgPipeHandle>,
+    /// `.any()`/`.accepts(&[..])`/`.accept(name)` — which `AnyProtocol`
+    /// candidates the open universal listener accepts. `None` means none of
+    /// those were called (the builder resolves through the ordinary
+    /// `resolve_listen_protocol` axes instead). See [`AnyMode`].
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    any_mode: Option<AnyMode>,
+    /// Per-listener handler overrides for `.any()`, keyed by protocol name
+    /// — `.any_handler(name, handler)` populates this; entries here win
+    /// over the `App`-level default-handler registry
+    /// (`App::any_default_handlers`). See
+    /// [`proxima_listen::any::AnyHandler`]'s doc for why the value is
+    /// type-erased.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    any_handlers: std::collections::BTreeMap<String, proxima_listen::any::AnyHandler>,
+    /// `.any_on_reject(hook)` — the reject-hook seam threaded onto the
+    /// resolved `AnyListenProtocol` (see that type's `with_reject_hook`).
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    any_reject_hook: Option<crate::listeners::RejectHook>,
+}
+
+/// Which `AnyProtocol` candidates `.any()`/`.accepts()`/`.accept()` selected.
+/// `All` accepts every candidate the registry currently holds; `Subset`
+/// restricts to the named ones (`.accept(name)` is `Subset` with one entry).
+#[cfg(any(feature = "http1", feature = "http1-native"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnyMode {
+    All,
+    Subset(Vec<String>),
 }
 
 impl ListenerBuilder {
@@ -186,6 +214,89 @@ impl ListenerBuilder {
         self
     }
 
+    /// Select the open universal listener, accepting EVERY `AnyProtocol`
+    /// candidate the `App`'s [`proxima_listen::any::AnyRegistry`] currently
+    /// holds (h1, h2 prior-knowledge — see `App::new`'s doc). Each accepted
+    /// connection routes to its own candidate's bound handler: a
+    /// per-listener `.any_handler(name, handler)` override if present,
+    /// else the `App`-level default (`App::register_any_default_handler`),
+    /// else — for a candidate whose expected handler type happens to be a
+    /// [`PipeHandle`](crate::pipe::PipeHandle) (h1/h2's shape) — the
+    /// `.handle(pipe)` this builder already required, erased. A candidate
+    /// with no handler resolvable ANY of those three ways logs a named
+    /// config error per connection rather than silently dropping it — see
+    /// `proxima_http::any_listener::classify_and_drive`'s doc.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn any(mut self) -> Self {
+        self.any_mode = Some(AnyMode::All);
+        self
+    }
+
+    /// Restrict the open universal listener to a named subset of
+    /// registered candidates — otherwise identical to [`Self::any`].
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn accepts(mut self, names: &[&str]) -> Self {
+        self.any_mode = Some(AnyMode::Subset(
+            names.iter().map(|name| (*name).to_string()).collect(),
+        ));
+        self
+    }
+
+    /// Restrict the open universal listener to exactly one registered
+    /// candidate — sugar over [`Self::accepts`] with a single name.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn accept(self, name: &str) -> Self {
+        self.accepts(&[name])
+    }
+
+    /// Bind an explicit per-protocol handler for the open universal
+    /// listener, by that protocol's registered name (`"h1"`, `"h2"`, or a
+    /// future candidate's own name). `handler` is erased via
+    /// [`proxima_listen::any::erase_handler`] and downcast back inside that
+    /// SAME candidate's own `AnyProtocol::drive` — see that trait's doc for
+    /// why the handler type isn't fixed to [`PipeHandle`](crate::pipe::PipeHandle).
+    /// Calling this WITHOUT a prior `.any()`/`.accepts()`/`.accept()`
+    /// implicitly restricts the listener to just the named protocol
+    /// (mirroring `.pgwire(query)` carrying its own engine without a
+    /// separate "select pgwire" call) — call `.any()` first if you want
+    /// every candidate accepted with only some of them overridden.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn any_handler<T: Send + Sync + 'static>(
+        mut self,
+        name: impl Into<String>,
+        handler: T,
+    ) -> Self {
+        let name = name.into();
+        self.any_mode = Some(match self.any_mode.take() {
+            None => AnyMode::Subset(vec![name.clone()]),
+            Some(AnyMode::Subset(mut names)) => {
+                if !names.contains(&name) {
+                    names.push(name.clone());
+                }
+                AnyMode::Subset(names)
+            }
+            Some(AnyMode::All) => AnyMode::All,
+        });
+        self.any_handlers
+            .insert(name, proxima_listen::any::erase_handler(handler));
+        self
+    }
+
+    /// Install the open universal listener's reject-hook seam (see
+    /// [`proxima_http::any_listener::RejectHook`]'s doc) — observes a
+    /// connection the classifier dropped before any candidate resolved.
+    /// The seam only; no deny-list/blacklist policy is implemented here.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn any_on_reject(mut self, hook: crate::listeners::RejectHook) -> Self {
+        self.any_reject_hook = Some(hook);
+        self
+    }
+
     /// Terminate TLS at this listener — the listener-inherent counterpart of
     /// the client's bare, url-less
     /// [`TransportSugar::tls()`](proxima_config::sugar::TransportSugar::tls)
@@ -264,10 +375,26 @@ impl ListenerBuilder {
         })?;
         #[cfg(feature = "pgwire")]
         let pgwire_query = self.pgwire_query;
+        // Built BEFORE protocol resolution (unlike every other axis, which
+        // resolves against bare spec data) — `.any()`/`.accepts()`/
+        // `.accept()` need `app.any_registry()` /
+        // `app.any_default_handlers()` to resolve at all.
+        let app = App::new()?;
+        #[cfg(any(feature = "http1", feature = "http1-native"))]
+        let (protocol, extra_protocol) = match &self.any_mode {
+            Some(mode) => any_listen_protocol(
+                &app,
+                mode,
+                &self.any_handlers,
+                self.any_reject_hook.clone(),
+                dispatch.clone(),
+            )?,
+            None => resolve_listen_protocol(&self.spec)?,
+        };
+        #[cfg(not(any(feature = "http1", feature = "http1-native")))]
         let (protocol, extra_protocol) = resolve_listen_protocol(&self.spec)?;
         #[cfg(feature = "tls")]
         let (protocol, extra_protocol) = compose_tls(self.tls, protocol, extra_protocol)?;
-        let app = App::new()?;
         if let Some(protocol) = extra_protocol {
             app.register_listen_protocol(protocol)?;
         }
@@ -301,6 +428,62 @@ fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<SocketAddr> {
     spec.get("http")
         .and_then(Value::as_str)
         .and_then(|value| value.parse().ok())
+}
+
+/// Resolve `.any()`/`.accepts()`/`.accept()` to a fresh
+/// [`crate::listeners::AnyListenProtocol`] — the `.any()`-family sibling of
+/// [`resolve_listen_protocol`]. Builds the per-protocol handler map each
+/// candidate resolves through, in override-precedence order:
+///
+/// 1. a per-listener `.any_handler(name, handler)` binding (`overrides`);
+/// 2. the `App`-level default (`App::any_default_handlers`);
+/// 3. the single `.handle(pipe)` this builder already required, erased —
+///    works for any candidate whose expected handler type IS a
+///    [`PipeHandle`](crate::pipe::PipeHandle) (h1/h2's shape); a
+///    differently-shaped candidate must use step 1 or 2, since this
+///    fallback would simply fail its own downcast otherwise (a config
+///    error naming the protocol, never a panic).
+///
+/// Always self-registers a fresh `AnyListenProtocol` instance (never
+/// reuses one across calls) since the merged handler map is per-call data
+/// — the same reason `.pgwire(query)` builds fresh every time instead of
+/// sharing `App::new()`'s static registration.
+#[cfg(any(feature = "http1", feature = "http1-native"))]
+fn any_listen_protocol(
+    app: &App,
+    mode: &AnyMode,
+    overrides: &std::collections::BTreeMap<String, proxima_listen::any::AnyHandler>,
+    reject_hook: Option<crate::listeners::RejectHook>,
+    dispatch_fallback: PipeHandle,
+) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
+    let registry = app.any_registry();
+    let candidate_names: Vec<String> = match mode {
+        AnyMode::All => registry.names(),
+        AnyMode::Subset(names) => names.clone(),
+    };
+    let defaults = app.any_default_handlers();
+    let mut merged: std::collections::BTreeMap<String, proxima_listen::any::AnyHandler> =
+        std::collections::BTreeMap::new();
+    for name in &candidate_names {
+        let handler = overrides
+            .get(name)
+            .or_else(|| defaults.get(name))
+            .cloned()
+            .unwrap_or_else(|| proxima_listen::any::erase_handler(dispatch_fallback.clone()));
+        merged.insert(name.clone(), handler);
+    }
+    let merged = Arc::new(merged);
+
+    let mut protocol = match mode {
+        AnyMode::All => crate::listeners::AnyListenProtocol::new(&registry, merged),
+        AnyMode::Subset(names) => {
+            crate::listeners::AnyListenProtocol::with_names(&registry, names, merged)?
+        }
+    };
+    if let Some(hook) = reject_hook {
+        protocol = protocol.with_reject_hook(hook);
+    }
+    Ok(("any".to_string(), Some(Arc::new(protocol))))
 }
 
 /// Reject spec axes the listener side has no wiring for, instead of letting
@@ -751,5 +934,111 @@ mod tests {
         };
         assert!(format!("{err}").contains(".pgwire"), "got: {err}");
         assert!(format!("{err}").contains(".tls"), "got: {err}");
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn any_mode_defaults_to_none() {
+        assert_eq!(ListenerBuilder::default().any_mode, None);
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn dot_any_selects_every_registered_candidate() {
+        let builder = ListenerBuilder::default().any();
+        assert_eq!(builder.any_mode, Some(AnyMode::All));
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn dot_accepts_restricts_to_the_named_subset() {
+        let builder = ListenerBuilder::default().accepts(&["h1", "h2"]);
+        assert_eq!(
+            builder.any_mode,
+            Some(AnyMode::Subset(vec!["h1".to_string(), "h2".to_string()]))
+        );
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn dot_accept_restricts_to_exactly_one_name() {
+        let builder = ListenerBuilder::default().accept("h2");
+        assert_eq!(
+            builder.any_mode,
+            Some(AnyMode::Subset(vec!["h2".to_string()]))
+        );
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn any_handler_without_a_prior_any_call_implicitly_selects_that_name() {
+        let builder = ListenerBuilder::default().any_handler("h1", 7_u8);
+        assert_eq!(
+            builder.any_mode,
+            Some(AnyMode::Subset(vec!["h1".to_string()]))
+        );
+        assert!(builder.any_handlers.contains_key("h1"));
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn any_handler_after_dot_any_keeps_all_mode_and_still_records_the_override() {
+        let builder = ListenerBuilder::default().any().any_handler("h1", 7_u8);
+        assert_eq!(builder.any_mode, Some(AnyMode::All));
+        assert!(builder.any_handlers.contains_key("h1"));
+    }
+
+    // Task's builder-resolution requirement: `.any()`/`.accepts()`/`.accept()`
+    // resolve correctly through `any_listen_protocol` — exercised directly
+    // (not through a live socket) against a real `App`, whose `App::new()`
+    // registers the real h1 (+ h2 when `http2` is compiled in) candidates.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[proxima::test]
+    async fn any_listen_protocol_resolves_to_the_any_registry_name() {
+        let app = App::new().expect("App::new");
+        let dispatch = crate::pipe::into_handle(EchoOk);
+        let (name, extra) = any_listen_protocol(
+            &app,
+            &AnyMode::All,
+            &std::collections::BTreeMap::new(),
+            None,
+            dispatch,
+        )
+        .expect("any_listen_protocol resolves");
+        assert_eq!(name, "any");
+        let protocol = extra.expect(".any() must carry a protocol to self-register");
+        assert_eq!(protocol.name(), "any");
+    }
+
+    #[cfg(feature = "http2")]
+    #[proxima::test]
+    async fn any_listen_protocol_subset_rejects_an_unregistered_name() {
+        let app = App::new().expect("App::new");
+        let dispatch = crate::pipe::into_handle(EchoOk);
+        let outcome = any_listen_protocol(
+            &app,
+            &AnyMode::Subset(vec!["not-a-real-protocol".to_string()]),
+            &std::collections::BTreeMap::new(),
+            None,
+            dispatch,
+        );
+        assert!(
+            outcome.is_err(),
+            "an unregistered candidate name must error, not silently ignore"
+        );
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    struct EchoOk;
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    impl proxima_primitives::pipe::SendPipe for EchoOk {
+        type In = crate::request::Request<bytes::Bytes>;
+        type Out = crate::request::Response<bytes::Bytes>;
+        type Err = ProximaError;
+
+        async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
+            Ok(crate::request::Response::ok("ok"))
+        }
     }
 }
