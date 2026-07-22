@@ -441,6 +441,23 @@ mod tests {
         assert!(expanded.contains("-> Result < () , Box < dyn std :: error :: Error > >"));
     }
 
+    // the recommended `#[proxima::main]` idiom (docs/lib.rs example): any
+    // error type propagates verbatim, not just `ProximaError` — the macro
+    // never inspects `R`. `Send + Sync` is the form that also works on the
+    // prime backend (see `run_with_cores`'s `F::Output: Send` bound in
+    // `src/runtime.rs`); this test proves the macro itself imposes no
+    // additional constraint beyond preserving the annotated type.
+    #[test]
+    fn preserves_boxed_send_sync_error_return_type() {
+        let expanded = expand_ok(
+            "",
+            "async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { Ok(()) }",
+        );
+        assert!(expanded.contains(
+            "-> Result < () , Box < dyn std :: error :: Error + Send + Sync > >"
+        ));
+    }
+
     #[test]
     fn preserves_exit_code_return_type() {
         let expanded = expand_ok(

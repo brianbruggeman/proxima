@@ -1226,6 +1226,13 @@ required-features = ["macros", "tokio"]
 name = "proxima_main_demo"
 required-features = ["macros", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
 
+# #[proxima::main(runtime = "tokio")] with a bare, non-Send Box<dyn Error> —
+# proves the one form the prime backend genuinely cannot accept (F::Output
+# crosses a driver-core channel, requiring Send) still works on tokio.
+[[example]]
+name = "proxima_main_tokio_bare_error_demo"
+required-features = ["macros", "tokio"]
+
 # flagship composite-runtime proof — prime + tokio serving concurrently in one
 # process on the same sans-IO pipe. runtime-tokio is opt-in (see runtime-tokio
 # above); the prime side is covered by serve-prime's default bundle, listed
