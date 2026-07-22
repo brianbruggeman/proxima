@@ -393,16 +393,24 @@ impl ListenProtocol for NamedListenProtocol {
 /// Build a fresh `HttpListenProtocol` to wrap in TLS — needed because the
 /// non-TLS default path leaves `resolve_listen_protocol`'s `extra_protocol`
 /// `None` (relying on `App::new()`'s pre-registration); `.tls()` needs a
-/// concrete instance in hand to wrap regardless.
-#[cfg(all(feature = "tls", feature = "http1"))]
+/// concrete instance in hand to wrap regardless. `HttpListenProtocol` is
+/// available under either `http1` (the legacy tokio-coupled build) or
+/// `http1-native` (the tokio-free build) — see `listeners/mod.rs`'s
+/// re-export gate — so this checks the same `any(...)` the rest of the
+/// crate uses to reach it, not `http1` alone.
+#[cfg(all(feature = "tls", any(feature = "http1", feature = "http1-native")))]
 fn http_listen_protocol_for_tls() -> Result<Arc<dyn ListenProtocol>, ProximaError> {
     Ok(Arc::new(crate::listeners::HttpListenProtocol::new()))
 }
 
-#[cfg(all(feature = "tls", not(feature = "http1")))]
+#[cfg(all(
+    feature = "tls",
+    not(any(feature = "http1", feature = "http1-native"))
+))]
 fn http_listen_protocol_for_tls() -> Result<Arc<dyn ListenProtocol>, ProximaError> {
     Err(ProximaError::Config(
-        "Listener::builder(): .tls(config) on the default transport needs the `http1` feature; none built"
+        "Listener::builder(): .tls(config) on the default transport needs the `http1` or \
+         `http1-native` feature; none built"
             .into(),
     ))
 }
