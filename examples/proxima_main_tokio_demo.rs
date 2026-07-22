@@ -7,7 +7,10 @@
 //! cargo run --example proxima_main_tokio_demo
 //! ```
 //!
-//! The sibling prime proof is `examples/proxima_main_demo.rs`.
+//! The sibling prime proof is `examples/proxima_main_demo.rs`; the bare
+//! non-`Send` `Box<dyn std::error::Error>` proof (tokio-only — the prime
+//! backend requires `Send`) is
+//! `examples/proxima_main_tokio_bare_error_demo.rs`.
 
 use std::process::ExitCode;
 

@@ -75,7 +75,13 @@ pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
 /// async fn main() -> std::process::ExitCode { /* hyper/axum/TokioPerCore bin */ }
 ///
 /// #[proxima::main(runtime = "prime")]
-/// async fn main() -> Result<(), proxima::ProximaError> { /* prime serve path */ }
+/// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+///     /* any `?`-propagated error type works, not just `ProximaError` — a
+///        bare, non-`Send` `Box<dyn std::error::Error>` only compiles under
+///        `runtime = "tokio"`: the prime backend moves the body's output
+///        across a driver-core channel, which requires `Send` */
+///     Ok(())
+/// }
 /// ```
 #[proc_macro_attribute]
 pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
