@@ -3696,6 +3696,7 @@ dependencies = [
  "conflaguration",
  "criterion",
  "futures",
+ "futures-rustls",
  "h3",
  "h3-quinn",
  "http",

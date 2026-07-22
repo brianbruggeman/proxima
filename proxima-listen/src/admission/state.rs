@@ -72,6 +72,12 @@ pub enum ShedReason {
     /// This peer already has `per_peer_cap` live connections — the DoS knob.
     /// Shed even when the listener's global capacity has room left.
     PerPeerLimit,
+    /// Request-level only (`ConnAdmission::request_admit`, the std-tier
+    /// request-admission sibling of this connection-level core): the
+    /// listener is in its courtesy quiesce window — new requests are shed,
+    /// but (unlike [`ShedReason::Draining`]) connections stay open and
+    /// already-admitted requests complete normally.
+    Quiescing,
 }
 
 /// The decision [`ListenerCore::admit`] returns.

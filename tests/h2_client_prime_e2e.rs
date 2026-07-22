@@ -9,7 +9,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use bytes::Bytes;
 
@@ -48,12 +47,8 @@ async fn h2_client_unary_roundtrip_over_prime_wire() {
     let dispatch: PipeHandle = into_handle(PongPipe);
     spawn_on_current_core(Box::pin(async move {
         if let Ok((socket, _peer)) = listener.accept().await {
-            let in_flight = Arc::new(AtomicU64::new(0));
-            let quiesce = Arc::new(proxima_primitives::pipe::quiesce::QuiesceResponse {
-                status: 503,
-                retry_after: String::new(),
-            });
-            let _ = serve_h2_connection(socket, dispatch, in_flight, quiesce, None).await;
+            let admission = proxima_listen::admission::ConnAdmission::unbounded();
+            let _ = serve_h2_connection(socket, dispatch, admission, None).await;
         }
     }));
 

@@ -43,7 +43,6 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -56,13 +55,13 @@ use futures::stream::FuturesUnordered;
 use rustc_hash::FxHashMap;
 
 use proxima_core::ProximaError;
+use proxima_listen::admission::{ConnAdmission, RequestAdmit};
 use proxima_protocols::http2_codec::connection::{Connection, ConnectionEvent, SendOutcome};
 use proxima_protocols::http2_codec::frame::StandardSettings;
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::body::{ChunkStream, RequestStream};
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::handler::PipeHandle;
-use proxima_primitives::pipe::quiesce::QuiesceResponse;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
 use proxima_primitives::stream::PeerInfo;
 
@@ -121,8 +120,7 @@ enum SelectOutcome {
 pub async fn serve_h2_connection<S>(
     socket: S,
     dispatch: PipeHandle,
-    in_flight: Arc<AtomicU64>,
-    _quiesce_response: Arc<QuiesceResponse>,
+    admission: ConnAdmission,
     peer: Option<PeerInfo>,
 ) -> Result<(), ProximaError>
 where
@@ -228,7 +226,7 @@ where
                 }
             }
             SelectOutcome::Handler(item) => {
-                process_handler_completion(item, &in_flight, &mut connection, &mut chunk_pulls)?;
+                process_handler_completion(item, &admission, &mut connection, &mut chunk_pulls)?;
             }
             SelectOutcome::ChunkPull(item) => {
                 process_chunk_pull_completion(
@@ -246,7 +244,7 @@ where
         // No await — `now_or_never` polls each next() once; Pending
         // returns None and we move on.
         while let Some(item) = handlers.next().now_or_never().flatten() {
-            process_handler_completion(item, &in_flight, &mut connection, &mut chunk_pulls)?;
+            process_handler_completion(item, &admission, &mut connection, &mut chunk_pulls)?;
         }
         while let Some(item) = chunk_pulls.next().now_or_never().flatten() {
             process_chunk_pull_completion(
@@ -299,7 +297,44 @@ where
                     };
                     let (request, headers_buffer) = build_request(headers, body, peer.clone());
                     connection.return_headers_buffer(headers_buffer);
-                    spawn_handler(stream_id, request, &dispatch, &in_flight, &mut handlers);
+                    // Request-level admission: h2 has its own natural
+                    // per-stream boundary (RequestHead), so it calls
+                    // `request_admit`/`request_release` directly instead of
+                    // the legacy-atomics bridge h1 uses (see
+                    // `ConnAdmission::in_flight_counter`'s doc). On `Shed`
+                    // this stream alone gets an in-band 503 — the
+                    // connection and every other live stream keep running.
+                    match admission.request_admit() {
+                        RequestAdmit::Admit => {
+                            spawn_handler(stream_id, request, &dispatch, &mut handlers);
+                        }
+                        RequestAdmit::Shed { reason } => {
+                            tracing::debug!(
+                                stream_id,
+                                ?reason,
+                                "h2 native request shed by listener admission"
+                            );
+                            let response = Response::new(503)
+                                .with_body(Bytes::from_static(b"service unavailable"))
+                                .with_header("content-type", "text/plain")
+                                .with_header("retry-after", "1");
+                            match emit_response_head_and_first_pull(
+                                &mut connection,
+                                stream_id,
+                                response,
+                            ) {
+                                Ok(pull) => chunk_pulls.push(pull),
+                                Err(render_error) => {
+                                    tracing::warn!(
+                                        ?render_error,
+                                        stream_id,
+                                        "h2 native shed-response render failed"
+                                    );
+                                    let _ = connection.send_rst(stream_id, INTERNAL_ERROR);
+                                }
+                            }
+                        }
+                    }
                 }
                 ConnectionEvent::BodyData {
                     stream_id,
@@ -414,12 +449,12 @@ fn resume_pending_sends(
 
 fn process_handler_completion(
     item: (u32, Result<Response<Bytes>, ProximaError>),
-    in_flight: &Arc<AtomicU64>,
+    admission: &ConnAdmission,
     connection: &mut Connection,
     chunk_pulls: &mut FuturesUnordered<ChunkPullFuture>,
 ) -> Result<(), ProximaError> {
     let (stream_id, response_result) = item;
-    in_flight.fetch_sub(1, Ordering::Relaxed);
+    admission.request_release();
     match response_result {
         Ok(response) => {
             let pull = emit_response_head_and_first_pull(connection, stream_id, response)?;
@@ -555,10 +590,10 @@ fn spawn_handler(
     stream_id: u32,
     request: Request<Bytes>,
     dispatch: &PipeHandle,
-    in_flight: &Arc<AtomicU64>,
     handlers: &mut FuturesUnordered<HandlerFuture>,
 ) {
-    in_flight.fetch_add(1, Ordering::Relaxed);
+    // no in-flight increment here — `request_admit()` already incremented
+    // the shared counter at the call site before deciding to admit.
     let dispatch = Arc::clone(dispatch);
     handlers.push(Box::pin(async move {
         let result = dispatch_request(&dispatch, request).await;

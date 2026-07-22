@@ -310,6 +310,7 @@ mod tests {
             _handler: AnyHandler,
             _spec: &'a Value,
             _peer: Option<PeerInfo>,
+            _admission: &'a crate::admission::ConnAdmission,
         ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
             Box::pin(async move { Ok(()) })
         }
@@ -449,6 +450,7 @@ mod tests {
             _handler: AnyHandler,
             _spec: &'a Value,
             _peer: Option<PeerInfo>,
+            _admission: &'a crate::admission::ConnAdmission,
         ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
             Box::pin(async move { Ok(()) })
         }
@@ -502,6 +504,7 @@ mod tests {
             _handler: AnyHandler,
             _spec: &'a Value,
             _peer: Option<PeerInfo>,
+            _admission: &'a crate::admission::ConnAdmission,
         ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
             Box::pin(async move { Ok(()) })
         }
@@ -567,6 +570,7 @@ mod tests {
             _handler: AnyHandler,
             _spec: &'a Value,
             _peer: Option<PeerInfo>,
+            _admission: &'a crate::admission::ConnAdmission,
         ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
             Box::pin(async move { Ok(()) })
         }

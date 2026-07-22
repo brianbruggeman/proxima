@@ -44,3 +44,11 @@ pub use state::{
     Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenerCore, Phase, ReleaseOutcome,
     Route, ShedReason,
 };
+
+/// Request-level admission (the per-request twin of [`ListenerCore`]) —
+/// std-tier only: every caller is an accept-loop reactor adapter already
+/// gated on `std`.
+#[cfg(feature = "std")]
+mod request;
+#[cfg(feature = "std")]
+pub use request::{ConnAdmission, RequestAdmit};

@@ -33,7 +33,7 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -50,7 +50,6 @@ use hyper::service::service_fn as pipe_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use proxima::error::ProximaError;
 use proxima::h2::serve_h2_connection;
-use proxima::listeners::http::QuiesceResponse;
 use proxima::pipe::{PipeHandle, into_handle};
 use proxima::request::{Request, Response};
 use proxima::runtime::{CoreId, Runtime, TokioPerCoreRuntime};
@@ -114,13 +113,13 @@ fn start_native_default_tokio() -> std::net::SocketAddr {
             let _ = socket.set_nodelay(true);
             let dispatch = dispatch.clone();
             tokio::spawn(async move {
-                let in_flight = Arc::new(AtomicU64::new(0));
-                let quiesce = Arc::new(QuiesceResponse {
-                    status: 503,
-                    retry_after: "1".into(),
-                });
-                let _ =
-                    serve_h2_connection(socket.compat(), dispatch, in_flight, quiesce, None).await;
+                let _ = serve_h2_connection(
+                    socket.compat(),
+                    dispatch,
+                    proxima_listen::admission::ConnAdmission::unbounded(),
+                    None,
+                )
+                .await;
             });
         }
     });
@@ -154,16 +153,10 @@ fn start_native_per_core_round_robin() -> std::net::SocketAddr {
                         CoreId(core_index),
                         Box::new(move || {
                             Box::pin(async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
                                 let _ = serve_h2_connection(
                                     socket.compat(),
                                     dispatch,
-                                    in_flight,
-                                    quiesce,
+                                    proxima_listen::admission::ConnAdmission::unbounded(),
                                     None,
                                 )
                                 .await;

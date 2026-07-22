@@ -57,7 +57,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -74,7 +73,6 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use proxima::error::ProximaError;
 use proxima::h2::serve_h2_connection;
 use proxima::listen_handle::bind_reuseport_listener;
-use proxima::listeners::http::QuiesceResponse;
 use proxima::pipe::{PipeHandle, into_handle};
 use proxima::request::{Request, Response};
 use proxima::runtime::{CoreId, PrimeRuntime, Runtime, TokioPerCoreRuntime};
@@ -427,12 +425,13 @@ fn start_proxima_default_tokio(pipe: PipeHandle) -> std::net::SocketAddr {
             let _ = socket.set_nodelay(true);
             let pipe = pipe.clone();
             tokio::spawn(async move {
-                let in_flight = Arc::new(AtomicU64::new(0));
-                let quiesce = Arc::new(QuiesceResponse {
-                    status: 503,
-                    retry_after: "1".into(),
-                });
-                let _ = serve_h2_connection(socket.compat(), pipe, in_flight, quiesce, None).await;
+                let _ = serve_h2_connection(
+                    socket.compat(),
+                    pipe,
+                    proxima_listen::admission::ConnAdmission::unbounded(),
+                    None,
+                )
+                .await;
             });
         }
     });
@@ -468,14 +467,13 @@ fn start_proxima_current_thread(pipe: PipeHandle) -> std::net::SocketAddr {
                     let _ = socket.set_nodelay(true);
                     let pipe = pipe.clone();
                     tokio::spawn(async move {
-                        let in_flight = Arc::new(AtomicU64::new(0));
-                        let quiesce = Arc::new(QuiesceResponse {
-                            status: 503,
-                            retry_after: "1".into(),
-                        });
-                        let _ =
-                            serve_h2_connection(socket.compat(), pipe, in_flight, quiesce, None)
-                                .await;
+                        let _ = serve_h2_connection(
+                            socket.compat(),
+                            pipe,
+                            proxima_listen::admission::ConnAdmission::unbounded(),
+                            None,
+                        )
+                        .await;
                     });
                 }
             });
@@ -514,16 +512,10 @@ fn start_proxima_prime_compat(pipe: PipeHandle) -> std::net::SocketAddr {
                         let _ = socket.set_nodelay(true);
                         let pipe = pipe.clone();
                         tokio::spawn(async move {
-                            let in_flight = Arc::new(AtomicU64::new(0));
-                            let quiesce = Arc::new(QuiesceResponse {
-                                status: 503,
-                                retry_after: "1".into(),
-                            });
                             let _ = serve_h2_connection(
                                 socket.compat(),
                                 pipe,
-                                in_flight,
-                                quiesce,
+                                proxima_listen::admission::ConnAdmission::unbounded(),
                                 None,
                             )
                             .await;
@@ -1034,13 +1026,13 @@ fn start_proxima_multi_thread_multicore(pipe: PipeHandle) -> Vec<std::net::Socke
                 let _ = socket.set_nodelay(true);
                 let pipe = pipe.clone();
                 tokio::spawn(async move {
-                    let in_flight = Arc::new(AtomicU64::new(0));
-                    let quiesce = Arc::new(QuiesceResponse {
-                        status: 503,
-                        retry_after: "1".into(),
-                    });
-                    let _ =
-                        serve_h2_connection(socket.compat(), pipe, in_flight, quiesce, None).await;
+                    let _ = serve_h2_connection(
+                        socket.compat(),
+                        pipe,
+                        proxima_listen::admission::ConnAdmission::unbounded(),
+                        None,
+                    )
+                    .await;
                 });
             }
         });
@@ -1072,16 +1064,10 @@ fn start_proxima_per_core_multicore(pipe: PipeHandle) -> Vec<std::net::SocketAdd
                             let _ = socket.set_nodelay(true);
                             let pipe = pipe.clone();
                             tokio::task::spawn_local(async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
                                 let _ = serve_h2_connection(
                                     socket.compat(),
                                     pipe,
-                                    in_flight,
-                                    quiesce,
+                                    proxima_listen::admission::ConnAdmission::unbounded(),
                                     None,
                                 )
                                 .await;
@@ -1125,16 +1111,10 @@ fn start_proxima_prime_compat_multicore(pipe: PipeHandle) -> Vec<std::net::Socke
                             let _ = socket.set_nodelay(true);
                             let pipe = pipe.clone();
                             tokio::spawn(async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
                                 let _ = serve_h2_connection(
                                     socket.compat(),
                                     pipe,
-                                    in_flight,
-                                    quiesce,
+                                    proxima_listen::admission::ConnAdmission::unbounded(),
                                     None,
                                 )
                                 .await;
@@ -1486,16 +1466,10 @@ fn start_proxima_reuseport_per_core(pipe: PipeHandle) -> Vec<SocketAddr> {
                             let _ = socket.set_nodelay(true);
                             let pipe = pipe.clone();
                             tokio::task::spawn_local(async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
                                 let _ = serve_h2_connection(
                                     socket.compat(),
                                     pipe,
-                                    in_flight,
-                                    quiesce,
+                                    proxima_listen::admission::ConnAdmission::unbounded(),
                                     None,
                                 )
                                 .await;
@@ -1545,16 +1519,10 @@ fn start_proxima_reuseport_prime_compat(pipe: PipeHandle) -> Vec<SocketAddr> {
                             let _ = socket.set_nodelay(true);
                             let pipe = pipe.clone();
                             tokio::spawn(async move {
-                                let in_flight = Arc::new(AtomicU64::new(0));
-                                let quiesce = Arc::new(QuiesceResponse {
-                                    status: 503,
-                                    retry_after: "1".into(),
-                                });
                                 let _ = serve_h2_connection(
                                     socket.compat(),
                                     pipe,
-                                    in_flight,
-                                    quiesce,
+                                    proxima_listen::admission::ConnAdmission::unbounded(),
                                     None,
                                 )
                                 .await;

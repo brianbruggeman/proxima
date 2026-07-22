@@ -20,6 +20,8 @@ use proxima_core::ProximaError;
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
 use serde_json::Value;
 
+use crate::admission::ConnAdmission;
+
 /// Type-erased per-protocol handler carried through the open universal
 /// listener's dispatch path. Different candidates want different handler
 /// SHAPES — h1/h2 both want a
@@ -169,12 +171,25 @@ pub trait AnyProtocol: Send + Sync + 'static {
     /// looked it up by [`AnyProtocol::name`] before calling `drive`) —
     /// downcast it via [`downcast_handler`] to the concrete type this
     /// candidate expects (e.g. h1/h2 downcast to
-    /// [`PipeHandle`](proxima_primitives::pipe::handler::PipeHandle)).
+    /// [`PipeHandle`](proxima_primitives::pipe::handler::PipeHandle));
+    /// pgwire/redis candidates carry their own engine as struct fields and
+    /// leave `handler` unused (documented asymmetry — see their own impls).
+    ///
+    /// `admission` is the listener-wide [`ConnAdmission`] handle: call
+    /// [`ConnAdmission::request_admit`] at THIS candidate's own request
+    /// boundary (h1 per request, h2 per stream, pgwire per message, redis
+    /// per command), dispatch to the handler only on
+    /// `RequestAdmit::Admit`, call [`ConnAdmission::request_release`] on
+    /// completion, and on `Shed` render this protocol's OWN wire-specific
+    /// rejection instead of dispatching — the listener owns the uniform
+    /// admission policy (capacity, quiesce, drain); the protocol only
+    /// reports boundaries and renders the reply.
     fn drive<'a>(
         &'a self,
         stream: Box<dyn StreamConnection>,
         handler: AnyHandler,
         spec: &'a Value,
         peer: Option<PeerInfo>,
+        admission: &'a ConnAdmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>>;
 }

@@ -137,13 +137,13 @@ async fn spawn_proxima_native(dispatch: PipeHandle) -> std::net::SocketAddr {
             let _ = socket.set_nodelay(true);
             let dispatch = dispatch.clone();
             tokio::spawn(async move {
-                let in_flight = Arc::new(AtomicU64::new(0));
-                let quiesce = Arc::new(QuiesceResponse {
-                    status: 503,
-                    retry_after: "1".into(),
-                });
-                let _ =
-                    serve_h2_connection(socket.compat(), dispatch, in_flight, quiesce, None).await;
+                let _ = serve_h2_connection(
+                    socket.compat(),
+                    dispatch,
+                    proxima_listen::admission::ConnAdmission::unbounded(),
+                    None,
+                )
+                .await;
             });
         }
     });

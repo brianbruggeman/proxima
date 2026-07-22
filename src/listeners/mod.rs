@@ -5,10 +5,12 @@ pub mod dpdk_stream;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use proxima_http::listener as http;
 // `Listener::any()` scaffolding: h1/h2-prior-knowledge `AnyProtocol`
-// candidates + `AnyListenProtocol`, the open registry-driven sibling of
-// `HttpListenProtocol`. Available whenever the combiner is (h1 candidate
-// needs only `http-listener`); the h2 candidate additionally needs
-// `http2-native` (root feature `http2`), gated inside the module itself.
+// candidates + `AnyListenProtocol`, the ONE bind+accept loop every
+// TCP-stream listener now drives through: `.any()`, `.http()`'s reshape, AND
+// the registry-driven `.h2()`/`.grpc()` axis (since `H2ListenProtocol`'s
+// retirement). Available whenever the combiner is (h1 candidate needs only
+// `http-listener`); the h2 candidate additionally needs `http2-native` (root
+// feature `http2`), gated inside the module itself.
 #[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use proxima_http::any_listener as any;
 #[cfg(all(target_os = "linux", feature = "io-uring", feature = "http1"))]
@@ -32,8 +34,6 @@ pub use proxima_quic::stream_listener as quic_stream;
 // else, for uniform composition.
 #[cfg(feature = "http1")]
 pub use proxima_http::http1::listener as h1;
-#[cfg(feature = "http2")]
-pub use proxima_http::http2::listener as h2;
 #[cfg(feature = "http3-quinn-compat")]
 pub use proxima_http::http3::listener as h3;
 #[cfg(any(feature = "tcp", feature = "unix"))]
@@ -65,8 +65,6 @@ pub use any::{AnyListenProtocol, H1AnyProtocol, RejectHook};
 pub use any::H2PriorKnowledgeAnyProtocol;
 #[cfg(feature = "tokio")]
 pub use mcp::McpListenProtocol;
-#[cfg(feature = "http2")]
-pub use proxima_http::http2::listener::H2ListenProtocol;
 // legacy quinn-backed listener; proxima-http's `http3::listener` module
 // only exists under its own `http3-quinn-compat` feature (native h3 is
 // tokio-free by default — see the umbrella `http3-quinn-compat` feature).
