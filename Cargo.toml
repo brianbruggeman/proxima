@@ -844,6 +844,15 @@ lossless-backpressure = ["proxima-telemetry/lossless-backpressure"]
 # `runtime-tokio` themselves. Serve stays prime-first regardless (see
 # App::default_runtime: serve-prime wins over a merely-linked runtime-tokio).
 test-support = ["macros"]
+# narrow forwarder for `#[proxima::test(runtime = "tokio")]`'s `run_tokio*`
+# drivers (proxima-test's `tokio-driver` feature) — for dev-dependency call
+# sites that want ONLY that, without pulling the full `tokio` feature's
+# closure (dep:h2, tokio-util, proxima-net/tokio, proxima-primitives/
+# runtime-tokio, the sister-prime-tokio-compat stack, ...). `tokio` and
+# `test-prime-tokio-compat` both already forward `proxima-test`'s tokio
+# driver as a side effect of pulling in much more; this exists for crates
+# that need exactly the driver and nothing else.
+test-support-tokio = ["test-support", "proxima-test/tokio-driver"]
 test-prime   = ["test-support", "prime-tokio-compat", "prime/prime-tokio-compat", "proxima-test/test-prime"]
 runtime-prime-full    = ["proxima-primitives/runtime-prime-full", "proxima-runtime/runtime-prime-full", "prime?/runtime-prime-full", "proxima-net/runtime-prime-full"]
 # perf knobs (compose with sub-flags)

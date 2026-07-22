@@ -134,7 +134,7 @@ async fn record_ws_session(path: &std::path::Path, frames: &[&[u8]]) {
     tokio::fs::write(path, bytes).await.expect("write");
 }
 
-#[proxima::test]
+#[proxima::test(runtime = "tokio")]
 async fn ws_session_replays_as_upgrade_with_recomputed_accept_and_frames() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("ws.bin");
@@ -198,7 +198,7 @@ async fn ws_session_replays_as_upgrade_with_recomputed_accept_and_frames() {
     assert_eq!(out, expected, "recorded server frames must replay verbatim");
 }
 
-#[proxima::test]
+#[proxima::test(runtime = "tokio")]
 async fn non_ws_request_to_ws_replay_is_a_miss() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("ws.bin");
@@ -221,7 +221,7 @@ async fn non_ws_request_to_ws_replay_is_a_miss() {
     );
 }
 
-#[proxima::test]
+#[proxima::test(runtime = "tokio")]
 async fn ws_replay_without_client_key_errors() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("ws.bin");
@@ -244,7 +244,7 @@ async fn ws_replay_without_client_key_errors() {
     );
 }
 
-#[proxima::test]
+#[proxima::test(runtime = "tokio")]
 async fn http_post_recording_is_not_indexed_as_ws() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("http.bin");

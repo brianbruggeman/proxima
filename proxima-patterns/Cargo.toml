@@ -127,7 +127,7 @@ portable-atomic = { workspace = true, default-features = false, optional = true 
 toml = { workspace = true }
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support-tokio"] }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time", "sync"] }
 tempfile = { workspace = true }

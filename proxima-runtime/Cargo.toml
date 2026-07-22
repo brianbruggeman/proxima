@@ -63,7 +63,7 @@ name = "foreign_strategy"
 required-features = ["concurrency"]
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support-tokio"] }
 criterion = { workspace = true }
 toml.workspace = true
 temp-env.workspace = true

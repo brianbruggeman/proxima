@@ -62,7 +62,7 @@ proxima-telemetry = { workspace = true, features = ["std", "macros"] }
 workspace = true
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support-tokio"] }
 proxima-protocols = { workspace = true, features = ["quic-alloc", "quic-mock-tls"] }
 proxima-runtime.workspace = true
 toml.workspace = true

@@ -405,7 +405,7 @@ mod tests {
         tokio::fs::write(path, bytes).await.expect("write fixture");
     }
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn replay_match_returns_recorded_response() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("echo.jsonl");
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(&body[..], b"{\"ok\":1}");
     }
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn replay_miss_returns_typed_error() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("echo.jsonl");

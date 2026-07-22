@@ -65,7 +65,7 @@ bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support-tokio"] }
 rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "fs"] }

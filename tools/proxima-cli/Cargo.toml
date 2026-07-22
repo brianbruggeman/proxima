@@ -31,7 +31,7 @@ futures.workspace = true
 tokio-util = { workspace = true, features = ["compat"] }
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support-tokio"] }
 tempfile.workspace = true
 time.workspace = true
 bytes.workspace = true
