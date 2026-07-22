@@ -153,9 +153,19 @@ impl SendPipe for EchoBodyPipe {
 
 
 async fn spawn_native_server(dispatch: PipeHandle) -> std::net::SocketAddr {
+    spawn_native_server_with_admission(dispatch, proxima_listen::admission::ConnAdmission::unbounded())
+        .await
+}
+
+/// Sibling of [`spawn_native_server`] that takes a caller-supplied
+/// [`proxima_listen::admission::ConnAdmission`] instead of an unbounded
+/// one, so a test can exercise a real `max_in_flight_requests` cap.
+async fn spawn_native_server_with_admission(
+    dispatch: PipeHandle,
+    admission: proxima_listen::admission::ConnAdmission,
+) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
-    let admission = proxima_listen::admission::ConnAdmission::unbounded();
     tokio::spawn(async move {
         let (socket, peer) = listener.accept().await.expect("accept tcp");
         let _ = serve_h2_connection(
@@ -167,6 +177,41 @@ async fn spawn_native_server(dispatch: PipeHandle) -> std::net::SocketAddr {
         .await;
     });
     addr
+}
+
+/// The handler behind the admission-shed tests below: signals
+/// `entered_tx` as soon as it is dispatched (proving `ConnAdmission`
+/// genuinely admitted it — the ONLY way to observe this signal is past
+/// `request_admit()` returning `Admit`), then blocks on `release_rx`
+/// until the test says to proceed. Holds the listener's one capacity
+/// slot open long enough for a concurrent second stream to be shed
+/// against a real held slot, never a race against an empty cap.
+struct SlowGatePipe {
+    entered_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release_rx: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl SendPipe for SlowGatePipe {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        _request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        let entered_tx = self.entered_tx.lock().expect("lock").take();
+        let release_rx = self.release_rx.lock().expect("lock").take();
+        async move {
+            if let Some(entered_tx) = entered_tx {
+                let _ = entered_tx.send(());
+            }
+            if let Some(release_rx) = release_rx {
+                let _ = release_rx.await;
+            }
+            Ok(Response::new(200).with_body(Bytes::from_static(b"slow-ok")))
+        }
+    }
 }
 
 #[proxima::test(flavor = "multi_thread", worker_threads = 2)]
@@ -671,6 +716,147 @@ async fn native_h2_listener_round_trip_echoes_request_body() {
         collected.extend_from_slice(&chunk);
     }
     assert_eq!(&collected[..], b"hello native h2");
+
+    drop(h2_client);
+    drop(conn_task);
+}
+
+/// Pre-existing (already-correct) behavior, pinned as a real regression
+/// test instead of living only in `examples/any_listener_production.rs`'s
+/// §4 narrative: a BODYLESS shed request gets the in-band 503 — never a
+/// stream reset. No body-stream receiver is ever opened for this request
+/// (`end_stream` arrives with the HEADERS frame), so this case was never
+/// exposed to the defect [`native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset`]
+/// below proves fixed.
+#[proxima::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_h2_listener_bodyless_shed_request_receives_in_band_503() {
+    let admission = proxima_listen::admission::ConnAdmission::new(1);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let dispatch: PipeHandle = into_handle(SlowGatePipe {
+        entered_tx: std::sync::Mutex::new(Some(entered_tx)),
+        release_rx: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let addr = spawn_native_server_with_admission(dispatch, admission).await;
+    let tcp = TcpStream::connect(addr).await.expect("connect");
+    let (mut h2_client, h2_conn) = h2::client::handshake(tcp).await.expect("handshake");
+    let conn_task = tokio::spawn(async move {
+        let _ = h2_conn.await;
+    });
+
+    let slow_request = http::Request::builder()
+        .method("GET")
+        .uri("http://localhost/slow")
+        .body(())
+        .expect("request");
+    let (slow_response_future, _) = h2_client
+        .send_request(slow_request, true)
+        .expect("send_request");
+
+    entered_rx.await.expect("slow handler signals entered");
+
+    let shed_request = http::Request::builder()
+        .method("GET")
+        .uri("http://localhost/shed-bodyless")
+        .body(())
+        .expect("request");
+    let (shed_response_future, _) = h2_client
+        .send_request(shed_request, true)
+        .expect("send_request");
+    let (shed_status, shed_body) = collect_body(shed_response_future).await;
+    assert_eq!(
+        shed_status, 503,
+        "the shed bodyless request must get the in-band 503"
+    );
+    assert_eq!(&shed_body[..], b"service unavailable");
+
+    release_tx.send(()).expect("release send");
+    let (slow_status, slow_body) = collect_body(slow_response_future).await;
+    assert_eq!(slow_status, 200);
+    assert_eq!(&slow_body[..], b"slow-ok");
+
+    drop(h2_client);
+    drop(conn_task);
+}
+
+/// The h2 defect this proves fixed: `ConnAdmission::request_admit`
+/// shedding a BODY-CARRYING request used to never dispatch the built
+/// `Request`, so its body-stream receiver (bundled into that `Request`)
+/// dropped with it. The client's subsequent DATA frame then landed on a
+/// closed channel, and the `BodyData` handler's `Some(Err(_))` arm reset
+/// the stream (`RST_STREAM(INTERNAL_ERROR)`) instead of delivering the
+/// 503 already queued. This sends a REAL body (not the bodyless GET the
+/// pre-existing demo used), so the fix — draining the body in the
+/// background instead of dropping it — is actually exercised.
+#[proxima::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset() {
+    let admission = proxima_listen::admission::ConnAdmission::new(1);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let dispatch: PipeHandle = into_handle(SlowGatePipe {
+        entered_tx: std::sync::Mutex::new(Some(entered_tx)),
+        release_rx: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let addr = spawn_native_server_with_admission(dispatch, admission).await;
+    let tcp = TcpStream::connect(addr).await.expect("connect");
+    let (mut h2_client, h2_conn) = h2::client::handshake(tcp).await.expect("handshake");
+    let conn_task = tokio::spawn(async move {
+        let _ = h2_conn.await;
+    });
+
+    // Stream A: admitted, holds the listener's ONLY capacity slot open
+    // until the test releases it below.
+    let slow_request = http::Request::builder()
+        .method("GET")
+        .uri("http://localhost/slow")
+        .body(())
+        .expect("request");
+    let (slow_response_future, _) = h2_client
+        .send_request(slow_request, true)
+        .expect("send_request");
+
+    entered_rx.await.expect("slow handler signals entered");
+
+    // Stream B: concurrent with A, carries a REAL body — must be shed
+    // (capacity is exhausted) and must receive the in-band 503, never a
+    // stream reset.
+    let shed_request = http::Request::builder()
+        .method("POST")
+        .uri("http://localhost/shed-with-body")
+        .body(())
+        .expect("request");
+    let (shed_response_future, mut shed_send_stream) = h2_client
+        .send_request(shed_request, false)
+        .expect("send_request");
+    shed_send_stream
+        .send_data(Bytes::from_static(b"a real request body, not bodyless"), true)
+        .expect("send body");
+
+    let shed_response = shed_response_future.await.expect(
+        "body-carrying shed request must receive an in-band response, not a stream reset",
+    );
+    assert_eq!(
+        shed_response.status(),
+        503,
+        "body-carrying shed request must get the in-band 503"
+    );
+    let mut shed_body = shed_response.into_body();
+    let mut collected = Vec::new();
+    while let Some(chunk) = shed_body.data().await {
+        let chunk = chunk.expect("chunk — must not be a stream reset");
+        let len = chunk.len();
+        shed_body
+            .flow_control()
+            .release_capacity(len)
+            .expect("flow control");
+        collected.extend_from_slice(&chunk);
+    }
+    assert_eq!(&collected[..], b"service unavailable");
+
+    release_tx.send(()).expect("release send");
+    let (slow_status, slow_body) = collect_body(slow_response_future).await;
+    assert_eq!(slow_status, 200);
+    assert_eq!(&slow_body[..], b"slow-ok");
 
     drop(h2_client);
     drop(conn_task);

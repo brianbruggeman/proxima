@@ -15,7 +15,6 @@
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Poll;
 
 use bytes::Bytes;
@@ -28,6 +27,7 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, error};
 
 use proxima_core::ProximaError;
+use proxima_listen::admission::{ConnAdmission, RequestAdmit};
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::SendPipe;
@@ -50,6 +50,43 @@ const BODY_CHANNEL_DEPTH: usize = 8;
 #[derive(Debug, Clone, Default)]
 pub struct HttpListenerSpec {
     pub max_body_bytes: Option<usize>,
+}
+
+/// The in-band response for a request `ConnAdmission::request_admit` sheds
+/// — identical body/headers to h2 native's own shed arm
+/// (`proxima-http/src/http2/server.rs`'s `RequestAdmit::Shed` branch), so a
+/// client sees the same wire contract regardless of which listener
+/// candidate it landed on. Never a connection reset: the connection (and,
+/// for h1, its keep-alive state) is untouched by a shed decision.
+fn shed_response() -> Response<Bytes> {
+    Response::new(503)
+        .with_body(Bytes::from_static(b"service unavailable"))
+        .with_header("content-type", "text/plain")
+        .with_header("retry-after", "1")
+}
+
+/// Release an admitted request's capacity slot; a no-op for a request that
+/// was shed (never admitted, nothing to release). Every early-return path
+/// in [`dispatch_streaming_request`] shares this one call instead of
+/// re-deriving the admit/shed branch at each site.
+fn release_if_admitted(admission: &ConnAdmission, outcome: RequestAdmit) {
+    if matches!(outcome, RequestAdmit::Admit) {
+        admission.request_release();
+    }
+}
+
+/// The streaming-path counterpart of h2 native's body-drain fix
+/// (`proxima-http/src/http2/server.rs`'s `drain_request_body`): a shed
+/// streaming request still has its body arriving on the wire (the pump
+/// keeps feeding `body_rx` regardless of admission's decision), so this
+/// reads-and-discards it instead of dispatching to the real Pipe —
+/// keeping the connection's byte stream in sync so the 503 rendered
+/// alongside this lands cleanly instead of desyncing h1 framing.
+async fn drain_shed_body(mut request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    if let Some(stream) = request.stream.take() {
+        let _ = stream.collect().await;
+    }
+    Ok(shed_response())
 }
 
 /// Dispatch one request through the Pipe chain, opening a span that
@@ -77,8 +114,12 @@ where
     Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let spec = Arc::new(HttpListenerSpec { max_body_bytes });
-    let in_flight = Arc::new(AtomicU64::new(0));
-    let quiescing = Arc::new(AtomicBool::new(false));
+    // One-off convenience entry point (no listener-wide capacity policy to
+    // share) — unbounded admission, matching this function's pre-existing
+    // behavior of never shedding on capacity, while still gaining a real
+    // `request_admit`/`request_release` handshake instead of a bespoke
+    // counter.
+    let admission = ConnAdmission::unbounded();
     let quiesce_response = Arc::new(QuiesceResponse {
         status: 503,
         retry_after: "1".into(),
@@ -87,8 +128,7 @@ where
         socket,
         dispatch,
         spec,
-        in_flight,
-        quiescing,
+        admission,
         quiesce_response,
         None,
         runtime,
@@ -127,8 +167,7 @@ pub async fn serve_connection<Stream>(
     socket: Stream,
     dispatch: PipeHandle,
     spec: Arc<HttpListenerSpec>,
-    in_flight: Arc<AtomicU64>,
-    quiescing: Arc<AtomicBool>,
+    admission: ConnAdmission,
     quiesce_response: Arc<QuiesceResponse>,
     peer: Option<proxima_primitives::stream::PeerInfo>,
     runtime: Option<Arc<dyn Runtime>>,
@@ -198,8 +237,7 @@ where
                     &mut out,
                     &dispatch,
                     &spec,
-                    &in_flight,
-                    &quiescing,
+                    &admission,
                     &quiesce_response,
                     &peer,
                     runtime.as_ref(),
@@ -252,7 +290,7 @@ where
                     writer.write_all(&out).await.map_err(io_err)?;
                     return Ok(());
                 }
-                if quiescing.load(Ordering::Relaxed) {
+                if admission.is_quiescing() {
                     let quiesce_headers = vec![
                         (
                             "Retry-After".to_string(),
@@ -286,7 +324,7 @@ where
         // Quiescing — refuse the request with the configured status
         // and a Retry-After header. Don't dispatch; close connection
         // after writing the response.
-        if quiescing.load(Ordering::Relaxed) {
+        if admission.is_quiescing() {
             let quiesce_headers = vec![
                 (
                     "Retry-After".to_string(),
@@ -336,79 +374,97 @@ where
             return Ok(());
         }
 
-        // Build the proxima::Request from Connection accessors and
-        // dispatch through the Pipe chain. One Bytes::copy_from_slice
-        // for each of: method, path, body. Headers are copied into a
-        // HeaderList — Tier 3 (the bump arena) would absorb this if we
-        // moved Request fields off owned Bytes, but the existing
-        // proxima::Request shape uses Bytes today so we pay it for now.
-        let in_flight_now = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
-        let cancel = proxima_core::signal::Signal::new();
-        let cancel_guard = cancel.clone().guard();
-        let mut request = build_proxima_request(&mut connection, &spec);
-        request.context.cancel = cancel.clone();
-        request.context.peer = peer.clone();
-        let trace_id = request.context.trace_id.clone();
-        let telemetry = request.context.telemetry.clone();
-        telemetry.gauge_set(
-            "proxima.requests.in_flight",
-            &proxima_primitives::pipe::telemetry_surface::Labels::empty(),
-            in_flight_now as i64,
-        );
-        // Race the dispatch against socket EOF detection. If the
-        // client disconnects mid-dispatch, the read returns 0; we
-        // fire `cancel.fire()` and then poll the dispatch future
-        // to completion so the Pipe has a chance to observe the
-        // cancellation and clean up. Hand-rolled biased poll —
-        // tokio-free equivalent of `tokio::select!` (see
-        // `http2::server::SelectOutcome`'s doc for the pattern).
-        let mut dispatch_future = pin!(dispatch_request(&dispatch, request));
-        let mut watch_buf = [0_u8; 1];
-        let race = poll_fn(|cx| {
-            if let Poll::Ready(response) = dispatch_future.as_mut().poll(cx) {
-                return Poll::Ready(DispatchRace::Response(response));
+        // Request-level admission: the request-count twin of the
+        // connection-level `ListenerCore` gate, same handshake h2 native
+        // uses at its own per-stream boundary
+        // (`proxima-http/src/http2/server.rs`'s `RequestAdmit` match).
+        // `Shed` never dispatches to the Pipe and never touches
+        // `cancel`/`in_flight` bookkeeping (there was nothing to admit);
+        // the shed response flows through the SAME tail below as any
+        // other outcome, so write framing, keep-alive, and upgrade
+        // handling stay identical for both.
+        let mut trace_id: Option<Arc<[u8]>> = None;
+        let outcome: Result<Response<Bytes>, ProximaError> = match admission.request_admit() {
+            RequestAdmit::Shed { reason } => {
+                debug!(?reason, "h1 request shed by listener admission");
+                Ok(shed_response())
             }
-            if let Poll::Ready(read) = Pin::new(&mut reader).poll_read(cx, &mut watch_buf) {
-                return Poll::Ready(DispatchRace::Read(read));
-            }
-            Poll::Pending
-        })
-        .await;
-        let outcome = match race {
-            DispatchRace::Response(response) => response,
-            DispatchRace::Read(Ok(0)) => {
-                debug!("client disconnected during dispatch");
-                cancel.fire();
-                // Give the Pipe a poll cycle to observe
-                // the cancel signal before we drop its
-                // future. Without this, drop happens before
-                // the cancelled arm executes and the
-                // Pipe's cleanup code never runs.
-                let _ = dispatch_future.await;
-                in_flight.fetch_sub(1, Ordering::Relaxed);
-                return Ok(());
-            }
-            DispatchRace::Read(Ok(_n)) => {
-                // Pipelined bytes from the client. Buffer
-                // the byte by feeding it back into
-                // Connection; the next iteration's poll
-                // picks up the trailing request after this
-                // one's response is written.
-                connection.feed_bytes(&watch_buf[..1]);
-                dispatch_future.await
-            }
-            DispatchRace::Read(Err(error)) => {
-                debug!(?error, "read error during dispatch");
-                cancel.fire();
-                let _ = dispatch_future.await;
-                in_flight.fetch_sub(1, Ordering::Relaxed);
-                return Ok(());
+            RequestAdmit::Admit => {
+                // Build the proxima::Request from Connection accessors and
+                // dispatch through the Pipe chain. One Bytes::copy_from_slice
+                // for each of: method, path, body. Headers are copied into a
+                // HeaderList — Tier 3 (the bump arena) would absorb this if we
+                // moved Request fields off owned Bytes, but the existing
+                // proxima::Request shape uses Bytes today so we pay it for now.
+                let cancel = proxima_core::signal::Signal::new();
+                let cancel_guard = cancel.clone().guard();
+                let mut request = build_proxima_request(&mut connection, &spec);
+                request.context.cancel = cancel.clone();
+                request.context.peer = peer.clone();
+                trace_id = request.context.trace_id.clone();
+                let telemetry = request.context.telemetry.clone();
+                telemetry.gauge_set(
+                    "proxima.requests.in_flight",
+                    &proxima_primitives::pipe::telemetry_surface::Labels::empty(),
+                    admission.in_flight() as i64,
+                );
+                // Race the dispatch against socket EOF detection. If the
+                // client disconnects mid-dispatch, the read returns 0; we
+                // fire `cancel.fire()` and then poll the dispatch future
+                // to completion so the Pipe has a chance to observe the
+                // cancellation and clean up. Hand-rolled biased poll —
+                // tokio-free equivalent of `tokio::select!` (see
+                // `http2::server::SelectOutcome`'s doc for the pattern).
+                let mut dispatch_future = pin!(dispatch_request(&dispatch, request));
+                let mut watch_buf = [0_u8; 1];
+                let race = poll_fn(|cx| {
+                    if let Poll::Ready(response) = dispatch_future.as_mut().poll(cx) {
+                        return Poll::Ready(DispatchRace::Response(response));
+                    }
+                    if let Poll::Ready(read) = Pin::new(&mut reader).poll_read(cx, &mut watch_buf) {
+                        return Poll::Ready(DispatchRace::Read(read));
+                    }
+                    Poll::Pending
+                })
+                .await;
+                let result = match race {
+                    DispatchRace::Response(response) => response,
+                    DispatchRace::Read(Ok(0)) => {
+                        debug!("client disconnected during dispatch");
+                        cancel.fire();
+                        // Give the Pipe a poll cycle to observe
+                        // the cancel signal before we drop its
+                        // future. Without this, drop happens before
+                        // the cancelled arm executes and the
+                        // Pipe's cleanup code never runs.
+                        let _ = dispatch_future.await;
+                        admission.request_release();
+                        return Ok(());
+                    }
+                    DispatchRace::Read(Ok(_n)) => {
+                        // Pipelined bytes from the client. Buffer
+                        // the byte by feeding it back into
+                        // Connection; the next iteration's poll
+                        // picks up the trailing request after this
+                        // one's response is written.
+                        connection.feed_bytes(&watch_buf[..1]);
+                        dispatch_future.await
+                    }
+                    DispatchRace::Read(Err(error)) => {
+                        debug!(?error, "read error during dispatch");
+                        cancel.fire();
+                        let _ = dispatch_future.await;
+                        admission.request_release();
+                        return Ok(());
+                    }
+                };
+                admission.request_release();
+                // Successful response — disarm the cancel guard so a normal
+                // return doesn't fire it.
+                cancel_guard.disarm();
+                result
             }
         };
-        in_flight.fetch_sub(1, Ordering::Relaxed);
-        // Successful response — disarm the cancel guard so a normal
-        // return doesn't fire it.
-        cancel_guard.disarm();
 
         let upgrade_after_write = match outcome {
             Ok(response) => {
@@ -597,8 +653,7 @@ async fn dispatch_streaming_request<R, W>(
     out: &mut Vec<u8>,
     dispatch: &PipeHandle,
     spec: &Arc<HttpListenerSpec>,
-    in_flight: &Arc<AtomicU64>,
-    quiescing: &Arc<AtomicBool>,
+    admission: &ConnAdmission,
     quiesce_response: &Arc<QuiesceResponse>,
     peer: &Option<proxima_primitives::stream::PeerInfo>,
     runtime: Option<&Arc<dyn Runtime>>,
@@ -610,7 +665,7 @@ where
     // Quiescing — refuse with the configured status WITHOUT consuming
     // the body. Closes the connection after writing; the half-uploaded
     // body bytes drain via TCP RST when we close.
-    if quiescing.load(Ordering::Relaxed) {
+    if admission.is_quiescing() {
         let quiesce_headers = vec![
             (
                 "Retry-After".to_string(),
@@ -658,7 +713,15 @@ where
         return Ok(StreamingOutcome::Close);
     }
 
-    let in_flight_now = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+    // Request-level admission: same handshake as the buffered path
+    // above and h2 native's per-stream boundary. The body pump below
+    // must run regardless of the outcome — the client is already
+    // sending (or about to send) body bytes on the wire, and those
+    // bytes have to be drained to keep h1 framing in sync even when
+    // shed. `RequestAdmit` is `Copy`; `admission_outcome` is read again
+    // inside `pipe_task`/`dispatch_future` below to pick real dispatch
+    // vs. drain-and-shed.
+    let admission_outcome = admission.request_admit();
     let cancel = proxima_core::signal::Signal::new();
     let cancel_guard = cancel.clone().guard();
 
@@ -668,12 +731,19 @@ where
     request.context.cancel = cancel.clone();
     request.context.peer = peer.clone();
     let trace_id = request.context.trace_id.clone();
-    let telemetry = request.context.telemetry.clone();
-    telemetry.gauge_set(
-        "proxima.requests.in_flight",
-        &proxima_primitives::pipe::telemetry_surface::Labels::empty(),
-        in_flight_now as i64,
-    );
+    match admission_outcome {
+        RequestAdmit::Admit => {
+            let telemetry = request.context.telemetry.clone();
+            telemetry.gauge_set(
+                "proxima.requests.in_flight",
+                &proxima_primitives::pipe::telemetry_surface::Labels::empty(),
+                admission.in_flight() as i64,
+            );
+        }
+        RequestAdmit::Shed { reason } => {
+            debug!(?reason, "h1 streaming request shed by listener admission");
+        }
+    }
 
     let dispatch_clone = dispatch.clone();
 
@@ -688,7 +758,10 @@ where
             let (resp_tx, mut resp_rx) =
                 oneshot::channel::<Result<Response<Bytes>, ProximaError>>();
             let pipe_task = async move {
-                let response = dispatch_request(&dispatch_clone, request).await;
+                let response = match admission_outcome {
+                    RequestAdmit::Admit => dispatch_request(&dispatch_clone, request).await,
+                    RequestAdmit::Shed { .. } => drain_shed_body(request).await,
+                };
                 let _ = resp_tx.send(response);
             };
             rt.spawn_on_current_core(Box::pin(pipe_task));
@@ -707,20 +780,20 @@ where
                     // buffered path's dispatch_future-then-poll
                     // pattern.
                     let _ = resp_rx.await;
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     return Ok(StreamingOutcome::Close);
                 }
                 Err(PumpError::Decode) => {
                     cancel.fire();
                     let _ = resp_rx.await;
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     write_minimal_error(writer, out, 400, "Bad Request").await?;
                     return Ok(StreamingOutcome::Close);
                 }
                 Err(PumpError::Io(error)) => {
                     cancel.fire();
                     let _ = resp_rx.await;
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     return Err(ProximaError::Io(error));
                 }
             }
@@ -751,7 +824,7 @@ where
                     debug!("client disconnected during streaming dispatch");
                     cancel.fire();
                     let _ = resp_rx.await;
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     return Ok(StreamingOutcome::Close);
                 }
                 StreamDispatchRace::Read(Ok(_n)) => {
@@ -769,11 +842,11 @@ where
                     debug!(?error, "read error during streaming dispatch");
                     cancel.fire();
                     let _ = resp_rx.await;
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     return Ok(StreamingOutcome::Close);
                 }
             };
-            in_flight.fetch_sub(1, Ordering::Relaxed);
+            release_if_admitted(admission, admission_outcome);
             cancel_guard.disarm();
             finish_streaming_response(writer, out, connection, trace_id.as_deref(), response_result)
                 .await
@@ -785,8 +858,12 @@ where
             // for `tokio::task::spawn_local`). Same concurrency as
             // the spawned-task arm above: the Pipe drains `body_rx`
             // as the pump fills it.
-            let mut dispatch_future =
-                pin!(async move { dispatch_request(&dispatch_clone, request).await });
+            let mut dispatch_future = pin!(async move {
+                match admission_outcome {
+                    RequestAdmit::Admit => dispatch_request(&dispatch_clone, request).await,
+                    RequestAdmit::Shed { .. } => drain_shed_body(request).await,
+                }
+            });
             let mut dispatch_done: Option<Result<Response<Bytes>, ProximaError>> = None;
             let pump_outcome = {
                 let mut pump_future =
@@ -835,7 +912,7 @@ where
                     if dispatch_done.is_none() {
                         let _ = dispatch_future.await;
                     }
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     return Ok(StreamingOutcome::Close);
                 }
                 Err(PumpError::Decode) => {
@@ -843,7 +920,7 @@ where
                     if dispatch_done.is_none() {
                         let _ = dispatch_future.await;
                     }
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     write_minimal_error(writer, out, 400, "Bad Request").await?;
                     return Ok(StreamingOutcome::Close);
                 }
@@ -852,7 +929,7 @@ where
                     if dispatch_done.is_none() {
                         let _ = dispatch_future.await;
                     }
-                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                    release_if_admitted(admission, admission_outcome);
                     return Err(ProximaError::Io(error));
                 }
             }
@@ -882,7 +959,7 @@ where
                             debug!("client disconnected during streaming dispatch");
                             cancel.fire();
                             let _ = dispatch_future.await;
-                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                            release_if_admitted(admission, admission_outcome);
                             return Ok(StreamingOutcome::Close);
                         }
                         DispatchRace::Read(Ok(_n)) => {
@@ -893,13 +970,13 @@ where
                             debug!(?error, "read error during streaming dispatch");
                             cancel.fire();
                             let _ = dispatch_future.await;
-                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                            release_if_admitted(admission, admission_outcome);
                             return Ok(StreamingOutcome::Close);
                         }
                     }
                 }
             };
-            in_flight.fetch_sub(1, Ordering::Relaxed);
+            release_if_admitted(admission, admission_outcome);
             cancel_guard.disarm();
             finish_streaming_response(writer, out, connection, trace_id.as_deref(), response_result)
                 .await
@@ -1423,6 +1500,7 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
     use std::task::{Context, Poll};
 
     use futures::executor::block_on;
@@ -1827,8 +1905,7 @@ mod tests {
     fn serve_connection_completes_over_an_in_memory_duplex_with_no_tokio_runtime() {
         let (server_half, mut client_half) = test_duplex();
         let spec = Arc::new(HttpListenerSpec::default());
-        let in_flight = Arc::new(AtomicU64::new(0));
-        let quiescing = Arc::new(AtomicBool::new(false));
+        let admission = ConnAdmission::unbounded();
         let quiesce_response = Arc::new(QuiesceResponse {
             status: 503,
             retry_after: "1".into(),
@@ -1840,8 +1917,7 @@ mod tests {
                 response: || Response::new(200).with_body(Bytes::from_static(b"pong")),
             }),
             spec,
-            in_flight,
-            quiescing,
+            admission,
             quiesce_response,
             None,
             None,
@@ -1865,6 +1941,196 @@ mod tests {
         let wire = String::from_utf8(response).expect("response should be utf8");
         assert!(wire.starts_with("HTTP/1.1 200"), "response head: {wire}");
         assert!(wire.ends_with("pong"), "response body: {wire}");
+    }
+
+    /// Read one full HTTP/1.1 response off a keep-alive connection: parse
+    /// headers up to `\r\n\r\n`, then read exactly `Content-Length` more
+    /// body bytes. Unlike `read_to_end` (used elsewhere in this file for
+    /// `Connection: close` responses), this never blocks past the end of
+    /// ONE response, so the caller can keep reusing the same connection.
+    async fn read_http_response<R: AsyncRead + Unpin>(reader: &mut R) -> (String, Vec<u8>) {
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 512];
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let count = reader.read(&mut chunk).await.expect("read response head");
+            assert!(count > 0, "unexpected eof while reading response headers");
+            buf.extend_from_slice(&chunk[..count]);
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        let mut body = buf[header_end..].to_vec();
+        while body.len() < content_length {
+            let count = reader.read(&mut chunk).await.expect("read response body");
+            assert!(count > 0, "unexpected eof while reading response body");
+            body.extend_from_slice(&chunk[..count]);
+        }
+        body.truncate(content_length);
+        (head, body)
+    }
+
+    /// The handler behind [`h1_in_flight_shed_renders_503_then_recovers_after_release`]:
+    /// the FIRST call (whichever connection reaches the shared, capacity-1
+    /// `ConnAdmission` first) signals `entered_tx` — proving to the test
+    /// that admission genuinely admitted it before a second connection's
+    /// request can be shed against a real held slot — then blocks on
+    /// `release_rx` until the test says to proceed. Every later call
+    /// (there is exactly one, in this test: the follow-up request that
+    /// proves `request_release` restored capacity) returns immediately.
+    struct GatedOnceHandler {
+        first_call_done: std::sync::atomic::AtomicBool,
+        entered_tx: Mutex<Option<oneshot::Sender<()>>>,
+        release_rx: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl SendPipe for GatedOnceHandler {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            _request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+            let is_first_call = !self
+                .first_call_done
+                .swap(true, std::sync::atomic::Ordering::SeqCst);
+            let entered_tx = if is_first_call {
+                self.entered_tx.lock().unwrap().take()
+            } else {
+                None
+            };
+            let release_rx = if is_first_call {
+                self.release_rx.lock().unwrap().take()
+            } else {
+                None
+            };
+            async move {
+                if let Some(entered_tx) = entered_tx {
+                    let _ = entered_tx.send(());
+                }
+                if let Some(release_rx) = release_rx {
+                    let _ = release_rx.await;
+                }
+                Ok(Response::new(200).with_body(Bytes::from_static(b"ok")))
+            }
+        }
+    }
+
+    /// The h1 admission defect this proves fixed: `max_in_flight_requests`
+    /// used to be a silent no-op on h1 because the request loop never
+    /// called `request_admit`/`request_release` — it only incremented a
+    /// bare counter for telemetry. With a capacity-1 `ConnAdmission` shared
+    /// across two connections: connection A's request is admitted and held
+    /// open (proving admission happened before B ever dials); connection
+    /// B's concurrent request is shed and gets a real in-band 503 (parsed
+    /// status line, not a reset); B's connection stays usable — its NEXT
+    /// request, sent after A releases, succeeds — proving `request_release`
+    /// actually restored capacity instead of leaving the cap permanently
+    /// exhausted.
+    #[test]
+    fn h1_in_flight_shed_renders_503_then_recovers_after_release() {
+        block_on(async {
+            let admission = ConnAdmission::new(1);
+            let (entered_tx, entered_rx) = oneshot::channel::<()>();
+            let (release_tx, release_rx) = oneshot::channel::<()>();
+            let dispatch = into_handle(GatedOnceHandler {
+                first_call_done: std::sync::atomic::AtomicBool::new(false),
+                entered_tx: Mutex::new(Some(entered_tx)),
+                release_rx: Mutex::new(Some(release_rx)),
+            });
+            let spec = Arc::new(HttpListenerSpec::default());
+            let quiesce_response = Arc::new(QuiesceResponse {
+                status: 503,
+                retry_after: "1".into(),
+            });
+
+            let (server_a, mut client_a) = test_duplex();
+            let (server_b, mut client_b) = test_duplex();
+
+            let server_a_fut = serve_connection(
+                server_a,
+                dispatch.clone(),
+                spec.clone(),
+                admission.clone(),
+                quiesce_response.clone(),
+                None,
+                None,
+            );
+            let server_b_fut = serve_connection(
+                server_b,
+                dispatch,
+                spec,
+                admission,
+                quiesce_response,
+                None,
+                None,
+            );
+
+            let client_fut = async {
+                client_a
+                    .write_all(b"GET /a HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("client a write");
+
+                // A's request is now admitted and blocked in the handler —
+                // the ONLY way `entered_rx` resolves is past
+                // `request_admit()` returning `Admit`.
+                entered_rx.await.expect("handler signals entered");
+
+                client_b
+                    .write_all(b"GET /b1 HTTP/1.1\r\nHost: x\r\n\r\n")
+                    .await
+                    .expect("client b write (first, over capacity)");
+                let (head_b1, body_b1) = read_http_response(&mut client_b).await;
+                assert!(
+                    head_b1.starts_with("HTTP/1.1 503"),
+                    "the (N+1)th concurrent request must be shed in-band: {head_b1}"
+                );
+                assert_eq!(
+                    body_b1, b"service unavailable",
+                    "shed body matches h1's rendering of the h2-parity 503"
+                );
+
+                release_tx.send(()).expect("release send");
+                let (head_a, body_a) = read_http_response(&mut client_a).await;
+                assert!(
+                    head_a.starts_with("HTTP/1.1 200"),
+                    "the admitted request completes normally once released: {head_a}"
+                );
+                assert_eq!(body_a, b"ok");
+
+                // Connection B stayed usable after its 503 (never reset) —
+                // and capacity is now free, so this follow-up on the SAME
+                // connection must succeed, proving `request_release`
+                // genuinely gave the slot back.
+                client_b
+                    .write_all(b"GET /b2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("client b write (second, after release)");
+                let (head_b2, body_b2) = read_http_response(&mut client_b).await;
+                assert!(
+                    head_b2.starts_with("HTTP/1.1 200"),
+                    "capacity freed by request_release must admit the follow-up: {head_b2}"
+                );
+                assert_eq!(body_b2, b"ok");
+            };
+
+            let (server_a_result, server_b_result, ()) =
+                futures::join!(server_a_fut, server_b_fut, client_fut);
+            server_a_result.expect("connection A completes cleanly");
+            server_b_result.expect("connection B completes cleanly");
+        });
     }
 
     #[test]

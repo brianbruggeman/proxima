@@ -111,6 +111,10 @@ enum SelectOutcome {
     Read(std::io::Result<usize>),
     Handler((u32, Result<Response<Bytes>, ProximaError>)),
     ChunkPull(ChunkPullOutput),
+    /// A shed request's inbound body finished draining (see
+    /// [`drain_request_body`]) — nothing to act on, the drain future is
+    /// already gone from `body_drains` once `FuturesUnordered` yields it.
+    BodyDrained,
 }
 
 /// Drive a native HTTP/2 connection to completion. Each accepted
@@ -156,6 +160,14 @@ where
     // emit the terminator if the body ended). Runs in the same
     // task as reads and handler completions — no `tokio::spawn`.
     let mut chunk_pulls: FuturesUnordered<ChunkPullFuture> = FuturesUnordered::new();
+    // Inbound bodies being drained-and-discarded for streams `ConnAdmission`
+    // shed (see `drain_request_body`'s doc) — keeps each shed stream's
+    // `body_senders` receiver alive and polled so the client's DATA frames
+    // land on a live channel instead of the closed one a dropped `Request`
+    // would leave behind (the h2 defect this drives around: a send into a
+    // closed channel reset the stream with `INTERNAL_ERROR` instead of
+    // delivering the 503 already queued).
+    let mut body_drains: FuturesUnordered<BodyDrainFuture> = FuturesUnordered::new();
     let mut read_buf = vec![0u8; 16_384];
     let mut peer_closed = false;
 
@@ -175,13 +187,14 @@ where
             && body_senders.is_empty()
             && chunk_pulls.is_empty()
             && pending_sends.is_empty()
+            && body_drains.is_empty()
         {
             break;
         }
 
-        // Step 3: select on (read | handler completion | chunk pull).
-        // Only blocks if NO event is currently ready. The "drain ready"
-        // loop below picks up everything else that's ready before we
+        // Step 3: select on (read | handler completion | chunk pull | body
+        // drain). Only blocks if NO event is currently ready. The "drain
+        // ready" loop below picks up everything else that's ready before we
         // pay another syscall to flush — at high stream concurrency
         // this is the difference between 1 frame/syscall and many.
         let outcome = std::future::poll_fn(|cx| {
@@ -199,6 +212,11 @@ where
                 && let Poll::Ready(Some(item)) = chunk_pulls.poll_next_unpin(cx)
             {
                 return Poll::Ready(SelectOutcome::ChunkPull(item));
+            }
+            if !body_drains.is_empty()
+                && let Poll::Ready(Some(())) = body_drains.poll_next_unpin(cx)
+            {
+                return Poll::Ready(SelectOutcome::BodyDrained);
             }
             Poll::Pending
         })
@@ -236,6 +254,7 @@ where
                     &mut pending_sends,
                 )?;
             }
+            SelectOutcome::BodyDrained => {}
         }
 
         // Drain everything else that's ready RIGHT NOW. Batches frames
@@ -246,6 +265,7 @@ where
         while let Some(item) = handlers.next().now_or_never().flatten() {
             process_handler_completion(item, &admission, &mut connection, &mut chunk_pulls)?;
         }
+        while body_drains.next().now_or_never().flatten().is_some() {}
         while let Some(item) = chunk_pulls.next().now_or_never().flatten() {
             process_chunk_pull_completion(
                 item,
@@ -314,6 +334,26 @@ where
                                 ?reason,
                                 "h2 native request shed by listener admission"
                             );
+                            // A body-carrying request still has its
+                            // `NativeBodyStream` receiver referenced by
+                            // `body_senders` above; dropping `request`
+                            // here (unused on this arm) would drop that
+                            // receiver too, so the client's next DATA
+                            // frame would hit a closed channel and
+                            // `Some(Err(_))` in the `BodyData` handler
+                            // below would RST the stream instead of
+                            // delivering this 503. Drain-and-discard it
+                            // on a background future instead — keeps
+                            // the receiver alive so DATA frames land
+                            // cleanly (flow-control credit is granted
+                            // unconditionally in `Connection::handle_data`
+                            // as bytes are fed, independent of whether
+                            // anything reads the body — see that
+                            // method's doc), and the stream closes with
+                            // the 503 instead of a reset.
+                            if let Some(body_stream) = request.stream {
+                                body_drains.push(drain_request_body(body_stream));
+                            }
                             let response = Response::new(503)
                                 .with_body(Bytes::from_static(b"service unavailable"))
                                 .with_header("content-type", "text/plain")
@@ -687,6 +727,23 @@ fn next_chunk_future(stream_id: u32, mut body_stream: ChunkStream) -> ChunkPullF
     Box::pin(async move {
         let next = body_stream.next().await;
         (stream_id, next, body_stream)
+    })
+}
+
+/// A shed request's inbound body, read-and-discarded in the background so
+/// its `NativeBodyStream` receiver stays alive (see the `RequestAdmit::Shed`
+/// arm's comment above for why: without this, the receiver drops with the
+/// half-built `Request`, and the client's next DATA frame hits a closed
+/// channel and resets the stream instead of receiving the 503 already
+/// queued). Flow-control credit is granted unconditionally as bytes are fed
+/// into the connection (`Connection::handle_data`'s auto-replenish, not
+/// gated on anything reading the body), so no extra window bookkeeping is
+/// needed here beyond letting the bytes land on a live channel.
+type BodyDrainFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+fn drain_request_body(stream: RequestStream) -> BodyDrainFuture {
+    Box::pin(async move {
+        let _ = stream.collect().await;
     })
 }
 
