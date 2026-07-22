@@ -54,6 +54,8 @@ pub mod fanout;
 pub mod filter;
 #[cfg(feature = "std")]
 pub mod filter_registry;
+#[cfg(feature = "std")]
+pub mod fanout_registry;
 pub mod drain_sink;
 pub mod drain_source;
 pub mod ext;
@@ -198,6 +200,8 @@ pub use stream_bridge::{IntoReader, IntoWriter};
 pub use drain_sink::RingSinkWriteError;
 #[cfg(feature = "std")]
 pub use filter_registry::{FilterRegistry, FilterRegistryConfig};
+#[cfg(feature = "std")]
+pub use fanout_registry::{KeyedFanOut, SubscriptionId};
 #[cfg(feature = "std")]
 pub use live_filter::{FilterControl, FilterUpdate, IdSet, LiveFilter, live_filter, live_filter_ids};
 pub use resilience::{Backoff, CircuitBreaker, CircuitState, Deadline, Jitter, RetryAction, RetryController};

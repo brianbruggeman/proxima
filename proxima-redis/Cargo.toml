@@ -29,6 +29,12 @@ tracing = { workspace = true, optional = true }
 # plaintext password + ACL credentials zeroized on drop — connection-level
 # AUTH/HELLO secrets get the same hygiene pgwire gives SCRAM key material.
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"], optional = true }
+# the tokio-free native listener stack: `RedisAnyProtocol` mounts into
+# `proxima-listen`'s `AnyListenProtocol` open universal listener over the
+# runtime-matched acceptor factory — see the `listen` feature below.
+proxima-listen = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, features = ["std"], optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = ["std"]
@@ -53,6 +59,31 @@ client = [
     "dep:tracing",
     "dep:zeroize",
 ]
+# the tokio-free native (sans-IO) redis/RESP LISTENER: `RedisConnectionPipe`
+# + `RedisAnyProtocol` mounting into `proxima-listen`'s `AnyListenProtocol`
+# open universal listener over the runtime-matched acceptor factory. Mirrors
+# `proxima-pgwire`'s own `listen` feature. `--no-default-features` leaves the
+# bare sans-IO codec (and the `client` graph) with zero tokio; this feature
+# adds the upgrade seam (std-only) the connection pipe returns, and the
+# `AnyProtocol` candidate.
+listen = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "proxima-core/io-async-compat",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:bon",
+    "dep:bytes",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:thiserror",
+    "dep:tracing",
+    "dep:proxima-listen",
+    "dep:proxima-runtime",
+    "dep:serde_json",
+]
 
 [dev-dependencies]
 proxima-net = { workspace = true, features = ["tokio"] }
@@ -60,7 +91,12 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
 rstest = { workspace = true }
 temp-env = { workspace = true }
-proxima = { workspace = true, features = ["test-support"] }
+# `tokio` alongside `test-support`: in-tree tests use
+# `#[proxima::test(runtime = "tokio")]`, whose `run_tokio*` drivers live
+# behind `proxima-test/tokio-driver` — only reachable transitively through
+# `proxima`'s own `tokio` feature (mirrors `proxima-listen`'s identical
+# dev-dependency line for the same reason).
+proxima = { workspace = true, features = ["test-support", "tokio"] }
 
 [lints]
 workspace = true
@@ -68,3 +104,9 @@ workspace = true
 [[example]]
 name = "capture_realredis"
 required-features = ["client"]
+
+[[test]]
+name = "pubsub_round_trip"
+path = "tests/pubsub_round_trip.rs"
+required-features = ["listen"]
+

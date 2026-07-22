@@ -100,6 +100,12 @@ pub struct ListenerBuilder {
     /// [`Self::pgwire`].
     #[cfg(feature = "pgwire")]
     pgwire_query: Option<proxima_pgwire::PgPipeHandle>,
+    /// The typed command handler `.redis(handler)` carries — accumulated
+    /// separately from `spec` for the same reason `pgwire_query` is: a
+    /// `proxima_redis::RedisPipeHandle` doesn't fit a `serde_json::Value`
+    /// spec key. See [`Self::redis`].
+    #[cfg(feature = "redis-listener")]
+    redis_handler: Option<proxima_redis::RedisPipeHandle>,
     /// `.any()`/`.accepts(&[..])`/`.accept(name)` — which `AnyProtocol`
     /// candidates the open universal listener accepts. `None` means none of
     /// those were called (the builder resolves through the ordinary
@@ -211,6 +217,26 @@ impl ListenerBuilder {
     pub fn pgwire(mut self, query: proxima_pgwire::PgPipeHandle) -> Self {
         self.pgwire_query = Some(query);
         self.spec.insert("pgwire_axis".to_string(), Value::Bool(true));
+        self
+    }
+
+    /// Select the Redis/Valkey wire protocol as the listen protocol,
+    /// carrying the command handler directly — the same asymmetry
+    /// `.pgwire(query)` has: `handler` is the typed
+    /// [`RedisPipeHandle`](proxima_redis::RedisPipeHandle)
+    /// (`Request<RedisRequest>`/`Response<RespValue>`), which no generic
+    /// `.handle(pipe)` can carry. Resolves through a single-candidate
+    /// `AnyListenProtocol` wrapping [`proxima_redis::RedisAnyProtocol`] —
+    /// there is no standalone `RedisListenProtocol`; redis's listen-side
+    /// surface has always been an `AnyProtocol` candidate. `.tls(config)`
+    /// composes normally as the generic decorator over this (RESP-over-TLS
+    /// is whole-connection TLS from byte 0, unlike pgwire's in-band
+    /// SSLRequest — no conflict to guard against).
+    #[cfg(feature = "redis-listener")]
+    #[must_use]
+    pub fn redis(mut self, handler: proxima_redis::RedisPipeHandle) -> Self {
+        self.redis_handler = Some(handler);
+        self.spec.insert("redis_axis".to_string(), Value::Bool(true));
         self
     }
 
@@ -375,6 +401,8 @@ impl ListenerBuilder {
         })?;
         #[cfg(feature = "pgwire")]
         let pgwire_query = self.pgwire_query;
+        #[cfg(feature = "redis-listener")]
+        let redis_handler = self.redis_handler;
         // Built BEFORE protocol resolution (unlike every other axis, which
         // resolves against bare spec data) — `.any()`/`.accepts()`/
         // `.accept()` need `app.any_registry()` /
@@ -407,6 +435,20 @@ impl ListenerBuilder {
             app.register_listen_protocol(Arc::new(proxima_pgwire::PgWireListenProtocol::new(
                 "pgwire", query,
             )))?;
+        }
+        // `.redis(handler)` carries a typed command handler the same way
+        // `.pgwire(query)` carries its query engine — register a fresh
+        // single-candidate `AnyListenProtocol` wrapping `RedisAnyProtocol`
+        // now, before `.serve()` resolves `protocol` ("redis") against the
+        // registry.
+        #[cfg(feature = "redis-listener")]
+        if let Some(handler) = redis_handler {
+            app.register_listen_protocol(Arc::new(
+                crate::listeners::AnyListenProtocol::single_candidate(
+                    "redis",
+                    Arc::new(proxima_redis::RedisAnyProtocol::new("redis", handler)),
+                ),
+            ))?;
         }
         app.mount("/{*path}", MountTarget::Handle(dispatch))?;
         let config = RunConfig {
@@ -545,6 +587,9 @@ fn resolve_listen_protocol(
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     if spec.contains_key("pgwire_axis") {
         return Ok(("pgwire".to_string(), None));
+    }
+    if spec.contains_key("redis_axis") {
+        return Ok(("redis".to_string(), None));
     }
     if spec.contains_key("grpc") || spec.contains_key("h2") {
         return h2_listen_protocol();
