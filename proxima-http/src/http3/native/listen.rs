@@ -7,22 +7,52 @@
 //! prime per-core wheel under `timer = "prime-wheel"`). The listener names
 //! neither prime nor tokio; either runtime supplies the factory + timer driver.
 //!
-//! The listener inlines the EndpointDemux + per-connection book-keeping rather
-//! than going through [`proxima_quic::native::Listener`]; sharing them is future
-//! work.
+//! # Composition over `proxima_quic::native::Listener<RustlsServerProvider>`
+//!
+//! The QUIC transport (DCID-keyed demux, per-connection accept/timeout/
+//! transmit, Version Negotiation replies, ODCID routing) is
+//! [`proxima_quic::native::listener::Listener`] — this module no longer
+//! inlines its own `EndpointDemux` + `BTreeMap<u32, ConnEntry>` + timer +
+//! transmit block. `H3NativeListenProtocol` KEEPS its own `serve()` loop
+//! and its own H3 bookkeeping (`h3_state: BTreeMap<u32, PerConnection>`,
+//! keyed by the SAME `ConnectionHandle` the `Listener` hands out) — the
+//! composition is BY SHARED KEY, not inheritance: `Listener<P>` stays
+//! QUIC-only, H3 stays H3-only, and a `ConnectionHandle` is the join key
+//! between the two tables.
 //!
 //! Scope: single-task accept + per-connection driver fan-in. Each tick:
 //!
-//! 1. Recv any pending UDP datagram, classify via EndpointDemux, route
-//!    to an existing connection or create a new one.
-//! 2. For each connection, drive the H3 state machine + pump H3 events
-//!    into a per-stream pending-request map.
+//! 1. Recv a burst of datagrams; `listener.ingest_datagram(now, peer,
+//!    bytes)` per datagram (demux/accept/ODCID/VN all live inside the
+//!    listener now) — its `DatagramIngest` return NAMES the touched
+//!    handle directly (fed straight into `dirty`, no side-channel drain)
+//!    and carries any per-connection error `Listener` surfaced; drain
+//!    `accept_rx` for freshly accepted handles and seed their
+//!    `PerConnection` H3 state.
+//! 2. Drive H3 for ONLY the connections `dirty` names — populated by step
+//!    1's `ingest_datagram` returns, further unioned with any handle
+//!    whose dispatched response was just applied (needs its H3 layer
+//!    driven again to push the response into the QUIC send buffers) —
+//!    targeted, not a full-table scan.
 //! 3. Once a request's HEADERS + FIN both arrive, spawn the
-//!    `PipeHandle::call_dyn` future on tokio. The result comes back
-//!    via an mpsc channel.
-//! 4. The next tick consumes ready responses + ships HEADERS+DATA+FIN
-//!    back through the H3 state machine, then drains the QUIC layer's
-//!    outbound queue to the socket.
+//!    `PipeHandle::call_dyn` future cooperatively (no `tokio::spawn`; see
+//!    `in_flight`). The result comes back via an mpsc channel.
+//! 4. The next tick (or the SAME tick, via the fixpoint gate) consumes
+//!    ready responses + ships HEADERS+DATA+FIN back through the H3 state
+//!    machine, then drains `listener.transmit()` to the socket.
+//!
+//! # Errors never vanish
+//!
+//! A per-connection error surfaced by `Listener::ingest_datagram` is
+//! NEVER silently dropped: `Listener<P>` itself already acted (closed
+//! with a transport code) on RFC 9000's own unambiguous violations and
+//! emitted a `proxima_telemetry::error!` event; for the remaining
+//! ambiguous / application-flavored errors it left the connection open
+//! and this module (`close_with_h3_code`) closes it with the H3-specific
+//! code its own semantics call for — `Connection::close` is idempotent
+//! (first call wins), so attempting this unconditionally on every
+//! surfaced error is always safe: a no-op when `Listener<P>` already
+//! acted, and the actual escalation when it didn't.
 //!
 //! Future work (out of scope for v1):
 //! - request-body streaming (we currently buffer to FIN before
@@ -30,8 +60,6 @@
 //!   bidirectional POST).
 //! - proper per-connection task fan-out (today everything runs in the
 //!   listener task).
-//! - sharing the demux + driver with `proxima_quic::native::Listener`
-//!   once that grows a tokio-backed transport.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -53,28 +81,25 @@ use std::future::poll_fn;
 
 use proxima_core::ProximaError;
 use proxima_core::datagram_batch::DefaultDatagramBatch;
-use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, StreamId as H3StreamId};
-use proxima_protocols::http3_codec::settings::Settings;
+use proxima_listen::stream::DatagramProtocol;
 use proxima_listen::{ListenProtocol, ServeContext};
 use proxima_primitives::pipe::capabilities::Clock;
 use proxima_primitives::pipe::clock::TimeClock;
-use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext};
-use proxima_protocols::quic::connection::{Connection, DatagramWrite, HandshakeLimits};
-use proxima_protocols::quic::endpoint::{
-    ConnectionHandle, ConnectionIdBytes, DatagramClassification, DropReason, EndpointDemux,
-};
+use proxima_primitives::stream::DatagramSocketBatchExt;
+use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, StreamId as H3StreamId};
+use proxima_protocols::http3_codec::settings::Settings;
+use proxima_protocols::quic::connection::{Connection, ConnectionState, HandshakeLimits};
+use proxima_protocols::quic::endpoint::ConnectionHandle;
 use proxima_protocols::quic::time::Instant as ProtoInstant;
 use proxima_protocols::quic::tls::rustls_provider::{RustlsConfig, RustlsServerProvider};
-use proxima_primitives::stream::DatagramSocketBatchExt;
+use proxima_quic::native::{AcceptFn, DatagramIngest, Listener};
 
 use super::driver::{DriverState, drive_server_step};
 
 const ALPN_H3: &[u8] = b"h3";
-/// QUIC version 1 (RFC 9000), big-endian, for the supported-versions list
-/// of an outbound Version Negotiation packet.
-const QUIC_V1_VERSION: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 /// RFC 9114 §8.1 — HTTP/3 application error codes carried in the
 /// QUIC CONNECTION_CLOSE frame's error_code field. We map every
 /// driver-level error to H3_GENERAL_PROTOCOL_ERROR today; future
@@ -100,63 +125,36 @@ fn err_reason_for_close(err: &proxima_protocols::quic::connection::ConnectionErr
     }
 }
 
-/// Map a `handle_datagram` failure to the appropriate CONNECTION_CLOSE
-/// frame on the wire. Returns `true` if the connection should be
-/// torn down; `false` when the error is the kind RFC 9000 §10.3
-/// classifies as "silently discard the packet" (header parse, decrypt
-/// failure, anti-amplification reject, etc.). The caller logs either
-/// way but only the `true` return path issues a CONNECTION_CLOSE.
-fn close_for_datagram_error<P: proxima_protocols::quic::tls::TlsProvider>(
-    connection: &mut proxima_protocols::quic::connection::Connection<P>,
+/// Close `connection` with the most specific H3 error code the reason
+/// string identifies (until the driver/connection layer carries typed H3
+/// error variants) — the escalation THIS layer owns (H3 semantics),
+/// applied on top of whatever `Listener<P>` already did for the SAME
+/// error. `Connection::close` is idempotent (first call wins): if
+/// `Listener<P>` already closed this connection with a transport code
+/// (one of RFC 9000's own unambiguous violations —
+/// `FlowControlError`/`ProtocolViolation`/`Frame`), this call is a
+/// harmless no-op and the transport code is what reaches the wire; if
+/// `Listener<P>` left the connection open (an ambiguous, application-
+/// flavored error it has no transport code for), THIS call is what
+/// actually reaches the wire — restoring the H3-specific escalation the
+/// pre-`Listener<P>` code did, now explicitly at the layer that owns H3
+/// semantics.
+fn close_with_h3_code(
+    connection: &mut Connection<RustlsServerProvider>,
+    handle_id: u32,
     err: &proxima_protocols::quic::connection::ConnectionError,
-) -> bool {
-    use proxima_protocols::quic::connection::ConnectionError;
-    match err {
-        ConnectionError::FlowControlError { reason } => {
-            // RFC 9000 §20.1 FLOW_CONTROL_ERROR = 0x03; the
-            // triggering frame is STREAM (0x08..0x0f). We pick 0x08
-            // as the canonical STREAM type.
-            let _ = connection.close_transport(0x03, 0x08, reason.as_bytes());
-            true
-        }
-        ConnectionError::ProtocolViolation { reason } => {
-            // RFC 9000 §20.1 PROTOCOL_VIOLATION = 0x0a.
-            let _ = connection.close_transport(0x0a, 0, reason.as_bytes());
-            true
-        }
-        // RFC 9000 §10.3 — packets that fail header parsing,
-        // decryption, or AEAD authentication "MUST be silently
-        // discarded"; they do NOT terminate the connection. A peer
-        // can ship a short-header 1-RTT packet at any moment after
-        // the handshake; if our state machine isn't there yet,
-        // returning Err is normal and dropping the connection would
-        // break the very interop case the test
-        // `listener_h3_native::h3_native_listener_round_trip`
-        // exercises (quinn client → native server: ships short-header
-        // packets while we're still mid-Handshake).
-        ConnectionError::Frame(_) => {
-            // RFC 9000 §12.4 — malformed frame after successful
-            // decryption is FRAME_ENCODING_ERROR (0x07).
-            let _ = connection.close_transport(0x07, 0, b"frame encoding error");
-            true
-        }
-        ConnectionError::Header(_)
-        | ConnectionError::PacketProtection(_)
-        | ConnectionError::Aead(_)
-        | ConnectionError::PacketNumber(_)
-        // TransientRecvBufferFull: data was within our advertised
-        // credit but exceeded our reassembly buffer cap. NOT a peer
-        // violation; we deliberately skipped ACK so the peer
-        // retransmits once we've drained. No CLOSE warranted.
-        | ConnectionError::TransientRecvBufferFull { .. } => false,
-        _ => {
-            // For everything else (crypto error, version negotiation,
-            // etc.) take the application close path — Connection::close
-            // already maps INTERNAL_ERROR-ish failures to 0x1d.
-            let _ = connection.close(H3_GENERAL_PROTOCOL_ERROR, b"handle_datagram failed");
-            true
-        }
-    }
+) {
+    let reason = err_reason_for_close(err);
+    let h3_code = if reason
+        .windows(b"CLOSED_CRITICAL_STREAM".len())
+        .any(|window| window == b"CLOSED_CRITICAL_STREAM")
+    {
+        H3_CLOSED_CRITICAL_STREAM
+    } else {
+        H3_GENERAL_PROTOCOL_ERROR
+    };
+    warn!(?err, handle = handle_id, "h3-native connection-level error; closing with H3 code");
+    let _ = connection.close(h3_code, reason);
 }
 
 /// Native HTTP/3 listener, generic over the [`Clock`] the serve loop reads
@@ -228,7 +226,6 @@ where
             .get("part_source")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let local_tp = encode_default_transport_parameters();
         // Runtime-agnostic IO: the UDP socket comes from the runtime's datagram
         // factory (the UDP sibling of the TCP AcceptorFactory path) and the 1 ms
         // tick from `proxima_core::time::sleep` — the listener names neither prime nor
@@ -254,15 +251,36 @@ where
             }
             debug!(?bind, %local, "h3-native listener bound");
 
-            // Fixed 8-byte local CIDs (see generate_local_scid below) →
-            // EndpointDemux short-header dispatch goes through the
-            // O(1) hash path, not the O(N) linear scan.
-            let mut demux = EndpointDemux::with_local_cid_len(
-                proxima_protocols::quic::connection::SUPPORTED_VERSIONS,
-                8,
-            );
-            let mut connections: BTreeMap<u32, ConnEntry> = BTreeMap::new();
-            let mut next_handle: u32 = 0;
+            // The QUIC transport: demux, accept, ODCID routing, Version
+            // Negotiation, and per-connection timeout/transmit all live
+            // here now — see the module doc for the composition shape.
+            let accept_fn: AcceptFn<RustlsServerProvider> = {
+                let server_config = server_config.clone();
+                Arc::new(move |dcid: &[u8], scid: &[u8], local_scid: &[u8], now: ProtoInstant| {
+                    // RFC 9000 §18.2 — server transport parameters MUST include
+                    // the client's original DCID and our chosen SCID; clients
+                    // reject a server flight that omits them.
+                    let server_tp = encode_server_transport_parameters(dcid, local_scid);
+                    Connection::<RustlsServerProvider>::new_server_with_limits(
+                        RustlsConfig::Server {
+                            config: server_config.clone(),
+                        },
+                        &server_tp,
+                        dcid,
+                        scid,
+                        local_scid,
+                        now,
+                        handshake_limits,
+                    )
+                })
+            };
+            let (accept_tx, mut accept_rx) = futures::channel::mpsc::unbounded::<ConnectionHandle>();
+            let mut listener = Listener::<RustlsServerProvider>::new(accept_fn, accept_tx);
+            // H3-level bookkeeping, keyed by the SAME `ConnectionHandle.0`
+            // the listener hands out — the shared-key join between the
+            // QUIC-only transport and this module's H3-only state.
+            let mut h3_state: BTreeMap<u32, PerConnection> = BTreeMap::new();
+
             let (response_tx, mut response_rx) =
                 futures::channel::mpsc::unbounded::<DispatchResult>();
             // handler futures driven cooperatively in the serve loop — no
@@ -281,13 +299,8 @@ where
             // crate-local hand-rolled recv_storage/recv_meta/send_arena/send_spans —
             // same growable shape on the std/alloc tier, now shared + bench-gated.
             let mut batch = DefaultDatagramBatch::new();
+            let mut transmit_scratch = [0u8; 2048];
 
-            // Reused per-iteration scratch for the connection-handle
-            // snapshot each pass needs (drive / flush / timeout / send).
-            // Snapshotting decouples iteration from the &mut connections
-            // borrow inside each body; hoisting the buffer keeps it off
-            // the per-iteration alloc path (was 4 Vec allocs/iteration).
-            let mut handle_scratch: Vec<u32> = Vec::new();
             // Drive-to-fixpoint gate: after an event, re-run drive+transmit while a
             // pass stages output (a state transition can unblock more to send — e.g.
             // the Established transition emits HANDSHAKE_DONE then SETTINGS across
@@ -296,46 +309,28 @@ where
             // zero tick latency, and under load it stays busy instead of stranding
             // work behind a cap.
             let mut skip_wait = false;
-            // Origin reading of the injected clock, captured ONCE. `proto_now`
-            // reports micros ELAPSED since this — the same serve-start-relative
-            // ProtoInstant the loop always fed the QUIC deadline math (the old
-            // `std::time::Instant` origin did exactly this via `elapsed()`).
-            // Anchoring keeps the values small and identical in production
-            // (`TimeClock`, a large absolute `now_nanos`) and under a mock clock
-            // (starts at 0) — the clock is only the source, never the base.
-            let origin_nanos = clock.now_nanos();
-            loop {
-                // Sampled BEFORE the recv/timer/handlers race below, which can
-                // park for an arbitrarily long time on an idle socket — used
-                // ONLY to size `next_delay` (a duration relative to tick
-                // start). Any connection created or timed-out AFTER the
-                // await resolves must use a freshly-sampled `now` instead:
-                // reusing this pre-park value anchored a fresh connection's
-                // handshake_completion_deadline to the moment the tick
-                // started WAITING, not the moment its first datagram
-                // actually arrived. On a socket idle longer than
-                // HANDSHAKE_COMPLETION_MICROS (10s — routine under c1m32,
-                // where one of several SO_REUSEPORT-sharded listener
-                // instances can sit idle between sequential connections),
-                // the very next reap pass saw its own fresh `now` already
-                // past that deadline and reaped the connection within
-                // microseconds of accepting it — orphaning the client's
-                // in-flight Initial/Handshake retransmits, which then
-                // misrouted onto a phantom replacement connection and
-                // tripped "non-Initial packet received in Initial state".
-                let tick_start = proto_now(&clock, origin_nanos);
+            // Handles to drive this pass — declared OUTSIDE the loop and
+            // deliberately NOT reset to empty on every iteration: a
+            // `skip_wait` re-drive pass has NO new inbound datagram (so
+            // this tick's `ingest_datagram` calls alone would populate
+            // nothing), but the very reason it's re-driving at all is that
+            // the PREVIOUS
+            // pass staged output, and a state transition inside
+            // `drive_server_step` can require a SECOND call before it has
+            // more to say (the HANDSHAKE_DONE-then-SETTINGS shape the gate's
+            // own doc above names). So `dirty` stays populated across
+            // consecutive `skip_wait` passes and is cleared ONLY once a
+            // pass genuinely settles (see the gate at the loop's tail) —
+            // still O(dirty), never a full-table scan, but never dropped
+            // mid-fixpoint either.
+            let mut dirty: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
 
-                // 1) Receive a burst of datagrams in ONE `recvmmsg` syscall,
-                //    raced against the connections' earliest real QUIC deadline
-                //    and the shutdown signal — every arm is an event source, all
-                //    async. recv wakes instantly on data. The timer is a source
-                //    too: `sleep` schedules a wake on the bound time driver (the
-                //    prime per-core wheel today; a DPDK/hardware timer under
-                //    kernel-bypass — same code, link-bound), which the reactor
-                //    arms as its kernel epoll/kqueue timeout. NO fixed tick: we
-                //    arm the EXACT next protocol deadline, or NOTHING when none is
-                //    pending — a quiescent socket costs zero wakeups, a live one
-                //    pays zero tick latency.
+            loop {
+                let tick_start = core_instant_now(&clock);
+                let next_delay = listener
+                    .next_deadline()
+                    .map(|deadline| deadline.saturating_duration_since(tick_start));
+
                 let mut shutting_down = false;
                 let recv_outcome = if skip_wait {
                     // fixpoint re-drive (see the gate at the loop's tail): a prior
@@ -349,16 +344,6 @@ where
                     if drained > 0 { Some(Ok(drained)) } else { None }
                 } else {
                     let recv = poll_fn(|cx| socket.poll_fill_recv_batch(cx, &mut batch.recv));
-                    // Earliest deadline across all connections, as a delay from
-                    // `now`; `None` => nothing due => no timer armed.
-                    let next_delay = connections
-                        .values()
-                        .filter_map(|entry| entry.connection.next_timeout())
-                        .map(ProtoInstant::as_micros)
-                        .min()
-                        .map(|deadline| {
-                            Duration::from_micros(deadline.saturating_sub(tick_start.as_micros()))
-                        });
                     let timer = async {
                         match next_delay {
                             Some(delay) => clock.delay(delay).await,
@@ -382,7 +367,8 @@ where
                     .await
                     {
                         Either::Left((Either::Left((Either::Left((res, _)), _)), _)) => Some(res),
-                        // timer fired — pump QUIC timeouts in step 6 below.
+                        // timer fired — pump QUIC timeouts below (unconditional
+                        // reap, matching the original tick shape).
                         Either::Left((Either::Left((Either::Right(((), _)), _)), _)) => None,
                         // a handler completed (it pushed its result to
                         // response_tx); fall through to drain it.
@@ -399,13 +385,13 @@ where
                     break;
                 }
                 // Re-sample now that the await (if any) has resolved: this is
-                // the timestamp every connection created or timed-out below
-                // must be anchored to, not `tick_start`.
-                let now = proto_now(&clock, origin_nanos);
+                // the timestamp every connection created below must be
+                // anchored to, not `tick_start`.
+                let now = core_instant_now(&clock);
                 if let Some(Err(ref err)) = recv_outcome {
                     debug!(
                         ?err,
-                        "h3-native poll_recv_batch error; datagrams dropped before handle_inbound"
+                        "h3-native poll_recv_batch error; datagrams dropped before on_datagram"
                     );
                 }
                 if let Some(Ok(_first_count)) = recv_outcome {
@@ -418,215 +404,126 @@ where
                     // we don't depend on a raised net.core.rmem_max. The slab
                     // grows to the largest burst seen and is reused thereafter.
                     socket.drain_recv_to_empty(&mut batch.recv);
-                    // Version Negotiation replies (RFC 9000 §6) accumulate
-                    // here across the recv batch; the sync handler can't await
-                    // the socket, so the async loop flushes them below.
-                    let mut pending_vn: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
                     for view in batch.recv.filled_datagrams() {
                         debug!(len = view.bytes.len(), peer = %view.peer, "h3-native recv datagram");
-                        handle_inbound(
-                            view.bytes,
-                            view.peer,
-                            &mut demux,
-                            &mut connections,
-                            &mut next_handle,
-                            &server_config,
-                            &local_tp,
-                            &mut pending_vn,
-                            now,
-                            handshake_limits,
-                            part_source_mode,
-                        );
+                        // The concrete `ingest_datagram` (not the generic
+                        // `DatagramProtocol::on_datagram` trait method) —
+                        // its return NAMES which handle this datagram
+                        // touched (feeding `dirty` directly, no side-channel
+                        // drain) and carries any per-connection error
+                        // `Listener` surfaced (telemetry + transport close
+                        // already happened there for the unambiguous RFC
+                        // 9000 cases; an H3-level violation is still OPEN
+                        // for THIS layer to close with its own code).
+                        match listener.ingest_datagram(to_proto_instant(now), view.peer, view.bytes) {
+                            Ok(DatagramIngest::Existing { handle, error } | DatagramIngest::Accepted { handle, error }) => {
+                                dirty.insert(handle.0);
+                                if let Some(err) = error
+                                    && let Some(connection) = listener.connection_mut(handle)
+                                {
+                                    close_with_h3_code(connection, handle.0, &err);
+                                }
+                            }
+                            Ok(DatagramIngest::VersionNegotiated | DatagramIngest::Dropped) => {}
+                            Ok(_) => {
+                                // Future non_exhaustive `DatagramIngest`
+                                // variants — nothing to drive.
+                            }
+                            Err(error) => {
+                                warn!(?error, peer = %view.peer, "h3-native ingest_datagram failed; dropping");
+                            }
+                        }
                     }
                     batch.recv.clear();
-                    // Flush any Version Negotiation replies the batch produced.
-                    for (vn_bytes, vn_peer) in pending_vn.drain(..) {
-                        if let Err(err) =
-                            poll_fn(|cx| socket.poll_send_to(cx, &vn_bytes, vn_peer)).await
-                        {
-                            warn!(?err, %vn_peer, "h3-native version-negotiation send_to error");
-                        }
+                    // Seed H3 state for every freshly accepted connection —
+                    // the QUIC transport (demux/accept/ODCID/VN) already ran
+                    // above, inside `listener.ingest_datagram`.
+                    while let Ok(handle) = accept_rx.try_recv() {
+                        h3_state.insert(handle.0, PerConnection::new(part_source_mode));
+                        debug!(handle = handle.0, "h3-native accepted");
                     }
                 }
 
-                // 2) Drive each connection that has reached Established.
-                // The driver opens streams; that's only legal once 1-RTT
-                // keys are installed.
-                handle_scratch.clear();
-                handle_scratch.extend(connections.keys().copied());
-                for handle_id in handle_scratch.iter().copied() {
-                    if let Some(entry) = connections.get_mut(&handle_id) {
-                        if !matches!(
-                            entry.connection.state(),
-                            proxima_protocols::quic::connection::ConnectionState::Established(_)
-                        ) {
-                            continue;
-                        }
-                        // Established: the client now addresses us by our SCID,
-                        // so the handshake-only ODCID route is dead weight in
-                        // the bounded demux. Free it once to keep long-lived
-                        // connections at one table entry each.
-                        if let Some(odcid) = entry.original_dcid.take() {
-                            let _ = demux.unregister(&odcid);
-                        }
-                        if let Err(err) = drive_server_step(
-                            &mut entry.connection,
-                            &mut entry.driver.h3,
-                            &mut entry.driver.driver_state,
-                        ) {
-                            // RFC 9114 requires connection-level errors
-                            // to surface as CONNECTION_CLOSE on the
-                            // wire. close() transitions to Closing; the
-                            // next poll_transmit pass ships the close
-                            // frame before the reap loop removes the
-                            // entry. H3_GENERAL_PROTOCOL_ERROR is the
-                            // catch-all for protocol violations that
-                            // don't map to a more specific code; future
-                            // refinement can plumb (driver-error →
-                            // H3_FRAME_UNEXPECTED / H3_SETTINGS_ERROR /
-                            // H3_MISSING_SETTINGS / etc.) through the
-                            // driver's ConnectionError variants.
-                            // map the driver error to the most specific
-                            // H3 error code we can determine from the
-                            // reason string (until the driver carries
-                            // typed H3 error variants)
-                            let reason = err_reason_for_close(&err);
-                            let h3_code = if reason
-                                .windows(b"CLOSED_CRITICAL_STREAM".len())
-                                .any(|w| w == b"CLOSED_CRITICAL_STREAM")
-                            {
-                                H3_CLOSED_CRITICAL_STREAM
-                            } else {
-                                H3_GENERAL_PROTOCOL_ERROR
-                            };
-                            warn!(
-                                ?err,
-                                handle = handle_id,
-                                "h3-native driver step error; closing connection"
-                            );
-                            let _ = entry.connection.close(h3_code, reason);
-                            continue;
-                        }
-                        if let Err(err) = process_h3_events(
-                            ConnectionHandle(handle_id),
-                            &mut entry.driver,
-                            &dispatch,
-                            &response_tx,
-                            &mut in_flight,
-                        ) {
-                            #[cfg(feature = "http3-part-source")]
-                            {
-                                warn!(
-                                    ?err,
-                                    handle = handle_id,
-                                    "h3-native request header decode failed; closing connection"
-                                );
-                                let _ = entry
-                                    .connection
-                                    .close(QPACK_DECOMPRESSION_FAILED, b"qpack decode failed");
-                            }
-                            #[cfg(not(feature = "http3-part-source"))]
-                            let _ = err; // owned path validates in feed_request; unreachable
-                            continue;
-                        }
-                    }
-                }
+                // 2) Drive H3 for the connections this tick actually
+                // touched — the `dirty` set the recv arm just populated
+                // straight off `ingest_datagram`'s return, further unioned
+                // below with any handle whose dispatched response was just
+                // applied. Targeted, not a full-table scan of every live
+                // connection every tick.
+                drive_dirty_connections(&mut listener, &mut h3_state, &dirty, &dispatch, &response_tx, &mut in_flight);
 
                 // 2b) Drive ready response handlers to completion NOW so their
                 // responses emit in THIS iteration instead of trickling across
                 // subsequent ticks. `now_or_never` polls each ready handler
                 // once; a handler that genuinely yields stays queued and is
-                // woken via the `handlers` arm of the select below.
+                // woken via the `handlers` arm of the select above.
                 while in_flight.next().now_or_never().flatten().is_some() {}
 
                 // 3) Apply any ready responses. A freshly applied response is
                 // queued into the H3 layer by step 4 below, but step 2's drive
                 // (which moves H3 -> QUIC) already ran this pass — so without a
                 // re-drive the response sits in H3 until the next drive and the
-                // loop parks (timer-woken ~400us/request) before sending it.
-                // `applied_response` forces the fixpoint re-drive at the gate.
+                // loop parks (timer-woken) before sending it. Marking the
+                // handle dirty forces step 4 (and, via `applied_response`, the
+                // fixpoint re-drive at the gate) to push it.
                 let mut applied_response = false;
                 while let Ok(result) = response_rx.try_recv() {
-                    if let Some(entry) = connections.get_mut(&result.connection_handle) {
-                        apply_dispatch_response(&mut entry.driver, result);
+                    let connection_handle = result.connection_handle;
+                    if let Some(driver) = h3_state.get_mut(&connection_handle) {
+                        apply_dispatch_response(driver, result);
+                        dirty.insert(connection_handle);
                         applied_response = true;
                     }
                 }
 
-                // 4) Emit pending responses through H3.
-                handle_scratch.clear();
-                handle_scratch.extend(connections.keys().copied());
-                for handle_id in handle_scratch.iter().copied() {
-                    if let Some(entry) = connections.get_mut(&handle_id)
-                        && let Err(err) = flush_pending_responses(&mut entry.driver)
+                // 4) Emit pending responses through H3 for the dirty set.
+                for handle_id in &dirty {
+                    if let Some(driver) = h3_state.get_mut(handle_id)
+                        && let Err(err) = flush_pending_responses(driver)
                     {
                         warn!(?err, handle = handle_id, "h3-native response flush error");
                     }
                 }
 
                 // Per-connection timer tick so PTOs / idle deadlines
-                // advance. Reap any connection that transitioned to a
-                // terminal state (idle-timed-out, drained, closed) so
-                // the BTreeMap + EndpointDemux don't grow unbounded
-                // with stale entries — that's a DoS surface on its own.
-                let mut reap: Vec<ReapTarget> = Vec::new();
-                handle_scratch.clear();
-                handle_scratch.extend(connections.keys().copied());
-                for handle_id in handle_scratch.iter().copied() {
-                    let Some(entry) = connections.get_mut(&handle_id) else {
-                        continue;
-                    };
-                    let _ = entry.connection.handle_timeout(now);
-                    if matches!(
-                        entry.connection.state(),
-                        proxima_protocols::quic::connection::ConnectionState::Closed
-                            | proxima_protocols::quic::connection::ConnectionState::Draining(_)
-                    ) {
-                        reap.push((handle_id, entry.local_scid, entry.original_dcid.take()));
-                    }
-                }
-                for (handle_id, scid, odcid) in reap {
-                    connections.remove(&handle_id);
-                    if let Some(scid) = scid {
-                        let _ = demux.unregister(&scid);
-                    }
-                    if let Some(odcid) = odcid {
-                        let _ = demux.unregister(&odcid);
-                    }
-                    debug!(handle = handle_id, "h3-native reaped terminal connection");
+                // advance, unconditional every tick (matches the original
+                // shape) — the listener's INHERENT `handle_timeout` /
+                // `remove_connection` (NOT the `DatagramProtocol` trait's
+                // `on_timeout`, which discards the reaped handles) so this
+                // loop can also drop the matching H3 state. MUST derive
+                // from the SAME `now` sample `on_datagram` fed the listener
+                // this tick (via `to_proto_instant`, the exact conversion
+                // `Listener` uses internally to anchor a freshly-accepted
+                // connection's `handshake_completion_deadline`) — an
+                // independently-sampled, differently-epoched `now` here
+                // reaped connections microseconds after accepting them
+                // (see `to_proto_instant`'s doc for the two-epoch bug this
+                // caused and the regression test that caught it).
+                for handle in listener.handle_timeout(to_proto_instant(now)) {
+                    listener.remove_connection(handle);
+                    h3_state.remove(&handle.0);
+                    dirty.remove(&handle.0);
+                    debug!(handle = handle.0, "h3-native reaped terminal connection");
                 }
 
-                // 5) Stage every outbound datagram across all connections into
-                // one contiguous arena, then ship the whole burst with a single
-                // `sendmmsg`. Staging costs one small memcpy per packet (the
-                // response is a handful of bytes); batching the syscall is the
-                // win — per-packet `sendto` was the send-side floor.
+                // 5) Stage every outbound datagram — Version Negotiation
+                // replies AND every connection's QUIC egress — into one
+                // contiguous arena via the listener's `transmit`, then ship
+                // the whole burst with a single `sendmmsg`.
                 batch.send.reset();
-                let mut transmit_scratch = [0u8; 2048];
-                handle_scratch.clear();
-                handle_scratch.extend(connections.keys().copied());
-                for handle_id in handle_scratch.iter().copied() {
-                    let Some(entry) = connections.get_mut(&handle_id) else {
-                        continue;
-                    };
-                    let peer = entry.peer;
-                    loop {
-                        let len = match entry.connection.poll_transmit(now, &mut transmit_scratch) {
-                            Ok(Some(DatagramWrite { len, .. })) => len,
-                            Ok(None) => break,
-                            Err(err) => {
-                                warn!(?err, handle = handle_id, "h3-native poll_transmit error");
+                loop {
+                    match listener.transmit(now, &mut transmit_scratch).await {
+                        Ok(Some((len, peer))) => {
+                            if let Err(err) = batch.send.try_append(&transmit_scratch[..len], peer) {
+                                // alloc tier grows; this fires only on u32 arena overflow.
+                                // The dropped datagram is recovered by QUIC loss recovery.
+                                warn!(?err, %peer, "h3-native send-batch append dropped datagram");
                                 break;
                             }
-                        };
-                        if let Err(err) = batch.send.try_append(&transmit_scratch[..len], peer) {
-                            // alloc tier grows; this fires only on u32 arena overflow.
-                            // The dropped datagram is recovered by QUIC loss recovery.
-                            warn!(
-                                ?err,
-                                handle = handle_id,
-                                "h3-native send-batch append dropped datagram"
-                            );
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            warn!(?err, "h3-native transmit error");
                             break;
                         }
                     }
@@ -661,8 +558,18 @@ where
                 // 8x100 errors exposed). Under sustained load this stays busy
                 // (CPU-bound, correct); it parks on the deadline timer only when a
                 // pass drains recv AND stages nothing — i.e. genuinely idle.
+                //
+                // `dirty` is the set the NEXT pass drives: keep re-driving the
+                // SAME connections while the fixpoint gate keeps firing (a
+                // state transition inside `drive_server_step` can need a
+                // second call with no new inbound — see `dirty`'s doc at its
+                // declaration above); only once a pass produces NOTHING new
+                // for it (this branch's `else`) has it genuinely settled, so
+                // it's safe to drop until the next real touch.
                 if !batch.send.is_empty() || applied_response {
                     skip_wait = true;
+                } else {
+                    dirty.clear();
                 }
             }
             Ok(())
@@ -670,30 +577,48 @@ where
     }
 }
 
-/// A connection to reap: its handle plus the two demux keys (local SCID,
-/// client ODCID) to unregister so the bounded table stays clean.
-type ReapTarget = (u32, Option<[u8; 8]>, Option<ConnectionIdBytes>);
-
-struct ConnEntry {
-    /// `Connection<RustlsServerProvider>` carries inline send/recv
-    /// buffers + the rustls quic-connection trait object; on tokio
-    /// worker stacks it overflows. Box-allocate so each connection
-    /// owns one heap allocation rather than living on the listener's
-    /// stack frame.
-    connection: Box<Connection<RustlsServerProvider>>,
-    peer: SocketAddr,
-    /// The 8-byte SCID we registered in `EndpointDemux` when this
-    /// connection was accepted, retained so we can `demux.unregister`
-    /// on terminal-state reap and keep the table bounded.
-    local_scid: Option<[u8; 8]>,
-    /// The client's original DCID, also registered in the demux so
-    /// CRYPTO-fragmented / retransmitted Initials route here. Retained so
-    /// reap unregisters BOTH entries — otherwise it leaks and the bounded
-    /// demux table fills under load. Length is the CLIENT's choice (0..=20
-    /// per RFC 9000 §17.2) — quinn uses the full 20 — so this MUST hold a
-    /// variable-length CID, not a fixed [u8; 8].
-    original_dcid: Option<ConnectionIdBytes>,
-    driver: PerConnection,
+/// Drive `drive_server_step` + `process_h3_events` for every handle in
+/// `dirty` that has both live QUIC connection state AND live H3 state and
+/// has reached `Established` — the driver opens streams, which is only
+/// legal once 1-RTT keys are installed. On a driver-step error the
+/// connection is closed with the most specific H3 error code the reason
+/// string identifies (until the driver carries typed H3 error variants).
+fn drive_dirty_connections(
+    listener: &mut Listener<RustlsServerProvider>,
+    h3_state: &mut BTreeMap<u32, PerConnection>,
+    dirty: &std::collections::BTreeSet<u32>,
+    dispatch: &PipeHandle,
+    response_tx: &futures::channel::mpsc::UnboundedSender<DispatchResult>,
+    in_flight: &mut FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>,
+) {
+    for &handle_id in dirty {
+        let Some(connection) = listener.connection_mut(ConnectionHandle(handle_id)) else {
+            continue;
+        };
+        if !matches!(connection.state(), ConnectionState::Established(_)) {
+            continue;
+        }
+        let Some(driver) = h3_state.get_mut(&handle_id) else {
+            continue;
+        };
+        if let Err(err) = drive_server_step(connection, &mut driver.h3, &mut driver.driver_state) {
+            // RFC 9114 requires connection-level errors to surface as
+            // CONNECTION_CLOSE on the wire. close() transitions to
+            // Closing; the next `transmit` pass ships the close frame
+            // before the reap loop removes the entry.
+            close_with_h3_code(connection, handle_id, &err);
+            continue;
+        }
+        if let Err(err) = process_h3_events(ConnectionHandle(handle_id), driver, dispatch, response_tx, in_flight) {
+            #[cfg(feature = "http3-part-source")]
+            {
+                warn!(?err, handle = handle_id, "h3-native request header decode failed; closing connection");
+                let _ = connection.close(QPACK_DECOMPRESSION_FAILED, b"qpack decode failed");
+            }
+            #[cfg(not(feature = "http3-part-source"))]
+            let _ = err; // owned path validates in feed_request; unreachable
+        }
+    }
 }
 
 struct PerConnection {
@@ -754,201 +679,6 @@ struct CollectedResponse {
     status: u16,
     response_headers: Vec<(Vec<u8>, Vec<u8>)>,
     chunks: Vec<Bytes>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handle_inbound(
-    datagram: &[u8],
-    peer: SocketAddr,
-    demux: &mut EndpointDemux,
-    connections: &mut BTreeMap<u32, ConnEntry>,
-    next_handle: &mut u32,
-    server_config: &Arc<rustls::ServerConfig>,
-    local_tp: &[u8],
-    pending_vn: &mut Vec<(Vec<u8>, SocketAddr)>,
-    now: ProtoInstant,
-    handshake_limits: HandshakeLimits,
-    part_source_mode: bool,
-) {
-    let class = demux.classify_datagram(datagram);
-    debug!(
-        ?class,
-        datagram_len = datagram.len(),
-        first_byte = datagram.first().copied().unwrap_or(0),
-        %peer,
-        "h3-native classified inbound datagram"
-    );
-    match class {
-        DatagramClassification::Existing { handle, .. } => {
-            if let Some(entry) = connections.get_mut(&handle.0)
-                && let Err(err) = entry.connection.handle_datagram(now, datagram)
-            {
-                if close_for_datagram_error(&mut entry.connection, &err) {
-                    warn!(
-                        ?err,
-                        handle = handle.0,
-                        "h3-native handle_datagram (existing) failed; closing connection"
-                    );
-                } else {
-                    debug!(
-                        ?err,
-                        handle = handle.0,
-                        "h3-native handle_datagram (existing) failed; silently dropping packet per RFC 9000 §10.3"
-                    );
-                }
-            }
-        }
-        DatagramClassification::NewInitial { dcid, scid, .. } => {
-            let local_scid = generate_local_scid(dcid);
-            // Server transport parameters MUST include the
-            // original_destination_connection_id (client's first DCID)
-            // and initial_source_connection_id (server's local SCID)
-            // per RFC 9000 §18.2 — clients reject otherwise.
-            let server_tp = encode_server_transport_parameters(dcid, &local_scid);
-            let _ = local_tp;
-            let connection = match Connection::<RustlsServerProvider>::new_server_with_limits(
-                RustlsConfig::Server {
-                    config: server_config.clone(),
-                },
-                &server_tp,
-                dcid,
-                scid,
-                &local_scid,
-                now,
-                handshake_limits,
-            ) {
-                Ok(c) => c,
-                Err(err) => {
-                    warn!(?err, "h3-native new_server failed");
-                    return;
-                }
-            };
-            let handle = ConnectionHandle(*next_handle);
-            *next_handle = next_handle.saturating_add(1);
-            if demux.register(&local_scid, handle).is_err() {
-                warn!("h3-native demux full");
-                return;
-            }
-            // Route the client's ORIGINAL DCID to this same connection. Until
-            // the client receives our SCID it addresses every Initial — the
-            // CRYPTO-fragmented ClientHello continuations AND retransmits — to
-            // its own chosen DCID. Without this, fragment 2 classifies as a
-            // fresh Initial and spawns a phantom half-ClientHello connection
-            // that never completes the handshake. Stored so reap frees it too.
-            // the client's DCID is 0..=20 bytes (RFC 9000 §17.2); quinn uses
-            // the full 20. store the ACTUAL length — narrowing to [u8; 8] here
-            // silently dropped every non-8-byte client's ODCID, so its Initials
-            // never routed and the handshake stalled forever.
-            let original_dcid = client_dcid_for_demux(dcid);
-            if let Some(ref odcid) = original_dcid {
-                let _ = demux.register(odcid, handle);
-            }
-            let mut entry = ConnEntry {
-                connection: Box::new(connection),
-                peer,
-                local_scid: Some(local_scid),
-                original_dcid,
-                driver: PerConnection::new(part_source_mode),
-            };
-            if let Err(err) = entry.connection.handle_datagram(now, datagram) {
-                if close_for_datagram_error(&mut entry.connection, &err) {
-                    warn!(
-                        ?err,
-                        handle = handle.0,
-                        "h3-native first handle_datagram failed; closing connection"
-                    );
-                } else {
-                    debug!(
-                        ?err,
-                        handle = handle.0,
-                        "h3-native first handle_datagram failed; silently dropping packet per RFC 9000 §10.3"
-                    );
-                }
-            }
-            connections.insert(handle.0, entry);
-            debug!(handle = handle.0, %peer, "h3-native accepted");
-        }
-        DatagramClassification::UnsupportedVersion {
-            dcid,
-            scid,
-            peer_version,
-        } => {
-            // RFC 9000 §6 / §17.2.1 — the peer offered a version we don't
-            // speak (commonly a GREASE probe, e.g. 0x?a?a?a?a). Reply with a
-            // Version Negotiation packet listing v1 so it retries. The CIDs
-            // are echoed SWAPPED (VN.dcid = peer's scid, VN.scid = peer's
-            // dcid). Without this, version-probing clients (cloudflare quiche)
-            // never learn we speak v1 and stall. Queued; the recv loop sends.
-            debug!(
-                peer_version,
-                "h3-native unsupported version; replying with Version Negotiation"
-            );
-            let mut buf = [0u8; 64];
-            match build_version_negotiation(dcid, scid, &mut buf) {
-                Some(written) => pending_vn.push((buf[..written].to_vec(), peer)),
-                None => warn!("h3-native version-negotiation encode failed"),
-            }
-        }
-        DatagramClassification::Drop {
-            reason: DropReason::MalformedHeader,
-        } => {
-            debug!(%peer, "h3-native malformed header; dropping per RFC 9000 §10.3");
-        }
-        DatagramClassification::Drop { reason } => {
-            debug!(?reason, %peer, "h3-native classified drop");
-        }
-        _ => {}
-    }
-}
-
-/// Build a Version Negotiation packet (RFC 9000 §17.2.1) replying to a
-/// peer that offered an unsupported version. The CIDs are echoed
-/// SWAPPED — the VN's DCID is the peer's SCID and the VN's SCID is the
-/// peer's DCID — and the supported-versions list offers QUIC v1. Returns
-/// the written length, or `None` if encoding failed.
-fn build_version_negotiation(peer_dcid: &[u8], peer_scid: &[u8], out: &mut [u8]) -> Option<usize> {
-    proxima_protocols::quic::packet::header::Header::VersionNegotiation {
-        dcid: peer_scid,
-        scid: peer_dcid,
-        supported_versions_raw: &QUIC_V1_VERSION,
-    }
-    .encode(out)
-    .ok()
-}
-
-/// Generate a per-connection 8-byte server SCID. RFC 9000 §5.3
-/// requires this be **unpredictable to anyone other than the
-/// generating endpoint** — a deterministic derivation from the peer's
-/// DCID (which travels in the clear) lets any on-path observer
-/// pre-compute it, enabling targeted spoofing and blocking future
-/// hardening (CID rotation, retry-token integrity). `SysRng` reads
-/// straight from the OS entropy source; on an OS-RNG failure (which
-/// would also break TLS entirely) we fall back to a thread RNG so
-/// the listener doesn't have a unique panic surface, but log loud.
-fn generate_local_scid(_dcid: &[u8]) -> [u8; 8] {
-    use rand::{RngExt, TryRng};
-    let mut out = [0u8; 8];
-    if let Err(err) = rand::rngs::SysRng.try_fill_bytes(&mut out) {
-        // Fallback: ThreadRng (chacha-seeded from OS entropy at thread
-        // init) keeps the listener up if SysRng momentarily fails; it
-        // still satisfies "unpredictable to anyone other than this
-        // endpoint" per RFC 9000 §5.3.
-        warn!(?err, "h3-native SysRng failed; falling back to thread RNG");
-        rand::rng().fill(&mut out[..]);
-    }
-    out
-}
-
-/// Store the CLIENT's chosen original DCID for demux routing. The client
-/// picks its own length (0..=20 bytes per RFC 9000 §17.2 — quinn uses the
-/// full 20), so this preserves the ACTUAL length: an earlier
-/// `Option<[u8; 8]>` narrowing via `try_into` silently returned `None` for
-/// any non-8-byte DCID, so the demux never learned it and the client's
-/// fragmented/retransmitted Initials couldn't route home. `None` for an
-/// over-length CID matches the demux's own `register` reject.
-fn client_dcid_for_demux(dcid: &[u8]) -> Option<ConnectionIdBytes> {
-    let mut cid = ConnectionIdBytes::new();
-    cid.try_extend_from_slice(dcid).ok().map(|()| cid)
 }
 
 /// Build the dispatch `Request` head straight from a stepped lazy header
@@ -1226,10 +956,6 @@ fn build_request_from_h3(
     Ok(built)
 }
 
-fn encode_default_transport_parameters() -> Vec<u8> {
-    encode_server_transport_parameters(&[], &[])
-}
-
 /// RFC 9000 §18.2 — server transport parameters MUST include the
 /// client's original DCID and the server's chosen SCID. Clients
 /// reject server flights that omit these.
@@ -1262,17 +988,45 @@ fn encode_server_transport_parameters(original_dcid: &[u8], local_scid: &[u8]) -
     buf
 }
 
-/// The loop's monotonic `now` as micros ELAPSED since `origin_nanos`, derived
-/// from the single injected [`Clock`] so it and the timer sleep can never
-/// diverge (the two-clock defect the generic-clock threading closes).
-/// Elapsed-since-origin (not the clock's absolute reading) keeps the
-/// [`ProtoInstant`] serve-start-relative, exactly as the old `std::time::Instant`
-/// origin did — small, identical values whether the clock is production
-/// (`TimeClock`, large absolute) or a mock (starts at 0). `now_nanos` is
-/// truncated to microseconds, [`ProtoInstant`]'s resolution and the unit every
-/// QUIC deadline is in.
-fn proto_now<Clk: Clock>(clock: &Clk, origin_nanos: u64) -> ProtoInstant {
-    ProtoInstant::from_micros(clock.now_nanos().saturating_sub(origin_nanos) / 1_000)
+/// The loop's monotonic `now` (driver-agnostic `proxima_core::time::Instant`,
+/// what `Listener::on_datagram`/`transmit` and `next_deadline` all speak),
+/// derived from the single injected [`Clock`] so it and the timer sleep can
+/// never diverge. The absolute clock reading is used directly — no origin
+/// anchoring — because [`to_proto_instant`] below MUST convert it the exact
+/// same way `Listener` converts internally; see that function's doc for why
+/// this matters. Mirrors `proxima_listen::stream::datagram_protocol_listener`'s
+/// private `instant_now` (not exported; this is the one-line equivalent).
+fn core_instant_now<Clk: Clock>(clock: &Clk) -> proxima_core::time::Instant {
+    proxima_core::time::Instant::from_monotonic(Duration::from_nanos(clock.now_nanos()))
+}
+
+/// Convert the tick's already-sampled driver-agnostic `now` into the QUIC
+/// proto layer's microsecond `Instant` — needed ONLY for
+/// `Listener::handle_timeout`, the one remaining call that takes the proto
+/// layer's own `Instant` rather than the `proxima_core::time::Instant` every
+/// `DatagramProtocol` trait method (`on_datagram`/`transmit`) takes.
+///
+/// MUST be byte-for-byte the same conversion `Listener::on_datagram` applies
+/// internally (nanos → micros, absolute reading, no origin subtraction) —
+/// `Connection::new_server_with_limits` anchors a freshly-accepted
+/// connection's `handshake_completion_deadline` to THAT internal
+/// conversion's output. An earlier version of this function instead
+/// computed micros ELAPSED SINCE `serve()`'s start (mirroring the
+/// pre-`Listener<P>` code, which owned its OWN connection construction and
+/// so could pick any consistent epoch it liked) — with `Listener<P>` now
+/// owning construction, that put accept-time anchoring and this reap call
+/// on TWO DIFFERENT EPOCHS: accept anchored to the huge absolute-clock
+/// value, reap compared against the tiny elapsed-since-origin value, so
+/// `now >= handshake_completion_deadline` evaluated true immediately and
+/// every freshly-accepted connection was reaped within microseconds of
+/// being accepted. Caught by
+/// `proxima-http/tests/native_listener_stale_now_reap.rs` (same failure
+/// signature as the bug that test already guards, different root cause —
+/// a clock-epoch mismatch introduced by composing onto `Listener<P>`,
+/// not the pre-await/post-await `now` staleness the test was originally
+/// written for).
+fn to_proto_instant(now: proxima_core::time::Instant) -> ProtoInstant {
+    ProtoInstant::from_micros(u64::try_from(now.into_monotonic().as_micros()).unwrap_or(u64::MAX))
 }
 
 /// Parse runtime [`HandshakeLimits`] from the listener spec `Value`.
@@ -1376,58 +1130,63 @@ fn build_rustls_server_config(spec: &Value) -> Result<Arc<rustls::ServerConfig>,
 mod tests {
     use super::*;
 
-    // The regression guard for the CID-truncation bug: quinn (and RFC 9000
-    // §17.2's max) uses a 20-byte client DCID. The old `Option<[u8; 8]>`
-    // narrowing dropped it to `None`, so its Initials never registered and the
-    // handshake stalled for 30s. This MUST round-trip the full 20 bytes;
-    // reverting to `[u8; 8]` fails here.
-    #[test]
-    fn client_dcid_preserves_the_full_20_byte_quinn_length() {
-        let dcid20 = [0xABu8; 20];
-        let stored = client_dcid_for_demux(&dcid20).expect("20-byte client DCID must be kept");
-        assert_eq!(&stored[..], &dcid20[..]);
-    }
+    // The CID-length + Version-Negotiation regression guards that used to
+    // live here now target `proxima_quic::native::listener::Listener<P>`
+    // directly, at the source — that logic moved INTO the listener as part
+    // of the composition fold (see the module doc), so testing it here
+    // would just be testing the same code through an extra layer of
+    // indirection. See `proxima-quic/src/native/listener/tests.rs`:
+    // `client_dcid_preserves_the_full_20_byte_quinn_length`,
+    // `client_dcid_keeps_the_common_8_byte_length`,
+    // `client_dcid_keeps_a_zero_length_cid`,
+    // `client_dcid_rejects_over_max_length`,
+    // `version_negotiation_echoes_swapped_cids_and_offers_v1`,
+    // `unsupported_version_datagram_queues_a_vn_reply_drained_first_by_transmit`,
+    // `second_initial_still_addressed_to_the_clients_own_dcid_routes_to_the_existing_connection`.
 
+    // The regression guard for the clock-epoch bug `to_proto_instant`'s doc
+    // comment describes: `core_instant_now` (fed to `Listener::on_datagram`,
+    // which anchors a freshly-accepted connection's deadlines) and
+    // `to_proto_instant` (fed to `Listener::handle_timeout` for reap) MUST
+    // read the SAME absolute epoch — an ELAPSED-since-origin `now` for one
+    // and an ABSOLUTE `now` for the other reaped every connection within
+    // microseconds of accepting it. A large, non-zero clock reading (as
+    // production's `TimeClock` returns; a `MockDriver` starting near zero
+    // would not have caught this) is the case that actually exposes the
+    // two-epoch mismatch.
     #[test]
-    fn client_dcid_keeps_the_common_8_byte_length() {
-        let dcid8 = [0x11u8; 8];
-        let stored = client_dcid_for_demux(&dcid8).expect("8-byte client DCID kept");
-        assert_eq!(&stored[..], &dcid8[..]);
-    }
-
-    #[test]
-    fn client_dcid_keeps_a_zero_length_cid() {
-        // A client MAY use a zero-length CID (RFC 9000 §5.1).
-        assert_eq!(client_dcid_for_demux(&[]).map(|cid| cid.len()), Some(0));
-    }
-
-    #[test]
-    fn client_dcid_rejects_over_max_length() {
-        // > 20 bytes is illegal (RFC 9000 §17.2) — match the demux's own reject.
-        let too_long = [0u8; 21];
-        assert!(client_dcid_for_demux(&too_long).is_none());
-    }
-
-    #[test]
-    fn version_negotiation_echoes_swapped_cids_and_offers_v1() {
-        let peer_dcid = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let peer_scid = [10u8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
-        let mut buf = [0u8; 64];
-        let written = build_version_negotiation(&peer_dcid, &peer_scid, &mut buf)
-            .expect("version negotiation encodes");
-        let parsed = proxima_protocols::quic::packet::header::parse_long(&buf[..written])
-            .expect("parses as a long header");
-        match parsed {
-            proxima_protocols::quic::packet::header::Header::VersionNegotiation {
-                dcid,
-                scid,
-                supported_versions_raw,
-            } => {
-                assert_eq!(dcid, &peer_scid, "VN DCID echoes the peer's SCID (swapped)");
-                assert_eq!(scid, &peer_dcid, "VN SCID echoes the peer's DCID (swapped)");
-                assert_eq!(supported_versions_raw, &[0, 0, 0, 1], "offers QUIC v1");
-            }
-            _ => panic!("expected a VersionNegotiation packet"),
+    fn to_proto_instant_matches_the_absolute_epoch_core_instant_now_reads() {
+        struct FixedClock {
+            nanos: u64,
         }
+        impl Clock for FixedClock {
+            type Delay = core::future::Ready<()>;
+            fn now_nanos(&self) -> u64 {
+                self.nanos
+            }
+            fn delay(&self, _dur: Duration) -> Self::Delay {
+                core::future::ready(())
+            }
+        }
+
+        // A large absolute reading, exactly the shape `TimeClock` returns in
+        // production (nowhere near zero) — the case that actually exercises
+        // the epoch mismatch this test guards against.
+        let clock = FixedClock { nanos: 1_700_000_000_123_456_000 };
+        let now = core_instant_now(&clock);
+        let proto = to_proto_instant(now);
+
+        assert_eq!(
+            proto.as_micros(),
+            u64::try_from(now.into_monotonic().as_micros()).expect("fits u64"),
+            "to_proto_instant must read the SAME absolute epoch core_instant_now does — \
+             not elapsed-since-some-other-origin, or accept-time anchoring and the reap \
+             comparison land on different timelines"
+        );
+        assert_eq!(
+            proto.as_micros(),
+            clock.now_nanos() / 1_000,
+            "the conversion is a direct absolute nanos-to-micros truncation, no origin subtraction"
+        );
     }
 }
