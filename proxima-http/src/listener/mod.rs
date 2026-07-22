@@ -168,7 +168,7 @@ use serde_json::Value;
 #[cfg(feature = "tls")]
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 // tokio-io bridge for the legacy no-`AcceptorFactory` accept loop only —
-// `serve_via_factory`/`dispatch_h1_or_h2` stay on `FromFutures`/`IntoFutures`
+// `serve_via_factory`/`serve_via_open_classifier` stay on `FromFutures`/`IntoFutures`
 // (no tokio) regardless of this feature.
 #[cfg(feature = "http1")]
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -666,7 +666,7 @@ impl HttpListenProtocol {
                                 // Plain TCP, no TLS, no ALPN — sniff the
                                 // first bytes to dispatch h1 or h2 prior-
                                 // knowledge.
-                                dispatch_h1_or_h2(
+                                serve_via_open_classifier(
                                     socket.compat(),
                                     dispatch_for_conn,
                                     spec_for_conn,
@@ -680,7 +680,7 @@ impl HttpListenProtocol {
                             }
                         };
                         #[cfg(not(feature = "tls"))]
-                        let outcome = dispatch_h1_or_h2(
+                        let outcome = serve_via_open_classifier(
                             socket.compat(),
                             dispatch_for_conn,
                             spec_for_conn,
@@ -884,7 +884,7 @@ async fn serve_default_uds(
                             status: 503,
                             retry_after: "1".into(),
                         });
-                        if let Err(error) = dispatch_h1_or_h2(
+                        if let Err(error) = serve_via_open_classifier(
                             socket.compat(),
                             dispatch.clone(),
                             spec,
@@ -1051,7 +1051,7 @@ async fn serve_via_factory(
                         }
                     },
                     None => {
-                        dispatch_h1_or_h2(
+                        serve_via_open_classifier(
                             stream,
                             dispatch_for_conn,
                             spec_for_conn,
@@ -1065,7 +1065,7 @@ async fn serve_via_factory(
                     }
                 };
                 #[cfg(not(feature = "tls"))]
-                let outcome = dispatch_h1_or_h2(
+                let outcome = serve_via_open_classifier(
                     stream,
                     dispatch_for_conn,
                     spec_for_conn,
@@ -1229,19 +1229,52 @@ async fn drain_in_flight(in_flight: &Arc<AtomicU64>, timeout: std::time::Duratio
     }
 }
 
+/// The two candidates this combiner classifies between, built once per
+/// process. `Listener::any()`'s own open registry
+/// (`proxima_http::any_listener::AnyListenProtocol`) builds the identical
+/// pair per `App` instance from `App`'s `AnyRegistry` — this static is the
+/// combiner's own private copy, since the combiner threads listener-scoped
+/// state (`in_flight`/`quiescing`/`quiesce_response`) that the generic
+/// `AnyProtocol::drive` signature has no room for (see `any_listener`'s
+/// module doc) and therefore cannot dispatch through `AnyListenProtocol`
+/// directly.
+#[cfg(feature = "http2-native")]
+static ANY_CANDIDATES: std::sync::LazyLock<
+    std::sync::Arc<[std::sync::Arc<dyn proxima_listen::any::AnyProtocol>]>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Arc::from(vec![
+        std::sync::Arc::new(crate::any_listener::H1AnyProtocol::new())
+            as std::sync::Arc<dyn proxima_listen::any::AnyProtocol>,
+        std::sync::Arc::new(crate::any_listener::H2PriorKnowledgeAnyProtocol::new())
+            as std::sync::Arc<dyn proxima_listen::any::AnyProtocol>,
+    ])
+});
+
 /// Sniff the first bytes of a fresh connection to choose h1 or h2
-/// dispatch, via the sans-IO [`proxima_listen::preface::classify_preface`]
-/// primitive. h2 prior-knowledge clients (RFC 9113 §3.4) send a 24-byte
-/// preface; h1 clients send a request line — a short leading-byte sniff
-/// is enough to disambiguate before the full preface arrives.
+/// dispatch, via [`proxima_listen::any::Classifier`] over the same two
+/// candidates (`H1AnyProtocol`, `H2PriorKnowledgeAnyProtocol`) the open
+/// universal listener registers — this combiner and `Listener::any()` share
+/// one classification rule instead of each hand-rolling their own preface
+/// compare. h2 prior-knowledge clients (RFC 9113 §3.4) send a 24-byte
+/// preface; h1 clients send a request line — a short leading-byte sniff is
+/// enough to disambiguate before the full preface arrives.
 ///
-/// Used on transports without ALPN (UDS, plain-TCP-without-TLS). The
-/// TLS path doesn't need this — ALPN negotiates h1 vs h2 during the
-/// handshake. Re-emits the sniffed bytes via `PrefixedStream` so the
-/// chosen protocol driver sees the intact byte stream from byte zero.
+/// Used on transports without ALPN (UDS, plain-TCP-without-TLS). The TLS
+/// path doesn't need this — ALPN negotiates h1 vs h2 during the handshake.
+/// Re-emits the accumulated prefix via `Prepend` so the chosen protocol
+/// driver sees the intact byte stream from byte zero.
+///
+/// Replaces the former hand-rolled `dispatch_h1_or_h2` (retired):
+/// the classification RULE moved to `H1AnyProtocol::probe` /
+/// `H2PriorKnowledgeAnyProtocol::probe` in `proxima-http`'s `any_listener`
+/// module; this function still owns the listener-scoped state
+/// (`in_flight`/`quiescing`/`quiesce_response`) that the generic
+/// `AnyProtocol::drive` signature can't carry, so it calls
+/// `serve_connection`/`serve_h2_connection` directly rather than going
+/// through `AnyProtocol::drive`.
 // threads listener-scoped state plus the runtime handle for h1 streaming dispatch
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_h1_or_h2<S>(
+async fn serve_via_open_classifier<S>(
     mut socket: S,
     dispatch: PipeHandle,
     listener_spec: Arc<HttpListenerSpec>,
@@ -1254,28 +1287,98 @@ async fn dispatch_h1_or_h2<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut buf = [0_u8; proxima_listen::preface::H2_CLIENT_PREFACE_LEN];
-    let mut filled = 0usize;
-    // Read up to the route-sniff length to disambiguate. h1's smallest
-    // method ("GET ") is 4 ASCII bytes; h2's preface starts with "PRI ".
-    while filled < 4 {
-        let read = socket.read(&mut buf[filled..4]).await.map_err(|err| {
-            ProximaError::Io(std::io::Error::other(format!("preface sniff: {err}")))
-        })?;
-        if read == 0 {
-            return Ok(()); // peer closed before any data
-        }
-        filled += read;
-    }
     #[cfg(feature = "http2-native")]
-    let route = proxima_listen::preface::classify_preface(&buf[..filled]);
+    {
+        let mut classifier = proxima_listen::any::Classifier::new(
+            ANY_CANDIDATES.clone(),
+            proxima_listen::sized::ANY_MAX_PROBE_PREFIX_BYTES_DEFAULT,
+        );
+        let mut accumulated: Vec<u8> =
+            Vec::with_capacity(proxima_listen::preface::H2_CLIENT_PREFACE_LEN);
+        let mut chunk = [0_u8; proxima_listen::preface::H2_CLIENT_PREFACE_LEN];
+        loop {
+            let read = socket.read(&mut chunk).await.map_err(|err| {
+                ProximaError::Io(std::io::Error::other(format!("preface sniff: {err}")))
+            })?;
+            if read == 0 {
+                return Ok(()); // peer closed before any data
+            }
+            accumulated.extend_from_slice(&chunk[..read]);
+            match classifier.advance(&accumulated) {
+                proxima_listen::any::ClassifyOutcome::Matched(protocol)
+                    if protocol.name() == "h1" =>
+                {
+                    let stream = IntoFutures(Prepend::new(accumulated, FromFutures(socket)));
+                    return serve_connection(
+                        stream,
+                        dispatch,
+                        listener_spec,
+                        in_flight,
+                        quiescing,
+                        quiesce_response,
+                        peer,
+                        runtime,
+                    )
+                    .await;
+                }
+                proxima_listen::any::ClassifyOutcome::Matched(protocol)
+                    if protocol.name() == "h2" =>
+                {
+                    let stream = IntoFutures(Prepend::new(accumulated, FromFutures(socket)));
+                    // h2 is sans-IO; no per-request spawn, so the runtime handle is unused here.
+                    let _ = (runtime, quiescing, listener_spec);
+                    return crate::http2::serve_h2_connection(
+                        stream,
+                        dispatch,
+                        in_flight,
+                        quiesce_response,
+                        peer,
+                    )
+                    .await;
+                }
+                proxima_listen::any::ClassifyOutcome::Matched(_) => {
+                    return Err(ProximaError::Upstream(
+                        "unexpected any-protocol match in the h1+h2 combiner".into(),
+                    ));
+                }
+                proxima_listen::any::ClassifyOutcome::NeedMoreBytes { .. } => continue,
+                proxima_listen::any::ClassifyOutcome::Rejected { .. } => {
+                    return Err(ProximaError::Upstream(
+                        "h2 preface bytes did not match RFC 9113 §3.4".into(),
+                    ));
+                }
+                proxima_listen::any::ClassifyOutcome::PrefixBoundExceeded => {
+                    return Err(ProximaError::Upstream(
+                        "connection prefix exceeded bound before h1/h2 resolved".into(),
+                    ));
+                }
+                _ => {
+                    return Err(ProximaError::Upstream(
+                        "unrecognized any-protocol classify outcome".into(),
+                    ));
+                }
+            }
+        }
+    }
     #[cfg(not(feature = "http2-native"))]
-    let route = proxima_listen::preface::PrefaceClass::Http1;
-
-    if matches!(route, proxima_listen::preface::PrefaceClass::Http1) {
-        // h1 path. Hand the sniffed bytes back via PrefixedStream.
+    {
+        // No h2 compiled: read the route-sniff length (parity with the
+        // former dispatch_h1_or_h2's unconditional read) then always
+        // dispatch h1 — with h2 not compiled in, there is nothing else
+        // the connection could resolve to.
+        let mut filled = 0usize;
+        let mut buf = [0_u8; 4];
+        while filled < 4 {
+            let read = socket.read(&mut buf[filled..]).await.map_err(|err| {
+                ProximaError::Io(std::io::Error::other(format!("preface sniff: {err}")))
+            })?;
+            if read == 0 {
+                return Ok(()); // peer closed before any data
+            }
+            filled += read;
+        }
         let stream = IntoFutures(Prepend::new(buf[..filled].to_vec(), FromFutures(socket)));
-        return serve_connection(
+        serve_connection(
             stream,
             dispatch,
             listener_spec,
@@ -1285,51 +1388,7 @@ where
             peer,
             runtime,
         )
-        .await;
-    }
-    #[cfg(feature = "http2-native")]
-    {
-        // h2 path. Keep reading until we've seen the full 24-byte
-        // preface, then let the classifier confirm the final verdict.
-        // The h2 connection state machine consumes the preface as its
-        // first action, so we re-emit it via PrefixedStream.
-        while filled < buf.len() {
-            let read = socket.read(&mut buf[filled..]).await.map_err(|err| {
-                ProximaError::Io(std::io::Error::other(format!("preface read: {err}")))
-            })?;
-            if read == 0 {
-                return Err(ProximaError::Upstream("h2 preface truncated".into()));
-            }
-            filled += read;
-        }
-        match proxima_listen::preface::classify_preface(&buf[..filled]) {
-            proxima_listen::preface::PrefaceClass::Http2PriorKnowledge => {
-                let stream = IntoFutures(Prepend::new(buf.to_vec(), FromFutures(socket)));
-                // h2 is sans-IO; no per-request spawn, so the runtime handle is unused here.
-                let _ = runtime;
-                crate::http2::serve_h2_connection(stream, dispatch, in_flight, quiesce_response, peer)
-                    .await
-            }
-            // "PRI " committed the connection to h2 above; anything but
-            // an exact 24-byte match is neither valid h1 nor valid h2.
-            _ => Err(ProximaError::Upstream(
-                "h2 preface bytes did not match RFC 9113 §3.4".into(),
-            )),
-        }
-    }
-    #[cfg(not(feature = "http2-native"))]
-    {
-        // Unreachable when http2 disabled — route is always Http1.
-        let _ = (
-            dispatch,
-            in_flight,
-            quiescing,
-            quiesce_response,
-            listener_spec,
-            peer,
-            runtime,
-        );
-        Ok(())
+        .await
     }
 }
 
