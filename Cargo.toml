@@ -514,6 +514,14 @@ http-prime = ["http-prime-deps"]
 # transport (http-prime-deps brings proxima_net::prime / PrimeTcpUpstream).
 pgwire-client = ["http-prime", "dep:proxima-pgwire", "proxima-pgwire/client"]
 
+# `pgwire` is the SERVER-side sibling: mounts `PgWireListenProtocol` so
+# `Listener::builder().pgwire(query).bind(addr).serve()` speaks PostgreSQL.
+# Pulls `proxima-pgwire`'s own `listen` feature (default: TCP + TLS upgrade
+# over the runtime-matched `AcceptorFactory`, scram + md5 auth) — no
+# `http-prime-deps` needed, the listener consumes `ServeContext`'s acceptor
+# factory abstractly, same as h1/h2/h3-native.
+pgwire = ["dep:proxima-pgwire", "proxima-pgwire/listen"]
+
 # `redis-client` registers the `redis` protocol factory so `proxima::Client`
 # speaks Redis/Valkey — `{"type":"redis", "dsn": "redis://..."}` or the
 # `.redis(dsn)` / `.valkey(dsn)` builder sugar. Pulls the redis client over the
@@ -1264,7 +1272,10 @@ required-features = ["macros", "tokio"]
 [[example]]
 name = "multi_runtime"
 path = "examples/multi_runtime/main.rs"
-required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+# `http1` registers the "http" listen protocol both Apps bind — without it
+# this fails at runtime with `Registry("no listen protocol named 'http'")`,
+# not a compile error (same gotcha `hello`'s doc comment above explains).
+required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
 
 [[example]]
 name = "hello"
@@ -1282,8 +1293,11 @@ name = "runtime_select"
 path = "examples/runtime_select/main.rs"
 # needs BOTH: `runtime-tokio` for `TokioPerCoreRuntime`, `tokio` for
 # `proxima_net::tokio::TokioAcceptorFactory` (that module is gated on the
-# full `tokio` feature, not the narrower `runtime-tokio` marker).
-required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"]
+# full `tokio` feature, not the narrower `runtime-tokio` marker). `http1`
+# registers the "http" listen protocol it binds — without it this fails at
+# runtime with `Registry("no listen protocol named 'http'")`, not a compile
+# error (same gotcha `hello`'s doc comment above explains).
+required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
 
 # unified instrument: one #[instrument] annotation -> span (trace) + duration
 # metric, read back from an in-memory capture AND a stdout exporter. macros for
@@ -1458,6 +1472,18 @@ required-features = ["dpdk"]
 [[example]]
 name = "bench_server_h3"
 required-features = ["http3", "tracing-init"]
+
+# `.h2()` through Listener::builder(): native h2c listener + a real
+# H2ClientUpstream round trip, no tokio, no external h2 crate.
+[[example]]
+name = "h2_native_server"
+required-features = ["http2"]
+
+# `.pgwire(query)` through Listener::builder(): native PgWireListenProtocol +
+# a real PgClient (blocking, sans-IO session) round trip, no tokio-postgres.
+[[example]]
+name = "pgwire_server"
+required-features = ["pgwire"]
 
 # native h3 client probe: drives bench_multiplexed against a real h3 server.
 [[example]]

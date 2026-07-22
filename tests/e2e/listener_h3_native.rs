@@ -5,6 +5,13 @@
 //! the native sans-IO QUIC + H3 stack with no quinn, no h3-quinn.
 //! Client still uses h3 + h3-quinn (legacy) to prove the native stack
 //! is wire-compatible with the incumbent.
+//!
+//! `h3_native_listener_round_trip` reaches the protocol through a
+//! hand-built `ListenRegistry` (the shortcut every other native-h3 test/
+//! bench uses). `listener_builder_h3_serves_a_real_h3_client` below proves
+//! the SAME protocol is reachable through the fluent
+//! `Listener::builder().h3()...serve()` axis end to end — real UDP bind,
+//! real quinn+h3 client, no hand registry.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,7 +36,7 @@ use proxima::pipe::{into_handle};
 use proxima::request::{Request, Response};
 use proxima::runtime::{PrimeRuntime, Runtime};
 use proxima::telemetry::NoopTelemetry;
-use proxima::{ListenRegistry, ListenerSpec};
+use proxima::{ListenRegistry, Listener, ListenerBuilderEntry, ListenerSpec, TransportSugar};
 use proxima_net::prime::PrimeDatagramFactory;
 use proxima_primitives::pipe::SendPipe;
 
@@ -191,6 +198,79 @@ async fn h3_native_listener_round_trip() {
     assert_eq!(&body[..], b"ok");
 
     server_handle.shutdown();
+    client_endpoint.close(0u32.into(), b"done");
+    let _ = tokio::time::timeout(Duration::from_secs(1), driver_task).await;
+}
+
+/// Same wire proof as `h3_native_listener_round_trip` above, but reached
+/// through `Listener::builder().h3()...serve()` instead of a hand-built
+/// `ListenRegistry` + `ListenerSpec` — proves the builder axis actually
+/// resolves to the registered `H3NativeListenProtocol` (`.h3()` used to
+/// hard-error at `.serve()`; see `src/listener/handle.rs`'s
+/// `reject_dead_axes`) and that `App::new()`'s datagram-factory wiring (the
+/// UDP sibling of its `acceptor_factory`, threaded through
+/// `App::run_until_signal`'s `ServeContext`) actually reaches the listener.
+#[proxima::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listener_builder_h3_serves_a_real_h3_client() {
+    let _ = quinn::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let dispatch = into_handle(ConstantOk);
+
+    let probe = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let bound: SocketAddr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let server = Listener::builder()
+        .bind(bound)
+        .h3()
+        .spec("dev_self_signed", serde_json::json!(true))
+        .spec("dev_sans", serde_json::json!(["localhost"]))
+        .handle(dispatch)
+        .serve()
+        .await
+        .expect("Listener::builder().h3() serve");
+
+    // No bind-wait sleep here either: quinn PTO-retransmits its Initial for
+    // up to 30s (same rationale as `h3_native_listener_round_trip` above).
+    let mut client_endpoint = quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into()).unwrap();
+    client_endpoint.set_default_client_config(client_config());
+
+    let connecting = client_endpoint.connect(bound, "localhost").unwrap();
+    let connection = connecting.await.unwrap();
+
+    let h3_conn = h3_quinn::Connection::new(connection);
+    let (mut driver, mut send_request) = h3::client::builder()
+        .build::<_, _, Bytes>(h3_conn)
+        .await
+        .unwrap();
+
+    let driver_task = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(format!("https://localhost:{}/", bound.port()))
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+
+    let response = stream.recv_response().await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let mut body = bytes::BytesMut::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while bytes::Buf::has_remaining(&chunk) {
+            let bytes = bytes::Buf::chunk(&chunk);
+            body.extend_from_slice(bytes);
+            let advance = bytes.len();
+            bytes::Buf::advance(&mut chunk, advance);
+        }
+    }
+    assert_eq!(&body[..], b"ok");
+
+    server.stop();
     client_endpoint.close(0u32.into(), b"done");
     let _ = tokio::time::timeout(Duration::from_secs(1), driver_task).await;
 }

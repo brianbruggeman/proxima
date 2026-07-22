@@ -10,6 +10,10 @@ use crate::config_format::{ConfigFormatRegistry, default_config_format_registry}
 use crate::error::ProximaError;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
 use crate::listeners::http::HttpListenProtocol;
+#[cfg(feature = "http2")]
+use crate::listeners::H2ListenProtocol;
+#[cfg(feature = "http3")]
+use crate::listeners::H3NativeListenProtocol;
 #[cfg(feature = "tokio")]
 use crate::listeners::mcp::McpListenProtocol;
 use crate::load::LoadContext;
@@ -103,6 +107,12 @@ impl AppBuilder {
         #[cfg(any(feature = "http1", feature = "http1-native"))]
         self.listen_registry
             .register(Arc::new(HttpListenProtocol::new()))?;
+        #[cfg(feature = "http2")]
+        self.listen_registry
+            .register(Arc::new(H2ListenProtocol::new()))?;
+        #[cfg(feature = "http3")]
+        self.listen_registry
+            .register(Arc::new(H3NativeListenProtocol::new()))?;
         #[cfg(feature = "tokio")]
         self.listen_registry
             .register(Arc::new(McpListenProtocol::new()))?;

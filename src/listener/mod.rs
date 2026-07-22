@@ -18,14 +18,14 @@
 //! Both builders impl the SAME [`SpecBuilder`](crate::SpecBuilder) seam and
 //! thereby get the SAME [`ProtocolSugar`](crate::ProtocolSugar) /
 //! [`TransportSugar`](crate::TransportSugar) axes — no listener-specific
-//! per-wire methods (`.h1()`/`.h2()`/`.h3_native()` would fork the sugar
-//! instead of mirroring it; the wire is picked by the shared `.tcp()`/
-//! `.tls()`/`.h3()`/`.grpc()` axes, resolved to a concrete `ListenProtocol`
-//! by `resolve_listen_protocol` — the listen-side mirror of `load.rs`'s
-//! client-side factory dispatch). Two axes are honestly asymmetric and shadow
-//! the blanket method with an inherent one carrying more than a client ever
-//! needs — a listener needs cert material a client never carries, and has no
-//! url to dial:
+//! per-wire methods (`.h1()`/`.h3_native()` would fork the sugar instead of
+//! mirroring it; the wire is picked by the shared `.tcp()`/`.tls()`/`.h3()`/
+//! `.grpc()` axes, resolved to a concrete `ListenProtocol` by
+//! `resolve_listen_protocol` — the listen-side mirror of `load.rs`'s
+//! client-side factory dispatch). A few axes are honestly asymmetric and
+//! shadow or extend the blanket method with an inherent one carrying more
+//! than a client ever needs — a listener needs cert material (or a typed
+//! query engine, for pgwire) a client never carries, and has no url to dial:
 //!
 //! | axis | client (`ClientBuilder`) | listener (`ListenerBuilder`) |
 //! | --- | --- | --- |
@@ -35,6 +35,8 @@
 //! | `.proxy(url)` | real | no listener meaning — `.serve()` hard-errors if present |
 //! | `.http(url)` / `.https(url)` | real (dials the url) | real — carries the BIND address (`bind.to_string()`), read by `resolve_bind` when `.bind(addr)` wasn't called directly |
 //! | `.grpc(url)` / `.grpc()` | real, url-carrying | shadowed: inherent url-less `.grpc()` — listener dispatches to `.handle(pipe)`, not a url; resolves to `"h2"` (gRPC rides h2), self-registered like `.h3()` |
+//! | (no client twin) | — | inherent `.h2()` — the other name for the same shared `"h2"` protocol |
+//! | (no client twin) | — | inherent `.pgwire(query)` (feature `pgwire`) — carries a typed SQL query engine, self-registered fresh on every `.serve()` |
 //!
 //! `use proxima::TransportSugar` still brings `.tcp()`/`.auto()`/`.h3()` into
 //! scope on `ListenerBuilder`. There is no separate listener DSL — one

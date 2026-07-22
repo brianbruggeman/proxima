@@ -15,10 +15,14 @@ mod listener_client_interop;
 mod listener_expect_continue;
 #[path = "e2e/listener_h2.rs"]
 mod listener_h2;
+#[path = "e2e/listener_h2_native.rs"]
+mod listener_h2_native;
 #[path = "e2e/listener_h3.rs"]
 mod listener_h3;
 #[path = "e2e/listener_h3_native.rs"]
 mod listener_h3_native;
+#[path = "e2e/listener_pgwire_native.rs"]
+mod listener_pgwire_native;
 #[path = "e2e/listener_preface_dispatch.rs"]
 mod listener_preface_dispatch;
 #[path = "e2e/listener_streaming.rs"]
