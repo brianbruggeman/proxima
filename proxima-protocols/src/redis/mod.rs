@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::io;
 
+pub mod connection;
 pub mod pipe_contract;
 pub mod value;
 
@@ -46,6 +47,7 @@ pub mod codec_trait;
 #[cfg(feature = "redis-codec-trait")]
 pub use codec_trait::RedisFrameCodec;
 
+pub use connection::{Advanced, ConnMode, Connection, Limits};
 pub use pipe_contract::{RedisRequest, verb};
 pub use value::RespValue;
 

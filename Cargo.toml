@@ -596,11 +596,20 @@ websocket = ["tokio", "tokio-runtime", "tcp", "dep:async-tungstenite", "proxima-
 # pulls in the same async-tungstenite the listener uses; client-side handshake +
 # message exchange wrapped in a `Pipe`-compatible upstream. default off.
 websocket-upstream = ["websocket"]
-# RESP3 (Redis Serialization Protocol v3) listener (P5). sans-IO parser
-# + minimal TCP wire-up. Compared against `redis-protocol` crate in the
-# bench harness — that's the named baseline in
-# docs/protocol-gap/discipline.md.
-redis-listener = ["dep:proxima-redis", "tokio-runtime", "tcp"]
+# RESP3 (Redis Serialization Protocol v3) listener (P5). sans-IO parser +
+# `RedisAnyProtocol`, mounted onto `AnyListenProtocol`'s ONE bind + accept
+# loop (`proxima-http/http-listener`, same reasoning as the `pgwire`
+# feature's own doc — pulls the scaffolding without turning on the
+# umbrella's user-facing `http1`/`http1-native` axis). Compared against
+# `redis-protocol` crate in the bench harness — that's the named baseline
+# in docs/protocol-gap/discipline.md.
+redis-listener = [
+    "dep:proxima-redis",
+    "proxima-redis/listen",
+    "tokio-runtime",
+    "tcp",
+    "proxima-http/http-listener",
+]
 # DNS substrate (P1) — sans-IO RFC 1035 / RFC 3596 parser. minimum
 # viable resolver target. compared against `hickory-proto::Message`
 # scope-mismatched + a parity-scoped hand-rolled baseline in the
@@ -1491,6 +1500,14 @@ required-features = ["http2"]
 [[example]]
 name = "pgwire_server"
 required-features = ["pgwire"]
+
+# `.redis(handler)` through `Listener::builder()` — a real client conversation
+# exercising every legal RESP `Connection` FSM transition (PING, SUBSCRIBE,
+# a gated command, PUBLISH/pushed message, UNSUBSCRIBE, GET/SET reaching the
+# business handler).
+[[example]]
+name = "redis_server"
+required-features = ["redis-listener"]
 
 # native h3 client probe: drives bench_multiplexed against a real h3 server.
 [[example]]

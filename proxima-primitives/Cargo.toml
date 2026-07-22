@@ -189,7 +189,12 @@ loom = { workspace = true, features = ["futures"] }
 tokio = { workspace = true, features = ["macros", "rt"], optional = true }
 
 [target."cfg(not(loom))".dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+# `tokio` alongside `test-support`: several in-tree tests use
+# `#[proxima::test(runtime = "tokio")]`, whose `run_tokio*` drivers live
+# behind `proxima-test/tokio-driver` — only reachable transitively through
+# `proxima`'s own `tokio` feature (mirrors `proxima-listen`'s identical
+# dev-dependency line for the same reason).
+proxima = { workspace = true, features = ["test-support", "tokio"] }
 proxima-runtime = { workspace = true, features = ["tokio"] }
 # tests use tokio::time::{sleep, timeout, advance, start_paused} for cancel-token
 # race + paused-clock interval tests, plus JoinSet/LocalSet swap-registry tests.

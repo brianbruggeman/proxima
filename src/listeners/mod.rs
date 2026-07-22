@@ -6,12 +6,22 @@ pub mod dpdk_stream;
 pub use proxima_http::listener as http;
 // `Listener::any()` scaffolding: h1/h2-prior-knowledge `AnyProtocol`
 // candidates + `AnyListenProtocol`, the ONE bind+accept loop every
-// TCP-stream listener now drives through: `.any()`, `.http()`'s reshape, AND
-// the registry-driven `.h2()`/`.grpc()` axis (since `H2ListenProtocol`'s
-// retirement). Available whenever the combiner is (h1 candidate needs only
-// `http-listener`); the h2 candidate additionally needs `http2-native` (root
-// feature `http2`), gated inside the module itself.
-#[cfg(any(feature = "http1", feature = "http1-native"))]
+// TCP-stream listener now drives through: `.any()`, `.http()`'s reshape, the
+// registry-driven `.h2()`/`.grpc()` axis (since `H2ListenProtocol`'s
+// retirement), AND `.redis(handler)`'s own single-candidate mount (since a
+// standalone redis listener is likewise never a thing — redis's listen-side
+// surface has always been an `AnyProtocol` candidate). `proxima_http::any_listener`
+// itself is gated on `http-listener` (which pulls `http1-native`) since its
+// H1 candidate is unconditional inside the module — the umbrella's
+// `redis-listener` feature pulls `proxima-http/http-listener` transitively
+// (see its own Cargo.toml doc) precisely so `--features redis-listener`
+// alone still resolves this module without also turning on the umbrella's
+// user-facing `http1` axis.
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "redis-listener"
+))]
 pub use proxima_http::any_listener as any;
 #[cfg(all(target_os = "linux", feature = "io-uring", feature = "http1"))]
 pub mod http_uring;
@@ -59,7 +69,11 @@ pub use dpdk_stream::{DpdkStreamConnection, DpdkStreamListener, DpdkStreamUpstre
 pub use h1::H1ListenProtocol;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use http::{HttpListenProtocol, HttpListenerSpec, serve_h1_connection};
-#[cfg(any(feature = "http1", feature = "http1-native"))]
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "redis-listener"
+))]
 pub use any::{AnyListenProtocol, H1AnyProtocol, RejectHook};
 #[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
 pub use any::H2PriorKnowledgeAnyProtocol;
