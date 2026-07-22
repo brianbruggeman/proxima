@@ -150,6 +150,7 @@
 use std::future::Future;
 use std::future::poll_fn;
 use std::net::SocketAddr;
+#[cfg(feature = "http1")]
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -160,13 +161,21 @@ use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::stream::StreamExt;
-use proxima_core::io::{FromFutures, FromTokio, IntoFutures, IntoTokio, Prepend};
+use proxima_core::io::{FromFutures, IntoFutures, Prepend};
+#[cfg(feature = "http1")]
+use proxima_core::io::{FromTokio, IntoTokio};
 use serde_json::Value;
 #[cfg(feature = "tls")]
 use tokio_util::compat::FuturesAsyncReadCompatExt;
+// tokio-io bridge for the legacy no-`AcceptorFactory` accept loop only —
+// `serve_via_factory`/`dispatch_h1_or_h2` stay on `FromFutures`/`IntoFutures`
+// (no tokio) regardless of this feature.
+#[cfg(feature = "http1")]
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
+#[cfg(feature = "http1")]
 use tokio::net::TcpListener;
+#[cfg(feature = "http1")]
 use tokio::net::TcpStream as CompatTcpStream;
 use tracing::{debug, warn};
 
@@ -175,8 +184,10 @@ use proxima_core::time::{sleep, sleep_until};
 use proxima_core::ProximaError;
 use crate::http1::serve::serve_connection;
 use proxima_listen::{
-    Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenProtocol, ListenerCore, Route,
+    Admission, ConnectionHandle, DrainOutcome, ListenProtocol, ListenerCore, Route,
 };
+#[cfg(feature = "http1")]
+use proxima_listen::DispatchPolicy;
 use proxima_primitives::pipe::handler::PipeHandle;
 
 // Re-exports so the umbrella's `pub use listeners::*` keeps working.
@@ -328,7 +339,7 @@ impl HttpListenProtocol {
         dispatch: PipeHandle,
         spec: &Value,
         context: proxima_listen::ServeContext,
-        mut shutdown: oneshot::Receiver<()>,
+        shutdown: oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
         // UDS dispatch: `spec.path` set → bind a Unix domain socket
         // instead of TCP. Skips TLS/SO_REUSEPORT/TCP_NODELAY (none
@@ -336,23 +347,40 @@ impl HttpListenProtocol {
         // requires SocketAddr labels. h2 prior-knowledge dispatch on
         // UDS is a follow-on (preface sniff); today h1 only over UDS.
         if let Some(path) = spec.get("path").and_then(Value::as_str) {
-            let path_buf = PathBuf::from(path);
-            let mode = spec
-                .get("mode")
-                .and_then(Value::as_u64)
-                .map(|raw| raw as u32);
-            let max_body_bytes = spec
-                .get("max_body_bytes")
-                .and_then(Value::as_u64)
-                .map(|raw| raw as usize);
-            return Box::pin(serve_default_uds(
-                path_buf,
-                mode,
-                dispatch,
-                max_body_bytes,
-                context.ready_signal.clone(),
-                shutdown,
-            ));
+            // UDS has no `AcceptorFactory`-driven arm yet — it always
+            // rode the legacy tokio `UnixListener` path, so it stays
+            // behind `http1` (the tokio-coupled legacy feature) rather
+            // than gaining a half-built tokio-free stand-in here.
+            #[cfg(feature = "http1")]
+            {
+                let path_buf = PathBuf::from(path);
+                let mode = spec
+                    .get("mode")
+                    .and_then(Value::as_u64)
+                    .map(|raw| raw as u32);
+                let max_body_bytes = spec
+                    .get("max_body_bytes")
+                    .and_then(Value::as_u64)
+                    .map(|raw| raw as usize);
+                return Box::pin(serve_default_uds(
+                    path_buf,
+                    mode,
+                    dispatch,
+                    max_body_bytes,
+                    context.ready_signal.clone(),
+                    shutdown,
+                ));
+            }
+            #[cfg(not(feature = "http1"))]
+            {
+                let _ = path;
+                return Box::pin(async move {
+                    Err(ProximaError::Config(
+                        "http listener UDS bind requires the `http1` feature (no tokio-free UDS driver yet)"
+                            .into(),
+                    ))
+                });
+            }
         }
         let defaults = HttpListenerConfig::default();
         let max_body_bytes = spec
@@ -484,8 +512,19 @@ impl HttpListenProtocol {
                 shutdown,
             ));
         }
-        Box::pin(async move {
-            let listener = if use_reuseport {
+        // Legacy no-`AcceptorFactory` accept loop: tokio `TcpListener` +
+        // `tokio::select!`. Gated behind `http1` (the tokio-coupled
+        // legacy feature) — the tokio-free `http1-native` build only
+        // reaches the factory branch above; see the `#[cfg(not(feature
+        // = "http1"))]` arm below for that build's fallback.
+        #[cfg(feature = "http1")]
+        {
+            // Local `mut` shadow: the outer `shutdown` parameter stays
+            // immutable so the tokio-free build (which never takes
+            // `&mut shutdown`) doesn't trip `unused_mut`.
+            let mut shutdown = shutdown;
+            Box::pin(async move {
+                let listener = if use_reuseport {
                 proxima_listen::handle::bind_reuseport_listener_with_options(
                     bind,
                     tcp_fastopen_queue,
@@ -768,6 +807,21 @@ impl HttpListenProtocol {
             }
             Ok(())
         })
+        }
+        // tokio-free default: no `AcceptorFactory` and no `http1` legacy
+        // fallback compiled in — there's no bind path left. Restore the
+        // legacy tokio accept loop with `--features http1` (mirrors
+        // `H2ListenProtocol`'s non-native arm).
+        #[cfg(not(feature = "http1"))]
+        {
+            let _ = (context_for_close, runtime_for_conns, handler_dispatch_for_conn);
+            Box::pin(async move {
+                Err(ProximaError::Config(
+                    "http listener requires an AcceptorFactory (no `http1` tokio fallback in this build)"
+                        .into(),
+                ))
+            })
+        }
     }
 }
 
@@ -781,6 +835,10 @@ impl HttpListenProtocol {
 /// keeps the accept loop simple and avoids spawning. Each connection
 /// goes through the preface sniff so h1 and h2 prior-knowledge
 /// clients (no ALPN without TLS) work on the same socket.
+///
+/// Tokio-only (`tokio::net::UnixListener` + `tokio::select!`) — only
+/// reachable from `serve_default`'s `http1`-gated UDS arm.
+#[cfg(feature = "http1")]
 async fn serve_default_uds(
     path: PathBuf,
     mode: Option<u32>,
@@ -1273,7 +1331,12 @@ where
 // serve_h1_connection + serve_connection + helpers moved to
 // proxima-h1::serve. percent_decode tests live with the function there.
 
-#[cfg(test)]
+// exercises the factory path via `TokioAcceptorFactory` + a tokio
+// `LocalSet` test harness — needs the `http1` feature the same way
+// `http2::listener`'s test module needs `http2`, even though the driver
+// under test (`serve_via_factory` -> `serve_connection`) is itself
+// tokio-free.
+#[cfg(all(test, feature = "http1"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;

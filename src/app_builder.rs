@@ -8,7 +8,7 @@ use crate::codec_factory::{
 };
 use crate::config_format::{ConfigFormatRegistry, default_config_format_registry};
 use crate::error::ProximaError;
-#[cfg(feature = "http1")]
+#[cfg(any(feature = "http1", feature = "http1-native"))]
 use crate::listeners::http::HttpListenProtocol;
 #[cfg(feature = "tokio")]
 use crate::listeners::mcp::McpListenProtocol;
@@ -100,7 +100,7 @@ impl AppBuilder {
 
     pub fn with_defaults(mut self) -> Result<Self, ProximaError> {
         // listen protocols
-        #[cfg(feature = "http1")]
+        #[cfg(any(feature = "http1", feature = "http1-native"))]
         self.listen_registry
             .register(Arc::new(HttpListenProtocol::new()))?;
         #[cfg(feature = "tokio")]

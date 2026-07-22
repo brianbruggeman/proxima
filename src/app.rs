@@ -13,7 +13,7 @@ use proxima_primitives::pipe::SendPipe;
 
 use crate::context_inject::ContextInjector;
 use crate::error::ProximaError;
-#[cfg(feature = "http1")]
+#[cfg(any(feature = "http1", feature = "http1-native"))]
 use crate::listeners::http::HttpListenProtocol;
 #[cfg(feature = "tokio")]
 use crate::listeners::mcp::McpListenProtocol;
@@ -232,7 +232,7 @@ pub fn offline_runtime() -> Result<Arc<dyn Runtime>, ProximaError> {
 impl App {
     pub fn new() -> Result<Self, ProximaError> {
         let listen_registry = Arc::new(ListenRegistry::new());
-        #[cfg(feature = "http1")]
+        #[cfg(any(feature = "http1", feature = "http1-native"))]
         listen_registry.register(Arc::new(HttpListenProtocol::new()))?;
         #[cfg(feature = "tokio")]
         listen_registry.register(Arc::new(McpListenProtocol::new()))?;

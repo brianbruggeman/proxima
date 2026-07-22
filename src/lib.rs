@@ -288,7 +288,7 @@ pub use listen_handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
 pub use listener::{ListenerBuilder, ListenerBuilderEntry};
 #[cfg(feature = "tokio")]
 pub use listeners::McpListenProtocol;
-#[cfg(feature = "http1")]
+#[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use listeners::{HttpListenProtocol, serve_h1_connection};
 pub use load::{LoadContext, Spec, load};
 pub use log_buffer::{DEFAULT_LOG_BUFFER_CAPACITY, LiveTailReceiver, LogBuffer, LogBufferRegistry};
