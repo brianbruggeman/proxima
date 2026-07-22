@@ -938,7 +938,7 @@ mod tests {
         assert!(extra.is_none());
     }
 
-    #[cfg(feature = "http2")]
+    #[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
     #[test]
     fn grpc_axis_resolves_to_h2_and_self_registers() {
         let grpc = ListenerBuilder::default().grpc();
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(carried.name(), "h3-native");
     }
 
-    #[cfg(feature = "http2")]
+    #[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
     #[test]
     fn h2_axis_resolves_to_the_same_shared_h2_protocol_as_grpc() {
         let h2 = ListenerBuilder::default().h2();
@@ -1208,7 +1208,7 @@ mod tests {
         assert_eq!(protocol.name(), "any");
     }
 
-    #[cfg(feature = "http2")]
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
     #[proxima::test]
     async fn any_listen_protocol_subset_rejects_an_unregistered_name() {
         let app = App::new().expect("App::new");
