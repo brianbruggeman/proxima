@@ -943,10 +943,12 @@ required-features = ["runtime-tokio", "runtime-prime-executor", "runtime-prime-i
 [[bench]]
 name = "request_path"
 harness = false
+required-features = ["tokio"]
 
 [[bench]]
 name = "histogram_record"
 harness = false
+required-features = ["tokio"]
 
 [[bench]]
 name = "simd_json_decode"
@@ -955,10 +957,12 @@ harness = false
 [[bench]]
 name = "perf_audit"
 harness = false
+required-features = ["tokio"]
 
 [[bench]]
 name = "substrate_dispatch"
 harness = false
+required-features = ["tokio"]
 
 [[bench]]
 name = "network_throughput"
@@ -1119,12 +1123,14 @@ harness = false
 [[bench]]
 name = "hot_apply_build"
 harness = false
+required-features = ["tokio"]
 
 # hpack benches (4) moved to proxima-protocols/benches/
 
 [[bench]]
 name = "swap_under_load"
 harness = false
+required-features = ["tokio"]
 
 [[bench]]
 name = "capture_drain"
@@ -1142,6 +1148,7 @@ required-features = ["runtime-tokio"]
 [[bench]]
 name = "tee_backpressure"
 harness = false
+required-features = ["tokio"]
 
 [[bench]]
 name = "h1_vs_pingora"
@@ -1166,6 +1173,7 @@ harness = false
 [[bench]]
 name = "tee_sink_primitives"
 harness = false
+required-features = ["tokio"]
 
 # telemetry components c1..c14 live in `proxima-telemetry/benches/`.
 # runtime-prime-full bench stays here because it engages `proxima::runtime::prime::*` types.
@@ -1724,6 +1732,7 @@ required-features = ["sync-wrappers"]
 [[bench]]
 name = "bench_task_join_set_parity"
 harness = false
+required-features = ["tokio"]
 
 # prime-default serve compare-bench gate: drives HttpListenProtocol::serve
 # on both backends (tokio LocalSet + prime CoreShard), loopback 64 KiB GET.
