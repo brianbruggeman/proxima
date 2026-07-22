@@ -78,6 +78,14 @@ pub enum ShedReason {
     /// but (unlike [`ShedReason::Draining`]) connections stay open and
     /// already-admitted requests complete normally.
     Quiescing,
+    /// Accept-edge only (`proxima_http::any_listener::AnyListenProtocol`'s
+    /// blacklist gate, std-tier): this peer tripped a DoS-blacklist strike
+    /// threshold (a `DenySignature` match, or enough unclassifiable
+    /// rejects) and is still within its ban window — see
+    /// `crate::admission::blacklist::BlacklistTable`. Shed BEFORE
+    /// `ListenerCore::admit` is ever called, so a banned peer never commits
+    /// a table slot.
+    Blacklisted,
 }
 
 /// The decision [`ListenerCore::admit`] returns.

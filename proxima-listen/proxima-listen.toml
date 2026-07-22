@@ -36,3 +36,9 @@ drain_timeout_ms = 30000
 # preface, h1's longest method line) with generous headroom for future
 # candidates with longer fixed prefixes.
 max_probe_prefix_bytes = 256
+# Default priority for a `.deny(name, literal)` `DenySignature` candidate —
+# deliberately higher than every other candidate's default (100), so a
+# positively-identified malicious literal resolves and drops the connection
+# as soon as it is seen instead of being HELD by the classifier's
+# priority-ordered-wait rule behind a still-live legit candidate.
+any_deny_priority_default = 60000

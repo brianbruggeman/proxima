@@ -11,6 +11,8 @@ mod example_nginx_style_smoke;
 mod io_uring_prime_smoke;
 #[path = "e2e/listener_client_interop.rs"]
 mod listener_client_interop;
+#[path = "e2e/listener_deny_blacklist.rs"]
+mod listener_deny_blacklist;
 #[path = "e2e/listener_expect_continue.rs"]
 mod listener_expect_continue;
 #[path = "e2e/listener_h2.rs"]

@@ -124,6 +124,19 @@ pub struct ListenerBuilder {
     /// resolved `AnyListenProtocol` (see that type's `with_reject_hook`).
     #[cfg(any(feature = "http1", feature = "http1-native"))]
     any_reject_hook: Option<crate::listeners::RejectHook>,
+    /// `.deny(name, literal)`/`.denies([..])` — fixed malicious/scanner
+    /// byte literals registered as `DenySignature` candidates ALONGSIDE
+    /// whatever `.any()`/`.accepts()`/`.accept()` already selected. See
+    /// [`Self::deny`].
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    deny_signatures: Vec<(String, Vec<u8>)>,
+    /// `.blacklist(config)` — overrides the accept-edge DoS-blacklist's
+    /// strike thresholds/window/ban duration. `None` still gets a
+    /// default-config `BlacklistTable` at `.serve()` time (a deny needs
+    /// somewhere to record even if this was never called). See
+    /// [`Self::blacklist`].
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    blacklist_config: Option<proxima_listen::admission::BlacklistConfig>,
 }
 
 /// Which `AnyProtocol` candidates `.any()`/`.accepts()`/`.accept()` selected.
@@ -217,7 +230,8 @@ impl ListenerBuilder {
     #[must_use]
     pub fn pgwire(mut self, query: proxima_pgwire::PgPipeHandle) -> Self {
         self.pgwire_query = Some(query);
-        self.spec.insert("pgwire_axis".to_string(), Value::Bool(true));
+        self.spec
+            .insert("pgwire_axis".to_string(), Value::Bool(true));
         self
     }
 
@@ -237,7 +251,8 @@ impl ListenerBuilder {
     #[must_use]
     pub fn redis(mut self, handler: proxima_redis::RedisPipeHandle) -> Self {
         self.redis_handler = Some(handler);
-        self.spec.insert("redis_axis".to_string(), Value::Bool(true));
+        self.spec
+            .insert("redis_axis".to_string(), Value::Bool(true));
         self
     }
 
@@ -321,6 +336,64 @@ impl ListenerBuilder {
     #[must_use]
     pub fn any_on_reject(mut self, hook: crate::listeners::RejectHook) -> Self {
         self.any_reject_hook = Some(hook);
+        self
+    }
+
+    /// Register a fixed malicious/scanner byte literal as a `DenySignature`
+    /// candidate — reviewed ALONGSIDE whatever legit candidates are
+    /// selected, never narrowing the listener to just this one: implicitly
+    /// selects `.any()` (every registered candidate) if no
+    /// `.any()`/`.accepts()`/`.accept()` call has run yet (mirrors
+    /// `.any_handler`'s implicit-select convenience), but if a `.accepts()`
+    /// `Subset` is already in effect, this only ADDS the deny's own name to
+    /// that subset — it never collapses an existing subset down to just
+    /// the denies, which would stop the subset's legit candidates from
+    /// being classified at all. A match records a `Strike::Deny` against
+    /// the connecting peer and drops the connection — no handler dispatch.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn deny(mut self, name: impl Into<String>, literal: impl Into<Vec<u8>>) -> Self {
+        let name = name.into();
+        self.any_mode = Some(match self.any_mode.take() {
+            None | Some(AnyMode::All) => AnyMode::All,
+            Some(AnyMode::Subset(mut names)) => {
+                if !names.contains(&name) {
+                    names.push(name.clone());
+                }
+                AnyMode::Subset(names)
+            }
+        });
+        self.deny_signatures.push((name, literal.into()));
+        self
+    }
+
+    /// Register several `DenySignature` candidates in one call — sugar over
+    /// repeated [`Self::deny`] calls.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn denies<Name, Literal>(
+        mut self,
+        signatures: impl IntoIterator<Item = (Name, Literal)>,
+    ) -> Self
+    where
+        Name: Into<String>,
+        Literal: Into<Vec<u8>>,
+    {
+        for (name, literal) in signatures {
+            self = self.deny(name, literal);
+        }
+        self
+    }
+
+    /// Override the accept-edge DoS-blacklist's strike thresholds/window/
+    /// ban duration (see [`proxima_listen::admission::BlacklistConfig`]'s
+    /// doc). Not required before using [`Self::deny`] — `.serve()` builds a
+    /// default-config table regardless, since a deny needs somewhere to
+    /// record even when a caller never tunes it.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn blacklist(mut self, config: proxima_listen::admission::BlacklistConfig) -> Self {
+        self.blacklist_config = Some(config);
         self
     }
 
@@ -417,6 +490,8 @@ impl ListenerBuilder {
                 &self.any_handlers,
                 self.any_reject_hook.clone(),
                 dispatch.clone(),
+                &self.deny_signatures,
+                self.blacklist_config.clone(),
             )?,
             None => resolve_listen_protocol(&self.spec)?,
         };
@@ -496,6 +571,14 @@ fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<SocketAddr> {
 ///    fallback would simply fail its own downcast otherwise (a config
 ///    error naming the protocol, never a panic).
 ///
+/// Also builds the accept-edge DoS-blacklist wiring — UNCONDITIONALLY, even
+/// when `deny_signatures` is empty and `blacklist_config` was never set:
+/// registers each `DenySignature` into `app.any_registry()` (so it is
+/// classified alongside every other candidate `mode` selects), threads a
+/// `BlacklistTable` onto the resolved `AnyListenProtocol`, and COMPOSES the
+/// reject-hook (`reject_hook`, if present, still runs — this never clobbers
+/// it) so an unclassifiable reject also records a `Strike::Unclassifiable`.
+///
 /// Always self-registers a fresh `AnyListenProtocol` instance (never
 /// reuses one across calls) since the merged handler map is per-call data
 /// — the same reason `.pgwire(query)` builds fresh every time instead of
@@ -507,8 +590,23 @@ fn any_listen_protocol(
     overrides: &std::collections::BTreeMap<String, proxima_listen::any::AnyHandler>,
     reject_hook: Option<crate::listeners::RejectHook>,
     dispatch_fallback: PipeHandle,
+    deny_signatures: &[(String, Vec<u8>)],
+    blacklist_config: Option<proxima_listen::admission::BlacklistConfig>,
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     let registry = app.any_registry();
+
+    let blacklist =
+        proxima_listen::admission::BlacklistTable::new(blacklist_config.unwrap_or_default());
+    for (name, literal) in deny_signatures {
+        let candidate: Arc<dyn proxima_listen::any::AnyProtocol> =
+            Arc::new(proxima_listen::any::DenySignature::new(
+                name.clone(),
+                literal.clone(),
+                blacklist.clone(),
+            ));
+        registry.register(candidate)?;
+    }
+
     let candidate_names: Vec<String> = match mode {
         AnyMode::All => registry.names(),
         AnyMode::Subset(names) => names.clone(),
@@ -532,9 +630,25 @@ fn any_listen_protocol(
             crate::listeners::AnyListenProtocol::with_names(&registry, names, merged)?
         }
     };
-    if let Some(hook) = reject_hook {
-        protocol = protocol.with_reject_hook(hook);
-    }
+    let composed_hook: crate::listeners::RejectHook = {
+        let blacklist_for_hook = blacklist.clone();
+        Arc::new(
+            move |peer: Option<proxima_primitives::stream::PeerInfo>, reason| {
+                let peer_ip = proxima_listen::peer_ip(peer.as_ref());
+                blacklist_for_hook.record_strike(
+                    peer_ip,
+                    proxima_core::time::now(),
+                    proxima_listen::admission::Strike::Unclassifiable,
+                );
+                if let Some(hook) = &reject_hook {
+                    hook(peer, reason);
+                }
+            },
+        )
+    };
+    protocol = protocol
+        .with_reject_hook(composed_hook)
+        .with_blacklist(blacklist);
     Ok(("any".to_string(), Some(Arc::new(protocol))))
 }
 
@@ -626,16 +740,18 @@ fn resolve_listen_protocol(
 // build (no http1 at all) now gets instead of a build failure.
 #[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
 fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
-    let protocol: Arc<dyn ListenProtocol> = Arc::new(
-        crate::listeners::AnyListenProtocol::single_candidate(
+    let protocol: Arc<dyn ListenProtocol> =
+        Arc::new(crate::listeners::AnyListenProtocol::single_candidate(
             "h2",
             Arc::new(crate::listeners::H2PriorKnowledgeAnyProtocol::new()),
-        ),
-    );
+        ));
     Ok(("h2".to_string(), Some(protocol)))
 }
 
-#[cfg(all(feature = "http2", not(any(feature = "http1", feature = "http1-native"))))]
+#[cfg(all(
+    feature = "http2",
+    not(any(feature = "http1", feature = "http1-native"))
+))]
 fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     Err(ProximaError::Config(
         "Listener::builder(): .grpc()/.h2() needs `http1` or `http1-native` in addition to \
@@ -648,8 +764,7 @@ fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), Pro
 #[cfg(not(feature = "http2"))]
 fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     Err(ProximaError::Config(
-        "Listener::builder(): .grpc() needs the `http2` feature (gRPC rides h2); none built"
-            .into(),
+        "Listener::builder(): .grpc() needs the `http2` feature (gRPC rides h2); none built".into(),
     ))
 }
 
@@ -661,8 +776,7 @@ fn h3_native_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>
 }
 
 #[cfg(not(feature = "http3"))]
-fn h3_native_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError>
-{
+fn h3_native_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     Err(ProximaError::Config(
         "Listener::builder(): .h3() needs the `http3` feature; none built".into(),
     ))
@@ -690,7 +804,8 @@ fn compose_tls(
         None => http_listen_protocol_for_tls()?,
     };
     let registry_name = format!("{name}+tls");
-    let wrapped: Arc<dyn ListenProtocol> = Arc::new(proxima_listen::TlsListenProtocol::new(inner, tls));
+    let wrapped: Arc<dyn ListenProtocol> =
+        Arc::new(proxima_listen::TlsListenProtocol::new(inner, tls));
     // `ListenRegistry::register` derives its key from `protocol.name()`, and
     // `TlsListenProtocol::name()` deliberately delegates to the wrapped
     // protocol's name (so identity checks elsewhere, e.g.
@@ -747,10 +862,7 @@ fn http_listen_protocol_for_tls() -> Result<Arc<dyn ListenProtocol>, ProximaErro
     Ok(Arc::new(crate::listeners::HttpListenProtocol::new()))
 }
 
-#[cfg(all(
-    feature = "tls",
-    not(any(feature = "http1", feature = "http1-native"))
-))]
+#[cfg(all(feature = "tls", not(any(feature = "http1", feature = "http1-native"))))]
 fn http_listen_protocol_for_tls() -> Result<Arc<dyn ListenProtocol>, ProximaError> {
     Err(ProximaError::Config(
         "Listener::builder(): .tls(config) on the default transport needs the `http1` or \
@@ -810,14 +922,19 @@ mod tests {
     #[test]
     fn resolve_listen_protocol_defaults_to_http_and_opts_into_grpc_via_the_same_key_load_reads() {
         let http_default = ListenerBuilder::default().tcp();
-        let (name, extra) =
-            resolve_listen_protocol(&http_default.spec).expect("tcp resolves");
+        let (name, extra) = resolve_listen_protocol(&http_default.spec).expect("tcp resolves");
         assert_eq!(name, "http");
-        assert!(extra.is_none(), "\"http\" is already in App::new()'s default set");
+        assert!(
+            extra.is_none(),
+            "\"http\" is already in App::new()'s default set"
+        );
 
         let tls = ListenerBuilder::default().spec("transport", json!("tls"));
         let (name, extra) = resolve_listen_protocol(&tls.spec).expect("tls resolves");
-        assert_eq!(name, "http", "TLS is spec data on the same combiner, not a new protocol");
+        assert_eq!(
+            name, "http",
+            "TLS is spec data on the same combiner, not a new protocol"
+        );
         assert!(extra.is_none());
     }
 
@@ -1082,6 +1199,8 @@ mod tests {
             &std::collections::BTreeMap::new(),
             None,
             dispatch,
+            &[],
+            None,
         )
         .expect("any_listen_protocol resolves");
         assert_eq!(name, "any");
@@ -1100,6 +1219,8 @@ mod tests {
             &std::collections::BTreeMap::new(),
             None,
             dispatch,
+            &[],
+            None,
         );
         assert!(
             outcome.is_err(),

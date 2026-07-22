@@ -26,3 +26,19 @@ peer_table_cap = 256
 # sheds with `ShedReason::PerPeerLimit` once its own live count reaches this,
 # even when the listener's global capacity has room left.
 per_peer_cap = 64
+
+[admission.blacklist]
+# Strikes at `Strike::Deny` (a connection matched a registered
+# `DenySignature` literal) before a peer is banned. Deliberately low: a
+# deny match is a positively-identified bad actor, not ambiguous noise.
+deny_strike_threshold = 1
+# Strikes at `Strike::Unclassifiable` (the open listener's classifier
+# rejected the connection, or the prefix bound was exceeded) before a peer
+# is banned. Deliberately higher: unresolved classification is common
+# under normal noise (health-checkers, misconfigured clients).
+unclassifiable_strike_threshold = 20
+# Window (ms) both counters above share: a peer's strike counts reset
+# TOGETHER once this much time has elapsed since the window started.
+strike_window_ms = 60000
+# How long a ban lasts (ms) once either threshold above trips.
+ban_duration_ms = 300000
