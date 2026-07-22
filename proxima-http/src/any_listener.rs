@@ -53,7 +53,10 @@ use tracing::{debug, warn};
 use proxima_core::ProximaError;
 use proxima_core::io::{FromFutures, IntoFutures, Prepend};
 use proxima_core::time::sleep;
-use proxima_listen::admission::{Admission, ConnAdmission, ConnectionHandle, DrainOutcome, ListenerCore};
+use proxima_listen::admission::{
+    Admission, BlacklistTable, ConnAdmission, ConnectionHandle, DrainOutcome, ListenerCore,
+    ShedReason,
+};
 use proxima_listen::any::{
     AnyHandler, AnyProtocol, Classifier, ClassifyOutcome, ProbeVerdict, RejectReason,
     downcast_handler,
@@ -62,8 +65,8 @@ use proxima_listen::{ListenProtocol, ServeContext};
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
 
-use crate::http1::serve::serve_connection as serve_h1_connection_shared;
 use crate::http1::serve::HttpListenerSpec;
+use crate::http1::serve::serve_connection as serve_h1_connection_shared;
 #[cfg(feature = "http2-native")]
 use crate::http2::serve_h2_connection;
 
@@ -363,6 +366,7 @@ pub struct AnyListenProtocol {
     global_cap: usize,
     handlers: Arc<std::collections::BTreeMap<String, AnyHandler>>,
     on_reject: Option<RejectHook>,
+    blacklist: Option<BlacklistTable>,
 }
 
 impl AnyListenProtocol {
@@ -383,6 +387,7 @@ impl AnyListenProtocol {
             global_cap: proxima_listen::sized::ANY_MAX_PROBE_PREFIX_BYTES_DEFAULT,
             handlers,
             on_reject: None,
+            blacklist: None,
         }
     }
 
@@ -401,6 +406,7 @@ impl AnyListenProtocol {
             global_cap: proxima_listen::sized::ANY_MAX_PROBE_PREFIX_BYTES_DEFAULT,
             handlers,
             on_reject: None,
+            blacklist: None,
         }
     }
 
@@ -417,6 +423,7 @@ impl AnyListenProtocol {
             global_cap: proxima_listen::sized::ANY_MAX_PROBE_PREFIX_BYTES_DEFAULT,
             handlers,
             on_reject: None,
+            blacklist: None,
         })
     }
 
@@ -444,6 +451,7 @@ impl AnyListenProtocol {
             global_cap: proxima_listen::sized::ANY_MAX_PROBE_PREFIX_BYTES_DEFAULT,
             handlers: Arc::new(std::collections::BTreeMap::new()),
             on_reject: None,
+            blacklist: None,
         }
     }
 
@@ -453,6 +461,16 @@ impl AnyListenProtocol {
     #[must_use]
     pub fn with_reject_hook(mut self, hook: RejectHook) -> Self {
         self.on_reject = Some(hook);
+        self
+    }
+
+    /// Install the accept-edge DoS-blacklist gate (see [`BlacklistTable`]'s
+    /// doc). `None` by default — a bare `.any()` listener with no table
+    /// installed never sheds `ShedReason::Blacklisted`; both accept loops
+    /// (TCP + UDS) consult it BEFORE `ListenerCore::admit`, never after.
+    #[must_use]
+    pub fn with_blacklist(mut self, table: BlacklistTable) -> Self {
+        self.blacklist = Some(table);
         self
     }
 }
@@ -505,6 +523,7 @@ impl ListenProtocol for AnyListenProtocol {
         };
         let handlers = merge_dispatch_fallback(&self.handlers, &candidates, &dispatch);
         let on_reject = self.on_reject.clone();
+        let blacklist = self.blacklist.clone();
         let spec_owned = Arc::new(spec.clone());
         Box::pin(async move {
             // UDS: `spec.path` set -> bind a Unix domain socket instead of
@@ -523,6 +542,7 @@ impl ListenProtocol for AnyListenProtocol {
                         global_cap,
                         handlers,
                         on_reject,
+                        blacklist,
                         spec_owned,
                         context.ready_signal.clone(),
                         shutdown,
@@ -560,16 +580,19 @@ impl ListenProtocol for AnyListenProtocol {
                 .get("drain_timeout_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or(30_000);
-            let quiesce_duration_ms = spec_owned.get("quiesce_duration_ms").and_then(Value::as_u64);
+            let quiesce_duration_ms = spec_owned
+                .get("quiesce_duration_ms")
+                .and_then(Value::as_u64);
             #[cfg(feature = "tls")]
-            let tls_acceptor = match proxima_tls::config_from_spec_value(spec_owned.get(proxima_tls::SPEC_KEY)) {
-                Ok(Some(config)) => match proxima_tls::build_acceptor_futures_io(&config) {
-                    Ok(acceptor) => Some(acceptor),
+            let tls_acceptor =
+                match proxima_tls::config_from_spec_value(spec_owned.get(proxima_tls::SPEC_KEY)) {
+                    Ok(Some(config)) => match proxima_tls::build_acceptor_futures_io(&config) {
+                        Ok(acceptor) => Some(acceptor),
+                        Err(error) => return Err(error),
+                    },
+                    Ok(None) => None,
                     Err(error) => return Err(error),
-                },
-                Ok(None) => None,
-                Err(error) => return Err(error),
-            };
+                };
             serve_via_factory(
                 factory,
                 bind,
@@ -578,6 +601,7 @@ impl ListenProtocol for AnyListenProtocol {
                 global_cap,
                 handlers,
                 on_reject,
+                blacklist,
                 spec_owned,
                 context.telemetry.clone(),
                 context.runtime.clone(),
@@ -617,6 +641,18 @@ fn merge_dispatch_fallback(
     Arc::new(merged)
 }
 
+/// `true` if `blacklist` is installed AND currently bans `peer_ip` — the
+/// one check every accept loop (TCP factory, TCP quiesce window, UDS) runs
+/// BEFORE `ListenerCore::admit`. `None` (no table installed) always
+/// answers `false`, so a bare `.any()` listener with no `.deny()`/
+/// `.blacklist()` wiring behaves exactly as it did before this gate
+/// existed.
+fn peer_is_banned(blacklist: &Option<BlacklistTable>, peer_ip: std::net::IpAddr) -> bool {
+    blacklist
+        .as_ref()
+        .is_some_and(|table| table.is_banned(peer_ip, proxima_core::time::now()))
+}
+
 /// `AcceptorFactory`-driven accept loop: bind (honoring SO_REUSEPORT +
 /// TCP_FASTOPEN from `spec`, matching every other TCP listener in this
 /// crate), admit each accepted connection through a [`ListenerCore`],
@@ -639,6 +675,7 @@ async fn serve_via_factory(
     global_cap: usize,
     handlers: Arc<std::collections::BTreeMap<String, AnyHandler>>,
     on_reject: Option<RejectHook>,
+    blacklist: Option<BlacklistTable>,
     spec: Arc<Value>,
     telemetry: proxima_primitives::pipe::telemetry_surface::TelemetryHandle,
     runtime: Option<Arc<dyn proxima_runtime::Runtime>>,
@@ -661,7 +698,12 @@ async fn serve_via_factory(
     if let Some(sender) = ready_signal {
         let _ = sender.send(());
     }
-    debug!(?bind, use_reuseport, ?tcp_fastopen_queue, "any listener bound (open classifier, factory)");
+    debug!(
+        ?bind,
+        use_reuseport,
+        ?tcp_fastopen_queue,
+        "any listener bound (open classifier, factory)"
+    );
     #[cfg(feature = "tls")]
     if tls_acceptor.is_some() {
         debug!(?bind, "any listener terminating TLS");
@@ -671,7 +713,10 @@ async fn serve_via_factory(
     let mut core = ListenerCore::new(policy);
     let admission = ConnAdmission::new(max_in_flight_requests);
     let (release_tx, mut release_rx) = mpsc::unbounded::<ConnectionHandle>();
-    let listener_labels = proxima_primitives::pipe::telemetry_surface::Labels::from_pairs(&[("listener", label.as_str())]);
+    let listener_labels = proxima_primitives::pipe::telemetry_surface::Labels::from_pairs(&[(
+        "listener",
+        label.as_str(),
+    )]);
 
     loop {
         futures::select_biased! {
@@ -680,7 +725,17 @@ async fn serve_via_factory(
                 core.release(handle);
             },
             accepted = poll_fn(|cx| acceptor.poll_accept(cx)).fuse() => match accepted {
-                Ok(conn) => match core.admit(proxima_listen::peer_ip(conn.peer().as_ref())) {
+                Ok(conn) => {
+                    let peer_ip = proxima_listen::peer_ip(conn.peer().as_ref());
+                    // Blacklist gate BEFORE `core.admit` — never after: a
+                    // post-admit check would still have committed a table
+                    // slot for a banned peer.
+                    let decision = if peer_is_banned(&blacklist, peer_ip) {
+                        Admission::Shed { reason: ShedReason::Blacklisted }
+                    } else {
+                        core.admit(peer_ip)
+                    };
+                    match decision {
                     Admission::Admit { handle, route } => {
                         telemetry.counter_inc("proxima.connections_accepted_total", &listener_labels, 1);
                         let candidates_for_conn = candidates.clone();
@@ -713,6 +768,7 @@ async fn serve_via_factory(
                         debug!(?reason, "any listener connection shed");
                         drop(conn);
                     }
+                    }
                 },
                 Err(error) => warn!(?error, "any listener accept failed"),
             },
@@ -732,7 +788,16 @@ async fn serve_via_factory(
                     core.release(handle);
                 },
                 accepted = poll_fn(|cx| acceptor.poll_accept(cx)).fuse() => match accepted {
-                    Ok(conn) => match core.admit(proxima_listen::peer_ip(conn.peer().as_ref())) {
+                    Ok(conn) => {
+                        let peer_ip = proxima_listen::peer_ip(conn.peer().as_ref());
+                        // Blacklist gate BEFORE `core.admit` — never after
+                        // (see the primary accept loop above for why).
+                        let decision = if peer_is_banned(&blacklist, peer_ip) {
+                            Admission::Shed { reason: ShedReason::Blacklisted }
+                        } else {
+                            core.admit(peer_ip)
+                        };
+                        match decision {
                         Admission::Admit { handle, route } => {
                             telemetry.counter_inc("proxima.connections_accepted_total", &listener_labels, 1);
                             let candidates_for_conn = candidates.clone();
@@ -765,7 +830,8 @@ async fn serve_via_factory(
                             debug!(?reason, "any listener connection shed during quiesce");
                             drop(conn);
                         }
-                    },
+                        }
+                    }
                     Err(error) => warn!(?error, "any listener accept during quiesce failed"),
                 },
             }
@@ -775,12 +841,22 @@ async fn serve_via_factory(
     debug!("any listener draining: both connections and in-flight requests");
     admission.begin_drain();
     if let DrainOutcome::Draining = core.begin_drain() {
-        drain_both(&mut core, &admission, &mut release_rx, std::time::Duration::from_millis(drain_timeout_ms)).await;
+        drain_both(
+            &mut core,
+            &admission,
+            &mut release_rx,
+            std::time::Duration::from_millis(drain_timeout_ms),
+        )
+        .await;
     } else {
         // no connections were live; still bound-wait on any straggling
         // in-flight requests (a connection could have released between
         // begin_drain's snapshot and this check).
-        drain_requests_only(&admission, std::time::Duration::from_millis(drain_timeout_ms)).await;
+        drain_requests_only(
+            &admission,
+            std::time::Duration::from_millis(drain_timeout_ms),
+        )
+        .await;
     }
     Ok(())
 }
@@ -846,13 +922,16 @@ async fn serve_uds(
     global_cap: usize,
     handlers: Arc<std::collections::BTreeMap<String, AnyHandler>>,
     on_reject: Option<RejectHook>,
+    blacklist: Option<BlacklistTable>,
     spec: Arc<Value>,
     ready_signal: Option<std::sync::mpsc::Sender<()>>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(), ProximaError> {
     if path.exists() {
         std::fs::remove_file(&path).map_err(|err| {
-            ProximaError::Io(std::io::Error::other(format!("remove stale uds socket: {err}")))
+            ProximaError::Io(std::io::Error::other(format!(
+                "remove stale uds socket: {err}"
+            )))
         })?;
     }
     let listener = tokio::net::UnixListener::bind(&path)
@@ -873,7 +952,16 @@ async fn serve_uds(
     loop {
         tokio::select! {
             outcome = listener.accept() => match outcome {
-                Ok((socket, _peer)) => match core.admit(proxima_listen::peer_ip(None)) {
+                Ok((socket, _peer)) => {
+                    let peer_ip = proxima_listen::peer_ip(None);
+                    // Blacklist gate BEFORE `core.admit` — same discipline
+                    // as the TCP accept loops in `serve_via_factory`.
+                    let decision = if peer_is_banned(&blacklist, peer_ip) {
+                        Admission::Shed { reason: ShedReason::Blacklisted }
+                    } else {
+                        core.admit(peer_ip)
+                    };
+                    match decision {
                     Admission::Admit { handle, .. } => {
                         let stream: Box<dyn proxima_primitives::stream::StreamConnection> =
                             Box::new(UdsStream(tokio_util::compat::TokioAsyncReadCompatExt::compat(socket)));
@@ -901,7 +989,8 @@ async fn serve_uds(
                         debug!(?reason, "uds connection shed");
                         drop(socket);
                     }
-                },
+                    }
+                }
                 Err(error) => warn!(?error, "uds accept failed"),
             },
             _ = &mut shutdown => {
@@ -997,7 +1086,10 @@ async fn classify_and_drive(
         let tls_stream = match acceptor.accept(conn).await {
             Ok(stream) => stream,
             Err(error) => {
-                warn!(?error, "any listener: TLS handshake failed; rejecting plaintext connection");
+                warn!(
+                    ?error,
+                    "any listener: TLS handshake failed; rejecting plaintext connection"
+                );
                 return;
             }
         };
@@ -1010,7 +1102,16 @@ async fn classify_and_drive(
             && let Ok(name) = std::str::from_utf8(&alpn)
             && let Some(protocol) = candidates.iter().find(|candidate| candidate.name() == name)
         {
-            drive_matched(protocol.clone(), Vec::new(), boxed, peer_info, &handlers, &spec, &admission).await;
+            drive_matched(
+                protocol.clone(),
+                Vec::new(),
+                boxed,
+                peer_info,
+                &handlers,
+                &spec,
+                &admission,
+            )
+            .await;
             return;
         }
         classify_and_drive_plaintext(
@@ -1107,7 +1208,16 @@ async fn classify_and_drive_plaintext(
     let Some(protocol) = matched else {
         return;
     };
-    drive_matched(protocol, accumulated, raw_conn, peer_info, &handlers, &spec, &admission).await;
+    drive_matched(
+        protocol,
+        accumulated,
+        raw_conn,
+        peer_info,
+        &handlers,
+        &spec,
+        &admission,
+    )
+    .await;
 }
 
 /// Common tail: look up the matched candidate's bound handler, replay the
@@ -1343,7 +1453,13 @@ mod tests {
         let spec = Value::Null;
         let admission = proxima_listen::admission::ConnAdmission::unbounded();
         let outcome = h1
-            .drive(Box::new(NeverPolled), wrong_shaped_handler, &spec, None, &admission)
+            .drive(
+                Box::new(NeverPolled),
+                wrong_shaped_handler,
+                &spec,
+                None,
+                &admission,
+            )
             .await;
         let error = outcome.expect_err("mismatched handler shape must error, not panic");
         assert!(
@@ -1409,7 +1525,10 @@ mod tests {
     #[proxima::test(runtime = "tokio")]
     async fn drain_requests_only_waits_for_an_in_flight_request_to_release() {
         let admission = ConnAdmission::unbounded();
-        assert_eq!(admission.request_admit(), proxima_listen::admission::RequestAdmit::Admit);
+        assert_eq!(
+            admission.request_admit(),
+            proxima_listen::admission::RequestAdmit::Admit
+        );
 
         let (release_tx, release_rx) = futures::channel::oneshot::channel::<()>();
         let admission_for_holder = admission.clone();
@@ -1433,7 +1552,11 @@ mod tests {
             !drained_early,
             "drain must not complete while a request is still in flight"
         );
-        assert_eq!(admission.in_flight(), 1, "the in-flight request is still held");
+        assert_eq!(
+            admission.in_flight(),
+            1,
+            "the in-flight request is still held"
+        );
 
         // Release the held request; drain must now complete promptly.
         release_tx.send(()).expect("release send");
@@ -1457,14 +1580,10 @@ mod tests {
             .run_until(async move {
                 let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
                 let mut handlers = std::collections::BTreeMap::new();
-                handlers.insert(
-                    "h1".to_string(),
-                    erase_handler(into_handle(ConstantOk)),
-                );
+                handlers.insert("h1".to_string(), erase_handler(into_handle(ConstantOk)));
                 let candidates: Arc<[Arc<dyn AnyProtocol>]> =
                     Arc::from(vec![Arc::new(H1AnyProtocol::new()) as Arc<dyn AnyProtocol>]);
-                let protocol =
-                    AnyListenProtocol::from_candidates(candidates, Arc::new(handlers));
+                let protocol = AnyListenProtocol::from_candidates(candidates, Arc::new(handlers));
 
                 let tls_config = proxima_tls::TlsConfig::self_signed();
                 let mut spec = serde_json::Map::new();
@@ -1479,7 +1598,9 @@ mod tests {
                 .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-                let probe = tokio::net::TcpListener::bind(bind).await.expect("probe bind");
+                let probe = tokio::net::TcpListener::bind(bind)
+                    .await
+                    .expect("probe bind");
                 let addr = probe.local_addr().expect("probe addr");
                 drop(probe);
 

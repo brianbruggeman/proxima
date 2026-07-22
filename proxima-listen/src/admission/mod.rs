@@ -52,3 +52,12 @@ pub use state::{
 mod request;
 #[cfg(feature = "std")]
 pub use request::{ConnAdmission, RequestAdmit};
+
+/// Accept-edge DoS-blacklist — std-tier only, sibling of [`request`]: a
+/// `DenySignature` (`crate::any::deny`) and the reject-hook composition in
+/// `ListenerBuilder::serve` both need a `hashbrown`/`arc-swap`-backed table,
+/// same as [`ConnAdmission`].
+#[cfg(feature = "std")]
+mod blacklist;
+#[cfg(feature = "std")]
+pub use blacklist::{BlacklistConfig, BlacklistLayerBuilder, BlacklistTable, Strike};

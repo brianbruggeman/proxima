@@ -11,10 +11,10 @@
 
 #[cfg(feature = "std")]
 pub mod handle;
-#[cfg(feature = "std")]
-pub use handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
 #[cfg(feature = "tls")]
 pub use handle::TlsListenProtocol;
+#[cfg(feature = "std")]
+pub use handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
 
 #[cfg(feature = "std")]
 mod config;
@@ -69,6 +69,8 @@ pub use admission::{
     Route, ShedReason,
 };
 #[cfg(feature = "std")]
+pub use admission::{BlacklistConfig, BlacklistLayerBuilder, BlacklistTable, Strike};
+#[cfg(feature = "std")]
 pub use admission::{ConnAdmission, RequestAdmit};
 
 /// Open universal listener classification primitives: [`AnyProtocol`],
@@ -78,6 +80,6 @@ pub use admission::{ConnAdmission, RequestAdmit};
 pub mod any;
 #[cfg(feature = "std")]
 pub use any::{
-    AnyHandler, AnyProtocol, AnyRegistry, Classifier, ClassifyOutcome, ProbeVerdict, RejectReason,
-    downcast_handler, erase_handler,
+    AnyHandler, AnyProtocol, AnyRegistry, Classifier, ClassifyOutcome, DenySignature, ProbeVerdict,
+    RejectReason, downcast_handler, erase_handler,
 };

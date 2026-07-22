@@ -15,10 +15,12 @@
 //! `proxima-http`'s own connection drivers.
 
 mod classifier;
+mod deny;
 mod probe;
 mod registry;
 
 pub use classifier::{Classifier, ClassifyOutcome};
+pub use deny::DenySignature;
 pub use probe::{
     AnyHandler, AnyProtocol, ProbeVerdict, RejectReason, downcast_handler, erase_handler,
 };
