@@ -18,8 +18,10 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
 
 use bytes::Bytes;
+use proxima::prime::PrimeRuntime;
 use proxima::shutdown::ShutdownBarrier;
 use proxima::{
     App, Client, ListenerSpec, PipeHandle, ProximaError, Request, Response, SendPipe, into_handle,
@@ -60,20 +62,27 @@ impl ProxyPipe {
     }
 }
 
-// each app below builds its own independent runtime (no ambient one is
-// installed here — `runtime = "tokio"` just gives `main` an async context
-// to `.await` on), so `runtime = "tokio"` rather than `worker_threads`.
-#[proxima::main(runtime = "tokio")]
+// `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
+// to give `main` an async context to `.await` on (no tokio anywhere in the
+// build — see the crate's `cargo tree -i tokio` proof). That boot publishes
+// an AMBIENT runtime (`crate::runtime::install_runtime`), which `App::
+// builder().build()` would otherwise silently adopt — collapsing the two
+// apps below onto ONE shared runtime instead of each having its own. Each
+// app opts back OUT of that adoption with an explicit `.with_runtime(...)`
+// + `.with_acceptor_factory(...)`, the same override `multi_runtime`
+// demonstrates for the identical reason.
+#[proxima::main(cores = 1)]
 async fn main() -> Result<(), ProximaError> {
     let origin_bind: SocketAddr = ORIGIN_BIND.parse().expect("valid socket addr");
     let proxy_bind: SocketAddr = PROXY_BIND.parse().expect("valid socket addr");
 
     // one core per app is enough for one listener answering one request —
-    // set explicitly via the builder, no env var, no build-and-discard.
+    // an explicit prime runtime, independent of the other app's.
     let origin_app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     origin_app.mount("/", origin_pipe)?;
 
     // blocks until the accept lane has acked ready — no polling, no sleeping.
@@ -84,9 +93,10 @@ async fn main() -> Result<(), ProximaError> {
     // resolves the same prime HTTP backend a hand-built client would use.
     let client = Client::http(format!("http://{origin_bind}"))?;
     let proxy_app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     let proxy_pipe: PipeHandle = into_handle(ProxyPipe { client });
     proxy_app.mount("/", proxy_pipe)?;
 

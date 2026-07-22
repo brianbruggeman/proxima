@@ -1302,7 +1302,7 @@ required-features = ["macros", "instrument-metrics"]
 [[example]]
 name = "distributed_trace"
 path = "examples/distributed_trace/main.rs"
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "macros", "tokio"]
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "macros", "http1-native"]
 
 # backoff: retry with exponential backoff and jitter across transient failures.
 [[example]]
@@ -1480,17 +1480,17 @@ required-features = ["h3-native-upstream", "tracing-init"]
 [[example]]
 name = "proxy"
 path = "examples/proxy/main.rs"
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "tokio"]
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "http1-native", "macros"]
 
 [[example]]
 name = "gateway"
 path = "examples/gateway/main.rs"
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "tokio"]
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "http1-native", "macros"]
 
 [[example]]
 name = "load-balance"
 path = "examples/load-balance/main.rs"
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "tokio"]
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "http1-native", "macros"]
 
 [[example]]
 name = "crud"
@@ -1500,7 +1500,7 @@ required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "run
 [[example]]
 name = "integration"
 path = "examples/integration/main.rs"
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tokio"]
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "http1-native", "macros"]
 
 # the `units` binary bundles 15 test modules into one link target (see
 # tests/units.rs); 3 of them (scenario_smoke, settings_to_app,

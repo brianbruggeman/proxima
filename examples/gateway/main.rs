@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use proxima::prime::PrimeRuntime;
 use proxima::shutdown::ShutdownBarrier;
 use proxima::{
     App, Auth, Client, KeyExtractor, ListenerHandle, ListenerSpec, PipeHandle, ProximaError,
@@ -43,10 +44,15 @@ const GATEWAY_BIND: &str = "127.0.0.1:8090";
 const VALID_TOKEN: &str = "let-me-in";
 const RATE_LIMIT_CAPACITY: u64 = 2;
 
-// each app below builds its own independent runtime (no ambient one is
-// installed here — `runtime = "tokio"` just gives `main` an async context
-// to `.await` on), so `runtime = "tokio"` rather than `worker_threads`.
-#[proxima::main(runtime = "tokio")]
+// `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
+// to give `main` an async context to `.await` on (no tokio anywhere in the
+// build). That boot publishes an AMBIENT runtime (`crate::runtime::
+// install_runtime`), which `App::builder().build()` would otherwise
+// silently adopt — collapsing the three apps below onto ONE shared
+// runtime instead of each having its own. Each app opts back OUT of that
+// adoption with an explicit `.with_runtime(...)` + `.with_acceptor_factory(...)`,
+// the same override `multi_runtime` demonstrates for the identical reason.
+#[proxima::main(cores = 1)]
 async fn main() -> Result<(), ProximaError> {
     let origin_api_bind: SocketAddr = ORIGIN_API_BIND.parse().expect("valid socket addr");
     let origin_web_bind: SocketAddr = ORIGIN_WEB_BIND.parse().expect("valid socket addr");
@@ -110,11 +116,12 @@ async fn main() -> Result<(), ProximaError> {
     };
 
     // one core per app is enough for one listener answering one request —
-    // set explicitly via the builder, no env var, no build-and-discard.
+    // an explicit prime runtime, independent of the other apps'.
     let gateway_app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     // wildcard mount: the App's own top-level router pattern-matches paths
     // exactly (see `path_pattern`), so a catch-all is needed to let
     // "/api/..." and "/web/..." both reach the gateway pipe.
@@ -300,9 +307,10 @@ fn spawn_origin(
     calls: Arc<AtomicUsize>,
 ) -> Result<(App, ListenerHandle), ProximaError> {
     let app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     app.mount(
         "/{*rest}",
         into_handle(OriginPipe { label, calls }),

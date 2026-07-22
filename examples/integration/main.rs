@@ -51,10 +51,15 @@ async fn third_party_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, P
 }
 
 
-// each app below builds its own independent runtime (no ambient one is
-// installed here — `runtime = "tokio"` just gives `main` an async context
-// to `.await` on), so `runtime = "tokio"` rather than `worker_threads`.
-#[proxima::main(runtime = "tokio")]
+// `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
+// to give `main` an async context to `.await` on (no tokio anywhere in the
+// build). That boot publishes an AMBIENT runtime (`crate::runtime::
+// install_runtime`), which `App::builder().build()` would otherwise
+// silently adopt — collapsing the apps below onto ONE shared runtime
+// instead of each having its own. Each app opts back OUT of that adoption
+// with an explicit `.with_runtime(...)` + `.with_acceptor_factory(...)`,
+// the same override `multi_runtime` demonstrates for the identical reason.
+#[proxima::main(cores = 1)]
 async fn main() -> Result<(), ProximaError> {
     let origin_bind: SocketAddr = ORIGIN_BIND.parse().expect("valid socket addr");
     let edge_bind: SocketAddr = EDGE_BIND.parse().expect("valid socket addr");
@@ -64,11 +69,12 @@ async fn main() -> Result<(), ProximaError> {
     println!("phase 1: LIVE — front the vendor, record every response\n");
 
     // one core per app is enough for one listener answering one request —
-    // set explicitly via the builder, no env var, no build-and-discard.
+    // an explicit prime runtime, independent of the other apps'.
     let origin_app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     origin_app.mount("/", third_party_pipe)?;
     // blocks until the accept lane has acked ready — no polling, no sleeping.
     let origin_listener = origin_app.build_listener(ListenerSpec::http(origin_bind))?;
@@ -79,9 +85,10 @@ async fn main() -> Result<(), ProximaError> {
     // that SAME runtime — no separate, independently-built runtime to keep
     // in sync with the App's.
     let edge_live_app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     let edge_runtime = edge_live_app.runtime().expect("builder installs a runtime");
     let spigot = deferred_runtime();
     spigot.set(Arc::clone(&edge_runtime)).ok();
@@ -152,9 +159,10 @@ async fn main() -> Result<(), ProximaError> {
     // `ReplayUpstream` shares its SAME runtime instead of a
     // separately-built one only reused after the fact.
     let edge_fake_app = App::builder()
-        .with_runtime_cores(1)
         .with_defaults()?
-        .build()?;
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
     let replay_runtime = edge_fake_app.runtime().expect("builder installs a runtime");
     let replay = ReplayUpstream::from_jsonl(&cassette_path, "fake-front", replay_runtime).await?;
     println!(
