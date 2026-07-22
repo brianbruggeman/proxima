@@ -575,10 +575,12 @@ default = ["serve-prime", "http2", "http3", "histogram", "macros", "http-prime-d
 
 `serve-prime` makes `PrimeRuntime` the default serve+chain runtime — `tokio` is
 NOT in the default dependency graph at all. `http2`/`http3` resolve to the
-native, tokio-free drivers. Opt into the tokio-backed capability set
-(sister-tokio serve runtime, hyper, quinn-compat h3, h1) with `--features
-tokio`; `http1` specifically needs `tokio` because its connection driver has
-no sans-IO implementation yet (h2/h3 do).
+native, tokio-free drivers (`http2-native`/`http3-native`). Opt into the
+tokio-backed capability set (sister-tokio serve runtime, hyper, quinn-compat
+h3, legacy h1 client+listener) with `--features tokio`; `http1` layers that
+legacy hyper/tokio h1 stack on top of `http1-native`, which is itself the
+tokio-free sans-IO h1 driver (`serve_connection`/`serve_h1_connection`,
+generic over `futures::io::AsyncRead`/`AsyncWrite`).
 
 Telemetry substrate primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`, `log`, `recorder`, `native`, `config`) are structural — always-on, no feature flag. Only consumer-facing toggles that change the dependency closure remain as features.
 

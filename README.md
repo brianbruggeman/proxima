@@ -85,7 +85,7 @@ trace + metric + log. Reach for `#[proxima::piped]` only when you want a
 spawns the listener and returns only once it is actually accepting.
 
 ```bash
-cargo run --example hello --features http1
+cargo run --example hello --features http1-native
 ```
 
 ```

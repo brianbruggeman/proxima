@@ -404,10 +404,14 @@ default = [
     # `serve-prime` makes PrimeRuntime the default serve+chain runtime —
     # tokio is NOT in the default dependency graph at all (verify with
     # `cargo tree -e normal -i tokio`). `http2`/`http3` resolve to the
-    # native, tokio-free drivers. Opt into the tokio-backed capability
-    # set (sister-tokio serve runtime, hyper, quinn-compat h3, h1) with
-    # `--features tokio`; `http1` specifically needs `tokio` because its
-    # connection driver has no sans-IO implementation yet (h2/h3 do).
+    # native, tokio-free drivers (`http2-native`/`http3-native`). Opt into
+    # the tokio-backed capability set (sister-tokio serve runtime, hyper,
+    # quinn-compat h3, legacy h1 client+listener) with `--features tokio`;
+    # `http1` layers that legacy hyper/tokio h1 stack on top of
+    # `http1-native`, which is itself the tokio-free sans-IO h1 driver
+    # (`serve_connection`/`serve_h1_connection`, generic over
+    # `futures::io::AsyncRead`/`AsyncWrite`) — see `hello`'s doc comment
+    # below for the tokio-free flagship built on it.
     "serve-prime",
     "http2", "http3",
     "histogram", "macros",
@@ -1274,19 +1278,22 @@ name = "multi_runtime"
 path = "examples/multi_runtime/main.rs"
 # `http1` registers the "http" listen protocol both Apps bind — without it
 # this fails at runtime with `Registry("no listen protocol named 'http'")`,
-# not a compile error (same gotcha `hello`'s doc comment above explains).
+# not a compile error (`hello`'s doc comment below explains the same
+# registration gotcha for its own tokio-free `http1-native` build).
 required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
 
 [[example]]
 name = "hello"
 path = "examples/hello/main.rs"
-# `http1` is the h1+h2 ALPN-multiplexed listener `RunConfig::http`/`App::serve`
-# register under the name "http" (`AppBuilder::with_defaults`) — h1 has no
-# sans-IO driver yet, so `http1` pulls in `tokio` itself (see the `tokio`
-# feature's own doc comment above). Without it, `App::serve(RunConfig::http(..))`
-# fails at runtime with `Registry("no listen protocol named 'http'")`, not a
-# compile error, hence `required-features` here rather than relying on default.
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
+# `http1-native` registers the "http" h1+h2 ALPN-multiplexed listener
+# `RunConfig::http`/`App::serve` names (`AppBuilder::with_defaults`) via the
+# tokio-free `AcceptorFactory`-driven accept path (`http1-native`'s
+# `serve_connection`/`serve_h1_connection` IS the sans-IO h1 driver — see the
+# `tokio` feature's own doc comment above for `http1` vs `http1-native`).
+# Without it, `App::serve(RunConfig::http(..))` fails at runtime with
+# `Registry("no listen protocol named 'http'")`, not a compile error, hence
+# `required-features` here rather than relying on default.
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1-native"]
 
 [[example]]
 name = "runtime_select"
@@ -1296,7 +1303,7 @@ path = "examples/runtime_select/main.rs"
 # full `tokio` feature, not the narrower `runtime-tokio` marker). `http1`
 # registers the "http" listen protocol it binds — without it this fails at
 # runtime with `Registry("no listen protocol named 'http'")`, not a compile
-# error (same gotcha `hello`'s doc comment above explains).
+# error (same registration gotcha `hello`'s doc comment above explains).
 required-features = ["runtime-tokio", "tokio", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
 
 # unified instrument: one #[instrument] annotation -> span (trace) + duration

@@ -491,7 +491,7 @@ impl SendPipe for ProxyPipe {
 }
 ```
 
-Today (`examples/proxy/main.rs:51–61`):
+Today (`examples/proxy/main.rs:53–63`):
 
 ```rust
 struct ProxyPipe {
@@ -737,7 +737,7 @@ That is the whole algebra: **`and_then` (chain), filter, fan-out, fan-in, gate, 
 
 To answer HTTP, a pipe's input is an HTTP request and its output an HTTP response. `Handler` (`proxima-primitives/src/pipe/handler.rs:73`) is exactly that shape, pinned down: it is a trait, but you never implement it yourself — it is *blanket*-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>` (`handler.rs:75–78`). Section 7's `select_pipe` reaches `Handler` this way directly, since `#[proxima::piped(send)]` already gave it that `SendPipe` impl.
 
-A *bare* `async fn` — no `#[proxima::piped]` at all — reaches the server through an adjacent seam: `App::mount` accepts one directly via `IntoMountTarget<ViaFn>` (`src/app.rs:1228–1236`), which wraps the function in a small private `SendPipe` impl, `FnHandler` (`src/app.rs:1209`, `1211–1226`), before erasing it into a `Handler` the same way `select_pipe` was. This is the shape `hello` uses — mounted and served, this is `examples/hello/main.rs`, in full:
+A *bare* `async fn` — no `#[proxima::piped]` at all — reaches the server through an adjacent seam: `App::mount` accepts one directly via `IntoMountTarget<ViaFn>` (`src/app.rs:1286–1294`), which wraps the function in a small private `SendPipe` impl, `FnHandler` (`src/app.rs:1267`, `1269–1284`), before erasing it into a `Handler` the same way `select_pipe` was. This is the shape `hello` uses — mounted and served, this is `examples/hello/main.rs`, in full:
 
 ```rust
 /// A handler is just an `async fn`: typed request in, typed response out, nothing
@@ -770,15 +770,15 @@ async fn main() -> Result<(), ProximaError> {
 
 Three real pieces, each grounded in source:
 
-- **`App::new()`** (`src/app.rs:232–233`) builds the app with a runtime already set up — the engine that actually drives async work. Under a bare `#[proxima::main]`, `App::new()` adopts that same runtime rather than building a second, independent one.
-- **`app.mount("/", hello)`** (`mount` at `src/app.rs:538`) attaches your handler at a path. `mount` takes anything [`IntoMountTarget`] covers (`src/app.rs:1173`) — a handler-shaped pipe, a bare async fn, a registered pipe name, or an already-built `MountTarget`; `hello` here dispatches through the bare-fn arm just described. Underneath, that arm's own conversion runs `into_handle` (`proxima-primitives/src/pipe/handler.rs:86`), which wraps the erased `FnHandler` into a `PipeHandle`, one uniform type that can hold *any* handler. That is what lets `App` store handlers of different concrete types side by side, and mount several at different paths.
-- **`app.serve(RunConfig::http(bind))`** (`serve` at `src/app.rs:785`) spawns the listener and returns a `Server` handle *only once the socket is genuinely accepting* — no polling, no sleeping, no discovering `ECONNREFUSED` the hard way.
+- **`App::new()`** (`src/app.rs:253`) builds the app with a runtime already set up — the engine that actually drives async work. Under a bare `#[proxima::main]`, `App::new()` adopts that same runtime rather than building a second, independent one.
+- **`app.mount("/", hello)`** (`mount` at `src/app.rs:577`) attaches your handler at a path. `mount` takes anything [`IntoMountTarget`] covers (`src/app.rs:1231`) — a handler-shaped pipe, a bare async fn, a registered pipe name, or an already-built `MountTarget`; `hello` here dispatches through the bare-fn arm just described. Underneath, that arm's own conversion runs `into_handle` (`proxima-primitives/src/pipe/handler.rs:86`), which wraps the erased `FnHandler` into a `PipeHandle`, one uniform type that can hold *any* handler. That is what lets `App` store handlers of different concrete types side by side, and mount several at different paths.
+- **`app.serve(RunConfig::http(bind))`** (`serve` at `src/app.rs:829`) spawns the listener and returns a `Server` handle *only once the socket is genuinely accepting* — no polling, no sleeping, no discovering `ECONNREFUSED` the hard way.
 - **`server.run_until_signal()`** (`src/server.rs:94`) blocks until SIGINT/SIGTERM (or a `stop()` from any clone), then stops accepting and lets in-flight requests drain. That one line is the entire shutdown story — no `ShutdownBarrier` ceremony to hand-roll.
 
-Run it and, in another shell, curl it. `http1` is required, not default — h1 has no sans-IO driver yet, so the h1+h2 listener `RunConfig::http` names pulls in `tokio` underneath it (`examples/hello/main.rs`'s own module doc explains this; h2/h3 alone have native, tokio-free drivers):
+Run it and, in another shell, curl it. `http1-native` is required, not default — it registers the h1+h2 listener `RunConfig::http` names, over the tokio-free sans-IO h1 driver (`serve_connection`/`serve_h1_connection` in `proxima-http`; `examples/hello/main.rs`'s own module doc explains this). `http1` (which layers the legacy hyper/tokio h1 stack on top of `http1-native`) is not needed for this example — `hello` is tokio-free end to end:
 
 ```
-$ cargo run --example hello --features http1
+$ cargo run --example hello --features http1-native
 listening on http://127.0.0.1:8080
 
 $ curl http://127.0.0.1:8080/

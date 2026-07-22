@@ -1,9 +1,11 @@
 # Build a multi-runtime service
 
-**Prerequisites:** [Foundations](./00-foundations.md) — serving a pipe. Requires `--features "runtime-tokio tokio"`.
+**Prerequisites:** [Foundations](./00-foundations.md) — serving a pipe. Requires `--features "runtime-tokio,tokio,http1"`.
 **You will:** serve the *same* sans-IO pipe on prime **and** tokio concurrently in one process, sharing state across the runtime boundary. proxima's `Runtime` is an interface, not a process-singleton.
 **New concepts (in order):** the `Runtime` trait (prime vs tokio impls) · two runtimes in one process · shared state across the boundary.
-**Answer key:** [`examples/multi_runtime/main.rs`](../../examples/multi_runtime/main.rs) — `cargo run --example multi_runtime --features "runtime-tokio tokio"`.
+**Answer key:** [`examples/multi_runtime/main.rs`](../../examples/multi_runtime/main.rs) — `cargo run --example multi_runtime --features "runtime-tokio,tokio,http1"`.
+
+`http1` registers the "http" listen protocol both `App`s bind (`RunConfig::http`/`ListenerSpec::http` resolve to it) — without it this fails at runtime with `Registry("no listen protocol named 'http'")`, not a compile error; `Cargo.toml`'s own `required-features` for this example already lists it.
 
 The example frames it: *"tokio and glommio and monoio are process-singletons — one runtime per process. proxima's `Runtime` trait is just an interface: any number of implementations can live in the same process side by side."*
 
