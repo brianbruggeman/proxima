@@ -20,6 +20,8 @@ native = [
     "proxima-protocols/quic-alloc",
     "dep:rand",
     "dep:prime",
+    "dep:proxima-listen",
+    "proxima-listen/stream",
 ]
 # tokio-compat: glue allowing the native facade to be driven from tokio.
 # OFF by default per the workspace tokio-free-production rule.
@@ -33,7 +35,7 @@ quinn-compat = ["dep:quinn", "dep:quinn-proto", "dep:rustls", "dep:rcgen", "dep:
 proxima-core = { workspace = true }
 proxima-primitives = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
 tracing = { workspace = true }
 # Native path.
 proxima-protocols = { workspace = true, optional = true }
@@ -53,6 +55,8 @@ rcgen = { workspace = true, optional = true, features = ["aws_lc_rs", "pem"] }
 tokio-util = { workspace = true, optional = true, features = ["compat"] }
 serde = { workspace = true, features = ["derive"] }
 arrayvec.workspace = true
+proxima-listen = { workspace = true, optional = true }
+proxima-telemetry = { workspace = true, features = ["std", "macros"] }
 
 [lints]
 workspace = true
@@ -62,3 +66,4 @@ proxima = { workspace = true, features = ["test-support"] }
 proxima-protocols = { workspace = true, features = ["quic-alloc", "quic-mock-tls"] }
 proxima-runtime.workspace = true
 toml.workspace = true
+serde_json.workspace = true

@@ -31,7 +31,7 @@ pub mod tokio_endpoint;
 
 pub use config::{ClientConfig, EndpointConfig, ServerConfig};
 pub use endpoint::{Endpoint, EndpointError};
-pub use listener::{AcceptFn, Listener, ListenerError};
+pub use listener::{AcceptFn, DatagramIngest, Listener, ListenerError};
 
 #[cfg(feature = "tokio-compat")]
 pub use tokio_endpoint::TokioEndpoint;
