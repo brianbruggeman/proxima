@@ -30,7 +30,9 @@ use crate::pipes::PgPipeHandle;
 use crate::auth::PgAuth;
 use crate::broker::NotifyBroker;
 use crate::config::PgServerConfig;
-use crate::connection::{CancelRegistry, Negotiation, RuntimeHandle, negotiate, serve_session};
+use crate::connection::{
+    CancelRegistry, Negotiation, RuntimeHandle, negotiate, serve_session_admitted,
+};
 use crate::error::ServeError;
 
 #[cfg(feature = "tls")]
@@ -54,6 +56,13 @@ pub struct PgWireConnectionPipe {
     tls: Option<TlsAcceptor>,
     runtime: RuntimeHandle,
     label: String,
+    /// The listener-wide request-admission handle `PgWireAnyProtocol`
+    /// installs via [`Self::with_admission`]. `None` (the default a bare
+    /// `PgWireConnectionPipe::new` gets, e.g. in this file's own unit
+    /// tests) resolves to an unbounded, never-quiesced/-drained handle at
+    /// `call` time — behavior-preserving for every caller that predates
+    /// request-level admission.
+    admission: Option<proxima_listen::admission::ConnAdmission>,
 }
 
 impl PgWireConnectionPipe {
@@ -76,6 +85,7 @@ impl PgWireConnectionPipe {
             tls: None,
             runtime: None,
             label: label.into(),
+            admission: None,
         }
     }
 
@@ -94,6 +104,32 @@ impl PgWireConnectionPipe {
     #[must_use]
     pub fn with_runtime(mut self, runtime: RuntimeHandle) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Overrides the broker `new` constructs fresh. `PgWireAnyProtocol`
+    /// builds a FRESH `PgWireConnectionPipe` per accepted connection (to
+    /// carry that connection's own `ConnAdmission` clone) but must NOT
+    /// give each one its own broker — LISTEN/NOTIFY only works across
+    /// connections when they all share the SAME broker instance, built
+    /// once at `PgWireAnyProtocol::new` and installed here on every
+    /// per-connection pipe.
+    #[must_use]
+    pub fn with_broker(mut self, broker: Arc<NotifyBroker>) -> Self {
+        self.broker = broker;
+        self
+    }
+
+    /// Installs the listener-wide [`proxima_listen::admission::ConnAdmission`]
+    /// handle `PgWireAnyProtocol::drive` clones into a fresh
+    /// `PgWireConnectionPipe` per accepted connection (the shared counter
+    /// itself lives on the ONE `AnyListenProtocol`-driven listener, not per
+    /// connection — cloning here is one cheap `Arc` bump). Every frontend
+    /// message `main_loop` dispatches calls `request_admit`/
+    /// `request_release` through this handle.
+    #[must_use]
+    pub fn with_admission(mut self, admission: proxima_listen::admission::ConnAdmission) -> Self {
+        self.admission = Some(admission);
         self
     }
 
@@ -145,6 +181,7 @@ async fn drive_session<S>(
     broker: Arc<NotifyBroker>,
     tls: Option<TlsAcceptor>,
     runtime: RuntimeHandle,
+    admission: proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -153,16 +190,19 @@ where
     if let Some(byte) = peek_first_byte(&mut stream).await? {
         if is_direct_tls_first_byte(byte) {
             return serve_direct_tls(
-                byte, stream, query, auth, config, registry, broker, tls, runtime,
+                byte, stream, query, auth, config, registry, broker, tls, runtime, admission,
             )
             .await;
         }
         let stream = IntoFutures(Prepend::new(vec![byte], FromFutures(stream)));
-        return negotiate_and_serve(stream, query, auth, config, registry, broker, tls, runtime)
-            .await;
+        return negotiate_and_serve(
+            stream, query, auth, config, registry, broker, tls, runtime, admission,
+        )
+        .await;
     }
 
-    negotiate_and_serve(stream, query, auth, config, registry, broker, tls, runtime).await
+    negotiate_and_serve(stream, query, auth, config, registry, broker, tls, runtime, admission)
+        .await
 }
 
 /// Reads exactly one byte off the wire to classify the connection; `None`
@@ -195,6 +235,7 @@ async fn negotiate_and_serve<S>(
     broker: Arc<NotifyBroker>,
     tls: Option<TlsAcceptor>,
     runtime: RuntimeHandle,
+    admission: proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -206,7 +247,7 @@ where
             startup,
             leftover,
         } => {
-            serve_session(
+            serve_session_admitted(
                 stream,
                 session,
                 startup,
@@ -217,6 +258,7 @@ where
                 Some(registry),
                 Some(broker),
                 runtime,
+                admission,
             )
             .await
         }
@@ -230,7 +272,7 @@ where
         Negotiation::Closed => Ok(()),
         Negotiation::StartTls(stream) => {
             serve_tls(
-                stream, session, query, auth, config, registry, broker, tls, runtime,
+                stream, session, query, auth, config, registry, broker, tls, runtime, admission,
             )
             .await
         }
@@ -252,6 +294,7 @@ async fn serve_tls<S>(
     broker: Arc<NotifyBroker>,
     tls: Option<TlsAcceptor>,
     runtime: RuntimeHandle,
+    admission: proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -269,7 +312,7 @@ where
             startup,
             leftover,
         } => {
-            serve_session(
+            serve_session_admitted(
                 stream,
                 session,
                 startup,
@@ -280,6 +323,7 @@ where
                 Some(registry),
                 Some(broker),
                 runtime,
+                admission,
             )
             .await
         }
@@ -319,6 +363,7 @@ async fn serve_direct_tls<S>(
     broker: Arc<NotifyBroker>,
     tls: Option<TlsAcceptor>,
     runtime: RuntimeHandle,
+    admission: proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -335,7 +380,7 @@ where
             startup,
             leftover,
         } => {
-            serve_session(
+            serve_session_admitted(
                 stream,
                 session,
                 startup,
@@ -346,6 +391,7 @@ where
                 Some(registry),
                 Some(broker),
                 runtime,
+                admission,
             )
             .await
         }
@@ -378,6 +424,7 @@ async fn serve_tls<S>(
     _broker: Arc<NotifyBroker>,
     _tls: Option<TlsAcceptor>,
     _runtime: RuntimeHandle,
+    _admission: proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -401,6 +448,10 @@ impl SendPipe for PgWireConnectionPipe {
         #[cfg_attr(not(feature = "tls"), allow(clippy::clone_on_copy))]
         let tls = self.tls.clone();
         let runtime = self.runtime.clone();
+        let admission = self
+            .admission
+            .clone()
+            .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
         let handler = UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
             let HijackedSocket { stream, leftover } = hijacked;
             if !leftover.is_empty() {
@@ -411,9 +462,11 @@ impl SendPipe for PgWireConnectionPipe {
                     "pgwire upgrade received pre-buffered bytes before startup".into(),
                 ));
             }
-            drive_session(stream, query, auth, config, registry, broker, tls, runtime)
-                .await
-                .map_err(|error| ProximaError::Upstream(format!("pgwire session: {error}")))
+            drive_session(
+                stream, query, auth, config, registry, broker, tls, runtime, admission,
+            )
+            .await
+            .map_err(|error| ProximaError::Upstream(format!("pgwire session: {error}")))
         });
         Ok(Response::new(200).with_upgrade(handler))
     }

@@ -994,7 +994,51 @@ fn decode_binary_parameter(bytes: &[u8], declared: Option<Oid>) -> SqlValue {
     clippy::too_many_arguments,
     reason = "mirrors the wire lifecycle one-to-one; bundling would invent a type with no other consumer"
 )]
+/// Behavior-preserving wrapper over [`serve_session_admitted`] for every
+/// EXISTING caller (this crate's own test suite, `differential_realpg.rs`,
+/// `client_smoke.rs`) — an unbounded, never-quiesced/-drained
+/// [`proxima_listen::admission::ConnAdmission`], so none of those call
+/// sites need to change. `PgWireAnyProtocol::drive` (the new
+/// admission-aware caller) calls [`serve_session_admitted`] directly with
+/// the listener's REAL shared handle instead.
 pub async fn serve_session<S>(
+    stream: S,
+    session: Session,
+    startup: StartupOwned,
+    leftover: BytesMut,
+    query: PgPipeHandle,
+    auth: &PgAuth,
+    config: &PgServerConfig,
+    registry: Option<Arc<CancelRegistry>>,
+    broker: Option<Arc<NotifyBroker>>,
+    runtime: RuntimeHandle,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    serve_session_admitted(
+        stream,
+        session,
+        startup,
+        leftover,
+        query,
+        auth,
+        config,
+        registry,
+        broker,
+        runtime,
+        proxima_listen::admission::ConnAdmission::unbounded(),
+    )
+    .await
+}
+
+/// Request-admission-aware sibling of [`serve_session`] — every frontend
+/// message `main_loop` dispatches calls
+/// [`proxima_listen::admission::ConnAdmission::request_admit`]/
+/// `request_release` through `admission`, rendering an `ErrorResponse`
+/// (SQLSTATE `57P03`, cannot_connect_now) instead of dispatching on `Shed`.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_session_admitted<S>(
     mut stream: S,
     mut session: Session,
     startup: StartupOwned,
@@ -1005,6 +1049,7 @@ pub async fn serve_session<S>(
     registry: Option<Arc<CancelRegistry>>,
     broker: Option<Arc<NotifyBroker>>,
     runtime: RuntimeHandle,
+    admission: proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1103,6 +1148,7 @@ where
         &query,
         config,
         notify_rx,
+        &admission,
     )
     .await;
     if let Some(registry) = &registry {
@@ -1574,6 +1620,7 @@ async fn main_loop<S>(
     query: &PgPipeHandle,
     config: &PgServerConfig,
     mut notify_rx: UnboundedReceiver<Notification>,
+    admission: &proxima_listen::admission::ConnAdmission,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1617,7 +1664,7 @@ where
                 Err(error) => return Err(error.into()),
             };
             let outcome = if disposition == Disposition::Handle {
-                dispatch(&message, stream, out, session, state, query, config).await?
+                dispatch(&message, stream, out, session, state, query, config, admission).await?
             } else {
                 DispatchOutcome::Done
             };
@@ -1760,6 +1807,7 @@ enum DispatchOutcome {
     CopyIn(PendingCopyIn),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch<S>(
     message: &FrontendMessage<'_>,
     stream: &mut S,
@@ -1768,6 +1816,7 @@ async fn dispatch<S>(
     state: &mut ConnState,
     query: &PgPipeHandle,
     config: &PgServerConfig,
+    admission: &proxima_listen::admission::ConnAdmission,
 ) -> Result<DispatchOutcome, ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -1788,8 +1837,30 @@ where
                 finish_simple(stream, out, session).await?;
                 return Ok(DispatchOutcome::Done);
             }
+            // Request-level admission: the simple-query boundary is
+            // pgwire's natural "one request" unit (mirrors h1 per request,
+            // h2 per stream, redis per command). On `Shed` the query never
+            // reaches the engine; the listener's admission policy (quiesce
+            // window, hard drain, or a configured in-flight cap) renders as
+            // a real `ErrorResponse` (57P03, cannot_connect_now) instead —
+            // the connection stays alive and ready for the next query.
+            if let proxima_listen::admission::RequestAdmit::Shed { reason } =
+                admission.request_admit()
+            {
+                append_error(
+                    out,
+                    &ErrorInfo::new(
+                        "57P03",
+                        format!("server is shedding requests ({reason:?}); retry shortly"),
+                    ),
+                )?;
+                finish_simple(stream, out, session).await?;
+                return Ok(DispatchOutcome::Done);
+            }
             let request = build_request(verb::QUERY, sql_text, state.request());
-            let response = SendPipe::call(query.as_ref(), request).await?;
+            let response = SendPipe::call(query.as_ref(), request).await;
+            admission.request_release();
+            let response = response?;
             match downcast_reply(response)? {
                 PgReply::Query(reply) => {
                     emit_query_reply(
@@ -3216,6 +3287,79 @@ mod tests {
         assert!(
             has_message_tag(&ts.write_data, b'Z'),
             "ReadyForQuery (Z) must be present"
+        );
+    }
+
+    // The listener's admission policy (quiesce/drain/capacity), not the
+    // SQL engine, decides whether a simple query reaches it. Proves the
+    // Shed path renders a real ErrorResponse (57P03, cannot_connect_now)
+    // instead of dispatching to the engine, and that the connection stays
+    // alive afterward (ReadyForQuery follows, ready for the next query).
+    #[proxima::test(runtime = "tokio")]
+    async fn simple_query_is_shed_with_a_57p03_error_while_admission_is_quiescing() {
+        let session = session_after_startup();
+        let mut input = build_query_message("select 1");
+        input.extend_from_slice(&build_terminate_message());
+        let mut ts = TestStream::new(input);
+
+        let admission = proxima_listen::admission::ConnAdmission::unbounded();
+        admission.begin_quiesce();
+
+        serve_session_admitted(
+            &mut ts,
+            session,
+            default_startup(),
+            bytes::BytesMut::new(),
+            echo_handle(),
+            &PgAuth::Trust,
+            &default_config(),
+            None,
+            None,
+            None,
+            admission,
+        )
+        .await
+        .expect("serve_session_admitted must complete cleanly");
+
+        let found_57p03 = {
+            let mut offset = 0;
+            let mut found = false;
+            while offset < ts.write_data.len() {
+                let Some(&tag) = ts.write_data.get(offset) else {
+                    break;
+                };
+                let Some(len_slice) = ts.write_data.get(offset + 1..offset + 5) else {
+                    break;
+                };
+                let len =
+                    i32::from_be_bytes([len_slice[0], len_slice[1], len_slice[2], len_slice[3]]);
+                let Ok(frame_len) = usize::try_from(len) else {
+                    break;
+                };
+                if tag == b'E'
+                    && let Ok(Some((BackendMessage::ErrorResponse { fields }, _))) =
+                        parse_backend(&ts.write_data[offset..])
+                    && fields
+                        .get(error_field::CODE)
+                        .is_some_and(|code| code == "57P03")
+                {
+                    found = true;
+                }
+                offset += 1 + frame_len;
+            }
+            found
+        };
+        assert!(
+            found_57p03,
+            "expected a 57P03 (cannot_connect_now) ErrorResponse when admission sheds the query"
+        );
+        assert!(
+            has_message_tag(&ts.write_data, b'Z'),
+            "ReadyForQuery (Z) must follow — the connection stays alive through the shed"
+        );
+        assert!(
+            !has_message_tag(&ts.write_data, b'D'),
+            "the shed query must never reach the engine (no DataRow)"
         );
     }
 

@@ -199,19 +199,20 @@ impl ListenerBuilder {
     /// SQL engine directly — the one axis that genuinely needs more than a
     /// marker key: `query` is the same typed
     /// [`PgPipeHandle`](proxima_pgwire::PgPipeHandle)
-    /// [`PgWireListenProtocol::new`](proxima_pgwire::PgWireListenProtocol::new)
+    /// [`PgWireAnyProtocol::new`](proxima_pgwire::PgWireAnyProtocol::new)
     /// takes, matching a SQL verb `Request`/`Response` pair no generic
     /// `.handle(pipe)` (`Request<Bytes>`/`Response<Bytes>`) can carry. This
     /// is the same asymmetry `.tls(TlsConfig)` has against the client's bare
     /// `.tls()`: a listener needs real material a client-side axis never
     /// does. Unlike `.h2()`/`.h3()` (which resolve to one shared instance
     /// self-registered onto the fresh `App`), `.serve()` constructs a fresh
-    /// `PgWireListenProtocol` carrying THIS exact `query` every call —
-    /// `App::new()` cannot pre-register a protocol it doesn't yet have a
-    /// query engine for. `.handle(pipe)` is still required before `.serve()`
-    /// (the one validation path stays uniform across axes) even though
-    /// `PgWireListenProtocol::serve` never calls it once a
-    /// constructor-supplied `query` is present.
+    /// single-candidate `AnyListenProtocol` wrapping a `PgWireAnyProtocol`
+    /// carrying THIS exact `query` every call — `App::new()` cannot
+    /// pre-register a protocol it doesn't yet have a query engine for.
+    /// `.handle(pipe)` is still required before `.serve()` (the one
+    /// validation path stays uniform across axes) even though the resolved
+    /// protocol never calls it once a constructor-supplied `query` is
+    /// present.
     #[cfg(feature = "pgwire")]
     #[must_use]
     pub fn pgwire(mut self, query: proxima_pgwire::PgPipeHandle) -> Self {
@@ -429,12 +430,21 @@ impl ListenerBuilder {
         // `.pgwire(query)` carries a typed query engine `App::new()`'s
         // static registration set cannot know about ahead of time —
         // register a fresh instance carrying it now, before `.serve()`
-        // resolves `protocol` ("pgwire") against the registry.
+        // resolves `protocol` ("pgwire") against the registry. Resolves
+        // through `AnyListenProtocol` (a single-candidate `PgWireAnyProtocol`
+        // mount, not the standalone `PgWireListenProtocol`) so `.pgwire(query)`
+        // gets the SAME real `ListenerCore`/`ConnAdmission` admission and
+        // graceful drain every other TCP-stream listener now has —
+        // `PgWireListenProtocol` itself stays available (unretired) for
+        // direct/registry construction outside this builder.
         #[cfg(feature = "pgwire")]
         if let Some(query) = pgwire_query {
-            app.register_listen_protocol(Arc::new(proxima_pgwire::PgWireListenProtocol::new(
-                "pgwire", query,
-            )))?;
+            app.register_listen_protocol(Arc::new(
+                crate::listeners::AnyListenProtocol::single_candidate(
+                    "pgwire",
+                    Arc::new(proxima_pgwire::PgWireAnyProtocol::new("pgwire", query)),
+                ),
+            ))?;
         }
         // `.redis(handler)` carries a typed command handler the same way
         // `.pgwire(query)` carries its query engine — register a fresh
