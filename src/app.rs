@@ -60,6 +60,23 @@ pub struct App {
     /// `runtime-tokio`; see `proxima_net::tokio`, which has no `DatagramFactory`
     /// impl yet), so an h3-native listener currently requires the prime runtime.
     datagram_factory: Option<Arc<dyn DatagramFactory>>,
+    /// The open universal listener's candidate registry — `AnyProtocol`
+    /// impls (h1, h2 prior-knowledge) registered once here, mirroring how
+    /// `listen_registry` holds compiled `ListenProtocol`s. `Listener::any()`
+    /// / `.accepts()` / `.accept()` (`src/listener/handle.rs`) read a
+    /// snapshot of this at `.serve()` time.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    any_registry: Arc<proxima_listen::any::AnyRegistry>,
+    /// Per-protocol DEFAULT handler for the open universal listener — a
+    /// name -> `AnyHandler` map, empty at construction (there is no real
+    /// default pipe to register at `App::new()` time; a caller populates it
+    /// via `register_any_default_handler` before `Listener::any()` resolves).
+    /// `.accept(name, handler)`/`.any_handler(name, handler)` on the builder
+    /// override/add entries per-listener without mutating this App-level
+    /// table. See `proxima_listen::any::AnyHandler`'s doc for why the
+    /// handler is type-erased instead of a fixed `PipeHandle`.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    any_default_handlers: Arc<ArcSwap<BTreeMap<String, proxima_listen::any::AnyHandler>>>,
 }
 
 /// Pick the default serve+chain runtime and its matching acceptor factory.
@@ -249,6 +266,22 @@ pub fn offline_runtime() -> Result<Arc<dyn Runtime>, ProximaError> {
     }
 }
 
+/// Build a fresh, populated open-universal-listener candidate registry —
+/// factored out so both `App::new` and `App::__internal_assemble` register
+/// the identical compiled set (h1 always; h2 prior-knowledge when
+/// `http2-native` is compiled in) without duplicating the registration
+/// calls.
+#[cfg(any(feature = "http1", feature = "http1-native"))]
+fn new_any_registry() -> Result<Arc<proxima_listen::any::AnyRegistry>, ProximaError> {
+    let any_registry = Arc::new(proxima_listen::any::AnyRegistry::new());
+    any_registry.register(Arc::new(crate::listeners::H1AnyProtocol::new()))?;
+    #[cfg(feature = "http2")]
+    any_registry.register(Arc::new(
+        crate::listeners::H2PriorKnowledgeAnyProtocol::new(),
+    ))?;
+    Ok(any_registry)
+}
+
 impl App {
     pub fn new() -> Result<Self, ProximaError> {
         let listen_registry = Arc::new(ListenRegistry::new());
@@ -265,6 +298,17 @@ impl App {
         listen_registry.register(Arc::new(McpListenProtocol::new()))?;
         #[cfg(feature = "tcp")]
         listen_registry.register(Arc::new(crate::listeners::StreamListenProtocol::new()))?;
+
+        // Open universal listener candidates: registered once here so
+        // `Listener::any()`/`.accepts()`/`.accept()` always see the same
+        // compiled set `App::new()` shipped with. Mirrors the listen
+        // registry's own registration a few lines up, just a peer registry
+        // (`AnyProtocol`, not `ListenProtocol`) — see that trait's doc for
+        // why it's a peer, not an extension.
+        #[cfg(any(feature = "http1", feature = "http1-native"))]
+        let any_registry = new_any_registry()?;
+        #[cfg(any(feature = "http1", feature = "http1-native"))]
+        let any_default_handlers = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
         // Adopt whatever runtime `#[proxima::main]` already booted; otherwise
         // default to the prime per-core runtime + prime acceptor (the prime
@@ -298,6 +342,10 @@ impl App {
             runtime,
             acceptor_factory,
             datagram_factory,
+            #[cfg(any(feature = "http1", feature = "http1-native"))]
+            any_registry,
+            #[cfg(any(feature = "http1", feature = "http1-native"))]
+            any_default_handlers,
         })
     }
 
@@ -684,6 +732,10 @@ impl App {
             runtime,
             acceptor_factory,
             datagram_factory,
+            #[cfg(any(feature = "http1", feature = "http1-native"))]
+            any_registry: new_any_registry()?,
+            #[cfg(any(feature = "http1", feature = "http1-native"))]
+            any_default_handlers: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
         })
     }
 
@@ -897,6 +949,48 @@ impl App {
         protocol: Arc<dyn proxima_listen::ListenProtocol>,
     ) -> Result<(), ProximaError> {
         self.listen_registry.register(protocol)
+    }
+
+    /// Snapshot of the open universal listener's candidate registry —
+    /// `Listener::any()`/`.accepts()`/`.accept()` read this at `.serve()`
+    /// time to resolve which `AnyProtocol` candidates are eligible.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn any_registry(&self) -> Arc<proxima_listen::any::AnyRegistry> {
+        self.any_registry.clone()
+    }
+
+    /// Register (or overwrite) the App-level DEFAULT handler for one
+    /// `AnyProtocol` candidate name — the fallback `Listener::any()` uses
+    /// for a candidate with no per-listener `.accept(name, handler)`
+    /// override. Last-write-wins (unlike `register_listen_protocol`, a
+    /// default handler is ordinary configuration data, not a program
+    /// error to redefine).
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    pub fn register_any_default_handler(
+        &self,
+        name: impl Into<String>,
+        handler: proxima_listen::any::AnyHandler,
+    ) {
+        let name = name.into();
+        loop {
+            let current = self.any_default_handlers.load_full();
+            let mut next: BTreeMap<String, proxima_listen::any::AnyHandler> = (*current).clone();
+            next.insert(name.clone(), handler.clone());
+            let prev = self
+                .any_default_handlers
+                .compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&prev, &current) {
+                return;
+            }
+        }
+    }
+
+    /// Snapshot of the App-level per-protocol default-handler table.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn any_default_handlers(&self) -> Arc<BTreeMap<String, proxima_listen::any::AnyHandler>> {
+        self.any_default_handlers.load_full()
     }
 
     pub fn build_listener(&self, spec: ListenerSpec) -> Result<ListenerHandle, ProximaError> {

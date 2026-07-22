@@ -20,6 +20,13 @@
 ))]
 mod error_render;
 
+/// `Listener::any()` scaffolding: the h1/h2-prior-knowledge
+/// `AnyProtocol` candidates plus `AnyListenProtocol`, the open registry
+/// -driven sibling of [`listener::HttpListenProtocol`]. Needs `http-listener`
+/// for the h1 candidate (`serve_h1_connection`) at minimum; the h2
+/// candidate additionally needs `http2-native`.
+#[cfg(feature = "http-listener")]
+pub mod any_listener;
 #[cfg(any(
     feature = "http1",
     feature = "http1-native",
