@@ -139,7 +139,7 @@ proxy_protocol-codec-trait = ["proxy_protocol", "dep:proxima-codec"]
 # from proxima-redis (codec half only; the client stays in the
 # proxima-redis facade crate, mirroring the pgwire/pgwire_codec split).
 # Tier-1: no_std + alloc.
-redis = []
+redis = ["dep:memchr"]
 # RedisFrameCodec impls `FrameCodec` for RESP2/RESP3 — the plug-and-play-
 # floor sweep's spot-check that "could cleanly impl FrameCodec" is the
 # right call for this codec (validate/pipe-transform-sweep).
