@@ -98,7 +98,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"
 tokio-postgres = { workspace = true }
 rstest = { workspace = true }
 temp-env = { workspace = true }
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support-tokio"] }
 
 [lints]
 workspace = true
