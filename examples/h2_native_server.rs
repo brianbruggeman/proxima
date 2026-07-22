@@ -1,5 +1,5 @@
 //! `.h2()` through `Listener::builder()`: binds the native, tokio-free h2c
-//! listener ([`H2ListenProtocol`](proxima::listeners::H2ListenProtocol)) and
+//! listener (an `h2` `AnyProtocol` candidate on the unified `AnyListenProtocol`) and
 //! proves it with a real h2 client round trip — the native
 //! [`H2ClientUpstream`](proxima::h2::H2ClientUpstream) over
 //! [`PrimeTcpUpstream`](proxima::PrimeTcpUpstream), no external `h2` crate,
