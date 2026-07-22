@@ -437,10 +437,15 @@ impl HttpListenProtocol {
             }
             _ => dispatch,
         };
-        // TLS termination is opt-in via `__proxima_tls` in the spec (set by
-        // `Listener::run_with_runtime` when `with_tls(...)` was called).
-        // Build the acceptor once at listener start so a bad cert / key
-        // surfaces here instead of on the first connection.
+        // TLS termination is opt-in via `__proxima_tls` in the spec —
+        // stamped in by `proxima_listen::TlsListenProtocol`, a `ListenProtocol`
+        // DECORATOR composed in front of this protocol (there is no `tls`
+        // field on `ListenerSpec`/`Listener`; TLS on/off is the presence of
+        // that wrapper). This protocol's own `serve` doesn't know or care
+        // whether it's being called directly or through the decorator — it
+        // just reads the same marker key either way. Build the acceptor
+        // once at listener start so a bad cert / key surfaces here instead
+        // of on the first connection.
         #[cfg(feature = "tls")]
         let tls_acceptor: Option<tokio_rustls::TlsAcceptor> =
             match proxima_tls::config_from_spec_value(spec.get(proxima_tls::SPEC_KEY)) {

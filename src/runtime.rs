@@ -243,11 +243,19 @@ impl PrimeServeExt for PrimeRuntime {
         tls: proxima_tls::TlsConfig,
         pipe: PipeHandle,
     ) -> Result<ListenerHandle, ProximaError> {
-        let registry = make_http_registry()?;
+        // TLS composes as a `TlsListenProtocol` decorator around the plain
+        // `HttpListenProtocol`, carried via `ListenerSpec::protocol` — there
+        // is no `ListenerSpec::with_tls`/`.tls` field. `make_http_registry`
+        // is unused on this path (the wrapped protocol is carried, not
+        // looked up by name) but `run_with_runtime` still takes a registry
+        // parameter, so an empty one is passed.
+        let registry = ListenRegistry::new();
         let runtime: Arc<dyn proxima_runtime::Runtime> = self.clone();
         let acceptor = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-        ListenerSpec::http(bind)
-            .with_tls(tls)
+        let protocol: Arc<dyn proxima_listen::ListenProtocol> = Arc::new(
+            proxima_listen::TlsListenProtocol::new(Arc::new(HttpListenProtocol::new()), tls),
+        );
+        ListenerSpec::protocol(bind, protocol)
             .attach(pipe)
             .run_with_runtime(
                 &registry,

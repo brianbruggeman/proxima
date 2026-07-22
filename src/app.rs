@@ -840,6 +840,21 @@ impl App {
         Ok(())
     }
 
+    /// Register an additional [`ListenProtocol`](proxima_listen::ListenProtocol)
+    /// onto this `App`'s listen registry, on top of the `http`/`mcp`/`stream`
+    /// set `App::new` registers by default. The listen-side mirror of
+    /// registering a client [`PipeFactory`](crate::pipe_factory::PipeFactory):
+    /// makes a protocol name resolvable by `run_until_signal`/`serve`'s
+    /// string-keyed `RunConfig::protocol` without requiring every caller to
+    /// carry the concrete `Arc` themselves through
+    /// [`ListenerSpec::protocol`](proxima_listen::handle::ListenerSpec::protocol).
+    pub fn register_listen_protocol(
+        &self,
+        protocol: Arc<dyn proxima_listen::ListenProtocol>,
+    ) -> Result<(), ProximaError> {
+        self.listen_registry.register(protocol)
+    }
+
     pub fn build_listener(&self, spec: ListenerSpec) -> Result<ListenerHandle, ProximaError> {
         let dispatch: PipeHandle = into_handle(ContextInjector::new(
             self.router_handle(),
@@ -959,8 +974,7 @@ impl App {
             protocol_name,
             shutdown: proxima_listen::handle::ShutdownPolicy::drain_30s(),
             spec: listen.clone(),
-            #[cfg(feature = "tls")]
-            tls: None,
+            protocol: None,
         };
         listener_spec.attach(dispatch).run_with_runtime(
             &self.listen_registry,
