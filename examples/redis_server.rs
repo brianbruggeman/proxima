@@ -27,8 +27,7 @@ use proxima::error::ProximaError;
 use proxima::listeners::redis::RespValue;
 use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::Response;
-use proxima_redis::{RedisPipeReply, RedisPipeRequest};
+use proxima_redis::RedisRequest;
 
 /// A tiny in-memory KV store — the business handler the driver dispatches
 /// every non-pub/sub command to. GET/SET/DEL only; anything else answers
@@ -41,18 +40,20 @@ struct KvStore {
 }
 
 impl SendPipe for KvStore {
-    type In = RedisPipeRequest;
-    type Out = RedisPipeReply;
+    type In = RedisRequest;
+    type Out = RespValue;
     type Err = ProximaError;
 
     fn call(
         &self,
-        request: RedisPipeRequest,
-    ) -> impl core::future::Future<Output = Result<RedisPipeReply, ProximaError>> + Send {
+        request: RedisRequest,
+    ) -> impl core::future::Future<Output = Result<RespValue, ProximaError>> + Send {
         let store = self.data.clone();
         async move {
-            let args = &request.payload.args;
-            let reply = match request.method.as_bytes() {
+            let RedisRequest::Command { verb, args } = request else {
+                return Ok(RespValue::Error("ERR unknown command".to_string()));
+            };
+            let reply = match verb.as_slice() {
                 b"GET" => {
                     let key = args.first().cloned().unwrap_or_default();
                     let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -79,7 +80,7 @@ impl SendPipe for KvStore {
                     String::from_utf8_lossy(other)
                 )),
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 }

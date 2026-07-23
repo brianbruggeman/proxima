@@ -75,4 +75,4 @@ pub use glob::GlobSet;
 #[cfg(feature = "listen")]
 pub use pipe::RedisConnectionPipe;
 #[cfg(feature = "listen")]
-pub use pipes::{RedisPipeHandle, RedisPipeReply, RedisPipeRequest, into_redis_handle};
+pub use pipes::{RedisPipeHandle, into_redis_handle};

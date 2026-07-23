@@ -161,25 +161,27 @@ mod tests {
     use bytes::Bytes;
     use proxima_core::ProximaError;
     use proxima_primitives::pipe::method::Method;
-    use proxima_primitives::pipe::request::{Request, RequestContext, Response};
+    use proxima_primitives::pipe::request::{Request, RequestContext};
     use proxima_primitives::pipe::upgrade::HijackedSocket;
 
     use crate::config::RedisServerConfig;
-    use crate::pipes::{RedisPipeReply, RedisPipeRequest, into_redis_handle};
+    use crate::pipes::into_redis_handle;
 
     use super::*;
 
     struct EchoPipe;
 
     impl SendPipe for EchoPipe {
-        type In = RedisPipeRequest;
-        type Out = RedisPipeReply;
+        type In = proxima_protocols::redis::RedisRequest;
+        type Out = proxima_protocols::redis::RespValue;
         type Err = ProximaError;
 
-        async fn call(&self, _request: RedisPipeRequest) -> Result<RedisPipeReply, ProximaError> {
-            Ok(Response::typed(
-                200,
-                proxima_protocols::redis::RespValue::SimpleString("OK".to_string()),
+        async fn call(
+            &self,
+            _request: proxima_protocols::redis::RedisRequest,
+        ) -> Result<proxima_protocols::redis::RespValue, ProximaError> {
+            Ok(proxima_protocols::redis::RespValue::SimpleString(
+                "OK".to_string(),
             ))
         }
     }

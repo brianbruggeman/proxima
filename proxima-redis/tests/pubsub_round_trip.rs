@@ -16,9 +16,8 @@ use proxima_core::ProximaError;
 use proxima_listen::admission::ConnAdmission;
 use proxima_net::tokio::tokio_stream_listener::TokioTcpConnection;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::Response;
-use proxima_protocols::redis::{ParseError, RespValue, encode_command, parse};
-use proxima_redis::{RedisBroker, RedisPipeReply, RedisPipeRequest, RedisServerConfig, serve_connection};
+use proxima_protocols::redis::{ParseError, RedisRequest, RespValue, encode_command, parse};
+use proxima_redis::{RedisBroker, RedisServerConfig, serve_connection};
 
 #[derive(Default, Clone)]
 struct KvStore {
@@ -26,18 +25,20 @@ struct KvStore {
 }
 
 impl SendPipe for KvStore {
-    type In = RedisPipeRequest;
-    type Out = RedisPipeReply;
+    type In = RedisRequest;
+    type Out = RespValue;
     type Err = ProximaError;
 
     fn call(
         &self,
-        request: RedisPipeRequest,
-    ) -> impl core::future::Future<Output = Result<RedisPipeReply, ProximaError>> + Send {
+        request: RedisRequest,
+    ) -> impl core::future::Future<Output = Result<RespValue, ProximaError>> + Send {
         let store = self.data.clone();
         async move {
-            let args = &request.payload.args;
-            let reply = match request.method.as_bytes() {
+            let RedisRequest::Command { verb, args } = request else {
+                return Ok(RespValue::Error("ERR unknown command".to_string()));
+            };
+            let reply = match verb.as_slice() {
                 b"GET" => {
                     let key = args.first().cloned().unwrap_or_default();
                     match store.lock().expect("kv lock").get(&key) {
@@ -50,7 +51,7 @@ impl SendPipe for KvStore {
                     String::from_utf8_lossy(other)
                 )),
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 }

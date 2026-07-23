@@ -441,14 +441,15 @@ pub trait ListenerProtocolExt: Sized {
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
     /// use bytes::Bytes;
-    /// use proxima_redis::{RedisPipeRequest, RedisPipeReply, into_redis_handle};
+    /// use proxima_redis::{RedisRequest, into_redis_handle};
+    /// use proxima_redis::RespValue;
     ///
     /// struct Unimplemented;
     /// impl SendPipe for Unimplemented {
-    ///     type In = RedisPipeRequest;
-    ///     type Out = RedisPipeReply;
+    ///     type In = RedisRequest;
+    ///     type Out = RespValue;
     ///     type Err = ProximaError;
-    ///     async fn call(&self, _request: RedisPipeRequest) -> Result<RedisPipeReply, ProximaError> {
+    ///     async fn call(&self, _request: RedisRequest) -> Result<RespValue, ProximaError> {
     ///         unreachable!("no client connects in this doctest")
     ///     }
     /// }
