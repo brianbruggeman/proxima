@@ -353,6 +353,11 @@ name = "bench_memcached_frame_ownership"
 harness = false
 required-features = ["memcached-codec-trait"]
 
+[[test]]
+name = "memcached_frame_ownership_alloc"
+path = "tests/memcached_frame_ownership_alloc.rs"
+required-features = ["memcached-codec-trait"]
+
 [[bench]]
 name = "bench_grpc_framing"
 harness = false
