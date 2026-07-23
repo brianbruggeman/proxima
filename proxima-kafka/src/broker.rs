@@ -40,11 +40,9 @@ use futures::stream::StreamExt;
 
 use proxima_core::ProximaError;
 use proxima_core::live::{Live, LiveControl, live};
-use proxima_primitives::pipe::request::Response;
 use proxima_primitives::pipe::{BestEffort, KeyedFanOut, SendPipe};
 
 use crate::config::KafkaServerConfig;
-use crate::pipes::{KafkaPipeReply, KafkaPipeRequest};
 use crate::wire::{
     self, FetchPartitionResult, FetchResponse, FetchTopicResult, MetadataBroker, MetadataPartition,
     MetadataResponse, MetadataTopic, ProducePartitionResult, ProduceResponse, ProduceTopicResult,
@@ -257,12 +255,12 @@ impl KafkaBroker {
 }
 
 impl SendPipe for KafkaBroker {
-    type In = KafkaPipeRequest;
-    type Out = KafkaPipeReply;
+    type In = RequestBody;
+    type Out = ResponseBody;
     type Err = ProximaError;
 
-    async fn call(&self, request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
-        match request.payload {
+    async fn call(&self, request: RequestBody) -> Result<ResponseBody, ProximaError> {
+        match request {
             RequestBody::Produce(produce) => {
                 let mut topics = Vec::with_capacity(produce.topics.len());
                 for topic_data in produce.topics {
@@ -286,10 +284,7 @@ impl SendPipe for KafkaBroker {
                         partitions,
                     });
                 }
-                Ok(Response::typed(
-                    200,
-                    ResponseBody::Produce(ProduceResponse { topics }),
-                ))
+                Ok(ResponseBody::Produce(ProduceResponse { topics }))
             }
             RequestBody::Fetch(fetch) => {
                 let mut topics = Vec::with_capacity(fetch.topics.len());
@@ -316,15 +311,12 @@ impl SendPipe for KafkaBroker {
                         partitions,
                     });
                 }
-                Ok(Response::typed(
-                    200,
-                    ResponseBody::Fetch(FetchResponse { topics }),
-                ))
+                Ok(ResponseBody::Fetch(FetchResponse { topics }))
             }
             RequestBody::Metadata(metadata) => {
                 let requested = metadata.topics;
                 let response = self.metadata(requested.as_deref());
-                Ok(Response::typed(200, ResponseBody::Metadata(response)))
+                Ok(ResponseBody::Metadata(response))
             }
             RequestBody::ApiVersions => {
                 // protocol-level in `crate::framed_app::KafkaFramedApp` — a
@@ -332,10 +324,7 @@ impl SendPipe for KafkaBroker {
                 // here too keeps `KafkaBroker` correct standing alone
                 // (e.g. driven directly in a unit test, bypassing the
                 // connection driver).
-                Ok(Response::typed(
-                    200,
-                    ResponseBody::ApiVersions(wire::ApiVersionsResponse::supported()),
-                ))
+                Ok(ResponseBody::ApiVersions(wire::ApiVersionsResponse::supported()))
             }
         }
     }
@@ -345,33 +334,23 @@ impl SendPipe for KafkaBroker {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::method::Method;
-    use proxima_primitives::pipe::request::{Request, RequestContext};
 
     fn broker() -> KafkaBroker {
         KafkaBroker::new(Arc::new(KafkaServerConfig::default()))
     }
 
-    fn produce_request(topic: &str, partition: i32, record_set: &[u8]) -> KafkaPipeRequest {
-        Request {
-            method: Method::from_bytes(b"PRODUCE"),
-            path: bytes::Bytes::new(),
-            query: proxima_primitives::pipe::header_list::HeaderList::new(),
-            metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-            payload: RequestBody::Produce(wire::ProduceRequest {
-                acks: 1,
-                timeout_ms: 1000,
-                topics: vec![wire::ProduceTopicData {
-                    topic: topic.to_string(),
-                    partitions: vec![wire::ProducePartitionData {
-                        partition,
-                        record_set: bytes::Bytes::copy_from_slice(record_set),
-                    }],
+    fn produce_request(topic: &str, partition: i32, record_set: &[u8]) -> RequestBody {
+        RequestBody::Produce(wire::ProduceRequest {
+            acks: 1,
+            timeout_ms: 1000,
+            topics: vec![wire::ProduceTopicData {
+                topic: topic.to_string(),
+                partitions: vec![wire::ProducePartitionData {
+                    partition,
+                    record_set: bytes::Bytes::copy_from_slice(record_set),
                 }],
-            }),
-            stream: None,
-            context: RequestContext::default(),
-        }
+            }],
+        })
     }
 
     fn fetch_request(
@@ -379,28 +358,20 @@ mod tests {
         partition: i32,
         fetch_offset: i64,
         max_wait_ms: i32,
-    ) -> KafkaPipeRequest {
-        Request {
-            method: Method::from_bytes(b"FETCH"),
-            path: bytes::Bytes::new(),
-            query: proxima_primitives::pipe::header_list::HeaderList::new(),
-            metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-            payload: RequestBody::Fetch(wire::FetchRequest {
-                replica_id: -1,
-                max_wait_ms,
-                min_bytes: 1,
-                topics: vec![wire::FetchTopicData {
-                    topic: topic.to_string(),
-                    partitions: vec![wire::FetchPartitionData {
-                        partition,
-                        fetch_offset,
-                        max_bytes: 1_048_576,
-                    }],
+    ) -> RequestBody {
+        RequestBody::Fetch(wire::FetchRequest {
+            replica_id: -1,
+            max_wait_ms,
+            min_bytes: 1,
+            topics: vec![wire::FetchTopicData {
+                topic: topic.to_string(),
+                partitions: vec![wire::FetchPartitionData {
+                    partition,
+                    fetch_offset,
+                    max_bytes: 1_048_576,
                 }],
-            }),
-            stream: None,
-            context: RequestContext::default(),
-        }
+            }],
+        })
     }
 
     #[proxima::test(runtime = "tokio")]
@@ -410,7 +381,7 @@ mod tests {
             .call(produce_request("orders", 0, b"hello"))
             .await
             .expect("produce");
-        let ResponseBody::Produce(response) = produced.payload else {
+        let ResponseBody::Produce(response) = produced else {
             panic!("expected Produce");
         };
         assert_eq!(response.topics[0].partitions[0].base_offset, 0);
@@ -419,7 +390,7 @@ mod tests {
             .call(fetch_request("orders", 0, 0, 0))
             .await
             .expect("fetch");
-        let ResponseBody::Fetch(response) = fetched.payload else {
+        let ResponseBody::Fetch(response) = fetched else {
             panic!("expected Fetch");
         };
         assert_eq!(
@@ -441,7 +412,7 @@ mod tests {
             .call(produce_request("orders", 0, b"second"))
             .await
             .expect("produce 2");
-        let ResponseBody::Produce(response) = second.payload else {
+        let ResponseBody::Produce(response) = second else {
             panic!("expected Produce");
         };
         assert_eq!(response.topics[0].partitions[0].base_offset, 1);
@@ -450,7 +421,7 @@ mod tests {
             .call(fetch_request("orders", 0, 1, 0))
             .await
             .expect("fetch");
-        let ResponseBody::Fetch(response) = fetched.payload else {
+        let ResponseBody::Fetch(response) = fetched else {
             panic!("expected Fetch");
         };
         assert_eq!(
@@ -466,7 +437,7 @@ mod tests {
             .call(fetch_request("nobody-produced-here", 0, 0, 0))
             .await
             .expect("fetch");
-        let ResponseBody::Fetch(response) = fetched.payload else {
+        let ResponseBody::Fetch(response) = fetched else {
             panic!("expected Fetch");
         };
         assert!(response.topics[0].partitions[0].record_set.is_empty());
@@ -492,7 +463,7 @@ mod tests {
             .expect("fetch must return well before the 5s max_wait_ms timeout")
             .expect("join")
             .expect("fetch");
-        let ResponseBody::Fetch(response) = fetched.payload else {
+        let ResponseBody::Fetch(response) = fetched else {
             panic!("expected Fetch");
         };
         assert_eq!(
@@ -509,17 +480,9 @@ mod tests {
             .await
             .expect("produce");
 
-        let request = Request {
-            method: Method::from_bytes(b"METADATA"),
-            path: bytes::Bytes::new(),
-            query: proxima_primitives::pipe::header_list::HeaderList::new(),
-            metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-            payload: RequestBody::Metadata(wire::MetadataRequest { topics: None }),
-            stream: None,
-            context: RequestContext::default(),
-        };
+        let request = RequestBody::Metadata(wire::MetadataRequest { topics: None });
         let response = broker.call(request).await.expect("metadata");
-        let ResponseBody::Metadata(metadata) = response.payload else {
+        let ResponseBody::Metadata(metadata) = response else {
             panic!("expected Metadata");
         };
         assert_eq!(metadata.topics.len(), 1);

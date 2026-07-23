@@ -191,16 +191,16 @@ pub trait ListenerProtocolExt: Sized {
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
     /// use bytes::Bytes;
-    /// use proxima_kafka::{KafkaPipeRequest, KafkaPipeReply, into_kafka_handle};
+    /// use proxima_kafka::{RequestBody, ResponseBody, into_kafka_handle};
     ///
     /// // No client ever dials in this doctest, so neither handler body
     /// // runs — each only has to satisfy its typed contract.
     /// struct Unimplemented;
     /// impl SendPipe for Unimplemented {
-    ///     type In = KafkaPipeRequest;
-    ///     type Out = KafkaPipeReply;
+    ///     type In = RequestBody;
+    ///     type Out = ResponseBody;
     ///     type Err = ProximaError;
-    ///     async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+    ///     async fn call(&self, _request: RequestBody) -> Result<ResponseBody, ProximaError> {
     ///         unreachable!("no client connects in this doctest")
     ///     }
     /// }
@@ -237,14 +237,14 @@ pub trait ListenerProtocolExt: Sized {
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
     /// use bytes::Bytes;
-    /// use proxima_kafka::{KafkaPipeRequest, KafkaPipeReply, into_kafka_handle};
+    /// use proxima_kafka::{RequestBody, ResponseBody, into_kafka_handle};
     ///
     /// struct Unimplemented;
     /// impl SendPipe for Unimplemented {
-    ///     type In = KafkaPipeRequest;
-    ///     type Out = KafkaPipeReply;
+    ///     type In = RequestBody;
+    ///     type Out = ResponseBody;
     ///     type Err = ProximaError;
-    ///     async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+    ///     async fn call(&self, _request: RequestBody) -> Result<ResponseBody, ProximaError> {
     ///         unreachable!("no client connects in this doctest")
     ///     }
     /// }
