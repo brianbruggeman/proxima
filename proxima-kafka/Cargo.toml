@@ -1,0 +1,112 @@
+[package]
+name = "proxima-kafka"
+description = "Kafka client facade: the async client Pipe and blocking driver over the sans-IO Produce/Fetch/Metadata wire codec (ClientSession), so proxima::Client speaks Kafka, plus a broker-facade AnyProtocol listener candidate. The frame/header codec itself lives in proxima-protocols::kafka."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+# the sans-IO length-prefix framing + request-header parser (KafkaFrameCodec,
+# parse_frame, parse_request_header) — see proxima_protocols::kafka docs. The
+# Produce/Fetch/Metadata BODY codec (this crate's `wire` module) is new work
+# built on top, since proxima-protocols::kafka only lifts framing + header.
+# `wire` itself never touches framing (pure body encode/decode over plain
+# buffers), so this is only pulled in by `client`/`listen`, which both drive
+# real wire I/O and need the envelope.
+proxima-protocols = { workspace = true, default-features = false, features = ["kafka", "kafka-codec-trait"], optional = true }
+# the `FrameCodec` trait itself (`KafkaFrameCodec::encode_frame` /
+# `parse_frame`) — proxima-protocols re-exports the impl type, not the
+# trait; `client`/`listen`'s own response-envelope encoding needs the
+# trait in scope to call it.
+proxima-codec = { workspace = true, default-features = false, features = ["alloc"], optional = true }
+# the async client Pipe + sans-IO ClientSession. `alloc` (no std) keeps the
+# bare wire codec graph tokio-free; the `client` feature lifts proxima-primitives
+# to std (the ResponseStream / futures-io edges the driver needs).
+proxima-primitives = { workspace = true, default-features = false, features = ["alloc"], optional = true }
+proxima-core = { workspace = true, default-features = false, optional = true }
+# `wire` (this crate's Produce/Fetch/Metadata/ApiVersions body codec) is
+# always available, matching how proxima-redis's bare RESP codec re-export
+# needs no feature — so `bytes` (record_set payloads) and `thiserror`
+# (`WireError`) are hard dependencies, not gated behind `client`/`listen`.
+bon = { workspace = true, optional = true }
+bytes = { workspace = true, default-features = false }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+futures = { workspace = true, features = ["std", "async-await"], optional = true }
+futures-timer = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
+# the tokio-free native listener stack: `KafkaAnyProtocol` mounts into
+# `proxima-listen`'s `AnyListenProtocol` open universal listener over the
+# runtime-matched acceptor factory — see the `listen` feature below.
+proxima-listen = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, features = ["std"], optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = []
+# the async client `Pipe` + `PipeFactory` driving the sans-IO ClientSession over
+# a `StreamUpstream`, so `proxima::Client` speaks Kafka as a registered
+# protocol. `--no-default-features` leaves the bare sans-IO wire codec with zero
+# tokio in the dependency graph for bare-metal embedding.
+client = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "dep:proxima-protocols",
+    "dep:proxima-codec",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:bon",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:tracing",
+]
+# the tokio-free native (sans-IO) Kafka broker-facade LISTENER: the
+# `Connection` FSM + `KafkaAnyProtocol` mounting into `proxima-listen`'s
+# `AnyListenProtocol` open universal listener over the runtime-matched
+# acceptor factory. Mirrors `proxima-redis`'s own `listen` feature.
+# `--no-default-features` leaves the bare sans-IO codec (and the `client`
+# graph) with zero tokio; this feature adds the upgrade seam (std-only) the
+# connection pipe returns, and the `AnyProtocol` candidate.
+listen = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "proxima-core/io-async-compat",
+    "dep:proxima-protocols",
+    "dep:proxima-codec",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:bon",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:futures-timer",
+    "dep:serde",
+    "dep:tracing",
+    "dep:proxima-listen",
+    "dep:proxima-runtime",
+    "dep:serde_json",
+]
+
+[dev-dependencies]
+proxima-net = { workspace = true, features = ["tokio"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
+rstest = { workspace = true }
+temp-env = { workspace = true }
+# `tokio` alongside `test-support`: in-tree tests use
+# `#[proxima::test(runtime = "tokio")]`, whose `run_tokio*` drivers live
+# behind `proxima-test/tokio-driver` — only reachable transitively through
+# `proxima`'s own `tokio` feature (mirrors `proxima-redis`'s identical
+# dev-dependency line for the same reason).
+proxima = { workspace = true, features = ["test-support", "tokio"] }
+
+[lints]
+workspace = true
