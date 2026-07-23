@@ -1748,7 +1748,7 @@ required-features = ["tokio"]
 [[bench]]
 name = "bench_serve_prime_vs_tokio"
 harness = false
-required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
+required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1", "tokio"]
 
 # Concurrent aggregate throughput on PrimeServeExt::serve_http (the daemon
 # :9091 path): cores=1 (pre-round-robin single-core) vs cores=10 (round-robin
