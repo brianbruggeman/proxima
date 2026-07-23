@@ -111,16 +111,16 @@ fn resolve_config(
 ///
 /// ```
 /// use proxima_listen::any::AnyProtocol;
-/// use proxima_memcached::{MemcachedAnyProtocol, MemcachedPipeRequest, MemcachedPipeReply, into_memcached_handle};
+/// use proxima_memcached::{MemcachedAnyProtocol, MemcachedRequest, Reply, into_memcached_handle};
 /// use proxima_core::ProximaError;
 /// use proxima_primitives::pipe::SendPipe;
 ///
 /// struct Unimplemented; // no client dials in this doctest
 /// impl SendPipe for Unimplemented {
-///     type In = MemcachedPipeRequest;
-///     type Out = MemcachedPipeReply;
+///     type In = MemcachedRequest;
+///     type Out = Reply;
 ///     type Err = ProximaError;
-///     async fn call(&self, _request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
+///     async fn call(&self, _request: MemcachedRequest) -> Result<Reply, ProximaError> {
 ///         unreachable!()
 ///     }
 /// }
@@ -199,17 +199,16 @@ impl AnyProtocol for MemcachedAnyProtocol {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::request::Response;
 
     struct EchoPipe;
 
     impl proxima_primitives::pipe::SendPipe for EchoPipe {
-        type In = crate::pipes::MemcachedPipeRequest;
-        type Out = crate::pipes::MemcachedPipeReply;
+        type In = proxima_protocols::memcached::MemcachedRequest;
+        type Out = proxima_protocols::memcached::Reply;
         type Err = ProximaError;
 
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
-            Ok(Response::typed(200, proxima_protocols::memcached::Reply::Ok))
+            Ok(proxima_protocols::memcached::Reply::Ok)
         }
     }
 

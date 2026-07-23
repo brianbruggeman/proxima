@@ -22,24 +22,22 @@ use proxima_listen::admission::ConnAdmission;
 use proxima_listen::any::{AnyProtocol, erase_handler};
 use proxima_net::tokio::tokio_stream_listener::TokioTcpConnection;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::Response;
 use proxima_primitives::stream::StreamConnection;
 use proxima_protocols::memcached::{MemcachedRequest, Reply, StoredValue};
 
 use proxima_memcached::{
-    MemcachedAnyProtocol, MemcachedPipeHandle, MemcachedPipeReply, MemcachedPipeRequest,
-    MemcachedServerConfig, into_memcached_handle,
+    MemcachedAnyProtocol, MemcachedPipeHandle, MemcachedServerConfig, into_memcached_handle,
 };
 
 struct EchoHandler;
 
 impl SendPipe for EchoHandler {
-    type In = MemcachedPipeRequest;
-    type Out = MemcachedPipeReply;
+    type In = MemcachedRequest;
+    type Out = Reply;
     type Err = ProximaError;
 
-    async fn call(&self, request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
-        let reply = match request.payload {
+    async fn call(&self, request: MemcachedRequest) -> Result<Reply, ProximaError> {
+        let reply = match request {
             MemcachedRequest::Get { keys, .. } if keys == Bytes::from_static(b"k") => {
                 Reply::Values(vec![StoredValue {
                     key: b"k".to_vec(),
@@ -53,7 +51,7 @@ impl SendPipe for EchoHandler {
             MemcachedRequest::Delete { .. } => Reply::Deleted,
             _ => Reply::Error,
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 

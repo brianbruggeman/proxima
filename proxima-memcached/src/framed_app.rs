@@ -2,9 +2,7 @@
 //! `proxima_listen::any::FramedAny<MemcachedCodec, MemcachedFramedApp, _, _>`
 //! — the generic stateless `AnyProtocol` driver replacing this crate's
 //! former bespoke `serve_connection`/`main_loop` (see git history:
-//! `connection.rs`, `pipe.rs`). `build_request`/`method_for` are moved
-//! here verbatim from that driver — no wire-mapping logic is rewritten,
-//! only relocated next to their one remaining caller.
+//! `connection.rs`, `pipe.rs`).
 //!
 //! [`MemcachedOutcome`] is the sentinel `FramedAny` asked for: a plain
 //! reply and admission-shed reply both keep serving; `quit` and a
@@ -15,72 +13,14 @@
 //! (`Option`) + `AsFrame::keep_serving` (`bool`) instead of an early
 //! `return` inside a bespoke loop.
 
-use bytes::Bytes;
-
 use proxima_core::ProximaError;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::method::Method;
-use proxima_primitives::pipe::request::{Request, RequestContext};
 
 use proxima_protocols::memcached::frame_codec::{MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, Violation};
-use proxima_protocols::memcached::{MemcachedRequest, Reply, StoreMode};
+use proxima_protocols::memcached::{MemcachedRequest, Reply};
 
-use crate::pipes::{MemcachedPipeHandle, MemcachedPipeRequest};
-
-fn method_for(request: &MemcachedRequest) -> Method {
-    let verb: &[u8] = match request {
-        MemcachedRequest::Get { gets: false, .. } => b"GET",
-        MemcachedRequest::Get { gets: true, .. } => b"GETS",
-        MemcachedRequest::Store {
-            mode: StoreMode::Set,
-            ..
-        } => b"SET",
-        MemcachedRequest::Store {
-            mode: StoreMode::Add,
-            ..
-        } => b"ADD",
-        MemcachedRequest::Store {
-            mode: StoreMode::Replace,
-            ..
-        } => b"REPLACE",
-        MemcachedRequest::Store {
-            mode: StoreMode::Append,
-            ..
-        } => b"APPEND",
-        MemcachedRequest::Store {
-            mode: StoreMode::Prepend,
-            ..
-        } => b"PREPEND",
-        MemcachedRequest::Cas { .. } => b"CAS",
-        MemcachedRequest::Delete { .. } => b"DELETE",
-        MemcachedRequest::Counter {
-            increment: true, ..
-        } => b"INCR",
-        MemcachedRequest::Counter {
-            increment: false, ..
-        } => b"DECR",
-        MemcachedRequest::Touch { .. } => b"TOUCH",
-        MemcachedRequest::FlushAll { .. } => b"FLUSH_ALL",
-        MemcachedRequest::Stats { .. } => b"STATS",
-        MemcachedRequest::Version => b"VERSION",
-        MemcachedRequest::Quit => b"QUIT",
-    };
-    Method::from_bytes(verb)
-}
-
-fn build_request(payload: MemcachedRequest) -> MemcachedPipeRequest {
-    Request {
-        method: method_for(&payload),
-        path: Bytes::new(),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload,
-        stream: None,
-        context: RequestContext::default(),
-    }
-}
+use crate::pipes::MemcachedPipeHandle;
 
 /// A parsed frame's outcome — what [`proxima_listen::any::FramedAny`]'s
 /// generic `drive` loop should do with it. `Reply`/`Silent` keep
@@ -183,10 +123,10 @@ impl SendPipe for MemcachedFramedApp {
 /// performs generically.
 async fn dispatch(handler: &MemcachedPipeHandle, request: MemcachedRequest) -> MemcachedOutcome {
     let noreply = request.is_noreply();
-    let dispatched = SendPipe::call(handler.as_ref(), build_request(request)).await;
+    let dispatched = SendPipe::call(handler.as_ref(), request).await;
     match dispatched {
-        Ok(_response) if noreply => MemcachedOutcome::Silent,
-        Ok(response) => MemcachedOutcome::Reply(response.payload),
+        Ok(_reply) if noreply => MemcachedOutcome::Silent,
+        Ok(reply) => MemcachedOutcome::Reply(reply),
         Err(_error) if noreply => MemcachedOutcome::Silent,
         Err(error) => {
             tracing::error!(error = %error, "memcached handler error");
@@ -222,18 +162,20 @@ pub fn shed_reply(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
-    use proxima_primitives::pipe::request::Response;
+    use proxima_protocols::memcached::StoreMode;
 
     struct EchoHandler;
 
     impl SendPipe for EchoHandler {
-        type In = MemcachedPipeRequest;
-        type Out = crate::pipes::MemcachedPipeReply;
+        type In = MemcachedRequest;
+        type Out = Reply;
         type Err = ProximaError;
 
-        async fn call(&self, request: MemcachedPipeRequest) -> Result<Self::Out, ProximaError> {
-            let reply = match request.payload {
+        async fn call(&self, request: MemcachedRequest) -> Result<Self::Out, ProximaError> {
+            let reply = match request {
                 MemcachedRequest::Get { keys, .. } if keys == Bytes::from_static(b"k") => {
                     Reply::Values(vec![proxima_protocols::memcached::StoredValue {
                         key: b"k".to_vec(),
@@ -247,7 +189,7 @@ mod tests {
                 MemcachedRequest::Delete { .. } => Reply::Deleted,
                 _ => Reply::Error,
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 
