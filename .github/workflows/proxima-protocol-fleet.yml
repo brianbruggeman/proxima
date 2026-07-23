@@ -1,0 +1,86 @@
+name: proxima-protocol-fleet
+
+# Gate for the protocol-fleet crates: proxima-memcached, proxima-dns,
+# proxima-kafka, proxima-mqtt, proxima-amqp. These landed on main with NO CI
+# coverage — no workflow referenced them, nothing ran --workspace, and
+# affected.yml/.github/ci-areas.toml had no area for them, leaving 278
+# passing tests ungated. Mirrors proxima-redis.yml's shape (per-crate build +
+# test + clippy + the sans-IO tokio invariant), matrixed over the fleet
+# instead of one crate: the sans-IO codec (proxima-protocols), the client
+# Pipe facade, and the tokio-free native listener stack (memcached/kafka/mqtt
+# gate their listener e2e suite behind `required-features = ["listen"]`,
+# exercised here via --all-features) all re-prove on every push without
+# anyone's memory (guiding-principle 16).
+
+on:
+  push:
+    branches: [main, "integrate/protocol-fleet", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # The full per-crate gate: bare codec build + all-features build + clippy +
+  # codec/client/listener tests, matrixed over the fleet.
+  protocol-fleet-gate:
+    name: protocol-fleet-gate.sh (${{ matrix.crate }}, ${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.protocol_fleet == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        crate:
+          - proxima-memcached
+          - proxima-dns
+          - proxima-kafka
+          - proxima-mqtt
+          - proxima-amqp
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/protocol-fleet-gate.sh ${{ matrix.crate }}
+
+  # Tokio gate as its own fast job, matrixed over the fleet: each crate's
+  # no-default-features codec graph must carry zero tokio (the bare-metal /
+  # DPDK embedding contract) — same claim proxima-redis makes, extended to
+  # the five new crates.
+  tokio-gate:
+    name: no-default-features carries zero tokio (${{ matrix.crate }})
+    needs: changes
+    if: needs.changes.outputs.protocol_fleet == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - proxima-memcached
+          - proxima-dns
+          - proxima-kafka
+          - proxima-mqtt
+          - proxima-amqp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: assert empty tokio subtree
+        run: |
+          leaked="$(cargo tree -p ${{ matrix.crate }} --no-default-features -e normal -i tokio 2>/dev/null || true)"
+          if printf '%s' "$leaked" | grep -q '^tokio'; then
+            printf 'FAIL: tokio leaked into the no-default-features graph:\n%s\n' "$leaked"
+            exit 1
+          fi
+          echo "ok: no tokio in the bare ${{ matrix.crate }} graph"

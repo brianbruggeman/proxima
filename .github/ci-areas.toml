@@ -15,6 +15,27 @@ paths = ["scripts/proxima-pgwire-gate.sh", ".github/workflows/proxima-pgwire.yml
 packages = ["proxima-redis"]
 paths = ["scripts/proxima-redis-gate.sh", ".github/workflows/proxima-redis.yml"]
 
+# The five protocol crates (memcached/dns/kafka/mqtt/amqp) all depend on
+# proxima-listen through their optional `listen` feature — an optional dep
+# isn't in the default-feature resolve graph cargo-metadata walks, so the
+# dependency-closure detection above can't see it. proxima-listen and
+# proxima-protocols are path-globbed explicitly so a change to either shared
+# driver still trips this area (a proxima-listen change breaking kafka must
+# not stay green).
+[area.protocol_fleet]
+packages = ["proxima-memcached", "proxima-dns", "proxima-kafka", "proxima-mqtt", "proxima-amqp"]
+paths = [
+    "scripts/protocol-fleet-gate.sh",
+    ".github/workflows/proxima-protocol-fleet.yml",
+    "proxima-memcached/**",
+    "proxima-dns/**",
+    "proxima-kafka/**",
+    "proxima-mqtt/**",
+    "proxima-amqp/**",
+    "proxima-listen/**",
+    "proxima-protocols/**",
+]
+
 [area.telemetry]
 packages = ["proxima-telemetry"]
 paths = ["scripts/telemetry-gate.sh", ".github/workflows/proxima-telemetry.yml"]
