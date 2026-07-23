@@ -565,5 +565,10 @@ pub mod codec_trait;
 #[cfg(feature = "dns-codec-trait")]
 pub use codec_trait::{DnsDatagramCodec, Message, QuestionIter, RecordIter, parse_message};
 
+#[cfg(feature = "dns-codec-trait")]
+pub mod frame_codec;
+#[cfg(feature = "dns-codec-trait")]
+pub use frame_codec::{DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation};
+
 pub mod encode;
 pub use encode::{AnswerRecord, EncodeError, EncodeQuestion, encode_name, encode_query, encode_response};

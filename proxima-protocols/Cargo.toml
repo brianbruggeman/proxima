@@ -52,7 +52,12 @@ std = []
 dns = []
 # DnsDatagramCodec impls `proxima_codec::Datagram` for DNS-over-UDP — one
 # packet is one message, matching the trait's atomic-datagram contract.
-dns-codec-trait = ["dns", "dep:proxima-codec"]
+# Also carries `frame_codec::DnsTcpCodec`, the TCP-direction `FrameCodec`
+# + `OwnFrame`/`Incomplete` impl `proxima_listen::any::FramedAny` composes
+# against — folded in here (mirrors `memcached-codec-trait`'s identical
+# choice) so `codec-pipe` (needed for `OwnFrame`/`Incomplete`) is always
+# present alongside the plain `FrameCodec` impl for this one protocol.
+dns-codec-trait = ["dns", "dep:proxima-codec", "codec-pipe"]
 
 # Sans-IO TCP connection state machine (RFC 793 control FSM) — extracted
 # from proxima-tcp. Tier-3: no_std + no-alloc, zero deps.
