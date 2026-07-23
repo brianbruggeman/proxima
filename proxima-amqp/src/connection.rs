@@ -6,27 +6,38 @@
 //! business [`AmqpPipeHandle`] before routing it, and writes AMQP frames
 //! back onto the wire.
 //!
-//! Mirrors `proxima_redis::connection`'s `main_loop`/`read_some`/
-//! `flush_out` shape, plus the same multi-source `select!` pattern (racing
-//! the socket read against this connection's consumer push channel).
+//! Mirrors `proxima_redis::connection`'s `main_loop`/`flush_out` shape,
+//! plus the same multi-source merge pattern (racing the socket read against
+//! this connection's consumer push channel and shutdown) via
+//! [`proxima_listen::wait_for_wire_event`], the shared outer-wait driver
+//! (see `crate::wait_sources` for the source enum and why AMQP's
+//! channel-multiplexed push is still a flat `Bytes` stream at this layer).
 //!
 //! Sequential await-per-event (mandatory, same reasoning as redis):
 //! `basic.publish` replies (implicitly, via routing) must observe request
 //! order, and interleaving is answered by reading every already-buffered
-//! frame to completion before the next socket read.
+//! frame to completion before the next socket read. That inner decode+
+//! dispatch loop stays bespoke here (not folded into the shared driver):
+//! `dispatch_publish`'s handler round-trip and `dispatch_method`'s per-
+//! channel content reassembly (`fsm.close_channel`, consumer subscribe/
+//! cancel bookkeeping) are not [`proxima_core::markers::DropSafe`] — a
+//! dropped `basic.publish` mid-flight could leave a half-applied route, and
+//! the FSM's per-channel reassembly state is exactly the kind of built-up-
+//! over-several-frames state a raced-and-cancelled poll would corrupt. Only
+//! the outer WAIT (is there more to do) is shared; see
+//! `proxima_listen::serve_multiplexed`'s module doc.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::channel::mpsc::{self, UnboundedReceiver};
+use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use futures::stream::StreamExt;
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::{Request, RequestContext};
+use proxima_primitives::pipe::{FanIn, Select};
 
 use crate::broker::{AmqpBroker, ConsumerSink, ExchangeKind};
 use crate::config::AmqpServerConfig;
@@ -35,6 +46,7 @@ use crate::frame::encode_method_frame;
 use crate::fsm::{Advanced, Connection as Fsm, Limits};
 use crate::method::Method;
 use crate::pipes::{AmqpMessage, AmqpPipeHandle, AmqpPipeRequest};
+use crate::wait_sources::AmqpConnSource;
 use crate::wire::{FieldTable, FieldValue};
 
 mod reply_code {
@@ -111,13 +123,6 @@ fn server_properties() -> FieldTable {
     table
 }
 
-async fn read_some<S: AsyncRead + Unpin>(
-    stream: &mut S,
-    scratch: &mut [u8],
-) -> std::io::Result<usize> {
-    stream.read(scratch).await
-}
-
 async fn flush_out<S: AsyncWrite + Unpin>(
     stream: &mut S,
     out: &mut Vec<u8>,
@@ -168,10 +173,15 @@ enum Outcome {
     Close,
 }
 
-/// Serves one accepted connection to completion.
+/// Serves one accepted connection to completion. The outer wait races: (a)
+/// more socket bytes, (b) this connection's consumer push channel (frames
+/// `AmqpBroker` pushed via `KeyedFanOut`), (c) shutdown — via
+/// [`proxima_listen::wait_for_wire_event`], the shared outer-wait driver
+/// (see `crate::wait_sources`'s doc for why the inner decode+dispatch loop
+/// stays sequential and outside that race).
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<S>(
-    mut stream: S,
+    stream: S,
     handler: AmqpPipeHandle,
     broker: std::sync::Arc<AmqpBroker>,
     config: &AmqpServerConfig,
@@ -186,17 +196,29 @@ where
         message_max_bytes: config.message_max_bytes,
     });
     let mut out = Vec::with_capacity(config.write_high_water_bytes + 4096);
-    let mut scratch = vec![0_u8; config.read_buffer_bytes];
     let (push_tx, push_rx) = mpsc::unbounded::<Bytes>();
     let mut consumers = ConsumerState::default();
     let mut open_channels: BTreeSet<u16> = BTreeSet::new();
     let mut phase = Phase::AwaitingStartOk;
 
+    let (read_half, mut write_half) = stream.split();
+    // declaration order == `Select::Fifo` scan order == the old
+    // `select_biased!`'s arm order (shutdown, then push, then read) — the
+    // SAME tie-break priority, just expressed as array position instead of
+    // macro-arm position.
+    let sources = FanIn::new(
+        [
+            AmqpConnSource::shutdown(shutdown),
+            AmqpConnSource::push(push_rx),
+            AmqpConnSource::read(read_half, config.read_buffer_bytes),
+        ],
+        Select::Fifo,
+    );
+
     let outcome = main_loop(
-        &mut stream,
+        &mut write_half,
         &mut fsm,
         &mut out,
-        &mut scratch,
         &handler,
         &broker,
         &push_tx,
@@ -204,8 +226,7 @@ where
         &mut open_channels,
         &mut phase,
         config,
-        push_rx,
-        shutdown,
+        &sources,
         &admission,
     )
     .await;
@@ -215,10 +236,9 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn main_loop<S>(
-    stream: &mut S,
+    write_half: &mut futures::io::WriteHalf<S>,
     fsm: &mut Fsm,
     out: &mut Vec<u8>,
-    scratch: &mut [u8],
     handler: &AmqpPipeHandle,
     broker: &AmqpBroker,
     push_tx: &mpsc::UnboundedSender<Bytes>,
@@ -226,8 +246,7 @@ async fn main_loop<S>(
     open_channels: &mut BTreeSet<u16>,
     phase: &mut Phase,
     config: &AmqpServerConfig,
-    mut push_rx: UnboundedReceiver<Bytes>,
-    mut shutdown: oneshot::Receiver<()>,
+    sources: &FanIn<AmqpConnSource<futures::io::ReadHalf<S>>, Select, 3>,
     admission: &proxima_listen::admission::ConnAdmission,
 ) -> Result<(), AmqpServeError>
 where
@@ -266,7 +285,7 @@ where
                     ) {
                         Outcome::Continue => {}
                         Outcome::Close => {
-                            flush_out(stream, out).await?;
+                            flush_out(write_half, out).await?;
                             return Ok(());
                         }
                     }
@@ -305,19 +324,19 @@ where
                         reply_code::SYNTAX_ERROR,
                         "unexpected basic.deliver from client",
                     );
-                    flush_out(stream, out).await?;
+                    flush_out(write_half, out).await?;
                     return Ok(());
                 }
                 Advanced::ProtocolError { reason } => {
                     tracing::error!(reason, "amqp protocol violation");
                     write_connection_close(out, reply_code::SYNTAX_ERROR, &reason);
-                    flush_out(stream, out).await?;
+                    flush_out(write_half, out).await?;
                     return Ok(());
                 }
                 Advanced::FrameTooLarge { limit } => {
                     tracing::error!(limit, "amqp frame exceeds frame-max");
                     write_connection_close(out, reply_code::FRAME_ERROR, "frame exceeds frame-max");
-                    flush_out(stream, out).await?;
+                    flush_out(write_half, out).await?;
                     return Err(AmqpServeError::FrameTooLarge { limit });
                 }
                 Advanced::MessageTooLarge { limit } => {
@@ -327,41 +346,19 @@ where
                         reply_code::RESOURCE_ERROR,
                         "message body too large",
                     );
-                    flush_out(stream, out).await?;
+                    flush_out(write_half, out).await?;
                     return Err(AmqpServeError::MessageTooLarge { limit });
                 }
             }
             if out.len() >= config.write_high_water_bytes {
-                flush_out(stream, out).await?;
+                flush_out(write_half, out).await?;
             }
         }
-        flush_out(stream, out).await?;
+        flush_out(write_half, out).await?;
 
-        futures::select_biased! {
-            _ = (&mut shutdown).fuse() => return Ok(()),
-            pushed = push_rx.next().fuse() => {
-                match pushed {
-                    Some(bytes) => {
-                        out.extend_from_slice(&bytes);
-                        while let Ok(more) = push_rx.try_recv() {
-                            out.extend_from_slice(&more);
-                        }
-                        flush_out(stream, out).await?;
-                    }
-                    None => {
-                        // the sender half lives on `push_tx`, held by this
-                        // same task — `None` cannot happen while the loop
-                        // runs; parking (not panicking) is the house style
-                        // for a violated-by-construction invariant.
-                    }
-                }
-            }
-            read = read_some(stream, scratch).fuse() => {
-                match read? {
-                    0 => return Ok(()),
-                    count => fsm.feed_bytes(&scratch[..count]),
-                }
-            }
+        match proxima_listen::wait_for_wire_event(sources, write_half).await? {
+            Some(bytes) => fsm.feed_bytes(&bytes),
+            None => return Ok(()),
         }
     }
 }
