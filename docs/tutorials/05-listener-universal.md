@@ -166,7 +166,11 @@ single toy listener grows into a production one.
   learned.
 - [`docs/tutorials/02-listener-builder.md`](./02-listener-builder.md) — the
   deep dive on everything `Listener::builder()` does BEYOND `.any()`
-  (`.tcp()`/`.tls()`/`.h3()`/`.grpc()`/`.pgwire(query)`, why TLS composes as
-  a decorator, the two places the builder honestly can't mirror `Client`).
-  Not required for this on-ramp — read it if you want the full builder
-  story.
+  (`.tcp()`/`.udp()`/`.quic()`/`.tls()`/`.grpc()`/`.pgwire(query)`, why TLS
+  composes as a decorator, the two places the builder honestly can't mirror
+  `Client`). Not required for this on-ramp — read it if you want the full
+  builder story.
+- [Part 4: composing the sugar](./07-sugar-composition.md) — the three
+  type-specific axis families (transport/security/protocol) and how they
+  compose, once you're past `.any()`/`.accept()` and want to pick a wire
+  on purpose.

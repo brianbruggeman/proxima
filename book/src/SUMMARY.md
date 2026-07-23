@@ -23,6 +23,10 @@
 
 - [config](configure/config.md)
 
+# Protocols
+
+- [the protocol fleet](protocols/fleet.md)
+
 # Make it resilient
 
 - [clock](resilience/clock.md)
@@ -79,6 +83,7 @@
 
 - [plugin](extend/plugin.md)
 - [codec](extend/codec.md)
+- [protocol](extend/protocol.md)
 
 # Applied — build a real thing
 

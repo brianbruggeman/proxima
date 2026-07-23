@@ -1627,6 +1627,36 @@ required-features = ["http1-native", "http2"]
 name = "any_listener_conflag"
 required-features = ["http1-native"]
 
+# The builder-sugar composition families end to end: transport/security/
+# protocol axes composing on the same Listener::builder()/Client::builder()
+# seam, plus the honest failure mode (a named ProximaError::Config) for an
+# invalid composition (`.kafka().quic()`, `.grpc().quic()`).
+[[example]]
+name = "sugar_composition"
+required-features = ["http1-native", "tls", "http3", "kafka-listener", "dns-listener"]
+
+# `.protocol(impl AnyProtocol)` from OUTSIDE this crate: a third-party
+# candidate registered onto the open universal listener via ONLY
+# `proxima::prelude`, classified and driven alongside the built-in h1
+# candidate on the same bind — the "add your own protocol" walkthrough.
+[[example]]
+name = "extend_protocol"
+required-features = ["http1-native"]
+
+# The protocol fleet: memcached, DNS, Kafka, MQTT, AMQP, each client AND
+# listener over the SAME .protocol()/`.kafka()`-style sugar, plus a protocol
+# config (`KafkaServerConfig`) driven from a TOML file alongside its builder.
+[[example]]
+name = "protocol_fleet"
+required-features = [
+    "http1-native",
+    "memcached-listener", "memcached-client",
+    "dns-listener", "dns-client",
+    "kafka-listener", "kafka-client",
+    "mqtt-listener", "mqtt-client",
+    "amqp-listener", "amqp-client",
+]
+
 # `.pgwire(query)` through Listener::builder(): native PgWireListenProtocol +
 # a real PgClient (blocking, sans-IO session) round trip, no tokio-postgres.
 [[example]]
