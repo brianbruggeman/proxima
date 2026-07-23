@@ -75,6 +75,7 @@ listen = [
     "dep:proxima-telemetry",
     "dep:proxima-listen",
     "proxima-listen/stream",
+    "proxima-listen/framed-any",
     "dep:proxima-runtime",
 ]
 
