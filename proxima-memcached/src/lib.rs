@@ -11,17 +11,31 @@
 //! TLS-wrapped) — the same split `proxima-redis` uses between
 //! `proxima-protocols::redis` and its own client half.
 //!
-//! The `listen` feature (below) adds the server side: [`connection`]'s
-//! sans-IO-over-any-`futures::io`-stream driver, [`pipe::MemcachedConnectionPipe`]
-//! (the connection layer as a real `Pipe`), and
+//! The `listen` feature (below) adds the server side:
+//! [`framed_app::MemcachedFramedApp`] (the business-handler pipe wired as
+//! `proxima_listen::any::FramedAny`'s `App`) and
 //! [`any_protocol::MemcachedAnyProtocol`] — the `AnyProtocol` candidate
 //! that mounts memcached into the open universal listener
-//! (`Listener::builder().accept("memcached")`). There is no standalone
-//! `MemcachedListenProtocol` bind+accept loop: memcached's listen-side
-//! surface has always been an `AnyProtocol` candidate, driven by
+//! (`Listener::builder().accept("memcached")`) by building a `FramedAny`
+//! internally. There is no standalone `MemcachedListenProtocol`
+//! bind+accept loop: memcached's listen-side surface has always been an
+//! `AnyProtocol` candidate, driven by
 //! `proxima_http::any_listener::AnyListenProtocol`'s ONE bind+accept loop
-//! (real `ListenerCore`/`ConnAdmission` admission, graceful drain) —
-//! mirroring `proxima-redis`'s own `listen` feature shape.
+//! (real `ListenerCore`/`ConnAdmission` admission, graceful drain).
+//!
+//! There is no bespoke per-connection I/O driver here anymore (no
+//! `connection::serve_connection`/`main_loop`, no
+//! `pipe::MemcachedConnectionPipe` CONNECT-and-upgrade indirection) —
+//! `proxima_listen::any::FramedAny` is the ONE generic stateless
+//! `AnyProtocol` driver every stateless request/reply wire shares; see
+//! `framed_app`'s module doc for how memcached's `noreply`/`quit`/
+//! protocol-violation semantics map onto its `AsFrame` seam.
+//!
+//! `FramedAny`'s `Shed` closure carries the shed frame itself
+//! (`Fn(ShedReason, &App::In) -> App::Out`), so `framed_app::shed_reply`
+//! matches the deleted driver's admission behavior exactly: a
+//! `noreply`-flagged command that gets admission-shed stays silent, and
+//! `quit` closes rather than answering a `SERVER_ERROR`.
 
 #[cfg(feature = "client")]
 pub mod client;
@@ -31,11 +45,7 @@ pub mod any_protocol;
 #[cfg(feature = "listen")]
 pub mod config;
 #[cfg(feature = "listen")]
-pub mod connection;
-#[cfg(feature = "listen")]
-pub mod error;
-#[cfg(feature = "listen")]
-pub mod pipe;
+pub mod framed_app;
 #[cfg(feature = "listen")]
 pub mod pipes;
 
@@ -61,10 +71,6 @@ pub use any_protocol::MemcachedAnyProtocol;
 #[cfg(feature = "listen")]
 pub use config::MemcachedServerConfig;
 #[cfg(feature = "listen")]
-pub use connection::serve_connection;
-#[cfg(feature = "listen")]
-pub use error::MemcachedServeError;
-#[cfg(feature = "listen")]
-pub use pipe::MemcachedConnectionPipe;
+pub use framed_app::{MemcachedAppError, MemcachedFramedApp, MemcachedOutcome};
 #[cfg(feature = "listen")]
 pub use pipes::{MemcachedPipeHandle, MemcachedPipeReply, MemcachedPipeRequest, into_memcached_handle};
