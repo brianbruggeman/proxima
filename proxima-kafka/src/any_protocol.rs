@@ -1,8 +1,22 @@
 //! `KafkaAnyProtocol` — Kafka as an [`AnyProtocol`] candidate for the open
 //! universal listener (`Listener::builder().accept("kafka")` /
-//! `AnyListenProtocol`). Authored directly against `AnyProtocol`, mirroring
-//! `proxima_redis::any_protocol::RedisAnyProtocol` and
-//! `proxima_pgwire::any_protocol::PgWireAnyProtocol`.
+//! `AnyListenProtocol`).
+//!
+//! `drive` builds and delegates to a
+//! [`proxima_listen::any::FramedAny<KafkaCodec, KafkaFramedApp, _, _>`] —
+//! the generic stateless `AnyProtocol` driver, proving Kafka's own
+//! request/reply wire drops onto the pipe-centered driver rather than
+//! hand-rolling `serve_connection`/a CONNECT-and-upgrade indirection per
+//! protocol (see git history: `connection.rs`, `pipe.rs`, both deleted).
+//! Kafka's `Fetch` long-poll wait lives entirely INSIDE the handler
+//! pipe's own `call` (`crate::broker::KafkaBroker::fetch_partition`
+//! races a wake ping against `max_wait_ms`) — `FramedAny` just awaits
+//! that call like any other, so Kafka is a stateless `FramedAny`
+//! candidate, not a stateful/server-push one. `KafkaAnyProtocol` itself
+//! stays a thin, named constructor: it resolves the per-connection
+//! `KafkaServerConfig` from the listener spec and BUILDS a fresh
+//! `FramedAny` per accepted connection, rather than hand-rolling
+//! `impl AnyProtocol` end to end.
 //!
 //! Positive-match probe: a real Kafka request opens with an 8-byte prefix —
 //! a 4-byte big-endian frame length, then the request header's first two
@@ -11,16 +25,6 @@
 //! `correlation_id` + a 2-byte `client_id` length) or an `api_key` outside
 //! [`wire::SUPPORTED_API_VERSIONS`] is definitively not this facade's wire
 //! (mirrors pgwire's own length+code 8-byte positive match).
-//!
-//! `drive` carries its own engine (`handler`, `config`) as struct fields —
-//! the same `AnyHandler`-unused asymmetry `RedisAnyProtocol`/
-//! `PgWireAnyProtocol` document. Unlike those two, there is no separate
-//! shared broker `Arc` built once in `new` and installed per connection:
-//! Kafka's entire recognized wire surface routes through `handler` itself
-//! (see `crate::broker`'s module doc), so each accepted connection just
-//! builds a fresh [`KafkaConnectionPipe`] carrying THIS connection's
-//! [`ConnAdmission`] clone, erases it, and hands it to
-//! [`proxima_listen::serve_pipe::handle_connection`].
 
 use std::future::Future;
 use std::pin::Pin;
@@ -28,13 +32,13 @@ use std::pin::Pin;
 use serde_json::Value;
 
 use proxima_core::ProximaError;
-use proxima_listen::admission::ConnAdmission;
-use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
-use proxima_primitives::pipe::handler::into_handle;
+use proxima_listen::admission::{ConnAdmission, ShedReason};
+use proxima_listen::any::{AnyHandler, AnyProtocol, FramedAny, ProbeVerdict};
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
 
 use crate::config::KafkaServerConfig;
-use crate::pipe::KafkaConnectionPipe;
+use crate::frame_codec::{KafkaCodec, KafkaOwnedFrame};
+use crate::framed_app::{KafkaFramedApp, KafkaOutcome, shed_reply};
 use crate::pipes::KafkaPipeHandle;
 use crate::wire;
 
@@ -44,6 +48,39 @@ const PROBE_PREFIX_BYTES: usize = 8;
 /// prefix: `api_key`(2) + `api_version`(2) + `correlation_id`(4) +
 /// `client_id` nullable-string length(2).
 const MIN_V0_HEADER_BYTES: i32 = 10;
+
+/// The concrete [`FramedAny`] instantiation Kafka drives — `Probe`/`Shed`
+/// are plain `fn` items (no captured state), so `KafkaAnyProtocol` needs
+/// no generic parameters of its own to name this type.
+type KafkaFramedAny =
+    FramedAny<KafkaCodec, KafkaFramedApp, fn(&[u8]) -> ProbeVerdict, fn(ShedReason, &KafkaOwnedFrame) -> KafkaOutcome>;
+
+fn probe_kafka(prefix: &[u8]) -> ProbeVerdict {
+    if prefix.len() < PROBE_PREFIX_BYTES {
+        return ProbeVerdict::NeedMore {
+            at_least: PROBE_PREFIX_BYTES,
+        };
+    }
+    let length = i32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
+    if length < MIN_V0_HEADER_BYTES {
+        return ProbeVerdict::No;
+    }
+    let api_key = i16::from_be_bytes([prefix[4], prefix[5]]);
+    if wire::SUPPORTED_API_VERSIONS.iter().any(|&(key, _, _)| key == api_key) {
+        ProbeVerdict::Match { consumed: 0 }
+    } else {
+        ProbeVerdict::No
+    }
+}
+
+fn resolve_config(base: &KafkaServerConfig, spec: &Value) -> Result<KafkaServerConfig, ProximaError> {
+    match spec.get("kafka") {
+        None => Ok(base.clone()),
+        Some(overrides) => {
+            serde_json::from_value(overrides.clone()).map_err(|error| ProximaError::Config(format!("kafka spec: {error}")))
+        }
+    }
+}
 
 /// Kafka wire candidate for the open universal listener.
 pub struct KafkaAnyProtocol {
@@ -69,16 +106,18 @@ impl KafkaAnyProtocol {
         self.config = config;
         self
     }
-}
 
-fn resolve_config(
-    base: &KafkaServerConfig,
-    spec: &Value,
-) -> Result<KafkaServerConfig, ProximaError> {
-    match spec.get("kafka") {
-        None => Ok(base.clone()),
-        Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("kafka spec: {error}"))),
+    /// Builds the [`FramedAny`] this connection drives, from `config`
+    /// (already resolved against the listener spec).
+    fn build(&self, config: &KafkaServerConfig) -> KafkaFramedAny {
+        FramedAny::new(
+            self.label.clone(),
+            KafkaCodec::new(config.max_message_bytes),
+            KafkaFramedApp::new(self.handler.clone()),
+            probe_kafka as fn(&[u8]) -> ProbeVerdict,
+            shed_reply as fn(ShedReason, &KafkaOwnedFrame) -> KafkaOutcome,
+            PROBE_PREFIX_BYTES,
+        )
     }
 }
 
@@ -92,44 +131,21 @@ impl AnyProtocol for KafkaAnyProtocol {
     }
 
     fn probe(&self, prefix: &[u8]) -> ProbeVerdict {
-        if prefix.len() < PROBE_PREFIX_BYTES {
-            return ProbeVerdict::NeedMore {
-                at_least: PROBE_PREFIX_BYTES,
-            };
-        }
-        let length = i32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
-        if length < MIN_V0_HEADER_BYTES {
-            return ProbeVerdict::No;
-        }
-        let api_key = i16::from_be_bytes([prefix[4], prefix[5]]);
-        if wire::SUPPORTED_API_VERSIONS
-            .iter()
-            .any(|&(key, _, _)| key == api_key)
-        {
-            ProbeVerdict::Match { consumed: 0 }
-        } else {
-            ProbeVerdict::No
-        }
+        probe_kafka(prefix)
     }
 
     fn drive<'a>(
         &'a self,
         stream: Box<dyn StreamConnection>,
-        _handler: AnyHandler,
+        handler: AnyHandler,
         spec: &'a Value,
-        _peer: Option<PeerInfo>,
+        peer: Option<PeerInfo>,
         admission: &'a ConnAdmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
         Box::pin(async move {
             let config = resolve_config(&self.config, spec)?;
-            let connection_pipe = KafkaConnectionPipe::new(
-                self.label.clone(),
-                self.handler.clone(),
-                std::sync::Arc::new(config),
-            )
-            .with_admission(admission.clone());
-            let pipe = into_handle(connection_pipe);
-            proxima_listen::serve_pipe::handle_connection(stream, pipe).await
+            let framed = self.build(&config);
+            framed.drive(stream, handler, spec, peer, admission).await
         })
     }
 }
@@ -150,9 +166,7 @@ mod tests {
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
             Ok(Response::typed(
                 200,
-                crate::wire::ResponseBody::ApiVersions(
-                    crate::wire::ApiVersionsResponse::supported(),
-                ),
+                crate::wire::ResponseBody::ApiVersions(crate::wire::ApiVersionsResponse::supported()),
             ))
         }
     }
@@ -176,19 +190,13 @@ mod tests {
     #[test]
     fn probe_matches_a_real_api_versions_request_prefix() {
         let protocol = KafkaAnyProtocol::new("kafka", handler());
-        assert_eq!(
-            protocol.probe(&api_versions_prefix(1)),
-            ProbeVerdict::Match { consumed: 0 }
-        );
+        assert_eq!(protocol.probe(&api_versions_prefix(1)), ProbeVerdict::Match { consumed: 0 });
     }
 
     #[test]
     fn probe_needs_more_bytes_below_the_eight_byte_prefix() {
         let protocol = KafkaAnyProtocol::new("kafka", handler());
-        assert_eq!(
-            protocol.probe(b"\x00\x00\x00"),
-            ProbeVerdict::NeedMore { at_least: 8 }
-        );
+        assert_eq!(protocol.probe(b"\x00\x00\x00"), ProbeVerdict::NeedMore { at_least: 8 });
     }
 
     #[test]
@@ -215,5 +223,20 @@ mod tests {
         // RESP's `*1\r\n$4\r\nPING\r\n` — no valid Kafka frame length lives
         // at byte 0 of this.
         assert_eq!(protocol.probe(b"*1\r\n$4\r\nPING\r\n"), ProbeVerdict::No);
+    }
+
+    #[test]
+    fn resolve_config_overrides_max_message_bytes_from_the_spec() {
+        let base = KafkaServerConfig::default();
+        let spec = serde_json::json!({ "kafka": { "max_message_bytes": 4096 } });
+        let resolved = resolve_config(&base, &spec).expect("spec resolves");
+        assert_eq!(resolved.max_message_bytes, 4096);
+    }
+
+    #[test]
+    fn resolve_config_falls_back_to_the_base_config_with_no_spec_override() {
+        let base = KafkaServerConfig::default();
+        let resolved = resolve_config(&base, &Value::Null).expect("no override resolves");
+        assert_eq!(resolved, base);
     }
 }

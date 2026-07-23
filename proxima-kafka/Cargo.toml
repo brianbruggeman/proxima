@@ -93,6 +93,8 @@ listen = [
     "dep:proxima-listen",
     "dep:proxima-runtime",
     "dep:serde_json",
+    "proxima-listen/framed-any",
+    "proxima-protocols/codec-pipe",
 ]
 
 [dev-dependencies]

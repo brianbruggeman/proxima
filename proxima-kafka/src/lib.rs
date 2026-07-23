@@ -16,12 +16,21 @@
 //! TLS-wrapped) — the same split `proxima-redis` uses between
 //! `proxima-protocols::redis` and its own client.
 //!
-//! The `listen` feature adds the server side: [`connection`]'s
-//! sans-IO-over-any-`futures::io`-stream driver, [`pipe::KafkaConnectionPipe`]
-//! (the connection layer as a real `Pipe`), and
-//! [`any_protocol::KafkaAnyProtocol`] — the `AnyProtocol` candidate that
-//! mounts kafka into the open universal listener
-//! (`Listener::builder().accept("kafka")`). [`broker::KafkaBroker`] is the
+//! The `listen` feature adds the server side:
+//! [`frame_codec::KafkaCodec`] (the sans-IO `FrameCodec` +
+//! `OwnFrame`/`Incomplete` impl over [`wire`]'s Produce/Fetch/Metadata/
+//! ApiVersions body codec), [`framed_app::KafkaFramedApp`] (the
+//! business-handler pipe wired as `proxima_listen::any::FramedAny`'s
+//! `App`), and [`any_protocol::KafkaAnyProtocol`] — the `AnyProtocol`
+//! candidate that mounts kafka into the open universal listener
+//! (`Listener::builder().accept("kafka")`) by building a `FramedAny`
+//! internally. There is no bespoke per-connection I/O driver here
+//! anymore (no `connection::serve_connection`, no
+//! `pipe::KafkaConnectionPipe` CONNECT-and-upgrade indirection) —
+//! `proxima_listen::any::FramedAny` is the ONE generic stateless
+//! `AnyProtocol` driver every stateless request/reply wire shares; see
+//! `framed_app`'s module doc for how Kafka's `ApiVersions`/violation
+//! semantics map onto its `AsFrame` seam. [`broker::KafkaBroker`] is the
 //! default Produce/Fetch/Metadata handler a caller plugs in as
 //! `KafkaAnyProtocol::new(label, into_kafka_handle(broker))` — a
 //! protocol-correct broker FACADE (in-memory per-topic-partition log,
@@ -41,11 +50,9 @@ pub mod broker;
 #[cfg(feature = "listen")]
 pub mod config;
 #[cfg(feature = "listen")]
-pub mod connection;
+pub mod frame_codec;
 #[cfg(feature = "listen")]
-pub mod error;
-#[cfg(feature = "listen")]
-pub mod pipe;
+pub mod framed_app;
 #[cfg(feature = "listen")]
 pub mod pipes;
 
@@ -75,10 +82,8 @@ pub use broker::KafkaBroker;
 #[cfg(feature = "listen")]
 pub use config::KafkaServerConfig;
 #[cfg(feature = "listen")]
-pub use connection::serve_connection;
+pub use frame_codec::{KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, Violation};
 #[cfg(feature = "listen")]
-pub use error::KafkaServeError;
-#[cfg(feature = "listen")]
-pub use pipe::KafkaConnectionPipe;
+pub use framed_app::{KafkaAppError, KafkaFramedApp, KafkaOutcome};
 #[cfg(feature = "listen")]
 pub use pipes::{KafkaPipeHandle, KafkaPipeReply, KafkaPipeRequest, into_kafka_handle};

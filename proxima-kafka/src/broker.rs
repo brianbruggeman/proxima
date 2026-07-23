@@ -1,6 +1,6 @@
 //! `KafkaBroker` — the default Produce/Fetch/Metadata handler every
-//! [`crate::pipe::KafkaConnectionPipe`] this facade drives can plug in as
-//! its [`crate::pipes::KafkaPipeHandle`].
+//! [`crate::any_protocol::KafkaAnyProtocol`] this facade drives can plug
+//! in as its [`crate::pipes::KafkaPipeHandle`].
 //!
 //! Unlike `proxima_redis::broker::RedisBroker` (protocol-level PUBLISH/
 //! SUBSCRIBE bookkeeping sitting ALONGSIDE an arbitrary, separately-plugged
@@ -327,7 +327,7 @@ impl SendPipe for KafkaBroker {
                 Ok(Response::typed(200, ResponseBody::Metadata(response)))
             }
             RequestBody::ApiVersions => {
-                // protocol-level in `crate::connection`'s driver — a
+                // protocol-level in `crate::framed_app::KafkaFramedApp` — a
                 // handler should never see this variant, but answering it
                 // here too keeps `KafkaBroker` correct standing alone
                 // (e.g. driven directly in a unit test, bypassing the
