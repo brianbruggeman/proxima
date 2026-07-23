@@ -46,6 +46,7 @@ async-stream = { workspace = true, optional = true }
 # `stream` only pulls FrameCodec/FrameLimits/LengthDelimitedCodec (alloc-tier);
 # no registry/JsonCodec std surface needed here.
 proxima-codec = { workspace = true, optional = true, features = ["alloc"] }
+proxima-protocols = { workspace = true, optional = true, default-features = false, features = ["codec-pipe"] }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support", "tokio"] }
@@ -111,6 +112,12 @@ stream = [
     "dep:async-stream",
     "dep:proxima-codec",
 ]
+# `FramedAny<C>` — the generic stateless `AnyProtocol` driver over any
+# `proxima_codec::FrameCodec` (memcached/dns-tcp/stateless-kafka-lite
+# shape). Needs `proxima-codec` for the codec trait itself and
+# `proxima-protocols/codec-pipe` for the pre-existing `FrameCodecPipe`/
+# `OnFrame` pipe adapter this driver composes (no new pipe-algebra type).
+framed-any = ["std", "dep:proxima-codec", "dep:proxima-protocols"]
 
 [lints]
 workspace = true
