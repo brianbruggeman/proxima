@@ -5,6 +5,7 @@
 
 use std::io::{Read, Write};
 
+use bytes::Bytes;
 use proxima_protocols::memcached::{MemcachedRequest, Reply, encode_request};
 
 use crate::client::session::{ClientError, ClientSession, Step};
@@ -49,7 +50,8 @@ impl<S: Read + Write> MemcachedClient<S> {
     /// [`ClientError::Io`] if the final write fails.
     pub fn close(mut self) -> Result<(), ClientError> {
         let mut bytes = Vec::new();
-        encode_request(&MemcachedRequest::Quit, &mut bytes);
+        // encode_request is itself generic; Quit carries no T-typed field to infer from
+        encode_request(&MemcachedRequest::<Bytes>::Quit, &mut bytes);
         self.stream.write_all(&bytes)?;
         self.stream.flush()?;
         Ok(())

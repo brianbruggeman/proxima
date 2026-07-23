@@ -69,7 +69,7 @@ fn malformed_oversized_partial() -> Vec<u8> {
 /// Parses `wire` once (outside the measured window) then counts only the
 /// allocations `MemcachedCodec::own_frame` itself performs.
 fn own_frame_alloc_count(wire: &[u8], max_message_bytes: usize) -> usize {
-    let codec = MemcachedCodec::new(max_message_bytes);
+    let codec: MemcachedCodec = MemcachedCodec::new(max_message_bytes);
     let raw = Bytes::from(wire.to_vec());
     let (frame, _consumed) = codec.parse_frame(&raw).expect("every workload resolves Ok");
 
