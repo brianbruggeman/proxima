@@ -128,21 +128,18 @@ async fn http_quic_listener_resolves_h3_native() {
 ))]
 mod kafka_axis {
     use super::*;
-    use proxima_kafka::wire::{ApiVersionsResponse, ResponseBody};
-    use proxima_kafka::{KafkaPipeHandle, KafkaPipeReply, KafkaPipeRequest, into_kafka_handle};
+    use proxima_kafka::wire::{ApiVersionsResponse, RequestBody, ResponseBody};
+    use proxima_kafka::{KafkaPipeHandle, into_kafka_handle};
 
     struct StubKafka;
 
     impl SendPipe for StubKafka {
-        type In = KafkaPipeRequest;
-        type Out = KafkaPipeReply;
+        type In = RequestBody;
+        type Out = ResponseBody;
         type Err = ProximaError;
 
-        async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
-            Ok(KafkaPipeReply::typed(
-                200,
-                ResponseBody::ApiVersions(ApiVersionsResponse::supported()),
-            ))
+        async fn call(&self, _request: RequestBody) -> Result<ResponseBody, ProximaError> {
+            Ok(ResponseBody::ApiVersions(ApiVersionsResponse::supported()))
         }
     }
 

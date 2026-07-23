@@ -186,18 +186,18 @@ async fn dns_section() -> Result<(), ProximaError> {
 /// the routing-critical subset, never a drop-in broker replacement.
 async fn kafka_section() -> Result<(), ProximaError> {
     use proxima_kafka::wire::{ApiKey, ProduceRequest, ProduceResponse, ProduceTopicData, ProducePartitionData, RequestBody, ResponseBody, decode_response};
-    use proxima_kafka::{KafkaPipeReply, KafkaPipeRequest, into_kafka_handle};
+    use proxima_kafka::into_kafka_handle;
 
     struct EchoProduce;
 
     impl SendPipe for EchoProduce {
-        type In = KafkaPipeRequest;
-        type Out = KafkaPipeReply;
+        type In = RequestBody;
+        type Out = ResponseBody;
         type Err = ProximaError;
 
-        async fn call(&self, request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
-            match request.payload {
-                RequestBody::Produce(_) => Ok(Response::typed(200, ResponseBody::Produce(ProduceResponse::default()))),
+        async fn call(&self, request: RequestBody) -> Result<ResponseBody, ProximaError> {
+            match request {
+                RequestBody::Produce(_) => Ok(ResponseBody::Produce(ProduceResponse::default())),
                 _ => Err(ProximaError::Upstream("unexpected api".into())),
             }
         }

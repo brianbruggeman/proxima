@@ -101,4 +101,4 @@ pub use frame_codec::{KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, 
 #[cfg(feature = "listen")]
 pub use framed_app::{KafkaAppError, KafkaFramedApp, KafkaOutcome};
 #[cfg(feature = "listen")]
-pub use pipes::{KafkaPipeHandle, KafkaPipeReply, KafkaPipeRequest, into_kafka_handle};
+pub use pipes::{KafkaPipeHandle, into_kafka_handle};

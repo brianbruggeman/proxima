@@ -86,16 +86,16 @@ fn resolve_config(base: &KafkaServerConfig, spec: &Value) -> Result<KafkaServerC
 ///
 /// ```
 /// use proxima_listen::any::AnyProtocol;
-/// use proxima_kafka::{KafkaAnyProtocol, KafkaPipeRequest, KafkaPipeReply, into_kafka_handle};
+/// use proxima_kafka::{KafkaAnyProtocol, RequestBody, ResponseBody, into_kafka_handle};
 /// use proxima_core::ProximaError;
 /// use proxima_primitives::pipe::SendPipe;
 ///
 /// struct Unimplemented; // no client dials in this doctest
 /// impl SendPipe for Unimplemented {
-///     type In = KafkaPipeRequest;
-///     type Out = KafkaPipeReply;
+///     type In = RequestBody;
+///     type Out = ResponseBody;
 ///     type Err = ProximaError;
-///     async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+///     async fn call(&self, _request: RequestBody) -> Result<ResponseBody, ProximaError> {
 ///         unreachable!()
 ///     }
 /// }
@@ -174,20 +174,16 @@ impl AnyProtocol for KafkaAnyProtocol {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::request::Response;
 
     struct EchoPipe;
 
     impl proxima_primitives::pipe::SendPipe for EchoPipe {
-        type In = crate::pipes::KafkaPipeRequest;
-        type Out = crate::pipes::KafkaPipeReply;
+        type In = crate::wire::RequestBody;
+        type Out = crate::wire::ResponseBody;
         type Err = ProximaError;
 
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
-            Ok(Response::typed(
-                200,
-                crate::wire::ResponseBody::ApiVersions(crate::wire::ApiVersionsResponse::supported()),
-            ))
+            Ok(crate::wire::ResponseBody::ApiVersions(crate::wire::ApiVersionsResponse::supported()))
         }
     }
 

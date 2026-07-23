@@ -1,45 +1,38 @@
 //! Typed pipe handles for the Kafka broker-facade pipeline.
 //!
-//! `KafkaPipeRequest = Request<RequestBody>` / `KafkaPipeReply =
-//! Response<ResponseBody>`: the business handler pipe is fully typed — no
-//! downcast, no type erasure. `KafkaPipeHandle` is an instantiation of the
-//! generic erased form `proxima_primitives::pipe::alloc_tier::PipeHandle<In,
-//! Out>`. Mirrors `proxima_redis::pipes` / `proxima_pgwire::pipes` 1:1.
+//! The business handler pipe carries [`RequestBody`] straight to
+//! [`ResponseBody`] — no `Request`/`Response` envelope cell (payload-no-cell:
+//! a pipe is `P -> Q`, and `RequestBody`/`ResponseBody` are already
+//! self-describing — `correlation_id` lives outside them entirely, threaded
+//! by `crate::framed_app::dispatch` directly, never through the envelope).
+//! `KafkaPipeHandle` is an instantiation of the generic erased form
+//! `proxima_primitives::pipe::alloc_tier::PipeHandle<In, Out>`. Mirrors
+//! `proxima_redis::pipes` / `proxima_pgwire::pipes` 1:1.
 
 use proxima_primitives::pipe::alloc_tier;
 
 use crate::wire::{RequestBody, ResponseBody};
 
-/// Typed request carrying a decoded [`RequestBody`] as payload — every
-/// Produce/Fetch/Metadata this facade recognizes reaches the handler
-/// through this one shape (`ApiVersions` is answered protocol-level by the
-/// connection driver itself and never reaches a handler — see
-/// `crate::connection`'s doc).
-pub type KafkaPipeRequest = proxima_primitives::pipe::request::Request<RequestBody>;
-
-/// Typed response carrying an encoded-shape [`ResponseBody`] as payload.
-pub type KafkaPipeReply = proxima_primitives::pipe::request::Response<ResponseBody>;
-
 /// Runtime-erased handle for Kafka broker-facade handler pipes.
-pub type KafkaPipeHandle = alloc_tier::PipeHandle<KafkaPipeRequest, KafkaPipeReply>;
+pub type KafkaPipeHandle = alloc_tier::PipeHandle<RequestBody, ResponseBody>;
 
 /// Wrap any Kafka-compatible pipe in a [`KafkaPipeHandle`] — the bridge
-/// between a business handler you write (`impl SendPipe<In =
-/// KafkaPipeRequest, Out = KafkaPipeReply>`) and every seam that wants the
-/// type-erased [`KafkaPipeHandle`] ([`crate::KafkaAnyProtocol::new`],
+/// between a business handler you write (`impl SendPipe<In = RequestBody,
+/// Out = ResponseBody>`) and every seam that wants the type-erased
+/// [`KafkaPipeHandle`] ([`crate::KafkaAnyProtocol::new`],
 /// `proxima::ListenerProtocolExt::kafka`).
 ///
 /// ```
-/// use proxima_kafka::{KafkaPipeRequest, KafkaPipeReply, into_kafka_handle};
+/// use proxima_kafka::{RequestBody, ResponseBody, into_kafka_handle};
 /// use proxima_core::ProximaError;
 /// use proxima_primitives::pipe::SendPipe;
 ///
 /// struct Broker;
 /// impl SendPipe for Broker {
-///     type In = KafkaPipeRequest;
-///     type Out = KafkaPipeReply;
+///     type In = RequestBody;
+///     type Out = ResponseBody;
 ///     type Err = ProximaError;
-///     async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+///     async fn call(&self, _request: RequestBody) -> Result<ResponseBody, ProximaError> {
 ///         unreachable!("illustrative — no request is dispatched in this doctest")
 ///     }
 /// }

@@ -3,9 +3,6 @@
 //! the generic stateless `AnyProtocol` driver replacing this crate's
 //! former bespoke `serve_connection`/`KafkaConnectionPipe` CONNECT/upgrade
 //! indirection (see git history: `connection.rs`, `pipe.rs`).
-//! `build_request`/`method_for` are moved here verbatim from that driver —
-//! no wire-mapping logic is rewritten, only relocated next to their one
-//! remaining caller.
 //!
 //! [`KafkaOutcome`] is the sentinel `FramedAny` asked for: `Reply` keeps
 //! serving, `CloseWithReply` writes one final courtesy reply then stops
@@ -32,41 +29,13 @@
 //! request (Produce/Fetch/Metadata) gets the "busy" empty-reply
 //! treatment when shed.
 
-use bytes::Bytes;
-
 use proxima_listen::admission::ShedReason;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::method::Method;
-use proxima_primitives::pipe::request::{Request, RequestContext};
 
 use crate::frame_codec::{KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, Violation, empty_response_for};
-use crate::pipes::{KafkaPipeHandle, KafkaPipeRequest};
-use crate::wire::{ApiKey, ApiVersionsResponse, RequestBody, ResponseBody};
-
-fn method_for(api_key: i16) -> Method {
-    let verb: &[u8] = match ApiKey::from_i16(api_key) {
-        ApiKey::Produce => b"PRODUCE",
-        ApiKey::Fetch => b"FETCH",
-        ApiKey::Metadata => b"METADATA",
-        ApiKey::ApiVersions => b"APIVERSIONS",
-        ApiKey::Other(_) => b"UNKNOWN",
-    };
-    Method::from_bytes(verb)
-}
-
-fn build_request(api_key: i16, payload: RequestBody) -> KafkaPipeRequest {
-    Request {
-        method: method_for(api_key),
-        path: Bytes::new(),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload,
-        stream: None,
-        context: RequestContext::default(),
-    }
-}
+use crate::pipes::KafkaPipeHandle;
+use crate::wire::{ApiVersionsResponse, RequestBody, ResponseBody};
 
 fn apiversions_reply(correlation_id: i32) -> KafkaOutcome {
     KafkaOutcome::Reply {
@@ -196,11 +165,10 @@ impl SendPipe for KafkaFramedApp {
 /// arm exactly, minus the admission check `FramedAny`'s `AdmittedApp` now
 /// performs generically.
 async fn dispatch(handler: &KafkaPipeHandle, correlation_id: i32, api_key: i16, body: RequestBody) -> KafkaOutcome {
-    let request = build_request(api_key, body);
-    match SendPipe::call(handler.as_ref(), request).await {
+    match SendPipe::call(handler.as_ref(), body).await {
         Ok(response) => KafkaOutcome::Reply {
             correlation_id,
-            body: response.payload,
+            body: response,
         },
         Err(error) => {
             tracing::error!(error = %error, api_key, "kafka handler error");
@@ -245,23 +213,20 @@ pub fn shed_reply(reason: ShedReason, input: &KafkaOwnedFrame) -> KafkaOutcome {
 mod tests {
     use super::*;
     use proxima_core::ProximaError;
-    use proxima_primitives::pipe::request::Response;
 
     use crate::wire;
+    use crate::wire::ApiKey;
 
     struct EchoHandler;
 
     impl SendPipe for EchoHandler {
-        type In = KafkaPipeRequest;
-        type Out = crate::pipes::KafkaPipeReply;
+        type In = RequestBody;
+        type Out = ResponseBody;
         type Err = ProximaError;
 
-        async fn call(&self, request: KafkaPipeRequest) -> Result<Self::Out, ProximaError> {
-            match request.payload {
-                RequestBody::Produce(_) => Ok(Response::typed(
-                    200,
-                    ResponseBody::Produce(wire::ProduceResponse::default()),
-                )),
+        async fn call(&self, request: RequestBody) -> Result<Self::Out, ProximaError> {
+            match request {
+                RequestBody::Produce(_) => Ok(ResponseBody::Produce(wire::ProduceResponse::default())),
                 _ => Err(ProximaError::Upstream("unexpected api".into())),
             }
         }

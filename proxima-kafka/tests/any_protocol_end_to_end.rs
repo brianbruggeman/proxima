@@ -20,13 +20,10 @@ use proxima_listen::admission::ConnAdmission;
 use proxima_listen::any::{AnyProtocol, erase_handler};
 use proxima_net::tokio::tokio_stream_listener::TokioTcpConnection;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::Response;
 use proxima_primitives::stream::StreamConnection;
 
 use proxima_kafka::wire::{ApiKey, ProduceResponse, RequestBody, ResponseBody};
-use proxima_kafka::{
-    KafkaAnyProtocol, KafkaPipeHandle, KafkaPipeReply, KafkaPipeRequest, KafkaServerConfig, into_kafka_handle,
-};
+use proxima_kafka::{KafkaAnyProtocol, KafkaPipeHandle, KafkaServerConfig, into_kafka_handle};
 
 fn encode_request(api_key: i16, api_version: i16, correlation_id: i32, body: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
@@ -63,11 +60,11 @@ fn read_correlation_id(reply: &[u8]) -> i32 {
 struct HandlerThatMustNotBeCalled;
 
 impl SendPipe for HandlerThatMustNotBeCalled {
-    type In = KafkaPipeRequest;
-    type Out = KafkaPipeReply;
+    type In = RequestBody;
+    type Out = ResponseBody;
     type Err = ProximaError;
 
-    async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+    async fn call(&self, _request: RequestBody) -> Result<ResponseBody, ProximaError> {
         panic!("this request must never reach the handler pipe");
     }
 }
@@ -75,13 +72,13 @@ impl SendPipe for HandlerThatMustNotBeCalled {
 struct EchoProduceHandler;
 
 impl SendPipe for EchoProduceHandler {
-    type In = KafkaPipeRequest;
-    type Out = KafkaPipeReply;
+    type In = RequestBody;
+    type Out = ResponseBody;
     type Err = ProximaError;
 
-    async fn call(&self, request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
-        match request.payload {
-            RequestBody::Produce(_) => Ok(Response::typed(200, ResponseBody::Produce(ProduceResponse::default()))),
+    async fn call(&self, request: RequestBody) -> Result<ResponseBody, ProximaError> {
+        match request {
+            RequestBody::Produce(_) => Ok(ResponseBody::Produce(ProduceResponse::default())),
             _ => Err(ProximaError::Upstream("unexpected api".into())),
         }
     }
