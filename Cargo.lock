@@ -3663,6 +3663,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-dns"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "bytes",
+ "conflaguration",
+ "futures",
+ "proxima",
+ "proxima-codec",
+ "proxima-core",
+ "proxima-listen",
+ "proxima-primitives",
+ "proxima-protocols",
+ "proxima-runtime",
+ "proxima-telemetry",
+ "rstest",
+ "serde",
+ "serde_json",
+ "temp-env",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "proxima-example-new-platform"
 version = "0.1.0"
 dependencies = [

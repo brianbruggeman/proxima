@@ -73,6 +73,36 @@ impl Flags {
     pub fn ra(self) -> bool {
         self.0 & 0x0080 != 0
     }
+
+    /// Build the flags word for an outbound query: `QR=0`, `OPCODE=0`
+    /// (standard query, RFC 1035 §4.1.1), `RD` set per `recursion_desired`.
+    /// Every other bit (AA/TC/RA/Z/RCODE) is meaningless on a query and
+    /// left zero. See [`encode::encode_query`](super::encode::encode_query).
+    #[must_use]
+    pub fn for_query(recursion_desired: bool) -> Self {
+        Self(if recursion_desired { 0x0100 } else { 0x0000 })
+    }
+
+    /// Build the flags word for an outbound response: `QR=1`, `OPCODE=0`,
+    /// `RD` echoed from the query being answered (RFC 1035 §4.1.1: "this
+    /// bit is copied into the response"), `AA`/`RA` set per the caller,
+    /// `RCODE` in the low 4 bits. See
+    /// [`encode::encode_response`](super::encode::encode_response).
+    #[must_use]
+    pub fn for_response(recursion_desired: bool, authoritative: bool, recursion_available: bool, rcode: u8) -> Self {
+        let mut bits = 0x8000u16;
+        if recursion_desired {
+            bits |= 0x0100;
+        }
+        if authoritative {
+            bits |= 0x0400;
+        }
+        if recursion_available {
+            bits |= 0x0080;
+        }
+        bits |= u16::from(rcode & 0x0F);
+        Self(bits)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,3 +564,6 @@ mod tests {
 pub mod codec_trait;
 #[cfg(feature = "dns-codec-trait")]
 pub use codec_trait::{DnsDatagramCodec, Message, QuestionIter, RecordIter, parse_message};
+
+pub mod encode;
+pub use encode::{AnswerRecord, EncodeError, EncodeQuestion, encode_name, encode_query, encode_response};

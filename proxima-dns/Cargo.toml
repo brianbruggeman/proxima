@@ -1,0 +1,88 @@
+[package]
+name = "proxima-dns"
+description = "DNS resolver client + listener facade: the async client Pipe (DnsClientUpstream) and the UDP/TCP servers (DnsDatagramProtocol / DnsAnyProtocol) over the sans-IO RFC 1035 codec, so proxima::Client / proxima::Listener speak DNS. The codec itself lives in proxima-protocols::dns."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+# the sans-IO RFC 1035 parser/encoder (Header/Flags/Question/Record/RData,
+# parse_*/encode_*) and the proxima_codec::Datagram impl (DnsDatagramCodec/
+# Message/parse_message) — see proxima_protocols::dns docs. Required
+# unconditionally: this crate's top-level re-exports of the wire layer
+# don't gate behind `client`/`listen`.
+proxima-protocols = { workspace = true, default-features = false, features = ["dns", "dns-codec-trait"] }
+proxima-codec = { workspace = true, optional = true }
+# the typed pipe surface (DnsQuery/DnsAnswer/DnsPipeHandle) both the client
+# and listener sides build against.
+proxima-primitives = { workspace = true, default-features = false, features = ["alloc"], optional = true }
+proxima-core = { workspace = true, default-features = false, optional = true }
+bon = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+futures = { workspace = true, features = ["std", "async-await"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+proxima-telemetry = { workspace = true, optional = true }
+# the tokio-free native listener stack: DnsDatagramProtocol mounts into
+# `proxima-listen`'s DatagramProtocolListenProtocol; DnsAnyProtocol mounts
+# into `proxima-listen`'s AnyListenProtocol open universal listener.
+proxima-listen = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, features = ["std"], optional = true }
+
+[features]
+default = ["std"]
+std = []
+# the async resolver client `DnsClientUpstream` + sans-IO `DnsClientSession`
+# driving a query over a pluggable `DatagramFactory` (prime, tokio, a fake
+# test socket), so `proxima::Client` speaks DNS as a registered protocol.
+client = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:bon",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:thiserror",
+]
+# the tokio-free native (sans-IO) DNS UDP/TCP LISTENER: `DnsDatagramProtocol`
+# (UDP, a `DatagramProtocol` state machine) + `DnsAnyProtocol` (TCP, an
+# `AnyProtocol` candidate mounting into `AnyListenProtocol`'s open universal
+# listener). `--no-default-features` leaves the bare sans-IO codec (and the
+# `client` graph) with zero tokio; this feature adds the listener stack.
+listen = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:proxima-codec",
+    "dep:bon",
+    "dep:bytes",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:proxima-telemetry",
+    "dep:proxima-listen",
+    "proxima-listen/stream",
+    "dep:proxima-runtime",
+]
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support", "tokio"] }
+serde_json = { workspace = true }
+rstest = { workspace = true }
+temp-env = { workspace = true }
+
+[lints]
+workspace = true
