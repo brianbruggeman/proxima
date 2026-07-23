@@ -87,6 +87,8 @@ impl<S: Read + Write> MemcachedClient<S> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use proxima_protocols::memcached::StoreMode;
     use std::io::Cursor;
@@ -126,10 +128,10 @@ mod tests {
         let reply = client
             .command(&MemcachedRequest::Store {
                 mode: StoreMode::Set,
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 flags: 0,
                 exptime: 0,
-                value: b"v".to_vec(),
+                value: Bytes::from_static(b"v"),
                 noreply: false,
             })
             .expect("command");

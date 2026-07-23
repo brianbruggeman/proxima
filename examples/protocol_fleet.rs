@@ -74,7 +74,10 @@ async fn memcached_section() -> Result<(), ProximaError> {
 
     #[derive(Default, Clone)]
     struct KvStore {
-        data: Arc<Mutex<std::collections::HashMap<Vec<u8>, Vec<u8>>>>,
+        // keyed by `Bytes` (the wire re-owns via `Bytes::slice_ref`, an
+        // `Arc` refcount bump, not a copy) — `StoredValue`'s own fields
+        // stay `Vec<u8>` (the reply model this example does not change).
+        data: Arc<Mutex<std::collections::HashMap<bytes::Bytes, bytes::Bytes>>>,
     }
 
     impl SendPipe for KvStore {
@@ -91,13 +94,12 @@ async fn memcached_section() -> Result<(), ProximaError> {
                 }
                 MemcachedRequest::Get { keys, .. } => {
                     let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let values = keys
-                        .into_iter()
+                    let values = proxima_memcached::iter_keys(&keys)
                         .filter_map(|key| {
                             guard.get(&key).map(|data| StoredValue {
-                                key: key.clone(),
+                                key: key.to_vec(),
                                 flags: 0,
-                                data: data.clone(),
+                                data: data.to_vec(),
                                 cas_unique: None,
                             })
                         })

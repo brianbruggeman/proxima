@@ -162,6 +162,7 @@ where
 ///     }
 /// }
 /// impl OwnFrame for GreetCodec {
+///     type Source = bytes::Bytes;
 ///     type Owned = String;
 ///     fn own_frame(_source: &bytes::Bytes, frame: &&str) -> String {
 ///         (*frame).to_string()
@@ -254,7 +255,12 @@ impl<C, App, Probe, Shed> FramedAny<C, App, Probe, Shed> {
 
 impl<C, App, Probe, Shed> AnyProtocol for FramedAny<C, App, Probe, Shed>
 where
-    C: OwnFrame + Clone + Send + Sync + 'static,
+    // `Source = Bytes`: this driver reads into a `BytesMut` and hands the
+    // codec a freshly `Bytes::copy_from_slice`'d window per attempt (see
+    // `drive`'s own doc below) — the alloc tier. A no-alloc `Source` codec
+    // would need its own driver loop, not this one (`OwnFrame::Source`'s
+    // doc in `codec_pipe.rs`).
+    C: OwnFrame<Source = Bytes> + Clone + Send + Sync + 'static,
     C::Error: Incomplete + core::fmt::Display + Send + Sync + 'static,
     C::Owned: Send + 'static,
     App: SendPipe<In = C::Owned> + Clone + Send + Sync + 'static,
@@ -427,6 +433,7 @@ mod tests {
     }
 
     impl OwnFrame for GreetCodec {
+        type Source = Bytes;
         type Owned = String;
 
         fn own_frame(_source: &Bytes, frame: &&str) -> String {

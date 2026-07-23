@@ -83,7 +83,12 @@ memcached = ["dep:thiserror"]
 # feature, unlike `grpc_framing`/`http1_codec`/`websocket_frame`) so
 # `codec-pipe` (needed for `OwnFrame`/`Incomplete`) is always present
 # alongside the plain `FrameCodec` impl for this one protocol.
-memcached-codec-trait = ["memcached", "dep:proxima-codec", "codec-pipe"]
+# `dep:memchr` backs `pipe_contract::iter_keys`'s lazy `b' '` scan over a
+# multi-get's untouched keys span (no container at all — see that
+# function's doc) — `pipe_contract` itself lives behind this feature (not
+# the bare `memcached` feature) because it needs `Bytes`, which the bare
+# no_std FSM tier (`connection.rs`) must never depend on.
+memcached-codec-trait = ["memcached", "dep:proxima-codec", "codec-pipe", "dep:memchr"]
 
 # Sans-IO NVMe command-set wire codec for a userspace storage stack —
 # extracted from proxima-nvme-codec. Tier-3: no_std + no-alloc, zero deps.
@@ -342,6 +347,11 @@ required-features = ["kafka"]
 name = "bench_memcached"
 harness = false
 required-features = ["memcached"]
+
+[[bench]]
+name = "bench_memcached_frame_ownership"
+harness = false
+required-features = ["memcached-codec-trait"]
 
 [[bench]]
 name = "bench_grpc_framing"

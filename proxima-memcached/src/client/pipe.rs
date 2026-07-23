@@ -186,30 +186,42 @@ fn client_error_to_proxima(error: ClientError) -> ProximaError {
 }
 
 /// `[verb] ++ NUL-split(body)` -> [`MemcachedRequest`], per this module's
-/// documented wire convention.
-fn decode_request(verb: &str, body: &[u8]) -> Result<MemcachedRequest, String> {
+/// documented wire convention. `body`'s fields become [`Bytes::slice_ref`]
+/// windows into `body` itself — an `Arc` refcount bump, not a copy,
+/// mirroring `MemcachedRequest::from_command`'s own zero-copy lift.
+fn decode_request(verb: &str, body: &Bytes) -> Result<MemcachedRequest, String> {
     let mut fields = body.split(|&byte| byte == 0);
     let upper = verb.to_ascii_uppercase();
     match upper.as_str() {
         "GET" | "GETS" => {
-            let keys: Vec<Vec<u8>> = if body.is_empty() {
-                Vec::new()
-            } else {
-                fields.map(<[u8]>::to_vec).collect()
-            };
-            if keys.is_empty() {
+            // This client's own wire convention NUL-delimits keys; the
+            // real memcached wire (and `MemcachedRequest::Get::keys`)
+            // space-joins them — re-join here once, on this cold
+            // request-construction path (not the hot re-owning path
+            // `Bytes::slice_ref` covers), matching what `encode_request`
+            // will write to the wire regardless.
+            let mut joined = Vec::new();
+            if !body.is_empty() {
+                for (index, field) in fields.enumerate() {
+                    if index > 0 {
+                        joined.push(b' ');
+                    }
+                    joined.extend_from_slice(field);
+                }
+            }
+            if joined.is_empty() {
                 return Err("GET/GETS requires at least one key".to_string());
             }
             Ok(MemcachedRequest::Get {
-                keys,
+                keys: Bytes::from(joined),
                 gets: upper == "GETS",
             })
         }
         "SET" | "ADD" | "REPLACE" | "APPEND" | "PREPEND" => {
-            let key = next_field(&mut fields, "key")?;
+            let key = next_field(&mut fields, body, "key")?;
             let flags = next_u32(&mut fields, "flags")?;
             let exptime = next_u32(&mut fields, "exptime")?;
-            let value = next_field(&mut fields, "value")?;
+            let value = next_field(&mut fields, body, "value")?;
             let mode = match upper.as_str() {
                 "SET" => StoreMode::Set,
                 "ADD" => StoreMode::Add,
@@ -227,11 +239,11 @@ fn decode_request(verb: &str, body: &[u8]) -> Result<MemcachedRequest, String> {
             })
         }
         "CAS" => {
-            let key = next_field(&mut fields, "key")?;
+            let key = next_field(&mut fields, body, "key")?;
             let flags = next_u32(&mut fields, "flags")?;
             let exptime = next_u32(&mut fields, "exptime")?;
             let cas_unique = next_u64(&mut fields, "cas_unique")?;
-            let value = next_field(&mut fields, "value")?;
+            let value = next_field(&mut fields, body, "value")?;
             Ok(MemcachedRequest::Cas {
                 key,
                 flags,
@@ -242,11 +254,11 @@ fn decode_request(verb: &str, body: &[u8]) -> Result<MemcachedRequest, String> {
             })
         }
         "DELETE" => Ok(MemcachedRequest::Delete {
-            key: next_field(&mut fields, "key")?,
+            key: next_field(&mut fields, body, "key")?,
             noreply: false,
         }),
         "INCR" | "DECR" => {
-            let key = next_field(&mut fields, "key")?;
+            let key = next_field(&mut fields, body, "key")?;
             let delta = next_u64(&mut fields, "delta")?;
             Ok(MemcachedRequest::Counter {
                 increment: upper == "INCR",
@@ -256,7 +268,7 @@ fn decode_request(verb: &str, body: &[u8]) -> Result<MemcachedRequest, String> {
             })
         }
         "TOUCH" => {
-            let key = next_field(&mut fields, "key")?;
+            let key = next_field(&mut fields, body, "key")?;
             let exptime = next_u32(&mut fields, "exptime")?;
             Ok(MemcachedRequest::Touch {
                 key,
@@ -279,9 +291,7 @@ fn decode_request(verb: &str, body: &[u8]) -> Result<MemcachedRequest, String> {
                 noreply: false,
             })
         }
-        "STATS" => Ok(MemcachedRequest::Stats {
-            args: body.to_vec(),
-        }),
+        "STATS" => Ok(MemcachedRequest::Stats { args: body.clone() }),
         "VERSION" => Ok(MemcachedRequest::Version),
         "QUIT" => Ok(MemcachedRequest::Quit),
         other => Err(format!("unknown memcached verb '{other}'")),
@@ -290,25 +300,26 @@ fn decode_request(verb: &str, body: &[u8]) -> Result<MemcachedRequest, String> {
 
 fn next_field<'a>(
     fields: &mut impl Iterator<Item = &'a [u8]>,
+    body: &Bytes,
     name: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Bytes, String> {
     fields
         .next()
-        .map(<[u8]>::to_vec)
+        .map(|field| body.slice_ref(field))
         .ok_or_else(|| format!("missing field '{name}'"))
 }
 
 fn next_u32<'a>(fields: &mut impl Iterator<Item = &'a [u8]>, name: &str) -> Result<u32, String> {
-    let field = next_field(fields, name)?;
-    core::str::from_utf8(&field)
+    let field = fields.next().ok_or_else(|| format!("missing field '{name}'"))?;
+    core::str::from_utf8(field)
         .ok()
         .and_then(|text| text.parse::<u32>().ok())
         .ok_or_else(|| format!("field '{name}' must be a number"))
 }
 
 fn next_u64<'a>(fields: &mut impl Iterator<Item = &'a [u8]>, name: &str) -> Result<u64, String> {
-    let field = next_field(fields, name)?;
-    core::str::from_utf8(&field)
+    let field = fields.next().ok_or_else(|| format!("missing field '{name}'"))?;
+    core::str::from_utf8(field)
         .ok()
         .and_then(|text| text.parse::<u64>().ok())
         .ok_or_else(|| format!("field '{name}' must be a number"))
@@ -321,11 +332,12 @@ mod tests {
 
     #[test]
     fn decode_request_parses_get_with_one_key() {
-        let request = decode_request("GET", b"mykey").expect("decode");
+        let body = Bytes::from_static(b"mykey");
+        let request = decode_request("GET", &body).expect("decode");
         assert_eq!(
             request,
             MemcachedRequest::Get {
-                keys: vec![b"mykey".to_vec()],
+                keys: Bytes::from_static(b"mykey"),
                 gets: false,
             }
         );
@@ -336,11 +348,12 @@ mod tests {
         let mut body = b"a".to_vec();
         body.push(0);
         body.extend_from_slice(b"b");
+        let body = Bytes::from(body);
         let request = decode_request("GET", &body).expect("decode");
         assert_eq!(
             request,
             MemcachedRequest::Get {
-                keys: vec![b"a".to_vec(), b"b".to_vec()],
+                keys: Bytes::from_static(b"a b"),
                 gets: false,
             }
         );
@@ -348,16 +361,16 @@ mod tests {
 
     #[test]
     fn decode_request_parses_set() {
-        let body = b"k\x000\x0060\x00hello";
-        let request = decode_request("SET", body).expect("decode");
+        let body = Bytes::from_static(b"k\x000\x0060\x00hello");
+        let request = decode_request("SET", &body).expect("decode");
         assert_eq!(
             request,
             MemcachedRequest::Store {
                 mode: StoreMode::Set,
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 flags: 0,
                 exptime: 60,
-                value: b"hello".to_vec(),
+                value: Bytes::from_static(b"hello"),
                 noreply: false,
             }
         );
@@ -365,11 +378,11 @@ mod tests {
 
     #[test]
     fn decode_request_rejects_unknown_verb() {
-        assert!(decode_request("BOGUS", b"").is_err());
+        assert!(decode_request("BOGUS", &Bytes::new()).is_err());
     }
 
     #[test]
     fn decode_request_rejects_get_with_no_keys() {
-        assert!(decode_request("GET", b"").is_err());
+        assert!(decode_request("GET", &Bytes::new()).is_err());
     }
 }

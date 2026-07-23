@@ -234,7 +234,7 @@ mod tests {
 
         async fn call(&self, request: MemcachedPipeRequest) -> Result<Self::Out, ProximaError> {
             let reply = match request.payload {
-                MemcachedRequest::Get { keys, .. } if keys == vec![b"k".to_vec()] => {
+                MemcachedRequest::Get { keys, .. } if keys == Bytes::from_static(b"k") => {
                     Reply::Values(vec![proxima_protocols::memcached::StoredValue {
                         key: b"k".to_vec(),
                         flags: 0,
@@ -259,7 +259,7 @@ mod tests {
     async fn a_get_hit_dispatches_to_the_handler_and_replies() {
         let outcome = app()
             .call(MemcachedOwnedFrame::Request(MemcachedRequest::Get {
-                keys: vec![b"k".to_vec()],
+                keys: Bytes::from_static(b"k"),
                 gets: false,
             }))
             .await
@@ -280,10 +280,10 @@ mod tests {
         let outcome = app()
             .call(MemcachedOwnedFrame::Request(MemcachedRequest::Store {
                 mode: StoreMode::Set,
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 flags: 0,
                 exptime: 0,
-                value: b"v".to_vec(),
+                value: Bytes::from_static(b"v"),
                 noreply: true,
             }))
             .await
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn shed_reply_renders_a_server_error_that_keeps_serving_for_an_ordinary_command() {
         let input = MemcachedOwnedFrame::Request(MemcachedRequest::Delete {
-            key: b"k".to_vec(),
+            key: Bytes::from_static(b"k"),
             noreply: false,
         });
         let outcome = shed_reply(proxima_listen::admission::ShedReason::Draining, &input);
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn shed_reply_stays_silent_for_a_shed_noreply_command() {
         let input = MemcachedOwnedFrame::Request(MemcachedRequest::Delete {
-            key: b"k".to_vec(),
+            key: Bytes::from_static(b"k"),
             noreply: true,
         });
         let outcome = shed_reply(proxima_listen::admission::ShedReason::Draining, &input);

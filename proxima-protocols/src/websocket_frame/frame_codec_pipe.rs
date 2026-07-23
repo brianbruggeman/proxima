@@ -29,6 +29,7 @@ pub struct OwnedWsFrame {
 }
 
 impl OwnFrame for WebSocketFrameCodec {
+    type Source = Bytes;
     type Owned = OwnedWsFrame;
 
     fn own_frame(source: &Bytes, frame: &Frame<'_>) -> OwnedWsFrame {

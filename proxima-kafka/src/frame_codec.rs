@@ -184,6 +184,7 @@ pub enum KafkaOwnedFrame {
 }
 
 impl OwnFrame for KafkaCodec {
+    type Source = Bytes;
     type Owned = KafkaOwnedFrame;
 
     fn own_frame(_source: &Bytes, frame: &KafkaFrame<'_>) -> KafkaOwnedFrame {

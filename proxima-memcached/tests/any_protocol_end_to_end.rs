@@ -13,6 +13,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
+use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -39,7 +40,7 @@ impl SendPipe for EchoHandler {
 
     async fn call(&self, request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
         let reply = match request.payload {
-            MemcachedRequest::Get { keys, .. } if keys == vec![b"k".to_vec()] => {
+            MemcachedRequest::Get { keys, .. } if keys == Bytes::from_static(b"k") => {
                 Reply::Values(vec![StoredValue {
                     key: b"k".to_vec(),
                     flags: 0,
