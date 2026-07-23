@@ -51,6 +51,31 @@ fn parse_legacy_spread_flag(raw: &str) -> Result<bool, Infallible> {
 /// and [`crate::handle::bind_reuseport_listener_with_options`]. One built
 /// `ListenTuningConfig` == one serialisable config == one listener-tuning
 /// policy.
+///
+/// Config is first-class in two equivalent forms — the fluent `.builder()`
+/// and a TOML file loaded through [`Self::layered`] — and they produce the
+/// exact same value:
+///
+/// ```
+/// use std::io::Write;
+///
+/// use proxima_listen::ListenTuningConfig;
+///
+/// let via_builder = ListenTuningConfig::builder()
+///     .backlog(2048)
+///     .drain_timeout_ms(10_000)
+///     .build();
+///
+/// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
+/// write!(file, "backlog = 2048\ndrain_timeout_ms = 10000\n").expect("write toml");
+///
+/// let via_toml = ListenTuningConfig::layered()
+///     .from_path(file.path())
+///     .expect("load from toml")
+///     .build();
+///
+/// assert_eq!(via_builder, via_toml);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "PROXIMA_LISTEN")]
 #[builder(derive(Clone, Debug))]

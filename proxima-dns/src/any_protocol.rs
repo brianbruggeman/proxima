@@ -63,7 +63,31 @@ type DnsFramedAny = FramedAny<
     fn(ShedReason, &proxima_protocols::dns::DnsTcpOwnedFrame) -> DnsTcpOutcome,
 >;
 
-/// DNS-over-TCP wire candidate for the open universal listener.
+/// DNS-over-TCP wire candidate for the open universal listener. See
+/// [`crate::DnsDatagramProtocol`] for the UDP sibling — the two speak the
+/// same [`DnsPipeHandle`] but resolve onto different `ListenProtocol`
+/// machinery (this one rides `AnyListenProtocol`'s TCP accept loop; the UDP
+/// one is a standalone `DatagramProtocolListenProtocol`).
+///
+/// ```
+/// use proxima_listen::any::AnyProtocol;
+/// use proxima_dns::{DnsAnyProtocol, DnsPipeRequest, DnsPipeReply, into_dns_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Unimplemented; // no client dials in this doctest
+/// impl SendPipe for Unimplemented {
+///     type In = DnsPipeRequest;
+///     type Out = DnsPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: DnsPipeRequest) -> Result<DnsPipeReply, ProximaError> {
+///         unreachable!()
+///     }
+/// }
+///
+/// let candidate = DnsAnyProtocol::new("dns", into_dns_handle(Unimplemented));
+/// assert_eq!(candidate.name(), "dns");
+/// ```
 pub struct DnsAnyProtocol {
     label: String,
     handler: DnsPipeHandle,

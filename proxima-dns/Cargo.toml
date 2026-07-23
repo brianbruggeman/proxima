@@ -84,6 +84,11 @@ proxima = { workspace = true, features = ["test-support", "tokio"] }
 serde_json = { workspace = true }
 rstest = { workspace = true }
 temp-env = { workspace = true }
+# `PrimeDatagramFactory` in the `DnsClientUpstream::new` doctest — the real
+# transport a caller injects; the crate's own tests use a private fake.
+proxima-net = { workspace = true, features = ["prime"] }
+# TOML-file loading in the `DnsResolverConfig` config doctest.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

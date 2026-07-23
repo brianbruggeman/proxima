@@ -21,6 +21,19 @@
 //! [`proxima_primitives::pipe::KeyedFanOut`] for PUBLISH/SUBSCRIBE fan-out
 //! the same way `proxima_redis::broker::RedisBroker` does for
 //! PUBLISH/SUBSCRIBE/PSUBSCRIBE.
+//!
+//! ## Scope
+//!
+//! **v3.1.1 only** ([`Packet::Connect`]'s `protocol_level` is read as `4`;
+//! there is no v5 property/reason-code parsing). **Every delivery is
+//! downgraded to QoS 0 and the retain flag is cleared** — [`broker::MqttBroker`]
+//! fans a `PUBLISH` out to every subscriber as QoS 0, regardless of the
+//! QoS the publisher used or the QoS a subscriber requested in its
+//! `SUBSCRIBE` (`SUBACK`'s `granted` is always `[0, 0, ...]`); there is no
+//! QoS 1/2 redelivery bookkeeping and **no retained-message storage** — a
+//! late subscriber never receives a publish that happened before it
+//! subscribed. This is a routing fabric (like redis PUBLISH/SUBSCRIBE),
+//! not a durable broker.
 
 #[cfg(feature = "client")]
 pub mod client;

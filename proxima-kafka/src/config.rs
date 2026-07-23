@@ -32,6 +32,36 @@ fn default_port() -> i32 {
 }
 
 /// Kafka wire server configuration.
+///
+/// Config is first-class in two equivalent forms — the fluent builder and a
+/// TOML file loaded through `conflaguration` — and they produce the exact
+/// same value:
+///
+/// ```
+/// use std::io::Write;
+///
+/// use proxima_kafka::KafkaServerConfig;
+///
+/// let via_builder = KafkaServerConfig::builder()
+///     .broker_id(1)
+///     .advertised_host("broker.internal")
+///     .build();
+///
+/// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
+/// write!(
+///     file,
+///     "broker_id = 1\nadvertised_host = \"broker.internal\"\n"
+/// )
+/// .expect("write toml");
+///
+/// let via_toml: KafkaServerConfig = conflaguration::builder()
+///     .file(file.path())
+///     .validate()
+///     .build()
+///     .expect("load from toml");
+///
+/// assert_eq!(via_builder, via_toml);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
 #[settings(prefix = "KAFKA")]
 #[builder(derive(Clone, Debug))]

@@ -21,5 +21,28 @@ pub type MemcachedPipeReply = proxima_primitives::pipe::request::Response<Reply>
 /// Runtime-erased handle for memcached command-handler pipes.
 pub type MemcachedPipeHandle = alloc_tier::PipeHandle<MemcachedPipeRequest, MemcachedPipeReply>;
 
-/// Wrap any memcached-compatible pipe in a [`MemcachedPipeHandle`].
+/// Wrap any memcached-compatible pipe in a [`MemcachedPipeHandle`] — the
+/// bridge between a business handler you write (`impl SendPipe<In =
+/// MemcachedPipeRequest, Out = MemcachedPipeReply>`) and every seam that
+/// wants the type-erased [`MemcachedPipeHandle`]
+/// ([`crate::MemcachedAnyProtocol::new`], `proxima::ListenerProtocolExt::memcached`).
+///
+/// ```
+/// use proxima_memcached::{MemcachedPipeRequest, MemcachedPipeReply, into_memcached_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct EchoStats;
+/// impl SendPipe for EchoStats {
+///     type In = MemcachedPipeRequest;
+///     type Out = MemcachedPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
+///         unreachable!("illustrative — no request is dispatched in this doctest")
+///     }
+/// }
+///
+/// let handle = into_memcached_handle(EchoStats);
+/// # let _ = handle;
+/// ```
 pub use alloc_tier::into_handle as into_memcached_handle;

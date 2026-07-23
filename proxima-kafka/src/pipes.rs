@@ -23,5 +23,28 @@ pub type KafkaPipeReply = proxima_primitives::pipe::request::Response<ResponseBo
 /// Runtime-erased handle for Kafka broker-facade handler pipes.
 pub type KafkaPipeHandle = alloc_tier::PipeHandle<KafkaPipeRequest, KafkaPipeReply>;
 
-/// Wrap any Kafka-compatible pipe in a [`KafkaPipeHandle`].
+/// Wrap any Kafka-compatible pipe in a [`KafkaPipeHandle`] — the bridge
+/// between a business handler you write (`impl SendPipe<In =
+/// KafkaPipeRequest, Out = KafkaPipeReply>`) and every seam that wants the
+/// type-erased [`KafkaPipeHandle`] ([`crate::KafkaAnyProtocol::new`],
+/// `proxima::ListenerProtocolExt::kafka`).
+///
+/// ```
+/// use proxima_kafka::{KafkaPipeRequest, KafkaPipeReply, into_kafka_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Broker;
+/// impl SendPipe for Broker {
+///     type In = KafkaPipeRequest;
+///     type Out = KafkaPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+///         unreachable!("illustrative — no request is dispatched in this doctest")
+///     }
+/// }
+///
+/// let handle = into_kafka_handle(Broker);
+/// # let _ = handle;
+/// ```
 pub use alloc_tier::into_handle as into_kafka_handle;

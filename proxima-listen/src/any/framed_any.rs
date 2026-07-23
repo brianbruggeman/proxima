@@ -103,6 +103,114 @@ where
 /// Construct with [`Self::new`]; `probe` classifies the connection prefix,
 /// `app` handles one parsed frame at a time, `shed_reply` renders this
 /// wire's own admission-shed rejection.
+///
+/// # What this is for
+///
+/// `FramedAny` is the ONE generic driver every STATELESS request/reply wire
+/// (memcached, DNS-over-TCP, a Kafka-lite framing) shares instead of
+/// hand-writing its own `serve_connection`/`main_loop`: read bytes, run the
+/// codec, dispatch one frame to `app`, write the reply frame, loop. Reach
+/// for it when a wire is "one request in, one reply out, no server-pushed
+/// data between requests." A STATEFUL wire that can push data outside the
+/// request/reply cadence (redis pub/sub, pgwire LISTEN/NOTIFY) does NOT fit
+/// this shape — that's what [`crate::wait_for_wire_event`] is for instead
+/// (see its own doc for the split).
+///
+/// `probe`/`shed_reply` are plain closures (or `fn` items) — no new trait to
+/// implement beyond the codec itself ([`FrameCodec`] + [`OwnFrame`] +
+/// [`Incomplete`] on `C::Error`) and the business pipe (`App: SendPipe`).
+///
+/// ```
+/// use proxima_codec::FrameCodec;
+/// use proxima_listen::admission::ShedReason;
+/// use proxima_listen::any::{AnyProtocol, AsFrame, FramedAny, ProbeVerdict};
+/// use proxima_protocols::codec_pipe::{Incomplete, OwnFrame};
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// // A trivial line protocol: `GREET <name>\r\n` in, `HELLO <NAME>\r\n` out.
+/// #[derive(Clone, Copy, Default)]
+/// struct GreetCodec;
+///
+/// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// struct Incompl;
+/// impl std::fmt::Display for Incompl {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("incomplete: no terminating CRLF yet")
+///     }
+/// }
+/// impl std::error::Error for Incompl {}
+/// impl Incomplete for Incompl {
+///     fn is_incomplete(&self) -> bool {
+///         true
+///     }
+/// }
+///
+/// impl FrameCodec for GreetCodec {
+///     type Frame<'a> = &'a str;
+///     type Error = Incompl;
+///     fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(&'a str, usize), Incompl> {
+///         let terminator = buf.windows(2).position(|w| w == b"\r\n").ok_or(Incompl)?;
+///         let line = std::str::from_utf8(&buf[..terminator]).map_err(|_| Incompl)?;
+///         let name = line.strip_prefix("GREET ").ok_or(Incompl)?;
+///         Ok((name, terminator + 2))
+///     }
+///     fn encode_frame(&self, frame: &&str, dest: &mut Vec<u8>) -> Result<(), Incompl> {
+///         dest.extend_from_slice(b"HELLO ");
+///         dest.extend_from_slice(frame.as_bytes());
+///         dest.extend_from_slice(b"\r\n");
+///         Ok(())
+///     }
+/// }
+/// impl OwnFrame for GreetCodec {
+///     type Owned = String;
+///     fn own_frame(_source: &bytes::Bytes, frame: &&str) -> String {
+///         (*frame).to_string()
+///     }
+/// }
+///
+/// // The business handler: uppercases the greeted name.
+/// #[derive(Clone, Copy)]
+/// struct GreetApp;
+/// impl SendPipe for GreetApp {
+///     type In = String;
+///     type Out = String;
+///     type Err = Incompl;
+///     async fn call(&self, input: String) -> Result<String, Incompl> {
+///         Ok(input.to_uppercase())
+///     }
+/// }
+/// impl AsFrame<GreetCodec> for String {
+///     fn as_frame(&self) -> Option<&str> {
+///         Some(self)
+///     }
+/// }
+///
+/// fn greet_probe(prefix: &[u8]) -> ProbeVerdict {
+///     const TAG: &[u8] = b"GREET ";
+///     let compare_len = prefix.len().min(TAG.len());
+///     if prefix[..compare_len] != TAG[..compare_len] {
+///         return ProbeVerdict::No;
+///     }
+///     if prefix.len() < TAG.len() {
+///         return ProbeVerdict::NeedMore { at_least: TAG.len() };
+///     }
+///     ProbeVerdict::Match { consumed: 0 }
+/// }
+///
+/// let candidate = FramedAny::new(
+///     "greet",
+///     GreetCodec,
+///     GreetApp,
+///     greet_probe,
+///     |_reason: ShedReason, _input: &String| "BUSY".to_string(),
+///     64,
+/// );
+///
+/// // `probe` is pure and sans-IO — no socket needed to exercise it.
+/// assert_eq!(candidate.probe(b"GREET "), ProbeVerdict::Match { consumed: 0 });
+/// assert_eq!(candidate.probe(b"QUIT\r\n"), ProbeVerdict::No);
+/// assert_eq!(candidate.name(), "greet");
+/// ```
 pub struct FramedAny<C, App, Probe, Shed> {
     label: String,
     codec: C,

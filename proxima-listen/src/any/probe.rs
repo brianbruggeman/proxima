@@ -131,6 +131,115 @@ pub enum ProbeVerdict {
 /// [`crate::preface::classify_preface`]. `drive` is where the real
 /// (allocating, async, runtime-touching) work happens, exactly once, on the
 /// stream the listener already accepted.
+///
+/// # Write your own protocol
+///
+/// This is the seam a downstream crate uses to teach `Listener::builder()`
+/// a wire this workspace has never heard of — kafka/mqtt/amqp/memcached/
+/// redis/dns all reach the open universal listener through exactly this
+/// trait (see e.g. `proxima_kafka::KafkaAnyProtocol`); nothing about it is
+/// first-party-only. Three pieces: (1) a type implementing `AnyProtocol`
+/// (`probe` classifies a connection prefix, `drive` serves one accepted
+/// connection), (2) a one-line extension trait so callers get a fluent
+/// `.yourproto()` instead of the more verbose `.protocol(YourProtocol)`,
+/// (3) `use your_crate::YourProtocolExt;` at the call site to light it up —
+/// mirroring [`ListenerProtocolExt`](https://docs.rs/proxima/latest/proxima/trait.ListenerProtocolExt.html)'s
+/// own `.kafka()`/`.mqtt()`/… shape.
+///
+/// ```
+/// use std::future::Future;
+/// use std::pin::Pin;
+///
+/// use proxima_core::ProximaError;
+/// use proxima_listen::admission::ConnAdmission;
+/// use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
+/// use proxima_primitives::stream::{PeerInfo, StreamConnection};
+/// use serde_json::Value;
+///
+/// // (1) The protocol itself: a trivial `PING\r\n` -> `PONG\r\n` line
+/// // protocol, sans-IO classification + one async drive.
+/// struct PingProtocol;
+///
+/// impl AnyProtocol for PingProtocol {
+///     fn name(&self) -> &str {
+///         "ping"
+///     }
+///
+///     fn max_prefix_bytes(&self) -> usize {
+///         6 // len("PING\r\n")
+///     }
+///
+///     fn probe(&self, prefix: &[u8]) -> ProbeVerdict {
+///         const TAG: &[u8] = b"PING\r\n";
+///         let compare_len = prefix.len().min(TAG.len());
+///         if prefix[..compare_len] != TAG[..compare_len] {
+///             return ProbeVerdict::No;
+///         }
+///         if prefix.len() < TAG.len() {
+///             return ProbeVerdict::NeedMore { at_least: TAG.len() };
+///         }
+///         ProbeVerdict::Match { consumed: TAG.len() }
+///     }
+///
+///     fn drive<'a>(
+///         &'a self,
+///         mut stream: Box<dyn StreamConnection>,
+///         _handler: AnyHandler,
+///         _spec: &'a Value,
+///         _peer: Option<PeerInfo>,
+///         _admission: &'a ConnAdmission,
+///     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
+///         Box::pin(async move {
+///             use futures::io::AsyncWriteExt;
+///             stream.write_all(b"PONG\r\n").await.map_err(ProximaError::Io)?;
+///             Ok(())
+///         })
+///     }
+/// }
+///
+/// // (2) The one-line extension trait — the same idiom
+/// // `proxima::ListenerProtocolExt` uses for `.kafka()`/`.mqtt()`/….
+/// trait PingExt: Sized {
+///     fn ping(self) -> Self;
+/// }
+///
+/// impl PingExt for proxima::ListenerBuilder {
+///     fn ping(self) -> Self {
+///         self.protocol(PingProtocol)
+///     }
+/// }
+///
+/// # use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError as PxError};
+/// # use proxima::pipe::into_handle;
+/// # use proxima::SendPipe;
+/// # use bytes::Bytes;
+/// #
+/// # struct Dispatch;
+/// # impl SendPipe for Dispatch {
+/// #     type In = Request<Bytes>;
+/// #     type Out = Response<Bytes>;
+/// #     type Err = PxError;
+/// #     async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, PxError> {
+/// #         Ok(Response::new(404))
+/// #     }
+/// # }
+/// #
+/// # #[proxima::main]
+/// # async fn main() -> Result<(), PxError> {
+/// // (3) `use your_crate::YourProtocolExt;` (here, `PingExt` is local) ->
+/// // `.ping()` reads exactly like the first-party `.kafka()`/`.mqtt()`.
+/// let bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+/// let server = Listener::builder()
+///     .bind(bind)
+///     .http(bind.to_string())
+///     .ping()
+///     .handle(into_handle(Dispatch))
+///     .serve()
+///     .await?;
+/// server.stop();
+/// # Ok(())
+/// # }
+/// ```
 pub trait AnyProtocol: Send + Sync + 'static {
     /// Registry key and diagnostic label — mirrors
     /// [`crate::ListenProtocol::name`].

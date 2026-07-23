@@ -59,6 +59,30 @@ fn default_ban_duration_ms() -> u64 {
 /// sourced from the `sized` floor `build.rs` generates from
 /// `proxima-listen-core.toml`'s `[admission.blacklist]` section — there is
 /// no double source of truth.
+/// Config is first-class in two equivalent forms — the fluent `.builder()`
+/// and a TOML file loaded through [`Self::layered`] — and they produce the
+/// exact same value:
+///
+/// ```
+/// use std::io::Write;
+///
+/// use proxima_listen::BlacklistConfig;
+///
+/// let via_builder = BlacklistConfig::builder()
+///     .deny_strike_threshold(2)
+///     .ban_duration_ms(600_000)
+///     .build();
+///
+/// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
+/// write!(file, "deny_strike_threshold = 2\nban_duration_ms = 600000\n").expect("write toml");
+///
+/// let via_toml = BlacklistConfig::layered()
+///     .from_path(file.path())
+///     .expect("load from toml")
+///     .build();
+///
+/// assert_eq!(via_builder, via_toml);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "PROXIMA_LISTEN_ADMISSION_BLACKLIST")]
 #[builder(derive(Clone, Debug))]

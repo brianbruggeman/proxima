@@ -38,5 +38,31 @@ pub type AmqpPipeReply = proxima_primitives::pipe::request::Response<()>;
 /// Runtime-erased handle for AMQP publish-handler pipes.
 pub type AmqpPipeHandle = alloc_tier::PipeHandle<AmqpPipeRequest, AmqpPipeReply>;
 
-/// Wrap any AMQP-compatible pipe in an [`AmqpPipeHandle`].
+/// Wrap any AMQP-compatible pipe in an [`AmqpPipeHandle`] — the bridge
+/// between a business handler you write (`impl SendPipe<In =
+/// AmqpPipeRequest, Out = AmqpPipeReply>`) and every seam that wants the
+/// type-erased [`AmqpPipeHandle`] ([`crate::AmqpAnyProtocol::new`],
+/// `proxima::ListenerProtocolExt::amqp`). `Err` drops the publish without
+/// routing it — the one route-vs-drop decision a handler gets (see the
+/// module doc).
+///
+/// ```
+/// use proxima_amqp::{AmqpPipeRequest, AmqpPipeReply, into_amqp_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::{SendPipe, request::Response};
+///
+/// struct ObservePublish;
+/// impl SendPipe for ObservePublish {
+///     type In = AmqpPipeRequest;
+///     type Out = AmqpPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, request: AmqpPipeRequest) -> Result<AmqpPipeReply, ProximaError> {
+///         let _routing_key = &request.payload.routing_key; // observe, transform, persist, ...
+///         Ok(Response::typed(200, ()))
+///     }
+/// }
+///
+/// let handle = into_amqp_handle(ObservePublish);
+/// # let _ = handle;
+/// ```
 pub use alloc_tier::into_handle as into_amqp_handle;

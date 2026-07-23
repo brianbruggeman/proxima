@@ -69,6 +69,110 @@ pub enum WireEvent {
 /// whatever is already buffered) and again after it returns `Some` — this
 /// function is exactly the wait step in between, nothing more.
 ///
+/// # What this is for
+///
+/// Reach for this when a wire is STATEFUL — it can push data at the client
+/// outside the ordinary request/reply cadence (redis pub/sub, pgwire
+/// LISTEN/NOTIFY). Those connections must race THREE things at once: more
+/// bytes arriving on the socket, an out-of-band push queued by some other
+/// connection, and shutdown. [`crate::any::FramedAny`] is the sibling for
+/// the opposite case — a STATELESS wire that is purely request-in/reply-out
+/// with nothing ever arriving unprompted; see that type's own doc for the
+/// split and why memcached/DNS-over-TCP fit there instead of here.
+///
+/// # The `DropSafe` contract, and why the inner loop stays bespoke
+///
+/// `sources` is raced through [`FanIn`], and `FanIn::call` polls each merged
+/// source once per scan and DROPS any in-flight call that isn't ready yet —
+/// so every source here must be
+/// [`proxima_core::markers::DropSafe`](proxima_core::markers::DropSafe):
+/// safe to cancel mid-poll with no observable torn state (a `Read`/`Push`
+/// source that hasn't produced a value yet has consumed nothing real). An
+/// arbitrary business `handler.call()` dispatch does NOT qualify — dropping
+/// it mid-flight could leave a half-applied command or an unacknowledged
+/// `PUBLISH`. That is exactly why decode+dispatch (the loop that calls the
+/// business handler once per parsed frame) stays sequential and OUTSIDE
+/// this race, written per-protocol in the caller (pgwire's and redis's own
+/// `main_loop`) instead of folded into one shared driver the way
+/// `FramedAny` folds the stateless case: this function only ever
+/// multiplexes the WAIT step — "is there anything to do yet" — never the
+/// dispatch itself.
+///
+/// ```
+/// use bytes::Bytes;
+/// use core::cell::RefCell;
+/// use core::future::Future;
+/// use core::pin::Pin;
+/// use core::task::{Context, Poll};
+///
+/// use proxima_core::markers::DropSafe;
+/// use proxima_listen::serve_multiplexed::{WireEvent, wait_for_wire_event};
+/// use proxima_primitives::pipe::{Exhausted, FanIn, Select, UnpinPipe};
+///
+/// // A scripted source standing in for a real socket-Read/pubsub-Push
+/// // source: yields the next scripted event on each call.
+/// struct Scripted {
+///     steps: RefCell<Vec<Result<WireEvent, Exhausted>>>,
+/// }
+/// impl DropSafe for Scripted {}
+///
+/// struct ScriptedCall(Option<Result<WireEvent, Exhausted>>);
+/// impl Future for ScriptedCall {
+///     type Output = Result<WireEvent, Exhausted>;
+///     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+///         Poll::Ready(self.get_mut().0.take().expect("polled after resolved"))
+///     }
+/// }
+///
+/// impl UnpinPipe for Scripted {
+///     type In = ();
+///     type Out = WireEvent;
+///     type Err = Exhausted;
+///     fn call(&self, (): ()) -> impl Future<Output = Result<WireEvent, Exhausted>> + Unpin {
+///         let mut steps = self.steps.borrow_mut();
+///         if steps.is_empty() {
+///             return ScriptedCall(Some(Err(Exhausted)));
+///         }
+///         ScriptedCall(Some(steps.remove(0)))
+///     }
+/// }
+///
+/// # struct RecordingWriter { written: Vec<u8> }
+/// # impl futures::io::AsyncWrite for RecordingWriter {
+/// #     fn poll_write(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+/// #         self.written.extend_from_slice(buf);
+/// #         Poll::Ready(Ok(buf.len()))
+/// #     }
+/// #     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> { Poll::Ready(Ok(())) }
+/// #     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> { Poll::Ready(Ok(())) }
+/// # }
+/// #
+/// # fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
+/// #     let mut pinned = core::pin::pin!(future);
+/// #     let mut cx = Context::from_waker(std::task::Waker::noop());
+/// #     loop {
+/// #         if let Poll::Ready(output) = pinned.as_mut().poll(&mut cx) {
+/// #             return output;
+/// #         }
+/// #     }
+/// # }
+/// #
+/// // A queued pub/sub push is written straight to the socket, then the
+/// // wait continues until the client's own next `Read` arrives.
+/// let source = Scripted {
+///     steps: RefCell::new(vec![
+///         Ok(WireEvent::Push(Bytes::from_static(b"push-1"))),
+///         Ok(WireEvent::Read(Bytes::from_static(b"bytes"))),
+///     ]),
+/// };
+/// let fan = FanIn::new([source], Select::Fifo);
+/// let mut writer = RecordingWriter { written: Vec::new() };
+///
+/// let outcome = block_on(wait_for_wire_event(&fan, &mut writer)).expect("wait");
+/// assert_eq!(outcome, Some(Bytes::from_static(b"bytes")));
+/// assert_eq!(writer.written, b"push-1");
+/// ```
+///
 /// # Errors
 /// A write failure while flushing a `Push` event onto `write_half`, or a
 /// source reporting [`WireEvent::Failed`].

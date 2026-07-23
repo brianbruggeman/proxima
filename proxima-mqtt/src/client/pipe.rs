@@ -65,6 +65,19 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
     /// Builds a client over `upstream` with `config`. The transport is
     /// injected (runtime object); the config is the declarative half —
     /// the same split `RedisClientUpstream::new` uses.
+    ///
+    /// `new` never touches the network — the `CONNECT` handshake only runs
+    /// lazily on the first `.call()`:
+    ///
+    /// ```
+    /// use proxima_mqtt::{MqttClientConfig, MqttClientUpstream};
+    /// use proxima_net::prime::PrimeTcpUpstream;
+    ///
+    /// let addr = "127.0.0.1:1883".parse().expect("valid socket address");
+    /// let transport = PrimeTcpUpstream::new(addr);
+    /// let client = MqttClientUpstream::new(transport, MqttClientConfig::default());
+    /// # let _ = client;
+    /// ```
     pub fn new(upstream: U, config: MqttClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),

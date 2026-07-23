@@ -24,6 +24,15 @@
 //!   listener — also the `listen` feature. See its module doc for the
 //!   2-byte length-prefix framing gap this module fills directly rather
 //!   than extending the shared codec crate.
+//!
+//! ## Scope
+//!
+//! **UDP and TCP, no DNS-over-QUIC (DoQ) or DNS-over-TLS/HTTPS (DoT/DoH).**
+//! Classic UDP queries ([`DnsDatagramProtocol`]) and DNS-over-TCP framing
+//! ([`DnsAnyProtocol`]) are both implemented; the encrypted-transport
+//! variants (DoQ/DoT/DoH) are not — `proxima::ListenerProtocolExt::dns`'s
+//! `.quic()` pairing is a named config error rather than a silent
+//! plaintext fallback (see that method's doc).
 
 #[cfg(any(feature = "client", feature = "listen"))]
 pub mod error;

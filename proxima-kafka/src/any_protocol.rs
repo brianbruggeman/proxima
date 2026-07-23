@@ -83,6 +83,26 @@ fn resolve_config(base: &KafkaServerConfig, spec: &Value) -> Result<KafkaServerC
 }
 
 /// Kafka wire candidate for the open universal listener.
+///
+/// ```
+/// use proxima_listen::any::AnyProtocol;
+/// use proxima_kafka::{KafkaAnyProtocol, KafkaPipeRequest, KafkaPipeReply, into_kafka_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Unimplemented; // no client dials in this doctest
+/// impl SendPipe for Unimplemented {
+///     type In = KafkaPipeRequest;
+///     type Out = KafkaPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
+///         unreachable!()
+///     }
+/// }
+///
+/// let candidate = KafkaAnyProtocol::new("kafka", into_kafka_handle(Unimplemented));
+/// assert_eq!(candidate.name(), "kafka");
+/// ```
 pub struct KafkaAnyProtocol {
     label: String,
     handler: KafkaPipeHandle,

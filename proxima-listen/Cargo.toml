@@ -49,7 +49,11 @@ proxima-codec = { workspace = true, optional = true, features = ["alloc"] }
 proxima-protocols = { workspace = true, optional = true, default-features = false, features = ["codec-pipe"] }
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support", "tokio"] }
+# `http1-native` is here only so the `AnyProtocol` doctest (the "write your
+# own protocol" worked example on `probe.rs`) can bind a real
+# `Listener::builder()...serve()` — the crate's own tests never register a
+# wire protocol themselves.
+proxima = { workspace = true, features = ["test-support", "tokio", "http1-native"] }
 rstest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }

@@ -36,6 +36,16 @@
 //! matches the deleted driver's admission behavior exactly: a
 //! `noreply`-flagged command that gets admission-shed stays silent, and
 //! `quit` closes rather than answering a `SERVER_ERROR`.
+//!
+//! ## Scope
+//!
+//! **Text protocol only.** The binary protocol (opcode-framed, used by some
+//! high-throughput clients) is not implemented — [`parse_command`] only
+//! recognizes the ASCII command set (`get`/`gets`/`set`/`add`/`replace`/
+//! `append`/`prepend`/`cas`/`delete`/`incr`/`decr`/`touch`/`flush_all`/
+//! `stats`/`version`/`quit`). A client hard-coded to the binary protocol
+//! (rare — most drivers default to text, or negotiate) will not interoperate
+//! with this facade.
 
 #[cfg(feature = "client")]
 pub mod client;

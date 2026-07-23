@@ -54,6 +54,19 @@ impl<U: StreamUpstream> KafkaClientUpstream<U> {
     /// Builds a client over `upstream` with `config`. The transport is
     /// injected (runtime object); the config is the declarative half — the
     /// same split `RedisClientUpstream::new` uses.
+    ///
+    /// `new` never touches the network — the TCP connect and `ApiVersions`
+    /// handshake only run lazily on the first `.call()`:
+    ///
+    /// ```
+    /// use proxima_kafka::{KafkaClientConfig, KafkaClientUpstream};
+    /// use proxima_net::prime::PrimeTcpUpstream;
+    ///
+    /// let addr = "127.0.0.1:9092".parse().expect("valid socket address");
+    /// let transport = PrimeTcpUpstream::new(addr);
+    /// let client = KafkaClientUpstream::new(transport, KafkaClientConfig::default());
+    /// # let _ = client;
+    /// ```
     pub fn new(upstream: U, config: KafkaClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),

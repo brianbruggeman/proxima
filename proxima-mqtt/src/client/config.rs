@@ -27,6 +27,32 @@ fn default_keep_alive() -> u16 {
 
 /// Connection parameters for proxima's MQTT client. Maps 1:1 to a TOML
 /// `[mqtt]` table or `MQTT_CLIENT_*` env vars, and to the bon builder.
+///
+/// Config is first-class in two equivalent forms — the fluent builder and a
+/// TOML file loaded through `conflaguration` — and they produce the exact
+/// same value:
+///
+/// ```
+/// use std::io::Write;
+///
+/// use proxima_mqtt::MqttClientConfig;
+///
+/// let via_builder = MqttClientConfig::builder()
+///     .client_id("sensor-01")
+///     .keep_alive(30)
+///     .build();
+///
+/// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
+/// write!(file, "client_id = \"sensor-01\"\nkeep_alive = 30\n").expect("write toml");
+///
+/// let via_toml: MqttClientConfig = conflaguration::builder()
+///     .file(file.path())
+///     .validate()
+///     .build()
+///     .expect("load from toml");
+///
+/// assert_eq!(via_builder, via_toml);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
 #[settings(prefix = "MQTT_CLIENT")]
 #[builder(derive(Clone, Debug))]

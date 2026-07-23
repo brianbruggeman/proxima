@@ -54,6 +54,26 @@ const MQTT_CONNECT_FIXED_HEADER: u8 = 0x10;
 const MAX_PROBE_BYTES: usize = 13;
 
 /// MQTT wire candidate for the open universal listener.
+///
+/// ```
+/// use proxima_listen::any::AnyProtocol;
+/// use proxima_mqtt::{MqttAnyProtocol, MqttPipeRequest, MqttPipeReply, into_mqtt_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Unimplemented; // no client dials in this doctest
+/// impl SendPipe for Unimplemented {
+///     type In = MqttPipeRequest;
+///     type Out = MqttPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: MqttPipeRequest) -> Result<MqttPipeReply, ProximaError> {
+///         unreachable!()
+///     }
+/// }
+///
+/// let candidate = MqttAnyProtocol::new("mqtt", into_mqtt_handle(Unimplemented));
+/// assert_eq!(candidate.name(), "mqtt");
+/// ```
 pub struct MqttAnyProtocol {
     label: String,
     handler: MqttPipeHandle,

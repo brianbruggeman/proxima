@@ -53,6 +53,18 @@ struct Cached<C> {
 }
 
 impl<U: StreamUpstream> AmqpClientUpstream<U> {
+    /// `new` never touches the network — the protocol-header handshake
+    /// only runs lazily on the first `.call()`:
+    ///
+    /// ```
+    /// use proxima_amqp::{AmqpClientConfig, AmqpClientUpstream};
+    /// use proxima_net::prime::PrimeTcpUpstream;
+    ///
+    /// let addr = "127.0.0.1:5672".parse().expect("valid socket address");
+    /// let transport = PrimeTcpUpstream::new(addr);
+    /// let client = AmqpClientUpstream::new(transport, AmqpClientConfig::default());
+    /// # let _ = client;
+    /// ```
     pub fn new(upstream: U, config: AmqpClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),
