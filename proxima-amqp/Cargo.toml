@@ -1,0 +1,87 @@
+[package]
+name = "proxima-amqp"
+description = "AMQP 0-9-1 broker facade: the async client Pipe (publish/consume) and the listener-side broker (connection/channel FSM + exchange-to-queue routing over KeyedFanOut), built on the sans-IO frame envelope in proxima-protocols::amqp. Method-level (connection/channel/exchange/queue/basic) encode/decode lives in this crate — proxima-protocols::amqp only frames the outer envelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+# the sans-IO AMQP 0-9-1 frame envelope (type/channel/length/payload/0xCE) —
+# see proxima_protocols::amqp docs. Method-arg wire types (short-string,
+# long-string, field-table, bit-packed flags) and the per-method
+# encode/decode live in this crate's own `wire`/`method` modules — the
+# upstream codec stops at the envelope.
+proxima-protocols = { workspace = true, default-features = false, features = ["amqp"] }
+proxima-primitives = { workspace = true, default-features = false, features = ["alloc"], optional = true }
+proxima-core = { workspace = true, default-features = false, optional = true }
+bon = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+futures = { workspace = true, features = ["std", "async-await"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
+# the tokio-free native listener stack: `AmqpAnyProtocol` mounts into
+# `proxima-listen`'s `AnyListenProtocol` open universal listener over the
+# runtime-matched acceptor factory — see the `listen` feature below.
+proxima-listen = { workspace = true, optional = true }
+proxima-runtime = { workspace = true, features = ["std"], optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = []
+# the async client `Pipe` driving the sans-IO `ClientSession` over a
+# `StreamUpstream`, so `proxima::Client` speaks AMQP 0-9-1 as a registered
+# protocol. `--no-default-features` leaves the bare sans-IO wire/method codec
+# with zero tokio in the dependency graph for bare-metal embedding.
+client = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:bon",
+    "dep:bytes",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:tracing",
+]
+# the tokio-free native (sans-IO) AMQP 0-9-1 LISTENER: `AmqpConnectionPipe`
+# + `AmqpAnyProtocol` mounting into `proxima-listen`'s `AnyListenProtocol`
+# open universal listener over the runtime-matched acceptor factory. Mirrors
+# `proxima-redis`'s own `listen` feature. `--no-default-features` leaves the
+# bare sans-IO codec (and the `client` graph) with zero tokio; this feature
+# adds the upgrade seam (std-only) the connection pipe returns, and the
+# `AnyProtocol` candidate. AMQP routing (exchange -> queue) reuses
+# `proxima_primitives::pipe::KeyedFanOut` — the same broadcast registry
+# `proxima-redis`'s PUBLISH/SUBSCRIBE broker uses.
+listen = [
+    "std",
+    "proxima-primitives/std",
+    "proxima-core/std",
+    "proxima-core/io-async-compat",
+    "dep:proxima-primitives",
+    "dep:proxima-core",
+    "dep:bon",
+    "dep:bytes",
+    "dep:conflaguration",
+    "dep:futures",
+    "dep:serde",
+    "dep:tracing",
+    "dep:proxima-listen",
+    "dep:proxima-runtime",
+    "dep:serde_json",
+]
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support", "tokio"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
