@@ -257,8 +257,8 @@ pub use app_builder::AppBuilder;
 pub use body::{ChunkStream, RequestStream, ResponseStream};
 pub use buffer_pool::{BufferPool, DEFAULT_BUFFER_BYTES, DEFAULT_POOL_PER_WORKER, PooledBuf};
 pub use client::{
-    Client, ClientProtocol, RequestBuilder as ClientRequestBuilder, Response as ClientResponse,
-    Transport,
+    Client, ClientBuilder, ClientProtocol, ClientProtocolExt, ClientSecurityExt,
+    ClientTransportExt, RequestBuilder as ClientRequestBuilder, Response as ClientResponse,
 };
 pub use codec::{BytesPassthrough, FrameCodec, JsonCodec, MessageCodec, StatefulCodec, WireCodec};
 pub use codec_factory::{
@@ -285,7 +285,7 @@ pub use listen::{
     ProbeVerdict, ServeBuilder, ServeContext, ThreadLocalListenProtocol, ThreadLocalListenRegistry,
 };
 pub use listen_handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
-pub use listener::{ListenerBuilder, ListenerBuilderEntry};
+pub use listener::{ListenerBuilder, ListenerBuilderEntry, ListenerProtocolExt, ListenerTransportExt};
 #[cfg(feature = "tokio")]
 pub use listeners::McpListenProtocol;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
@@ -364,9 +364,12 @@ pub use stream::{
     StreamUpstream, StreamUpstreamExt,
 };
 pub use sugar::desugar;
-// the fluent builder seam + axis sugar traits — `use proxima::{ProtocolSugar,
-// TransportSugar}` to light up `.http()`/`.tcp()`/… on any spec builder.
-pub use sugar::{ProtocolSugar, SpecBuilder, TransportSugar};
+// the fluent builder base seam. The axis sugar itself is TYPE-SPECIFIC, not
+// blanket-impl'd over this: `use proxima::{ListenerTransportExt,
+// ListenerProtocolExt}` / `{ClientTransportExt, ClientSecurityExt,
+// ClientProtocolExt}` light up `.tcp()`/`.http()`/… on `ListenerBuilder` /
+// `ClientBuilder` respectively.
+pub use sugar::SpecBuilder;
 pub use proxima_primitives::transport;
 pub use proxima_primitives::transport::{
     DEFAULT_REPLAY_CAP_BYTES, Replay, ReplayEvent, tap_complete, tap_complete_with_size,
@@ -395,23 +398,28 @@ pub use upstreams::{
 };
 pub use write_back::{WriteBackConditions, WriteBackRule};
 
-/// Everything a THIRD-PARTY crate needs to plug a custom protocol into
-/// proxima without depending on `proxima-listen` directly: the two open
-/// extension traits — [`AnyProtocol`] for
-/// `Listener::builder().any().protocol(impl AnyProtocol)`, [`ClientProtocol`]
-/// for `Client::builder().protocol(impl ClientProtocol)` — the builder entry
-/// points those methods live on, and the verdict/outcome types an
-/// `AnyProtocol::probe` impl returns and a caller inspecting
-/// `Classifier::advance` reads. `use proxima::prelude::*;` is the one import
-/// a downstream crate (kafka/mqtt/a private wire) needs to write
-/// `impl AnyProtocol for MyProtocol { .. }` / `impl ClientProtocol for
-/// MyProtocol { .. }` and wire it up — mirroring the two seams
-/// `src/client/handle.rs`'s `ClientProtocol` doc and
-/// `src/listener/handle.rs`'s `ListenerBuilder::protocol` doc describe.
+/// The one import for both halves of the builder-sugar surface:
+///
+/// - Everything a THIRD-PARTY crate needs to plug a custom protocol into
+///   proxima without depending on `proxima-listen` directly: the two open
+///   extension traits — [`AnyProtocol`] for
+///   `Listener::builder().any().protocol(impl AnyProtocol)`, [`ClientProtocol`]
+///   for `Client::builder().protocol(impl ClientProtocol)` — the builder entry
+///   points those methods live on, and the verdict/outcome types an
+///   `AnyProtocol::probe` impl returns and a caller inspecting
+///   `Classifier::advance` reads. Mirrors the two seams
+///   `src/client/handle.rs`'s `ClientProtocol` doc and
+///   `src/listener/handle.rs`'s `ListenerBuilder::protocol` doc describe.
+/// - The TYPE-SPECIFIC builder-sugar extension traits themselves —
+///   [`ListenerTransportExt`] / [`ListenerProtocolExt`] for `ListenerBuilder`,
+///   [`ClientTransportExt`] / [`ClientSecurityExt`] / [`ClientProtocolExt`]
+///   for `ClientBuilder` — so `.tcp()`/`.http()`/`.tls()`/`.kafka()`/… are all
+///   in scope from this one `use`.
 pub mod prelude {
     pub use crate::{
-        AnyProtocol, App, ClassifyOutcome, Client, ClientProtocol, Listener, ListenerBuilder,
-        ListenerBuilderEntry, ProbeVerdict,
+        AnyProtocol, App, ClassifyOutcome, Client, ClientBuilder, ClientProtocol,
+        ClientProtocolExt, ClientSecurityExt, ClientTransportExt, Listener, ListenerBuilder,
+        ListenerBuilderEntry, ListenerProtocolExt, ListenerTransportExt, ProbeVerdict,
     };
 }
 

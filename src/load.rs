@@ -486,16 +486,30 @@ fn build_pipe<'context>(
         // assumed retry attached on http shorthand and didn't.
         let (handle, kv_backend): (PipeHandle, Option<Arc<dyn KvHandle>>) =
             if let Some(http) = value.get("http") {
-                let canonical = canonical_http(http, value)?;
-                // default prime; `"wire":"tokio"` selects the tokio-compat (hyper)
-                // wire when both are built — compatibility for tokio-only upstreams.
-                // falls back to `"http"` when the tokio wire isn't registered.
-                let key = match value.get("wire").and_then(Value::as_str) {
-                    Some("tokio") if context.registry.get("http-tokio").is_ok() => "http-tokio",
-                    _ => "http",
-                };
-                let factory = context.registry.get(key)?;
-                (factory.build(&canonical, None).await?, None)
+                // `.quic()` (`ClientTransportExt`) dispatches through the
+                // NATIVE h3 upstream instead of the ordinary h1/h2 prime
+                // client — the bug fix: `transport` used to never reach
+                // this branch at all (only `canonical_http`'s forwarded
+                // fields did, and `transport` wasn't among them), so
+                // `.http(url).quic()` silently dialed the plaintext/ALPN
+                // h1 client every time. See `canonical_h3`'s own doc for
+                // the field-forwarding contract.
+                if value.get("transport").and_then(Value::as_str) == Some("quic") {
+                    let canonical = canonical_h3(http, value)?;
+                    let factory = context.registry.get("h3-native")?;
+                    (factory.build(&canonical, None).await?, None)
+                } else {
+                    let canonical = canonical_http(http, value)?;
+                    // default prime; `"wire":"tokio"` selects the tokio-compat (hyper)
+                    // wire when both are built — compatibility for tokio-only upstreams.
+                    // falls back to `"http"` when the tokio wire isn't registered.
+                    let key = match value.get("wire").and_then(Value::as_str) {
+                        Some("tokio") if context.registry.get("http-tokio").is_ok() => "http-tokio",
+                        _ => "http",
+                    };
+                    let factory = context.registry.get(key)?;
+                    (factory.build(&canonical, None).await?, None)
+                }
             } else if let Some(grpc) = value.get("grpc") {
                 // gRPC transport: same `{url} + name/timeout/headers` canonical
                 // shape as http; the `grpc` factory stacks the h2 client.
@@ -575,7 +589,32 @@ fn canonical_http(http_field: &Value, full: &Value) -> Result<Value, ProximaErro
         .ok_or_else(|| ProximaError::Config("`http` shorthand must be a string url".into()))?;
     let mut spec = serde_json::Map::new();
     spec.insert("url".into(), Value::String(url.into()));
-    for forwarded in ["name", "timeout", "method", "headers", "proxy", "response"] {
+    for forwarded in [
+        "name", "timeout", "method", "headers", "proxy", "response", "transport",
+    ] {
+        if let Some(value) = full.get(forwarded) {
+            spec.insert(forwarded.into(), value.clone());
+        }
+    }
+    Ok(Value::Object(spec))
+}
+
+/// Canonicalize a `{"http": url, "transport": "quic", ...}` spec for the
+/// `h3-native` factory ([`crate::upstreams::h3_native::H3NativeUpstreamFactory`])
+/// — the `.quic()` sibling of [`canonical_http`]. Forwards exactly the
+/// fields `H3NativeConfig` reads (`addr`/`server_name`/`insecure`/
+/// `timeout_ms`; see `src/upstreams/h3_native.rs`), plus the `http` shorthand
+/// itself as `url` (mirroring `canonical_http`'s `url` field) so a bare
+/// `.http(url).quic()` needs no other axis to dial — `H3NativeConfig::into_dial`
+/// still requires the url's host to be an IP literal until hostname
+/// resolution lands (see its own doc).
+fn canonical_h3(http_field: &Value, full: &Value) -> Result<Value, ProximaError> {
+    let url = http_field
+        .as_str()
+        .ok_or_else(|| ProximaError::Config("`http` shorthand must be a string url".into()))?;
+    let mut spec = serde_json::Map::new();
+    spec.insert("url".into(), Value::String(url.into()));
+    for forwarded in ["addr", "server_name", "insecure", "timeout_ms"] {
         if let Some(value) = full.get(forwarded) {
             spec.insert(forwarded.into(), value.clone());
         }
@@ -893,6 +932,81 @@ fn with_extra(base: &crate::telemetry::Labels, key: &str, value: &str) -> crate:
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // The bug fix, proven decisively: a `LoadContext` whose registry carries
+    // ONLY the `h3-native` factory (no `"http"` factory at all). Before this
+    // fix, `.http(url).quic()` never forwarded `transport`, so `build_pipe`
+    // always looked up `"http"` regardless — that path would fail here with
+    // "no factory named 'http'". Success is only possible because the
+    // `transport == "quic"` branch dispatches to the registered `h3-native`
+    // factory instead — asserting the resolved factory, not just that the
+    // spec compiles.
+    #[cfg(all(
+        feature = "h3-native-upstream",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    #[proxima::test]
+    async fn quic_transport_dispatches_through_h3_native_not_the_ordinary_http_factory() {
+        let registry = Arc::new(PipeFactoryRegistry::new());
+        registry
+            .register(Arc::new(
+                crate::upstreams::h3_native::H3NativeUpstreamFactory::new(),
+            ))
+            .expect("register h3-native");
+        let context = LoadContext {
+            registry,
+            source_registry: Arc::new(proxima_primitives::pipe::SourceFactoryRegistry::new()),
+            recording_spigot: crate::recording::deferred_runtime(),
+            recording_source_registry: Arc::new(
+                default_recording_source_registry().expect("recording registry"),
+            ),
+            codec_registry: Arc::new(default_codec_registry().expect("codec registry")),
+            config_formats: Arc::new(default_config_format_registry().expect("config formats")),
+            schemas: Arc::new(SchemaRegistry::new()),
+            log_buffers: Arc::new(LogBufferRegistry::new()),
+            telemetry: Arc::new(NoopTelemetry),
+            metrics: None,
+            http_client: new_http_client_handle(),
+        };
+        let outcome = load(
+            json!({"http": "https://127.0.0.1:4433", "transport": "quic"}),
+            &context,
+        )
+        .await;
+        let error_text = outcome.as_ref().err().map(ToString::to_string);
+        assert!(
+            outcome.is_ok(),
+            ".http(url).quic() must dispatch through the registered h3-native factory \
+             (no \"http\" factory exists in this context to silently fall back to): {error_text:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_h3_forwards_the_fields_h3_native_config_reads() {
+        let full = json!({
+            "http": "https://127.0.0.1:4433",
+            "server_name": "example.com",
+            "insecure": true,
+            "timeout_ms": 1500,
+            "name": "ignored-on-this-side",
+        });
+        let canonical = canonical_h3(&full["http"], &full).expect("canonical_h3");
+        assert_eq!(canonical["url"], "https://127.0.0.1:4433");
+        assert_eq!(canonical["server_name"], "example.com");
+        assert_eq!(canonical["insecure"], true);
+        assert_eq!(canonical["timeout_ms"], 1500);
+        assert!(
+            canonical.get("name").is_none(),
+            "canonical_h3 forwards only the h3-native config fields, not the http ones"
+        );
+    }
+
+    #[test]
+    fn canonical_http_forwards_transport_now() {
+        let full = json!({"http": "http://example.test", "transport": "tls"});
+        let canonical = canonical_http(&full["http"], &full).expect("canonical_http");
+        assert_eq!(canonical["transport"], "tls");
+    }
 
     #[proxima::test]
     async fn load_inline_kv_cache_returns_kv_upstream_handle() {

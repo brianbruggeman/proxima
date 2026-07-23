@@ -3,7 +3,7 @@
 //! listener (through the existing `App::serve` / `HttpListenProtocol`
 //! path — no new driver, no new socket code); `Client::builder()` dials it
 //! over a REAL socket. Both builders compose the identical
-//! `TransportSugar`/`ProtocolSugar` axes.
+//! `ListenerTransportExt`/`ClientTransportExt` (and `ClientProtocolExt`) axes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(
@@ -27,7 +27,10 @@ use bytes::Bytes;
 use proxima::error::ProximaError;
 use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
-use proxima::{Client, Listener, ListenerBuilderEntry, ProtocolSugar, SendPipe, TransportSugar};
+use proxima::{
+    Client, ClientProtocolExt, ClientTransportExt, Listener, ListenerBuilderEntry,
+    ListenerTransportExt, SendPipe,
+};
 
 /// Answers every request with a fixed 200 — the "real pipe" the listener
 /// dispatches to.
@@ -75,7 +78,8 @@ fn wait_until_listening(addr: SocketAddr) {
 
 /// The symmetric proof: `Listener::builder()` (server side) and
 /// `Client::builder()` (client side) interoperate over a real loopback
-/// socket, both composing `TransportSugar`'s `.tcp()` from the SAME
+/// socket, both composing their own `.tcp()` (`ListenerTransportExt` /
+/// `ClientTransportExt`) from the SAME
 /// `SpecBuilder` seam. Dials BOTH the literal root and a nested path —
 /// `ListenerBuilder::serve` mounts at the `"/{*path}"` catch-all convention
 /// (`src/app.rs:925,981`), not the literal `"/"`, so a non-root path must

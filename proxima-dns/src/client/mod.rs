@@ -12,6 +12,6 @@ pub mod config;
 pub mod pipe;
 pub mod session;
 
-pub use config::DnsResolverConfig;
+pub use config::{DnsConfigError, DnsResolverConfig};
 pub use pipe::DnsClientUpstream;
 pub use session::DnsClientSession;

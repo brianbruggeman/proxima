@@ -1,5 +1,12 @@
+#[cfg(all(
+    feature = "amqp-client",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub mod amqp;
 pub mod callback;
 pub mod callback_registry;
+#[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+pub mod dns;
 pub mod fs;
 #[cfg(all(
     feature = "http-prime",
@@ -7,6 +14,18 @@ pub mod fs;
     any(target_os = "linux", target_os = "macos")
 ))]
 pub mod grpc_h2;
+#[cfg(all(
+    feature = "kafka-client",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub mod kafka;
+#[cfg(all(
+    feature = "memcached-client",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub mod memcached;
+#[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos")))]
+pub mod mqtt;
 #[cfg(all(
     feature = "pgwire-client",
     any(target_os = "linux", target_os = "macos")
@@ -46,8 +65,15 @@ pub use proxima_net::tokio::tokio_stream_upstream as tokio_stream;
 #[cfg(feature = "websocket-upstream")]
 pub use proxima_http::websocket::upstream as websocket;
 
+#[cfg(all(
+    feature = "amqp-client",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub use amqp::{AmqpClientProtocol, AmqpPipeFactory};
 pub use callback::{CallbackPipeFactory, CallbackUpstream};
 pub use callback_registry::{CallbackFn, CallbackFuture, CallbackRegistry, DynCallbackFn};
+#[cfg(all(feature = "dns-client", any(target_os = "linux", target_os = "macos")))]
+pub use dns::{DnsClientProtocol, DnsPipeFactory};
 pub use fs::{FsPipeFactory, FsUpstream};
 #[cfg(all(
     feature = "http-prime",
@@ -64,14 +90,26 @@ pub use h3::Http3Upstream;
 pub use h3_native::H3NativeUpstreamFactory;
 #[cfg(feature = "http1")]
 pub use http::{HttpPipeFactory, HttpUpstream};
+#[cfg(all(
+    feature = "kafka-client",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub use kafka::{KafkaClientProtocol, KafkaPipeFactory};
 pub use kv_cache::{KvCache, KvCacheFactory};
 pub use kv_file::{KvFile, KvFileFactory};
 pub use kv_upstream::KvUpstream;
 #[cfg(all(
+    feature = "memcached-client",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub use memcached::{MemcachedClientProtocol, MemcachedPipeFactory};
+#[cfg(all(feature = "mqtt-client", any(target_os = "linux", target_os = "macos")))]
+pub use mqtt::{MqttClientProtocol, MqttPipeFactory};
+#[cfg(all(
     feature = "pgwire-client",
     any(target_os = "linux", target_os = "macos")
 ))]
-pub use pgwire::PgwirePipeFactory;
+pub use pgwire::{PgwireClientProtocol, PgwirePipeFactory};
 #[cfg(feature = "tokio")]
 pub use process::{
     ProcessPipeFactory, ProcessSpec, ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal,
@@ -83,7 +121,7 @@ pub use record::{RecordPipeFactory, RecordUpstream};
     feature = "redis-client",
     any(target_os = "linux", target_os = "macos")
 ))]
-pub use redis::RedisPipeFactory;
+pub use redis::{RedisClientProtocol, RedisPipeFactory};
 pub use replay::{ReplayPipeFactory, ReplayUpstream};
 #[cfg(any(feature = "tcp", feature = "unix"))]
 pub use stream_passthrough::{

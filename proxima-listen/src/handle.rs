@@ -57,8 +57,8 @@ pub struct ListenerSpec {
     /// A protocol resolved at construction time instead of by name through
     /// the [`ListenRegistry`] at serve time. Populated by [`Self::protocol`]
     /// (the escape hatch below), and by the umbrella `proxima` crate's
-    /// `ListenerBuilder::serve` when its shared `ProtocolSugar`/
-    /// `TransportSugar` spec resolves to a protocol outside `App::new()`'s
+    /// `ListenerBuilder::serve` when its `ListenerProtocolExt`/
+    /// `ListenerTransportExt` spec resolves to a protocol outside `App::new()`'s
     /// default set (`h2`/`h3-native`) — see `resolve_listen_protocol` in
     /// `src/listener/handle.rs` — so a fluent caller's choice can never
     /// desync from `protocol_name`. `None` for the registry-lookup path

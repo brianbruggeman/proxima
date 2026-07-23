@@ -56,7 +56,7 @@ pub use proxima_protocols::dns::encode::{
 pub use proxima_protocols::dns::codec_trait::{DnsDatagramCodec, Message, QuestionIter, RecordIter, parse_message};
 
 #[cfg(feature = "client")]
-pub use client::{DnsClientUpstream, DnsResolverConfig};
+pub use client::{DnsClientUpstream, DnsConfigError, DnsResolverConfig};
 
 #[cfg(any(feature = "client", feature = "listen"))]
 pub use error::DnsClientError;

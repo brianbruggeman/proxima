@@ -13,17 +13,19 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use serde_json::Value;
 
 use proxima_pgwire::{PgClientConfig, PgReply, PgResponse, PgwireClientUpstream, QueryRequest};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::handler::{Handler, PipeHandle, into_handle};
+use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::request::{Request, Response};
 
 use crate::PrimeTcpUpstream;
+use crate::client::handle::ClientProtocol;
 use crate::error::ProximaError;
 
 /// A [`PipeFactory`] for the `pgwire` key. Builds a client `Handler` from a
@@ -176,10 +178,38 @@ fn config_from_spec(spec: &Value) -> Result<PgClientConfig, ProximaError> {
         .map_err(|err| ProximaError::Config(format!("pgwire config: {err}")))
 }
 
+/// The out-of-crate [`ClientProtocol`] a `.pgwire(dsn)` builder call merges —
+/// migrated OFF the old bespoke inherent `ClientBuilder::pgwire` onto the
+/// same `.protocol()` mechanism every other protocol terminal uses, wrapping
+/// this SAME [`PgwirePipeFactory`] (net-zero runtime change; see Section E
+/// of the builder-sugar design).
+pub struct PgwireClientProtocol {
+    dsn: String,
+}
+
+impl PgwireClientProtocol {
+    /// Point at a PostgreSQL server by DSN (`postgres://user:pw@host:port/db`).
+    #[must_use]
+    pub fn dsn(dsn: impl Into<String>) -> Self {
+        Self { dsn: dsn.into() }
+    }
+}
+
+impl ClientProtocol for PgwireClientProtocol {
+    fn spec(&self) -> Value {
+        serde_json::json!({"type": "pgwire", "dsn": self.dsn})
+    }
+
+    fn factory(&self) -> Arc<dyn PipeFactory> {
+        Arc::new(PgwirePipeFactory::new())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::client::protocol::ClientProtocolExt;
 
     #[test]
     fn config_from_dsn_spec() {
@@ -210,6 +240,15 @@ mod tests {
     #[test]
     fn factory_name_is_the_spec_key() {
         assert_eq!(PgwirePipeFactory::new().name(), "pgwire");
+    }
+
+    #[test]
+    fn client_protocol_lowers_to_the_type_and_dsn_spec() {
+        let protocol = PgwireClientProtocol::dsn("postgres://u:p@h:5432/db");
+        let spec = protocol.spec();
+        assert_eq!(spec["type"], "pgwire");
+        assert_eq!(spec["dsn"], "postgres://u:p@h:5432/db");
+        assert_eq!(protocol.factory().name(), "pgwire");
     }
 
     /// The headline: pgwire reached through `proxima::Client` like any other

@@ -34,6 +34,11 @@ use proxima::telemetry::NoopTelemetry;
 use proxima_http::http3::native::H3NativeUpstream;
 use proxima_primitives::pipe::SendPipe;
 
+/// Shared slot the client task publishes its `(status, body)` result (or a
+/// stringified error) into, for the driving thread to read back after the
+/// runtime shuts down.
+type SharedRequestResult = Arc<Mutex<Option<Result<(u16, Bytes), String>>>>;
+
 /// Constant `200 OK` + `ok` handler — the server-side Handler.
 struct ConstantOk;
 
@@ -158,7 +163,7 @@ fn native_h3_upstream_round_trips_against_native_listener() {
     let handle = prime::os::core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
     let done = Arc::new(AtomicBool::new(false));
     let done_for_factory = done.clone();
-    let result: Arc<Mutex<Option<Result<(u16, Bytes), String>>>> = Arc::new(Mutex::new(None));
+    let result: SharedRequestResult = Arc::new(Mutex::new(None));
     let result_for_factory = result.clone();
 
     handle
@@ -250,7 +255,7 @@ fn native_h3_upstream_round_trips_with_part_source_on_both_halves() {
     let handle = prime::os::core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
     let done = Arc::new(AtomicBool::new(false));
     let done_for_factory = done.clone();
-    let result: Arc<Mutex<Option<Result<(u16, Bytes), String>>>> = Arc::new(Mutex::new(None));
+    let result: SharedRequestResult = Arc::new(Mutex::new(None));
     let result_for_factory = result.clone();
 
     handle

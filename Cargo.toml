@@ -616,6 +616,13 @@ websocket = ["tokio", "tokio-runtime", "tcp", "dep:async-tungstenite", "proxima-
 # pulls in the same async-tungstenite the listener uses; client-side handshake +
 # message exchange wrapped in a `Pipe`-compatible upstream. default off.
 websocket-upstream = ["websocket"]
+# `ListenerBuilder::websocket(handler)` — wires a WebSocket (RFC 6455)
+# handler into h1's EXISTING connection-upgrade seam (sans-IO handshake:
+# Sec-WebSocket-Accept via sha1+base64). Deliberately NOT the `websocket`
+# feature above: no tokio, no async-tungstenite, no full-connection listener
+# — this rides whichever h1 build (`http1`/`http1-native`) is already
+# compiled in. See `src/listener/websocket.rs`'s module doc.
+websocket-upgrade = ["proxima-protocols/websocket_handshake"]
 # RESP3 (Redis Serialization Protocol v3) listener (P5). sans-IO parser +
 # `RedisAnyProtocol`, mounted onto `AnyListenProtocol`'s ONE bind + accept
 # loop (`proxima-http/http-listener`, same reasoning as the `pgwire`
