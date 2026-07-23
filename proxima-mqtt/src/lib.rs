@@ -41,6 +41,8 @@ pub mod pipe;
 pub mod pipes;
 #[cfg(feature = "listen")]
 pub mod topic_filter;
+#[cfg(feature = "listen")]
+pub mod wait_sources;
 
 pub use proxima_protocols::mqtt::{
     Connection, ParseError, Packet, PacketType, parse_packet, pipe_contract,
