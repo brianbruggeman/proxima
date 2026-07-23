@@ -18,7 +18,22 @@
 //! hand-rolled parser in the bench harness.
 //!
 //! Sub-flag: `mqtt-listener` (default off).
+//!
+//! [`connection`] wraps [`parse_packet`] in a sans-IO state machine
+//! ([`connection::Connection`] — `feed_bytes`/`advance`/`consume`, DoS-capped
+//! by [`connection::Limits`]) mirroring [`crate::redis::connection::Connection`]'s
+//! shape. [`encode`] builds the server-to-client and client-to-server wire
+//! packets [`parse_packet`] cannot itself produce. [`pipe_contract`] maps a
+//! packet onto a `proxima_primitives::pipe::Pipe` request the same way
+//! [`crate::redis::pipe_contract`] does for RESP — the std client/listener
+//! facade (`proxima-mqtt`) builds on both.
 
+pub mod connection;
+pub mod encode;
+pub mod pipe_contract;
+
+pub use connection::{Advanced, Connection, Limits};
+pub use pipe_contract::{MqttReply, MqttRequest, is_streaming, verb};
 
 /// MQTT control packet types (low nibble of the first byte after
 /// shifting right by 4).
@@ -212,8 +227,14 @@ fn read_u16(buf: &[u8]) -> Result<(u16, &[u8]), ParseError> {
     Ok((value, &buf[2..]))
 }
 
+/// Reads one length-prefixed MQTT UTF-8 string field (`u16` BE length +
+/// bytes). Exposed beyond this module because the CONNECT payload's
+/// remainder (`Packet::Connect::rest` — Will Topic/Message, username,
+/// password) is left for the caller to walk per the connect-flags bits,
+/// the same "less common payload structure is a raw slice" reasoning the
+/// module doc describes.
 #[inline(always)]
-fn read_string(buf: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
+pub fn read_string(buf: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
     let (len, rest) = read_u16(buf)?;
     let len = len as usize;
     if rest.len() < len {
