@@ -77,7 +77,47 @@ impl Default for DnsResolverConfig {
     }
 }
 
+/// Errors parsing a `dns://` resolver DSN — mirrors the sibling client
+/// crates' `KafkaConfigError`/`RedisConfigError` shape.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DnsConfigError {
+    #[error("dsn must start with dns://")]
+    Scheme,
+    #[error("dsn port must be a number")]
+    Port,
+}
+
 impl DnsResolverConfig {
+    /// Parses a `dns://resolver_ip[:port]` DSN — the resolver IP MUST be an
+    /// IP literal, matching [`Self::resolver_ip`]'s own constraint (a stub
+    /// resolver cannot resolve its own upstream's hostname). A missing
+    /// field falls back to its default. This is the ergonomic entry the
+    /// fluent `.dns(dsn)` client sugar lowers to.
+    ///
+    /// # Errors
+    /// [`DnsConfigError::Scheme`] when the scheme is not `dns`,
+    /// [`DnsConfigError::Port`] on a non-numeric port.
+    pub fn from_dsn(dsn: &str) -> Result<Self, DnsConfigError> {
+        let rest = dsn.strip_prefix("dns://").ok_or(DnsConfigError::Scheme)?;
+        let (resolver_ip, port) = match rest.rsplit_once(':') {
+            Some((host, port)) => (
+                host,
+                port.parse::<u16>().map_err(|_error| DnsConfigError::Port)?,
+            ),
+            None => (rest, default_port()),
+        };
+        let resolver_ip = if resolver_ip.is_empty() {
+            default_resolver_ip()
+        } else {
+            resolver_ip.to_string()
+        };
+        Ok(Self {
+            resolver_ip,
+            port,
+            ..Self::default()
+        })
+    }
+
     /// The socket address the client dials.
     ///
     /// # Errors
@@ -154,6 +194,35 @@ mod tests {
             .build();
         assert_eq!(config.resolver_addr().unwrap().to_string(), "9.9.9.9:5353");
         assert_eq!(config.max_attempts, 3);
+    }
+
+    #[test]
+    fn dsn_full_round_trips_resolver_ip_and_port() {
+        let config = DnsResolverConfig::from_dsn("dns://9.9.9.9:5353").unwrap();
+        assert_eq!(config.resolver_ip, "9.9.9.9");
+        assert_eq!(config.port, 5353);
+    }
+
+    #[test]
+    fn dsn_minimal_falls_back_to_the_default_port() {
+        let config = DnsResolverConfig::from_dsn("dns://9.9.9.9").unwrap();
+        assert_eq!(config.port, 53);
+    }
+
+    #[test]
+    fn dsn_rejects_foreign_scheme() {
+        assert_eq!(
+            DnsResolverConfig::from_dsn("redis://9.9.9.9"),
+            Err(DnsConfigError::Scheme)
+        );
+    }
+
+    #[test]
+    fn dsn_rejects_non_numeric_port() {
+        assert_eq!(
+            DnsResolverConfig::from_dsn("dns://9.9.9.9:notaport"),
+            Err(DnsConfigError::Port)
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ use tokio::net::TcpStream;
 use proxima::error::ProximaError;
 use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
-use proxima::{Listener, ListenerBuilderEntry, SendPipe, TransportSugar};
+use proxima::{Listener, ListenerBuilderEntry, ListenerTransportExt, SendPipe};
 use proxima_listen::admission::BlacklistConfig;
 
 /// The scanner literal `.deny("scanner", SCANNER_LITERAL)` registers — an

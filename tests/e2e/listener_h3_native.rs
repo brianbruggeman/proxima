@@ -10,7 +10,7 @@
 //! hand-built `ListenRegistry` (the shortcut every other native-h3 test/
 //! bench uses). `listener_builder_h3_serves_a_real_h3_client` below proves
 //! the SAME protocol is reachable through the fluent
-//! `Listener::builder().h3()...serve()` axis end to end — real UDP bind,
+//! `Listener::builder().quic()...serve()` axis end to end — real UDP bind,
 //! real quinn+h3 client, no hand registry.
 
 #![allow(
@@ -36,7 +36,7 @@ use proxima::pipe::{into_handle};
 use proxima::request::{Request, Response};
 use proxima::runtime::{PrimeRuntime, Runtime};
 use proxima::telemetry::NoopTelemetry;
-use proxima::{ListenRegistry, Listener, ListenerBuilderEntry, ListenerSpec, TransportSugar};
+use proxima::{ListenRegistry, Listener, ListenerBuilderEntry, ListenerSpec, ListenerTransportExt};
 use proxima_net::prime::PrimeDatagramFactory;
 use proxima_primitives::pipe::SendPipe;
 
@@ -203,9 +203,9 @@ async fn h3_native_listener_round_trip() {
 }
 
 /// Same wire proof as `h3_native_listener_round_trip` above, but reached
-/// through `Listener::builder().h3()...serve()` instead of a hand-built
+/// through `Listener::builder().quic()...serve()` instead of a hand-built
 /// `ListenRegistry` + `ListenerSpec` — proves the builder axis actually
-/// resolves to the registered `H3NativeListenProtocol` (`.h3()` used to
+/// resolves to the registered `H3NativeListenProtocol` (`.quic()` used to
 /// hard-error at `.serve()`; see `src/listener/handle.rs`'s
 /// `reject_dead_axes`) and that `App::new()`'s datagram-factory wiring (the
 /// UDP sibling of its `acceptor_factory`, threaded through
@@ -222,13 +222,13 @@ async fn listener_builder_h3_serves_a_real_h3_client() {
 
     let server = Listener::builder()
         .bind(bound)
-        .h3()
+        .quic()
         .spec("dev_self_signed", serde_json::json!(true))
         .spec("dev_sans", serde_json::json!(["localhost"]))
         .handle(dispatch)
         .serve()
         .await
-        .expect("Listener::builder().h3() serve");
+        .expect("Listener::builder().quic() serve");
 
     // No bind-wait sleep here either: quinn PTO-retransmits its Initial for
     // up to 30s (same rationale as `h3_native_listener_round_trip` above).

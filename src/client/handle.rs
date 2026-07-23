@@ -407,40 +407,7 @@ impl SendPipe for Client {
 }
 
 
-/// The wire a [`Client`] speaks, the transport axis of protocol × transport ×
-/// auth. Lowers to the spec `transport` key the factory registry resolves; the
-/// app protocol (`.http`/`.grpc`/…) and this compose into the concrete upstream.
-///
-/// `Auto` (the default) negotiates over the scheme/ALPN — `https` → TLS with
-/// h1/h2 by ALPN, `http` → plaintext h1. `Tcp`/`Tls` force the wire; `H3` is
-/// HTTP/3 over QUIC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Transport {
-    /// Negotiate from the URL scheme + ALPN (the default).
-    #[default]
-    Auto,
-    /// Plaintext TCP.
-    Tcp,
-    /// TLS over TCP (h1/h2 by ALPN).
-    Tls,
-    /// HTTP/3 over QUIC.
-    H3,
-}
-
-impl Transport {
-    /// The spec-string this transport lowers to.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Transport::Auto => "auto",
-            Transport::Tcp => "tcp",
-            Transport::Tls => "tls",
-            Transport::H3 => "h3",
-        }
-    }
-}
-
-/// Fluent builder for [`Client`]: `Client::builder().http(url).transport(t).build()`.
+/// Fluent builder for [`Client`]: `Client::builder().http(url).tcp().build()`.
 #[derive(Default)]
 pub struct ClientBuilder {
     spec: serde_json::Map<String, Value>,
@@ -472,62 +439,15 @@ pub trait ClientProtocol {
 }
 
 impl ClientBuilder {
-    // protocol axis (`.http()`/`.https()`/`.grpc()`) and transport axis
-    // (`.auto()`/`.tcp()`/`.tls()`/`.h3()`/`.proxy()`) are the `ProtocolSugar` /
-    // `TransportSugar` traits, blanket-impl'd over the `SpecBuilder` below.
-    // `use proxima::{ProtocolSugar, TransportSugar}` brings them into scope —
-    // the method is on the page because you imported it. The typed `.transport(
-    // Transport)` and `.auth(ClientAuth)` escape hatches stay inherent.
-
-    /// Point the client at a PostgreSQL server by DSN
-    /// (`postgres://user:pw@host:port/db`). Lowers to the `pgwire` protocol
-    /// terminal (`{"type":"pgwire","dsn":...}`). The SQL reply is typed, not an
-    /// HTTP body, so it rides the response `Carry`:
-    /// `response.reply::<proxima_pgwire::PgReply>()`.
-    #[cfg(feature = "pgwire-client")]
-    #[must_use]
-    pub fn pgwire(mut self, dsn: impl Into<String>) -> Self {
-        self.spec
-            .insert("type".to_string(), Value::String("pgwire".to_string()));
-        self.spec
-            .insert("dsn".to_string(), Value::String(dsn.into()));
-        self
-    }
-
-    /// Point the client at a Redis server by DSN
-    /// (`redis://[user:pass@]host[:port][/db]`). Lowers to the `redis` protocol
-    /// terminal (`{"type":"redis","dsn":...}`). The reply is typed, not an HTTP
-    /// body, so it rides the response `Carry`:
-    /// `response.reply::<proxima_redis::RespValue>()`.
-    #[cfg(feature = "redis-client")]
-    #[must_use]
-    pub fn redis(mut self, dsn: impl Into<String>) -> Self {
-        self.spec
-            .insert("type".to_string(), Value::String("redis".to_string()));
-        self.spec
-            .insert("dsn".to_string(), Value::String(dsn.into()));
-        self
-    }
-
-    /// Point the client at a Valkey server by DSN — Valkey speaks the same RESP
-    /// wire protocol as Redis, so this aliases [`redis`](Self::redis) onto the
-    /// one `redis` factory (one codec, one client, one terminal cover both).
-    #[cfg(feature = "redis-client")]
-    #[must_use]
-    pub fn valkey(self, dsn: impl Into<String>) -> Self {
-        self.redis(dsn)
-    }
-
-    /// Select the wire ([`Transport`]) — the transport axis. Lowers to the spec
-    /// `transport` key; the app-protocol factory (`http`/`grpc`) composes it.
-    #[must_use]
-    pub fn transport(mut self, transport: Transport) -> Self {
-        self.spec.insert(
-            "transport".to_string(),
-            Value::String(transport.as_str().to_string()),
-        );
-        self
-    }
+    // protocol axis (`.http()`/`.https()`/`.grpc()`/`.kafka()`/`.mqtt()`/
+    // `.amqp()`/`.dns()`/`.memcached()`/`.redis()`/`.valkey()`/`.pgwire()`) is
+    // `ClientProtocolExt`; transport axis (`.tcp()`/`.udp()`/`.quic()`/
+    // `.proxy()`) is `ClientTransportExt`; security axis (`.tls()`) is
+    // `ClientSecurityExt` — all TYPE-SPECIFIC extension traits (no blanket
+    // impl) in the umbrella crate root, re-exported via `proxima::prelude`.
+    // `use proxima::prelude::*;` (or the individual trait names) brings them
+    // into scope — the method is on the page because you imported it. The
+    // `.auth(ClientAuth)` escape hatch stays inherent.
 
     /// Merge an arbitrary spec key (retry, synth, name, …) — same shape as a
     /// `[[pipe]]` entry. Lets the builder express anything `from_value` can.
@@ -640,11 +560,11 @@ impl ClientBuilder {
     }
 }
 
-/// The base spec seam ([`proxima_config::sugar::SpecBuilder`]): the axis sugar
-/// ([`ProtocolSugar`](proxima_config::sugar::ProtocolSugar) /
-/// [`TransportSugar`](proxima_config::sugar::TransportSugar)) is blanket-impl'd over
-/// this, so a `use` of an axis trait lights up its methods on `ClientBuilder`.
-/// `set` reuses the existing `.spec()` so there is exactly one write path.
+/// The base spec seam ([`proxima_config::sugar::SpecBuilder`]): the
+/// TYPE-SPECIFIC axis extension traits (`ClientTransportExt` /
+/// `ClientSecurityExt` / `ClientProtocolExt`, defined against `ClientBuilder`
+/// directly — no blanket impl) call through this. `set` reuses the existing
+/// `.spec()` so there is exactly one write path.
 impl proxima_config::sugar::SpecBuilder for ClientBuilder {
     fn set(self, key: &str, value: impl Into<Value>) -> Self {
         self.spec(key, value.into())
@@ -741,7 +661,9 @@ fn toml_to_json(value: toml::Value) -> Value {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_config::sugar::{ProtocolSugar, TransportSugar};
+    use crate::client::protocol::ClientProtocolExt;
+    use crate::client::security::ClientSecurityExt;
+    use crate::client::transport::ClientTransportExt;
     use serde_json::json;
 
     /// A protocol defined "outside" this crate: a factory the default registry
@@ -1055,7 +977,7 @@ mod tests {
         // protocol × transport × proxy lower to the spec keys the registry resolves.
         let built = Client::builder()
             .https("https://api.example.com")
-            .transport(Transport::Tls)
+            .tls()
             .proxy("http://127.0.0.1:8080")
             .build()
             .expect("builder build");
@@ -1073,7 +995,7 @@ mod tests {
         );
 
         // the headline parity: the fluent builder and the config file lower to
-        // the IDENTICAL spec (one door). `.tls()` is the TransportSugar twin of
+        // the IDENTICAL spec (one door). `.tls()` is the `ClientSecurityExt` twin of
         // `transport = "tls"`; both Clients carry the same `inner.spec`.
         let fluent = Client::builder()
             .http("http://api.example.com")
@@ -1097,6 +1019,25 @@ mod tests {
         assert_eq!(
             grpc.inner.spec.get("grpc").and_then(Value::as_str),
             Some("https://collector:4317")
+        );
+    }
+
+    #[test]
+    fn tcp_udp_quic_write_the_transport_key() {
+        let tcp = Client::builder().tcp().build().expect("tcp build");
+        assert_eq!(
+            tcp.inner.spec.get("transport").and_then(Value::as_str),
+            Some("tcp")
+        );
+        let udp = Client::builder().udp().build().expect("udp build");
+        assert_eq!(
+            udp.inner.spec.get("transport").and_then(Value::as_str),
+            Some("udp")
+        );
+        let quic = Client::builder().quic().build().expect("quic build");
+        assert_eq!(
+            quic.inner.spec.get("transport").and_then(Value::as_str),
+            Some("quic")
         );
     }
 
