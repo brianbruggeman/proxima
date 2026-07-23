@@ -15,7 +15,7 @@
 //! `proxima_core::markers::DropSafe`'s own doc + `fan_in.rs:274/288/302`'s
 //! enforced bound on every merged source).
 //!
-//! # Why `std::sync::Mutex`, not `RefCell`
+//! # Why `proxima_primitives::sync::blocking::Mutex`, not `RefCell`
 //!
 //! `FanIn::call` takes `&self` (`fan_in.rs`'s own contract), so a source
 //! that needs `&mut` access to its read half / channel / oneshot needs
@@ -31,12 +31,14 @@
 //! never held across an `.await` (acquired and released within one
 //! synchronous `poll()`), so this is a correctness-only cost (a few atomic
 //! ops per poll), not a real lock-contention concern — but it IS a real
-//! deviation from the RefCell-shaped design the design spike assumed.
+//! deviation from the RefCell-shaped design the design spike assumed. The
+//! workspace-canonical sync `Mutex` (`proxima_primitives::sync::blocking`,
+//! parking_lot-backed on std) is used rather than `std::sync::Mutex` — same
+//! usage, no poisoning to recover from.
 
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use std::sync::Mutex;
 
 use bytes::Bytes;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -47,14 +49,13 @@ use futures::stream::Stream;
 use proxima_core::markers::DropSafe;
 use proxima_listen::WireEvent;
 use proxima_primitives::pipe::{Exhausted, UnpinPipe};
+use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
 
-/// Recovers a poisoned lock instead of panicking (`expect`/`unwrap` are
-/// denied in source by the workspace lints) — a panic while holding one of
-/// these locks means the connection is already unwinding, so recovering
-/// the (possibly torn) inner value and letting the caller observe whatever
-/// `poll` returns next is strictly better than a second panic here.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+/// `parking_lot::Mutex` never poisons, so this is a plain passthrough — kept
+/// as a named helper so every call site reads `lock(mutex)` uniformly rather
+/// than `mutex.lock()` in some places and a poison-recovery dance in others.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock()
 }
 
 /// One of the three sources `connection.rs`'s outer wait races: the socket

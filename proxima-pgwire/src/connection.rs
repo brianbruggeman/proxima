@@ -17,8 +17,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 #[cfg(feature = "listen")]
 use std::future::Future;
 #[cfg(feature = "listen")]
-use std::sync::Mutex;
-#[cfg(feature = "listen")]
 use std::pin::Pin;
 #[cfg(feature = "listen")]
 use std::task::{Context, Poll};
@@ -40,6 +38,8 @@ use proxima_core::markers::DropSafe;
 use proxima_listen::WireEvent;
 #[cfg(feature = "listen")]
 use proxima_primitives::pipe::{Exhausted, FanIn, Select, UnpinPipe};
+#[cfg(feature = "listen")]
+use proxima_primitives::sync::blocking::Mutex;
 
 use proxima_protocols::pgwire_codec::backend::{
     DataRowWriter, ErrorResponseWriter, RowDescriptionWriter, encode_copy_in_response,
@@ -1660,23 +1660,22 @@ where
     Ok(false)
 }
 
-/// Recovers a poisoned lock instead of panicking (`expect`/`unwrap` are
-/// denied in source by the workspace lints). A panic while holding one of
-/// these locks means the connection is already unwinding, so recovering
-/// the (possibly torn) inner value and letting the caller observe whatever
-/// happens next is strictly better than a second panic here. Mirrors
-/// `proxima_redis::wait_sources`'s identical helper (same wall: `FanIn`
-/// sources need `&self`-shaped interior mutability, and `RefCell` — the
-/// obvious first reach — is never `Sync`, which the connection future's
-/// pre-existing `Send` requirement demands).
+/// `proxima_primitives::sync::blocking::Mutex` (parking_lot-backed on std,
+/// the workspace-canonical sync mutex) never poisons, so this is a plain
+/// passthrough — kept as a named helper so every call site reads
+/// `lock(mutex)` uniformly. Mirrors `proxima_redis::wait_sources`'s
+/// identical helper (same wall: `FanIn` sources need `&self`-shaped
+/// interior mutability, and `RefCell` — the obvious first reach — is never
+/// `Sync`, which the connection future's pre-existing `Send` requirement
+/// demands).
 #[cfg(feature = "listen")]
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> proxima_primitives::sync::blocking::MutexGuard<'_, T> {
+    mutex.lock()
 }
 
 #[cfg(feature = "listen")]
 fn into_inner<T>(mutex: Mutex<T>) -> T {
-    mutex.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex.into_inner()
 }
 
 /// Encodes one `NotificationResponse` (no flush — the caller decides when
