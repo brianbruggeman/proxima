@@ -67,11 +67,13 @@ proxima-build = { path = "proxima-build" }
 proxima-codec = { path = "proxima-codec", default-features = false }
 proxima-config = { path = "proxima-config", default-features = false }
 proxima-core = { path = "proxima-core", default-features = false }
+proxima-dns = { path = "proxima-dns", default-features = false }
 proxima-http = { path = "proxima-http", default-features = false }
 proxima-kafka = { path = "proxima-kafka", default-features = false }
 proxima-listen = { path = "proxima-listen" }
 proxima-macros = { path = "proxima-macros" }
-proxima-mqtt = { path = "proxima-mqtt" }
+proxima-memcached = { path = "proxima-memcached", default-features = false }
+proxima-mqtt = { path = "proxima-mqtt", default-features = false }
 proxima-patterns = { path = "proxima-patterns", default-features = false }
 proxima-test = { path = "proxima-test" }
 proxima-net = { path = "proxima-net", default-features = false }
@@ -243,6 +245,11 @@ proxima-quic = { workspace = true, optional = true }
 proxima-recording = { workspace = true, features = ["pipe", "replay"] }
 proxima-protocols = { workspace = true, features = ["proxy_protocol-std"] }
 proxima-redis = { workspace = true, optional = true }
+proxima-memcached = { workspace = true, optional = true }
+proxima-dns = { workspace = true, optional = true }
+proxima-kafka = { workspace = true, optional = true }
+proxima-mqtt = { workspace = true, optional = true }
+proxima-amqp = { workspace = true, optional = true }
 proxima-telemetry = { workspace = true }
 prime = { workspace = true, optional = true }
 proxima-listen = { workspace = true }
@@ -628,6 +635,19 @@ redis-listener = [
 # scope-mismatched + a parity-scoped hand-rolled baseline in the
 # bench harness so the Compare-bench gate cell passes honestly.
 dns-substrate = ["proxima-protocols/dns"]
+# `dns-client` registers the `dns` protocol factory so `proxima::Client`
+# can issue DNS queries over a pluggable `DatagramFactory`. Mirrors
+# `redis-client`'s shape.
+dns-client = ["http-prime", "dep:proxima-dns", "proxima-dns/client"]
+# DNS UDP/TCP listener — mounts `DnsAnyProtocol`/`DnsDatagramProtocol` from
+# the standalone `proxima-dns` crate. Mirrors `redis-listener`'s shape.
+dns-listener = [
+    "dep:proxima-dns",
+    "proxima-dns/listen",
+    "tokio-runtime",
+    "tcp",
+    "proxima-http/http-listener",
+]
 # proxima-side outbound HTTP/3 upstream (P7 in docs/protocol-gap/discipline.md).
 # pulls in the same h3 + h3-quinn the listener uses, plus webpki-roots for
 # default trust roots. compared in the bench harness against a hand-rolled
@@ -661,30 +681,75 @@ grpc-framing = ["proxima-protocols/grpc_framing"]
 # as a scope-matched reference (prost is the standard Rust protobuf crate).
 # default off.
 protobuf-wire = ["proxima-protocols/protobuf_wire"]
+# `memcached-client` registers the `memcached` protocol factory so
+# `proxima::Client` speaks memcached. Mirrors `redis-client`'s shape.
+memcached-client = ["http-prime", "dep:proxima-memcached", "proxima-memcached/client"]
 # Memcached text-protocol listener (P6 in docs/protocol-gap/discipline.md).
 # sans-IO parser for the ASCII protocol (get / set / delete / incr / decr /
 # flush_all / version / quit / stats / touch). Binary protocol is a follow-up.
 # Compared in the bench harness against a hand-rolled parity baseline.
+# Mounts `MemcachedAnyProtocol` from the standalone `proxima-memcached`
+# crate onto `AnyListenProtocol`, mirroring `redis-listener`'s shape.
 # default off.
-memcached-listener = ["proxima-protocols/memcached", "tokio-runtime", "tcp"]
+memcached-listener = [
+    "dep:proxima-memcached",
+    "proxima-memcached/listen",
+    "tokio-runtime",
+    "tcp",
+    "proxima-http/http-listener",
+]
+# `mqtt-client` registers the `mqtt` protocol factory so `proxima::Client`
+# speaks MQTT. Mirrors `redis-client`'s shape.
+mqtt-client = ["http-prime", "dep:proxima-mqtt", "proxima-mqtt/client"]
 # MQTT v3.1.1 listener (P2 in docs/protocol-gap/discipline.md). sans-IO
 # parser for the binary packet format: 1-byte type+flags + 1-4 byte varint
 # remaining length + variable header + payload. Covers the routing-critical
 # subset (CONNECT, PUBLISH, SUBSCRIBE, etc.). v5 is a follow-up sibling.
 # Compared in the bench harness against a hand-rolled parity baseline.
+# Mounts `MqttAnyProtocol` from the standalone `proxima-mqtt` crate onto
+# `AnyListenProtocol`, mirroring `redis-listener`'s shape.
 # default off.
-mqtt-listener = ["proxima-protocols/mqtt", "tokio-runtime", "tcp"]
+mqtt-listener = [
+    "dep:proxima-mqtt",
+    "proxima-mqtt/listen",
+    "tokio-runtime",
+    "tcp",
+    "proxima-http/http-listener",
+]
+# `amqp-client` registers the `amqp` protocol factory so `proxima::Client`
+# speaks AMQP 0-9-1. Mirrors `redis-client`'s shape.
+amqp-client = ["http-prime", "dep:proxima-amqp", "proxima-amqp/client"]
 # AMQP 0-9-1 listener (P3 in docs/protocol-gap/discipline.md). sans-IO
 # parser for the binary frame format used by RabbitMQ + native AMQP brokers.
 # Fixed 7-byte header (type/channel/length) + payload + trailing 0xCE.
-# Method frames decode class_id + method_id for routing. Sub-flag default off.
-amqp-listener = ["proxima-protocols/amqp", "tokio-runtime", "tcp"]
+# Method frames decode class_id + method_id for routing. Mounts
+# `AmqpAnyProtocol` from the standalone `proxima-amqp` crate onto
+# `AnyListenProtocol`, mirroring `redis-listener`'s shape. Sub-flag default
+# off.
+amqp-listener = [
+    "dep:proxima-amqp",
+    "proxima-amqp/listen",
+    "tokio-runtime",
+    "tcp",
+    "proxima-http/http-listener",
+]
+# `kafka-client` registers the `kafka` protocol factory so `proxima::Client`
+# speaks Kafka. Mirrors `redis-client`'s shape.
+kafka-client = ["http-prime", "dep:proxima-kafka", "proxima-kafka/client"]
 # Kafka wire-format listener (P4 in docs/protocol-gap/discipline.md).
 # sans-IO parser for the 4-byte length-prefix framing + request header
 # (api_key + api_version + correlation_id + client_id). Schema-agnostic
 # enough that substrate middleware can route by API key without
-# compiling .schema files. Sub-flag default off.
-kafka-listener = ["proxima-protocols/kafka", "tokio-runtime", "tcp"]
+# compiling .schema files. Mounts `KafkaAnyProtocol` from the standalone
+# `proxima-kafka` crate onto `AnyListenProtocol`, mirroring
+# `redis-listener`'s shape. Sub-flag default off.
+kafka-listener = [
+    "dep:proxima-kafka",
+    "proxima-kafka/listen",
+    "tokio-runtime",
+    "tcp",
+    "proxima-http/http-listener",
+]
 # WebSocket sans-IO frame codec (P11 in docs/protocol-gap/discipline.md).
 # RFC 6455 frame parsing/encoding decoupled from async-tungstenite so
 # substrate middleware can inspect frames without round-tripping through
