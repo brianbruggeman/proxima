@@ -11,6 +11,7 @@ members = [
     "proxima-codec",
     "proxima-config",
     "proxima-core",
+    "proxima-dns",
     "proxima-http",
     "proxima-storage",
     "proxima-listen",
