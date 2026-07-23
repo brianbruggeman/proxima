@@ -15,7 +15,13 @@ readme.workspace = true
 # Message/parse_message) — see proxima_protocols::dns docs. Required
 # unconditionally: this crate's top-level re-exports of the wire layer
 # don't gate behind `client`/`listen`.
-proxima-protocols = { workspace = true, default-features = false, features = ["dns", "dns-codec-trait"] }
+# `alloc` selects proxima-protocols' alloc-tier `DnsTcpQuery::name`
+# (`alloc::string::String`, not the no-alloc `heapless::String` rung) — this
+# crate's own `framed_app` re-owns that field into an unbounded `String`
+# unconditionally, so it needs the alloc tier explicitly now that
+# `default-features = false` skips proxima-protocols' own `default =
+# ["alloc"]`.
+proxima-protocols = { workspace = true, default-features = false, features = ["dns", "dns-codec-trait", "alloc"] }
 proxima-codec = { workspace = true, optional = true }
 # the typed pipe surface (DnsQuery/DnsAnswer/DnsPipeHandle) both the client
 # and listener sides build against.

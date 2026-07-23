@@ -517,4 +517,15 @@ fn main() {
     http1_codec_sizing::emit_sizing_consts(&out_dir);
     http3_codec_sizing::emit_sizing_consts(&out_dir);
     quic_sizing::emit_sizing_consts(&out_dir);
+
+    // proxima_alloc cfg — copied from proxima-primitives/build.rs (C3, the
+    // DNS-TCP no-alloc rung): selects between an unbounded
+    // `alloc::string::String` and a `heapless::String` inline buffer for
+    // `dns::frame_codec::DnsTcpQuery::name`. Plain-feature fallback only
+    // (no PROXIMA_PROFILE cross-axis here — this crate has no profile
+    // resolution of its own).
+    println!("cargo:rustc-check-cfg=cfg(proxima_alloc)");
+    if env::var("CARGO_FEATURE_ALLOC").is_ok() {
+        println!("cargo:rustc-cfg=proxima_alloc");
+    }
 }
