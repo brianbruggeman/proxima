@@ -281,8 +281,8 @@ pub use bytes::Bytes;
 pub use header_list::{HeaderList, IntoHeaderBytes};
 pub use kv::{CacheEntry, EvictionPolicy, KvCaps, KvHandle};
 pub use listen::{
-    ListenProtocol, ListenProtocolFluent, ListenRegistry, ServeBuilder, ServeContext,
-    ThreadLocalListenProtocol, ThreadLocalListenRegistry,
+    AnyProtocol, ClassifyOutcome, ListenProtocol, ListenProtocolFluent, ListenRegistry,
+    ProbeVerdict, ServeBuilder, ServeContext, ThreadLocalListenProtocol, ThreadLocalListenRegistry,
 };
 pub use listen_handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
 pub use listener::{ListenerBuilder, ListenerBuilderEntry};
@@ -394,6 +394,26 @@ pub use upstreams::{
     ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal,
 };
 pub use write_back::{WriteBackConditions, WriteBackRule};
+
+/// Everything a THIRD-PARTY crate needs to plug a custom protocol into
+/// proxima without depending on `proxima-listen` directly: the two open
+/// extension traits — [`AnyProtocol`] for
+/// `Listener::builder().any().protocol(impl AnyProtocol)`, [`ClientProtocol`]
+/// for `Client::builder().protocol(impl ClientProtocol)` — the builder entry
+/// points those methods live on, and the verdict/outcome types an
+/// `AnyProtocol::probe` impl returns and a caller inspecting
+/// `Classifier::advance` reads. `use proxima::prelude::*;` is the one import
+/// a downstream crate (kafka/mqtt/a private wire) needs to write
+/// `impl AnyProtocol for MyProtocol { .. }` / `impl ClientProtocol for
+/// MyProtocol { .. }` and wire it up — mirroring the two seams
+/// `src/client/handle.rs`'s `ClientProtocol` doc and
+/// `src/listener/handle.rs`'s `ListenerBuilder::protocol` doc describe.
+pub mod prelude {
+    pub use crate::{
+        AnyProtocol, App, ClassifyOutcome, Client, ClientProtocol, Listener, ListenerBuilder,
+        ListenerBuilderEntry, ProbeVerdict,
+    };
+}
 
 /// Drive a future to completion — expression sugar over the `block_on` verb.
 /// Two arities, both pointing down to a concrete `block_on`:

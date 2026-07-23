@@ -130,6 +130,16 @@ pub struct ListenerBuilder {
     /// [`Self::deny`].
     #[cfg(any(feature = "http1", feature = "http1-native"))]
     deny_signatures: Vec<(String, Vec<u8>)>,
+    /// `.protocol(impl AnyProtocol)` — externally-defined `AnyProtocol`
+    /// candidates, registered into the `App`'s `AnyRegistry` at `.serve()`
+    /// time ALONGSIDE whatever `.any()`/`.accepts()`/`.accept()` already
+    /// selected — the listener-side mirror of
+    /// [`ClientProtocol`](crate::client::handle::ClientProtocol)'s
+    /// `.protocol(impl ClientProtocol)`
+    /// ([`ClientBuilder::protocol`](crate::client::handle::ClientBuilder::protocol)).
+    /// See [`Self::protocol`].
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    extra_protocols: Vec<Arc<dyn proxima_listen::any::AnyProtocol>>,
     /// `.blacklist(config)` — overrides the accept-edge DoS-blacklist's
     /// strike thresholds/window/ban duration. `None` still gets a
     /// default-config `BlacklistTable` at `.serve()` time (a deny needs
@@ -292,6 +302,44 @@ impl ListenerBuilder {
     #[must_use]
     pub fn accept(self, name: &str) -> Self {
         self.accepts(&[name])
+    }
+
+    /// Plug in an out-of-crate `AnyProtocol` candidate for the open
+    /// universal listener — the listener-side mirror of
+    /// [`ClientProtocol`](crate::client::handle::ClientProtocol)'s
+    /// [`.protocol(impl ClientProtocol)`](crate::client::handle::ClientBuilder::protocol):
+    /// the typed, no-import path to extend `Listener::builder()` with a
+    /// kafka/mqtt/private-wire candidate a downstream crate defines, with no
+    /// edit here. Wraps `protocol` in the `Arc<dyn AnyProtocol>`
+    /// [`proxima_listen::any::AnyRegistry::register`] wants and adds its own
+    /// [`AnyProtocol::name`](proxima_listen::any::AnyProtocol::name) to the
+    /// selected set, composing with `.any()`/`.accepts()`/`.accept()`
+    /// exactly like [`Self::deny`] does: `None` implicitly selects every
+    /// currently-registered candidate PLUS this one (so a caller who only
+    /// calls `.protocol(..)` doesn't also have to remember `.any()`), an
+    /// existing `All` stays `All`, and an existing `Subset` only gains this
+    /// name rather than being narrowed to it. The candidate itself is
+    /// registered into `App::any_registry()` inside [`any_listen_protocol`]
+    /// at `.serve()` time, the same place `.deny()`'s `DenySignature`
+    /// candidates register — `ListenerBuilder` cannot register any earlier
+    /// since the `App` (and its registry) doesn't exist until `.serve()`
+    /// creates one.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[must_use]
+    pub fn protocol(mut self, protocol: impl proxima_listen::any::AnyProtocol) -> Self {
+        let protocol: Arc<dyn proxima_listen::any::AnyProtocol> = Arc::new(protocol);
+        let name = protocol.name().to_string();
+        self.any_mode = Some(match self.any_mode.take() {
+            None | Some(AnyMode::All) => AnyMode::All,
+            Some(AnyMode::Subset(mut names)) => {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+                AnyMode::Subset(names)
+            }
+        });
+        self.extra_protocols.push(protocol);
+        self
     }
 
     /// Bind an explicit per-protocol handler for the open universal
@@ -490,8 +538,11 @@ impl ListenerBuilder {
                 &self.any_handlers,
                 self.any_reject_hook.clone(),
                 dispatch.clone(),
-                &self.deny_signatures,
-                self.blacklist_config.clone(),
+                AnyAxisConfig {
+                    deny_signatures: &self.deny_signatures,
+                    blacklist_config: self.blacklist_config.clone(),
+                    extra_protocols: &self.extra_protocols,
+                },
             )?,
             None => resolve_listen_protocol(&self.spec)?,
         };
@@ -557,10 +608,30 @@ fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<SocketAddr> {
         .and_then(|value| value.parse().ok())
 }
 
+/// The candidate-accumulation axes `any_listen_protocol` registers into
+/// `app.any_registry()` before resolving `mode` — grouped into one struct
+/// (rather than three more positional parameters) since all three are
+/// exactly the `ListenerBuilder` fields that only ever exist to feed this
+/// one function: `.deny()`/`.denies()` (`deny_signatures`), `.blacklist()`
+/// (`blacklist_config`), and `.protocol()` (`extra_protocols`, see
+/// [`ListenerBuilder::protocol`]).
+#[cfg(any(feature = "http1", feature = "http1-native"))]
+struct AnyAxisConfig<'a> {
+    deny_signatures: &'a [(String, Vec<u8>)],
+    blacklist_config: Option<proxima_listen::admission::BlacklistConfig>,
+    extra_protocols: &'a [Arc<dyn proxima_listen::any::AnyProtocol>],
+}
+
 /// Resolve `.any()`/`.accepts()`/`.accept()` to a fresh
 /// [`crate::listeners::AnyListenProtocol`] — the `.any()`-family sibling of
-/// [`resolve_listen_protocol`]. Builds the per-protocol handler map each
-/// candidate resolves through, in override-precedence order:
+/// [`resolve_listen_protocol`]. Registers `axis.extra_protocols`
+/// (`.protocol(impl AnyProtocol)` candidates, see [`ListenerBuilder::protocol`])
+/// into `app.any_registry()` first, before `axis.deny_signatures` and before
+/// `candidate_names` snapshots the registry — so an externally-defined
+/// candidate is present under its own name in time to be selected by
+/// `mode`, exactly like a first-party one `App::new()` pre-registered.
+/// Builds the per-protocol handler map each candidate resolves through, in
+/// override-precedence order:
 ///
 /// 1. a per-listener `.any_handler(name, handler)` binding (`overrides`);
 /// 2. the `App`-level default (`App::any_default_handlers`);
@@ -572,10 +643,10 @@ fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<SocketAddr> {
 ///    error naming the protocol, never a panic).
 ///
 /// Also builds the accept-edge DoS-blacklist wiring — UNCONDITIONALLY, even
-/// when `deny_signatures` is empty and `blacklist_config` was never set:
-/// registers each `DenySignature` into `app.any_registry()` (so it is
-/// classified alongside every other candidate `mode` selects), threads a
-/// `BlacklistTable` onto the resolved `AnyListenProtocol`, and COMPOSES the
+/// when `axis.deny_signatures` is empty and `axis.blacklist_config` was
+/// never set: registers each `DenySignature` into `app.any_registry()` (so
+/// it is classified alongside every other candidate `mode` selects), threads
+/// a `BlacklistTable` onto the resolved `AnyListenProtocol`, and COMPOSES the
 /// reject-hook (`reject_hook`, if present, still runs — this never clobbers
 /// it) so an unclassifiable reject also records a `Strike::Unclassifiable`.
 ///
@@ -590,14 +661,20 @@ fn any_listen_protocol(
     overrides: &std::collections::BTreeMap<String, proxima_listen::any::AnyHandler>,
     reject_hook: Option<crate::listeners::RejectHook>,
     dispatch_fallback: PipeHandle,
-    deny_signatures: &[(String, Vec<u8>)],
-    blacklist_config: Option<proxima_listen::admission::BlacklistConfig>,
+    axis: AnyAxisConfig<'_>,
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     let registry = app.any_registry();
 
+    // `.protocol(impl AnyProtocol)` candidates — registered before the
+    // `deny_signatures` loop below so an external candidate's own name is
+    // already in the registry by the time `candidate_names` snapshots it.
+    for protocol in axis.extra_protocols {
+        registry.register(protocol.clone())?;
+    }
+
     let blacklist =
-        proxima_listen::admission::BlacklistTable::new(blacklist_config.unwrap_or_default());
-    for (name, literal) in deny_signatures {
+        proxima_listen::admission::BlacklistTable::new(axis.blacklist_config.unwrap_or_default());
+    for (name, literal) in axis.deny_signatures {
         let candidate: Arc<dyn proxima_listen::any::AnyProtocol> =
             Arc::new(proxima_listen::any::DenySignature::new(
                 name.clone(),
@@ -1167,6 +1244,76 @@ mod tests {
 
     #[cfg(any(feature = "http1", feature = "http1-native"))]
     #[test]
+    fn dot_protocol_without_a_prior_any_call_implicitly_selects_all_like_deny_does() {
+        let builder = ListenerBuilder::default().protocol(StubAnyProtocol::new("mini"));
+        assert_eq!(
+            builder.any_mode,
+            Some(AnyMode::All),
+            ".protocol() with no prior .any()/.accepts()/.accept() must select every \
+             registered candidate, the same implicit-select .deny() uses — not narrow to \
+             just the new one"
+        );
+        assert_eq!(builder.extra_protocols.len(), 1);
+        assert_eq!(builder.extra_protocols[0].name(), "mini");
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn dot_protocol_after_accepts_subset_only_appends_its_own_name() {
+        let builder = ListenerBuilder::default()
+            .accepts(&["h1"])
+            .protocol(StubAnyProtocol::new("mini"));
+        assert_eq!(
+            builder.any_mode,
+            Some(AnyMode::Subset(vec!["h1".to_string(), "mini".to_string()]))
+        );
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
+    fn dot_protocol_after_dot_any_keeps_all_mode() {
+        let builder = ListenerBuilder::default()
+            .any()
+            .protocol(StubAnyProtocol::new("mini"));
+        assert_eq!(builder.any_mode, Some(AnyMode::All));
+    }
+
+    // The functional counterpart of the three builder-state tests above:
+    // `any_listen_protocol` actually REGISTERS an `extra_protocols` entry
+    // into `app.any_registry()` and resolves it as a live candidate,
+    // exercised directly against a real `App` (not through a socket) —
+    // the same style as `any_listen_protocol_resolves_to_the_any_registry_name`.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[proxima::test]
+    async fn any_listen_protocol_registers_and_selects_an_extra_protocol() {
+        let app = App::new().expect("App::new");
+        let dispatch = crate::pipe::into_handle(EchoOk);
+        let extra_protocols: Vec<Arc<dyn proxima_listen::any::AnyProtocol>> =
+            vec![Arc::new(StubAnyProtocol::new("mini"))];
+        let (name, extra) = any_listen_protocol(
+            &app,
+            &AnyMode::Subset(vec!["mini".to_string()]),
+            &std::collections::BTreeMap::new(),
+            None,
+            dispatch,
+            AnyAxisConfig {
+                deny_signatures: &[],
+                blacklist_config: None,
+                extra_protocols: &extra_protocols,
+            },
+        )
+        .expect("any_listen_protocol resolves a registered extra protocol");
+        assert_eq!(name, "any");
+        assert!(extra.is_some());
+        assert!(
+            app.any_registry().get("mini").is_ok(),
+            "the extra protocol must land in the App's AnyRegistry, reachable the same way \
+             a first-party candidate is"
+        );
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    #[test]
     fn any_handler_without_a_prior_any_call_implicitly_selects_that_name() {
         let builder = ListenerBuilder::default().any_handler("h1", 7_u8);
         assert_eq!(
@@ -1199,8 +1346,11 @@ mod tests {
             &std::collections::BTreeMap::new(),
             None,
             dispatch,
-            &[],
-            None,
+            AnyAxisConfig {
+                deny_signatures: &[],
+                blacklist_config: None,
+                extra_protocols: &[],
+            },
         )
         .expect("any_listen_protocol resolves");
         assert_eq!(name, "any");
@@ -1219,13 +1369,59 @@ mod tests {
             &std::collections::BTreeMap::new(),
             None,
             dispatch,
-            &[],
-            None,
+            AnyAxisConfig {
+                deny_signatures: &[],
+                blacklist_config: None,
+                extra_protocols: &[],
+            },
         );
         assert!(
             outcome.is_err(),
             "an unregistered candidate name must error, not silently ignore"
         );
+    }
+
+    /// A minimal `AnyProtocol` stand-in for an externally-defined candidate
+    /// — `.protocol(impl AnyProtocol)`'s tests only need a name and a
+    /// never-matching probe, never a live drive.
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    struct StubAnyProtocol {
+        name: String,
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    impl StubAnyProtocol {
+        fn new(name: impl Into<String>) -> Self {
+            Self { name: name.into() }
+        }
+    }
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    impl proxima_listen::any::AnyProtocol for StubAnyProtocol {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn max_prefix_bytes(&self) -> usize {
+            8
+        }
+
+        fn probe(&self, _prefix: &[u8]) -> proxima_listen::any::ProbeVerdict {
+            proxima_listen::any::ProbeVerdict::No
+        }
+
+        fn drive<'a>(
+            &'a self,
+            _stream: Box<dyn proxima_primitives::stream::StreamConnection>,
+            _handler: proxima_listen::any::AnyHandler,
+            _spec: &'a Value,
+            _peer: Option<proxima_primitives::stream::PeerInfo>,
+            _admission: &'a proxima_listen::admission::ConnAdmission,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), ProximaError>> + Send + 'a>,
+        > {
+            Box::pin(async move { Ok(()) })
+        }
     }
 
     #[cfg(any(feature = "http1", feature = "http1-native"))]
