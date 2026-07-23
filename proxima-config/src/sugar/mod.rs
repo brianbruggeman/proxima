@@ -11,9 +11,11 @@
 //! | `record = "trace.jsonl"` | `type = "record"` wrapping the sibling origin |
 //!
 //! [`desugar`] is the config half. [`builder`] is the fluent half: a
-//! [`SpecBuilder`] seam + axis traits ([`ProtocolSugar`], [`TransportSugar`])
-//! that accumulate the same spec `Value` — the fluent builder and the config
-//! file meet on one spec (one door, free parity).
+//! [`SpecBuilder`] seam concrete builders (`proxima::ListenerBuilder` /
+//! `proxima::ClientBuilder`) accumulate the same spec `Value` through — the
+//! fluent builder and the config file meet on one spec (one door, free
+//! parity). The type-specific axis extension traits live in the umbrella
+//! crate, not here (no blanket impl over every `SpecBuilder`).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -24,7 +26,7 @@ use serde_json::{Map, Value, json};
 use proxima_core::ProximaError;
 
 pub mod builder;
-pub use builder::{ProtocolSugar, SpecBuilder, TransportSugar};
+pub use builder::SpecBuilder;
 
 pub fn desugar(value: Value) -> Result<Value, ProximaError> {
     let Value::Object(map) = value else {

@@ -63,6 +63,15 @@ impl PipeFactory for PrimeHttpPipeFactory {
                 .get("proxy")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            // `.tls()` (`ClientSecurityExt`) — an ASSERTION the wire must be
+            // TLS, read separately for the same reason `proxy` is: it names
+            // a validation, not an upstream-config field. See
+            // `build_prime_upstream`'s `transport == "tls"` + `http://`
+            // scheme rejection.
+            let transport = spec
+                .get("transport")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let config: HttpConfig = serde_json::from_value(spec)
                 .map_err(|err| ProximaError::Config(format!("http config: {err}")))?;
             // mirror the hyper factory: the same HttpUpstreamConfig
@@ -75,6 +84,7 @@ impl PipeFactory for PrimeHttpPipeFactory {
                 runtime,
                 config.response,
                 proxy.as_deref(),
+                transport.as_deref(),
             )
         })
     }
@@ -95,6 +105,7 @@ fn build_prime_upstream(
     config: crate::http1::http_config::HttpUpstreamConfig,
     response: crate::http1::response_config::ResponseHandlingConfig,
     proxy: Option<&str>,
+    transport: Option<&str>,
 ) -> Result<PipeHandle, ProximaError> {
     let parsed =
         Url::parse(url).map_err(|err| ProximaError::Config(format!("parse url `{url}`: {err}")))?;
@@ -107,6 +118,15 @@ fn build_prime_upstream(
             )));
         }
     };
+    // `.tls()` asserts the wire MUST be TLS — an `http://` dial url paired
+    // with it is a config error, never a silent plaintext downgrade (the
+    // bug `Transport::Tls` used to hide entirely: `canonical_http` never
+    // forwarded `transport`, so this check was unreachable).
+    if transport == Some("tls") && !secure {
+        return Err(ProximaError::Config(format!(
+            "url `{url}` is http:// but .tls() asserts the wire must be TLS; use an https:// url"
+        )));
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| ProximaError::Config(format!("url `{url}` has no host")))?
@@ -242,6 +262,7 @@ mod tests {
             config.clone(),
             response,
             Some("http://127.0.0.1:8080"),
+            None,
         );
         assert!(https.is_ok(), "https-via-proxy builds");
         let http = build_prime_upstream(
@@ -250,6 +271,7 @@ mod tests {
             config,
             response,
             Some("http://127.0.0.1:8080"),
+            None,
         );
         assert!(http.is_ok(), "http-via-proxy builds");
     }
@@ -264,8 +286,53 @@ mod tests {
             config,
             response,
             Some("not a url"),
+            None,
         );
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+
+    /// The bug-fix headline: `.tls()` (`transport == "tls"`) paired with an
+    /// `http://` dial url is a config error, never a silent plaintext
+    /// downgrade — the exact composition `Transport::Tls` used to hide
+    /// entirely (dead: `canonical_http` never forwarded `transport`, so this
+    /// check was unreachable before the fix).
+    #[test]
+    fn tls_transport_with_http_scheme_is_a_config_error() {
+        let config = crate::http1::http_config::HttpUpstreamConfig::default();
+        let response = crate::http1::response_config::ResponseHandlingConfig::default();
+        let outcome = build_prime_upstream(
+            "http://api.example.test",
+            "p",
+            config,
+            response,
+            None,
+            Some("tls"),
+        );
+        let err = match outcome {
+            Ok(_) => panic!(".tls() + http:// must not silently build a plaintext upstream"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("tls"), "got: {err}");
+    }
+
+    /// The matching happy path: `.tls()` with an `https://` url builds fine.
+    #[test]
+    fn tls_transport_with_https_scheme_builds() {
+        let config = crate::http1::http_config::HttpUpstreamConfig::default();
+        let response = crate::http1::response_config::ResponseHandlingConfig::default();
+        let outcome = build_prime_upstream(
+            "https://api.example.test",
+            "p",
+            config,
+            response,
+            None,
+            Some("tls"),
+        );
+        assert!(
+            outcome.is_ok(),
+            "got: {:?}",
+            outcome.err().map(|err| err.to_string())
+        );
     }
 
     #[test]
