@@ -6,7 +6,6 @@ use std::pin::Pin;
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::{FutureExt, select};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -14,6 +13,7 @@ use tracing::{debug, warn};
 
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
+use proxima_protocols::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 use crate::error::ProximaError;
 use crate::pipe::PipeHandle;
@@ -198,56 +198,38 @@ where
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    #[serde(default)]
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcSuccess<'lifetime> {
-    jsonrpc: &'static str,
-    id: Value,
-    result: &'lifetime Value,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcError {
-    jsonrpc: &'static str,
-    id: Value,
-    error: JsonRpcErrorBody,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcErrorBody {
-    code: i32,
-    message: String,
-}
-
 async fn handle_jsonrpc(line: &str, dispatch: &PipeHandle) -> Option<String> {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(parsed) => parsed,
         Err(err) => {
-            return Some(error_response(
-                Value::Null,
-                -32700,
-                format!("parse error: {err}"),
-            ));
+            let response = JsonRpcResponse::failure(
+                None,
+                JsonRpcError::parse_error(format!("parse error: {err}")),
+            );
+            return Some(to_wire(&response));
         }
     };
-    let id = request.id.clone().unwrap_or(Value::Null);
-    if request.id.is_none() {
+    let Some(id) = request.id.clone() else {
         // notification — dispatch but don't respond.
         let _ = dispatch_method(&request, dispatch).await;
         return None;
-    }
-    match dispatch_method(&request, dispatch).await {
-        Ok(result) => Some(success_response(id, &result)),
-        Err((code, message)) => Some(error_response(id, code, message)),
-    }
+    };
+    let response = match dispatch_method(&request, dispatch).await {
+        Ok(result) => JsonRpcResponse::success(id, result),
+        Err((code, message)) => JsonRpcResponse::failure(
+            Some(id),
+            JsonRpcError {
+                code: i64::from(code),
+                message,
+                data: None,
+            },
+        ),
+    };
+    Some(to_wire(&response))
+}
+
+fn to_wire(response: &JsonRpcResponse) -> String {
+    serde_json::to_string(response).unwrap_or_else(|_| String::new())
 }
 
 async fn dispatch_method(
@@ -258,7 +240,7 @@ async fn dispatch_method(
         "initialize" => Ok(initialize_response()),
         "initialized" | "notifications/initialized" => Ok(Value::Null),
         "tools/list" => Ok(tools_list_response()),
-        "tools/call" => tool_call(&request.params, dispatch).await,
+        "tools/call" => tool_call(request.params.as_ref().unwrap_or(&Value::Null), dispatch).await,
         other => Err((-32601, format!("method `{other}` not found"))),
     }
 }
@@ -837,24 +819,6 @@ fn build_request(method: &str, path_with_query: &str) -> Result<Request<Bytes>, 
         stream: None,
         context,
     })
-}
-
-fn success_response(id: Value, result: &Value) -> String {
-    let envelope = JsonRpcSuccess {
-        jsonrpc: "2.0",
-        id,
-        result,
-    };
-    serde_json::to_string(&envelope).unwrap_or_else(|_| String::new())
-}
-
-fn error_response(id: Value, code: i32, message: String) -> String {
-    let envelope = JsonRpcError {
-        jsonrpc: "2.0",
-        id,
-        error: JsonRpcErrorBody { code, message },
-    };
-    serde_json::to_string(&envelope).unwrap_or_else(|_| String::new())
 }
 
 #[cfg(test)]
