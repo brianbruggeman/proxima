@@ -2,10 +2,11 @@
 //! `proxima_protocols::mqtt::Connection` FSM, dispatches each parsed
 //! packet, and writes the reply packet back onto the wire.
 //!
-//! Mirrors `proxima_redis::connection`'s `main_loop`/`read_some`/
-//! `flush_out` shape, plus the datagram-listener multi-source `select!`
-//! pattern (here racing the socket read against this connection's pub/sub
-//! push channel instead of redis's PUBLISH-driven one). Composes
+//! Mirrors `proxima_redis::connection`'s `main_loop`/`flush_out` shape, plus
+//! the datagram-listener multi-source merge pattern (here racing the socket
+//! read against this connection's pub/sub push channel instead of redis's
+//! PUBLISH-driven one) — via [`proxima_listen::wait_for_wire_event`], the
+//! shared outer-wait driver (see `crate::wait_sources`). Composes
 //! `proxima_protocols::mqtt` (`Connection`/`parse_packet`/`encode`) over
 //! any `futures::io` stream — no runtime, no socket type, no TLS
 //! knowledge.
@@ -18,16 +19,14 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::channel::mpsc::{self, UnboundedReceiver};
+use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use futures::stream::StreamExt;
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::{Request, RequestContext};
-use proxima_primitives::pipe::HeaderList;
+use proxima_primitives::pipe::{FanIn, HeaderList, Select};
 
 use proxima_protocols::mqtt::encode::{
     encode_ack, encode_connack, encode_pingresp, encode_suback, iter_subscribe_filters,
@@ -42,13 +41,7 @@ use crate::config::MqttServerConfig;
 use crate::error::MqttServeError;
 use crate::pipes::{MqttPipeHandle, MqttPipeRequest};
 use crate::topic_filter::is_valid_filter;
-
-async fn read_some<S: AsyncRead + Unpin>(
-    stream: &mut S,
-    scratch: &mut [u8],
-) -> std::io::Result<usize> {
-    stream.read(scratch).await
-}
+use crate::wait_sources::MqttConnSource;
 
 async fn flush_out<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
     if !out.is_empty() {
@@ -275,12 +268,14 @@ fn dispatch_unsubscribe(
 
 /// Serves one accepted connection to completion. Sequential await-per-packet
 /// — MQTT has no pipelining concept, but the same "never spawn per-packet"
-/// discipline redis's driver documents applies for reply ordering. The
-/// `select!` at the bottom races: (a) more socket bytes, (b) this
-/// connection's pub/sub push channel (frames `MqttBroker` pushed via
-/// `KeyedFanOut`), (c) shutdown.
+/// discipline redis's driver documents applies for reply ordering. The outer
+/// wait races: (a) more socket bytes, (b) this connection's pub/sub push
+/// channel (frames `MqttBroker` pushed via `KeyedFanOut`), (c) shutdown —
+/// via [`proxima_listen::wait_for_wire_event`], the shared outer-wait driver
+/// (see `crate::wait_sources`'s doc for why the inner decode+dispatch loop
+/// stays sequential and outside that race).
 pub async fn serve_connection<S>(
-    mut stream: S,
+    stream: S,
     handler: MqttPipeHandle,
     broker: std::sync::Arc<MqttBroker>,
     config: &MqttServerConfig,
@@ -294,25 +289,36 @@ where
         max_message_bytes: config.max_message_bytes,
     });
     let mut out = Vec::with_capacity(config.write_high_water_bytes + 4096);
-    let mut scratch = vec![0_u8; config.read_buffer_bytes];
     let (push_tx, push_rx) = mpsc::unbounded::<Bytes>();
     let push_sink = PushSink::new(push_tx);
     let mut state = SubscriberState::default();
     let mut connected = false;
 
+    let (read_half, mut write_half) = stream.split();
+    // declaration order == `Select::Fifo` scan order == the old
+    // `select_biased!`'s arm order (shutdown, then push, then read) — the
+    // SAME tie-break priority, just expressed as array position instead of
+    // macro-arm position.
+    let sources = FanIn::new(
+        [
+            MqttConnSource::shutdown(shutdown),
+            MqttConnSource::push(push_rx),
+            MqttConnSource::read(read_half, config.read_buffer_bytes),
+        ],
+        Select::Fifo,
+    );
+
     let outcome = main_loop(
-        &mut stream,
+        &mut write_half,
         &mut connection,
         &mut out,
-        &mut scratch,
         &handler,
         &broker,
         &push_sink,
         &mut state,
         &mut connected,
         config,
-        push_rx,
-        shutdown,
+        &sources,
         &admission,
     )
     .await;
@@ -322,18 +328,16 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn main_loop<S>(
-    stream: &mut S,
+    write_half: &mut futures::io::WriteHalf<S>,
     connection: &mut MqttConnection,
     out: &mut Vec<u8>,
-    scratch: &mut [u8],
     handler: &MqttPipeHandle,
     broker: &MqttBroker,
     push_sink: &PushSink,
     state: &mut SubscriberState,
     connected: &mut bool,
     config: &MqttServerConfig,
-    mut push_rx: UnboundedReceiver<Bytes>,
-    mut shutdown: oneshot::Receiver<()>,
+    sources: &FanIn<MqttConnSource<futures::io::ReadHalf<S>>, Select, 3>,
     admission: &proxima_listen::admission::ConnAdmission,
 ) -> Result<(), MqttServeError>
 where
@@ -359,7 +363,7 @@ where
                         FrameOutcome::NoReply => {}
                         FrameOutcome::Close(bytes) => {
                             out.extend_from_slice(&bytes);
-                            flush_out(stream, out).await?;
+                            flush_out(write_half, out).await?;
                             return Ok(());
                         }
                         FrameOutcome::InternalError(error) => {
@@ -368,7 +372,7 @@ where
                         }
                     }
                     if out.len() >= config.write_high_water_bytes {
-                        flush_out(stream, out).await?;
+                        flush_out(write_half, out).await?;
                     }
                 }
                 Advanced::ProtocolError { reason, .. } => {
@@ -385,33 +389,11 @@ where
                 }
             }
         }
-        flush_out(stream, out).await?;
+        flush_out(write_half, out).await?;
 
-        futures::select_biased! {
-            _ = (&mut shutdown).fuse() => return Ok(()),
-            pushed = push_rx.next().fuse() => {
-                match pushed {
-                    Some(bytes) => {
-                        out.extend_from_slice(&bytes);
-                        while let Ok(more) = push_rx.try_recv() {
-                            out.extend_from_slice(&more);
-                        }
-                        flush_out(stream, out).await?;
-                    }
-                    None => {
-                        // sender half lives on `push_sink`, held by this same
-                        // task — `None` cannot happen while the loop runs;
-                        // parking (not panicking) is the house style for a
-                        // violated-by-construction invariant.
-                    }
-                }
-            }
-            read = read_some(stream, scratch).fuse() => {
-                match read? {
-                    0 => return Ok(()),
-                    count => connection.feed_bytes(&scratch[..count]),
-                }
-            }
+        match proxima_listen::wait_for_wire_event(sources, write_half).await? {
+            Some(bytes) => connection.feed_bytes(&bytes),
+            None => return Ok(()),
         }
     }
 }
