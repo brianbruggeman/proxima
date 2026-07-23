@@ -33,10 +33,9 @@
 //! one-frame-per-call contract.
 
 use core::future::Future;
-use core::ops::Deref;
 
 use bytes::Bytes;
-use proxima_codec::{Addressed, Datagram, FrameCodec};
+use proxima_codec::{Addressed, Datagram, FrameCodec, ShareBuf};
 use proxima_primitives::pipe::{Pipe, SendPipe};
 
 /// Bridges a borrowed `C::Frame<'a>` into an owned value backed by the
@@ -61,8 +60,11 @@ use proxima_primitives::pipe::{Pipe, SendPipe};
 /// can be megabytes), so `Bytes`/alloc-tier is forced, not a default.
 pub trait OwnFrame: FrameCodec {
     /// The per-call window this codec re-owns from. `Bytes` on the alloc
-    /// tier; see the trait doc for the no-alloc seam.
-    type Source: Deref<Target = [u8]>;
+    /// tier; see the trait doc for the no-alloc seam. Bounded by
+    /// [`ShareBuf`] (component C4) rather than a bare
+    /// `Deref<Target = [u8]>` so `own_frame` can hand back a same-allocation
+    /// sub-slice through ANY caller-supplied buffer type, not just `Bytes`.
+    type Source: ShareBuf;
     /// The owned counterpart of `Self::Frame<'_>`.
     type Owned;
 

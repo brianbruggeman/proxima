@@ -43,23 +43,22 @@
 //! no_std FSM tier ([`super::connection`]) is the genuine zero-alloc
 //! floor: borrowed `Command<'a>` in, borrowed `Command<'a>` out.
 //!
-//! [`OwnedPayload`] names the alloc-tier storage ([`Bytes`], today's only
-//! implementation) as one alias rather than spelling `Bytes` at every
-//! field — a separate, not-yet-landed spike is scoping whether a
-//! no-alloc representation can carry an owned frame across the async
-//! handler boundary too. If that lands, it swaps this one alias;
-//! [`MemcachedRequest`]'s field declarations do not need to change.
+//! # Buffer genericity (component C4)
+//!
+//! [`MemcachedRequest`] is generic over `T: ShareBuf`, defaulted to
+//! [`Bytes`] — a caller drives the codec over their OWN buffer type (an
+//! `Arc<[u8]>`-backed window, a DPDK `rte_mbuf`, ...) with no behavior or
+//! allocation change on the `T = Bytes` path. `share` (not
+//! `Bytes::slice_ref`) is the re-owning primitive throughout this module;
+//! see `proxima_codec::share_buf`'s own doc for why the seam is `share`
+//! and not `bytes::Buf`.
 
 use alloc::vec::Vec;
 
 use bytes::Bytes;
+use proxima_codec::ShareBuf;
 
 use super::{Command, StoreMode};
-
-/// The owned-frame payload storage type. `Bytes` (`Arc`-backed refcount
-/// slicing) on this alloc tier — see the module doc for the no-alloc
-/// spike this alias exists to leave room for.
-pub type OwnedPayload = Bytes;
 
 /// Command verbs a caller sets as `Request.method` (uppercased, mirroring
 /// `crate::redis::pipe_contract::verb`'s convention of a symbolic routing
@@ -86,43 +85,44 @@ pub mod verb {
 
 /// The typed payload a caller's `Request.payload` carries — the owned,
 /// `'static` mirror of [`Command`], one variant per memcached command
-/// shape.
+/// shape. Generic over `T: ShareBuf` (component C4), defaulted to
+/// [`Bytes`] — see the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemcachedRequest {
+pub enum MemcachedRequest<T = Bytes> {
     Get {
         /// The untouched, still space-joined `"k1 k2 k3"` wire span —
         /// see the module doc. Walk it with [`iter_keys`].
-        keys: OwnedPayload,
+        keys: T,
         gets: bool,
     },
     Store {
         mode: StoreMode,
-        key: OwnedPayload,
+        key: T,
         flags: u32,
         exptime: u32,
-        value: OwnedPayload,
+        value: T,
         noreply: bool,
     },
     Cas {
-        key: OwnedPayload,
+        key: T,
         flags: u32,
         exptime: u32,
         cas_unique: u64,
-        value: OwnedPayload,
+        value: T,
         noreply: bool,
     },
     Delete {
-        key: OwnedPayload,
+        key: T,
         noreply: bool,
     },
     Counter {
         increment: bool,
-        key: OwnedPayload,
+        key: T,
         delta: u64,
         noreply: bool,
     },
     Touch {
-        key: OwnedPayload,
+        key: T,
         exptime: u32,
         noreply: bool,
     },
@@ -131,29 +131,29 @@ pub enum MemcachedRequest {
         noreply: bool,
     },
     Stats {
-        args: OwnedPayload,
+        args: T,
     },
     Version,
     Quit,
 }
 
-impl MemcachedRequest {
+impl<T: ShareBuf> MemcachedRequest<T> {
     /// Lift a borrowed, parse-buffer-tied [`Command`] into an owned,
     /// `'static` request — the async-boundary conversion a handler pipe
     /// needs (the borrowed form cannot outlive the connection's read
     /// buffer past the point the driver calls `Connection::consume`).
-    /// `source` must be the exact [`Bytes`] window `command` was parsed
-    /// from (`command`'s slices become [`Bytes::slice_ref`] windows into
-    /// it — an `Arc` refcount bump, not a copy).
+    /// `source` must be the exact `T` window `command` was parsed from
+    /// (`command`'s slices become `source.share(..)` windows into it — an
+    /// `Arc` refcount bump on the `T = Bytes` default, not a copy).
     #[must_use]
-    pub fn from_command(source: &Bytes, command: &Command<'_>) -> Self {
+    pub fn from_command(source: &T, command: &Command<'_>) -> Self {
         // `Command<'_>`'s fields are all Copy-eligible (`&[u8]`/`u32`/`bool`);
         // cloning is a bitwise copy of borrowed slices, not an allocation —
         // matching on the clone (by value) avoids the `&&[u8]` double
         // indirection a reference-pattern match ergonomics would produce.
         match command.clone() {
             Command::Get { keys, gets } => Self::Get {
-                keys: source.slice_ref(keys),
+                keys: source.share(keys),
                 gets,
             },
             Command::Store {
@@ -165,10 +165,10 @@ impl MemcachedRequest {
                 noreply,
             } => Self::Store {
                 mode,
-                key: source.slice_ref(key),
+                key: source.share(key),
                 flags,
                 exptime,
-                value: source.slice_ref(value),
+                value: source.share(value),
                 noreply,
             },
             Command::Cas {
@@ -179,15 +179,15 @@ impl MemcachedRequest {
                 value,
                 noreply,
             } => Self::Cas {
-                key: source.slice_ref(key),
+                key: source.share(key),
                 flags,
                 exptime,
                 cas_unique,
-                value: source.slice_ref(value),
+                value: source.share(value),
                 noreply,
             },
             Command::Delete { key, noreply } => Self::Delete {
-                key: source.slice_ref(key),
+                key: source.share(key),
                 noreply,
             },
             Command::Counter {
@@ -197,7 +197,7 @@ impl MemcachedRequest {
                 noreply,
             } => Self::Counter {
                 increment,
-                key: source.slice_ref(key),
+                key: source.share(key),
                 delta,
                 noreply,
             },
@@ -206,13 +206,13 @@ impl MemcachedRequest {
                 exptime,
                 noreply,
             } => Self::Touch {
-                key: source.slice_ref(key),
+                key: source.share(key),
                 exptime,
                 noreply,
             },
             Command::FlushAll { delay, noreply } => Self::FlushAll { delay, noreply },
             Command::Stats { args } => Self::Stats {
-                args: source.slice_ref(args),
+                args: source.share(args),
             },
             Command::Version => Self::Version,
             Command::Quit => Self::Quit,
@@ -237,13 +237,14 @@ impl MemcachedRequest {
     }
 }
 
-/// Walks a `Get`'s `keys` span (`"k1 k2 k3"`), yielding each key as a
-/// [`Bytes`] sub-slice — an `Arc` refcount bump per key, not a copy.
-/// Splits lazily on `b' '` via [`memchr::memchr`] (workspace principle 11:
-/// SIMD byte scan), one pass, zero allocation: no `Vec`/`Box`/`ArrayVec`
-/// materializes the key list. A run of consecutive spaces (or a leading
-/// one) yields no empty keys, matching the wire grammar's tokenization.
-pub fn iter_keys(keys: &Bytes) -> impl Iterator<Item = Bytes> + '_ {
+/// Walks a `Get`'s `keys` span (`"k1 k2 k3"`), yielding each key as a `T`
+/// sub-slice — an `Arc` refcount bump per key on the `T = Bytes` default,
+/// not a copy. Splits lazily on `b' '` via [`memchr::memchr`] (workspace
+/// principle 11: SIMD byte scan), one pass, zero allocation: no
+/// `Vec`/`Box`/`ArrayVec` materializes the key list. A run of consecutive
+/// spaces (or a leading one) yields no empty keys, matching the wire
+/// grammar's tokenization.
+pub fn iter_keys<T: ShareBuf>(keys: &T) -> impl Iterator<Item = T> + '_ {
     let mut remaining = keys.clone();
     core::iter::from_fn(move || {
         loop {
@@ -251,13 +252,17 @@ pub fn iter_keys(keys: &Bytes) -> impl Iterator<Item = Bytes> + '_ {
                 return None;
             }
             match memchr::memchr(b' ', &remaining) {
-                Some(0) => remaining = remaining.slice(1..),
+                Some(0) => remaining = remaining.share(&remaining[1..]),
                 Some(index) => {
-                    let key = remaining.slice(..index);
-                    remaining = remaining.slice(index + 1..);
+                    let key = remaining.share(&remaining[..index]);
+                    remaining = remaining.share(&remaining[index + 1..]);
                     return Some(key);
                 }
-                None => return Some(core::mem::replace(&mut remaining, Bytes::new())),
+                None => {
+                    let key = remaining.share(&remaining[..]);
+                    remaining = remaining.share(&remaining[remaining.len()..]);
+                    return Some(key);
+                }
             }
         }
     })
@@ -302,7 +307,7 @@ fn write_noreply(dest: &mut Vec<u8>, noreply: bool) {
 /// [`Command`] (there is no existing request encoder to reuse).
 /// `Get::keys` is already the space-joined wire span, so it is written
 /// once, verbatim — the SAME shape [`Command::Get::keys`] itself is.
-pub fn encode_request(request: &MemcachedRequest, dest: &mut Vec<u8>) {
+pub fn encode_request<T: ShareBuf>(request: &MemcachedRequest<T>, dest: &mut Vec<u8>) {
     match request {
         MemcachedRequest::Get { keys, gets } => {
             dest.extend_from_slice(if *gets { b"gets" } else { b"get" });

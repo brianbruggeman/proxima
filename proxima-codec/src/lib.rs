@@ -705,3 +705,6 @@ pub use factory::{
     BytesPassthroughCodecFactory, BytesPassthroughDynCodec, CodecBuildFuture, CodecFactory,
     CodecRegistry, DynCodec, DynCodecFactory, DynCodecHandle, JsonCodecFactory, JsonDynCodec,
 };
+
+pub mod share_buf;
+pub use share_buf::ShareBuf;

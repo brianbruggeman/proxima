@@ -35,9 +35,10 @@
 
 use alloc::vec::Vec;
 use core::fmt;
+use core::marker::PhantomData;
 
 use bytes::Bytes;
-use proxima_codec::FrameCodec;
+use proxima_codec::{FrameCodec, ShareBuf};
 
 use crate::codec_pipe::{Incomplete, OwnFrame};
 use crate::memcached::codec_trait::encode_command;
@@ -105,19 +106,50 @@ impl Incomplete for NeedMoreBytes {
 /// stateless per call and `FramedAny`'s driver hands it the WHOLE
 /// currently-buffered window on every attempt (re-parsing from byte
 /// zero; see `proxima_listen::any::FramedAny`'s own doc).
-#[derive(Debug, Clone, Copy)]
-pub struct MemcachedCodec {
+///
+/// Generic over `T: ShareBuf` (component C4) — the buffer type a caller
+/// drives this codec's [`OwnFrame`] seam over, defaulted to [`Bytes`].
+/// `parse_frame`/`encode_frame` themselves are `&[u8]`-only and `T`-
+/// independent; `T` only surfaces in [`OwnFrame::Source`]/[`Self::Owned`].
+/// `PhantomData<fn() -> T>` (not `PhantomData<T>`) so `MemcachedCodec<T>`
+/// stays `Send`/`Sync`/`Copy` regardless of `T`'s own variance — the codec
+/// never stores a `T`, it only names the type its `own_frame` re-owns
+/// into. `Clone`/`Copy` are hand-rolled below rather than derived: a plain
+/// `#[derive(Copy)]` would add a `T: Copy` bound, and `Bytes` is `!Copy`,
+/// so the default `MemcachedCodec<Bytes>` would stop compiling.
+#[derive(Debug)]
+pub struct MemcachedCodec<T = Bytes> {
     pub max_message_bytes: usize,
+    _owned: PhantomData<fn() -> T>,
 }
 
-impl MemcachedCodec {
-    #[must_use]
-    pub const fn new(max_message_bytes: usize) -> Self {
-        Self { max_message_bytes }
+impl<T> Clone for MemcachedCodec<T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-impl FrameCodec for MemcachedCodec {
+impl<T> Copy for MemcachedCodec<T> {}
+
+impl<T> MemcachedCodec<T> {
+    #[must_use]
+    pub const fn new(max_message_bytes: usize) -> Self {
+        Self {
+            max_message_bytes,
+            _owned: PhantomData,
+        }
+    }
+}
+
+// `+ 'static`: `FrameCodec`'s own supertrait bound (`Send + Sync + 'static`
+// on `Self`) requires `MemcachedCodec<T>: 'static`, which in turn requires
+// `T: 'static` — `T` genuinely appears in the `fn() -> T` phantom marker's
+// type signature (unlike Send/Sync, `'static` is not decoupled by the
+// phantom-fn trick). Unrelated to the Send bound this codec deliberately
+// does NOT require: an owned `T` (a real buffer, not a borrowed window)
+// is `'static` by construction on every real impl, including a DPDK
+// `rte_mbuf` handle.
+impl<T: ShareBuf + 'static> FrameCodec for MemcachedCodec<T> {
     type Frame<'a> = MemcachedFrame<'a>;
     type Error = NeedMoreBytes;
 
@@ -175,26 +207,28 @@ impl FrameCodec for MemcachedCodec {
 /// [`OwnFrame::Owned`] for [`MemcachedCodec`] — the owned mirror of
 /// [`MemcachedFrame::Request`]/[`MemcachedFrame::Violation`] (never
 /// `Reply`; that variant only ever appears on the encode side). No large
-/// variant here: `MemcachedRequest::Get::keys` is one `Bytes` (a
-/// pointer/len/refcount handle), the same size as every other field.
+/// variant here: `MemcachedRequest::Get::keys` is one `T` (a
+/// pointer/len/refcount handle on the `T = Bytes` default), the same size
+/// as every other field.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemcachedOwnedFrame {
-    Request(MemcachedRequest),
+pub enum MemcachedOwnedFrame<T = Bytes> {
+    Request(MemcachedRequest<T>),
     Violation(Violation),
 }
 
-impl OwnFrame for MemcachedCodec {
-    // Memcached frames are genuinely unbounded (`max_message_bytes` is a
-    // runtime field; a real `set` value can be megabytes) — `Bytes` is the
-    // ONLY tier that fits (see `OwnFrame::Source`'s own doc for the
-    // no-alloc seam this codec cannot use). This is forced, not a default.
-    type Source = Bytes;
-    type Owned = MemcachedOwnedFrame;
+impl<T: ShareBuf + 'static> OwnFrame for MemcachedCodec<T> {
+    // `T` is genuinely unbounded (`max_message_bytes` is a runtime field; a
+    // real `set` value can be megabytes) — a caller's own `ShareBuf` impl
+    // must itself be able to hold that, same as `Bytes` on the default
+    // (see `OwnFrame::Source`'s own doc for the no-alloc seam a per-`T`
+    // impl block could still take).
+    type Source = T;
+    type Owned = MemcachedOwnedFrame<T>;
 
-    /// Re-owns via [`MemcachedRequest::from_command`]'s `Bytes::slice_ref`
+    /// Re-owns via [`MemcachedRequest::from_command`]'s `ShareBuf::share`
     /// lift (workspace principles 1, 11 — the same seam
     /// `grpc_framing`/`http1_codec`/`websocket_frame` already ship).
-    fn own_frame(source: &Bytes, frame: &MemcachedFrame<'_>) -> MemcachedOwnedFrame {
+    fn own_frame(source: &T, frame: &MemcachedFrame<'_>) -> MemcachedOwnedFrame<T> {
         match frame {
             MemcachedFrame::Request(command) => {
                 MemcachedOwnedFrame::Request(MemcachedRequest::from_command(source, command))
@@ -248,7 +282,7 @@ mod tests {
 
     #[test]
     fn parse_frame_partial_value_over_the_cap_is_a_message_too_large_violation() {
-        let codec = MemcachedCodec::new(8);
+        let codec: MemcachedCodec = MemcachedCodec::new(8);
         let buf = b"set k 0 0 500\r\nabc";
         let (frame, consumed) = codec.parse_frame(buf).expect("folds into a violation frame");
         assert_eq!(consumed, buf.len());
@@ -342,7 +376,7 @@ mod tests {
     /// `connection::Advanced`'s identical `Short | PartialValue` pairing).
     #[test]
     fn parse_frame_unterminated_get_over_the_cap_is_a_message_too_large_violation() {
-        let codec = MemcachedCodec::new(8);
+        let codec: MemcachedCodec = MemcachedCodec::new(8);
         let buf = b"get k1 k2 k3 k4 k5"; // no CRLF yet, already > 8 bytes
         let (frame, consumed) = codec.parse_frame(buf).expect("folds into a violation frame");
         assert_eq!(consumed, buf.len());

@@ -332,7 +332,7 @@ fn bench_parse_frame(criterion: &mut Criterion) {
     group.measurement_time(Duration::from_millis(700));
     group.sample_size(30);
     for workload in workloads() {
-        let codec = MemcachedCodec::new(workload.max_message_bytes);
+        let codec: MemcachedCodec = MemcachedCodec::new(workload.max_message_bytes);
         let raw = Bytes::from(workload.bytes.clone());
         group.throughput(Throughput::Bytes(raw.len() as u64));
         group.bench_function(workload.label, |bencher| {
@@ -352,7 +352,7 @@ fn bench_own_frame_owned_vec(criterion: &mut Criterion) {
     group.measurement_time(Duration::from_millis(700));
     group.sample_size(30);
     for workload in workloads() {
-        let codec = MemcachedCodec::new(workload.max_message_bytes);
+        let codec: MemcachedCodec = MemcachedCodec::new(workload.max_message_bytes);
         let raw = Bytes::from(workload.bytes.clone());
         group.throughput(Throughput::Bytes(raw.len() as u64));
         group.bench_function(workload.label, |bencher| {
@@ -377,7 +377,7 @@ fn bench_own_frame_zero_copy(criterion: &mut Criterion) {
     group.measurement_time(Duration::from_millis(700));
     group.sample_size(30);
     for workload in workloads() {
-        let codec = MemcachedCodec::new(workload.max_message_bytes);
+        let codec: MemcachedCodec = MemcachedCodec::new(workload.max_message_bytes);
         let raw = Bytes::from(workload.bytes.clone());
         group.throughput(Throughput::Bytes(raw.len() as u64));
         group.bench_function(workload.label, |bencher| {
@@ -437,7 +437,7 @@ fn print_alloc_report() {
         "e_bytes"
     );
     for workload in workloads() {
-        let codec = MemcachedCodec::new(workload.max_message_bytes);
+        let codec: MemcachedCodec = MemcachedCodec::new(workload.max_message_bytes);
         let raw = Bytes::from(workload.bytes.clone());
         let region = Region::new(&ALLOC);
 
