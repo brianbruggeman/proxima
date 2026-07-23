@@ -541,6 +541,20 @@ pub mod codec_trait;
 #[cfg(feature = "memcached-codec-trait")]
 pub use codec_trait::{DatagramHeader, MemcachedDatagramCodec};
 
+/// The TCP-direction [`proxima_codec::FrameCodec`] +
+/// `codec_pipe::OwnFrame`/`Incomplete` impl —
+/// `proxima_listen::any::FramedAny`'s seam for memcached. Gated behind
+/// the SAME `memcached-codec-trait` feature as [`codec_trait`] (the UDP
+/// `Datagram` impl) rather than following the sibling `<protocol>-frame-pipe`
+/// split (`grpc_framing`, `http1_codec`, `websocket_frame`) — this crate's
+/// own `codec-pipe` feature is pulled in directly by
+/// `memcached-codec-trait` below instead of a separate feature, so one
+/// `--features memcached-codec-trait` line exercises the whole seam.
+#[cfg(feature = "memcached-codec-trait")]
+pub mod frame_codec;
+#[cfg(feature = "memcached-codec-trait")]
+pub use frame_codec::{MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedMoreBytes, Violation};
+
 /// Sans-IO connection state machine (bytes in, [`Command`] out) — the
 /// server-side idiom `proxima-memcached` drives. Mirrors
 /// `crate::redis::connection`'s shape.

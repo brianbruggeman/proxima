@@ -72,7 +72,13 @@ kafka-codec-trait = ["kafka", "dep:proxima-codec"]
 memcached = ["dep:thiserror"]
 # MemcachedDatagramCodec impls `proxima_codec::Datagram` for memcached's
 # UDP mode (8-byte request-id/sequence/total header + the text protocol).
-memcached-codec-trait = ["memcached", "dep:proxima-codec"]
+# Also carries `frame_codec::MemcachedCodec`, the TCP-direction
+# `FrameCodec` + `OwnFrame`/`Incomplete` impl `proxima_listen::any::FramedAny`
+# composes against — folded in here (not a separate `memcached-frame-pipe`
+# feature, unlike `grpc_framing`/`http1_codec`/`websocket_frame`) so
+# `codec-pipe` (needed for `OwnFrame`/`Incomplete`) is always present
+# alongside the plain `FrameCodec` impl for this one protocol.
+memcached-codec-trait = ["memcached", "dep:proxima-codec", "codec-pipe"]
 
 # Sans-IO NVMe command-set wire codec for a userspace storage stack —
 # extracted from proxima-nvme-codec. Tier-3: no_std + no-alloc, zero deps.

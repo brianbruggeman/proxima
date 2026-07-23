@@ -1,13 +1,22 @@
 //! `MemcachedAnyProtocol` — memcached (text protocol) as an [`AnyProtocol`]
 //! candidate for the open universal listener
 //! (`Listener::builder().accept("memcached")` / `AnyListenProtocol`).
-//! Authored directly against `AnyProtocol`, mirroring
-//! `proxima_redis::any_protocol::RedisAnyProtocol` — there is no standalone
-//! `MemcachedListenProtocol` bind+accept loop preceding this one.
+//!
+//! `drive` builds and delegates to a
+//! [`proxima_listen::any::FramedAny<MemcachedCodec, MemcachedFramedApp, _, _>`]
+//! — the generic stateless `AnyProtocol` driver, proving a real protocol
+//! codec drops onto the pipe-centered driver rather than hand-rolling
+//! `serve_connection`/`main_loop` per protocol (see git history:
+//! `connection.rs`, `pipe.rs`, both deleted). `MemcachedAnyProtocol`
+//! itself stays a thin, named constructor: it resolves the
+//! per-connection `MemcachedServerConfig` from the listener spec (a real,
+//! if untested-before-this-change, feature the generic driver has no
+//! opinion on) and BUILDS a fresh `FramedAny` per accepted connection,
+//! rather than hand-rolling `impl AnyProtocol` end to end.
 //!
 //! Positive-match probe: unlike RESP (every command is sigil-prefixed with
 //! `*`), memcached's text protocol has no framing sigil at all — a command
-//! is just its lowercase verb token. [`probe`] matches the accumulated
+//! is just its lowercase verb token. [`probe_verb`] matches the accumulated
 //! prefix against the fixed, closed set of known verbs
 //! ([`KNOWN_VERBS`]), requiring the verb be immediately followed by a
 //! space (has-argument commands) or `\r` (the zero-argument commands:
@@ -15,15 +24,6 @@
 //! the `get` verb. Real memcached clients only ever send lowercase verbs,
 //! so there's no collision with h1 (uppercase HTTP methods) or RESP
 //! (`*`-prefixed).
-//!
-//! `drive` carries its own engine (`handler`, `config`) as a struct
-//! field — the same `AnyHandler`-unused asymmetry
-//! [`crate::pipe::MemcachedConnectionPipe`] docs. Each accepted connection
-//! builds a FRESH [`MemcachedConnectionPipe`] carrying THIS connection's
-//! [`ConnAdmission`] clone, erases it, and hands it to
-//! [`proxima_listen::serve_pipe::handle_connection`] — the ONE
-//! CONNECT-request/upgrade-handler driver pgwire, redis, and memcached now
-//! share.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -32,26 +32,79 @@ use serde_json::Value;
 
 use proxima_core::ProximaError;
 use proxima_listen::admission::ConnAdmission;
-use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
-use proxima_primitives::pipe::handler::into_handle;
+use proxima_listen::any::{AnyHandler, AnyProtocol, FramedAny, ProbeVerdict};
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
+use proxima_protocols::memcached::frame_codec::{MemcachedCodec, MemcachedOwnedFrame};
 
 use crate::config::MemcachedServerConfig;
-use crate::pipe::MemcachedConnectionPipe;
+use crate::framed_app::{MemcachedFramedApp, MemcachedOutcome, shed_reply};
 use crate::pipes::MemcachedPipeHandle;
 
 /// Every verb the sans-IO codec's `parse_command` recognizes. Ordered
-/// longest-shares-a-prefix-first is not required — [`probe`] checks every
-/// candidate on each call.
+/// longest-shares-a-prefix-first is not required — [`probe_verb`] checks
+/// every candidate on each call.
 const KNOWN_VERBS: &[&[u8]] = &[
     b"get", b"gets", b"set", b"add", b"replace", b"append", b"prepend", b"cas", b"delete",
     b"incr", b"decr", b"touch", b"flush_all", b"stats", b"version", b"quit",
 ];
 
 /// `len("flush_all")` (the longest known verb) plus one delimiter byte —
-/// the most bytes [`probe`] ever needs before it can decide match-or-not
-/// for every verb in [`KNOWN_VERBS`].
+/// the most bytes [`probe_verb`] ever needs before it can decide
+/// match-or-not for every verb in [`KNOWN_VERBS`].
 const MAX_PREFIX_BYTES: usize = 10;
+
+/// The concrete [`FramedAny`] instantiation memcached drives — `Probe`/
+/// `Shed` are plain `fn` items (no captured state), so `MemcachedAnyProtocol`
+/// needs no generic parameters of its own to name this type.
+type MemcachedFramedAny = FramedAny<
+    MemcachedCodec,
+    MemcachedFramedApp,
+    fn(&[u8]) -> ProbeVerdict,
+    fn(proxima_listen::admission::ShedReason, &MemcachedOwnedFrame) -> MemcachedOutcome,
+>;
+
+/// Whether `prefix` matches `verb` followed by a space (has-argument
+/// commands) or `\r` (the zero-argument commands).
+fn matches_verb(prefix: &[u8], verb: &[u8]) -> bool {
+    prefix.len() > verb.len()
+        && &prefix[..verb.len()] == verb
+        && matches!(prefix[verb.len()], b' ' | b'\r')
+}
+
+/// Whether `prefix` could still resolve to `verb`: `prefix` is no longer
+/// than `verb` and matches it byte-for-byte so far. A `prefix` already
+/// longer than `verb` without having matched a delimiter (checked by
+/// [`matches_verb`] before this is ever consulted) has diverged — not
+/// plausible.
+fn is_plausible_prefix_of(prefix: &[u8], verb: &[u8]) -> bool {
+    prefix.len() <= verb.len() && prefix == &verb[..prefix.len()]
+}
+
+fn probe_verb(prefix: &[u8]) -> ProbeVerdict {
+    if KNOWN_VERBS.iter().any(|verb| matches_verb(prefix, verb)) {
+        return ProbeVerdict::Match { consumed: 0 };
+    }
+    let still_plausible = KNOWN_VERBS
+        .iter()
+        .any(|verb| is_plausible_prefix_of(prefix, verb));
+    if still_plausible && prefix.len() < MAX_PREFIX_BYTES {
+        return ProbeVerdict::NeedMore {
+            at_least: MAX_PREFIX_BYTES,
+        };
+    }
+    ProbeVerdict::No
+}
+
+fn resolve_config(
+    base: &MemcachedServerConfig,
+    spec: &Value,
+) -> Result<MemcachedServerConfig, ProximaError> {
+    match spec.get("memcached") {
+        None => Ok(base.clone()),
+        Some(overrides) => serde_json::from_value(overrides.clone())
+            .map_err(|error| ProximaError::Config(format!("memcached spec: {error}"))),
+    }
+}
 
 /// memcached (text protocol) wire candidate for the open universal
 /// listener.
@@ -78,34 +131,19 @@ impl MemcachedAnyProtocol {
         self.config = config;
         self
     }
-}
 
-fn resolve_config(
-    base: &MemcachedServerConfig,
-    spec: &Value,
-) -> Result<MemcachedServerConfig, ProximaError> {
-    match spec.get("memcached") {
-        None => Ok(base.clone()),
-        Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("memcached spec: {error}"))),
+    /// Builds the [`FramedAny`] this connection drives, from `config`
+    /// (already resolved against the listener spec).
+    fn build(&self, config: &MemcachedServerConfig) -> MemcachedFramedAny {
+        FramedAny::new(
+            self.label.clone(),
+            MemcachedCodec::new(config.max_message_bytes),
+            MemcachedFramedApp::new(self.handler.clone()),
+            probe_verb as fn(&[u8]) -> ProbeVerdict,
+            shed_reply as fn(proxima_listen::admission::ShedReason, &MemcachedOwnedFrame) -> MemcachedOutcome,
+            MAX_PREFIX_BYTES,
+        )
     }
-}
-
-/// Whether `prefix` matches `verb` followed by a space (has-argument
-/// commands) or `\r` (the zero-argument commands).
-fn matches_verb(prefix: &[u8], verb: &[u8]) -> bool {
-    prefix.len() > verb.len()
-        && &prefix[..verb.len()] == verb
-        && matches!(prefix[verb.len()], b' ' | b'\r')
-}
-
-/// Whether `prefix` could still resolve to `verb`: `prefix` is no longer
-/// than `verb` and matches it byte-for-byte so far. A `prefix` already
-/// longer than `verb` without having matched a delimiter (checked by
-/// [`matches_verb`] before this is ever consulted) has diverged — not
-/// plausible.
-fn is_plausible_prefix_of(prefix: &[u8], verb: &[u8]) -> bool {
-    prefix.len() <= verb.len() && prefix == &verb[..prefix.len()]
 }
 
 impl AnyProtocol for MemcachedAnyProtocol {
@@ -118,38 +156,21 @@ impl AnyProtocol for MemcachedAnyProtocol {
     }
 
     fn probe(&self, prefix: &[u8]) -> ProbeVerdict {
-        if KNOWN_VERBS.iter().any(|verb| matches_verb(prefix, verb)) {
-            return ProbeVerdict::Match { consumed: 0 };
-        }
-        let still_plausible = KNOWN_VERBS
-            .iter()
-            .any(|verb| is_plausible_prefix_of(prefix, verb));
-        if still_plausible && prefix.len() < MAX_PREFIX_BYTES {
-            return ProbeVerdict::NeedMore {
-                at_least: MAX_PREFIX_BYTES,
-            };
-        }
-        ProbeVerdict::No
+        probe_verb(prefix)
     }
 
     fn drive<'a>(
         &'a self,
         stream: Box<dyn StreamConnection>,
-        _handler: AnyHandler,
+        handler: AnyHandler,
         spec: &'a Value,
-        _peer: Option<PeerInfo>,
+        peer: Option<PeerInfo>,
         admission: &'a ConnAdmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
         Box::pin(async move {
             let config = resolve_config(&self.config, spec)?;
-            let connection_pipe = MemcachedConnectionPipe::new(
-                self.label.clone(),
-                self.handler.clone(),
-                std::sync::Arc::new(config),
-            )
-            .with_admission(admission.clone());
-            let pipe = into_handle(connection_pipe);
-            proxima_listen::serve_pipe::handle_connection(stream, pipe).await
+            let framed = self.build(&config);
+            framed.drive(stream, handler, spec, peer, admission).await
         })
     }
 }
@@ -226,5 +247,20 @@ mod tests {
         let protocol = MemcachedAnyProtocol::new("memcached", handler());
         assert_eq!(protocol.probe(b"*1\r\n"), ProbeVerdict::No);
         assert_eq!(protocol.probe(b"GET /\r\n"), ProbeVerdict::No);
+    }
+
+    #[test]
+    fn resolve_config_overrides_max_message_bytes_from_the_spec() {
+        let base = MemcachedServerConfig::default();
+        let spec = serde_json::json!({ "memcached": { "max_message_bytes": 4096 } });
+        let resolved = resolve_config(&base, &spec).expect("spec resolves");
+        assert_eq!(resolved.max_message_bytes, 4096);
+    }
+
+    #[test]
+    fn resolve_config_falls_back_to_the_base_config_with_no_spec_override() {
+        let base = MemcachedServerConfig::default();
+        let resolved = resolve_config(&base, &Value::Null).expect("no override resolves");
+        assert_eq!(resolved, base);
     }
 }
