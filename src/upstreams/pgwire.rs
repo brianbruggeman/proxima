@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use proxima_pgwire::{PgClientConfig, PgReply, PgResponse, PgwireClientUpstream, QueryRequest};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::handler::{Handler, PipeHandle, into_handle};
+use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::request::{Request, Response};
 
