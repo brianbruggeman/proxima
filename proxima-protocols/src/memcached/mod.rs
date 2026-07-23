@@ -131,8 +131,12 @@ pub fn parse_command(buf: &[u8]) -> Result<(Command<'_>, usize), ParseError> {
     }
 }
 
+// `pub(crate)` (not private) — `connection`, `pipe_contract`, and `reply`
+// reuse these exact tokenizer/integer primitives on the reply-parsing and
+// request-model side instead of re-deriving them; the request parser
+// (`parse_command`, above) stays the only place that OWNS command framing.
 #[inline]
-fn find_crlf(buf: &[u8]) -> Option<usize> {
+pub(crate) fn find_crlf(buf: &[u8]) -> Option<usize> {
     let mut i = 0;
     while i + 1 < buf.len() {
         if buf[i] == b'\r' && buf[i + 1] == b'\n' {
@@ -144,7 +148,7 @@ fn find_crlf(buf: &[u8]) -> Option<usize> {
 }
 
 #[inline]
-fn split_token(line: &[u8]) -> Option<(&[u8], &[u8])> {
+pub(crate) fn split_token(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let space = line.iter().position(|&b| b == b' ');
     match space {
         Some(idx) => {
@@ -159,7 +163,7 @@ fn split_token(line: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 #[inline]
-fn parse_u32(token: &[u8], field: &'static str) -> Result<u32, ParseError> {
+pub(crate) fn parse_u32(token: &[u8], field: &'static str) -> Result<u32, ParseError> {
     let mut value: u32 = 0;
     for &byte in token {
         if !byte.is_ascii_digit() {
@@ -177,7 +181,7 @@ fn parse_u32(token: &[u8], field: &'static str) -> Result<u32, ParseError> {
 }
 
 #[inline]
-fn parse_u64(token: &[u8], field: &'static str) -> Result<u64, ParseError> {
+pub(crate) fn parse_u64(token: &[u8], field: &'static str) -> Result<u64, ParseError> {
     let mut value: u64 = 0;
     for &byte in token {
         if !byte.is_ascii_digit() {
@@ -536,3 +540,21 @@ mod tests {
 pub mod codec_trait;
 #[cfg(feature = "memcached-codec-trait")]
 pub use codec_trait::{DatagramHeader, MemcachedDatagramCodec};
+
+/// Sans-IO connection state machine (bytes in, [`Command`] out) — the
+/// server-side idiom `proxima-memcached` drives. Mirrors
+/// `crate::redis::connection`'s shape.
+pub mod connection;
+/// The memcached-over-`Pipe` contract: [`MemcachedRequest`] (the owned,
+/// `'static` mirror of [`Command`]) plus its wire encoder. Mirrors
+/// `crate::redis::pipe_contract`'s role.
+pub mod pipe_contract;
+/// Owned server-reply model (`STORED`/`VALUE ... END`/...) plus
+/// `encode_reply`/`parse_reply` — the encode-direction counterpart
+/// `parse_command` has none of, needed by both `proxima-memcached`'s
+/// listener (encode) and client (parse).
+pub mod reply;
+
+pub use connection::{Advanced, Connection, Limits};
+pub use pipe_contract::{MemcachedRequest, encode_request, verb};
+pub use reply::{Reply, ReplyHint, StoredValue, encode_reply, parse_reply};

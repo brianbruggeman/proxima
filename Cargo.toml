@@ -15,6 +15,7 @@ members = [
     "proxima-storage",
     "proxima-listen",
     "proxima-macros",
+    "proxima-memcached",
     "proxima-patterns",
     "proxima-test",
     "proxima-net",
