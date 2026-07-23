@@ -106,7 +106,10 @@ fn store_verb(mode: StoreMode) -> &'static [u8] {
 /// text protocol has no existing encoder; UDP mode is the first
 /// caller that needs to turn a `Command` back into wire bytes rather
 /// than only ever parsing them.
-fn encode_command(command: &Command<'_>, dest: &mut Vec<u8>) {
+// `pub(crate)` (not private): `frame_codec::MemcachedCodec` (the TCP
+// `FrameCodec` impl) reuses this exact encoder for its own
+// `MemcachedFrame::Request` encode arm rather than re-deriving it.
+pub(crate) fn encode_command(command: &Command<'_>, dest: &mut Vec<u8>) {
     match *command {
         Command::Get { keys, gets } => {
             dest.extend_from_slice(if gets { b"gets " } else { b"get " });

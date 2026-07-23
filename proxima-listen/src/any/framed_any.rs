@@ -39,13 +39,30 @@ const DEFAULT_READ_CHUNK: usize = 64 * 1024;
 /// the same split, read backwards, for encode — the seam every `App`
 /// plugged into [`FramedAny`] must supply for its own reply type.
 pub trait AsFrame<C: FrameCodec> {
-    /// Borrow `self` as the codec's own frame shape for encoding.
-    fn as_frame(&self) -> C::Frame<'_>;
+    /// Borrow `self` as the codec's own frame shape for encoding, if this
+    /// outcome writes anything at all. `None` renders NOTHING onto the
+    /// wire — the `noreply` contract several stateless protocols make
+    /// (memcached's `set ... noreply`, a `quit` with no status line):
+    /// the frame was still real (bytes were consumed), the wire contract
+    /// just forbids a reply either way. `Option` already says exactly
+    /// this; no new type needed.
+    fn as_frame(&self) -> Option<C::Frame<'_>>;
+
+    /// Whether `drive` keeps serving this connection after this outcome
+    /// (writing `as_frame`'s reply first, if any). `false` ends `drive`
+    /// with `Ok(())` immediately — no further socket read is attempted —
+    /// the same "stop, do not try to resynchronize" contract a `quit` or
+    /// an unrecoverable protocol violation makes. Defaults to `true`:
+    /// every existing [`AsFrame`] impl (this module's own `GreetCodec`
+    /// test included) is a plain keep-serving reply and needs no change.
+    fn keep_serving(&self) -> bool {
+        true
+    }
 }
 
 /// Gates a wrapped `App` on the listener-wide [`ConnAdmission`] handle
-/// before every dispatch, rendering `shed_reply(reason)` instead of calling
-/// `App` on `Shed` — the same request_admit/request_release/render-shed
+/// before every dispatch, rendering `shed_reply(reason, &input)` instead of
+/// calling `App` on `Shed` — the same request_admit/request_release/render-shed
 /// contract every other `AnyProtocol::drive` in this codebase follows (see
 /// [`AnyProtocol::drive`]'s own doc). Composing this INSIDE `OnFrame` (as
 /// `OnFrame<AdmittedApp<App, Shed>>`) keeps `FramedAny::drive`'s pipe
@@ -61,7 +78,7 @@ impl<App, Shed> SendPipe for AdmittedApp<App, Shed>
 where
     App: SendPipe,
     App::In: Send,
-    Shed: Fn(ShedReason) -> App::Out + Send + Sync + 'static,
+    Shed: Fn(ShedReason, &App::In) -> App::Out + Send + Sync + 'static,
 {
     type In = App::In;
     type Out = App::Out;
@@ -75,7 +92,7 @@ where
                     self.admission.request_release();
                     outcome
                 }
-                RequestAdmit::Shed { reason } => Ok((self.shed_reply)(reason)),
+                RequestAdmit::Shed { reason } => Ok((self.shed_reply)(reason, &input)),
             }
         }
     }
@@ -136,7 +153,7 @@ where
     App::Out: AsFrame<C> + Send + 'static,
     App::Err: From<C::Error> + core::fmt::Debug + Send + Sync + 'static,
     Probe: Fn(&[u8]) -> ProbeVerdict + Send + Sync + 'static,
-    Shed: Fn(ShedReason) -> App::Out + Clone + Send + Sync + 'static,
+    Shed: Fn(ShedReason, &App::In) -> App::Out + Clone + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
         &self.label
@@ -184,20 +201,36 @@ where
                     match SendPipe::call(&pipe, window).await {
                         Ok(Some((reply, consumed))) => {
                             buf.advance(consumed);
+                            let keep_serving = reply.keep_serving();
+                            // `frame` borrows `reply` (`AsFrame::as_frame`'s
+                            // `&self`-tied lifetime) — it must be dropped
+                            // BEFORE the `.await`s below, or the driven
+                            // future stops being `Send` (a borrow held
+                            // across an await point).
                             out_frame.clear();
-                            self.codec
-                                .encode_frame(&reply.as_frame(), &mut out_frame)
-                                .map_err(|error| {
-                                    ProximaError::Upstream(format!(
-                                        "framed-any '{}' encode: {error}",
-                                        self.label
-                                    ))
-                                })?;
-                            write_half
-                                .write_all(&out_frame)
-                                .await
-                                .map_err(ProximaError::Io)?;
-                            write_half.flush().await.map_err(ProximaError::Io)?;
+                            let has_reply = if let Some(frame) = reply.as_frame() {
+                                self.codec.encode_frame(&frame, &mut out_frame).map_err(
+                                    |error| {
+                                        ProximaError::Upstream(format!(
+                                            "framed-any '{}' encode: {error}",
+                                            self.label
+                                        ))
+                                    },
+                                )?;
+                                true
+                            } else {
+                                false
+                            };
+                            if has_reply {
+                                write_half
+                                    .write_all(&out_frame)
+                                    .await
+                                    .map_err(ProximaError::Io)?;
+                                write_half.flush().await.map_err(ProximaError::Io)?;
+                            }
+                            if !keep_serving {
+                                return Ok(());
+                            }
                         }
                         Ok(None) => break,
                         Err(error) => {
@@ -295,13 +328,28 @@ mod tests {
 
     /// Owned reply value — a thin wrapper (not a bare `String`) so
     /// [`AsFrame`] can be implemented locally without an orphan-rule
-    /// conflict on a foreign type.
+    /// conflict on a foreign type. `Silent` proves the `noreply` seam
+    /// generically (consumes a frame, renders nothing, keeps serving);
+    /// `Bye` proves `keep_serving() == false` (renders a final frame,
+    /// then `drive` stops — the `quit`/protocol-violation-then-close
+    /// shape a real stateless protocol needs).
     #[derive(Debug, Clone, PartialEq, Eq)]
-    struct HelloReply(String);
+    enum HelloReply {
+        Hello(String),
+        Silent,
+        Bye(String),
+    }
 
     impl AsFrame<GreetCodec> for HelloReply {
-        fn as_frame(&self) -> &str {
-            &self.0
+        fn as_frame(&self) -> Option<&str> {
+            match self {
+                HelloReply::Hello(name) | HelloReply::Bye(name) => Some(name),
+                HelloReply::Silent => None,
+            }
+        }
+
+        fn keep_serving(&self) -> bool {
+            !matches!(self, HelloReply::Bye(_))
         }
     }
 
@@ -327,7 +375,10 @@ mod tests {
     }
 
     /// Uppercases the greeted name — proves the App stage actually ran (not
-    /// just an echo of the parsed frame).
+    /// just an echo of the parsed frame). A greeted name of `quiet`
+    /// answers [`HelloReply::Silent`] — this crate's own stand-in for a
+    /// real stateless protocol's `noreply`/`quit` commands, which consume
+    /// a frame but must never render one.
     #[derive(Clone, Copy)]
     struct GreetApp;
 
@@ -340,7 +391,13 @@ mod tests {
             &self,
             input: String,
         ) -> impl Future<Output = Result<HelloReply, GreetAppError>> + Send {
-            async move { Ok(HelloReply(input.to_uppercase())) }
+            async move {
+                match input.as_str() {
+                    "quiet" => Ok(HelloReply::Silent),
+                    "bye" => Ok(HelloReply::Bye("BYE".to_string())),
+                    _ => Ok(HelloReply::Hello(input.to_uppercase())),
+                }
+            }
         }
     }
 
@@ -364,7 +421,7 @@ mod tests {
             GreetCodec,
             GreetApp,
             greet_probe,
-            |_reason: ShedReason| HelloReply("BUSY".to_string()),
+            |_reason: ShedReason, _input: &String| HelloReply::Hello("BUSY".to_string()),
             64,
         ))
     }
@@ -588,6 +645,78 @@ mod tests {
             let mut reply = vec![0_u8; 12];
             stream.read_exact(&mut reply).await.expect("read reply");
             assert_eq!(&reply, b"HELLO BUSY\r\n");
+        });
+
+        let conn: Box<dyn StreamConnection> = Box::new(listener.accept().await.expect("accept"));
+        classify_and_drive_once(conn, candidates, &admission).await;
+        client.await.expect("client task");
+    }
+
+    /// The `AsFrame::as_frame() -> None` seam: a `GREET quiet\r\n` consumes
+    /// its bytes and produces no reply at all, but the connection keeps
+    /// serving — a pipelined `GREET alice\r\n` right behind it still gets
+    /// answered. Proves `drive` skips the write (not just skips the
+    /// content) for a real `noreply`-shaped outcome, generically, with no
+    /// memcached/dns-specific code in `FramedAny` itself.
+    #[proxima::test]
+    async fn framed_any_writes_nothing_for_a_silent_outcome_but_keeps_serving() {
+        let (listener, addr) = bind_loopback().await;
+        let candidates: Arc<[Arc<dyn AnyProtocol>]> = Arc::from(vec![greet_candidate()]);
+        let admission = ConnAdmission::unbounded();
+
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("client connect");
+            stream
+                .write_all(b"GREET quiet\r\nGREET alice\r\n")
+                .await
+                .expect("write greet");
+            let mut reply = vec![0_u8; 13];
+            stream.read_exact(&mut reply).await.expect("read reply");
+            assert_eq!(
+                &reply, b"HELLO ALICE\r\n",
+                "the silent GREET must not have written HELLO QUIET first"
+            );
+        });
+
+        let conn: Box<dyn StreamConnection> = Box::new(listener.accept().await.expect("accept"));
+        classify_and_drive_once(conn, candidates, &admission).await;
+        client.await.expect("client task");
+    }
+
+    /// `keep_serving() == false`: `drive` writes the final frame, then
+    /// stops WITHOUT attempting another socket read — a pipelined
+    /// `GREET alice\r\n` sent right behind `GREET bye\r\n` in the SAME
+    /// write must never be answered.
+    #[proxima::test]
+    async fn framed_any_stops_after_a_keep_serving_false_outcome() {
+        let (listener, addr) = bind_loopback().await;
+        let candidates: Arc<[Arc<dyn AnyProtocol>]> = Arc::from(vec![greet_candidate()]);
+        let admission = ConnAdmission::unbounded();
+
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("client connect");
+            stream
+                .write_all(b"GREET bye\r\nGREET alice\r\n")
+                .await
+                .expect("write greet");
+            let mut reply = vec![0_u8; 11];
+            stream.read_exact(&mut reply).await.expect("read reply");
+            assert_eq!(&reply, b"HELLO BYE\r\n");
+
+            let mut trailing = [0_u8; 16];
+            let read = stream
+                .read(&mut trailing)
+                .await
+                .expect("read after close should not error");
+            assert_eq!(
+                read, 0,
+                "drive must close after a keep_serving() == false outcome, \
+                 never answering the pipelined GREET alice"
+            );
         });
 
         let conn: Box<dyn StreamConnection> = Box::new(listener.accept().await.expect("accept"));
