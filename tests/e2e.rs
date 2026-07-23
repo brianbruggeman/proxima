@@ -9,6 +9,8 @@ mod example_nginx_multi_smoke;
 mod example_nginx_style_smoke;
 #[path = "e2e/io_uring_prime_smoke.rs"]
 mod io_uring_prime_smoke;
+#[path = "e2e/listener_any_protocol_extension.rs"]
+mod listener_any_protocol_extension;
 #[path = "e2e/listener_client_interop.rs"]
 mod listener_client_interop;
 #[path = "e2e/listener_deny_blacklist.rs"]
