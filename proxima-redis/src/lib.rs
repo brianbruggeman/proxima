@@ -41,6 +41,8 @@ pub mod glob;
 pub mod pipe;
 #[cfg(feature = "listen")]
 pub mod pipes;
+#[cfg(feature = "listen")]
+pub mod wait_sources;
 
 pub use proxima_protocols::redis::{
     Frame, ParseError, RespValue, encode, encode_command, parse, pipe_contract,

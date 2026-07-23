@@ -38,6 +38,15 @@ pub mod serve_pipe;
 #[cfg(feature = "std")]
 pub use serve_pipe::serve_pipe_upgrades;
 
+/// Shared outer-wait driver for stateful connection protocols racing
+/// socket bytes against an async push channel + shutdown (redis pub/sub,
+/// pgwire LISTEN/NOTIFY) — the sibling of [`serve_pipe`] for that inner
+/// `select!` step.
+#[cfg(feature = "std")]
+pub mod serve_multiplexed;
+#[cfg(feature = "std")]
+pub use serve_multiplexed::{WireEvent, wait_for_wire_event};
+
 /// The listener registry, `ServeContext`/`ListenProtocol` serve surface,
 /// and the fluent `ServeBuilder` — the std-tier reactor adapter that drives
 /// the [`admission`] core's decisions. Folded straight out of this crate

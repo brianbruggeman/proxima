@@ -14,13 +14,32 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+#[cfg(feature = "listen")]
+use std::future::Future;
+#[cfg(feature = "listen")]
+use std::sync::Mutex;
+#[cfg(feature = "listen")]
+use std::pin::Pin;
+#[cfg(feature = "listen")]
+use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::FutureExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(not(feature = "listen"))]
+use futures::FutureExt;
+#[cfg(not(feature = "listen"))]
 use futures::stream::StreamExt;
+#[cfg(feature = "listen")]
+use futures::stream::Stream;
+
+#[cfg(feature = "listen")]
+use proxima_core::markers::DropSafe;
+#[cfg(feature = "listen")]
+use proxima_listen::WireEvent;
+#[cfg(feature = "listen")]
+use proxima_primitives::pipe::{Exhausted, FanIn, Select, UnpinPipe};
 
 use proxima_protocols::pgwire_codec::backend::{
     DataRowWriter, ErrorResponseWriter, RowDescriptionWriter, encode_copy_in_response,
@@ -787,13 +806,20 @@ where
     clippy::too_many_arguments,
     reason = "copy-in spans the read loop and the engine re-call"
 )]
-async fn handle_copy_in<S>(
+// Split into a read half + a write half (rather than one combined
+// `stream: &mut S`) so `main_loop`'s caller can hand this the SAME
+// `ReadHalf`/`WriteHalf` split it holds for the outer-wait retrofit — no
+// reunite/re-split dance needed, since neither `handle_copy_in` nor
+// `collect_copy_data` ever needed BOTH traits on the SAME value at once
+// (`collect_copy_data` never writes; confirmed by reading its body).
+async fn handle_copy_in<R, W>(
     format: CopyFormat,
     column_formats: &[FormatCode],
     sql: &str,
     connection_id: u64,
     cancel: &CancelToken,
-    stream: &mut S,
+    read_half: &mut R,
+    write_half: &mut W,
     out: &mut Vec<u8>,
     buf: &mut BytesMut,
     session: &mut Session,
@@ -801,13 +827,14 @@ async fn handle_copy_in<S>(
     config: &PgServerConfig,
 ) -> Result<bool, ServeError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
 {
     session.copy_in_begun()?;
     append_copy_in_response(out, format, column_formats)?;
-    flush_out(stream, out).await?;
+    flush_out(write_half, out).await?;
 
-    let Some((rows, failed)) = collect_copy_data(stream, buf, session, config).await? else {
+    let Some((rows, failed)) = collect_copy_data(read_half, buf, session, config).await? else {
         return Ok(false);
     };
 
@@ -925,7 +952,8 @@ fn append_command_complete(out: &mut Vec<u8>, tag: &str) -> io::Result<()> {
 /// fed to the FSM and its disposition obeyed — CopyData payloads buffer,
 /// CopyDone ends the stream, CopyFail aborts (returning the abort flag set),
 /// Terminate closes the connection (`None`). Mirrors the main loop's buffer
-/// and `max_message_bytes` handling.
+/// and `max_message_bytes` handling. Read-only (never writes to `stream`) —
+/// narrower than `handle_copy_in`'s combined bound used to suggest.
 async fn collect_copy_data<S>(
     stream: &mut S,
     buf: &mut BytesMut,
@@ -933,7 +961,7 @@ async fn collect_copy_data<S>(
     config: &PgServerConfig,
 ) -> Result<Option<(Vec<Vec<u8>>, bool)>, ServeError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncRead + Unpin + Send,
 {
     let mut rows: Vec<Vec<u8>> = Vec::new();
     let mut scratch = vec![0_u8; config.read_buffer_bytes];
@@ -1165,7 +1193,7 @@ where
     };
 
     let outcome = main_loop(
-        &mut stream,
+        stream,
         &mut out,
         &mut buf,
         &mut session,
@@ -1632,36 +1660,193 @@ where
     Ok(false)
 }
 
+/// Recovers a poisoned lock instead of panicking (`expect`/`unwrap` are
+/// denied in source by the workspace lints). A panic while holding one of
+/// these locks means the connection is already unwinding, so recovering
+/// the (possibly torn) inner value and letting the caller observe whatever
+/// happens next is strictly better than a second panic here. Mirrors
+/// `proxima_redis::wait_sources`'s identical helper (same wall: `FanIn`
+/// sources need `&self`-shaped interior mutability, and `RefCell` — the
+/// obvious first reach — is never `Sync`, which the connection future's
+/// pre-existing `Send` requirement demands).
+#[cfg(feature = "listen")]
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(feature = "listen")]
+fn into_inner<T>(mutex: Mutex<T>) -> T {
+    mutex.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Encodes one `NotificationResponse` (no flush — the caller decides when
+/// to write it). Shared by [`emit_notification`] (the `not(listen)` outer
+/// wait, still racing via `select_biased!`) and [`PgConnSource::Notify`]
+/// (the `listen`-feature outer wait, racing via
+/// `proxima_listen::wait_for_wire_event`) so the wire format is defined
+/// exactly once.
+fn encode_notification(notification: &Notification) -> io::Result<Vec<u8>> {
+    let mut encoded = Vec::new();
+    let size = 11 + notification.channel.len() + notification.payload.len();
+    append_message(
+        &mut encoded,
+        size,
+        &BackendMessage::NotificationResponse {
+            process_id: notification.process_id,
+            channel: PgStr::new(notification.channel.as_bytes()),
+            payload: PgStr::new(notification.payload.as_bytes()),
+        },
+    )?;
+    Ok(encoded)
+}
+
+/// `main_loop`'s outer-wait source over [`proxima_listen::wait_for_wire_event`]
+/// — the `listen`-feature sibling of the `not(listen)` `select_biased!` still
+/// backing [`idle_read`]. Only ever constructed transiently around ONE idle
+/// wait (see `main_loop`'s own doc for why): built from `read_half`/
+/// `notify_rx` moved in, raced once, then unwound back via [`into_inner`] so
+/// the plain (non-idle) read path and COPY IN's `handle_copy_in` keep using
+/// them as ordinary owned values the rest of the time — the `Mutex` cost is
+/// paid only for the moment a race is actually happening.
+///
+/// `Mutex`, not `RefCell`: `FanIn::call` takes `&self`, so a source needing
+/// `&mut` access to its read half / channel needs interior mutability, and
+/// `RefCell` is never `Sync` — but `PgWireConnectionPipe: SendPipe`'s
+/// upgrade closure requires the whole connection future to be `Send` (a
+/// pre-existing constraint, unrelated to this retrofit). Never contended
+/// (one task drives the whole `FanIn` sequentially) and never held across
+/// an `.await` (acquired and released within one synchronous `poll()`).
+#[cfg(feature = "listen")]
+enum PgConnSource<'source, R> {
+    Read {
+        read_half: &'source Mutex<R>,
+        scratch: &'source Mutex<Vec<u8>>,
+    },
+    Notify {
+        notify_rx: &'source Mutex<UnboundedReceiver<Notification>>,
+    },
+}
+
+// justified: the Read variant only observes readiness (a socket read whose
+// dropped-mid-poll future loses nothing — the kernel still holds the
+// unread bytes) and the Notify variant only peeks a channel (a dropped
+// `.next()` future mid-`Pending` has registered no side effect; the
+// receiver itself remembers readiness) — neither mid-sends a partial
+// reply, so dropping an in-flight `call` future leaves no torn state (see
+// `proxima_core::markers::DropSafe`'s own doc + `fan_in.rs:274/288/302`'s
+// enforced bound on every merged source).
+#[cfg(feature = "listen")]
+impl<R> DropSafe for PgConnSource<'_, R> {}
+
+#[cfg(feature = "listen")]
+enum PgConnCall<'source, R> {
+    Read {
+        read_half: &'source Mutex<R>,
+        scratch: &'source Mutex<Vec<u8>>,
+    },
+    Notify {
+        notify_rx: &'source Mutex<UnboundedReceiver<Notification>>,
+    },
+}
+
+#[cfg(feature = "listen")]
+impl<R: AsyncRead + Unpin> Future for PgConnCall<'_, R> {
+    type Output = Result<WireEvent, Exhausted>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            PgConnCall::Read { read_half, scratch } => {
+                let mut read_half = lock(read_half);
+                let mut scratch = lock(scratch);
+                match Pin::new(&mut *read_half).poll_read(cx, &mut scratch) {
+                    Poll::Ready(Ok(0)) => Poll::Ready(Ok(WireEvent::Stop)),
+                    Poll::Ready(Ok(count)) => Poll::Ready(Ok(WireEvent::Read(
+                        Bytes::copy_from_slice(&scratch[..count]),
+                    ))),
+                    Poll::Ready(Err(error)) => Poll::Ready(Ok(WireEvent::Failed(error))),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            PgConnCall::Notify { notify_rx } => {
+                let mut notify_rx = lock(notify_rx);
+                match Pin::new(&mut *notify_rx).poll_next(cx) {
+                    Poll::Ready(Some(notification)) => match encode_notification(&notification) {
+                        Ok(encoded) => Poll::Ready(Ok(WireEvent::Push(Bytes::from(encoded)))),
+                        Err(error) => Poll::Ready(Ok(WireEvent::Failed(error))),
+                    },
+                    // the sender half lives on this connection's own
+                    // `ConnState::notify_tx`, held for the connection's
+                    // whole lifetime — `None` cannot happen while the loop
+                    // runs (mirrors the identical comment on the
+                    // `not(listen)` `select_biased!` arm this parallels);
+                    // treated as "will never produce again" rather than a
+                    // hard error.
+                    Poll::Ready(None) => Poll::Ready(Err(Exhausted)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "listen")]
+impl<R: AsyncRead + Unpin> UnpinPipe for PgConnSource<'_, R> {
+    type In = ();
+    type Out = WireEvent;
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<WireEvent, Exhausted>> + Unpin {
+        match self {
+            PgConnSource::Read { read_half, scratch } => PgConnCall::Read {
+                read_half,
+                scratch,
+            },
+            PgConnSource::Notify { notify_rx } => PgConnCall::Notify { notify_rx },
+        }
+    }
+}
+
+/// Drives one authenticated connection's simple/extended-query lifecycle to
+/// completion. Owns `stream` (moved in, not `&mut S`) so it can split it
+/// once into a `ReadHalf`/`WriteHalf` pair — [`dispatch`]/[`finish_simple`]
+/// only ever write, [`collect_copy_data`] only ever reads (confirmed by
+/// reading their bodies; narrowed accordingly), so nothing downstream needs
+/// the combined type back. The safe delivery point (state `Idle`, `buf`
+/// drained) is the ONLY place `read_half`/`notify_rx` are ever temporarily
+/// wrapped in a `Mutex` and raced via [`proxima_listen::wait_for_wire_event`]
+/// — see [`PgConnSource`]'s doc for why, and why that cost is paid only for
+/// the duration of one wait, not the connection's whole lifetime.
 #[expect(
     clippy::too_many_arguments,
     reason = "the notification receiver joins the wire lifecycle the loop already drives"
 )]
 async fn main_loop<S>(
-    stream: &mut S,
+    stream: S,
     out: &mut Vec<u8>,
     buf: &mut BytesMut,
     session: &mut Session,
     state: &mut ConnState,
     query: &PgPipeHandle,
     config: &PgServerConfig,
-    mut notify_rx: UnboundedReceiver<Notification>,
+    #[cfg_attr(not(feature = "listen"), allow(unused_mut))] mut notify_rx: UnboundedReceiver<Notification>,
     admission: &AdmissionHandle,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let (mut read_half, mut write_half) = stream.split();
     let mut scratch = vec![0_u8; config.read_buffer_bytes];
     loop {
         loop {
             if session.is_closed() {
-                flush_out(stream, out).await?;
+                flush_out(&mut write_half, out).await?;
                 return Ok(());
             }
             let parsed = match parse_frontend(buf) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     append_error(out, &protocol_violation(error))?;
-                    flush_out(stream, out).await?;
+                    flush_out(&mut write_half, out).await?;
                     session.fail();
                     return Ok(());
                 }
@@ -1682,14 +1867,24 @@ where
                             char::from(tag)
                         )),
                     )?;
-                    flush_out(stream, out).await?;
+                    flush_out(&mut write_half, out).await?;
                     session.fail();
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
             };
             let outcome = if disposition == Disposition::Handle {
-                dispatch(&message, stream, out, session, state, query, config, admission).await?
+                dispatch(
+                    &message,
+                    &mut write_half,
+                    out,
+                    session,
+                    state,
+                    query,
+                    config,
+                    admission,
+                )
+                .await?
             } else {
                 DispatchOutcome::Done
             };
@@ -1701,7 +1896,8 @@ where
                     &pending.sql,
                     state.connection_id,
                     &state.cancel,
-                    stream,
+                    &mut read_half,
+                    &mut write_half,
                     out,
                     buf,
                     session,
@@ -1710,11 +1906,11 @@ where
                 )
                 .await?;
                 if !proceed {
-                    flush_out(stream, out).await?;
+                    flush_out(&mut write_half, out).await?;
                     return Ok(());
                 }
                 if pending.finish_simple {
-                    finish_simple(stream, out, session).await?;
+                    finish_simple(&mut write_half, out, session).await?;
                 }
             }
         }
@@ -1727,7 +1923,7 @@ where
                 )
                 .fatal(),
             )?;
-            flush_out(stream, out).await?;
+            flush_out(&mut write_half, out).await?;
             return Err(ServeError::MessageTooLarge {
                 limit: config.max_message_bytes,
             });
@@ -1740,9 +1936,44 @@ where
         // the socket alone and notifications stay queued in the unbounded
         // channel until the next idle pass.
         let read = if session.state_name() == StateName::Idle {
-            idle_read(stream, buf, &mut scratch, out, &mut notify_rx).await?
+            #[cfg(feature = "listen")]
+            {
+                // `read_half`/`notify_rx` are moved into transient `Mutex`es
+                // for exactly this one wait — see `PgConnSource`'s doc.
+                let read_lock = Mutex::new(read_half);
+                let notify_lock = Mutex::new(notify_rx);
+                let scratch_lock = Mutex::new(vec![0_u8; config.read_buffer_bytes]);
+                let sources = FanIn::new(
+                    [
+                        PgConnSource::Notify {
+                            notify_rx: &notify_lock,
+                        },
+                        PgConnSource::Read {
+                            read_half: &read_lock,
+                            scratch: &scratch_lock,
+                        },
+                    ],
+                    Select::Fifo,
+                );
+                let outcome = proxima_listen::wait_for_wire_event(&sources, &mut write_half).await?;
+                read_half = into_inner(read_lock);
+                notify_rx = into_inner(notify_lock);
+                match outcome {
+                    Some(bytes) => {
+                        let count = bytes.len();
+                        buf.extend_from_slice(&bytes);
+                        count
+                    }
+                    None => 0,
+                }
+            }
+            #[cfg(not(feature = "listen"))]
+            {
+                idle_read(&mut read_half, &mut write_half, buf, &mut scratch, out, &mut notify_rx)
+                    .await?
+            }
         } else {
-            read_some(stream, buf, &mut scratch).await?
+            read_some(&mut read_half, buf, &mut scratch).await?
         };
         if read == 0 {
             if buf.is_empty() {
@@ -1753,22 +1984,30 @@ where
     }
 }
 
-/// Waits at the idle safe point for either client bytes or a notification.
-/// A notification is encoded as NotificationResponse and flushed, then the
-/// wait resumes — so any number of notifications drain before the next
-/// client message, and none ever interleaves a message sequence (this only
-/// runs when the FSM is Idle). Returns the count of client bytes read (0 on
-/// peer close); a notification returns a non-zero sentinel so the caller's
-/// EOF check does not fire while bytes are still pending.
-async fn idle_read<S>(
-    stream: &mut S,
+/// Waits at the idle safe point for either client bytes or a notification —
+/// the `not(listen)` sibling of `main_loop`'s `PgConnSource`-based race
+/// (this crate's bare sans-IO tier has no `proxima-listen` dependency to
+/// retrofit onto: `proxima-listen` is optional, gated behind the `listen`
+/// feature, so `connection.rs` — compiled unconditionally — cannot hard-
+/// depend on it). A notification is encoded as NotificationResponse and
+/// flushed, then the wait resumes — so any number of notifications drain
+/// before the next client message, and none ever interleaves a message
+/// sequence (this only runs when the FSM is Idle). Returns the count of
+/// client bytes read (0 on peer close); a notification returns a non-zero
+/// sentinel so the caller's EOF check does not fire while bytes are still
+/// pending.
+#[cfg(not(feature = "listen"))]
+async fn idle_read<R, W>(
+    read_half: &mut R,
+    write_half: &mut W,
     buf: &mut BytesMut,
     scratch: &mut [u8],
     out: &mut Vec<u8>,
     notify_rx: &mut UnboundedReceiver<Notification>,
 ) -> Result<usize, ServeError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send,
 {
     loop {
         futures::select_biased! {
@@ -1777,20 +2016,21 @@ where
                     // the sender is held by this same connection's state, so
                     // None means the connection is tearing down; fall back to
                     // a plain read so the loop's EOF handling takes over
-                    return read_some(stream, buf, scratch).await;
+                    return read_some(read_half, buf, scratch).await;
                 };
-                emit_notification(stream, out, &notification).await?;
+                emit_notification(write_half, out, &notification).await?;
             }
-            read = read_some(stream, buf, scratch).fuse() => {
+            read = read_some(read_half, buf, scratch).fuse() => {
                 return read;
             }
         }
     }
 }
 
-/// Encodes one NotificationResponse and flushes it. The `process_id` on the
-/// wire is the *notifying* connection's pid as carried on the
-/// [`Notification`], not this listener's pid.
+/// Encodes one NotificationResponse (via [`encode_notification`]) and
+/// flushes it. The `process_id` on the wire is the *notifying* connection's
+/// pid as carried on the [`Notification`], not this listener's pid.
+#[cfg(not(feature = "listen"))]
 async fn emit_notification<S>(
     stream: &mut S,
     out: &mut Vec<u8>,
@@ -1799,16 +2039,7 @@ async fn emit_notification<S>(
 where
     S: AsyncWrite + Unpin + Send,
 {
-    let size = 11 + notification.channel.len() + notification.payload.len();
-    append_message(
-        out,
-        size,
-        &BackendMessage::NotificationResponse {
-            process_id: notification.process_id,
-            channel: PgStr::new(notification.channel.as_bytes()),
-            payload: PgStr::new(notification.payload.as_bytes()),
-        },
-    )?;
+    out.extend_from_slice(&encode_notification(notification)?);
     flush_out(stream, out).await?;
     Ok(())
 }
@@ -1832,6 +2063,9 @@ enum DispatchOutcome {
     CopyIn(PendingCopyIn),
 }
 
+// Write-only (never reads `stream`) — narrower than the combined bound
+// this used to carry, so `main_loop` can pass its `write_half` split
+// directly with no reunite step.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch<S>(
     message: &FrontendMessage<'_>,
@@ -1844,7 +2078,7 @@ async fn dispatch<S>(
     admission: &AdmissionHandle,
 ) -> Result<DispatchOutcome, ServeError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncWrite + Unpin + Send,
 {
     // without `listen` there is no listener admission policy to consult —
     // the handle is threaded but unused
@@ -2040,7 +2274,7 @@ where
     Ok(DispatchOutcome::Done)
 }
 
-async fn finish_simple<S: AsyncRead + AsyncWrite + Unpin + Send>(
+async fn finish_simple<S: AsyncWrite + Unpin + Send>(
     stream: &mut S,
     out: &mut Vec<u8>,
     session: &mut Session,
@@ -2344,7 +2578,7 @@ async fn handle_execute<S>(
     config: &PgServerConfig,
 ) -> Result<DispatchOutcome, ServeError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncWrite + Unpin + Send,
 {
     let Ok(name_text) = portal_name.to_str() else {
         extended_fail(
@@ -2602,7 +2836,7 @@ fn handle_function_call<S>(
     _session: &mut Session,
 ) -> Result<(), ServeError>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncWrite + Unpin + Send,
 {
     append_error(
         out,
@@ -4352,5 +4586,132 @@ mod tests {
             !backend_tag_sequence(&written).contains(&b'T'),
             "Execute must not emit RowDescription (Describe owns it)"
         );
+    }
+
+    #[cfg(feature = "listen")]
+    mod pg_conn_source_tests {
+        use super::*;
+        use futures::channel::mpsc;
+
+        fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
+            let mut pinned = core::pin::pin!(future);
+            let mut context = Context::from_waker(std::task::Waker::noop());
+            loop {
+                if let Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
+                    return output;
+                }
+            }
+        }
+
+        struct OnceReader {
+            chunk: Vec<u8>,
+            served: bool,
+        }
+
+        impl AsyncRead for OnceReader {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut [u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if self.served {
+                    return Poll::Ready(Ok(0));
+                }
+                let count = self.chunk.len().min(buf.len());
+                buf[..count].copy_from_slice(&self.chunk[..count]);
+                self.served = true;
+                Poll::Ready(Ok(count))
+            }
+        }
+
+        struct FailingReader;
+
+        impl AsyncRead for FailingReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut [u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Poll::Ready(Err(std::io::Error::other("boom")))
+            }
+        }
+
+        #[test]
+        fn read_source_yields_bytes_then_stop_on_eof() {
+            let read_lock = Mutex::new(OnceReader {
+                chunk: b"SELECT 1".to_vec(),
+                served: false,
+            });
+            let scratch_lock = Mutex::new(vec![0_u8; 64]);
+            let source = PgConnSource::Read {
+                read_half: &read_lock,
+                scratch: &scratch_lock,
+            };
+            let first = block_on(UnpinPipe::call(&source, ())).expect("first poll");
+            match first {
+                WireEvent::Read(bytes) => assert_eq!(&bytes[..], b"SELECT 1"),
+                other => panic!("expected Read, got {other:?}"),
+            }
+            let second = block_on(UnpinPipe::call(&source, ())).expect("second poll");
+            assert!(
+                matches!(second, WireEvent::Stop),
+                "EOF must be Stop, not Exhausted (only ONE source dying must not stall the whole wait)"
+            );
+        }
+
+        #[test]
+        fn read_source_surfaces_a_real_io_error_as_failed_not_stop() {
+            let read_lock = Mutex::new(FailingReader);
+            let scratch_lock = Mutex::new(vec![0_u8; 64]);
+            let source = PgConnSource::Read {
+                read_half: &read_lock,
+                scratch: &scratch_lock,
+            };
+            let outcome = block_on(UnpinPipe::call(&source, ())).expect("poll");
+            assert!(
+                matches!(outcome, WireEvent::Failed(_)),
+                "a hard io error must not be silently downgraded to Stop"
+            );
+        }
+
+        #[test]
+        fn notify_source_encodes_and_yields_a_push_event() {
+            let (tx, rx) = mpsc::unbounded::<Notification>();
+            tx.unbounded_send(Notification {
+                process_id: 42,
+                channel: "chan".to_string(),
+                payload: "payload".to_string(),
+            })
+            .expect("send");
+            let notify_lock = Mutex::new(rx);
+            let source: PgConnSource<'_, OnceReader> = PgConnSource::Notify {
+                notify_rx: &notify_lock,
+            };
+            let outcome = block_on(UnpinPipe::call(&source, ())).expect("poll");
+            match outcome {
+                WireEvent::Push(bytes) => {
+                    let expected = encode_notification(&Notification {
+                        process_id: 42,
+                        channel: "chan".to_string(),
+                        payload: "payload".to_string(),
+                    })
+                    .expect("encode");
+                    assert_eq!(&bytes[..], expected.as_slice());
+                }
+                other => panic!("expected Push, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn notify_source_exhausts_once_the_channel_closes() {
+            let (tx, rx) = mpsc::unbounded::<Notification>();
+            drop(tx);
+            let notify_lock = Mutex::new(rx);
+            let source: PgConnSource<'_, OnceReader> = PgConnSource::Notify {
+                notify_rx: &notify_lock,
+            };
+            let outcome = block_on(UnpinPipe::call(&source, ()));
+            assert!(matches!(outcome, Err(Exhausted)));
+        }
     }
 }

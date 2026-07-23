@@ -3,11 +3,13 @@
 //! command, and writes the RESP reply back onto the wire.
 //!
 //! Mirrors `proxima_pgwire::connection`'s `main_loop`/`read_some`/
-//! `flush_out` shape, plus the datagram-listener multi-source `select!`
+//! `flush_out` shape, plus the datagram-listener multi-source merge
 //! pattern (here racing the socket read against this connection's pub/sub
-//! push channel instead of pgwire's LISTEN/NOTIFY `notify_rx`). Composes
-//! `proxima_protocols::redis` (parse/encode/`Connection`) over any
-//! `futures::io` stream — no runtime, no socket type, no TLS knowledge.
+//! push channel instead of pgwire's LISTEN/NOTIFY `notify_rx`) — via
+//! [`proxima_listen::wait_for_wire_event`], the shared outer-wait driver
+//! (see `crate::wait_sources`). Composes `proxima_protocols::redis`
+//! (parse/encode/`Connection`) over any `futures::io` stream — no runtime,
+//! no socket type, no TLS knowledge.
 //!
 //! Pipelining is answered by reading every already-buffered command to
 //! completion before the next socket read (the inner loop below); replies
@@ -19,15 +21,13 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::channel::mpsc::{self, UnboundedReceiver};
+use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use futures::stream::StreamExt;
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::request::{Request, RequestContext};
-use proxima_primitives::pipe::{HeaderList, Pipe, PipeExt, SendPipe, SubscriptionId};
+use proxima_primitives::pipe::{FanIn, HeaderList, Pipe, PipeExt, Select, SendPipe, SubscriptionId};
 
 use proxima_protocols::redis::{Advanced, ConnMode, Connection as RespConnection, Frame, Limits, RedisRequest, RespValue};
 
@@ -35,13 +35,7 @@ use crate::broker::{PushSink, RedisBroker};
 use crate::config::RedisServerConfig;
 use crate::error::RedisServeError;
 use crate::pipes::{RedisPipeHandle, RedisPipeRequest};
-
-async fn read_some<S: AsyncRead + Unpin>(
-    stream: &mut S,
-    scratch: &mut [u8],
-) -> std::io::Result<usize> {
-    stream.read(scratch).await
-}
+use crate::wait_sources::RedisConnSource;
 
 async fn flush_out<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
     if !out.is_empty() {
@@ -347,11 +341,14 @@ async fn dispatch_args(
 
 /// Serves one accepted connection to completion. Sequential await-per-frame
 /// (mandatory — pipelining requires N replies in request order; never spawn
-/// per-command). The `select!` at the bottom races: (a) more socket bytes,
-/// (b) this connection's pub/sub push channel (frames `RedisBroker` pushed
-/// via `KeyedFanOut`), (c) shutdown.
+/// per-command). The outer wait races: (a) more socket bytes, (b) this
+/// connection's pub/sub push channel (frames `RedisBroker` pushed via
+/// `KeyedFanOut`), (c) shutdown — via
+/// [`proxima_listen::wait_for_wire_event`], the shared outer-wait driver
+/// (see `crate::wait_sources`'s doc for why the inner decode+dispatch loop
+/// stays sequential and outside that race).
 pub async fn serve_connection<S>(
-    mut stream: S,
+    stream: S,
     handler: RedisPipeHandle,
     broker: std::sync::Arc<RedisBroker>,
     config: &RedisServerConfig,
@@ -365,23 +362,34 @@ where
         max_message_bytes: config.max_message_bytes,
     });
     let mut out = Vec::with_capacity(config.write_high_water_bytes + 4096);
-    let mut scratch = vec![0_u8; config.read_buffer_bytes];
     let (push_tx, push_rx) = mpsc::unbounded::<Bytes>();
     let push_sink = PushSink::new(push_tx);
     let mut state = SubscriberState::default();
 
+    let (read_half, mut write_half) = stream.split();
+    // declaration order == `Select::Fifo` scan order == the old
+    // `select_biased!`'s arm order (shutdown, then push, then read) — the
+    // SAME tie-break priority, just expressed as array position instead of
+    // macro-arm position.
+    let sources = FanIn::new(
+        [
+            RedisConnSource::shutdown(shutdown),
+            RedisConnSource::push(push_rx),
+            RedisConnSource::read(read_half, config.read_buffer_bytes),
+        ],
+        Select::Fifo,
+    );
+
     let outcome = main_loop(
-        &mut stream,
+        &mut write_half,
         &mut connection,
         &mut out,
-        &mut scratch,
         &handler,
         &broker,
         &push_sink,
         &mut state,
         config,
-        push_rx,
-        shutdown,
+        &sources,
         &admission,
     )
     .await;
@@ -391,17 +399,15 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn main_loop<S>(
-    stream: &mut S,
+    write_half: &mut futures::io::WriteHalf<S>,
     connection: &mut RespConnection,
     out: &mut Vec<u8>,
-    scratch: &mut [u8],
     handler: &RedisPipeHandle,
     broker: &RedisBroker,
     push_sink: &PushSink,
     state: &mut SubscriberState,
     config: &RedisServerConfig,
-    mut push_rx: UnboundedReceiver<Bytes>,
-    mut shutdown: oneshot::Receiver<()>,
+    sources: &FanIn<RedisConnSource<futures::io::ReadHalf<S>>, Select, 3>,
     admission: &proxima_listen::admission::ConnAdmission,
 ) -> Result<(), RedisServeError>
 where
@@ -433,7 +439,7 @@ where
                                 out,
                                 &RespValue::Error(format!("ERR Protocol error: {reason}")),
                             );
-                            flush_out(stream, out).await?;
+                            flush_out(write_half, out).await?;
                             return Ok(());
                         }
                     };
@@ -446,24 +452,24 @@ where
                         }
                         FrameOutcome::Close => {
                             write_reply(out, &RespValue::SimpleString("OK".to_string()));
-                            flush_out(stream, out).await?;
+                            flush_out(write_half, out).await?;
                             return Ok(());
                         }
                         FrameOutcome::InternalError(error) => {
                             tracing::error!(error = %error, "redis handler error");
                             write_reply(out, &RespValue::Error("ERR internal error".to_string()));
-                            flush_out(stream, out).await?;
+                            flush_out(write_half, out).await?;
                             return Err(RedisServeError::Pipe(error));
                         }
                     }
                     if out.len() >= config.write_high_water_bytes {
-                        flush_out(stream, out).await?;
+                        flush_out(write_half, out).await?;
                     }
                 }
                 Advanced::ProtocolError { reason, .. } => {
                     tracing::error!(reason, "redis malformed frame");
                     write_reply(out, &RespValue::Error(format!("ERR Protocol error: {reason}")));
-                    flush_out(stream, out).await?;
+                    flush_out(write_half, out).await?;
                     return Ok(());
                 }
                 Advanced::MessageTooLarge => {
@@ -475,40 +481,18 @@ where
                             config.max_message_bytes
                         )),
                     );
-                    flush_out(stream, out).await?;
+                    flush_out(write_half, out).await?;
                     return Err(RedisServeError::MessageTooLarge {
                         limit: config.max_message_bytes,
                     });
                 }
             }
         }
-        flush_out(stream, out).await?;
+        flush_out(write_half, out).await?;
 
-        futures::select_biased! {
-            _ = (&mut shutdown).fuse() => return Ok(()),
-            pushed = push_rx.next().fuse() => {
-                match pushed {
-                    Some(bytes) => {
-                        out.extend_from_slice(&bytes);
-                        while let Ok(more) = push_rx.try_recv() {
-                            out.extend_from_slice(&more);
-                        }
-                        flush_out(stream, out).await?;
-                    }
-                    None => {
-                        // sender half lives on `push_sink`, held by this same
-                        // task — `None` cannot happen while the loop runs;
-                        // parking (not panicking) is the house style for a
-                        // violated-by-construction invariant.
-                    }
-                }
-            }
-            read = read_some(stream, scratch).fuse() => {
-                match read? {
-                    0 => return Ok(()),
-                    count => connection.feed_bytes(&scratch[..count]),
-                }
-            }
+        match proxima_listen::wait_for_wire_event(sources, write_half).await? {
+            Some(bytes) => connection.feed_bytes(&bytes),
+            None => return Ok(()),
         }
     }
 }

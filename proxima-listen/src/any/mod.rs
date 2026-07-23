@@ -16,11 +16,15 @@
 
 mod classifier;
 mod deny;
+#[cfg(feature = "framed-any")]
+mod framed_any;
 mod probe;
 mod registry;
 
 pub use classifier::{Classifier, ClassifyOutcome};
 pub use deny::DenySignature;
+#[cfg(feature = "framed-any")]
+pub use framed_any::{AsFrame, FramedAny};
 pub use probe::{
     AnyHandler, AnyProtocol, ProbeVerdict, RejectReason, downcast_handler, erase_handler,
 };
