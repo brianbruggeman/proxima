@@ -591,6 +591,9 @@ tokio = [
     "proxima-net/tokio",
     "proxima-primitives/runtime-tokio",
     "proxima-protocols/proxy_protocol-tokio-runtime",
+    # `mcp` listener (this feature-gated) parses/emits envelopes via the
+    # shared JSON-RPC 2.0 codec.
+    "proxima-protocols/jsonrpc",
     # restores the sister-tokio-compat prime worker (each prime worker
     # enters a tokio Handle so user pipes calling tokio::{time,sync,spawn}
     # keep working) — the original default behaviour before this crate's

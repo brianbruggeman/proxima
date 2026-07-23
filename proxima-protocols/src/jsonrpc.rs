@@ -14,14 +14,17 @@ use serde_json::Value;
 
 const JSONRPC_VERSION: &str = "2.0";
 
-/// A JSON-RPC 2.0 request envelope.
+/// A JSON-RPC 2.0 request envelope. `id` is `None` for a notification —
+/// the spec's wire form omits the `id` member entirely, and the sender
+/// expects no response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
-    pub id: RequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<RequestId>,
 }
 
 impl JsonRpcRequest {
@@ -31,13 +34,30 @@ impl JsonRpcRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
             method: method.into(),
             params,
-            id,
+            id: Some(id),
         }
+    }
+
+    /// A fire-and-forget request: dispatched but never answered.
+    #[must_use]
+    pub fn notification(method: impl Into<String>, params: Option<Value>) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: method.into(),
+            params,
+            id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
     }
 }
 
 /// A JSON-RPC 2.0 response envelope. Exactly one of `result` / `error`
-/// is populated.
+/// is populated. `id` is `null` when the request's id could not be
+/// determined (e.g. a parse error before the envelope was readable).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
@@ -45,7 +65,7 @@ pub struct JsonRpcResponse {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
-    pub id: RequestId,
+    pub id: Option<RequestId>,
 }
 
 impl JsonRpcResponse {
@@ -55,12 +75,12 @@ impl JsonRpcResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: Some(result),
             error: None,
-            id,
+            id: Some(id),
         }
     }
 
     #[must_use]
-    pub fn failure(id: RequestId, error: JsonRpcError) -> Self {
+    pub fn failure(id: Option<RequestId>, error: JsonRpcError) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: None,
@@ -81,6 +101,15 @@ pub struct JsonRpcError {
 }
 
 impl JsonRpcError {
+    #[must_use]
+    pub fn parse_error(detail: impl Into<String>) -> Self {
+        Self {
+            code: -32_700,
+            message: detail.into(),
+            data: None,
+        }
+    }
+
     #[must_use]
     pub fn method_not_found(method: &str) -> Self {
         Self {
@@ -109,8 +138,10 @@ impl JsonRpcError {
     }
 }
 
-/// JSON-RPC request id. The spec allows string, integer, or null;
-/// proxima treats null as a notification and rejects it as a request.
+/// JSON-RPC request id. The spec allows string, integer, or null for a
+/// request id; proxima represents "no id" (notification, or null) as
+/// `JsonRpcRequest::id: Option<RequestId>` rather than folding null into
+/// this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
@@ -168,11 +199,30 @@ mod tests {
     #[test]
     fn failure_response_carries_error_only() {
         let error = JsonRpcError::method_not_found("missing/method");
-        let response = JsonRpcResponse::failure(RequestId::from(1), error.clone());
+        let response = JsonRpcResponse::failure(Some(RequestId::from(1)), error.clone());
         let serialized = serde_json::to_value(&response).expect("serialize");
         assert!(serialized.get("result").is_none());
         assert_eq!(serialized["error"]["code"], -32_601);
         let parsed: JsonRpcResponse = serde_json::from_value(serialized).expect("parse");
         assert_eq!(parsed.error, Some(error));
+    }
+
+    #[test]
+    fn notification_omits_id_on_the_wire() {
+        let request = JsonRpcRequest::notification("notifications/initialized", None);
+        assert!(request.is_notification());
+        let serialized = serde_json::to_value(&request).expect("serialize");
+        assert!(serialized.get("id").is_none(), "got: {serialized}");
+        let parsed: JsonRpcRequest = serde_json::from_value(serialized).expect("parse");
+        assert!(parsed.is_notification());
+    }
+
+    #[test]
+    fn failure_response_with_unknown_id_serializes_null() {
+        let response =
+            JsonRpcResponse::failure(None, JsonRpcError::parse_error("parse error: eof"));
+        let serialized = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(serialized["id"], Value::Null);
+        assert_eq!(serialized["error"]["code"], -32_700);
     }
 }
