@@ -18,7 +18,7 @@ name = "proximad"
 path = "src/daemon.rs"
 
 [dependencies]
-proxima = { workspace = true, features = ["runtime-tokio"] }
+proxima = { workspace = true, features = ["runtime-tokio", "tokio", "http1-native"] }
 clap = { workspace = true, features = ["derive", "env"] }
 mimalloc.workspace = true
 serde_json.workspace = true
