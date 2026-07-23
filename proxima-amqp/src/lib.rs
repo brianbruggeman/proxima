@@ -93,6 +93,8 @@ pub mod error;
 pub mod pipe;
 #[cfg(feature = "listen")]
 pub mod pipes;
+#[cfg(feature = "listen")]
+pub mod wait_sources;
 
 pub use fsm::{Advanced, Connection, Limits, PROTOCOL_HEADER};
 pub use method::{Method, MethodError};
