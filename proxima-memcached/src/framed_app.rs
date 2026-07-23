@@ -329,8 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn shed_reply_renders_a_server_error_that_keeps_serving() {
-        let outcome = shed_reply(proxima_listen::admission::ShedReason::Draining);
+    fn shed_reply_renders_a_server_error_that_keeps_serving_for_an_ordinary_command() {
+        let input = MemcachedOwnedFrame::Request(MemcachedRequest::Delete {
+            key: b"k".to_vec(),
+            noreply: false,
+        });
+        let outcome = shed_reply(proxima_listen::admission::ShedReason::Draining, &input);
         assert!(outcome.keep_serving());
         match outcome {
             MemcachedOutcome::Reply(Reply::ServerError(message)) => {
@@ -338,5 +342,26 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn shed_reply_stays_silent_for_a_shed_noreply_command() {
+        let input = MemcachedOwnedFrame::Request(MemcachedRequest::Delete {
+            key: b"k".to_vec(),
+            noreply: true,
+        });
+        let outcome = shed_reply(proxima_listen::admission::ShedReason::Draining, &input);
+        assert_eq!(outcome, MemcachedOutcome::Silent);
+        assert!(outcome.keep_serving());
+        assert!(outcome.as_frame().is_none());
+    }
+
+    #[test]
+    fn shed_reply_closes_silently_for_a_shed_quit() {
+        let input = MemcachedOwnedFrame::Request(MemcachedRequest::Quit);
+        let outcome = shed_reply(proxima_listen::admission::ShedReason::Draining, &input);
+        assert_eq!(outcome, MemcachedOutcome::CloseSilent);
+        assert!(!outcome.keep_serving());
+        assert!(outcome.as_frame().is_none());
     }
 }
