@@ -62,6 +62,21 @@ impl<U: StreamUpstream> MemcachedClientUpstream<U> {
     /// future SASL-auth extension); the base protocol has no handshake, so
     /// it is not otherwise consulted here — only `upstream.connect()`'s
     /// `host`/`port` (already baked into `upstream`) matter.
+    ///
+    /// `new` never touches the network — `upstream.connect()` only runs
+    /// lazily on the first `.call()`, so building one is cheap and
+    /// side-effect-free (this doctest never sends a command, and needs no
+    /// running memcached server):
+    ///
+    /// ```
+    /// use proxima_memcached::{MemcachedClientConfig, MemcachedClientUpstream};
+    /// use proxima_net::prime::PrimeTcpUpstream;
+    ///
+    /// let addr = "127.0.0.1:11211".parse().expect("valid socket address");
+    /// let transport = PrimeTcpUpstream::new(addr);
+    /// let client = MemcachedClientUpstream::new(transport, MemcachedClientConfig::default());
+    /// # let _ = client;
+    /// ```
     pub fn new(upstream: U, _config: MemcachedClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),

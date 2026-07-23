@@ -20,6 +20,18 @@ pub trait ClientSecurityExt: Sized {
     /// `"tls"`. Combining this with an `http://` (non-`https`) dial url is a
     /// config error at build time (`build_prime_upstream`), never a silent
     /// plaintext downgrade.
+    ///
+    /// ```
+    /// use proxima::{Client, ClientProtocolExt, ClientSecurityExt};
+    ///
+    /// // `.build()` is lazy — the assertion is only checked when the
+    /// // transport actually resolves, on the first `.send()`.
+    /// let client = Client::builder()
+    ///     .https("https://localhost:8443")
+    ///     .tls()
+    ///     .build()?;
+    /// # Ok::<(), proxima::ProximaError>(())
+    /// ```
     #[must_use]
     fn tls(self) -> Self;
 }

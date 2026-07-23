@@ -93,7 +93,31 @@ pub type DnsPipeReply = proxima_primitives::pipe::request::Response<DnsAnswer>;
 /// Runtime-erased handle for DNS query-handler pipes.
 pub type DnsPipeHandle = proxima_primitives::pipe::alloc_tier::PipeHandle<DnsPipeRequest, DnsPipeReply>;
 
-/// Wrap any DNS-compatible pipe in a [`DnsPipeHandle`].
+/// Wrap any DNS-compatible pipe in a [`DnsPipeHandle`] — the bridge between
+/// a business handler you write (`impl SendPipe<In = DnsPipeRequest, Out =
+/// DnsPipeReply>`) and every seam that wants the type-erased
+/// [`DnsPipeHandle`] ([`crate::DnsAnyProtocol::new`],
+/// [`crate::DnsDatagramProtocol::listen_protocol`],
+/// `proxima::ListenerProtocolExt::dns`).
+///
+/// ```
+/// use proxima_dns::{DnsPipeRequest, DnsPipeReply, into_dns_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Resolver;
+/// impl SendPipe for Resolver {
+///     type In = DnsPipeRequest;
+///     type Out = DnsPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: DnsPipeRequest) -> Result<DnsPipeReply, ProximaError> {
+///         unreachable!("illustrative — no query is dispatched in this doctest")
+///     }
+/// }
+///
+/// let handle = into_dns_handle(Resolver);
+/// # let _ = handle;
+/// ```
 pub use proxima_primitives::pipe::alloc_tier::into_handle as into_dns_handle;
 
 #[cfg(test)]

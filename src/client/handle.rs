@@ -429,6 +429,97 @@ pub struct ClientBuilder {
 /// lowers to AND the `PipeFactory` that resolves it — so a kafka/redis/private
 /// crate adds a wire to `proxima::Client` with no edit here. Pair with a
 /// per-crate extension trait (e.g. `FooClientExt::foo`) for fluent sugar.
+///
+/// # Write your own protocol
+///
+/// Every DSN-carrying method on
+/// [`ClientProtocolExt`](crate::client::protocol::ClientProtocolExt)
+/// (`.kafka()`, `.redis()`, `.pgwire()`, …) is built from exactly these two
+/// pieces — a `ClientProtocol` impl plus a one-line extension trait. Nothing
+/// about the mechanism is first-party-only; a downstream crate follows the
+/// same three steps to teach `Client` a wire this workspace has never heard
+/// of, without editing anything here.
+///
+/// ```
+/// use std::future::Future;
+/// use std::pin::Pin;
+/// use std::sync::Arc;
+///
+/// use bytes::Bytes;
+/// use serde_json::Value;
+///
+/// use proxima::{Client, ClientBuilder, ClientProtocol, ProximaError, Request, Response, SendPipe};
+/// use proxima::pipe::{PipeHandle, into_handle};
+/// use proxima::pipe_factory::PipeFactory;
+///
+/// // (1) The pipe your protocol dials to — a real implementation would open
+/// // a socket here; this one answers in-process, standing in for the dial.
+/// struct PingPipe;
+///
+/// impl SendPipe for PingPipe {
+///     type In = Request<Bytes>;
+///     type Out = Response<Bytes>;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+///         Ok(Response::ok("pong"))
+///     }
+/// }
+///
+/// // (2) The factory `ClientProtocol::factory` points at — resolves a spec
+/// // into a live pipe, the same seam every first-party protocol factory
+/// // (`proxima_kafka`'s, `proxima_redis`'s, …) implements.
+/// struct PingPipeFactory;
+///
+/// impl PipeFactory for PingPipeFactory {
+///     fn name(&self) -> &str {
+///         "ping"
+///     }
+///
+///     fn build(
+///         &self,
+///         _spec: &Value,
+///         _inner: Option<PipeHandle>,
+///     ) -> Pin<Box<dyn Future<Output = Result<PipeHandle, ProximaError>> + Send + '_>> {
+///         Box::pin(async move { Ok(into_handle(PingPipe)) })
+///     }
+/// }
+///
+/// // (3) The `ClientProtocol` impl: what spec key selects this protocol,
+/// // and which factory resolves it.
+/// struct PingClientProtocol;
+///
+/// impl ClientProtocol for PingClientProtocol {
+///     fn spec(&self) -> Value {
+///         serde_json::json!({"type": "ping"})
+///     }
+///
+///     fn factory(&self) -> Arc<dyn PipeFactory> {
+///         Arc::new(PingPipeFactory)
+///     }
+/// }
+///
+/// // (4) The one-line extension trait — the same idiom every first-party
+/// // `.kafka()`/`.redis()`/`.pgwire()` fluent method uses.
+/// trait PingClientExt: Sized {
+///     fn ping(self) -> Self;
+/// }
+///
+/// impl PingClientExt for ClientBuilder {
+///     fn ping(self) -> Self {
+///         self.protocol(PingClientProtocol)
+///     }
+/// }
+///
+/// # #[proxima::main]
+/// # async fn main() -> Result<(), ProximaError> {
+/// // `use your_crate::PingClientExt;` is all a caller needs to unlock
+/// // `.ping()` — it reads exactly like a first-party protocol method.
+/// let client = Client::builder().ping().build()?;
+/// let body = client.get("/").send().await?.text().await?;
+/// assert_eq!(body, "pong");
+/// # Ok(())
+/// # }
+/// ```
 pub trait ClientProtocol {
     /// The spec this protocol lowers to (e.g. `{"type":"foo", ...}`); merged
     /// into the builder's spec.

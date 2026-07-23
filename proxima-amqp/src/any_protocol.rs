@@ -27,6 +27,26 @@ use crate::pipe::AmqpConnectionPipe;
 use crate::pipes::AmqpPipeHandle;
 
 /// AMQP 0-9-1 wire candidate for the open universal listener.
+///
+/// ```
+/// use proxima_listen::any::AnyProtocol;
+/// use proxima_amqp::{AmqpAnyProtocol, AmqpPipeRequest, AmqpPipeReply, into_amqp_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Unimplemented; // no client dials in this doctest
+/// impl SendPipe for Unimplemented {
+///     type In = AmqpPipeRequest;
+///     type Out = AmqpPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: AmqpPipeRequest) -> Result<AmqpPipeReply, ProximaError> {
+///         unreachable!()
+///     }
+/// }
+///
+/// let candidate = AmqpAnyProtocol::new("amqp", into_amqp_handle(Unimplemented));
+/// assert_eq!(candidate.name(), "amqp");
+/// ```
 pub struct AmqpAnyProtocol {
     label: String,
     handler: AmqpPipeHandle,

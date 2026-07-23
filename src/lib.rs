@@ -1,16 +1,77 @@
 //! proxima is a config-driven proxy and middleware runtime. The
-//! primitive is [`Pipe`] — an async `request → response` boundary
-//! that every upstream, middleware, and composition unit implements.
-//! Pipes compose recursively; the same spec drives the library, the
-//! CLI, and an MCP control plane.
+//! primitive is [`Pipe`](crate::pipe::Pipe) — an async `request → response`
+//! boundary that every upstream, middleware, and composition unit
+//! implements. Pipes compose recursively; the same spec drives the
+//! library, the CLI, and an MCP control plane.
 //!
-//! For the teaching surface, start at the [`pipe`] module — its
+//! For the teaching surface, start at the [`mod@pipe`] module — its
 //! `//!` rustdoc is the canonical introduction to Pipe-as-the-primitive
 //! (composition, middleware, substrate primitives, recording, serving).
 //! For the per-core runtime, see [`prime`]. Hot-swap, recording,
 //! replay, and `causal explain` are substrate primitives — see
 //! [`Replay`], [`Diff`], [`Isolate`], [`Causal`], [`SwappablePipe`],
 //! [`WriteBack`], [`check_determinism`].
+//!
+//! # Orientation
+//!
+//! Every wire proxima speaks — HTTP, gRPC, Kafka, MQTT, AMQP, DNS,
+//! memcached, Redis, PostgreSQL — reduces to the same shape: a [`Listener`]
+//! accepts connections and dispatches them to a [`Pipe`](crate::pipe::Pipe);
+//! a [`Client`] dials an upstream and drives requests through one. Both sides are
+//! fluent builders (this crate's "1st-class config AND 1st-class builder"
+//! discipline — every builder also has a serialisable config mirror, see
+//! e.g. [`listen::ListenTuningConfig`]). Bring the whole builder-sugar
+//! surface into scope with one import:
+//!
+//! ```
+//! use proxima::prelude::*;
+//! ```
+//!
+//! A minimal service: a handler is a bare `async fn`, mounted with no
+//! attribute at all (`App::mount` takes it directly); `.handle(pipe)` is
+//! the listener-side twin.
+//!
+//! ```no_run
+//! use proxima::prelude::*;
+//! use proxima::{Request, Response, ProximaError};
+//! use proxima::pipe::into_handle;
+//! use bytes::Bytes;
+//! use std::net::{Ipv4Addr, SocketAddr};
+//!
+//! struct Hello;
+//! impl SendPipe for Hello {
+//!     type In = Request<Bytes>;
+//!     type Out = Response<Bytes>;
+//!     type Err = ProximaError;
+//!     async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+//!         Ok(Response::ok("hello, proxima"))
+//!     }
+//! }
+//! # use proxima::SendPipe;
+//!
+//! #[proxima::main]
+//! async fn main() -> Result<(), ProximaError> {
+//!     let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, 8080));
+//!
+//!     // Listener: bind, pick the wire, hand it a pipe, serve until signalled.
+//!     let server = Listener::http(bind).handle(into_handle(Hello)).serve().await?;
+//!
+//!     // Client: same axes (`.http()`/`.tls()`/`.kafka()`/…), the other direction.
+//!     let client = Client::builder().http(format!("http://{bind}")).build()?;
+//!     let body = client.get("/").send().await?.text().await?;
+//!     assert_eq!(body, "hello, proxima");
+//!
+//!     server.run_until_signal().await;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! `examples/hello` is this same shape, runnable today
+//! (`cargo run --example hello --features http1-native`). See
+//! [`ListenerProtocolExt`]/[`ListenerTransportExt`] and
+//! [`ClientProtocolExt`]/[`ClientTransportExt`]/[`ClientSecurityExt`] for
+//! every wire and transport axis, and [`AnyProtocol`]/[`ClientProtocol`] for
+//! how to teach either builder a protocol this crate has never heard of.
 
 // `alloc` is referenced by the disciplined-component telemetry modules,
 // which were originally no_std. brought in here so `alloc::vec::Vec`
@@ -415,6 +476,20 @@ pub use write_back::{WriteBackConditions, WriteBackRule};
 ///   [`ClientTransportExt`] / [`ClientSecurityExt`] / [`ClientProtocolExt`]
 ///   for `ClientBuilder` — so `.tcp()`/`.http()`/`.tls()`/`.kafka()`/… are all
 ///   in scope from this one `use`.
+///
+/// One `use` unlocks every axis method in the same chain — no separate
+/// import per trait:
+///
+/// ```
+/// use proxima::prelude::*;
+///
+/// let client = Client::builder()
+///     .https("https://localhost:8443") // ClientProtocolExt
+///     .tls()                           // ClientSecurityExt
+///     .tcp()                           // ClientTransportExt
+///     .build()?;
+/// # Ok::<(), proxima::ProximaError>(())
+/// ```
 pub mod prelude {
     pub use crate::{
         AnyProtocol, App, ClassifyOutcome, Client, ClientBuilder, ClientProtocol,

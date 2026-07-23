@@ -41,6 +41,17 @@ pub struct DnsClientUpstream {
 }
 
 impl DnsClientUpstream {
+    /// `new` never touches the network — a UDP socket only opens lazily on
+    /// the first query. Building one is cheap and side-effect-free:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use proxima_dns::{DnsClientUpstream, DnsResolverConfig};
+    /// use proxima_net::prime::PrimeDatagramFactory;
+    ///
+    /// let resolver = DnsClientUpstream::new(Arc::new(PrimeDatagramFactory), DnsResolverConfig::default());
+    /// # let _ = resolver;
+    /// ```
     #[must_use]
     pub fn new(factory: Arc<dyn DatagramFactory>, config: DnsResolverConfig) -> Self {
         Self { factory, config }

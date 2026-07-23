@@ -34,6 +34,32 @@ fn default_max_attempts() -> u32 {
 /// Resolver connection parameters for [`crate::client::DnsClientUpstream`].
 /// Maps 1:1 to a TOML `[dns_resolver]` table or `DNS_RESOLVER_*` env vars,
 /// and to the bon builder.
+///
+/// Config is first-class in two equivalent forms — the fluent builder and a
+/// TOML file loaded through `conflaguration` — and they produce the exact
+/// same value:
+///
+/// ```
+/// use std::io::Write;
+///
+/// use proxima_dns::DnsResolverConfig;
+///
+/// let via_builder = DnsResolverConfig::builder()
+///     .resolver_ip("9.9.9.9")
+///     .max_attempts(3)
+///     .build();
+///
+/// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
+/// write!(file, "resolver_ip = \"9.9.9.9\"\nmax_attempts = 3\n").expect("write toml");
+///
+/// let via_toml: DnsResolverConfig = conflaguration::builder()
+///     .file(file.path())
+///     .validate()
+///     .build()
+///     .expect("load from toml");
+///
+/// assert_eq!(via_builder, via_toml);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
 #[settings(prefix = "DNS_RESOLVER")]
 #[builder(derive(Clone, Debug))]

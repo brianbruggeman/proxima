@@ -37,6 +37,21 @@
 //! batch-granularity offsets, a real if per-partition-sequential Fetch
 //! long-poll), not a production Kafka broker. There is no standalone
 //! `KafkaListenProtocol` bind+accept loop, mirroring redis's own shape.
+//!
+//! ## Scope
+//!
+//! **API version 0 only, record sets carried opaque.** [`wire`] decodes
+//! exactly the v0 shape of Produce/Fetch/Metadata/ApiVersions
+//! ([`wire::SUPPORTED_API_VERSIONS`] advertises `(api_key, 0, 0)` for every
+//! key) — no compression, no transactional/idempotent-producer fields, no
+//! v1+ schema evolution. `record_set` (the actual message batch bytes
+//! inside a Produce/Fetch body) is carried and stored as an opaque
+//! [`bytes::Bytes`] blob, never parsed into individual records
+//! ([`broker::KafkaBroker`]'s doc: "one opaque `record_set` blob, appended
+//! whole"); this facade routes and replays record sets, it does not
+//! decode `RecordBatch` framing, per-record headers, or compression
+//! codecs. Not a substitute for a real broker's replication, transactions,
+//! or consumer-group coordination — those protocols are unimplemented.
 
 #[cfg(feature = "client")]
 pub mod client;

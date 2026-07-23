@@ -98,7 +98,10 @@ listen = [
 ]
 
 [dev-dependencies]
-proxima-net = { workspace = true, features = ["tokio"] }
+# `prime` for `PrimeTcpUpstream` in the `KafkaClientUpstream::new` doctest.
+proxima-net = { workspace = true, features = ["tokio", "prime"] }
+# TOML-file loading in the `KafkaServerConfig` config doctest.
+tempfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
 rstest = { workspace = true }

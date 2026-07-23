@@ -82,6 +82,10 @@ listen = [
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support", "tokio"] }
 serde_json = { workspace = true }
+# `prime` for `PrimeTcpUpstream` in the `AmqpClientUpstream::new` doctest.
+proxima-net = { workspace = true, features = ["prime"] }
+# TOML-file loading in the `AmqpServerConfig` config doctest.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

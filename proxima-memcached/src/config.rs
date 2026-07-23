@@ -20,6 +20,36 @@ fn default_max_message() -> usize {
 }
 
 /// Memcached text-protocol server configuration.
+///
+/// Config is first-class in two equivalent forms — the fluent builder and a
+/// TOML file loaded through `conflaguration` — and they produce the exact
+/// same value:
+///
+/// ```
+/// use std::io::Write;
+///
+/// use proxima_memcached::MemcachedServerConfig;
+///
+/// let via_builder = MemcachedServerConfig::builder()
+///     .read_buffer_bytes(4096)
+///     .max_message_bytes(1_048_576)
+///     .build();
+///
+/// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
+/// write!(
+///     file,
+///     "read_buffer_bytes = 4096\nwrite_high_water_bytes = 65536\nmax_message_bytes = 1048576\n"
+/// )
+/// .expect("write toml");
+///
+/// let via_toml: MemcachedServerConfig = conflaguration::builder()
+///     .file(file.path())
+///     .validate()
+///     .build()
+///     .expect("load from toml");
+///
+/// assert_eq!(via_builder, via_toml);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
 #[settings(prefix = "MEMCACHED")]
 #[builder(derive(Clone, Debug))]

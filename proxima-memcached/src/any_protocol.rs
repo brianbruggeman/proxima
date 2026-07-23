@@ -108,6 +108,26 @@ fn resolve_config(
 
 /// memcached (text protocol) wire candidate for the open universal
 /// listener.
+///
+/// ```
+/// use proxima_listen::any::AnyProtocol;
+/// use proxima_memcached::{MemcachedAnyProtocol, MemcachedPipeRequest, MemcachedPipeReply, into_memcached_handle};
+/// use proxima_core::ProximaError;
+/// use proxima_primitives::pipe::SendPipe;
+///
+/// struct Unimplemented; // no client dials in this doctest
+/// impl SendPipe for Unimplemented {
+///     type In = MemcachedPipeRequest;
+///     type Out = MemcachedPipeReply;
+///     type Err = ProximaError;
+///     async fn call(&self, _request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
+///         unreachable!()
+///     }
+/// }
+///
+/// let candidate = MemcachedAnyProtocol::new("memcached", into_memcached_handle(Unimplemented));
+/// assert_eq!(candidate.name(), "memcached");
+/// ```
 pub struct MemcachedAnyProtocol {
     label: String,
     handler: MemcachedPipeHandle,
