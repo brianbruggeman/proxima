@@ -3779,6 +3779,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-kafka"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "bytes",
+ "conflaguration",
+ "futures",
+ "futures-timer",
+ "proxima",
+ "proxima-codec",
+ "proxima-core",
+ "proxima-listen",
+ "proxima-net",
+ "proxima-primitives",
+ "proxima-protocols",
+ "proxima-runtime",
+ "rstest",
+ "serde",
+ "serde_json",
+ "temp-env",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "proxima-listen"
 version = "0.1.0"
 dependencies = [
