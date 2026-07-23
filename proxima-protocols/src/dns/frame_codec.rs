@@ -34,7 +34,6 @@
 //! before the (possibly attacker-controlled) body is even framed, matching
 //! the deleted driver's own "close immediately, don't buffer it" contract.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -43,9 +42,22 @@ use proxima_codec::FrameCodec;
 
 use crate::codec_pipe::{Incomplete, OwnFrame};
 use crate::dns::codec_trait::parse_message;
+#[cfg(not(proxima_alloc))]
+use crate::dns::Name;
 
 /// RFC 1035 §4.2.2 length-prefix width, in bytes.
 const TCP_LENGTH_PREFIX_BYTES: usize = 2;
+
+/// RFC 1035 §2.3.4: "the total length of a domain name (i.e., label
+/// octets and label length octets) is restricted to 255 octets or
+/// less." The no-alloc tier's [`DnsTcpQuery::name`] inlines this as a
+/// `heapless::String` capacity — an RFC-mandated invariant, not a
+/// tunable, so it is a plain `const` here rather than a
+/// `build.rs`/TOML-baked axis (P12 carve-out; mirrors the same RFC
+/// citation [`crate::dns::encode::EncodeError::NameTooLong`] already
+/// uses at the wire-encode boundary).
+#[cfg(not(proxima_alloc))]
+const DNS_NAME_DOTTED_CAP: usize = 255;
 
 /// Why [`DnsTcpCodec::parse_frame`] / [`DnsTcpCodec::encode_frame`] could
 /// not make progress. Only [`Self::Incomplete`] means "read more and
@@ -150,8 +162,17 @@ pub struct DnsTcpQuery {
     pub id: u16,
     /// `RD` bit of the query.
     pub recursion_desired: bool,
-    /// Dotted question name, e.g. `"example.com."`.
-    pub name: String,
+    /// Dotted question name, e.g. `"example.com."` — unbounded `String`
+    /// on this (alloc) tier. The no-alloc tier's build of this crate
+    /// carries the same field as a `heapless::String` inline buffer
+    /// instead (zero allocator).
+    #[cfg(proxima_alloc)]
+    pub name: alloc::string::String,
+    /// Dotted question name, e.g. `"example.com."`, rendered into a
+    /// fixed-capacity inline buffer (ZERO allocator) — see
+    /// `DNS_NAME_DOTTED_CAP` and `render_name_bounded`.
+    #[cfg(not(proxima_alloc))]
+    pub name: heapless::String<DNS_NAME_DOTTED_CAP>,
     pub qtype: u16,
     pub qclass: u16,
 }
@@ -167,12 +188,28 @@ pub enum DnsTcpViolation {
     /// The message parsed, but does not carry exactly one question (RFC
     /// 1035 §4.1.2 permits more; no deployed client/server pair does).
     NotSingleQuestion,
+    /// No-alloc tier only: the question name's dotted rendering does not
+    /// fit `DNS_NAME_DOTTED_CAP` bytes — rejected rather than truncated
+    /// (a truncated name would silently answer the wrong question). The
+    /// wire parser does not itself enforce RFC 1035 §2.3.4's 255-octet
+    /// name-length invariant (see [`crate::dns::Name::labels`]), so this
+    /// is the no-alloc tier's own backstop against an adversarial message
+    /// that violates it.
+    #[cfg(not(proxima_alloc))]
+    NameTooLong,
 }
 
 /// [`OwnFrame::Owned`] for [`DnsTcpCodec`] — either a usable query or a
 /// reason it wasn't one. Never constructed for the encode direction; a
 /// reply's bytes are handed to [`DnsTcpCodec::encode_frame`] directly as
 /// `&[u8]`, with no owning step in between.
+// no-alloc tier only: `DnsTcpQuery::name` inlines a
+// `heapless::String<DNS_NAME_DOTTED_CAP>` (the whole point of the C3
+// no-alloc rung — zero allocator, fixed-capacity storage), which makes
+// `Query` genuinely larger than `Violation`. Boxing it would require an
+// allocator, defeating that exact point — the size difference is the
+// design, not a defect.
+#[cfg_attr(not(proxima_alloc), allow(clippy::large_enum_variant))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsTcpOwnedFrame {
     Query(DnsTcpQuery),
@@ -195,19 +232,60 @@ impl OwnFrame for DnsTcpCodec {
             Some(Ok(question)) => question,
             _ => return DnsTcpOwnedFrame::Violation(DnsTcpViolation::NotSingleQuestion),
         };
+        // alloc tier: unconditional, unbounded render — pre-existing
+        // `to_dotted()`/`from_utf8_lossy` behavior, left untouched (the
+        // compression-chain accumulated-byte gap it carries is a separate
+        // follow-on, out of scope here).
+        #[cfg(proxima_alloc)]
+        let name = question.name.to_dotted();
+        // no-alloc tier: bounded, strict-UTF-8 render — over-cap or
+        // invalid-UTF-8 rejects the query rather than truncating it.
+        #[cfg(not(proxima_alloc))]
+        let name = match render_name_bounded::<DNS_NAME_DOTTED_CAP>(&question.name) {
+            Ok(name) => name,
+            Err(()) => return DnsTcpOwnedFrame::Violation(DnsTcpViolation::NameTooLong),
+        };
         DnsTcpOwnedFrame::Query(DnsTcpQuery {
             id: message.header.id,
             recursion_desired: message.header.flags.rd(),
-            name: question.name.to_dotted(),
+            name,
             qtype: question.qtype,
             qclass: question.qclass,
         })
     }
 }
 
+/// No-alloc-tier name render: append each label + a `.` separator into a
+/// fixed-capacity `heapless::String<CAP>`, using **strict**
+/// `core::str::from_utf8` (never `from_utf8_lossy`) — a lossy replacement
+/// character is 3 bytes for a 1-byte invalid input, which can inflate the
+/// rendered length past the wire length; strict decoding guarantees the
+/// output is never longer than the input, so a `CAP` sized to the RFC
+/// 1035 §2.3.4 wire limit (`DNS_NAME_DOTTED_CAP`) is provably tight.
+/// The root name (no labels) renders as `"."`, matching
+/// [`crate::dns::Name::to_dotted`]. Any push failure (capacity exceeded,
+/// or a label that is not valid UTF-8) folds to `Err(())` — the caller
+/// maps that to [`DnsTcpViolation::NameTooLong`], never truncates.
+#[cfg(not(proxima_alloc))]
+fn render_name_bounded<const CAP: usize>(name: &Name<'_>) -> Result<heapless::String<CAP>, ()> {
+    let mut rendered: heapless::String<CAP> = heapless::String::new();
+    let mut has_label = false;
+    for label in name.labels() {
+        has_label = true;
+        let text = core::str::from_utf8(label).map_err(|_error| ())?;
+        rendered.push_str(text).map_err(|_error| ())?;
+        rendered.push('.').map_err(|_error| ())?;
+    }
+    if !has_label {
+        rendered.push('.').map_err(|_error| ())?;
+    }
+    Ok(rendered)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[cfg(proxima_alloc)]
     use alloc::string::ToString;
     use alloc::vec;
 
@@ -216,6 +294,21 @@ mod tests {
 
     fn codec() -> DnsTcpCodec {
         DnsTcpCodec::new(65_535)
+    }
+
+    /// Tier-neutral `DnsTcpQuery::name` constructor for test fixtures —
+    /// `alloc::string::String` on the alloc tier, a `heapless::String`
+    /// parsed via `FromStr` on the no-alloc tier. `dotted` must fit
+    /// `DNS_NAME_DOTTED_CAP` on the no-alloc tier.
+    #[cfg(proxima_alloc)]
+    fn expected_name(dotted: &str) -> alloc::string::String {
+        dotted.to_string()
+    }
+
+    #[cfg(not(proxima_alloc))]
+    fn expected_name(dotted: &str) -> heapless::String<DNS_NAME_DOTTED_CAP> {
+        use core::str::FromStr;
+        heapless::String::from_str(dotted).expect("fixture name fits DNS_NAME_DOTTED_CAP")
     }
 
     fn framed_query(id: u16) -> Vec<u8> {
@@ -289,7 +382,7 @@ mod tests {
             DnsTcpOwnedFrame::Query(DnsTcpQuery {
                 id: 1234,
                 recursion_desired: true,
-                name: "example.com.".to_string(),
+                name: expected_name("example.com."),
                 qtype: 1,
                 qclass: 1,
             })

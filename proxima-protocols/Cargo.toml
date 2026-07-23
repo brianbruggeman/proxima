@@ -46,8 +46,18 @@ tracing = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 
 [features]
-default = []
+# `alloc` is default-on so a plain build (no `--no-default-features`) keeps
+# the pre-C3 behavior ("String as today") — mirrors
+# `proxima-primitives`' own `default = ["std"]` / `std = ["alloc", ...]`
+# backward-compat shape. Opt into the no-alloc tier explicitly via
+# `--no-default-features --features dns-codec-trait`.
+default = ["alloc"]
 std = []
+# Selects the alloc-tier `proxima_alloc` cfg (see build.rs) — the DNS-TCP
+# `OwnFrame` no-alloc rung (C3) reads it to choose between an unbounded
+# `alloc::string::String` and a `heapless::String` inline buffer for
+# `DnsTcpQuery::name`. Mirrors `proxima-primitives`' own `alloc` axis.
+alloc = []
 
 dns = []
 # DnsDatagramCodec impls `proxima_codec::Datagram` for DNS-over-UDP — one
@@ -57,7 +67,11 @@ dns = []
 # against — folded in here (mirrors `memcached-codec-trait`'s identical
 # choice) so `codec-pipe` (needed for `OwnFrame`/`Incomplete`) is always
 # present alongside the plain `FrameCodec` impl for this one protocol.
-dns-codec-trait = ["dns", "dep:proxima-codec", "codec-pipe"]
+# `dep:heapless` backs the no-alloc tier's `DnsTcpQuery::name` inline
+# buffer (C3) — present regardless of tier so the alloc-tier build (which
+# doesn't reference it) and the no-alloc-tier build (which does) both
+# resolve without a separate feature split.
+dns-codec-trait = ["dns", "dep:proxima-codec", "codec-pipe", "dep:heapless"]
 
 # Sans-IO TCP connection state machine (RFC 793 control FSM) — extracted
 # from proxima-tcp. Tier-3: no_std + no-alloc, zero deps.
@@ -322,6 +336,15 @@ workspace = true
 name = "bench_dns"
 harness = false
 required-features = ["dns"]
+
+[[test]]
+name = "dns_no_alloc_alloc_counter"
+path = "tests/dns_no_alloc_alloc_counter.rs"
+required-features = ["dns-codec-trait"]
+
+[[example]]
+name = "dns_tcp_no_alloc_walkthrough"
+required-features = ["dns-codec-trait"]
 
 [[bench]]
 name = "bench_nvme_codec"
