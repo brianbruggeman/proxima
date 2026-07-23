@@ -63,7 +63,12 @@ pub use proxima_protocols::memcached::{
     Command, ParseError, Reply, ReplyHint, StoreMode, StoredValue, encode_reply, parse_command,
     parse_reply,
 };
-pub use proxima_protocols::memcached::pipe_contract::{MemcachedRequest, encode_request, verb};
+// `MemcachedRequest`'s fields are `Bytes`/`MultigetKeys` — needs
+// proxima-protocols' `memcached-codec-trait` tier, which `client` and
+// `listen` both now pull in (see this crate's Cargo.toml); the bare,
+// zero-feature build never references it.
+#[cfg(any(feature = "client", feature = "listen"))]
+pub use proxima_protocols::memcached::pipe_contract::{MemcachedRequest, encode_request, iter_keys, verb};
 
 #[cfg(feature = "client")]
 pub use client::{

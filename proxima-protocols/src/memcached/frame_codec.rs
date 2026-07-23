@@ -55,6 +55,13 @@ pub enum Violation {
     /// tripped (matching the FSM driver this replaces).
     Protocol,
     /// A still-incomplete command already exceeds `limit` buffered bytes.
+    /// Covers BOTH `ParseError::PartialValue` (a `set`-style command whose
+    /// declared value length exceeds the cap) and `ParseError::Short` (no
+    /// CRLF yet — including a `get` whose key list never terminates) —
+    /// mirroring `connection::Advanced`'s own `Short | PartialValue`
+    /// pairing (the bare FSM tier's identical DoS guard). There is no
+    /// separate "too many keys" case: a multi-`get`'s key list is one
+    /// span of THIS same buffer, so it can never exceed `limit` either.
     MessageTooLarge { limit: usize },
 }
 
@@ -120,8 +127,15 @@ impl FrameCodec for MemcachedCodec {
     ) -> Result<(MemcachedFrame<'a>, usize), NeedMoreBytes> {
         match parse_command(buf) {
             Ok((command, consumed)) => Ok((MemcachedFrame::Request(command), consumed)),
-            Err(ParseError::Short) => Err(NeedMoreBytes),
-            Err(ParseError::PartialValue(_declared)) => {
+            // `Short` (no CRLF yet — a `get`'s key list included) and
+            // `PartialValue` (a `set`-style declared length not yet fully
+            // buffered) share the SAME "keep reading, unless the buffer
+            // has already grown past the cap" rule — matches
+            // `connection::Advanced`'s identical `Short | PartialValue`
+            // pairing (the bare FSM tier's own DoS guard). This is what
+            // bounds a multi-`get`'s key-list span: it can't exceed
+            // `max_message_bytes` because the WHOLE command can't.
+            Err(ParseError::Short | ParseError::PartialValue(_)) => {
                 if buf.len() > self.max_message_bytes {
                     Ok((
                         MemcachedFrame::Violation(Violation::MessageTooLarge {
@@ -160,7 +174,9 @@ impl FrameCodec for MemcachedCodec {
 
 /// [`OwnFrame::Owned`] for [`MemcachedCodec`] — the owned mirror of
 /// [`MemcachedFrame::Request`]/[`MemcachedFrame::Violation`] (never
-/// `Reply`; that variant only ever appears on the encode side).
+/// `Reply`; that variant only ever appears on the encode side). No large
+/// variant here: `MemcachedRequest::Get::keys` is one `Bytes` (a
+/// pointer/len/refcount handle), the same size as every other field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemcachedOwnedFrame {
     Request(MemcachedRequest),
@@ -168,12 +184,20 @@ pub enum MemcachedOwnedFrame {
 }
 
 impl OwnFrame for MemcachedCodec {
+    // Memcached frames are genuinely unbounded (`max_message_bytes` is a
+    // runtime field; a real `set` value can be megabytes) — `Bytes` is the
+    // ONLY tier that fits (see `OwnFrame::Source`'s own doc for the
+    // no-alloc seam this codec cannot use). This is forced, not a default.
+    type Source = Bytes;
     type Owned = MemcachedOwnedFrame;
 
-    fn own_frame(_source: &Bytes, frame: &MemcachedFrame<'_>) -> MemcachedOwnedFrame {
+    /// Re-owns via [`MemcachedRequest::from_command`]'s `Bytes::slice_ref`
+    /// lift (workspace principles 1, 11 — the same seam
+    /// `grpc_framing`/`http1_codec`/`websocket_frame` already ship).
+    fn own_frame(source: &Bytes, frame: &MemcachedFrame<'_>) -> MemcachedOwnedFrame {
         match frame {
             MemcachedFrame::Request(command) => {
-                MemcachedOwnedFrame::Request(MemcachedRequest::from_command(command))
+                MemcachedOwnedFrame::Request(MemcachedRequest::from_command(source, command))
             }
             MemcachedFrame::Violation(kind) => MemcachedOwnedFrame::Violation(*kind),
             MemcachedFrame::Reply(_) => {
@@ -267,16 +291,21 @@ mod tests {
 
     #[test]
     fn own_frame_reowns_a_request_into_a_memcached_request() {
-        let (frame, _) = codec().parse_frame(b"set k 5 60 5\r\nhello\r\n").expect("parses");
-        let owned = MemcachedCodec::own_frame(&Bytes::from_static(b"unused"), &frame);
+        // `source` must be the SAME `Bytes` window `frame`'s borrowed
+        // slices came from — `own_frame` now calls `Bytes::slice_ref`
+        // internally, which panics on a subset that isn't actually a
+        // sub-slice of `source`'s own backing allocation.
+        let raw = Bytes::from_static(b"set k 5 60 5\r\nhello\r\n");
+        let (frame, _) = codec().parse_frame(&raw).expect("parses");
+        let owned = MemcachedCodec::own_frame(&raw, &frame);
         assert_eq!(
             owned,
             MemcachedOwnedFrame::Request(MemcachedRequest::Store {
                 mode: StoreMode::Set,
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 flags: 5,
                 exptime: 60,
-                value: b"hello".to_vec(),
+                value: Bytes::from_static(b"hello"),
                 noreply: false,
             })
         );
@@ -290,5 +319,36 @@ mod tests {
             owned,
             MemcachedOwnedFrame::Violation(Violation::MessageTooLarge { limit: 16 })
         );
+    }
+
+    #[test]
+    fn own_frame_reowns_a_multi_get_keys_span_untouched() {
+        let raw = Bytes::from_static(b"get a b c\r\n");
+        let (frame, _) = codec().parse_frame(&raw).expect("parses");
+        let owned = MemcachedCodec::own_frame(&raw, &frame);
+        assert_eq!(
+            owned,
+            MemcachedOwnedFrame::Request(MemcachedRequest::Get {
+                keys: Bytes::from_static(b"a b c"),
+                gets: false,
+            })
+        );
+    }
+
+    /// A `get` whose key list never terminates (no CRLF yet) and has
+    /// already grown past the cap is rejected at parse time — there is no
+    /// separate key-count cap: the DoS bound is `max_message_bytes`
+    /// alone, the same guard `set`'s declared-length case uses (mirrors
+    /// `connection::Advanced`'s identical `Short | PartialValue` pairing).
+    #[test]
+    fn parse_frame_unterminated_get_over_the_cap_is_a_message_too_large_violation() {
+        let codec = MemcachedCodec::new(8);
+        let buf = b"get k1 k2 k3 k4 k5"; // no CRLF yet, already > 8 bytes
+        let (frame, consumed) = codec.parse_frame(buf).expect("folds into a violation frame");
+        assert_eq!(consumed, buf.len());
+        assert!(matches!(
+            frame,
+            MemcachedFrame::Violation(Violation::MessageTooLarge { limit: 8 })
+        ));
     }
 }

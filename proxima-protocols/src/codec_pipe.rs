@@ -33,25 +33,42 @@
 //! one-frame-per-call contract.
 
 use core::future::Future;
+use core::ops::Deref;
 
 use bytes::Bytes;
 use proxima_codec::{Addressed, Datagram, FrameCodec};
 use proxima_primitives::pipe::{Pipe, SendPipe};
 
 /// Bridges a borrowed `C::Frame<'a>` into an owned value backed by the
-/// SAME `Bytes` allocation the input window came from — the borrow
+/// SAME `Self::Source` allocation the input window came from — the borrow
 /// crossing a `Pipe::call` must pay (`Pipe::Out` cannot borrow from
 /// `Pipe::In` once `call` returns it by value; see
 /// `proxima_primitives::pipe::Pipe`'s RPITIT contract).
-/// Every real impl re-slices the source `Bytes` (`Bytes::slice_ref` or
+/// Every real impl re-slices the source (`Bytes::slice_ref` or
 /// equivalent) rather than copying — an `Arc` refcount bump over
 /// already-refcounted storage, not a fresh byte copy.
+///
+/// `Source` names the per-call input the codec re-owns FROM — today every
+/// impl sets `Source = Bytes` (the alloc-tier, `Arc`-backed window). This
+/// is the tier-selection seam: a bounded codec's `impl OwnFrame` block can
+/// be `#[cfg]`-gated to a no-alloc `Source` (e.g. a `heapless`-backed
+/// fixed window) on a tier where the whole message fits inline, mirroring
+/// `proxima_primitives::pipe::retry_rules`'s `#[cfg]`-per-impl-block
+/// idiom — NOT a generic type parameter threaded through the handler
+/// (that would cascade into `App: SendPipe<In = C::Owned>` for no
+/// benefit). Memcached cannot take that seam: its frames are genuinely
+/// unbounded (`max_message_bytes` is a runtime field; a real `set` value
+/// can be megabytes), so `Bytes`/alloc-tier is forced, not a default.
 pub trait OwnFrame: FrameCodec {
+    /// The per-call window this codec re-owns from. `Bytes` on the alloc
+    /// tier; see the trait doc for the no-alloc seam.
+    type Source: Deref<Target = [u8]>;
     /// The owned counterpart of `Self::Frame<'_>`.
     type Owned;
 
-    /// Re-own one parsed frame given the `Bytes` window it was parsed from.
-    fn own_frame(source: &Bytes, frame: &Self::Frame<'_>) -> Self::Owned;
+    /// Re-own one parsed frame given the [`Self::Source`] window it was
+    /// parsed from.
+    fn own_frame(source: &Self::Source, frame: &Self::Frame<'_>) -> Self::Owned;
 }
 
 /// Whether a [`FrameCodec::Error`] means "the buffer does not hold a
@@ -85,11 +102,11 @@ where
     C: OwnFrame,
     C::Error: Incomplete,
 {
-    type In = Bytes;
+    type In = C::Source;
     type Out = Option<(C::Owned, usize)>;
     type Err = C::Error;
 
-    fn call(&self, input: Bytes) -> impl Future<Output = Result<Self::Out, Self::Err>> {
+    fn call(&self, input: C::Source) -> impl Future<Output = Result<Self::Out, Self::Err>> {
         async move {
             match self.inner.parse_frame(&input) {
                 Ok((frame, consumed)) => Ok(Some((C::own_frame(&input, &frame), consumed))),
@@ -111,12 +128,13 @@ where
     C: OwnFrame + Send + Sync + 'static,
     C::Error: Incomplete,
     C::Owned: Send,
+    C::Source: Send + Sync,
 {
-    type In = Bytes;
+    type In = C::Source;
     type Out = Option<(C::Owned, usize)>;
     type Err = C::Error;
 
-    fn call(&self, input: Bytes) -> impl Future<Output = Result<Self::Out, Self::Err>> + Send {
+    fn call(&self, input: C::Source) -> impl Future<Output = Result<Self::Out, Self::Err>> + Send {
         async move {
             match self.inner.parse_frame(&input) {
                 Ok((frame, consumed)) => Ok(Some((C::own_frame(&input, &frame), consumed))),

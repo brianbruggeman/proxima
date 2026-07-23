@@ -8,11 +8,58 @@
 //! `crate::redis::RespValue::from_frame` plays for a borrowed
 //! [`crate::redis::Frame`]): a business handler pipe's `Request.payload`
 //! carries a whole [`MemcachedRequest`], fully typed — no downcast, no
-//! `Vec<Vec<u8>>` arg-bag the handler has to re-parse per verb shape.
+//! arg-bag the handler has to re-parse per verb shape.
+//!
+//! # Zero-copy re-owning (workspace principles 1, 11)
+//!
+//! `key`/`value`/`args` are [`Bytes`] windows sliced from the same backing
+//! buffer the wire command was parsed from via [`Bytes::slice_ref`] — an
+//! `Arc` refcount bump, not a copy — mirroring the pattern
+//! `grpc_framing::frame_codec_pipe`/`http1_codec::frame_codec_pipe`/
+//! `websocket_frame::frame_codec_pipe` already ship on the same
+//! `codec_pipe::OwnFrame` seam.
+//!
+//! A multi-`get`'s keys are NOT materialized into any container at all.
+//! `MemcachedRequest::Get::keys` is ONE `Bytes` — the untouched
+//! `"k1 k2 k3"` span, still space-joined exactly as it arrived on the
+//! wire — because every owned collection (`Vec`, `Box`, `ArrayVec`,
+//! `heapless::Vec`) allocates, and a fixed-cap container additionally taxes
+//! the SAME allocation cost onto every request shape sharing its enum
+//! (measured: `Box<ArrayVec<Bytes, 64>>` made every `MemcachedRequest`
+//! value pay for a 64-slot allocation, regressing the single-key `get`
+//! path by >100%; see git history for that dead end). [`iter_keys`] walks
+//! the span lazily, splitting on `b' '` via `memchr::memchr` (workspace
+//! principle 11 — SIMD byte scan) one pass, zero allocation. A single key
+//! is just a span the iterator walks once — there is no separate
+//! single-key/multi-key code path, and no cap to enforce: the DoS bound is
+//! [`super::frame_codec::MemcachedCodec::max_message_bytes`] at
+//! `parse_frame` (the whole command, keys span included, must already fit
+//! before a `Command::Get` is ever produced).
+//!
+//! This tier can never be alloc-free (`Bytes` is `Arc`-backed by
+//! construction) — the claim is O(payload) copied → O(1) re-owned (one
+//! `Arc` refcount bump, already paid once per request, not per key), on
+//! this alloc tier, not zero-alloc and not the no-alloc floor. The bare
+//! no_std FSM tier ([`super::connection`]) is the genuine zero-alloc
+//! floor: borrowed `Command<'a>` in, borrowed `Command<'a>` out.
+//!
+//! [`OwnedPayload`] names the alloc-tier storage ([`Bytes`], today's only
+//! implementation) as one alias rather than spelling `Bytes` at every
+//! field — a separate, not-yet-landed spike is scoping whether a
+//! no-alloc representation can carry an owned frame across the async
+//! handler boundary too. If that lands, it swaps this one alias;
+//! [`MemcachedRequest`]'s field declarations do not need to change.
 
 use alloc::vec::Vec;
 
+use bytes::Bytes;
+
 use super::{Command, StoreMode};
+
+/// The owned-frame payload storage type. `Bytes` (`Arc`-backed refcount
+/// slicing) on this alloc tier — see the module doc for the no-alloc
+/// spike this alias exists to leave room for.
+pub type OwnedPayload = Bytes;
 
 /// Command verbs a caller sets as `Request.method` (uppercased, mirroring
 /// `crate::redis::pipe_contract::verb`'s convention of a symbolic routing
@@ -43,37 +90,39 @@ pub mod verb {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemcachedRequest {
     Get {
-        keys: Vec<Vec<u8>>,
+        /// The untouched, still space-joined `"k1 k2 k3"` wire span —
+        /// see the module doc. Walk it with [`iter_keys`].
+        keys: OwnedPayload,
         gets: bool,
     },
     Store {
         mode: StoreMode,
-        key: Vec<u8>,
+        key: OwnedPayload,
         flags: u32,
         exptime: u32,
-        value: Vec<u8>,
+        value: OwnedPayload,
         noreply: bool,
     },
     Cas {
-        key: Vec<u8>,
+        key: OwnedPayload,
         flags: u32,
         exptime: u32,
         cas_unique: u64,
-        value: Vec<u8>,
+        value: OwnedPayload,
         noreply: bool,
     },
     Delete {
-        key: Vec<u8>,
+        key: OwnedPayload,
         noreply: bool,
     },
     Counter {
         increment: bool,
-        key: Vec<u8>,
+        key: OwnedPayload,
         delta: u64,
         noreply: bool,
     },
     Touch {
-        key: Vec<u8>,
+        key: OwnedPayload,
         exptime: u32,
         noreply: bool,
     },
@@ -82,7 +131,7 @@ pub enum MemcachedRequest {
         noreply: bool,
     },
     Stats {
-        args: Vec<u8>,
+        args: OwnedPayload,
     },
     Version,
     Quit,
@@ -93,15 +142,18 @@ impl MemcachedRequest {
     /// `'static` request — the async-boundary conversion a handler pipe
     /// needs (the borrowed form cannot outlive the connection's read
     /// buffer past the point the driver calls `Connection::consume`).
+    /// `source` must be the exact [`Bytes`] window `command` was parsed
+    /// from (`command`'s slices become [`Bytes::slice_ref`] windows into
+    /// it — an `Arc` refcount bump, not a copy).
     #[must_use]
-    pub fn from_command(command: &Command<'_>) -> Self {
+    pub fn from_command(source: &Bytes, command: &Command<'_>) -> Self {
         // `Command<'_>`'s fields are all Copy-eligible (`&[u8]`/`u32`/`bool`);
         // cloning is a bitwise copy of borrowed slices, not an allocation —
         // matching on the clone (by value) avoids the `&&[u8]` double
         // indirection a reference-pattern match ergonomics would produce.
         match command.clone() {
             Command::Get { keys, gets } => Self::Get {
-                keys: split_keys(keys),
+                keys: source.slice_ref(keys),
                 gets,
             },
             Command::Store {
@@ -113,10 +165,10 @@ impl MemcachedRequest {
                 noreply,
             } => Self::Store {
                 mode,
-                key: key.to_vec(),
+                key: source.slice_ref(key),
                 flags,
                 exptime,
-                value: value.to_vec(),
+                value: source.slice_ref(value),
                 noreply,
             },
             Command::Cas {
@@ -127,15 +179,15 @@ impl MemcachedRequest {
                 value,
                 noreply,
             } => Self::Cas {
-                key: key.to_vec(),
+                key: source.slice_ref(key),
                 flags,
                 exptime,
                 cas_unique,
-                value: value.to_vec(),
+                value: source.slice_ref(value),
                 noreply,
             },
             Command::Delete { key, noreply } => Self::Delete {
-                key: key.to_vec(),
+                key: source.slice_ref(key),
                 noreply,
             },
             Command::Counter {
@@ -145,7 +197,7 @@ impl MemcachedRequest {
                 noreply,
             } => Self::Counter {
                 increment,
-                key: key.to_vec(),
+                key: source.slice_ref(key),
                 delta,
                 noreply,
             },
@@ -154,13 +206,13 @@ impl MemcachedRequest {
                 exptime,
                 noreply,
             } => Self::Touch {
-                key: key.to_vec(),
+                key: source.slice_ref(key),
                 exptime,
                 noreply,
             },
             Command::FlushAll { delay, noreply } => Self::FlushAll { delay, noreply },
             Command::Stats { args } => Self::Stats {
-                args: args.to_vec(),
+                args: source.slice_ref(args),
             },
             Command::Version => Self::Version,
             Command::Quit => Self::Quit,
@@ -185,12 +237,30 @@ impl MemcachedRequest {
     }
 }
 
-fn split_keys(joined: &[u8]) -> Vec<Vec<u8>> {
-    joined
-        .split(|&byte| byte == b' ')
-        .filter(|slice| !slice.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect()
+/// Walks a `Get`'s `keys` span (`"k1 k2 k3"`), yielding each key as a
+/// [`Bytes`] sub-slice — an `Arc` refcount bump per key, not a copy.
+/// Splits lazily on `b' '` via [`memchr::memchr`] (workspace principle 11:
+/// SIMD byte scan), one pass, zero allocation: no `Vec`/`Box`/`ArrayVec`
+/// materializes the key list. A run of consecutive spaces (or a leading
+/// one) yields no empty keys, matching the wire grammar's tokenization.
+pub fn iter_keys(keys: &Bytes) -> impl Iterator<Item = Bytes> + '_ {
+    let mut remaining = keys.clone();
+    core::iter::from_fn(move || {
+        loop {
+            if remaining.is_empty() {
+                return None;
+            }
+            match memchr::memchr(b' ', &remaining) {
+                Some(0) => remaining = remaining.slice(1..),
+                Some(index) => {
+                    let key = remaining.slice(..index);
+                    remaining = remaining.slice(index + 1..);
+                    return Some(key);
+                }
+                None => return Some(core::mem::replace(&mut remaining, Bytes::new())),
+            }
+        }
+    })
 }
 
 fn store_verb(mode: StoreMode) -> &'static [u8] {
@@ -229,19 +299,16 @@ fn write_noreply(dest: &mut Vec<u8>, noreply: bool) {
 
 /// Encode a [`MemcachedRequest`] as the wire command [`super::parse_command`]
 /// accepts back — the client's outbound path. Not routed through
-/// [`Command`] (there is no existing request encoder to reuse): `Command`'s
-/// `Get::keys` borrows one already-space-joined wire slice, while
-/// [`MemcachedRequest::Get`] holds its keys as separate owned buffers;
-/// joining them into a scratch buffer just to hand it to a
-/// `Command`-shaped encoder would cost the same allocation this function
-/// does directly, with an extra indirection.
+/// [`Command`] (there is no existing request encoder to reuse).
+/// `Get::keys` is already the space-joined wire span, so it is written
+/// once, verbatim — the SAME shape [`Command::Get::keys`] itself is.
 pub fn encode_request(request: &MemcachedRequest, dest: &mut Vec<u8>) {
     match request {
         MemcachedRequest::Get { keys, gets } => {
             dest.extend_from_slice(if *gets { b"gets" } else { b"get" });
-            for key in keys {
+            if !keys.is_empty() {
                 dest.push(b' ');
-                dest.extend_from_slice(key);
+                dest.extend_from_slice(keys);
             }
             dest.extend_from_slice(b"\r\n");
         }
@@ -350,30 +417,66 @@ mod tests {
     use crate::memcached::parse_command;
 
     #[test]
-    fn from_command_splits_multi_get_keys() {
-        let (command, _) = parse_command(b"get a b c\r\n").unwrap();
-        let request = MemcachedRequest::from_command(&command);
+    fn from_command_keeps_the_multi_get_keys_span_untouched() {
+        let raw = Bytes::from_static(b"get a b c\r\n");
+        let (command, _) = parse_command(&raw).unwrap();
+        let request = MemcachedRequest::from_command(&raw, &command);
         assert_eq!(
             request,
             MemcachedRequest::Get {
-                keys: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+                keys: Bytes::from_static(b"a b c"),
                 gets: false,
             }
         );
     }
 
     #[test]
+    fn iter_keys_splits_the_span_lazily() {
+        let keys = Bytes::from_static(b"a b c");
+        let collected: Vec<Bytes> = iter_keys(&keys).collect();
+        assert_eq!(
+            collected,
+            vec![
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn iter_keys_skips_runs_of_consecutive_spaces() {
+        let keys = Bytes::from_static(b" a  b ");
+        let collected: Vec<Bytes> = iter_keys(&keys).collect();
+        assert_eq!(collected, vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
+    }
+
+    #[test]
+    fn iter_keys_over_a_single_key_yields_exactly_one_item() {
+        let keys = Bytes::from_static(b"mykey");
+        let collected: Vec<Bytes> = iter_keys(&keys).collect();
+        assert_eq!(collected, vec![Bytes::from_static(b"mykey")]);
+    }
+
+    #[test]
+    fn iter_keys_over_an_empty_span_yields_nothing() {
+        let keys = Bytes::new();
+        assert_eq!(iter_keys(&keys).count(), 0);
+    }
+
+    #[test]
     fn from_command_preserves_store_fields() {
-        let (command, _) = parse_command(b"set k 5 60 5\r\nhello\r\n").unwrap();
-        let request = MemcachedRequest::from_command(&command);
+        let raw = Bytes::from_static(b"set k 5 60 5\r\nhello\r\n");
+        let (command, _) = parse_command(&raw).unwrap();
+        let request = MemcachedRequest::from_command(&raw, &command);
         assert_eq!(
             request,
             MemcachedRequest::Store {
                 mode: StoreMode::Set,
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 flags: 5,
                 exptime: 60,
-                value: b"hello".to_vec(),
+                value: Bytes::from_static(b"hello"),
                 noreply: false,
             }
         );
@@ -383,14 +486,14 @@ mod tests {
     fn is_noreply_true_only_for_mutation_family() {
         assert!(
             MemcachedRequest::Delete {
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 noreply: true,
             }
             .is_noreply()
         );
         assert!(
             !MemcachedRequest::Get {
-                keys: vec![b"k".to_vec()],
+                keys: Bytes::from_static(b"k"),
                 gets: false,
             }
             .is_noreply()
@@ -401,23 +504,24 @@ mod tests {
     fn encode_request_round_trips_through_parse_command() {
         let request = MemcachedRequest::Store {
             mode: StoreMode::Set,
-            key: b"mykey".to_vec(),
+            key: Bytes::from_static(b"mykey"),
             flags: 3,
             exptime: 60,
-            value: b"payload".to_vec(),
+            value: Bytes::from_static(b"payload"),
             noreply: false,
         };
         let mut wire = Vec::new();
         encode_request(&request, &mut wire);
-        let (command, used) = parse_command(&wire).unwrap();
-        assert_eq!(used, wire.len());
-        assert_eq!(MemcachedRequest::from_command(&command), request);
+        let raw = Bytes::from(wire);
+        let (command, used) = parse_command(&raw).unwrap();
+        assert_eq!(used, raw.len());
+        assert_eq!(MemcachedRequest::from_command(&raw, &command), request);
     }
 
     #[test]
     fn encode_request_multi_get_round_trips() {
         let request = MemcachedRequest::Get {
-            keys: vec![b"a".to_vec(), b"b".to_vec()],
+            keys: Bytes::from_static(b"a b"),
             gets: true,
         };
         let mut wire = Vec::new();
@@ -428,7 +532,7 @@ mod tests {
     #[test]
     fn encode_request_noreply_delete_round_trips() {
         let request = MemcachedRequest::Delete {
-            key: b"k".to_vec(),
+            key: Bytes::from_static(b"k"),
             noreply: true,
         };
         let mut wire = Vec::new();

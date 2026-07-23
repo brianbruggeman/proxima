@@ -14,7 +14,7 @@
 //! Sub-flag: `memcached-listener` (default off).
 
 
-use alloc::vec::Vec;
+use core::fmt;
 
 /// One parsed memcached request line plus any associated body.
 #[derive(Debug, Clone)]
@@ -74,12 +74,58 @@ pub enum StoreMode {
     Prepend,
 }
 
+/// Longest verb this parser recognizes (`flush_all`, 9 bytes) plus slack
+/// for a short unrecognized token — a diagnostic truncation length, not a
+/// deployment-tunable cap (workspace principle 12's carve-out for
+/// crate-private implementation details no caller could reasonably
+/// configure), so this stays a plain constant.
+const UNKNOWN_VERB_INLINE_CAP: usize = 16;
+
+/// The unrecognized verb token, copied inline — `Copy`, allocation-free
+/// (workspace principle 11's "stack over heap"). [`ParseError`] must stay
+/// `'static` ([`proxima_codec::Datagram::Error`]'s bound, which
+/// [`ParseError`] satisfies via `codec_trait`'s `impl Datagram`), which
+/// rules out borrowing the token from the input buffer directly; a
+/// verb longer than the inline cap is truncated — only the prefix matters
+/// for diagnostics. Replaces a `Vec<u8>` that `parse_command` allocated
+/// and every real caller (`frame_codec::MemcachedCodec::own_frame`'s
+/// catch-all arm) immediately discarded, keeping only the discriminant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct UnknownVerb {
+    bytes: [u8; UNKNOWN_VERB_INLINE_CAP],
+    len: u8,
+}
+
+impl UnknownVerb {
+    fn from_slice(verb: &[u8]) -> Self {
+        let mut bytes = [0_u8; UNKNOWN_VERB_INLINE_CAP];
+        let copy_len = verb.len().min(UNKNOWN_VERB_INLINE_CAP);
+        bytes[..copy_len].copy_from_slice(&verb[..copy_len]);
+        Self {
+            bytes,
+            len: copy_len as u8,
+        }
+    }
+
+    /// The (possibly truncated) verb bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+impl fmt::Debug for UnknownVerb {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_bytes(), formatter)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("buffer ended before CRLF")]
     Short,
     #[error("unknown command verb {0:?}")]
-    UnknownCommand(Vec<u8>),
+    UnknownCommand(UnknownVerb),
     #[error("malformed command: {0}")]
     Malformed(&'static str),
     #[error("invalid integer in field {0}")]
@@ -127,7 +173,7 @@ pub fn parse_command(buf: &[u8]) -> Result<(Command<'_>, usize), ParseError> {
         b"stats" => Ok((Command::Stats { args: rest }, after_line)),
         b"version" => Ok((Command::Version, after_line)),
         b"quit" => Ok((Command::Quit, after_line)),
-        other => Err(ParseError::UnknownCommand(other.to_vec())),
+        other => Err(ParseError::UnknownCommand(UnknownVerb::from_slice(other))),
     }
 }
 
@@ -518,7 +564,7 @@ mod tests {
     fn unknown_verb_returns_error() {
         let buf = b"flarble x\r\n";
         match parse_command(buf) {
-            Err(ParseError::UnknownCommand(verb)) => assert_eq!(verb, b"flarble"),
+            Err(ParseError::UnknownCommand(verb)) => assert_eq!(verb.as_bytes(), b"flarble"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -557,11 +603,18 @@ pub use frame_codec::{MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedM
 
 /// Sans-IO connection state machine (bytes in, [`Command`] out) — the
 /// server-side idiom `proxima-memcached` drives. Mirrors
-/// `crate::redis::connection`'s shape.
+/// `crate::redis::connection`'s shape. Stays on the bare `memcached`
+/// feature (no `bytes`/`arrayvec`): borrow-based, `Command<'a>` in,
+/// `Command<'a>` out.
 pub mod connection;
+
 /// The memcached-over-`Pipe` contract: [`MemcachedRequest`] (the owned,
 /// `'static` mirror of [`Command`]) plus its wire encoder. Mirrors
-/// `crate::redis::pipe_contract`'s role.
+/// `crate::redis::pipe_contract`'s role. Gated behind
+/// `memcached-codec-trait` (not the bare `memcached` feature): its fields
+/// are `Bytes`, needing `codec-pipe`'s `bytes` — the bare no_std FSM tier
+/// ([`connection`]) never touches this module.
+#[cfg(feature = "memcached-codec-trait")]
 pub mod pipe_contract;
 /// Owned server-reply model (`STORED`/`VALUE ... END`/...) plus
 /// `encode_reply`/`parse_reply` — the encode-direction counterpart
@@ -570,5 +623,6 @@ pub mod pipe_contract;
 pub mod reply;
 
 pub use connection::{Advanced, Connection, Limits};
-pub use pipe_contract::{MemcachedRequest, encode_request, verb};
+#[cfg(feature = "memcached-codec-trait")]
+pub use pipe_contract::{MemcachedRequest, encode_request, iter_keys, verb};
 pub use reply::{Reply, ReplyHint, StoredValue, encode_reply, parse_reply};

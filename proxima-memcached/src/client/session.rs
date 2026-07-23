@@ -147,6 +147,8 @@ impl ClientSession {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use proxima_protocols::memcached::StoreMode;
 
@@ -161,7 +163,7 @@ mod tests {
         let mut session = ClientSession::new();
         session
             .submit(&MemcachedRequest::Get {
-                keys: vec![b"mykey".to_vec()],
+                keys: Bytes::from_static(b"mykey"),
                 gets: false,
             })
             .expect("submit");
@@ -194,10 +196,10 @@ mod tests {
         session
             .submit(&MemcachedRequest::Store {
                 mode: StoreMode::Set,
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 flags: 0,
                 exptime: 0,
-                value: b"abc".to_vec(),
+                value: Bytes::from_static(b"abc"),
                 noreply: false,
             })
             .expect("submit");
@@ -214,7 +216,7 @@ mod tests {
         let mut session = ClientSession::new();
         session
             .submit(&MemcachedRequest::Delete {
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 noreply: true,
             })
             .expect("submit");

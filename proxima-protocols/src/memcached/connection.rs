@@ -202,7 +202,7 @@ mod tests {
         match connection.advance() {
             Advanced::ProtocolError {
                 error: ParseError::UnknownCommand(verb),
-            } => assert_eq!(verb, b"flarble"),
+            } => assert_eq!(verb.as_bytes(), b"flarble"),
             other => panic!("expected ProtocolError, got {other:?}"),
         }
     }

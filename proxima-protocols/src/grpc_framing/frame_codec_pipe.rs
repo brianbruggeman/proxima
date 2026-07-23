@@ -25,6 +25,7 @@ pub struct OwnedGrpcFrame {
 }
 
 impl OwnFrame for GrpcFrameCodec {
+    type Source = Bytes;
     type Owned = OwnedGrpcFrame;
 
     fn own_frame(source: &Bytes, frame: &Frame<'_>) -> OwnedGrpcFrame {

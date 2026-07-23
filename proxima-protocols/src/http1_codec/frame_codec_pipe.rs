@@ -103,6 +103,7 @@ impl OwnedFrame {
 /// The per-codec re-owning seam [`crate::codec_pipe::FrameCodecPipe`] is
 /// generic over.
 impl OwnFrame for H1RequestCodec {
+    type Source = Bytes;
     type Owned = OwnedFrame;
 
     fn own_frame(source: &Bytes, frame: &RequestHead<'_>) -> OwnedFrame {

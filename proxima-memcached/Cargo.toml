@@ -53,6 +53,11 @@ client = [
     "dep:serde",
     "dep:thiserror",
     "dep:tracing",
+    # pipe_contract::MemcachedRequest (Bytes-backed fields, MultigetKeys)
+    # lives behind proxima-protocols' memcached-codec-trait feature, not
+    # its bare memcached feature — the client speaks MemcachedRequest over
+    # Request<Bytes>, so it needs the same tier `listen` already pulls in.
+    "proxima-protocols/memcached-codec-trait",
 ]
 # the tokio-free native (sans-IO) memcached LISTENER: `MemcachedFramedApp`
 # + `MemcachedAnyProtocol`, built on `proxima-listen`'s generic

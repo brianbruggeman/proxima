@@ -180,6 +180,7 @@ pub enum DnsTcpOwnedFrame {
 }
 
 impl OwnFrame for DnsTcpCodec {
+    type Source = Bytes;
     type Owned = DnsTcpOwnedFrame;
 
     fn own_frame(_source: &Bytes, frame: &&[u8]) -> DnsTcpOwnedFrame {

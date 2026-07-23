@@ -54,6 +54,34 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/protocol-fleet-gate.sh ${{ matrix.crate }}
 
+  # OwnFrame::own_frame's per-request Vec-copy allocation cost on the
+  # memcached codec path (docs/bench-campaigns/2026-07-23-frame-ownership-baseline.md,
+  # guiding-principle 16: a bench arm cannot seal without a saved baseline +
+  # a CI job that diffs against it). Lives here rather than a new workflow —
+  # proxima-protocols/** already trips this gate's `changes` job (see
+  # .github/ci-areas.toml's `protocol_fleet` area), so a dedicated workflow
+  # would only duplicate the change-detection this one already has. Smoke-runs
+  # the bench (must exit 0 — catches panics, feature-gate drift, API breaks),
+  # then hard-asserts the allocation COUNTS the same bench's alloc report
+  # prints: allocs/op are a deterministic product of the codec's Vec lifting
+  # (byte-for-byte identical across every run in the baseline doc), unlike
+  # ns/op, which the baseline doc measured spiking 2-5x under ordinary
+  # background contention on a shared box — too noisy to hard-gate on here,
+  # doubly so on a shared CI runner.
+  memcached-frame-ownership-bench:
+    name: memcached frame-ownership bench (smoke + alloc-count gate)
+    needs: changes
+    if: needs.changes.outputs.protocol_fleet == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: bench runs clean (smoke — --quick, no timing assertion)
+        run: cargo bench -p proxima-protocols --features memcached-codec-trait --bench bench_memcached_frame_ownership -- --quick
+      - name: allocation counts match the committed baseline (deterministic gate)
+        run: cargo test -p proxima-protocols --features memcached-codec-trait --test memcached_frame_ownership_alloc
+
   # Tokio gate as its own fast job, matrixed over the fleet: each crate's
   # no-default-features codec graph must carry zero tokio (the bare-metal /
   # DPDK embedding contract) — same claim proxima-redis makes, extended to
