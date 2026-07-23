@@ -54,13 +54,16 @@ client = [
     "dep:thiserror",
     "dep:tracing",
 ]
-# the tokio-free native (sans-IO) memcached LISTENER: `MemcachedConnectionPipe`
-# + `MemcachedAnyProtocol` mounting into `proxima-listen`'s `AnyListenProtocol`
-# open universal listener over the runtime-matched acceptor factory. Mirrors
-# `proxima-redis`'s own `listen` feature. `--no-default-features` leaves the
-# bare sans-IO codec (and the `client` graph) with zero tokio; this feature
-# adds the upgrade seam (std-only) the connection pipe returns, and the
-# `AnyProtocol` candidate.
+# the tokio-free native (sans-IO) memcached LISTENER: `MemcachedFramedApp`
+# + `MemcachedAnyProtocol`, built on `proxima-listen`'s generic
+# `FramedAny<C>` stateless `AnyProtocol` driver, mounting into
+# `AnyListenProtocol`'s open universal listener over the runtime-matched
+# acceptor factory. Mirrors `proxima-redis`'s own `listen` feature name,
+# though redis still drives its own bespoke `serve_connection` (pub/sub
+# needs per-connection push state `FramedAny`'s stateless shape can't
+# carry) — memcached is genuinely stateless per command, so it reshapes
+# fully onto the generic driver. `--no-default-features` leaves the bare
+# sans-IO codec (and the `client` graph) with zero tokio.
 listen = [
     "std",
     "proxima-primitives/std",
@@ -71,19 +74,25 @@ listen = [
     "dep:bon",
     "dep:bytes",
     "dep:conflaguration",
-    "dep:futures",
     "dep:serde",
     "dep:thiserror",
     "dep:tracing",
     "dep:proxima-listen",
     "dep:proxima-runtime",
     "dep:serde_json",
+    "proxima-listen/framed-any",
+    "proxima-protocols/memcached-codec-trait",
 ]
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
 rstest = { workspace = true }
+# the tokio<->futures::io compat wrapper (`TokioTcpConnection`) this
+# crate's own `tests/any_protocol_end_to_end.rs` needs to drive
+# `MemcachedAnyProtocol` over a real loopback socket (mirrors
+# `proxima-mqtt`'s identical dev-dependency line for the same reason).
+proxima-net = { workspace = true, features = ["tokio"] }
 # `tokio` alongside `test-support`: in-tree tests use
 # `#[proxima::test(runtime = "tokio")]`, whose `run_tokio*` drivers live
 # behind `proxima-test/tokio-driver` — only reachable transitively through
