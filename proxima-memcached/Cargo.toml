@@ -100,5 +100,10 @@ proxima-net = { workspace = true, features = ["tokio"] }
 # dev-dependency line for the same reason).
 proxima = { workspace = true, features = ["test-support", "tokio"] }
 
+[[test]]
+name = "any_protocol_end_to_end"
+path = "tests/any_protocol_end_to_end.rs"
+required-features = ["listen"]
+
 [lints]
 workspace = true
