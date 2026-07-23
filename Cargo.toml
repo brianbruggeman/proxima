@@ -6,6 +6,7 @@ members = [
     "examples/no-std",
     "examples/wasm",
     "prime",
+    "proxima-amqp",
     "proxima-auth",
     "proxima-build",
     "proxima-codec",
@@ -56,6 +57,7 @@ manual_async_fn = "allow"
 [workspace.dependencies]
 prime = { path = "prime" }
 proxima = { path = "." }
+proxima-amqp = { path = "proxima-amqp" }
 proxima-auth = { path = "proxima-auth", default-features = false }
 proxima-build = { path = "proxima-build" }
 proxima-codec = { path = "proxima-codec", default-features = false }

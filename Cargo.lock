@@ -3552,6 +3552,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-amqp"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "bytes",
+ "conflaguration",
+ "futures",
+ "proxima",
+ "proxima-core",
+ "proxima-listen",
+ "proxima-primitives",
+ "proxima-protocols",
+ "proxima-runtime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "proxima-auth"
 version = "0.1.0"
 dependencies = [
