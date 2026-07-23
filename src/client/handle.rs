@@ -802,6 +802,39 @@ mod tests {
         assert_eq!(body, "mock-protocol-reply");
     }
 
+    /// A `ClientProtocol` defined "outside" this crate — the typed sibling of
+    /// `external_factory_registered_via_builder_is_reachable` above: instead
+    /// of a caller hand-writing `.factory(..).spec("type", ..)` itself, one
+    /// `.protocol(MockClientProtocol)` call merges the spec AND registers the
+    /// factory in one step. Reuses `MockFactory`/`MockPipe` — the seam under
+    /// test is `.protocol()`, not the factory it carries.
+    #[allow(dead_code)]
+    struct MockClientProtocol;
+
+    impl ClientProtocol for MockClientProtocol {
+        fn spec(&self) -> Value {
+            json!({"type": "mock"})
+        }
+
+        fn factory(&self) -> Arc<dyn PipeFactory> {
+            Arc::new(MockFactory)
+        }
+    }
+
+    #[cfg(feature = "runtime-prime")]
+    #[test]
+    fn external_protocol_registered_via_dot_protocol_is_reachable() {
+        let body = futures::executor::block_on(async {
+            let client = Client::builder()
+                .protocol(MockClientProtocol)
+                .build()
+                .expect("build");
+            let response = client.call("GET", "/").send().await.expect("send");
+            response.text().await.expect("text")
+        });
+        assert_eq!(body, "mock-protocol-reply");
+    }
+
     #[test]
     fn from_pipe_dispatches_to_an_in_process_pipe_with_no_spec() {
         // the in-process seam: a client built straight from a mounted pipe routes
