@@ -13,9 +13,10 @@
 //! `drive` carries its own engine (`handler`, `config`) as a struct field —
 //! the same `AnyHandler`-unused asymmetry [`crate::pipe::RedisConnectionPipe`]
 //! docs. Redis's handler is NOT bespoke: [`crate::pipes::RedisPipeHandle`]
-//! is `SendPipe<Request<RedisRequest>, Response<RespValue>>`, the same
-//! typed-handle shape pgwire's [`crate::pipes::RedisPipeHandle`] sibling
-//! (`proxima_pgwire::PgPipeHandle`) uses. Each accepted connection builds a
+//! is `SendPipe<RedisRequest, RespValue>` (no `Request`/`Response`
+//! envelope), the same de-enveloped typed-handle shape pgwire's
+//! [`crate::pipes::RedisPipeHandle`] sibling (`proxima_pgwire::PgPipeHandle`)
+//! uses. Each accepted connection builds a
 //! FRESH [`RedisConnectionPipe`] carrying THIS connection's [`ConnAdmission`]
 //! clone, erases it, and hands it to
 //! [`proxima_listen::serve_pipe::handle_connection`] — the ONE
@@ -130,19 +131,17 @@ impl AnyProtocol for RedisAnyProtocol {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::request::Response;
 
     struct EchoPipe;
 
     impl proxima_primitives::pipe::SendPipe for EchoPipe {
-        type In = crate::pipes::RedisPipeRequest;
-        type Out = crate::pipes::RedisPipeReply;
+        type In = proxima_protocols::redis::RedisRequest;
+        type Out = proxima_protocols::redis::RespValue;
         type Err = ProximaError;
 
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
-            Ok(Response::typed(
-                200,
-                proxima_protocols::redis::RespValue::SimpleString("OK".to_string()),
+            Ok(proxima_protocols::redis::RespValue::SimpleString(
+                "OK".to_string(),
             ))
         }
     }

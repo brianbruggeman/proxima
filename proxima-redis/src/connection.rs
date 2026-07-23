@@ -26,15 +26,14 @@ use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::request::{Request, RequestContext};
-use proxima_primitives::pipe::{FanIn, HeaderList, Pipe, PipeExt, Select, SendPipe, SubscriptionId};
+use proxima_primitives::pipe::{FanIn, Pipe, PipeExt, Select, SendPipe, SubscriptionId};
 
 use proxima_protocols::redis::{Advanced, ConnMode, Connection as RespConnection, Frame, Limits, RedisRequest, RespValue};
 
 use crate::broker::{PushSink, RedisBroker};
 use crate::config::RedisServerConfig;
 use crate::error::RedisServeError;
-use crate::pipes::{RedisPipeHandle, RedisPipeRequest};
+use crate::pipes::RedisPipeHandle;
 use crate::wait_sources::RedisConnSource;
 
 async fn flush_out<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
@@ -85,38 +84,35 @@ struct SubscriberGate {
 }
 
 impl Pipe for SubscriberGate {
-    type In = RedisPipeRequest;
-    type Out = RedisPipeRequest;
+    type In = RedisRequest;
+    type Out = RedisRequest;
     type Err = ProximaError;
 
     fn call(
         &self,
-        request: RedisPipeRequest,
-    ) -> impl core::future::Future<Output = Result<RedisPipeRequest, ProximaError>> {
+        request: RedisRequest,
+    ) -> impl core::future::Future<Output = Result<RedisRequest, ProximaError>> {
         let outcome = self.admission_result(request);
         async move { outcome }
     }
 }
 
 impl SendPipe for SubscriberGate {
-    type In = RedisPipeRequest;
-    type Out = RedisPipeRequest;
+    type In = RedisRequest;
+    type Out = RedisRequest;
     type Err = ProximaError;
 
     fn call(
         &self,
-        request: RedisPipeRequest,
-    ) -> impl core::future::Future<Output = Result<RedisPipeRequest, ProximaError>> + Send {
+        request: RedisRequest,
+    ) -> impl core::future::Future<Output = Result<RedisRequest, ProximaError>> + Send {
         let outcome = self.admission_result(request);
         async move { outcome }
     }
 }
 
 impl SubscriberGate {
-    fn admission_result(
-        &self,
-        request: RedisPipeRequest,
-    ) -> Result<RedisPipeRequest, ProximaError> {
+    fn admission_result(&self, request: RedisRequest) -> Result<RedisRequest, ProximaError> {
         if self.admitted {
             Ok(request)
         } else {
@@ -126,18 +122,6 @@ impl SubscriberGate {
                 String::from_utf8_lossy(&self.verb).to_lowercase()
             )))
         }
-    }
-}
-
-fn build_request(verb: &[u8], args: Vec<Vec<u8>>) -> RedisPipeRequest {
-    Request {
-        method: proxima_primitives::pipe::method::Method::from_bytes(verb),
-        path: Bytes::new(),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: RedisRequest { args },
-        stream: None,
-        context: RequestContext::default(),
     }
 }
 
@@ -195,6 +179,11 @@ enum FrameOutcome {
 /// check `admits`, etc.) — holding both at once is exactly the aliasing
 /// `h1_connection`'s typestate handles prevent at compile time; here the
 /// caller extracts `args` (ending the frame borrow) before calling in.
+/// Each arm is a 1:1 mechanical promotion of the former raw byte-`match`:
+/// same broker calls, same `ConnMode` transitions, same `admits()` gate on
+/// the `Command` arm in Subscriber mode — the only change is dispatching on
+/// [`RedisRequest::from_args`]'s FSM-aware carry instead of a bare
+/// `verb.as_slice()` match.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_args(
     args: Vec<Vec<u8>>,
@@ -205,33 +194,30 @@ async fn dispatch_args(
     state: &mut SubscriberState,
     admission: &proxima_listen::admission::ConnAdmission,
 ) -> FrameOutcome {
-    let Some((verb_bytes, rest)) = args.split_first() else {
+    if args.is_empty() {
         return FrameOutcome::Reply(RespValue::Error("ERR unknown command ''".to_string()));
-    };
-    let verb = verb_bytes.to_ascii_uppercase();
-    match verb.as_slice() {
-        b"PING" => FrameOutcome::Reply(ping_reply(rest)),
-        b"QUIT" => FrameOutcome::Close,
-        b"SUBSCRIBE" | b"SSUBSCRIBE" if !rest.is_empty() => {
-            let mut frames = Vec::with_capacity(rest.len());
-            for channel in rest {
+    }
+    match RedisRequest::from_args(args) {
+        RedisRequest::Subscribe { channels } => {
+            let mut frames = Vec::with_capacity(channels.len());
+            for channel in channels {
                 if connection.subscribe(channel.clone()) {
-                    let id = broker.subscribe_channel(channel, push_sink.clone());
+                    let id = broker.subscribe_channel(&channel, push_sink.clone());
                     state.channels.insert(channel.clone(), id);
                 }
                 frames.push(subscribe_ack(
                     "subscribe",
-                    Some(channel),
+                    Some(&channel),
                     connection.subscription_count(),
                 ));
             }
             FrameOutcome::Frames(frames)
         }
-        b"UNSUBSCRIBE" | b"SUNSUBSCRIBE" => {
-            let targets: Vec<Vec<u8>> = if rest.is_empty() {
+        RedisRequest::Unsubscribe { channels } => {
+            let targets: Vec<Vec<u8>> = if channels.is_empty() {
                 state.channels.keys().cloned().collect()
             } else {
-                rest.to_vec()
+                channels
             };
             if targets.is_empty() {
                 FrameOutcome::Frames(vec![subscribe_ack(
@@ -255,26 +241,26 @@ async fn dispatch_args(
                 FrameOutcome::Frames(frames)
             }
         }
-        b"PSUBSCRIBE" if !rest.is_empty() => {
-            let mut frames = Vec::with_capacity(rest.len());
-            for pattern in rest {
+        RedisRequest::Psubscribe { patterns } => {
+            let mut frames = Vec::with_capacity(patterns.len());
+            for pattern in patterns {
                 if connection.psubscribe(pattern.clone()) {
-                    let id = broker.subscribe_pattern(pattern, push_sink.clone());
+                    let id = broker.subscribe_pattern(&pattern, push_sink.clone());
                     state.patterns.insert(pattern.clone(), id);
                 }
                 frames.push(subscribe_ack(
                     "psubscribe",
-                    Some(pattern),
+                    Some(&pattern),
                     connection.subscription_count(),
                 ));
             }
             FrameOutcome::Frames(frames)
         }
-        b"PUNSUBSCRIBE" => {
-            let targets: Vec<Vec<u8>> = if rest.is_empty() {
+        RedisRequest::Punsubscribe { patterns } => {
+            let targets: Vec<Vec<u8>> = if patterns.is_empty() {
                 state.patterns.keys().cloned().collect()
             } else {
-                rest.to_vec()
+                patterns
             };
             if targets.is_empty() {
                 FrameOutcome::Frames(vec![subscribe_ack(
@@ -298,44 +284,51 @@ async fn dispatch_args(
                 FrameOutcome::Frames(frames)
             }
         }
-        b"PUBLISH" if rest.len() == 2 => match broker.publish(&rest[0], &rest[1]).await {
-            Ok(count) => FrameOutcome::Reply(RespValue::Integer(i64::try_from(count).unwrap_or(i64::MAX))),
-            Err(error) => FrameOutcome::InternalError(error),
-        },
-        _ => {
-            // Request-level admission: a business command dispatched to the
-            // handler is redis's natural "one request" unit (mirrors h1 per
-            // request, h2 per stream, pgwire per message). PING/SUBSCRIBE/
-            // PUBLISH etc. above are protocol-level framing, not business
-            // dispatch, and stay ungated — a health-check PING should not
-            // get shed during quiesce/drain.
-            if let proxima_listen::admission::RequestAdmit::Shed { reason } =
-                admission.request_admit()
-            {
-                return FrameOutcome::Reply(RespValue::Error(format!(
-                    "ERR server is shedding requests ({reason:?}); retry shortly"
-                )));
-            }
-            let request = build_request(&verb, rest.to_vec());
-            let admitted = connection.admits(&verb);
-            let dispatched = if connection.mode() == ConnMode::Subscriber {
-                let gate = SubscriberGate {
-                    admitted,
-                    verb: verb.clone(),
-                };
-                SendPipe::call(&handler.clone().filter(gate), request).await
-            } else {
-                SendPipe::call(handler.as_ref(), request).await
-            };
-            admission.request_release();
-            match dispatched {
-                Ok(response) => FrameOutcome::Reply(response.payload),
-                Err(ProximaError::Forbidden(reason)) => {
-                    FrameOutcome::Reply(RespValue::Error(format!("ERR {reason}")))
+        RedisRequest::Command { verb, args } => match verb.as_slice() {
+            b"PING" => FrameOutcome::Reply(ping_reply(&args)),
+            b"QUIT" => FrameOutcome::Close,
+            b"PUBLISH" if args.len() == 2 => match broker.publish(&args[0], &args[1]).await {
+                Ok(count) => {
+                    FrameOutcome::Reply(RespValue::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
                 }
                 Err(error) => FrameOutcome::InternalError(error),
+            },
+            _ => {
+                // Request-level admission: a business command dispatched to the
+                // handler is redis's natural "one request" unit (mirrors h1 per
+                // request, h2 per stream, pgwire per message). PING/SUBSCRIBE/
+                // PUBLISH etc. above are protocol-level framing, not business
+                // dispatch, and stay ungated — a health-check PING should not
+                // get shed during quiesce/drain.
+                if let proxima_listen::admission::RequestAdmit::Shed { reason } =
+                    admission.request_admit()
+                {
+                    return FrameOutcome::Reply(RespValue::Error(format!(
+                        "ERR server is shedding requests ({reason:?}); retry shortly"
+                    )));
+                }
+                let admitted = connection.admits(&verb);
+                let mode = connection.mode();
+                let request = RedisRequest::Command {
+                    verb: verb.clone(),
+                    args,
+                };
+                let dispatched = if mode == ConnMode::Subscriber {
+                    let gate = SubscriberGate { admitted, verb };
+                    SendPipe::call(&handler.clone().filter(gate), request).await
+                } else {
+                    SendPipe::call(handler.as_ref(), request).await
+                };
+                admission.request_release();
+                match dispatched {
+                    Ok(response) => FrameOutcome::Reply(response),
+                    Err(ProximaError::Forbidden(reason)) => {
+                        FrameOutcome::Reply(RespValue::Error(format!("ERR {reason}")))
+                    }
+                    Err(error) => FrameOutcome::InternalError(error),
+                }
             }
-        }
+        },
     }
 }
 
@@ -501,8 +494,6 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::method::Method;
-    use proxima_primitives::pipe::request::Response;
     use std::io::Read;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -511,21 +502,22 @@ mod tests {
     struct EchoHandler;
 
     impl SendPipe for EchoHandler {
-        type In = RedisPipeRequest;
-        type Out = crate::pipes::RedisPipeReply;
+        type In = RedisRequest;
+        type Out = RespValue;
         type Err = ProximaError;
 
         fn call(
             &self,
-            request: RedisPipeRequest,
+            request: RedisRequest,
         ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> + Send {
             async move {
-                let reply = if request.method == Method::from_bytes(b"GET") {
-                    RespValue::BulkString(b"stub-value".to_vec())
-                } else {
-                    RespValue::Error("ERR unknown command".to_string())
+                let reply = match request {
+                    RedisRequest::Command { verb, .. } if verb == b"GET" => {
+                        RespValue::BulkString(b"stub-value".to_vec())
+                    }
+                    _ => RespValue::Error("ERR unknown command".to_string()),
                 };
-                Ok(Response::typed(200, reply))
+                Ok(reply)
             }
         }
     }
