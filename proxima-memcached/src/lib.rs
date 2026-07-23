@@ -88,4 +88,4 @@ pub use config::MemcachedServerConfig;
 #[cfg(feature = "listen")]
 pub use framed_app::{MemcachedAppError, MemcachedFramedApp, MemcachedOutcome};
 #[cfg(feature = "listen")]
-pub use pipes::{MemcachedPipeHandle, MemcachedPipeReply, MemcachedPipeRequest, into_memcached_handle};
+pub use pipes::{MemcachedPipeHandle, into_memcached_handle};

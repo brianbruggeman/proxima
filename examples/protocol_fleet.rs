@@ -69,7 +69,7 @@ async fn main() -> Result<(), ProximaError> {
 /// SCOPE: text-protocol only (no binary protocol) — GET/SET/DELETE/INCR/
 /// DECR/TOUCH/FLUSH_ALL/VERSION/QUIT/STATS, ASCII framing only.
 async fn memcached_section() -> Result<(), ProximaError> {
-    use proxima_memcached::{MemcachedPipeReply, MemcachedPipeRequest, into_memcached_handle};
+    use proxima_memcached::into_memcached_handle;
     use proxima_protocols::memcached::{MemcachedRequest, Reply, StoredValue};
 
     #[derive(Default, Clone)]
@@ -81,13 +81,13 @@ async fn memcached_section() -> Result<(), ProximaError> {
     }
 
     impl SendPipe for KvStore {
-        type In = MemcachedPipeRequest;
-        type Out = MemcachedPipeReply;
+        type In = MemcachedRequest;
+        type Out = Reply;
         type Err = ProximaError;
 
-        async fn call(&self, request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
+        async fn call(&self, request: MemcachedRequest) -> Result<Reply, ProximaError> {
             let store = self.data.clone();
-            let reply = match request.payload {
+            let reply = match request {
                 MemcachedRequest::Store { key, value, .. } => {
                     store.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(key, value);
                     Reply::Stored
@@ -108,7 +108,7 @@ async fn memcached_section() -> Result<(), ProximaError> {
                 }
                 _ => Reply::Error,
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 

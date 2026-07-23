@@ -390,12 +390,11 @@ pub trait ListenerProtocolExt: Sized {
     /// use proxima::SendPipe;
     /// use bytes::Bytes;
     /// use proxima_memcached::{MemcachedRequest, Reply, into_memcached_handle};
-    /// use proxima_primitives::pipe::request::{Request as TypedRequest, Response as TypedResponse};
     ///
     /// struct Unimplemented;
     /// impl SendPipe for Unimplemented {
-    ///     type In = TypedRequest<MemcachedRequest>;
-    ///     type Out = TypedResponse<Reply>;
+    ///     type In = MemcachedRequest;
+    ///     type Out = Reply;
     ///     type Err = ProximaError;
     ///     async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
     ///         unreachable!("no client connects in this doctest")
