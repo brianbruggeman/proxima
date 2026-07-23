@@ -891,14 +891,21 @@ fn any_listen_protocol(
 }
 
 /// Reject spec axes the listener side has no wiring for, instead of letting
-/// them silently degrade to plaintext / connect-anyway. `.proxy(url)` is
-/// `TransportSugar`'s blanket method (unavoidably in scope on every
-/// `SpecBuilder`, `ListenerBuilder` included — there is no negative impl to
-/// remove it); it has no listener-side implementation, so `.serve()`
-/// hard-errors rather than the caller discovering an ignored-proxy listener
-/// at request time. A bare `.tls()` (blanket 0-arg) only reaches this check
-/// when the `tls` feature is off and the inherent `.tls(TlsConfig)` override
-/// above doesn't exist to shadow it.
+/// them silently degrade to plaintext / connect-anyway. `ListenerBuilder`
+/// does NOT implement `ClientTransportExt`/`ClientSecurityExt` (each
+/// TYPE-SPECIFIC now, not the retired blanket `ProtocolSugar`/
+/// `TransportSugar`), so a caller cannot actually reach the client's
+/// `.proxy(url)` or bare `.tls()` methods on a `ListenerBuilder` value —
+/// this guard exists for the ONE door still open regardless: the raw
+/// `SpecBuilder::set`/`.spec(key, value)` escape hatch every `SpecBuilder`
+/// still exposes (`builder.set("proxy", url)` compiles, since
+/// `ListenerBuilder: SpecBuilder`). `.proxy(url)`'s spec key has no
+/// listener-side wiring at all, so `.serve()` hard-errors rather than the
+/// caller discovering an ignored-proxy listener at request time. The bare
+/// `.tls()` marker check below catches the shape a hand-written `.spec("transport",
+/// "tls")` call (or a `tls`-feature-off build, where the inherent
+/// `.tls(TlsConfig)` override doesn't exist to shadow anything) would
+/// otherwise leave silently unterminated.
 fn reject_dead_axes(spec: &serde_json::Map<String, Value>) -> Result<(), ProximaError> {
     if spec.contains_key("proxy") {
         return Err(ProximaError::Config(
@@ -960,11 +967,10 @@ fn resolve_listen_protocol(
     if spec.get("transport").and_then(Value::as_str) == Some("quic") {
         return h3_native_listen_protocol();
     }
-    // default / `.tcp()` / `.auto()`: the ALPN h1+h2 combiner. `.tls()`
-    // composes as a decorator OVER whatever this resolves — see
-    // `compose_tls` — so it never changes what's resolved here. Already
-    // registered by `App::new()` under the default feature set, so nothing
-    // extra to carry.
+    // default / `.tcp()`: the ALPN h1+h2 combiner. `.tls()` composes as a
+    // decorator OVER whatever this resolves — see `compose_tls` — so it
+    // never changes what's resolved here. Already registered by
+    // `App::new()` under the default feature set, so nothing extra to carry.
     Ok(("http".to_string(), None))
 }
 
@@ -1017,7 +1023,7 @@ fn h3_native_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>
 #[cfg(not(feature = "http3"))]
 fn h3_native_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     Err(ProximaError::Config(
-        "Listener::builder(): .h3() needs the `http3` feature; none built".into(),
+        "Listener::builder(): .quic() needs the `http3` feature; none built".into(),
     ))
 }
 
@@ -1112,10 +1118,12 @@ fn http_listen_protocol_for_tls() -> Result<Arc<dyn ListenProtocol>, ProximaErro
 
 /// The base spec seam ([`proxima_config::sugar::SpecBuilder`]): identical
 /// impl to `ClientBuilder`'s (`crate::client::handle`) — `set`/`push` are the
-/// only two methods the axis sugar needs, so a `use` of `ProtocolSugar` /
-/// `TransportSugar` lights up the same methods here as on the client. `set`
-/// reuses the existing `.spec()` so there is exactly one write path (the same
-/// discipline `ClientBuilder::set` follows, `src/client/handle.rs:644`).
+/// only two methods [`crate::listener::transport::ListenerTransportExt`] /
+/// [`crate::listener::protocol::ListenerProtocolExt`] need underneath (each
+/// its OWN type-specific trait, unlike the retired blanket `ProtocolSugar`/
+/// `TransportSugar`). `set` reuses the existing `.spec()` so there is
+/// exactly one write path (the same discipline `ClientBuilder::set` follows,
+/// `src/client/handle.rs:644`).
 impl proxima_config::sugar::SpecBuilder for ListenerBuilder {
     fn set(self, key: &str, value: impl Into<Value>) -> Self {
         self.spec(key, value.into())

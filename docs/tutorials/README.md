@@ -12,16 +12,20 @@ Sections are **self-contained**: each states its prerequisites up front and can 
 
 - **[Foundations: the Pipe](./00-foundations.md)** — the base. `Pipe` · the four roles · errors · `and_then`/`AndThen` · the four tiers (`Pipe`/`SendPipe`/`UnpinPipe`/`UnpinSendPipe`) · `#[proxima::piped]` (stateless free-fn form + stateful `impl` form — you almost never hand-write `impl Pipe` anymore) · the pipe algebra (filter, fan-out, fan-in, gate, signal) · the served `Pipe` · `into_handle` · serve. Everything else stands on this.
 - **[Foundations, part 2: the pipe ergonomic surface](./01-ergonomics.md)** — the sugar layer on top: `PipeExt` (`.and_then`/`.filter`/`.fanout`/`.fanin`, one blanket trait) · the leaf macros (`pipe!`/`filter!`/`fanout!`/`fanin!`) · `#[proxima::piped]`'s impl-all tier closure, precisely · `App::mount`'s four accepted shapes (`IntoMountTarget<Via>`) · why time is a composed `Clock` capability, never a special method on `Pipe`. Adds no new capability over Foundations — read it once Foundations feels solid, to stop hand-rolling what these already give you for free.
-- **[Foundations, part 3: the Listener builder, mirrored from the Client](./02-listener-builder.md)** — `Listener::builder()`/`Listener::http(bind)`, the serve-side mirror of `Client::builder()`/`Client::http(url)`, built from the same `SpecBuilder`/`ProtocolSugar`/`TransportSugar` seam · `resolve_listen_protocol` (`.tcp()`/`.h3()`/`.grpc()`/`.h2()`/`.pgwire(query)` resolved to one concrete `ListenProtocol`) · `TlsListenProtocol`, TLS as a composed decorator instead of a spec field · `ListenerSpec::protocol`, the escape hatch for an out-of-crate wire · the two places a listener's builder honestly cannot mirror the client's. Read after Foundations part 2 if you are about to hand-roll `App::new()` + manual `RunConfig` wiring more than once.
+- **[Foundations, part 3: the Listener builder, mirrored from the Client](./02-listener-builder.md)** — `Listener::builder()`/`Listener::http(bind)`, the serve-side mirror of `Client::builder()`/`Client::http(url)`, built from the same `SpecBuilder` seam, each side's own TYPE-SPECIFIC axis traits on top (`ListenerTransportExt`/`ListenerProtocolExt` vs. `ClientTransportExt`/`ClientProtocolExt`/`ClientSecurityExt` — no blanket impl over every `SpecBuilder`) · `resolve_listen_protocol` (`.tcp()`/`.udp()`/`.quic()`/`.grpc()`/`.h2()`/`.pgwire(query)` resolved to one concrete `ListenProtocol`) · `TlsListenProtocol`, TLS as a composed decorator instead of a spec field · `.protocol(impl AnyProtocol)`, the escape hatch for an out-of-crate wire · the two places a listener's builder honestly cannot mirror the client's. Read after Foundations part 2 if you are about to hand-roll `App::new()` + manual `RunConfig` wiring more than once.
 - **[The native runtime: serving real HTTP with zero tokio](./03-native-runtime.md)** — the `Runtime` trait · `http1` vs. `http1-native` (tokio-coupled vs. tokio-free h1) · `#[proxima::main]`'s ambient-runtime seam and the collapse it causes if you don't opt out with `.with_runtime`/`.with_acceptor_factory` · `ShutdownBarrier` · a runtime shared on purpose (`deferred_runtime`) vs. adopted by accident. Walks `proxy` → `gateway` → `load-balance` → `integration` → `distributed_trace`, all served tokio-free, then contrasts `multi_runtime`/`runtime_select` where tokio is deliberately opted into.
 
 ## Listener on-ramp (a faster path to a running listener)
 
-A standalone, self-contained 3-page series for a reader who wants to stand up and grow a real listener WITHOUT first reading Foundations end to end — the reader only needs to be comfortable with Rust and `async`/`.await`, and to have built an HTTP server in some other framework before. Cross-links to Foundations and to [02-listener-builder.md](./02-listener-builder.md) where the deeper story lives, but does not require reading them first.
+A standalone, self-contained 7-page series for a reader who wants to stand up and grow a real listener WITHOUT first reading Foundations end to end — the reader only needs to be comfortable with Rust and `async`/`.await`, and to have built an HTTP server in some other framework before. Cross-links to Foundations and to [02-listener-builder.md](./02-listener-builder.md) where the deeper story lives, but does not require reading them first.
 
 - **[Part 1: hello](./04-listener-hello.md)** — the smallest complete proxima service: one handler, `App::mount`, `app.serve`, one real `curl` round trip.
 - **[Part 2: the universal listener](./05-listener-universal.md)** — `Listener::builder()` · `.any()` (stop picking a protocol, let the listener sniff it) · `.accept(name)`/`.accepts([...])` (narrow back down to one wire).
 - **[Part 3: growing it into production](./06-listener-production.md)** — telemetry (console + file + a real counter) · `.deny(name, literal)` + `.blacklist(config)` (a DoS-blacklisted accept/deny allowlist) · `max_in_flight_requests` + `ConnAdmission`/`ShedReason` (request-level admission rendered on the wire) · client-side `RateLimit`+`Retry`/`Backoff` (composed, not a new type) · `BlacklistConfig::layered()` (conflaguration as first-class) · same-port-vs-separate-port, side by side.
+- **[Part 4: composing the sugar](./07-sugar-composition.md)** — the three type-specific axis families (`.tcp()`/`.udp()`/`.quic()`, `.tls()`, `.http()`/`.grpc()`/`.kafka()`/…) · why `.http().quic()` IS h3, not a separate `.h3()` method · the honest failure mode: an invalid composition (`.kafka().quic()`) is a named `ProximaError::Config`, never a silent degrade.
+- **[Part 5: the protocol fleet](./08-protocol-fleet.md)** — memcached, DNS, Kafka, MQTT, AMQP, each taught client AND listener, with the honest scope boundary stated for each (this is a demonstration fleet, not production-complete brokers).
+- **[Part 6: add your own protocol](./09-extend-your-own-protocol.md)** — `AnyProtocol` (probe + drive), a one-line ext trait, and why a downstream crate can do this with zero edits to proxima itself. The most important page in this series if you're integrating a wire proxima doesn't ship.
+- **[Part 7: conflaguration as first-class](./10-conflaguration.md)** — the house config pattern (`#[derive(Builder, Deserialize, Serialize, Settings)]` + `Validate`), builder vs. TOML file side by side, for a listener's admission/blacklist knobs and a protocol's own server config.
 
 ## Build a ... (each project is complete in itself)
 
@@ -73,13 +77,19 @@ graph TD
   GW --> LB["Build a load balancer"]
   ONRAMP1["Listener on-ramp, part 1: hello"] --> ONRAMP2["part 2: the universal listener"]
   ONRAMP2 --> ONRAMP3["part 3: production"]
+  ONRAMP3 --> ONRAMP4["part 4: composing the sugar"]
+  ONRAMP4 --> ONRAMP5["part 5: the protocol fleet"]
+  ONRAMP5 --> ONRAMP6["part 6: add your own protocol"]
+  ONRAMP4 --> ONRAMP7["part 7: conflaguration as first-class"]
   ONRAMP3 -.-> LB
   ONRAMP3 -.-> BASE
 ```
 
 The listener on-ramp series is intentionally standalone (no arrow INTO it) —
 it does not require Foundations first. The dashed arrows OUT of part 3 are
-"read next if you want more," not prerequisites.
+"read next if you want more," not prerequisites. Parts 4-7 extend the same
+`Listener::builder()`/`Client::builder()` shape parts 1-3 taught — no new
+serve loop, no new client type, just more axes on the identical builders.
 
 Suggested reading order: Foundations → Gateway (broadest coverage) → then any project. The proxy-based projects (caching proxy, record/replay, load balancer) read most smoothly after the Gateway.
 

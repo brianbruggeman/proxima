@@ -425,8 +425,11 @@ one more real call onto the same `Listener::builder()...serve()` chain.
 ## Where to go next
 
 - [`docs/tutorials/02-listener-builder.md`](./02-listener-builder.md) — the
-  full builder story: `.tcp()`/`.tls()`/`.h3()`/`.grpc()`/`.pgwire(query)`,
-  why TLS composes as a decorator instead of a spec field.
+  full builder story: `.tcp()`/`.udp()`/`.quic()`/`.tls()`/`.grpc()`/
+  `.pgwire(query)`, why TLS composes as a decorator instead of a spec field.
+- [Part 4: composing the sugar](./07-sugar-composition.md) — every axis
+  from part 3 (`.accept`/`.deny`/`.blacklist`) still composes with the
+  transport/security/protocol axes this page adds next.
 - [`docs/tutorials/03-native-runtime.md`](./03-native-runtime.md) — the
   `Runtime` trait, `http1` vs `http1-native`, and the ambient-runtime
   adoption rule `#[proxima::main]` relies on.

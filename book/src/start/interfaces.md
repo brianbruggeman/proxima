@@ -27,36 +27,57 @@ value underneath: a plain JSON map of key → setting. A method call like
 config chapter later in this book shows the identical map coming from a
 config file instead of a builder chain — fluent code and config are two
 views of the same data, never two competing ways to say the same thing. The
-methods that write into that map are not hand-rolled per builder; they come
-from two axis traits, blanket-implemented over anything that can `set`/`push`
-a key (`proxima-config/src/sugar/builder.rs:47–57,62–83,89–122`):
+base seam is two methods, `set`/`push` (`proxima-config/src/sugar/builder.rs:51–57`):
 
 ```rust
 pub trait SpecBuilder: Sized {
     fn set(self, key: &str, value: impl Into<Value>) -> Self;
     fn push(self, key: &str, value: impl Into<Value>) -> Self;
 }
+```
 
-pub trait ProtocolSugar: SpecBuilder {
-    fn http(self, url: impl Into<String>) -> Self { self.set("http", url.into()) }
-    fn https(self, url: impl Into<String>) -> Self { self.set("http", url.into()) }
-    fn grpc(self, url: impl Into<String>) -> Self { self.set("grpc", url.into()) }
-}
+That's all `SpecBuilder` is. The fluent methods on top (`.http()`, `.tcp()`,
+`.tls()`, `.kafka()`, …) are **not** one blanket trait reaching across every
+builder — each axis is its own TYPE-SPECIFIC trait, implemented once per
+concrete builder: `ClientTransportExt`/`ClientProtocolExt`/`ClientSecurityExt`
+for `ClientBuilder` (`src/client/transport.rs`, `src/client/protocol.rs`,
+`src/client/security.rs`), `ListenerTransportExt`/`ListenerProtocolExt` for
+`ListenerBuilder` (`src/listener/transport.rs`, `src/listener/protocol.rs`).
+A prior version of this crate had a blanket pair here (`ProtocolSugar`/
+`TransportSugar`, `impl<B: SpecBuilder> ProtocolSugar for B {}`) — retired,
+precisely because "reaches every `SpecBuilder`, including foreign-crate ones
+a caller never meant to touch" turned out to be too much reach
+(`proxima-config/src/sugar/builder.rs`'s own module doc says so directly).
+The client's own transport axis, for the shape (`src/client/transport.rs:14–35`):
 
-pub trait TransportSugar: SpecBuilder {
-    fn auto(self) -> Self { self.set("transport", "auto") }
-    fn tcp(self) -> Self { self.set("transport", "tcp") }
-    fn tls(self) -> Self { self.set("transport", "tls") }
-    fn h3(self) -> Self { self.set("transport", "h3") }
-    fn proxy(self, url: impl Into<String>) -> Self { self.set("proxy", url.into()) }
+```rust
+pub trait ClientTransportExt: Sized {
+    fn tcp(self) -> Self;
+    fn udp(self) -> Self;
+    fn quic(self) -> Self;
+    fn proxy(self, url: impl Into<String>) -> Self;
 }
 ```
 
-`ClientBuilder` and `ListenerBuilder` each implement only `set`/`push`; every
-`.http(url)`/`.tls()`/`.h3()` method on both types is the identical blanket
-method, imported into scope with one `use
-proxima::{ProtocolSugar, TransportSugar};`. Nothing is implicit — the method
-is on the page because you imported the trait.
+`ClientBuilder` implements `ClientTransportExt`; `ListenerBuilder` implements
+the SEPARATE `ListenerTransportExt` (same method names, different trait, own
+impl). Every `.http(url)`/`.tls()`/`.quic()` method is on the page because
+you imported the SPECIFIC trait that provides it for the SPECIFIC builder
+you're calling it on — `use proxima::prelude::*;` brings every first-party
+axis trait into scope at once, or import them individually. Nothing is
+implicit magic, and — unlike the retired blanket design — a type can no
+longer accidentally inherit an axis method that makes no sense for it (a
+`ListenerBuilder` cannot reach the client-only `.proxy(url)` through
+`ClientTransportExt`, because it never implements that trait).
+
+HTTP/3 rides this same seam as a MODIFIER, not a fourth protocol key:
+`.http(url).quic()` (client) / `.http(bind).quic()` (listener) is h3 — there
+is no separate `.h3()` method. `.quic()` writes `transport: "quic"`; the
+loader checks that key alongside `http` and dispatches to the native h3
+upstream/listener instead of the ordinary h1/h2 path. See
+`docs/tutorials/07-sugar-composition.md` for the full composition story
+(transport × security × protocol, and the honest failure mode when an
+invalid combination is requested).
 
 ## `Client` — dial out
 
@@ -157,12 +178,16 @@ The complete file, including the h2 client round trip that proves it:
 
 `.serve()` composes `App::new()` + `App::mount` + `App::serve` underneath —
 the exact idiom the next section teaches, automated behind the builder.
-`.tls(config)`, `.h2()`, and `.pgwire(query)` are listener-only axes with no
-client-side twin (a listener terminates real cert material or speaks a typed
-SQL wire; a client only ever *picks* a transport for a url it already has) —
-`docs/tutorials/02-listener-builder.md` is the deep dive on those three axes,
-on why TLS composes as a decorator rather than a spec field, and on the two
-places the mirror is honestly asymmetric.
+`.h2()` and `.pgwire(query)` are listener-only axes with no client-side twin
+at all (a listener speaks h2 with nothing to dial, or terminates a typed SQL
+wire a client never carries). `.tls(TlsConfig)` DOES have a client-side twin
+(`ClientSecurityExt::tls()`) — but a different shape, not the same method
+reused: the client's is bare (zero-arg, ALPN negotiation does the actual
+work), the listener's takes real cert material (`proxima_tls::TlsConfig`) —
+a listener terminates TLS, a client only *picks* it for a url it already
+has. `docs/tutorials/02-listener-builder.md` is the deep dive on all three
+axes, on why TLS composes as a decorator rather than a spec field, and on
+the two places the mirror is honestly asymmetric.
 
 A listener can also skip picking a protocol entirely: `.any()` binds one
 socket and classifies each connection's own leading bytes against every
@@ -228,4 +253,10 @@ inside it adopts, unless each app opts out explicitly.
 - `docs/tutorials/04-listener-hello.md` onward — a standalone, faster
   on-ramp straight to a running `Listener`, for a reader who wants to skip
   straight to `.any()`/`.accept()`/`.deny()`/`.blacklist()` without reading
-  Foundations first.
+  Foundations first. It continues into `docs/tutorials/07-sugar-composition.md`
+  (the transport/security/protocol axes, composed), `08-protocol-fleet.md`
+  (memcached/DNS/Kafka/MQTT/AMQP, client and listener), and
+  `09-extend-your-own-protocol.md` (plugging in a protocol proxima doesn't
+  ship, with zero edits to this crate).
+- [add your own protocol](../extend/protocol.md) / [the protocol fleet](../protocols/fleet.md)
+  — this book's own chapters on the same two topics.
