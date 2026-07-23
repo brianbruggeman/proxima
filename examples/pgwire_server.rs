@@ -19,7 +19,7 @@ use bytes::Bytes;
 use proxima::error::ProximaError;
 use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
-use proxima::{Listener, ListenerBuilderEntry};
+use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt};
 use proxima_pgwire::{
     ColumnDesc, ErrorReply, PgReply, PgRequest, PgResponse, QueryReply, SqlValue, into_pg_handle,
     verb,

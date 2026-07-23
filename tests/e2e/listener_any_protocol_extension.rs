@@ -45,7 +45,7 @@ use proxima::pipe::into_handle;
 use proxima::prelude::*;
 use proxima::request::{Request, Response};
 use proxima::stream::{PeerInfo, StreamConnection};
-use proxima::{SendPipe, TransportSugar};
+use proxima::SendPipe;
 
 /// The literal a real `MINI/1.0` client would open a connection with — a
 /// fixed positive-match prefix, the same shape `DenySignature`'s own probe

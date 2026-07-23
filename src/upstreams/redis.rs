@@ -14,6 +14,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -22,6 +23,7 @@ use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_redis::{RedisClientConfig, RedisClientUpstream};
 
 use crate::PrimeTcpUpstream;
+use crate::client::handle::ClientProtocol;
 use crate::error::ProximaError;
 
 /// A [`PipeFactory`] for the `redis` key (Valkey shares it). Builds a client
@@ -68,10 +70,39 @@ fn config_from_spec(spec: &Value) -> Result<RedisClientConfig, ProximaError> {
         .map_err(|err| ProximaError::Config(format!("redis config: {err}")))
 }
 
+/// The out-of-crate [`ClientProtocol`] a `.redis(dsn)` / `.valkey(dsn)`
+/// builder call merges — migrated OFF the old bespoke inherent
+/// `ClientBuilder::{redis,valkey}` onto the same `.protocol()` mechanism
+/// every other protocol terminal uses, wrapping this SAME
+/// [`RedisPipeFactory`] (net-zero runtime change; see Section E of the
+/// builder-sugar design).
+pub struct RedisClientProtocol {
+    dsn: String,
+}
+
+impl RedisClientProtocol {
+    /// Point at a Redis/Valkey server by DSN (`redis://[user:pass@]host[:port][/db]`).
+    #[must_use]
+    pub fn dsn(dsn: impl Into<String>) -> Self {
+        Self { dsn: dsn.into() }
+    }
+}
+
+impl ClientProtocol for RedisClientProtocol {
+    fn spec(&self) -> Value {
+        serde_json::json!({"type": "redis", "dsn": self.dsn})
+    }
+
+    fn factory(&self) -> Arc<dyn PipeFactory> {
+        Arc::new(RedisPipeFactory::new())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::client::protocol::ClientProtocolExt;
 
     #[test]
     fn config_from_dsn_spec() {
@@ -101,6 +132,15 @@ mod tests {
     #[test]
     fn factory_name_is_the_spec_key() {
         assert_eq!(RedisPipeFactory::new().name(), "redis");
+    }
+
+    #[test]
+    fn client_protocol_lowers_to_the_type_and_dsn_spec() {
+        let protocol = RedisClientProtocol::dsn("redis://h:6379");
+        let spec = protocol.spec();
+        assert_eq!(spec["type"], "redis");
+        assert_eq!(spec["dsn"], "redis://h:6379");
+        assert_eq!(protocol.factory().name(), "redis");
     }
 
     /// The headline: redis reached through `proxima::Client` like any other

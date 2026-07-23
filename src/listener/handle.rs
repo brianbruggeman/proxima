@@ -7,7 +7,6 @@ use std::{future::Future, pin::Pin};
 use futures::channel::oneshot;
 use serde_json::Value;
 
-use proxima_config::sugar::ProtocolSugar;
 use proxima_listen::ListenProtocol;
 #[cfg(feature = "tls")]
 use proxima_listen::ServeContext;
@@ -15,6 +14,7 @@ use proxima_listen::handle::Listener;
 
 use crate::app::{App, MountTarget, RunConfig};
 use crate::error::ProximaError;
+use crate::listener::protocol::ListenerProtocolExt;
 use crate::pipe::PipeHandle;
 use crate::server::Server;
 
@@ -28,20 +28,20 @@ use crate::server::Server;
 /// on [`App`] / [`Server`]; Rust's orphan rule forbids an inherent `impl
 /// Listener { fn builder() }` from this crate, so the entry points are a
 /// local trait blanket-impl'd for the foreign type instead of a second
-/// `Listener` type living here — same idiom as
-/// `proxima_config::sugar::{TransportSugar, ProtocolSugar}`: import the
-/// trait to unlock the static methods, exactly like those traits unlock
-/// `.tcp()`/`.http()`. Bring it into scope with
-/// `use proxima::{Listener, ListenerBuilderEntry};`.
+/// `Listener` type living here — same idiom as the TYPE-SPECIFIC
+/// [`ListenerTransportExt`](crate::ListenerTransportExt) /
+/// [`ListenerProtocolExt`] extension traits: import the trait to unlock the
+/// static methods, exactly like those traits unlock `.tcp()`/`.http()`.
+/// Bring it into scope with `use proxima::{Listener, ListenerBuilderEntry};`.
 pub trait ListenerBuilderEntry {
     /// Fluent builder: `Listener::builder().bind(addr).tcp().handle(pipe).serve()`.
     #[must_use]
     fn builder() -> ListenerBuilder;
 
     /// One-liner mirroring [`Client::http(url)`](crate::Client::http): binds
-    /// the `ListenerBuilder`'s typed `.bind(addr)` slot AND the shared
-    /// [`ProtocolSugar::http`](proxima_config::sugar::ProtocolSugar::http)
-    /// spec key (`bind.to_string()`) in one call, so
+    /// the `ListenerBuilder`'s typed `.bind(addr)` slot AND the
+    /// [`ListenerProtocolExt::http`] spec key (`bind.to_string()`) in one
+    /// call, so
     /// `Listener::http(bind).tls(cfg).handle(pipe).serve()` reads exactly
     /// like `Client::builder().http(url).tls().build()`. Still requires
     /// `.handle(pipe)` before `.serve()` — the one input a listener carries
@@ -62,25 +62,22 @@ impl ListenerBuilderEntry for Listener {
 
 /// Fluent builder for [`Listener`] — accumulates a spec `serde_json::Map` the
 /// exact same way `ClientBuilder` does (see `crate::client::handle`), via
-/// `impl SpecBuilder` below. That blanket impl is what gives this type the
-/// SAME [`ProtocolSugar`](proxima_config::sugar::ProtocolSugar)
-/// (`.http`/`.https`/`.grpc`) and
-/// [`TransportSugar`](proxima_config::sugar::TransportSugar)
-/// (`.auto`/`.tcp`/`.tls`/`.h3`/`.proxy`) axes `ClientBuilder` gets — no
-/// listener-specific per-wire methods would fork the sugar rather than
-/// mirror it, EXCEPT where the wire genuinely has no client-side twin to
-/// mirror: `.h2()` (h2 has no url-carrying client axis the way `.tls()`/
-/// `.h3()` do) and `.pgwire(query)` (a typed SQL engine, not a wire pick at
-/// all). A few axes are honestly asymmetric and shadow or extend the
-/// blanket method with an inherent one carrying more than a client ever
-/// needs: `.tls(TlsConfig)` (real cert material), `.grpc()` (url-less — a
-/// listener dispatches to a `.handle(pipe)` already on hand, it doesn't dial
-/// out), `.h2()`, and `.pgwire(query)` (real query engine — see its own
-/// doc). `.proxy(url)` remains reachable through the blanket import (no
-/// negative impl exists to hide it) but `.serve()` hard-errors if it's
-/// present — see `reject_dead_axes`. `.bind()`/`.handle()` are the
-/// listener-specific axes, where the client instead has a url baked into
-/// `.http(url)` plus `.auth()`.
+/// `impl SpecBuilder` below. [`ListenerTransportExt`](crate::ListenerTransportExt)
+/// (`.tcp`/`.udp`/`.quic`) and [`ListenerProtocolExt`]
+/// (`.http`/`.https`/`.grpc`/`.kafka`/…) are its OWN type-specific extension
+/// traits (no blanket impl over every `SpecBuilder` — `ClientBuilder` gets
+/// its own, separate `ClientTransportExt`/`ClientProtocolExt`, not these
+/// same ones). A few axes are honestly asymmetric and shadow or extend the
+/// trait method with an inherent one carrying more than a client ever
+/// needs: `.tls(TlsConfig)` (real cert material, no trait minted at all —
+/// see [`Self::tls`]), `.grpc()` (url-less — a listener dispatches to a
+/// `.handle(pipe)` already on hand, it doesn't dial out), `.h2()` (inherent,
+/// no client twin), and `.pgwire(query)` (real query engine — see its own
+/// doc). `.proxy(url)` has no listener meaning at all (it lives only on
+/// `ClientTransportExt`) but `.serve()` still hard-errors if a caller
+/// reaches it through `.spec("proxy", ..)` directly — see
+/// `reject_dead_axes`. `.bind()`/`.handle()` are the listener-specific axes,
+/// where the client instead has a url baked into `.http(url)` plus `.auth()`.
 #[derive(Default)]
 pub struct ListenerBuilder {
     spec: serde_json::Map<String, Value>,
@@ -100,12 +97,26 @@ pub struct ListenerBuilder {
     /// [`Self::pgwire`].
     #[cfg(feature = "pgwire")]
     pgwire_query: Option<proxima_pgwire::PgPipeHandle>,
-    /// The typed command handler `.redis(handler)` carries — accumulated
+    /// The typed query handler `.dns(handler)` carries — accumulated
     /// separately from `spec` for the same reason `pgwire_query` is: a
-    /// `proxima_redis::RedisPipeHandle` doesn't fit a `serde_json::Value`
-    /// spec key. See [`Self::redis`].
-    #[cfg(feature = "redis-listener")]
-    redis_handler: Option<proxima_redis::RedisPipeHandle>,
+    /// `proxima_dns::DnsPipeHandle` doesn't fit a `serde_json::Value` spec
+    /// key. `.dns()` is the one dual-transport axis: `.serve()` branches on
+    /// `spec["transport"]` to pick a TCP single-candidate `AnyListenProtocol`
+    /// vs. a UDP `DatagramProtocolListenProtocol` — see
+    /// [`ListenerProtocolExt::dns`].
+    #[cfg(feature = "dns-listener")]
+    dns_handler: Option<proxima_dns::DnsPipeHandle>,
+    /// The reusable post-handshake handler `.websocket(handler)` carries —
+    /// wraps `dispatch` at `.serve()` time (see
+    /// `crate::listener::websocket::wrap_dispatch`) rather than resolving
+    /// through `resolve_listen_protocol`/`.protocol()`: a WebSocket upgrade
+    /// is ordinary H1 until the 101 response, not a peer wire protocol. See
+    /// [`ListenerProtocolExt::websocket`].
+    #[cfg(all(
+        feature = "websocket-upgrade",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    websocket_handler: Option<crate::listener::websocket::WebSocketHandler>,
     /// `.any()`/`.accepts(&[..])`/`.accept(name)` — which `AnyProtocol`
     /// candidates the open universal listener accepts. `None` means none of
     /// those were called (the builder resolves through the ordinary
@@ -160,15 +171,15 @@ enum AnyMode {
 }
 
 impl ListenerBuilder {
-    // `.auto()`/`.tcp()`/`.h3()` (`TransportSugar`) and `.http(url)`/
-    // `.https(url)` (`ProtocolSugar`) are real, unmodified blanket methods —
-    // `resolve_listen_protocol` below reads the same `transport`/`grpc` spec
-    // keys `load.rs` reads on the client side. `.tls()`/`.grpc()`/`.h2()`/
-    // `.pgwire(query)` are NOT blanket sugar here: all are inherent (the
-    // last two have no blanket twin at all) because a listener needs cert
-    // material / a query engine / has no url
-    // to dial. `use proxima::{ProtocolSugar, TransportSugar}` brings the rest
-    // into scope.
+    // `.tcp()`/`.udp()`/`.quic()` are `ListenerTransportExt`; `.http(bind)`/
+    // `.https(bind)`/`.grpc()`/`.kafka()`/… are `ListenerProtocolExt` — both
+    // TYPE-SPECIFIC extension traits impl'd below (no blanket over every
+    // `SpecBuilder`). `resolve_listen_protocol` below reads the same
+    // `transport`/`grpc` spec keys `load.rs` reads on the client side.
+    // `.tls()`/`.h2()` stay inherent here (no trait at all for `.tls()` —
+    // real cert material; `.h2()` has no client-side twin to fold into a
+    // shared trait). `use proxima::{ListenerTransportExt,
+    // ListenerProtocolExt};` brings the rest into scope.
 
     /// The socket address to listen on. Required before `.serve()` unless
     /// `.http(bind.to_string())` (or `Listener::http(bind)`, which calls it
@@ -189,80 +200,18 @@ impl ListenerBuilder {
         self
     }
 
-    /// Select gRPC as the listen protocol — the url-less counterpart of
-    /// [`ProtocolSugar::grpc(url)`](proxima_config::sugar::ProtocolSugar::grpc):
-    /// a listener dispatches to a `.handle(pipe)` already on hand, it doesn't
-    /// dial an upstream url, so this inherent 0-arg method shadows the
-    /// blanket 1-arg trait method and just flips the same `"grpc"` marker key
-    /// [`resolve_listen_protocol`] reads (mirroring `load.rs`'s
-    /// `value.get("grpc")` dispatch, `src/load.rs:499`). Resolves to the
-    /// `h2` listen protocol — gRPC rides h2.
-    #[must_use]
-    pub fn grpc(mut self) -> Self {
-        self.spec.insert("grpc".to_string(), Value::Bool(true));
-        self
-    }
-
     /// Select h2 (h2c, prior-knowledge, no ALPN, no TLS) as the listen
     /// protocol — the url-less counterpart of a client's transport pick: a
     /// listener dispatches to a `.handle(pipe)` already on hand rather than
     /// dialing an upstream url, so this is an inherent 0-arg method (there
-    /// is no blanket `TransportSugar::h2()` to shadow — h2 has no
-    /// client-side url-carrying twin the way `.tls()`/`.h3()` do). Resolves
-    /// to the exact same `h2` listen protocol `.grpc()` resolves to (see its
-    /// doc) — `.grpc()` and `.h2()` are the same wire, self-registered onto
-    /// the fresh `App` at `.serve()` time.
+    /// is no client-side url-carrying twin the way `.tls()`/`.quic()` do).
+    /// Resolves to the exact same `h2` listen protocol `.grpc()`
+    /// ([`ListenerProtocolExt::grpc`]) resolves to — `.grpc()` and `.h2()`
+    /// are the same wire, self-registered onto the fresh `App` at
+    /// `.serve()` time.
     #[must_use]
     pub fn h2(mut self) -> Self {
         self.spec.insert("h2".to_string(), Value::Bool(true));
-        self
-    }
-
-    /// Select PostgreSQL wire protocol as the listen protocol, carrying the
-    /// SQL engine directly — the one axis that genuinely needs more than a
-    /// marker key: `query` is the same typed
-    /// [`PgPipeHandle`](proxima_pgwire::PgPipeHandle)
-    /// [`PgWireAnyProtocol::new`](proxima_pgwire::PgWireAnyProtocol::new)
-    /// takes, matching a SQL verb `Request`/`Response` pair no generic
-    /// `.handle(pipe)` (`Request<Bytes>`/`Response<Bytes>`) can carry. This
-    /// is the same asymmetry `.tls(TlsConfig)` has against the client's bare
-    /// `.tls()`: a listener needs real material a client-side axis never
-    /// does. Unlike `.h2()`/`.h3()` (which resolve to one shared instance
-    /// self-registered onto the fresh `App`), `.serve()` constructs a fresh
-    /// single-candidate `AnyListenProtocol` wrapping a `PgWireAnyProtocol`
-    /// carrying THIS exact `query` every call — `App::new()` cannot
-    /// pre-register a protocol it doesn't yet have a query engine for.
-    /// `.handle(pipe)` is still required before `.serve()` (the one
-    /// validation path stays uniform across axes) even though the resolved
-    /// protocol never calls it once a constructor-supplied `query` is
-    /// present.
-    #[cfg(feature = "pgwire")]
-    #[must_use]
-    pub fn pgwire(mut self, query: proxima_pgwire::PgPipeHandle) -> Self {
-        self.pgwire_query = Some(query);
-        self.spec
-            .insert("pgwire_axis".to_string(), Value::Bool(true));
-        self
-    }
-
-    /// Select the Redis/Valkey wire protocol as the listen protocol,
-    /// carrying the command handler directly — the same asymmetry
-    /// `.pgwire(query)` has: `handler` is the typed
-    /// [`RedisPipeHandle`](proxima_redis::RedisPipeHandle)
-    /// (`Request<RedisRequest>`/`Response<RespValue>`), which no generic
-    /// `.handle(pipe)` can carry. Resolves through a single-candidate
-    /// `AnyListenProtocol` wrapping [`proxima_redis::RedisAnyProtocol`] —
-    /// there is no standalone `RedisListenProtocol`; redis's listen-side
-    /// surface has always been an `AnyProtocol` candidate. `.tls(config)`
-    /// composes normally as the generic decorator over this (RESP-over-TLS
-    /// is whole-connection TLS from byte 0, unlike pgwire's in-band
-    /// SSLRequest — no conflict to guard against).
-    #[cfg(feature = "redis-listener")]
-    #[must_use]
-    pub fn redis(mut self, handler: proxima_redis::RedisPipeHandle) -> Self {
-        self.redis_handler = Some(handler);
-        self.spec
-            .insert("redis_axis".to_string(), Value::Bool(true));
         self
     }
 
@@ -446,23 +395,20 @@ impl ListenerBuilder {
     }
 
     /// Terminate TLS at this listener — the listener-inherent counterpart of
-    /// the client's bare, url-less
-    /// [`TransportSugar::tls()`](proxima_config::sugar::TransportSugar::tls)
-    /// (which only picks a wire scheme for a url the client already
-    /// carries). A listener additionally needs cert material, so this takes
-    /// the exact [`proxima_tls::TlsConfig`] type. Composes at `.serve()` time
-    /// as a `proxima_listen::TlsListenProtocol` DECORATOR wrapping whatever
-    /// protocol `resolve_listen_protocol` resolves — TLS is NOT a spec key
-    /// and NOT a field on `ListenerSpec`; on/off is the presence of that
-    /// wrapper. No new TLS mechanism underneath: the decorator still stamps
-    /// the identical `proxima_tls::SPEC_KEY` (`"__proxima_tls"`) marker
-    /// `HttpListenProtocol::serve_default` reads
+    /// the client's bare, url-less `ClientSecurityExt::tls()` (which only
+    /// picks a wire scheme for a url the client already carries). A listener
+    /// additionally needs cert material, so this takes the exact
+    /// [`proxima_tls::TlsConfig`] type — deliberately NOT a trait method at
+    /// all (no `ListenerSecurityExt` is minted; see the module doc). Composes
+    /// at `.serve()` time as a `proxima_listen::TlsListenProtocol` DECORATOR
+    /// wrapping whatever protocol `resolve_listen_protocol` resolves — TLS is
+    /// NOT a spec key and NOT a field on `ListenerSpec`; on/off is the
+    /// presence of that wrapper. No new TLS mechanism underneath: the
+    /// decorator still stamps the identical `proxima_tls::SPEC_KEY`
+    /// (`"__proxima_tls"`) marker `HttpListenProtocol::serve_default` reads
     /// (`proxima-http/src/listener/mod.rs:451`) to build its
     /// `tokio_rustls::TlsAcceptor` — only WHERE that marker gets attached
     /// moved, from this builder's spec map to the decorator's own `serve`.
-    /// This inherent `(Self, TlsConfig)` signature shadows the blanket 0-arg
-    /// `TransportSugar::tls()`, so a bare `.tls()` call is a compile error
-    /// here, not a silent plaintext no-op.
     #[cfg(feature = "tls")]
     #[must_use]
     pub fn tls(mut self, tls: proxima_tls::TlsConfig) -> Self {
@@ -502,6 +448,7 @@ impl ListenerBuilder {
     /// `tests/e2e/listener_client_interop.rs`'s `wait_until_listening`).
     pub async fn serve(self) -> Result<Server, ProximaError> {
         reject_dead_axes(&self.spec)?;
+        reject_invalid_axis_combinations(&self)?;
         #[cfg(all(feature = "tls", feature = "pgwire"))]
         if self.tls.is_some() && self.pgwire_query.is_some() {
             return Err(ProximaError::Config(
@@ -521,10 +468,29 @@ impl ListenerBuilder {
                 "Listener::builder(): .handle(pipe) is required before .serve()".into(),
             )
         })?;
+        // `.websocket(handler)` wraps the ordinary dispatch pipe BEFORE
+        // mount — every non-upgrade request still reaches `dispatch`
+        // unchanged, a genuine handshake diverts to `handler` instead. See
+        // `crate::listener::websocket`'s module doc.
+        #[cfg(all(
+            feature = "websocket-upgrade",
+            any(feature = "http1", feature = "http1-native")
+        ))]
+        let websocket_handler = self.websocket_handler;
+        #[cfg(all(
+            feature = "websocket-upgrade",
+            any(feature = "http1", feature = "http1-native")
+        ))]
+        let dispatch = match websocket_handler {
+            Some(handler) => crate::listener::websocket::wrap_dispatch(dispatch, handler),
+            None => dispatch,
+        };
         #[cfg(feature = "pgwire")]
         let pgwire_query = self.pgwire_query;
-        #[cfg(feature = "redis-listener")]
-        let redis_handler = self.redis_handler;
+        #[cfg(feature = "dns-listener")]
+        let dns_handler = self.dns_handler;
+        #[cfg(feature = "dns-listener")]
+        let dns_transport = self.spec.get("transport").and_then(Value::as_str).map(str::to_string);
         // Built BEFORE protocol resolution (unlike every other axis, which
         // resolves against bare spec data) — `.any()`/`.accepts()`/
         // `.accept()` need `app.any_registry()` /
@@ -572,19 +538,37 @@ impl ListenerBuilder {
                 ),
             ))?;
         }
-        // `.redis(handler)` carries a typed command handler the same way
-        // `.pgwire(query)` carries its query engine — register a fresh
-        // single-candidate `AnyListenProtocol` wrapping `RedisAnyProtocol`
-        // now, before `.serve()` resolves `protocol` ("redis") against the
-        // registry.
-        #[cfg(feature = "redis-listener")]
-        if let Some(handler) = redis_handler {
-            app.register_listen_protocol(Arc::new(
-                crate::listeners::AnyListenProtocol::single_candidate(
-                    "redis",
-                    Arc::new(proxima_redis::RedisAnyProtocol::new("redis", handler)),
-                ),
-            ))?;
+        // `.dns(handler)` is the one dual-transport axis: `.serve()`
+        // branches on `spec["transport"]` and registers a FRESH instance
+        // carrying `handler` now, the same way `.pgwire(query)` does —
+        // `.quic()` is already rejected by `reject_invalid_axis_combinations`
+        // above, so only the tcp/udp arms are live here. `.tcp()` (default)
+        // registers a single-candidate `AnyListenProtocol` wrapping
+        // `DnsAnyProtocol` (DNS-over-TCP, RFC 1035 §4.2.2 framing); `.udp()`
+        // registers a `DatagramProtocolListenProtocol` wrapping
+        // `DnsDatagramProtocol`, self-registered the same way the native h3
+        // listener is (`h3_native_listen_protocol`).
+        #[cfg(feature = "dns-listener")]
+        if let Some(handler) = dns_handler {
+            match dns_transport.as_deref() {
+                Some("udp") => {
+                    app.register_listen_protocol(Arc::new(
+                        proxima_dns::DnsDatagramProtocol::listen_protocol(
+                            "dns",
+                            handler,
+                            proxima_dns::DnsServerConfig::default(),
+                        ),
+                    ))?;
+                }
+                _ => {
+                    app.register_listen_protocol(Arc::new(
+                        crate::listeners::AnyListenProtocol::single_candidate(
+                            "dns",
+                            Arc::new(proxima_dns::DnsAnyProtocol::new("dns", handler)),
+                        ),
+                    ))?;
+                }
+            }
         }
         app.mount("/{*path}", MountTarget::Handle(dispatch))?;
         let config = RunConfig {
@@ -596,9 +580,186 @@ impl ListenerBuilder {
     }
 }
 
-/// Recover the bind address from the `ProtocolSugar::http`/`.https` spec key
-/// (`bind.to_string()`, set by `Listener::http(bind)` or a caller's own
-/// `.http(bind.to_string())`) when `.bind(addr)` was never called directly —
+/// The impl lives here (not in `protocol.rs`, where the trait is defined)
+/// because `.pgwire()`/`.dns()`/`.websocket()` accumulate onto PRIVATE
+/// `ListenerBuilder` fields — Rust requires one coherent `impl Trait for
+/// Type` block, so the whole trait impl stays where those fields are
+/// declared. `.kafka()`/`.mqtt()`/`.amqp()`/`.memcached()`/`.redis()` only
+/// need the already-`pub` `.protocol()` seam; `.http()`/`.https()`/`.grpc()`
+/// only need the already-`pub` `.spec()` — those five COULD live in
+/// `protocol.rs`, but splitting one trait's methods across two `impl`
+/// blocks isn't legal Rust, so everything stays together.
+impl ListenerProtocolExt for ListenerBuilder {
+    fn http(self, bind: impl Into<String>) -> Self {
+        self.spec("http", Value::String(bind.into()))
+    }
+
+    fn https(self, bind: impl Into<String>) -> Self {
+        self.spec("http", Value::String(bind.into()))
+    }
+
+    fn grpc(mut self) -> Self {
+        self.spec.insert("grpc".to_string(), Value::Bool(true));
+        self
+    }
+
+    #[cfg(all(
+        feature = "kafka-listener",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    fn kafka(self, handler: proxima_kafka::KafkaPipeHandle) -> Self {
+        self.protocol(proxima_kafka::KafkaAnyProtocol::new("kafka", handler))
+    }
+
+    #[cfg(all(
+        feature = "mqtt-listener",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    fn mqtt(self, handler: proxima_mqtt::MqttPipeHandle) -> Self {
+        self.protocol(proxima_mqtt::MqttAnyProtocol::new("mqtt", handler))
+    }
+
+    #[cfg(all(
+        feature = "amqp-listener",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    fn amqp(self, handler: proxima_amqp::AmqpPipeHandle) -> Self {
+        self.protocol(proxima_amqp::AmqpAnyProtocol::new("amqp", handler))
+    }
+
+    #[cfg(all(
+        feature = "memcached-listener",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    fn memcached(self, handler: proxima_memcached::MemcachedPipeHandle) -> Self {
+        self.protocol(proxima_memcached::MemcachedAnyProtocol::new(
+            "memcached", handler,
+        ))
+    }
+
+    #[cfg(all(
+        feature = "redis-listener",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    fn redis(self, handler: proxima_redis::RedisPipeHandle) -> Self {
+        self.protocol(proxima_redis::RedisAnyProtocol::new("redis", handler))
+    }
+
+    #[cfg(feature = "pgwire")]
+    fn pgwire(mut self, query: proxima_pgwire::PgPipeHandle) -> Self {
+        self.pgwire_query = Some(query);
+        self.spec
+            .insert("pgwire_axis".to_string(), Value::Bool(true));
+        self
+    }
+
+    #[cfg(feature = "dns-listener")]
+    fn dns(mut self, handler: proxima_dns::DnsPipeHandle) -> Self {
+        self.dns_handler = Some(handler);
+        self.spec.insert("dns_axis".to_string(), Value::Bool(true));
+        self
+    }
+
+    #[cfg(all(
+        feature = "websocket-upgrade",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    fn websocket(mut self, handler: crate::listener::websocket::WebSocketHandler) -> Self {
+        // "Implies `.tcp()`" is a semantic statement, not a spec write: the
+        // absence of a `transport` key already resolves to the h1+h2 ALPN
+        // combiner (TCP) — see `resolve_listen_protocol`'s default arm.
+        // Deliberately NOT calling `.tcp()` here (which would overwrite an
+        // EXISTING `.quic()` to "tcp"): `reject_invalid_axis_combinations`
+        // needs to still see a caller's own `.quic()` in the spec to reject
+        // `.websocket(handler).quic()` — silently downgrading it here would
+        // make that combination unobservable instead of a config error.
+        self.websocket_handler = Some(handler);
+        self
+    }
+}
+
+/// Runtime validation for invalid axis compositions (Section G of the
+/// builder-sugar design) — a NAMED [`ProximaError::Config`], never a silent
+/// degrade and never a panic. Typestate can't do this: `.protocol()` is an
+/// open seam a third-party `.thrift()` extension joins without this crate
+/// ever seeing the concrete type, so the check can only run against the
+/// spec/field DATA a builder has accumulated by `.serve()` time — mirrors
+/// `reject_dead_axes`, just for the axis PAIRS that `resolve_listen_protocol`
+/// and the `.dns()`/`.websocket()` branches can't already refuse on their
+/// own.
+fn reject_invalid_axis_combinations(builder: &ListenerBuilder) -> Result<(), ProximaError> {
+    let transport = builder.spec.get("transport").and_then(Value::as_str);
+    let is_quic = transport == Some("quic");
+    #[cfg(any(feature = "pgwire", feature = "http1", feature = "http1-native"))]
+    let is_udp = transport == Some("udp");
+
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    if builder.any_mode.is_some() && (is_quic || is_udp) {
+        return Err(ProximaError::Config(
+            "Listener::builder(): .kafka()/.mqtt()/.amqp()/.memcached()/.redis()/.any()/\
+             .accept()/.protocol() are TCP-only (AnyProtocol::drive takes \
+             Box<dyn StreamConnection>); combining with .quic()/.udp() has no meaning — \
+             use .tcp() (the default)"
+                .into(),
+        ));
+    }
+
+    if (builder.spec.contains_key("grpc") || builder.spec.contains_key("h2")) && is_quic {
+        return Err(ProximaError::Config(
+            "Listener::builder(): .grpc()/.h2() + .quic(): gRPC rides h2, not QUIC; drop \
+             .quic() (the default h1+h2 ALPN combiner already carries h2)"
+                .into(),
+        ));
+    }
+
+    #[cfg(feature = "pgwire")]
+    if builder.pgwire_query.is_some() && (is_quic || is_udp) {
+        return Err(ProximaError::Config(
+            "Listener::builder(): .pgwire(query) is TCP-only (in-band SSLRequest upgrade \
+             assumes a byte stream); combining with .quic()/.udp() has no meaning — use \
+             .tcp() (the default)"
+                .into(),
+        ));
+    }
+
+    #[cfg(feature = "dns-listener")]
+    if builder.dns_handler.is_some() && is_quic {
+        return Err(ProximaError::Config(
+            "Listener::builder(): .dns(handler) + .quic(): DNS-over-QUIC (DoQ) is \
+             unimplemented; use .tcp() (DNS-over-TCP) or .udp() (classic DNS-over-UDP)"
+                .into(),
+        ));
+    }
+
+    #[cfg(all(
+        feature = "websocket-upgrade",
+        any(feature = "http1", feature = "http1-native")
+    ))]
+    if builder.websocket_handler.is_some() {
+        if is_quic {
+            return Err(ProximaError::Config(
+                "Listener::builder(): .websocket(handler) + .quic(): RFC 9220 extended-CONNECT \
+                 over h3 is unimplemented; use .tcp() (the default — `.websocket()` already \
+                 implies it)"
+                    .into(),
+            ));
+        }
+        if builder.any_mode.is_some() {
+            return Err(ProximaError::Config(
+                "Listener::builder(): .websocket(handler) + .kafka()/.mqtt()/.amqp()/\
+                 .memcached()/.redis()/.any()/.protocol(): both claim the same h1 \
+                 connection — pick one"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Recover the bind address from the [`ListenerProtocolExt::http`]/`.https`
+/// spec key (`bind.to_string()`, set by `Listener::http(bind)` or a caller's
+/// own `.http(bind.to_string())`) when `.bind(addr)` was never called directly —
 /// the "or needed an adapter" seam the client side doesn't need, since a
 /// client's `.http(url)` value IS the dial target, while a listener's bind
 /// address is otherwise a typed field the string spec key doesn't carry.
@@ -767,35 +928,36 @@ fn tls_marker_present(_spec: &serde_json::Map<String, Value>) -> bool {
 
 /// The listen-side protocol pick — the mirror of `load.rs`'s
 /// `value.get("http") ... else if value.get("grpc")` factory dispatch
-/// (`src/load.rs:488,499`), extended with the `transport` axis so `.h3()`
-/// resolves too (the client side doesn't need this extension: its `h3`
-/// transport rides the SAME `http`-keyed factory, selected by ALPN, not a
-/// different registry entry), and with `.h2()`/`.pgwire(query)`, which have
-/// no client-side twin at all. Returns the registry name to put in
+/// (`src/load.rs:488,499`), extended with the `transport` axis so `.quic()`
+/// resolves too (the client side doesn't need this extension: its own
+/// `.quic()` dispatches through a DIFFERENT mechanism entirely — see
+/// `load.rs`'s `canonical_h3` — not a shared ALPN-selected factory), and
+/// with `.h2()`/`.pgwire(query)`/`.dns(handler)`, which have no (or a
+/// differently-shaped) client-side twin. Returns the registry name to put in
 /// `RunConfig::protocol`, and — when that name is one `App::new()` doesn't
 /// register by default — the concrete protocol `ListenerBuilder::serve`
-/// registers onto its fresh `App` first. `.pgwire(query)` is checked FIRST
-/// (it carries a typed query engine no other axis combination can produce,
-/// so it always wins) and never returns an extra protocol here — `.serve()`
-/// registers its own fresh `PgWireListenProtocol` directly, since it needs
-/// the `query` handle this spec-only function never sees. `.grpc()`/`.h2()`
-/// take priority over `transport` next (mirrors `load.rs`'s `if http ...
-/// else if grpc`, which never consults `transport` either): a listener that
-/// calls both `.grpc()` and `.h3()` gets gRPC-over-h2, since no
-/// gRPC-over-h3 listen protocol exists.
+/// registers onto its fresh `App` first. `.pgwire(query)`/`.dns(handler)` are
+/// checked FIRST (each carries a typed handle no other axis combination can
+/// produce, so they always win) and never return an extra protocol here —
+/// `.serve()` registers its own fresh instance directly, since it needs the
+/// handle this spec-only function never sees. `.grpc()`/`.h2()` take
+/// priority over `transport` next (mirrors `load.rs`'s `if http ... else if
+/// grpc`, which never consults `transport` either): a listener that calls
+/// both `.grpc()` and `.quic()` gets gRPC-over-h2, since no gRPC-over-h3
+/// listen protocol exists.
 fn resolve_listen_protocol(
     spec: &serde_json::Map<String, Value>,
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
     if spec.contains_key("pgwire_axis") {
         return Ok(("pgwire".to_string(), None));
     }
-    if spec.contains_key("redis_axis") {
-        return Ok(("redis".to_string(), None));
+    if spec.contains_key("dns_axis") {
+        return Ok(("dns".to_string(), None));
     }
     if spec.contains_key("grpc") || spec.contains_key("h2") {
         return h2_listen_protocol();
     }
-    if spec.get("transport").and_then(Value::as_str) == Some("h3") {
+    if spec.get("transport").and_then(Value::as_str) == Some("quic") {
         return h3_native_listen_protocol();
     }
     // default / `.tcp()` / `.auto()`: the ALPN h1+h2 combiner. `.tls()`
@@ -975,7 +1137,7 @@ impl proxima_config::sugar::SpecBuilder for ListenerBuilder {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_config::sugar::TransportSugar;
+    use crate::listener::transport::ListenerTransportExt;
     use serde_json::json;
 
     // P4 config-as-mirror: the fluent builder and a literal config-shaped
@@ -1027,11 +1189,11 @@ mod tests {
 
     #[cfg(feature = "http3")]
     #[test]
-    fn h3_axis_resolves_to_h3_native_and_self_registers() {
-        let h3 = ListenerBuilder::default().h3();
-        let (name, extra) = resolve_listen_protocol(&h3.spec).expect("h3 resolves");
+    fn quic_axis_resolves_to_h3_native_and_self_registers() {
+        let quic = ListenerBuilder::default().quic();
+        let (name, extra) = resolve_listen_protocol(&quic.spec).expect("quic resolves");
         assert_eq!(name, "h3-native");
-        let carried = extra.expect(".h3() must carry a protocol to self-register");
+        let carried = extra.expect(".quic() must carry a protocol to self-register");
         assert_eq!(carried.name(), "h3-native");
     }
 
@@ -1059,20 +1221,32 @@ mod tests {
 
     #[cfg(feature = "pgwire")]
     #[test]
-    fn pgwire_axis_takes_priority_over_grpc_and_h3() {
+    fn pgwire_axis_takes_priority_over_grpc_and_quic() {
         let mixed = ListenerBuilder::default()
             .spec("pgwire_axis", json!(true))
             .spec("grpc", json!(true))
-            .spec("transport", json!("h3"));
+            .spec("transport", json!("quic"));
         let (name, extra) = resolve_listen_protocol(&mixed.spec).expect("pgwire wins");
         assert_eq!(name, "pgwire");
         assert!(extra.is_none());
     }
 
+    #[cfg(feature = "dns-listener")]
+    #[test]
+    fn dns_axis_resolves_to_dns_and_carries_nothing_here() {
+        // `.dns(handler)` self-registers directly in `.serve()` (the handler
+        // never reaches `resolve_listen_protocol`, which only sees the
+        // `dns_axis` marker key) — see `serve`'s own registration.
+        let dns = ListenerBuilder::default().spec("dns_axis", json!(true));
+        let (name, extra) = resolve_listen_protocol(&dns.spec).expect("dns resolves");
+        assert_eq!(name, "dns");
+        assert!(extra.is_none());
+    }
+
     #[test]
     fn listener_builder_mirrors_client_builder_axis_keys() {
-        // The same `ProtocolSugar`/`TransportSugar` method calls a
-        // `ClientBuilder` chain would make (`.https(url).tls()`,
+        // The same axis method NAMES a `ClientBuilder` chain would make
+        // (`.https(url).tls()`,
         // `src/client/handle.rs`'s `verbs_map_to_methods_and_builder_lowers_axes`)
         // lower to the IDENTICAL spec keys here — proof the listener rides the
         // shared sugar, not a forked DSL.
@@ -1131,10 +1305,14 @@ mod tests {
 
     #[test]
     fn proxy_axis_hard_errors_at_serve_instead_of_silently_ignoring_it() {
+        // `.proxy(url)` lives ONLY on `ClientTransportExt` now (no listener
+        // twin at all) — a caller reaching it via the raw `.spec()` escape
+        // hatch (the only way a `proxy` key could land on a `ListenerBuilder`
+        // today) must still hard-error at `.serve()`, not silently ignore it.
         let bind: SocketAddr = "127.0.0.1:0".parse().expect("addr");
         let builder = ListenerBuilder::default()
             .bind(bind)
-            .proxy("http://127.0.0.1:9");
+            .spec("proxy", json!("http://127.0.0.1:9"));
         let err = match futures::executor::block_on(builder.serve()) {
             Ok(_) => panic!(".proxy(url) must not silently serve"),
             Err(err) => err,

@@ -23,9 +23,15 @@
 //! ```
 
 pub mod handle;
+pub mod protocol;
 pub mod request;
 pub mod response;
+pub mod security;
+pub mod transport;
 
-pub use handle::{Client, ClientProtocol, Transport};
+pub use handle::{Client, ClientBuilder, ClientProtocol};
+pub use protocol::ClientProtocolExt;
 pub use request::RequestBuilder;
 pub use response::Response;
+pub use security::ClientSecurityExt;
+pub use transport::ClientTransportExt;

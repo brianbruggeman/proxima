@@ -25,7 +25,7 @@ use tokio::net::TcpStream;
 
 use proxima::error::ProximaError;
 use proxima::listeners::redis::RespValue;
-use proxima::{Listener, ListenerBuilderEntry};
+use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::Response;
 use proxima_redis::{RedisPipeReply, RedisPipeRequest};
