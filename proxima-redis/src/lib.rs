@@ -51,8 +51,8 @@ pub use proxima_protocols::redis::pipe_contract::{RedisRequest, verb};
 
 #[cfg(feature = "client")]
 pub use client::{
-    ClientError, ClientSession, PushStep, RedisClient, RedisClientConfig, RedisClientUpstream,
-    RedisConfigError, RespProtocol, Step,
+    Active, ClientError, ClientSession, PushStep, RedisClient, RedisClientConfig,
+    RedisClientUpstream, RedisConfigError, RespProtocol, Step, Subscribed,
 };
 
 // the server-side surface a redis command handler builds against —
