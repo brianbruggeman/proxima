@@ -184,6 +184,43 @@ async fn psubscribe_round_trips_through_pattern_state_too() {
     let _active_again = subscribed.unsubscribe_all().expect("unsubscribe_all");
 }
 
+#[proxima::test(runtime = "tokio", flavor = "multi_thread")]
+async fn ssubscribe_round_trips_through_the_shard_namespace_too() {
+    let bind_addr = spawn_server().await;
+    let config = client_config();
+
+    let subscriber_stream = TcpStream::connect(bind_addr).expect("connect subscriber");
+    let active = RedisClient::connect(subscriber_stream, &config).expect("handshake");
+    let mut subscribed = active.ssubscribe(&[b"orders"]).expect("ssubscribe");
+
+    let publisher_stream = TcpStream::connect(bind_addr).expect("connect publisher");
+    let mut publisher = RedisClient::connect(publisher_stream, &config).expect("handshake");
+    let publish_reply = publisher
+        .command(&[b"SPUBLISH", b"orders", b"shipped"])
+        .expect("spublish");
+    assert_eq!(publish_reply, RespValue::Integer(1));
+
+    let pushed = subscribed.next_push().expect("next_push");
+    assert_eq!(
+        pushed,
+        RespValue::Array(vec![
+            RespValue::BulkString(b"smessage".to_vec()),
+            RespValue::BulkString(b"orders".to_vec()),
+            RespValue::BulkString(b"shipped".to_vec()),
+        ])
+    );
+
+    let mut active_again = subscribed.unsubscribe_all().expect("unsubscribe_all");
+    let spublish_after_unsubscribe = active_again
+        .command(&[b"SPUBLISH", b"orders", b"nobody-home"])
+        .expect("spublish after unsubscribe_all");
+    assert_eq!(
+        spublish_after_unsubscribe,
+        RespValue::Integer(0),
+        "no shard subscribers remain once unsubscribe_all returns to Active"
+    );
+}
+
 /// A duplicate channel name in one `SUBSCRIBE` call: the server acks every
 /// argument unconditionally (one frame per loop iteration — `subscribe`'s own
 /// drain of `channels.len()` acks is unaffected), but its per-connection
@@ -213,6 +250,43 @@ async fn subscribe_with_a_duplicate_channel_name_still_returns_cleanly_to_active
     let mut active_again = subscribed
         .unsubscribe_all()
         .expect("unsubscribe_all must drain exactly the distinct-channel ack count, not hang");
+
+    let get_reply = active_again
+        .command(&[b"GET", b"k"])
+        .expect("command after unsubscribe_all");
+    assert_eq!(get_reply, RespValue::Null);
+}
+
+/// The shard-namespace variant of the same historically-bitten pattern
+/// (`subscribe_with_a_duplicate_channel_name_still_returns_cleanly_to_active`
+/// above): a duplicate shard-channel name in one `SSUBSCRIBE` call acks every
+/// argument unconditionally, but the server's per-connection bookkeeping
+/// (`SubscriberState::shard_channels`/`Connection::subscribe_shard`, both
+/// deduplicating sets) tracks only ONE distinct shard channel — so a
+/// bare-count client-side tracker would drain 2 `SUNSUBSCRIBE` acks from
+/// `unsubscribe_all` while the server only ever sends 1, hanging forever on
+/// the second read. `RedisClient`'s `shard_channels: BTreeSet<Vec<u8>>`
+/// dedupes the same way the server does, so exactly 1 ack is drained. The
+/// read timeout below turns a regression back into this bug into a loud,
+/// fast test failure instead of an indefinite CI hang.
+#[proxima::test(runtime = "tokio", flavor = "multi_thread")]
+async fn ssubscribe_with_a_duplicate_channel_name_still_returns_cleanly_to_active() {
+    let bind_addr = spawn_server().await;
+    let config = client_config();
+
+    let subscriber_stream = TcpStream::connect(bind_addr).expect("connect subscriber");
+    subscriber_stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set_read_timeout");
+    let active = RedisClient::connect(subscriber_stream, &config).expect("handshake");
+
+    let subscribed = active
+        .ssubscribe(&[b"news", b"news"])
+        .expect("ssubscribe with a duplicate shard-channel name");
+
+    let mut active_again = subscribed
+        .unsubscribe_all()
+        .expect("unsubscribe_all must drain exactly the distinct-shard-channel ack count, not hang");
 
     let get_reply = active_again
         .command(&[b"GET", b"k"])

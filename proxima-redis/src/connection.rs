@@ -49,13 +49,16 @@ fn write_reply(out: &mut Vec<u8>, value: &RespValue) {
 }
 
 /// The subscriptions THIS connection holds, keyed by the exact channel /
-/// pattern bytes so a later UNSUBSCRIBE/PUNSUBSCRIBE (or connection close)
-/// can remove precisely the right [`SubscriptionId`] from the shared
-/// [`RedisBroker`].
+/// pattern bytes so a later UNSUBSCRIBE/PUNSUBSCRIBE/SUNSUBSCRIBE (or
+/// connection close) can remove precisely the right [`SubscriptionId`] from
+/// the shared [`RedisBroker`]. `shard_channels` is a namespace distinct from
+/// `channels` — real Redis (7.0+) never crosses `SSUBSCRIBE` with
+/// `SUBSCRIBE`.
 #[derive(Default)]
 struct SubscriberState {
     channels: BTreeMap<Vec<u8>, SubscriptionId>,
     patterns: BTreeMap<Vec<u8>, SubscriptionId>,
+    shard_channels: BTreeMap<Vec<u8>, SubscriptionId>,
 }
 
 impl SubscriberState {
@@ -65,6 +68,9 @@ impl SubscriberState {
         }
         for (pattern, id) in &self.patterns {
             broker.unsubscribe_pattern(pattern, *id);
+        }
+        for (channel, id) in &self.shard_channels {
+            broker.unsubscribe_shard_channel(channel, *id);
         }
     }
 }
@@ -284,10 +290,59 @@ async fn dispatch_args(
                 FrameOutcome::Frames(frames)
             }
         }
+        RedisRequest::Ssubscribe { channels } => {
+            let mut frames = Vec::with_capacity(channels.len());
+            for channel in channels {
+                if connection.subscribe_shard(channel.clone()) {
+                    let id = broker.subscribe_shard_channel(&channel, push_sink.clone());
+                    state.shard_channels.insert(channel.clone(), id);
+                }
+                frames.push(subscribe_ack(
+                    "ssubscribe",
+                    Some(&channel),
+                    connection.shard_subscription_count(),
+                ));
+            }
+            FrameOutcome::Frames(frames)
+        }
+        RedisRequest::Sunsubscribe { channels } => {
+            let targets: Vec<Vec<u8>> = if channels.is_empty() {
+                state.shard_channels.keys().cloned().collect()
+            } else {
+                channels
+            };
+            if targets.is_empty() {
+                FrameOutcome::Frames(vec![subscribe_ack(
+                    "sunsubscribe",
+                    None,
+                    connection.shard_subscription_count(),
+                )])
+            } else {
+                let mut frames = Vec::with_capacity(targets.len());
+                for channel in &targets {
+                    connection.unsubscribe_shard(channel);
+                    if let Some(id) = state.shard_channels.remove(channel) {
+                        broker.unsubscribe_shard_channel(channel, id);
+                    }
+                    frames.push(subscribe_ack(
+                        "sunsubscribe",
+                        Some(channel),
+                        connection.shard_subscription_count(),
+                    ));
+                }
+                FrameOutcome::Frames(frames)
+            }
+        }
         RedisRequest::Command { verb, args } => match verb.as_slice() {
             b"PING" => FrameOutcome::Reply(ping_reply(&args)),
             b"QUIT" => FrameOutcome::Close,
             b"PUBLISH" if args.len() == 2 => match broker.publish(&args[0], &args[1]).await {
+                Ok(count) => {
+                    FrameOutcome::Reply(RespValue::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+                }
+                Err(error) => FrameOutcome::InternalError(error),
+            },
+            b"SPUBLISH" if args.len() == 2 => match broker.publish_shard(&args[0], &args[1]).await {
                 Ok(count) => {
                     FrameOutcome::Reply(RespValue::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
                 }

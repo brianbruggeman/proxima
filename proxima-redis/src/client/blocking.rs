@@ -65,6 +65,10 @@ pub struct RedisClient<S, State = Active> {
     /// Pattern subscriptions this client has open; same set-based bookkeeping
     /// as `channels`, for `PUNSUBSCRIBE`.
     patterns: BTreeSet<Vec<u8>>,
+    /// Shard-channel (`SSUBSCRIBE`) subscriptions this client has open — a
+    /// namespace distinct from `channels`, same set-based bookkeeping, for
+    /// `SUNSUBSCRIBE`.
+    shard_channels: BTreeSet<Vec<u8>>,
     _state: PhantomData<State>,
 }
 
@@ -114,6 +118,7 @@ impl<S: Read + Write, State> RedisClient<S, State> {
             captured: self.captured,
             channels: self.channels,
             patterns: self.patterns,
+            shard_channels: self.shard_channels,
             _state: PhantomData,
         }
     }
@@ -149,6 +154,7 @@ impl<S: Read + Write> RedisClient<S, Active> {
             captured: Vec::new(),
             channels: BTreeSet::new(),
             patterns: BTreeSet::new(),
+            shard_channels: BTreeSet::new(),
             _state: PhantomData,
         };
         client.drive_until_ready()?;
@@ -200,6 +206,24 @@ impl<S: Read + Write> RedisClient<S, Active> {
         self.enter_subscriber_mode(b"PSUBSCRIBE", patterns)?;
         for pattern in patterns {
             self.patterns.insert((*pattern).to_vec());
+        }
+        Ok(self.into_state())
+    }
+
+    /// Like [`Self::subscribe`] but for sharded pub/sub (`SSUBSCRIBE`) — a
+    /// channel namespace distinct from `subscribe`'s: only `SPUBLISH` reaches
+    /// it, never `PUBLISH`.
+    ///
+    /// # Errors
+    /// [`ClientError::Protocol`] if `channels` is empty. [`ClientError`] on
+    /// I/O or a malformed frame.
+    pub fn ssubscribe(mut self, channels: &[&[u8]]) -> Result<RedisClient<S, Subscribed>, ClientError> {
+        if channels.is_empty() {
+            return Err(ClientError::Protocol("ssubscribe requires at least one channel"));
+        }
+        self.enter_subscriber_mode(b"SSUBSCRIBE", channels)?;
+        for channel in channels {
+            self.shard_channels.insert((*channel).to_vec());
         }
         Ok(self.into_state())
     }
@@ -261,13 +285,15 @@ impl<S: Read + Write> RedisClient<S, Subscribed> {
         self.next_push_frame()
     }
 
-    /// Sends `UNSUBSCRIBE`/`PUNSUBSCRIBE` for every subscription this client
-    /// opened, drains each ack, and returns the client re-typed to [`Active`]
-    /// — the client-side mirror of the server falling back to
-    /// `ConnMode::Command` once every subscription is gone. Drains exactly
-    /// `self.channels.len()` / `self.patterns.len()` acks — the server sends
-    /// one per *distinct* open channel/pattern, so this must match the set,
-    /// not a count of every name ever passed to `subscribe`/`psubscribe`.
+    /// Sends `UNSUBSCRIBE`/`PUNSUBSCRIBE`/`SUNSUBSCRIBE` for every
+    /// subscription this client opened, drains each ack, and returns the
+    /// client re-typed to [`Active`] — the client-side mirror of the server
+    /// falling back to `ConnMode::Command` once every subscription is gone.
+    /// Drains exactly `self.channels.len()` / `self.patterns.len()` /
+    /// `self.shard_channels.len()` acks — the server sends one per *distinct*
+    /// open channel/pattern/shard channel, so this must match the set, not a
+    /// count of every name ever passed to `subscribe`/`psubscribe`/
+    /// `ssubscribe`.
     ///
     /// # Errors
     /// [`ClientError`] on I/O or a malformed frame.
@@ -287,6 +313,14 @@ impl<S: Read + Write> RedisClient<S, Subscribed> {
                 self.next_push_frame()?;
             }
             self.patterns.clear();
+        }
+        if !self.shard_channels.is_empty() {
+            self.session.queue_command(&[b"SUNSUBSCRIBE"])?;
+            self.flush_outbound()?;
+            for _ in 0..self.shard_channels.len() {
+                self.next_push_frame()?;
+            }
+            self.shard_channels.clear();
         }
         Ok(self.into_state())
     }

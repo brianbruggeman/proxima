@@ -126,6 +126,12 @@ pub struct Connection {
     mode: ConnMode,
     subscriptions: BTreeSet<Vec<u8>>,
     psubscriptions: BTreeSet<Vec<u8>>,
+    /// Sharded pub/sub (`SSUBSCRIBE`) exact-channel subscriptions — a
+    /// namespace distinct from `subscriptions`: real Redis (7.0+) never lets
+    /// an `SSUBSCRIBE`'d channel receive a regular `PUBLISH`, or vice versa,
+    /// so this is tracked and counted separately rather than folded into
+    /// `subscriptions`.
+    shard_subscriptions: BTreeSet<Vec<u8>>,
     limits: Limits,
 }
 
@@ -149,6 +155,7 @@ impl Connection {
             mode: ConnMode::Command,
             subscriptions: BTreeSet::new(),
             psubscriptions: BTreeSet::new(),
+            shard_subscriptions: BTreeSet::new(),
             limits,
         }
     }
@@ -248,17 +255,47 @@ impl Connection {
         removed
     }
 
+    /// Record a shard-channel (`SSUBSCRIBE`) subscription; returns whether it
+    /// is new. Enters `Subscriber` mode, same as `subscribe`/`psubscribe`.
+    pub fn subscribe_shard(&mut self, channel: Vec<u8>) -> bool {
+        let inserted = self.shard_subscriptions.insert(channel);
+        self.enter_subscriber_mode();
+        inserted
+    }
+
+    /// Remove a shard-channel subscription; returns whether it existed.
+    /// Falls back to `Command` mode once every subscription (exact, pattern,
+    /// and shard) is gone.
+    pub fn unsubscribe_shard(&mut self, channel: &[u8]) -> bool {
+        let removed = self.shard_subscriptions.remove(channel);
+        self.exit_subscriber_mode_if_idle();
+        removed
+    }
+
     fn exit_subscriber_mode_if_idle(&mut self) {
-        if self.subscriptions.is_empty() && self.psubscriptions.is_empty() {
+        if self.subscriptions.is_empty()
+            && self.psubscriptions.is_empty()
+            && self.shard_subscriptions.is_empty()
+        {
             self.mode = ConnMode::Command;
         }
     }
 
     /// Total subscription count (exact + pattern) — the real Redis
-    /// `SUBSCRIBE`/`UNSUBSCRIBE` reply's third element.
+    /// `SUBSCRIBE`/`UNSUBSCRIBE` reply's third element. Shard subscriptions
+    /// are counted separately by [`Self::shard_subscription_count`]: real
+    /// Redis keeps the two counters independent.
     #[must_use]
     pub fn subscription_count(&self) -> usize {
         self.subscriptions.len() + self.psubscriptions.len()
+    }
+
+    /// Shard-channel subscription count — the real Redis
+    /// `SSUBSCRIBE`/`SUNSUBSCRIBE` reply's third element, independent of
+    /// [`Self::subscription_count`].
+    #[must_use]
+    pub fn shard_subscription_count(&self) -> usize {
+        self.shard_subscriptions.len()
     }
 
     /// The exact channels this connection is currently subscribed to.
@@ -271,6 +308,12 @@ impl Connection {
     #[must_use]
     pub fn psubscriptions(&self) -> &BTreeSet<Vec<u8>> {
         &self.psubscriptions
+    }
+
+    /// The shard channels this connection is currently subscribed to.
+    #[must_use]
+    pub fn shard_subscriptions(&self) -> &BTreeSet<Vec<u8>> {
+        &self.shard_subscriptions
     }
 }
 
@@ -431,5 +474,54 @@ mod tests {
     fn unsubscribe_of_an_absent_channel_reports_false() {
         let mut connection = Connection::new();
         assert!(!connection.unsubscribe(b"never-subscribed"));
+    }
+
+    #[test]
+    fn subscribe_shard_enters_subscriber_mode_and_gates_admission() {
+        let mut connection = Connection::new();
+        connection.subscribe_shard(b"orders".to_vec());
+
+        assert_eq!(connection.mode(), ConnMode::Subscriber);
+        assert!(connection.admits(b"SSUBSCRIBE"));
+        assert!(connection.admits(b"SUNSUBSCRIBE"));
+        assert!(!connection.admits(b"GET"), "GET is not subscriber-safe");
+    }
+
+    #[test]
+    fn shard_subscription_count_is_independent_of_regular_subscription_count() {
+        let mut connection = Connection::new();
+        connection.subscribe(b"news".to_vec());
+        connection.subscribe_shard(b"orders".to_vec());
+        connection.subscribe_shard(b"payments".to_vec());
+
+        assert_eq!(connection.subscription_count(), 1, "regular count excludes shard channels");
+        assert_eq!(connection.shard_subscription_count(), 2, "shard count excludes regular channels");
+    }
+
+    #[test]
+    fn unsubscribing_the_last_shard_channel_returns_to_command_mode() {
+        let mut connection = Connection::new();
+        connection.subscribe_shard(b"orders".to_vec());
+        assert!(connection.unsubscribe_shard(b"orders"));
+
+        assert_eq!(connection.mode(), ConnMode::Command);
+        assert!(connection.admits(b"GET"));
+    }
+
+    #[test]
+    fn a_live_shard_subscription_keeps_the_connection_gated_after_regular_unsubscribe() {
+        let mut connection = Connection::new();
+        connection.subscribe(b"news".to_vec());
+        connection.subscribe_shard(b"orders".to_vec());
+
+        connection.unsubscribe(b"news");
+        assert_eq!(
+            connection.mode(),
+            ConnMode::Subscriber,
+            "a live shard subscription keeps the connection gated"
+        );
+
+        connection.unsubscribe_shard(b"orders");
+        assert_eq!(connection.mode(), ConnMode::Command);
     }
 }

@@ -66,6 +66,13 @@ impl SendPipe for PushSink {
 pub struct RedisBroker {
     channels: KeyedFanOut<PushSink, BestEffort>,
     patterns: KeyedFanOut<PushSink, BestEffort>,
+    /// Sharded pub/sub (`SSUBSCRIBE`/`SPUBLISH`) exact-channel fabric — a
+    /// `KeyedFanOut` entirely separate from `channels`: real Redis (7.0+)
+    /// keeps the two namespaces distinct, so an `SPUBLISH` never reaches a
+    /// `SUBSCRIBE`'d connection and vice versa, even though proxima is
+    /// single-node (the shard IS the node; only the namespace is what real
+    /// Redis requires to stay distinct).
+    shard_channels: KeyedFanOut<PushSink, BestEffort>,
     /// Live glob-set mirror of `patterns`'s registered keys, kept in sync by
     /// `subscribe_pattern`/`unsubscribe_pattern` — lets `publish` find the
     /// matching pattern keys with one wait-free read instead of iterating
@@ -87,6 +94,7 @@ impl RedisBroker {
         Self {
             channels: KeyedFanOut::new(),
             patterns: KeyedFanOut::new(),
+            shard_channels: KeyedFanOut::new(),
             pattern_set,
             pattern_control,
         }
@@ -131,6 +139,43 @@ impl RedisBroker {
     #[must_use]
     pub fn pattern_subscriber_count(&self, pattern: &[u8]) -> usize {
         self.patterns.subscription_count(pattern)
+    }
+
+    /// SSUBSCRIBE: register `sink` under the exact shard-channel name — a
+    /// namespace distinct from [`Self::subscribe_channel`].
+    pub fn subscribe_shard_channel(&self, channel: &[u8], sink: PushSink) -> SubscriptionId {
+        self.shard_channels.subscribe(channel.to_vec(), sink)
+    }
+
+    /// SUNSUBSCRIBE: remove one shard-channel subscription.
+    pub fn unsubscribe_shard_channel(&self, channel: &[u8], id: SubscriptionId) -> bool {
+        self.shard_channels.unsubscribe(channel, id)
+    }
+
+    /// The number of connections currently `SSUBSCRIBE`d to `channel`.
+    #[must_use]
+    pub fn shard_channel_subscriber_count(&self, channel: &[u8]) -> usize {
+        self.shard_channels.subscription_count(channel)
+    }
+
+    /// SPUBLISH: deliver to every shard-channel subscriber of `channel` (an
+    /// `smessage` frame) — never to a regular `channels`/`patterns`
+    /// subscriber, and never reached by a regular [`Self::publish`]. Returns
+    /// the number of connections the message reached, the real Redis
+    /// SPUBLISH reply.
+    pub async fn publish_shard(&self, channel: &[u8], payload: &[u8]) -> Result<usize, ProximaError> {
+        let count = self.shard_channels.subscription_count(channel);
+        if count > 0 {
+            let frame = Frame::Array(vec![
+                Frame::BlobString(b"smessage"),
+                Frame::BlobString(channel),
+                Frame::BlobString(payload),
+            ]);
+            self.shard_channels
+                .publish(channel, Bytes::from(encode(&frame)))
+                .await?;
+        }
+        Ok(count)
     }
 
     /// PUBLISH: deliver to every exact-channel subscriber (a `message`
@@ -291,6 +336,72 @@ mod tests {
             .publish(b"news.tech", b"gone")
             .await
             .expect("publish");
+        assert_eq!(rx.try_recv().ok(), None);
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn publish_shard_reaches_an_ssubscribe_subscriber_as_an_smessage_frame() {
+        let broker = RedisBroker::new();
+        let (push, mut rx) = sink();
+        broker.subscribe_shard_channel(b"orders", push);
+
+        let reached = broker
+            .publish_shard(b"orders", b"shipped")
+            .await
+            .expect("publish_shard");
+
+        assert_eq!(reached, 1);
+        let bytes = rx.next().await.expect("push delivered");
+        let (frame, _) = parse(&bytes).expect("valid RESP frame");
+        assert_eq!(
+            frame,
+            Frame::Array(vec![
+                Frame::BlobString(b"smessage"),
+                Frame::BlobString(b"orders"),
+                Frame::BlobString(b"shipped"),
+            ])
+        );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn shard_and_regular_channel_namespaces_never_cross() {
+        let broker = RedisBroker::new();
+        let (regular_push, mut regular_rx) = sink();
+        let (shard_push, mut shard_rx) = sink();
+        broker.subscribe_channel(b"orders", regular_push);
+        broker.subscribe_shard_channel(b"orders", shard_push);
+
+        let shard_reached = broker
+            .publish_shard(b"orders", b"only-shard")
+            .await
+            .expect("publish_shard");
+        assert_eq!(shard_reached, 1, "SPUBLISH reaches only the SSUBSCRIBE side");
+        assert!(shard_rx.next().await.is_some());
+        assert_eq!(
+            regular_rx.try_recv().ok(),
+            None,
+            "SPUBLISH must not reach a SUBSCRIBE subscriber on the same channel name"
+        );
+
+        let regular_reached = broker.publish(b"orders", b"only-regular").await.expect("publish");
+        assert_eq!(regular_reached, 1, "PUBLISH reaches only the SUBSCRIBE side");
+        assert!(regular_rx.next().await.is_some());
+        assert_eq!(
+            shard_rx.try_recv().ok(),
+            None,
+            "PUBLISH must not reach an SSUBSCRIBE subscriber on the same channel name"
+        );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn unsubscribe_shard_channel_stops_delivery() {
+        let broker = RedisBroker::new();
+        let (push, mut rx) = sink();
+        let id = broker.subscribe_shard_channel(b"orders", push);
+
+        assert!(broker.unsubscribe_shard_channel(b"orders", id));
+        broker.publish_shard(b"orders", b"gone").await.expect("publish_shard");
+
         assert_eq!(rx.try_recv().ok(), None);
     }
 
