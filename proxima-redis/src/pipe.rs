@@ -1,8 +1,9 @@
 //! `RedisConnectionPipe` — the connection layer as a real `Pipe`.
 //!
-//! A freshly accepted socket arrives as a `CONNECT` request; the pipe
-//! answers with `Response.upgrade` (the `proxima_primitives::pipe::upgrade`
-//! raw-socket-hijack seam). The upgrade handler runs
+//! Every accepted socket is upgraded unconditionally, so the pipe is a
+//! `() -> UpgradeHandler` accept hook (the
+//! `proxima_primitives::pipe::upgrade` raw-socket-hijack seam) with no
+//! synthetic request to fabricate. The upgrade handler runs
 //! [`crate::connection::serve_connection`] over the hijacked stream,
 //! calling the business-handler pipe once per non-pub/sub command. Mirrors
 //! `proxima_pgwire::pipe::PgWireConnectionPipe`.
@@ -15,13 +16,11 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncWrite};
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::upgrade::{HijackedSocket, UpgradeHandler};
 
 use crate::broker::RedisBroker;
@@ -30,8 +29,8 @@ use crate::connection::serve_connection;
 use crate::error::RedisServeError;
 use crate::pipes::RedisPipeHandle;
 
-/// The connection layer as a `Pipe`. Its `call` (for a `CONNECT` request)
-/// returns a `Response.upgrade` that drives `serve_connection` over the
+/// The connection layer as a `Pipe`. Its `call` (for the unit accept hook)
+/// returns an `UpgradeHandler` that drives `serve_connection` over the
 /// hijacked stream, calling `handler` per non-pub/sub command. One
 /// `RedisConnectionPipe` owns one [`RedisBroker`], shared by every
 /// connection it upgrades — that shared instance IS the PUBLISH/SUBSCRIBE
@@ -120,11 +119,11 @@ where
 }
 
 impl SendPipe for RedisConnectionPipe {
-    type In = Request<Bytes>;
-    type Out = Response<Bytes>;
+    type In = ();
+    type Out = UpgradeHandler;
     type Err = ProximaError;
 
-    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    async fn call(&self, (): ()) -> Result<UpgradeHandler, ProximaError> {
         let handler = self.handler.clone();
         let broker = Arc::clone(&self.broker);
         let config = Arc::clone(&self.config);
@@ -132,7 +131,7 @@ impl SendPipe for RedisConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        let handler_fn = UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
+        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
             let HijackedSocket { stream, leftover } = hijacked;
             if !leftover.is_empty() {
                 // a raw redis socket has no prior protocol head, so the
@@ -145,8 +144,7 @@ impl SendPipe for RedisConnectionPipe {
             drive_session(stream, handler, broker, config, admission)
                 .await
                 .map_err(|error| ProximaError::Upstream(format!("redis session: {error}")))
-        });
-        Ok(Response::new(200).with_upgrade(handler_fn))
+        }))
     }
 }
 
@@ -160,8 +158,6 @@ mod tests {
 
     use bytes::Bytes;
     use proxima_core::ProximaError;
-    use proxima_primitives::pipe::method::Method;
-    use proxima_primitives::pipe::request::{Request, RequestContext};
     use proxima_primitives::pipe::upgrade::HijackedSocket;
 
     use crate::config::RedisServerConfig;
@@ -220,36 +216,17 @@ mod tests {
         }
     }
 
-    fn connect_request() -> Request<Bytes> {
-        Request {
-            method: Method::Connect,
-            path: Bytes::new(),
-            query: proxima_primitives::pipe::header_list::HeaderList::new(),
-            metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-            payload: Bytes::new(),
-            stream: None,
-            context: RequestContext::default(),
-        }
-    }
-
     #[proxima::test(runtime = "tokio")]
-    async fn connect_request_answers_with_an_upgrade() {
+    async fn call_answers_with_an_upgrade_handler() {
         let pipe = RedisConnectionPipe::new(
             "redis",
             into_redis_handle(EchoPipe),
             std::sync::Arc::new(RedisServerConfig::default()),
         );
 
-        let response = pipe
-            .call(connect_request())
-            .await
-            .expect("connect must answer");
+        let handler = pipe.call(()).await;
 
-        assert_eq!(response.status, 200);
-        assert!(
-            response.upgrade.is_some(),
-            "connect response must carry an upgrade"
-        );
+        assert!(handler.is_ok(), "accept hook must answer with an upgrade");
     }
 
     #[proxima::test(runtime = "tokio")]
@@ -259,11 +236,7 @@ mod tests {
             into_redis_handle(EchoPipe),
             std::sync::Arc::new(RedisServerConfig::default()),
         );
-        let response = pipe
-            .call(connect_request())
-            .await
-            .expect("connect must answer");
-        let handler = response.upgrade.expect("upgrade must be present");
+        let handler = pipe.call(()).await.expect("accept hook must answer");
 
         let mut scripted = Vec::new();
         proxima_protocols::redis::encode_command(&[b"QUIT"], &mut scripted);

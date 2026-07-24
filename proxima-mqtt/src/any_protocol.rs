@@ -35,7 +35,7 @@ use serde_json::Value;
 use proxima_core::ProximaError;
 use proxima_listen::admission::ConnAdmission;
 use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
-use proxima_primitives::pipe::handler::into_handle;
+use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
 
 use proxima_protocols::mqtt::{ParseError, decode_remaining_length};
@@ -168,7 +168,7 @@ impl AnyProtocol for MqttAnyProtocol {
             )
             .with_broker(Arc::clone(&self.broker))
             .with_admission(admission.clone());
-            let pipe = into_handle(connection_pipe);
+            let pipe = alloc_tier::into_handle(connection_pipe);
             proxima_listen::serve_pipe::handle_connection(stream, pipe).await
         })
     }

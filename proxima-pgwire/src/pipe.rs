@@ -1,8 +1,9 @@
 //! `PgWireConnectionPipe` — the connection layer as a real `Pipe`.
 //!
-//! A freshly accepted socket arrives as a `CONNECT` request; the pipe
-//! answers with `Response.upgrade` (the `proxima_primitives::pipe::upgrade`
-//! raw-socket-hijack seam). The upgrade handler runs the startup
+//! Every accepted socket is upgraded unconditionally, so the pipe is a
+//! `() -> UpgradeHandler` accept hook (the
+//! `proxima_primitives::pipe::upgrade` raw-socket-hijack seam) with no
+//! synthetic request to fabricate. The upgrade handler runs the startup
 //! negotiation and the session loop over the hijacked stream, calling the
 //! engine `query` pipe once per protocol operation. This is the RISC
 //! payoff: connection handling is a `Pipe`, query handling is a `Pipe`,
@@ -16,12 +17,10 @@ use futures::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "tls")]
 use futures::io::AsyncReadExt;
 
-use bytes::Bytes;
 use proxima_core::ProximaError;
 #[cfg(feature = "tls")]
 use proxima_core::io::{FromFutures, IntoFutures, Prepend};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::upgrade::{HijackedSocket, UpgradeHandler};
 use proxima_protocols::pgwire_codec::Session;
 
@@ -40,8 +39,8 @@ type TlsAcceptor = futures_rustls::TlsAcceptor;
 #[cfg(not(feature = "tls"))]
 type TlsAcceptor = ();
 
-/// The connection layer as a `Pipe`. Its `call` (for a `CONNECT` request)
-/// returns a `Response.upgrade` that negotiates startup and runs the
+/// The connection layer as a `Pipe`. Its `call` (for the unit accept hook)
+/// returns an `UpgradeHandler` that negotiates startup and runs the
 /// session loop over the hijacked stream, calling `query` per protocol
 /// operation. TLS, when configured, is handled inside the upgrade: the
 /// pipe answers SSLRequest, wraps the stream, and re-negotiates — so the
@@ -435,11 +434,11 @@ where
 }
 
 impl SendPipe for PgWireConnectionPipe {
-    type In = Request<Bytes>;
-    type Out = Response<Bytes>;
+    type In = ();
+    type Out = UpgradeHandler;
     type Err = ProximaError;
 
-    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    async fn call(&self, (): ()) -> Result<UpgradeHandler, ProximaError> {
         let query = self.query.clone();
         let auth = self.auth.clone();
         let config = Arc::clone(&self.config);
@@ -454,7 +453,7 @@ impl SendPipe for PgWireConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        let handler = UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
+        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
             let HijackedSocket { stream, leftover } = hijacked;
             if !leftover.is_empty() {
                 // a raw pgwire socket has no prior protocol head, so the
@@ -469,8 +468,7 @@ impl SendPipe for PgWireConnectionPipe {
             )
             .await
             .map_err(|error| ProximaError::Upstream(format!("pgwire session: {error}")))
-        });
-        Ok(Response::new(200).with_upgrade(handler))
+        }))
     }
 }
 
@@ -485,16 +483,13 @@ mod tests {
     use bytes::Bytes;
     use futures::io::{AsyncRead, AsyncWrite};
     use proxima_core::ProximaError;
-    use proxima_primitives::pipe::request::{Request, RequestContext};
     use proxima_primitives::pipe::upgrade::HijackedSocket;
     use proxima_protocols::pgwire_codec::Oid;
 
     use crate::auth::PgAuth;
     use crate::config::PgServerConfig;
     use crate::connection::CancelRegistry;
-    use crate::pipe_contract::{
-        ColumnDesc, PgReply, QueryReply, QueryRequest, SqlValue, Verb, verb,
-    };
+    use crate::pipe_contract::{ColumnDesc, PgReply, QueryReply, QueryRequest, SqlValue, Verb};
     use crate::pipes::into_pg_handle;
 
     use super::*;
@@ -570,20 +565,8 @@ mod tests {
         buf
     }
 
-    fn connect_request() -> Request<Bytes> {
-        Request {
-            method: proxima_primitives::pipe::method::Method::from_bytes(verb::CONNECT),
-            path: Bytes::new(),
-            query: proxima_primitives::pipe::header_list::HeaderList::new(),
-            metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-            payload: Bytes::new(),
-            stream: None,
-            context: RequestContext::default(),
-        }
-    }
-
     #[proxima::test(runtime = "tokio")]
-    async fn connect_request_answers_with_an_upgrade() {
+    async fn call_answers_with_an_upgrade_handler() {
         let pipe = PgWireConnectionPipe::new(
             "pg",
             into_pg_handle(EchoPipe),
@@ -592,16 +575,9 @@ mod tests {
             Arc::new(CancelRegistry::new()),
         );
 
-        let response = pipe
-            .call(connect_request())
-            .await
-            .expect("connect must answer");
+        let handler = pipe.call(()).await;
 
-        assert_eq!(response.status, 200);
-        assert!(
-            response.upgrade.is_some(),
-            "connect response must carry an upgrade"
-        );
+        assert!(handler.is_ok(), "accept hook must answer with an upgrade");
     }
 
     #[proxima::test(runtime = "tokio")]
@@ -613,11 +589,7 @@ mod tests {
             Arc::new(PgServerConfig::builder().parameters(vec![]).build()),
             Arc::new(CancelRegistry::new()),
         );
-        let response = pipe
-            .call(connect_request())
-            .await
-            .expect("connect must answer");
-        let handler = response.upgrade.expect("upgrade must be present");
+        let handler = pipe.call(()).await.expect("accept hook must answer");
 
         let mut scripted = build_startup_bytes("alice");
         scripted.push(b'X');

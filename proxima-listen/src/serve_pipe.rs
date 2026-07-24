@@ -19,31 +19,17 @@ use futures::future::poll_fn;
 use proxima_telemetry::{debug, warn};
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::handler::PipeHandle;
-use proxima_primitives::pipe::request::{Request, RequestContext};
-use proxima_primitives::pipe::upgrade::{HijackStream, HijackedSocket};
+use proxima_primitives::pipe::upgrade::{AcceptHandle, HijackStream, HijackedSocket};
 use proxima_runtime::Runtime;
 use proxima_primitives::stream::{AcceptorFactory, StreamConnection, TcpBindOptions};
 
-fn connect_request() -> Request<Bytes> {
-    Request {
-        method: Method::Connect,
-        path: Bytes::new(),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: Bytes::new(),
-        stream: None,
-        context: RequestContext::default(),
-    }
-}
-
-/// Drives one accepted socket through the connection pipe: build a
-/// CONNECT request, take the returned upgrade, and invoke it against the
+/// Drives one accepted socket through the connection pipe: call the
+/// `() -> UpgradeHandler` accept hook and invoke the handler against the
 /// socket wrapped as a `HijackedSocket` (the accepted connection is
 /// already `futures::io`, so it boxes straight to `Box<dyn HijackStream>`).
+/// `Out = UpgradeHandler` makes the no-upgrade state unrepresentable —
+/// there is no defensive `else` branch to write.
 ///
 /// `pub` — the ONE connection-layer accept-to-upgrade driver. Before the
 /// AnyListenProtocol lift, `proxima-pgwire` and `proxima-redis` each carried
@@ -52,14 +38,9 @@ fn connect_request() -> Request<Bytes> {
 /// (workspace principle 1: dedup by pointing at the canonical primitive).
 pub async fn handle_connection(
     conn: Box<dyn StreamConnection>,
-    pipe: PipeHandle,
+    accept: AcceptHandle,
 ) -> Result<(), ProximaError> {
-    let response = SendPipe::call(&pipe, connect_request()).await?;
-    let Some(handler) = response.upgrade else {
-        return Err(ProximaError::Upstream(
-            "connection pipe did not return an upgrade".into(),
-        ));
-    };
+    let handler = accept.call(()).await?;
     let stream: Box<dyn HijackStream> = Box::new(conn);
     let hijacked = HijackedSocket::new(stream, Bytes::new());
     handler.invoke(hijacked).await
@@ -67,7 +48,7 @@ pub async fn handle_connection(
 
 fn spawn_connection(
     conn: Box<dyn StreamConnection>,
-    pipe: &PipeHandle,
+    pipe: &AcceptHandle,
     runtime: Option<&Arc<dyn Runtime>>,
     label: &str,
 ) {
@@ -117,7 +98,7 @@ pub async fn serve_pipe_upgrades(
     factory: Arc<dyn AcceptorFactory>,
     bind: SocketAddr,
     options: TcpBindOptions,
-    pipe: PipeHandle,
+    pipe: AcceptHandle,
     runtime: Option<Arc<dyn Runtime>>,
     mut shutdown: oneshot::Receiver<()>,
     label: &str,
@@ -149,7 +130,6 @@ mod tests {
     use std::task::{Context, Poll};
 
     use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-    use proxima_primitives::pipe::request::Response;
     use proxima_primitives::pipe::upgrade::UpgradeHandler;
     use proxima_primitives::stream::{PeerInfo, TcpAcceptor};
 
@@ -245,14 +225,11 @@ mod tests {
     }
 
     impl proxima_primitives::pipe::SendPipe for EchoBytePipe {
-        type In = Request<Bytes>;
-        type Out = Response<Bytes>;
+        type In = ();
+        type Out = UpgradeHandler;
         type Err = ProximaError;
 
-        fn call(
-            &self,
-            _request: Request<Bytes>,
-        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        fn call(&self, (): ()) -> impl Future<Output = Result<UpgradeHandler, ProximaError>> + Send {
             let done = self.done.clone();
             async move {
                 let handler = UpgradeHandler::new(move |mut socket: HijackedSocket| {
@@ -267,13 +244,10 @@ mod tests {
                         Ok(())
                     }
                 });
-                let mut response = Response::new(101);
-                response.upgrade = Some(handler);
-                Ok(response)
+                Ok(handler)
             }
         }
     }
-
 
     #[proxima::test(runtime = "tokio")]
     async fn serve_pipe_upgrades_drives_an_upgrade_returning_pipe_to_completion() {
@@ -288,7 +262,7 @@ mod tests {
                     conn: std::sync::Mutex::new(Some(Box::new(conn))),
                 });
                 let (done_tx, done_rx) = async_channel::bounded(1);
-                let pipe: PipeHandle = proxima_primitives::pipe::handler::into_handle(EchoBytePipe {
+                let pipe: AcceptHandle = proxima_primitives::pipe::alloc_tier::into_handle(EchoBytePipe {
                     done: Arc::new(done_tx),
                 });
                 let (_shutdown_tx, shutdown_rx) = oneshot::channel();
