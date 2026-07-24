@@ -33,7 +33,7 @@ use serde_json::Value;
 use proxima_core::ProximaError;
 use proxima_listen::admission::ConnAdmission;
 use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
-use proxima_primitives::pipe::handler::into_handle;
+use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
 
 use crate::auth::PgAuth;
@@ -180,7 +180,7 @@ impl AnyProtocol for PgWireAnyProtocol {
             let connection_pipe = connection_pipe.with_tls(tls);
             #[cfg(not(feature = "tls"))]
             let _ = tls;
-            let pipe = into_handle(connection_pipe);
+            let pipe = alloc_tier::into_handle(connection_pipe);
             proxima_listen::serve_pipe::handle_connection(stream, pipe).await
         })
     }

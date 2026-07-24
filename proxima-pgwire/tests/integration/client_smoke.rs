@@ -708,7 +708,6 @@ mod direct_tls {
         CancelRegistry, PgAuth, PgServerConfig, PgWireConnectionPipe, into_pg_handle,
     };
     use proxima_primitives::pipe::SendPipe;
-    use proxima_primitives::pipe::request::{Request, RequestContext};
     use proxima_primitives::pipe::upgrade::HijackedSocket;
     use proxima_primitives::stream::{StreamListener, StreamListenerExt, StreamUpstreamExt};
     use proxima_protocols::pgwire_codec::backend::{BackendMessage, parse_backend};
@@ -831,22 +830,7 @@ mod direct_tls {
             let Ok(conn) = listener.accept().await else {
                 return;
             };
-            let request = Request {
-                method: proxima_primitives::pipe::method::Method::from_bytes(
-                    proxima_pgwire::verb::CONNECT,
-                ),
-                path: Bytes::new(),
-                query: proxima_primitives::pipe::header_list::HeaderList::new(),
-                metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-                payload: Bytes::new(),
-                stream: None,
-                context: RequestContext::default(),
-            };
-            let response = pipe
-                .call(request)
-                .await
-                .expect("connect must answer with upgrade");
-            let handler = response.upgrade.expect("upgrade must be present");
+            let handler = pipe.call(()).await.expect("accept hook must answer");
             let hijacked = HijackedSocket::new(Box::new(conn), Bytes::new());
             let _ = handler.invoke(hijacked).await;
         });

@@ -20,7 +20,7 @@
 //! FRESH [`RedisConnectionPipe`] carrying THIS connection's [`ConnAdmission`]
 //! clone, erases it, and hands it to
 //! [`proxima_listen::serve_pipe::handle_connection`] — the ONE
-//! CONNECT-request/upgrade-handler driver pgwire and redis now share.
+//! accept-hook/upgrade-handler driver pgwire and redis now share.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -31,7 +31,7 @@ use serde_json::Value;
 use proxima_core::ProximaError;
 use proxima_listen::admission::ConnAdmission;
 use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
-use proxima_primitives::pipe::handler::into_handle;
+use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
 
 use crate::config::RedisServerConfig;
@@ -121,7 +121,7 @@ impl AnyProtocol for RedisAnyProtocol {
             )
             .with_broker(Arc::clone(&self.broker))
             .with_admission(admission.clone());
-            let pipe = into_handle(connection_pipe);
+            let pipe = alloc_tier::into_handle(connection_pipe);
             proxima_listen::serve_pipe::handle_connection(stream, pipe).await
         })
     }

@@ -10,8 +10,8 @@
 //! [`crate::pipe::PgWireConnectionPipe`] for the per-connection drive.
 //!
 //! The connection is a real `Pipe`: on each accepted socket the listener
-//! calls the connection pipe with a `CONNECT` request and invokes the
-//! returned `Response.upgrade` against the socket wrapped as a
+//! calls the connection pipe's `() -> UpgradeHandler` accept hook and
+//! invokes the returned handler against the socket wrapped as a
 //! `HijackedSocket`. The query engine is the `PipeHandle` supplied to
 //! [`PgWireListenProtocol::new`]; the registry's `dispatch` is used as the
 //! query pipe only when the constructor did not set one (so a bare
@@ -36,26 +36,16 @@ use tracing::{debug, warn};
 
 use proxima_core::ProximaError;
 use proxima_listen::{ListenProtocol, ServeContext};
-use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
+use proxima_primitives::pipe::alloc_tier;
+use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::upgrade::AcceptHandle;
 use proxima_runtime::Runtime;
 
 use crate::pipes::PgPipeHandle;
 use proxima_primitives::stream::TcpBindOptions;
 
 #[cfg(feature = "tokio-compat")]
-use bytes::Bytes;
-#[cfg(feature = "tokio-compat")]
 use futures::FutureExt;
-#[cfg(feature = "tokio-compat")]
-use proxima_primitives::pipe::SendPipe;
-#[cfg(feature = "tokio-compat")]
-use proxima_primitives::pipe::header_list::HeaderList;
-#[cfg(feature = "tokio-compat")]
-use proxima_primitives::pipe::request::{Request, RequestContext};
-#[cfg(feature = "tokio-compat")]
-use proxima_primitives::pipe::upgrade::{HijackStream, HijackedSocket};
-#[cfg(feature = "tokio-compat")]
-use proxima_primitives::stream::StreamConnection;
 
 use crate::auth::PgAuth;
 use crate::config::PgServerConfig;
@@ -144,42 +134,6 @@ fn resolve_tls(_spec: &Value) -> Result<Option<TlsAcceptor>, ProximaError> {
     Ok(None)
 }
 
-#[cfg(feature = "tokio-compat")]
-fn connect_request() -> Request<Bytes> {
-    Request {
-        method: proxima_primitives::pipe::method::Method::Connect,
-        path: Bytes::new(),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: Bytes::new(),
-        stream: None,
-        context: RequestContext::default(),
-    }
-}
-
-/// Drives one accepted socket through the connection pipe: build a
-/// `CONNECT` request, take the returned upgrade, and invoke it against the
-/// socket wrapped as a `HijackedSocket` (the accepted connection is
-/// already `futures::io`, so it boxes straight to `Box<dyn HijackStream>`).
-/// Mirrors `proxima_listen::serve_pipe_upgrades`'s per-connection step;
-/// retained for the legacy tokio acceptor path that does not flow through
-/// the factory helper.
-#[cfg(feature = "tokio-compat")]
-async fn handle_connection(
-    conn: Box<dyn StreamConnection>,
-    pipe: Arc<PgWireConnectionPipe>,
-) -> Result<(), ProximaError> {
-    let response = SendPipe::call(pipe.as_ref(), connect_request()).await?;
-    let Some(handler) = response.upgrade else {
-        return Err(ProximaError::Upstream(
-            "pgwire connection pipe did not return an upgrade".into(),
-        ));
-    };
-    let stream: Box<dyn HijackStream> = Box::new(conn);
-    let hijacked = HijackedSocket::new(stream, Bytes::new());
-    handler.invoke(hijacked).await
-}
-
 impl ListenProtocol for PgWireListenProtocol {
     fn name(&self) -> &str {
         &self.label
@@ -237,16 +191,16 @@ impl ListenProtocol for PgWireListenProtocol {
         );
         let factory = context.acceptor_factory.clone();
         let ready_signal = context.ready_signal.clone();
+        let pipe: AcceptHandle = alloc_tier::into_handle(connection_pipe);
 
         Box::pin(async move {
             let Some(factory) = factory else {
-                return serve_legacy(bind, connection_pipe, label, shutdown, ready_signal).await;
+                return serve_legacy(bind, pipe, label, shutdown, ready_signal).await;
             };
             let options = TcpBindOptions {
                 reuseport: use_reuseport,
                 ..TcpBindOptions::default()
             };
-            let pipe: PipeHandle = into_handle(connection_pipe);
             proxima_listen::serve_pipe_upgrades(
                 factory,
                 bind,
@@ -298,7 +252,7 @@ fn build_connection_pipe(
 #[cfg(feature = "tokio-compat")]
 async fn serve_legacy(
     bind: SocketAddr,
-    pipe: Arc<PgWireConnectionPipe>,
+    pipe: AcceptHandle,
     label: String,
     mut shutdown: oneshot::Receiver<()>,
     ready_signal: Option<std::sync::mpsc::Sender<()>>,
@@ -318,10 +272,13 @@ async fn serve_legacy(
             _ = (&mut shutdown).fuse() => return Ok(()),
             accepted = listener.accept().fuse() => match accepted {
                 Ok(conn) => {
-                    let pipe = Arc::clone(&pipe);
+                    let pipe = pipe.clone();
                     let label = label.clone();
                     tokio::task::spawn_local(async move {
-                        if let Err(error) = handle_connection(Box::new(conn), pipe).await {
+                        if let Err(error) =
+                            proxima_listen::serve_pipe::handle_connection(Box::new(conn), pipe)
+                                .await
+                        {
                             debug!(?error, label = %label, "pgwire connection ended");
                         }
                     });
@@ -335,7 +292,7 @@ async fn serve_legacy(
 #[cfg(not(feature = "tokio-compat"))]
 async fn serve_legacy(
     _bind: SocketAddr,
-    _pipe: Arc<PgWireConnectionPipe>,
+    _pipe: AcceptHandle,
     label: String,
     _shutdown: oneshot::Receiver<()>,
     _ready_signal: Option<std::sync::mpsc::Sender<()>>,

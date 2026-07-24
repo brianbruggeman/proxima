@@ -1,12 +1,12 @@
 //! `MqttConnectionPipe` — the connection layer as a real `Pipe`.
 //!
-//! A freshly accepted socket arrives as a `CONNECT` request (the pipe
-//! `Request`, not to be confused with the MQTT `CONNECT` packet the wire
-//! driver parses); the pipe answers with `Response.upgrade` (the
-//! `proxima_primitives::pipe::upgrade` raw-socket-hijack seam). The
-//! upgrade handler runs [`crate::connection::serve_connection`] over the
-//! hijacked stream, calling the business-handler pipe once — on the MQTT
-//! `CONNECT` packet, for auth. Mirrors `proxima_redis::pipe::RedisConnectionPipe`.
+//! Every accepted socket is upgraded unconditionally, so the pipe is a
+//! `() -> UpgradeHandler` accept hook (the
+//! `proxima_primitives::pipe::upgrade` raw-socket-hijack seam) with no
+//! synthetic request to fabricate. The upgrade handler runs
+//! [`crate::connection::serve_connection`] over the hijacked stream,
+//! calling the business-handler pipe once — on the MQTT `CONNECT` packet,
+//! for auth. Mirrors `proxima_redis::pipe::RedisConnectionPipe`.
 //!
 //! MQTT-over-TLS is whole-connection TLS from byte 0 — there is no in-band
 //! STARTTLS-style negotiation — so this pipe carries no TLS state of its
@@ -16,13 +16,11 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncWrite};
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::upgrade::{HijackedSocket, UpgradeHandler};
 
 use crate::broker::MqttBroker;
@@ -31,9 +29,9 @@ use crate::connection::serve_connection;
 use crate::error::MqttServeError;
 use crate::pipes::MqttPipeHandle;
 
-/// The connection layer as a `Pipe`. Its `call` (for a `CONNECT` pipe
-/// request) returns a `Response.upgrade` that drives `serve_connection`
-/// over the hijacked stream, calling `handler` once the wire-level MQTT
+/// The connection layer as a `Pipe`. Its `call` (for the unit accept hook)
+/// returns an `UpgradeHandler` that drives `serve_connection` over the
+/// hijacked stream, calling `handler` once the wire-level MQTT
 /// `CONNECT` packet arrives. One `MqttConnectionPipe` owns one
 /// [`MqttBroker`], shared by every connection it upgrades — that shared
 /// instance IS the PUBLISH/SUBSCRIBE fabric.
@@ -119,11 +117,11 @@ where
 }
 
 impl SendPipe for MqttConnectionPipe {
-    type In = Request<Bytes>;
-    type Out = Response<Bytes>;
+    type In = ();
+    type Out = UpgradeHandler;
     type Err = ProximaError;
 
-    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    async fn call(&self, (): ()) -> Result<UpgradeHandler, ProximaError> {
         let handler = self.handler.clone();
         let broker = Arc::clone(&self.broker);
         let config = Arc::clone(&self.config);
@@ -131,7 +129,7 @@ impl SendPipe for MqttConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        let handler_fn = UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
+        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
             let HijackedSocket { stream, leftover } = hijacked;
             if !leftover.is_empty() {
                 // a raw mqtt socket has no prior protocol head, so the
@@ -144,8 +142,7 @@ impl SendPipe for MqttConnectionPipe {
             drive_session(stream, handler, broker, config, admission)
                 .await
                 .map_err(|error| ProximaError::Upstream(format!("mqtt session: {error}")))
-        });
-        Ok(Response::new(200).with_upgrade(handler_fn))
+        }))
     }
 }
 
@@ -159,8 +156,7 @@ mod tests {
 
     use bytes::Bytes;
     use proxima_core::ProximaError;
-    use proxima_primitives::pipe::method::Method;
-    use proxima_primitives::pipe::request::{Request, RequestContext, Response};
+    use proxima_primitives::pipe::request::Response;
     use proxima_primitives::pipe::upgrade::HijackedSocket;
     use proxima_protocols::mqtt::MqttReply;
 
@@ -218,36 +214,17 @@ mod tests {
         }
     }
 
-    fn connect_request() -> Request<Bytes> {
-        Request {
-            method: Method::Connect,
-            path: Bytes::new(),
-            query: proxima_primitives::pipe::header_list::HeaderList::new(),
-            metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-            payload: Bytes::new(),
-            stream: None,
-            context: RequestContext::default(),
-        }
-    }
-
     #[proxima::test(runtime = "tokio")]
-    async fn connect_request_answers_with_an_upgrade() {
+    async fn call_answers_with_an_upgrade_handler() {
         let pipe = MqttConnectionPipe::new(
             "mqtt",
             into_mqtt_handle(AcceptAllPipe),
             std::sync::Arc::new(MqttServerConfig::default()),
         );
 
-        let response = pipe
-            .call(connect_request())
-            .await
-            .expect("connect must answer");
+        let handler = pipe.call(()).await;
 
-        assert_eq!(response.status, 200);
-        assert!(
-            response.upgrade.is_some(),
-            "connect response must carry an upgrade"
-        );
+        assert!(handler.is_ok(), "accept hook must answer with an upgrade");
     }
 
     #[proxima::test(runtime = "tokio")]
@@ -257,11 +234,7 @@ mod tests {
             into_mqtt_handle(AcceptAllPipe),
             std::sync::Arc::new(MqttServerConfig::default()),
         );
-        let response = pipe
-            .call(connect_request())
-            .await
-            .expect("connect must answer");
-        let handler = response.upgrade.expect("upgrade must be present");
+        let handler = pipe.call(()).await.expect("accept hook must answer");
 
         let mut scripted = Vec::new();
         proxima_protocols::mqtt::encode::encode_connect(b"c1", true, 30, None, None, &mut scripted);

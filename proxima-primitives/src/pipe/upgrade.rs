@@ -98,6 +98,14 @@ impl core::fmt::Debug for UpgradeHandler {
     }
 }
 
+/// Erased `() -> UpgradeHandler` accept hook: the connection-layer sibling
+/// of [`crate::pipe::handler::PipeHandle`]. An unconditional-upgrade
+/// protocol pipe (redis/pgwire/mqtt/amqp) upgrades every accepted socket
+/// with zero dependence on the inbound bytes, so its `SendPipe::In` is
+/// `()` rather than a synthetic `Request<Bytes>`.
+#[cfg(feature = "std")]
+pub type AcceptHandle = crate::pipe::alloc_tier::PipeHandle<(), UpgradeHandler>;
+
 // Local (?Send) upgrade variant for the io_uring listener path.
 //
 // io_uring's `tokio_uring::net::TcpStream` is `!Send` (held in `Rc`),
