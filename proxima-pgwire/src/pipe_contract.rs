@@ -7,10 +7,10 @@
 //! the way `proxima-redis` and `proxima-kafka` do: a business-handler `Pipe`
 //! is `P -> Q` (payload-no-cell, no `Request`/`Response` envelope), and
 //! [`QueryRequest`] is already self-describing — the FSM/verb information
-//! that used to live on `Request.method`/`.path` is now the enum
-//! discriminant and its fields. Because a SQL engine is just a `Pipe`,
-//! every proxima middleware — `Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`,
-//! record/replay, `RoutingPipe` — composes onto SQL with zero new code.
+//! that used to live on `Request.method`/`.path` is now its `verb` field.
+//! Because a SQL engine is just a `Pipe`, every proxima middleware —
+//! `Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`, record/replay,
+//! `RoutingPipe` — composes onto SQL with zero new code.
 //!
 //! # Two layers
 //!
@@ -20,15 +20,15 @@
 //!   not the SQL contract below); the `Pipe` returns a `Response` whose
 //!   `upgrade` runs the session loop. This is the same seam WebSocket /
 //!   CONNECT tunnels use (`proxima_primitives::pipe::upgrade`).
-//! - **query** ([`QueryRequest`]'s `Query`/`Parse`/`Execute`/`CopyData`
-//!   variants): inside the session, each protocol operation the driver
-//!   actually dispatches to the engine becomes one `Pipe::call(QueryRequest)
-//!   -> PgReply`. SQL text and bind parameters ride the matched variant's
-//!   fields; the driver owns wire framing and text/binary format-code
-//!   encoding so the SQL engine stays wire-agnostic. `Describe` (extended-
-//!   protocol Describe) is answered entirely from the driver's own
-//!   statement/portal store and never reaches the engine, so it has no
-//!   variant here.
+//! - **query** ([`Verb`]'s `Query`/`Parse`/`Execute`/`CopyData` variants):
+//!   inside the session, each protocol operation the driver actually
+//!   dispatches to the engine becomes one `Pipe::call(QueryRequest) ->
+//!   PgReply`. SQL text rides `QueryRequest::sql`; bind parameters and
+//!   other verb-specific data ride the matched `verb` variant's fields;
+//!   the driver owns wire framing and text/binary format-code encoding so
+//!   the SQL engine stays wire-agnostic. `Describe` (extended-protocol
+//!   Describe) is answered entirely from the driver's own statement/portal
+//!   store and never reaches the engine, so it has no variant here.
 //!
 //! The neutral [`SqlValue`] lives here, not in any engine: format-code
 //! encoding needs typed values (an `i64` becomes 8 big-endian bytes in
@@ -53,14 +53,14 @@ pub mod verb {
     /// `Response.upgrade` (the transport's own `Request<Bytes>` envelope,
     /// not the `QueryRequest` contract)
     pub const CONNECT: &[u8] = b"CONNECT";
-    /// simple-protocol query -> [`super::QueryRequest::Query`]
+    /// simple-protocol query -> [`super::Verb::Query`]
     pub const QUERY: &[u8] = b"QUERY";
-    /// extended-protocol Parse -> [`super::QueryRequest::Parse`]
+    /// extended-protocol Parse -> [`super::Verb::Parse`]
     pub const PARSE: &[u8] = b"PARSE";
     /// extended-protocol Execute against a bound portal ->
-    /// [`super::QueryRequest::Execute`]
+    /// [`super::Verb::Execute`]
     pub const EXECUTE: &[u8] = b"EXECUTE";
-    /// COPY IN second phase -> [`super::QueryRequest::CopyData`]
+    /// COPY IN second phase -> [`super::Verb::CopyData`]
     pub const COPY_DATA: &[u8] = b"COPY_DATA";
 }
 
@@ -138,48 +138,55 @@ impl ColumnDesc {
 
 /// The business-handler pipe's request payload — a de-enveloped
 /// (payload-no-cell) carry: a pipe is `QueryRequest -> PgReply`, no
-/// `Request`/`Response` wrapper. Each variant is exactly the protocol
-/// operation the driver's own dispatch actually calls the engine for —
-/// `Query` (simple-protocol query), `Parse` (extended-protocol Parse),
-/// `Execute` (extended-protocol Execute against a bound portal), and
-/// `CopyData` (the COPY IN second phase). Bind (`Bind`), Describe, Close,
-/// Flush, and Sync are answered entirely from the driver's own
-/// statement/portal store and never reach the engine, so they have no
+/// `Request`/`Response` wrapper. `sql`/`connection_id`/`cancel` ride every
+/// protocol operation, so they live on the request itself; [`Verb`] carries
+/// only the fields specific to the operation the driver's own dispatch
+/// actually calls the engine for — `Query` (simple-protocol query), `Parse`
+/// (extended-protocol Parse), `Execute` (extended-protocol Execute against a
+/// bound portal), and `CopyData` (the COPY IN second phase). Bind (`Bind`),
+/// Describe, Close, Flush, and Sync are answered entirely from the driver's
+/// own statement/portal store and never reach the engine, so they have no
 /// variant here (see the module doc).
 ///
-/// `connection_id` and `cancel` ride every variant: the engine keys
-/// per-connection state (transaction snapshots) off `connection_id`, and
-/// polls [`CancelToken::is_cancelled`] between units of work to abort a
+/// `connection_id` and `cancel` are shared across every verb: the engine
+/// keys per-connection state (transaction snapshots) off `connection_id`,
+/// and polls [`CancelToken::is_cancelled`] between units of work to abort a
 /// long-running query cooperatively.
 #[derive(Debug, Clone)]
-pub enum QueryRequest {
-    /// Simple-protocol query (`verb::QUERY`): `sql` is the client's literal
-    /// query text.
-    Query {
-        sql: String,
-        connection_id: u64,
-        cancel: CancelToken,
-    },
+pub struct QueryRequest {
+    /// The client's literal SQL text — every verb operates against it.
+    pub sql: String,
+    /// Process-unique connection id shared across every verb so the engine
+    /// can key per-connection state regardless of which operation
+    /// dispatched.
+    pub connection_id: u64,
+    /// Cooperative cancel signal shared across every verb so the engine can
+    /// poll [`CancelToken::is_cancelled`] regardless of which operation
+    /// dispatched.
+    pub cancel: CancelToken,
+    /// The protocol operation and its verb-specific fields.
+    pub verb: Verb,
+}
+
+/// The protocol-operation-specific fields a [`QueryRequest`] carries beyond
+/// its shared `sql`/`connection_id`/`cancel`.
+#[derive(Debug, Clone)]
+pub enum Verb {
+    /// Simple-protocol query (`verb::QUERY`): no extra fields — `sql` is the
+    /// whole request.
+    Query,
     /// Extended-protocol Parse (`verb::PARSE`): declares a prepared
     /// statement named `statement` (empty = unnamed) for `sql`. The engine
     /// answers with [`PgReply::Describe`].
-    Parse {
-        sql: String,
-        statement: String,
-        connection_id: u64,
-        cancel: CancelToken,
-    },
+    Parse { statement: String },
     /// Extended-protocol Execute (`verb::EXECUTE`) against a bound portal:
     /// `statement`/`portal` name the prepared statement and portal (empty =
     /// unnamed), `parameters` are the bind values already decoded from wire
     /// format to typed values.
     Execute {
-        sql: String,
         statement: String,
         portal: String,
         parameters: Vec<SqlValue>,
-        connection_id: u64,
-        cancel: CancelToken,
     },
     /// COPY IN second phase (`verb::COPY_DATA`): the driver collected the
     /// client's CopyData rows (or saw CopyFail) for the `sql` that opened
@@ -187,52 +194,12 @@ pub enum QueryRequest {
     /// `copy_failed` is true when the client sent CopyFail instead of
     /// CopyDone, so the engine rolls back.
     CopyData {
-        sql: String,
         copy_data: Vec<Vec<u8>>,
         copy_failed: bool,
-        connection_id: u64,
-        cancel: CancelToken,
     },
 }
 
 impl QueryRequest {
-    /// SQL text — every variant carries the statement it operates against.
-    #[must_use]
-    pub fn sql(&self) -> &str {
-        match self {
-            Self::Query { sql, .. }
-            | Self::Parse { sql, .. }
-            | Self::Execute { sql, .. }
-            | Self::CopyData { sql, .. } => sql,
-        }
-    }
-
-    /// Process-unique connection id — every variant carries it so the
-    /// engine can key per-connection state regardless of which operation
-    /// dispatched.
-    #[must_use]
-    pub fn connection_id(&self) -> u64 {
-        match self {
-            Self::Query { connection_id, .. }
-            | Self::Parse { connection_id, .. }
-            | Self::Execute { connection_id, .. }
-            | Self::CopyData { connection_id, .. } => *connection_id,
-        }
-    }
-
-    /// Cooperative cancel signal — every variant carries it so the engine
-    /// can poll [`CancelToken::is_cancelled`] regardless of which
-    /// operation dispatched.
-    #[must_use]
-    pub fn cancel(&self) -> &CancelToken {
-        match self {
-            Self::Query { cancel, .. }
-            | Self::Parse { cancel, .. }
-            | Self::Execute { cancel, .. }
-            | Self::CopyData { cancel, .. } => cancel,
-        }
-    }
-
     /// Builds a request from a generic bytes verb + wire fields — the
     /// construction site for a boundary that only has untyped transport
     /// fields to work with (`proxima::Client`'s universal `Request<Bytes>`
@@ -254,28 +221,24 @@ impl QueryRequest {
         parameters: Vec<SqlValue>,
     ) -> Result<Self, &'static str> {
         let sql = sql.into();
-        match verb {
-            self::verb::QUERY => Ok(Self::Query {
-                sql,
-                connection_id: 0,
-                cancel: CancelToken::none(),
-            }),
-            self::verb::PARSE => Ok(Self::Parse {
-                sql,
+        let query_verb = match verb {
+            self::verb::QUERY => Verb::Query,
+            self::verb::PARSE => Verb::Parse {
                 statement: statement.into(),
-                connection_id: 0,
-                cancel: CancelToken::none(),
-            }),
-            self::verb::EXECUTE => Ok(Self::Execute {
-                sql,
+            },
+            self::verb::EXECUTE => Verb::Execute {
                 statement: statement.into(),
                 portal: String::new(),
                 parameters,
-                connection_id: 0,
-                cancel: CancelToken::none(),
-            }),
-            _ => Err("unsupported client verb"),
-        }
+            },
+            _ => return Err("unsupported client verb"),
+        };
+        Ok(Self {
+            sql,
+            connection_id: 0,
+            cancel: CancelToken::none(),
+            verb: query_verb,
+        })
     }
 }
 
@@ -475,17 +438,17 @@ mod tests {
     fn try_from_wire_query_verb_builds_the_query_variant() {
         let request = QueryRequest::try_from_wire(verb::QUERY, "", "select 1", Vec::new())
             .expect("QUERY must be accepted");
-        assert_eq!(request.sql(), "select 1");
-        assert!(matches!(request, QueryRequest::Query { .. }));
+        assert_eq!(request.sql, "select 1");
+        assert!(matches!(request.verb, Verb::Query));
     }
 
     #[test]
     fn try_from_wire_parse_verb_carries_the_statement_name() {
         let request = QueryRequest::try_from_wire(verb::PARSE, "stmt1", "select $1", Vec::new())
             .expect("PARSE must be accepted");
-        match request {
-            QueryRequest::Parse { sql, statement, .. } => {
-                assert_eq!(sql, "select $1");
+        assert_eq!(request.sql, "select $1");
+        match request.verb {
+            Verb::Parse { statement } => {
                 assert_eq!(statement, "stmt1");
             }
             other => panic!("expected Parse, got {other:?}"),
@@ -494,17 +457,20 @@ mod tests {
 
     #[test]
     fn try_from_wire_execute_verb_carries_statement_and_parameters() {
-        let request =
-            QueryRequest::try_from_wire(verb::EXECUTE, "stmt1", "select $1", vec![SqlValue::Int(7)])
-                .expect("EXECUTE must be accepted");
-        match request {
-            QueryRequest::Execute {
-                sql,
+        let request = QueryRequest::try_from_wire(
+            verb::EXECUTE,
+            "stmt1",
+            "select $1",
+            vec![SqlValue::Int(7)],
+        )
+        .expect("EXECUTE must be accepted");
+        assert_eq!(request.sql, "select $1");
+        match request.verb {
+            Verb::Execute {
                 statement,
                 parameters,
                 ..
             } => {
-                assert_eq!(sql, "select $1");
                 assert_eq!(statement, "stmt1");
                 assert_eq!(parameters, vec![SqlValue::Int(7)]);
             }
@@ -536,18 +502,20 @@ mod tests {
     }
 
     #[test]
-    fn connection_id_and_cancel_project_across_every_variant() {
+    fn connection_id_and_cancel_are_shared_fields_regardless_of_verb() {
         let flag = Arc::new(AtomicBool::new(true));
         let cancel = CancelToken::from(Arc::clone(&flag));
-        let request = QueryRequest::CopyData {
+        let request = QueryRequest {
             sql: "copy t from stdin".to_string(),
-            copy_data: vec![b"1\tx\n".to_vec()],
-            copy_failed: false,
             connection_id: 42,
             cancel,
+            verb: Verb::CopyData {
+                copy_data: vec![b"1\tx\n".to_vec()],
+                copy_failed: false,
+            },
         };
-        assert_eq!(request.connection_id(), 42);
-        assert!(request.cancel().is_cancelled());
-        assert_eq!(request.sql(), "copy t from stdin");
+        assert_eq!(request.connection_id, 42);
+        assert!(request.cancel.is_cancelled());
+        assert_eq!(request.sql, "copy t from stdin");
     }
 }

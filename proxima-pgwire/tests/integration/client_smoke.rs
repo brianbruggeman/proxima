@@ -14,7 +14,7 @@ use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_pgwire::codec::Session;
 use proxima_pgwire::{
     ColumnDesc, DescribeReply, ErrorReply, Negotiation, PgAuth, PgPipeHandle, PgReply,
-    PgServerConfig, QueryReply, QueryRequest, RowStream, SqlValue, StaticCredentials,
+    PgServerConfig, QueryReply, QueryRequest, RowStream, SqlValue, StaticCredentials, Verb,
     into_pg_handle, negotiate, serve_session,
 };
 use proxima_primitives::pipe::SendPipe;
@@ -36,13 +36,14 @@ impl SendPipe for EchoPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let reply = match request {
-            QueryRequest::Query { sql, .. } => echo_query(&sql),
-            QueryRequest::Parse { sql, .. } => PgReply::Describe(echo_describe(&sql)),
-            QueryRequest::Execute { parameters, .. } => echo_execute(&parameters),
+        let QueryRequest { sql, verb, .. } = request;
+        let reply = match verb {
+            Verb::Query => echo_query(&sql),
+            Verb::Parse { .. } => PgReply::Describe(echo_describe(&sql)),
+            Verb::Execute { parameters, .. } => echo_execute(&parameters),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "echo pipe received unexpected request {other:?}"
+                    "echo pipe received unexpected verb {other:?}"
                 )));
             }
         };
@@ -194,26 +195,18 @@ impl SendPipe for CopyPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let sql = request.sql().to_owned();
-        let reply = match request {
-            QueryRequest::Query { .. } | QueryRequest::Execute { .. }
-                if sql.contains("TO STDOUT") =>
-            {
-                PgReply::CopyOut {
-                    format: CopyFormat::Text,
-                    column_formats: vec![],
-                    data: COPY_OUT_WITNESS.iter().map(|row| row.to_vec()).collect(),
-                }
-            }
-            QueryRequest::Query { .. } | QueryRequest::Execute { .. }
-                if sql.contains("FROM STDIN") =>
-            {
-                PgReply::CopyIn {
-                    format: CopyFormat::Text,
-                    column_formats: vec![],
-                }
-            }
-            QueryRequest::CopyData {
+        let sql = request.sql.clone();
+        let reply = match request.verb {
+            Verb::Query | Verb::Execute { .. } if sql.contains("TO STDOUT") => PgReply::CopyOut {
+                format: CopyFormat::Text,
+                column_formats: vec![],
+                data: COPY_OUT_WITNESS.iter().map(|row| row.to_vec()).collect(),
+            },
+            Verb::Query | Verb::Execute { .. } if sql.contains("FROM STDIN") => PgReply::CopyIn {
+                format: CopyFormat::Text,
+                column_formats: vec![],
+            },
+            Verb::CopyData {
                 copy_failed,
                 copy_data,
                 ..
@@ -224,7 +217,7 @@ impl SendPipe for CopyPipe {
                     PgReply::Query(QueryReply::tag(format!("COPY {}", copy_data.len())))
                 }
             }
-            QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply::default()),
+            Verb::Parse { .. } => PgReply::Describe(DescribeReply::default()),
             _ => {
                 return Err(ProximaError::Config(format!(
                     "copy pipe unexpected request sql {sql:?}"
@@ -251,8 +244,8 @@ impl SendPipe for StreamPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let reply = match request {
-            QueryRequest::Query { .. } | QueryRequest::Execute { .. } => {
+        let reply = match request.verb {
+            Verb::Query | Verb::Execute { .. } => {
                 let (sender, receiver) = async_channel::bounded::<Vec<SqlValue>>(4);
                 let count = self.count;
                 tokio::spawn(async move {
@@ -268,13 +261,13 @@ impl SendPipe for StreamPipe {
                     command_tag: None,
                 }
             }
-            QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
+            Verb::Parse { .. } => PgReply::Describe(DescribeReply {
                 parameter_types: vec![],
                 columns: vec![ColumnDesc::new("n", OID_INT4)],
             }),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "stream pipe unexpected request {other:?}"
+                    "stream pipe unexpected verb {other:?}"
                 )));
             }
         };
@@ -342,12 +335,12 @@ impl SendPipe for NotifyPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let QueryRequest::Query { sql, .. } = &request else {
+        if !matches!(request.verb, Verb::Query) {
             return Err(ProximaError::Config(format!(
                 "notify pipe unexpected request {request:?}"
             )));
-        };
-        let sql = sql.trim().to_string();
+        }
+        let sql = request.sql.trim().to_string();
         let reply = if sql.to_ascii_uppercase().starts_with("LISTEN ") {
             PgReply::Listen {
                 channels: vec![parse_listen_channel(&sql)],

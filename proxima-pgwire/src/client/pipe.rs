@@ -2,7 +2,7 @@
 //! transport seam `H1ClientUpstream` uses, so the client is agnostic to the
 //! wire (prime, tokio, TLS-wrapped). It drives the sans-IO [`ClientSession`]
 //! over a futures-io connection and maps the SQL-over-Pipe contract
-//! ([`QueryRequest`]'s `Query`/`Parse`/`Execute` variants) to/from
+//! ([`QueryRequest`]'s `verb` field — `Query`/`Parse`/`Execute`) to/from
 //! [`PgReply`] — no `Request`/`Response` envelope (payload-no-cell). A
 //! registered `PipeFactory` (see `crate::client::factory`) builds this, so
 //! `proxima::Client` speaks pgwire as just another protocol.
@@ -20,7 +20,9 @@ use proxima_protocols::pgwire_codec::Oid;
 
 use crate::client::config::PgClientConfig;
 use crate::client::session::{ClientError, ClientSession, QueryResult, Step};
-use crate::pipe_contract::{ColumnDesc, ErrorReply, PgReply, QueryReply, QueryRequest, SqlValue};
+use crate::pipe_contract::{
+    ColumnDesc, ErrorReply, PgReply, QueryReply, QueryRequest, SqlValue, Verb,
+};
 
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
@@ -111,18 +113,17 @@ async fn run_request<C: StreamConnection>(
     conn: &mut C,
     request: QueryRequest,
 ) -> Result<PgReply, ClientError> {
-    let result = match request {
-        QueryRequest::Query { sql, .. } => {
+    let QueryRequest { sql, verb, .. } = request;
+    let result = match verb {
+        Verb::Query => {
             session.submit_simple(&sql)?;
             run_query(session, conn).await?
         }
-        QueryRequest::Parse { sql, .. } => {
+        Verb::Parse { .. } => {
             session.submit_extended(&sql, &[])?;
             run_query(session, conn).await?
         }
-        QueryRequest::Execute {
-            sql, parameters, ..
-        } => {
+        Verb::Execute { parameters, .. } => {
             let params = parameters
                 .iter()
                 .map(sql_value_to_text)
@@ -131,7 +132,7 @@ async fn run_request<C: StreamConnection>(
             session.submit_extended(&sql, &borrowed)?;
             run_query(session, conn).await?
         }
-        QueryRequest::CopyData { .. } => {
+        Verb::CopyData { .. } => {
             return Err(ClientError::Protocol("unsupported client verb"));
         }
     };

@@ -21,7 +21,7 @@ use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt};
 use proxima_pgwire::{
-    ColumnDesc, ErrorReply, PgReply, QueryReply, QueryRequest, SqlValue, into_pg_handle,
+    ColumnDesc, ErrorReply, PgReply, QueryReply, QueryRequest, SqlValue, Verb, into_pg_handle,
 };
 use proxima_primitives::pipe::SendPipe;
 use proxima_protocols::pgwire_codec::Oid;
@@ -42,11 +42,12 @@ impl SendPipe for EchoPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let QueryRequest::Query { sql, .. } = &request else {
+        if !matches!(request.verb, Verb::Query) {
             return Err(ProximaError::Config(format!(
                 "example engine received unexpected request {request:?}"
             )));
-        };
+        }
+        let sql = &request.sql;
         let reply = if sql.trim().eq_ignore_ascii_case("select 1") {
             PgReply::Query(QueryReply::rows(
                 vec![ColumnDesc::new("?column?", OID_INT4)],

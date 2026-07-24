@@ -31,7 +31,7 @@ impl SendPipe for EchoPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let sql = request.sql().to_owned();
+        let sql = request.sql.clone();
         let reply = if sql.trim().eq_ignore_ascii_case("select 1") {
             PgReply::Query(QueryReply::rows(
                 vec![ColumnDesc::new("?column?", OID_INT4)],

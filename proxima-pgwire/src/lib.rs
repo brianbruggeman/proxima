@@ -5,7 +5,7 @@
 //! one primitive, `proxima_primitives::pipe::Pipe`. A SQL engine is a `Pipe`:
 //! it is `QueryRequest -> PgReply` (payload-no-cell — no `Request`/
 //! `Response` envelope), matching on [`pipe_contract::QueryRequest`]'s
-//! variants. The driver owns wire framing and the text/binary encoding of
+//! `verb` field. The driver owns wire framing and the text/binary encoding of
 //! [`pipe_contract::SqlValue`], so the engine stays wire-agnostic — and
 //! every proxima middleware (`Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`,
 //! record/replay, `RoutingPipe`) composes onto SQL with zero new code.
@@ -85,7 +85,7 @@ pub use listen::PgWireListenProtocol;
 pub use pipe::PgWireConnectionPipe;
 pub use pipe_contract::{
     CancelToken, ColumnDesc, DescribeReply, ErrorReply, NoticeReply, PgReply, QueryReply,
-    QueryRequest, RowStream, SqlValue, TxStatus, verb,
+    QueryRequest, RowStream, SqlValue, TxStatus, Verb, verb,
 };
 #[cfg(feature = "scram")]
 pub use scram::ScramClient;

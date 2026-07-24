@@ -10,14 +10,17 @@
 use std::net::SocketAddr;
 
 use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
-use proxima_pgwire::{CancelToken, PgClientConfig, PgReply, PgwireClientUpstream, QueryRequest};
+use proxima_pgwire::{
+    CancelToken, PgClientConfig, PgReply, PgwireClientUpstream, QueryRequest, Verb,
+};
 use proxima_primitives::pipe::SendPipe;
 
 fn make_query_request(sql: &str) -> QueryRequest {
-    QueryRequest::Query {
+    QueryRequest {
         sql: sql.to_string(),
         connection_id: 0,
         cancel: CancelToken::none(),
+        verb: Verb::Query,
     }
 }
 
