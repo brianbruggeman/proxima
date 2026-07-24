@@ -110,3 +110,8 @@ name = "pubsub_round_trip"
 path = "tests/pubsub_round_trip.rs"
 required-features = ["listen"]
 
+[[test]]
+name = "shard_pubsub_namespace"
+path = "tests/shard_pubsub_namespace.rs"
+required-features = ["listen"]
+

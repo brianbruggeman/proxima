@@ -62,17 +62,19 @@ pub fn is_streaming(command: &str) -> bool {
 /// (payload-no-cell) carry, FSM-aware over
 /// [`super::connection::ConnMode`]'s two states. Only the commands that
 /// actually move or are gated by that FSM get their own variant; every other
-/// command (`GET`, `SET`, `PING`, `PUBLISH`, …) is `Command{verb, args}` —
-/// the driver's own PING/QUIT/PUBLISH interception and `ConnMode::admits`
-/// gate still apply to that variant exactly as before. Arguments are raw
-/// bytes — binary safe, so a value can be any blob.
+/// command (`GET`, `SET`, `PING`, `PUBLISH`, `SPUBLISH`, …) is `Command{verb,
+/// args}` — the driver's own PING/QUIT/PUBLISH/SPUBLISH interception and
+/// `ConnMode::admits` gate still apply to that variant exactly as before.
+/// `SPUBLISH` stays a `Command` (like `PUBLISH`) rather than getting a
+/// variant of its own: publishing never drives `ConnMode`, only the
+/// subscribe/unsubscribe families do. Arguments are raw bytes — binary safe,
+/// so a value can be any blob.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisRequest {
-    /// `SUBSCRIBE`/`SSUBSCRIBE` with at least one channel — enters
-    /// `ConnMode::Subscriber`.
+    /// `SUBSCRIBE` with at least one channel — enters `ConnMode::Subscriber`.
     Subscribe { channels: Vec<Vec<u8>> },
-    /// `UNSUBSCRIBE`/`SUNSUBSCRIBE` — empty `channels` means "unsubscribe
-    /// every exact-channel subscription".
+    /// `UNSUBSCRIBE` — empty `channels` means "unsubscribe every
+    /// exact-channel subscription".
     Unsubscribe { channels: Vec<Vec<u8>> },
     /// `PSUBSCRIBE` with at least one pattern — enters
     /// `ConnMode::Subscriber`.
@@ -80,9 +82,18 @@ pub enum RedisRequest {
     /// `PUNSUBSCRIBE` — empty `patterns` means "unsubscribe every pattern
     /// subscription".
     Punsubscribe { patterns: Vec<Vec<u8>> },
-    /// Every other command, including the arity-empty (P)SUBSCRIBE forms
+    /// `SSUBSCRIBE` with at least one shard channel — enters
+    /// `ConnMode::Subscriber`. Real Redis (7.0+) keeps sharded pub/sub in a
+    /// namespace distinct from `Subscribe`'s exact-channel one: an
+    /// `SSUBSCRIBE foo` subscriber is reached only by `SPUBLISH foo`, never
+    /// by `PUBLISH foo`.
+    Ssubscribe { channels: Vec<Vec<u8>> },
+    /// `SUNSUBSCRIBE` — empty `channels` means "unsubscribe every shard
+    /// channel subscription".
+    Sunsubscribe { channels: Vec<Vec<u8>> },
+    /// Every other command, including the arity-empty (P|S)SUBSCRIBE forms
     /// (which surface as an unknown-command/arity error, same as before)
-    /// and the driver-intercepted PING/QUIT/PUBLISH.
+    /// and the driver-intercepted PING/QUIT/PUBLISH/SPUBLISH.
     Command { verb: Vec<u8>, args: Vec<Vec<u8>> },
 }
 
@@ -90,12 +101,6 @@ impl RedisRequest {
     /// Splits a raw command argument list (verb first, then its arguments)
     /// into the FSM-aware carry. The verb is upper-cased before matching —
     /// Redis command verbs are case-insensitive on the wire.
-    ///
-    /// NOTE: `SSUBSCRIBE`/`SUNSUBSCRIBE` (sharded pub/sub) collapse into the
-    /// regular `Subscribe`/`Unsubscribe` variants — this mirrors current
-    /// behavior (the broker gives shard channels no distinct namespace
-    /// today) rather than fixing the pre-existing sharded-pubsub compliance
-    /// gap, which is a separate follow-on (PC3-redis-COMPLIANCE).
     #[must_use]
     pub fn from_args(args: Vec<Vec<u8>>) -> Self {
         let Some((verb, rest)) = args.split_first() else {
@@ -107,10 +112,12 @@ impl RedisRequest {
         let verb = verb.to_ascii_uppercase();
         let rest = rest.to_vec();
         match verb.as_slice() {
-            b"SUBSCRIBE" | b"SSUBSCRIBE" if !rest.is_empty() => Self::Subscribe { channels: rest },
-            b"UNSUBSCRIBE" | b"SUNSUBSCRIBE" => Self::Unsubscribe { channels: rest },
+            b"SUBSCRIBE" if !rest.is_empty() => Self::Subscribe { channels: rest },
+            b"UNSUBSCRIBE" => Self::Unsubscribe { channels: rest },
             b"PSUBSCRIBE" if !rest.is_empty() => Self::Psubscribe { patterns: rest },
             b"PUNSUBSCRIBE" => Self::Punsubscribe { patterns: rest },
+            b"SSUBSCRIBE" if !rest.is_empty() => Self::Ssubscribe { channels: rest },
+            b"SUNSUBSCRIBE" => Self::Sunsubscribe { channels: rest },
             _ => Self::Command { verb, args: rest },
         }
     }
@@ -142,12 +149,51 @@ mod tests {
     }
 
     #[test]
-    fn from_args_collapses_ssubscribe_into_subscribe() {
+    fn from_args_splits_ssubscribe_into_its_own_variant() {
         let request = RedisRequest::from_args(vec![b"SSUBSCRIBE".to_vec(), b"shard".to_vec()]);
         assert_eq!(
             request,
-            RedisRequest::Subscribe {
+            RedisRequest::Ssubscribe {
                 channels: vec![b"shard".to_vec()]
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_empty_ssubscribe_falls_to_command() {
+        let request = RedisRequest::from_args(vec![b"SSUBSCRIBE".to_vec()]);
+        assert_eq!(
+            request,
+            RedisRequest::Command {
+                verb: b"SSUBSCRIBE".to_vec(),
+                args: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_sunsubscribe_with_no_targets_means_all() {
+        let request = RedisRequest::from_args(vec![b"SUNSUBSCRIBE".to_vec()]);
+        assert_eq!(
+            request,
+            RedisRequest::Sunsubscribe {
+                channels: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_spublish_stays_a_command() {
+        let request = RedisRequest::from_args(vec![
+            b"SPUBLISH".to_vec(),
+            b"shard".to_vec(),
+            b"hi".to_vec(),
+        ]);
+        assert_eq!(
+            request,
+            RedisRequest::Command {
+                verb: b"SPUBLISH".to_vec(),
+                args: vec![b"shard".to_vec(), b"hi".to_vec()]
             }
         );
     }
