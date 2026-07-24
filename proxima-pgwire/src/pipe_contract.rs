@@ -1,29 +1,34 @@
-//! The SQL-over-Pipe contract: the verb vocabulary and typed payloads a
-//! PostgreSQL connection exchanges with a `proxima_primitives::pipe::Pipe`.
+//! The SQL-over-Pipe contract: the self-describing request enum and typed
+//! payloads a PostgreSQL connection exchanges with a
+//! `proxima_primitives::pipe::Pipe`.
 //!
 //! This is the RISC payoff (workspace principle 1). pgwire does not own a
 //! bespoke handler trait — it speaks the one workspace primitive, `Pipe`,
-//! exactly the way `proxima-telemetry` does: a single `Pipe` matches on
-//! `Request.method` verbs and reads/writes typed values through `Carry`
-//! (`proxima-telemetry` carries `SpanRecord`/`LogRecord`; pgwire carries
-//! [`QueryRequest`] / [`QueryReply`]). Because a SQL engine is just a
-//! `Pipe`, every proxima middleware — `Auth`, `RateLimit`, `Retry`,
-//! `Tee`, `Diff`, record/replay, `RoutingPipe` — composes onto SQL with
-//! zero new code.
+//! the way `proxima-redis` and `proxima-kafka` do: a business-handler `Pipe`
+//! is `P -> Q` (payload-no-cell, no `Request`/`Response` envelope), and
+//! [`QueryRequest`] is already self-describing — the FSM/verb information
+//! that used to live on `Request.method`/`.path` is now the enum
+//! discriminant and its fields. Because a SQL engine is just a `Pipe`,
+//! every proxima middleware — `Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`,
+//! record/replay, `RoutingPipe` — composes onto SQL with zero new code.
 //!
 //! # Two layers
 //!
 //! - **connection** ([`verb::CONNECT`]): the listener calls the mounted
-//!   `Pipe` once per accepted socket; the `Pipe` returns a `Response`
-//!   whose `upgrade` runs the session loop. This is the same
-//!   raw-socket-hijack seam WebSocket / CONNECT tunnels use
-//!   (`proxima_primitives::pipe::upgrade`).
-//! - **query** ([`verb::QUERY`] / [`verb::PARSE`] / [`verb::DESCRIBE`] /
-//!   [`verb::EXECUTE`]): inside the session, each protocol operation
-//!   becomes a `Pipe::call`. SQL text rides `Request.body`; bind
-//!   parameters, statement metadata, and result rows ride `Carry`. The
-//!   driver owns wire framing and text/binary format-code encoding so
-//!   the SQL engine stays wire-agnostic.
+//!   connection `Pipe` once per accepted socket over the transport's own
+//!   `Request<Bytes>`/`Response<Bytes>` envelope (a raw-socket-hijack seam,
+//!   not the SQL contract below); the `Pipe` returns a `Response` whose
+//!   `upgrade` runs the session loop. This is the same seam WebSocket /
+//!   CONNECT tunnels use (`proxima_primitives::pipe::upgrade`).
+//! - **query** ([`QueryRequest`]'s `Query`/`Parse`/`Execute`/`CopyData`
+//!   variants): inside the session, each protocol operation the driver
+//!   actually dispatches to the engine becomes one `Pipe::call(QueryRequest)
+//!   -> PgReply`. SQL text and bind parameters ride the matched variant's
+//!   fields; the driver owns wire framing and text/binary format-code
+//!   encoding so the SQL engine stays wire-agnostic. `Describe` (extended-
+//!   protocol Describe) is answered entirely from the driver's own
+//!   statement/portal store and never reaches the engine, so it has no
+//!   variant here.
 //!
 //! The neutral [`SqlValue`] lives here, not in any engine: format-code
 //! encoding needs typed values (an `i64` becomes 8 big-endian bytes in
@@ -35,25 +40,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use proxima_protocols::pgwire_codec::{CopyFormat, FormatCode, Oid};
 
-/// Request-method verbs the driver sets and a SQL `Pipe` matches on.
-/// Bytes, not an enum, mirroring `proxima_telemetry`'s `METHOD_*` set —
-/// the wire substrate is bytes-internal and the verb is a cheap
-/// discriminant before the `Carry` downcast.
+/// Bytes-verb vocabulary for translating a generic, untyped transport
+/// (`Request<Bytes>.method`, e.g. `proxima::Client`'s universal envelope, or
+/// a hand-built test request) into a [`QueryRequest`] variant. The driver
+/// itself no longer builds requests from these bytes — it constructs each
+/// variant directly at its one dispatch site — but a boundary that only has
+/// raw method bytes to work with still needs a shared vocabulary to name
+/// them. `DESCRIBE` has no entry: the driver answers Describe locally and
+/// never dispatches it to the engine (see the module doc).
 pub mod verb {
-    /// a freshly accepted connection; the `Pipe` returns `Response.upgrade`
+    /// a freshly accepted connection; the connection `Pipe` returns
+    /// `Response.upgrade` (the transport's own `Request<Bytes>` envelope,
+    /// not the `QueryRequest` contract)
     pub const CONNECT: &[u8] = b"CONNECT";
-    /// simple-protocol query; SQL in `QueryRequest.sql`
+    /// simple-protocol query -> [`super::QueryRequest::Query`]
     pub const QUERY: &[u8] = b"QUERY";
-    /// extended-protocol Parse; SQL in `QueryRequest.sql`, name in `path`
+    /// extended-protocol Parse -> [`super::QueryRequest::Parse`]
     pub const PARSE: &[u8] = b"PARSE";
-    /// extended-protocol Describe; statement/portal name in `path`
-    pub const DESCRIBE: &[u8] = b"DESCRIBE";
-    /// extended-protocol Execute against a bound portal
+    /// extended-protocol Execute against a bound portal ->
+    /// [`super::QueryRequest::Execute`]
     pub const EXECUTE: &[u8] = b"EXECUTE";
-    /// COPY IN second phase: the driver collected the client's CopyData
-    /// rows (or saw CopyFail) and hands them back for the engine to apply.
-    /// SQL in `Request.body`; the rows ride `QueryRequest.copy_data` and the
-    /// abort flag rides `QueryRequest.copy_failed`.
+    /// COPY IN second phase -> [`super::QueryRequest::CopyData`]
     pub const COPY_DATA: &[u8] = b"COPY_DATA";
 }
 
@@ -81,7 +88,9 @@ pub enum SqlValue {
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
-    /// A token that is never cancelled — the `QueryRequest::new` default.
+    /// A token that is never cancelled — the default for a directly-driven
+    /// session (a client construction site, a test) that has no real
+    /// `CancelRegistry` flag to substitute.
     #[must_use]
     pub fn none() -> Self {
         Self(Arc::new(AtomicBool::new(false)))
@@ -127,48 +136,145 @@ impl ColumnDesc {
     }
 }
 
-/// The typed payload the driver puts in `Request.payload` for QUERY /
-/// EXECUTE. The SQL text rides `sql`; the out-of-band context is the
-/// remaining fields.
+/// The business-handler pipe's request payload — a de-enveloped
+/// (payload-no-cell) carry: a pipe is `QueryRequest -> PgReply`, no
+/// `Request`/`Response` wrapper. Each variant is exactly the protocol
+/// operation the driver's own dispatch actually calls the engine for —
+/// `Query` (simple-protocol query), `Parse` (extended-protocol Parse),
+/// `Execute` (extended-protocol Execute against a bound portal), and
+/// `CopyData` (the COPY IN second phase). Bind (`Bind`), Describe, Close,
+/// Flush, and Sync are answered entirely from the driver's own
+/// statement/portal store and never reach the engine, so they have no
+/// variant here (see the module doc).
+///
+/// `connection_id` and `cancel` ride every variant: the engine keys
+/// per-connection state (transaction snapshots) off `connection_id`, and
+/// polls [`CancelToken::is_cancelled`] between units of work to abort a
+/// long-running query cooperatively.
 #[derive(Debug, Clone)]
-pub struct QueryRequest {
-    /// SQL text for QUERY / PARSE / EXECUTE / COPY_DATA verbs
-    pub sql: String,
-    /// process-unique connection id; the engine keys per-connection
-    /// state (transaction snapshots) off it
-    pub connection_id: u64,
-    /// bound parameters, already decoded from wire format to typed values
-    pub parameters: Vec<SqlValue>,
-    /// statement name (Parse/Describe/Execute target); empty = unnamed
-    pub statement: String,
-    /// portal name (Execute target); empty = unnamed
-    pub portal: String,
-    /// COPY IN payload (set only on the `COPY_DATA` verb): the client's
-    /// CopyData rows, one raw COPY-format payload per `Vec<u8>`. Empty on
-    /// every other verb.
-    pub copy_data: Vec<Vec<u8>>,
-    /// COPY IN abort flag (set only on the `COPY_DATA` verb): true when the
-    /// client sent CopyFail instead of CopyDone, so the engine rolls back.
-    pub copy_failed: bool,
-    /// cooperative cancellation: the engine polls
-    /// [`CancelToken::is_cancelled`] between units of work to abort a
-    /// long-running query. Defaults to a never-cancelled token; the driver
-    /// substitutes the connection's real flag.
-    pub cancel: CancelToken,
+pub enum QueryRequest {
+    /// Simple-protocol query (`verb::QUERY`): `sql` is the client's literal
+    /// query text.
+    Query {
+        sql: String,
+        connection_id: u64,
+        cancel: CancelToken,
+    },
+    /// Extended-protocol Parse (`verb::PARSE`): declares a prepared
+    /// statement named `statement` (empty = unnamed) for `sql`. The engine
+    /// answers with [`PgReply::Describe`].
+    Parse {
+        sql: String,
+        statement: String,
+        connection_id: u64,
+        cancel: CancelToken,
+    },
+    /// Extended-protocol Execute (`verb::EXECUTE`) against a bound portal:
+    /// `statement`/`portal` name the prepared statement and portal (empty =
+    /// unnamed), `parameters` are the bind values already decoded from wire
+    /// format to typed values.
+    Execute {
+        sql: String,
+        statement: String,
+        portal: String,
+        parameters: Vec<SqlValue>,
+        connection_id: u64,
+        cancel: CancelToken,
+    },
+    /// COPY IN second phase (`verb::COPY_DATA`): the driver collected the
+    /// client's CopyData rows (or saw CopyFail) for the `sql` that opened
+    /// the transfer and hands them back for the engine to apply.
+    /// `copy_failed` is true when the client sent CopyFail instead of
+    /// CopyDone, so the engine rolls back.
+    CopyData {
+        sql: String,
+        copy_data: Vec<Vec<u8>>,
+        copy_failed: bool,
+        connection_id: u64,
+        cancel: CancelToken,
+    },
 }
 
 impl QueryRequest {
+    /// SQL text — every variant carries the statement it operates against.
     #[must_use]
-    pub fn new(connection_id: u64) -> Self {
-        Self {
-            sql: String::new(),
-            connection_id,
-            parameters: Vec::new(),
-            statement: String::new(),
-            portal: String::new(),
-            copy_data: Vec::new(),
-            copy_failed: false,
-            cancel: CancelToken::none(),
+    pub fn sql(&self) -> &str {
+        match self {
+            Self::Query { sql, .. }
+            | Self::Parse { sql, .. }
+            | Self::Execute { sql, .. }
+            | Self::CopyData { sql, .. } => sql,
+        }
+    }
+
+    /// Process-unique connection id — every variant carries it so the
+    /// engine can key per-connection state regardless of which operation
+    /// dispatched.
+    #[must_use]
+    pub fn connection_id(&self) -> u64 {
+        match self {
+            Self::Query { connection_id, .. }
+            | Self::Parse { connection_id, .. }
+            | Self::Execute { connection_id, .. }
+            | Self::CopyData { connection_id, .. } => *connection_id,
+        }
+    }
+
+    /// Cooperative cancel signal — every variant carries it so the engine
+    /// can poll [`CancelToken::is_cancelled`] regardless of which
+    /// operation dispatched.
+    #[must_use]
+    pub fn cancel(&self) -> &CancelToken {
+        match self {
+            Self::Query { cancel, .. }
+            | Self::Parse { cancel, .. }
+            | Self::Execute { cancel, .. }
+            | Self::CopyData { cancel, .. } => cancel,
+        }
+    }
+
+    /// Builds a request from a generic bytes verb + wire fields — the
+    /// construction site for a boundary that only has untyped transport
+    /// fields to work with (`proxima::Client`'s universal `Request<Bytes>`
+    /// envelope, a hand-built test request), mirroring
+    /// `RedisRequest::from_args`. `statement` is used for `PARSE`;
+    /// `parameters` for `EXECUTE`.
+    ///
+    /// An unrecognized verb is REJECTED, not widened to `Query`: this
+    /// boundary sits directly in front of live SQL execution, so coercing
+    /// garbage input into a query would silently execute the request body
+    /// as SQL (a fail-open on a SQL boundary — the wrong default). The
+    /// error message matches the pre-de-envelope client dispatch's own
+    /// rejection (`ClientError::Protocol("unsupported client verb")`) so a
+    /// caller sees the identical text either way.
+    pub fn try_from_wire(
+        verb: &[u8],
+        statement: impl Into<String>,
+        sql: impl Into<String>,
+        parameters: Vec<SqlValue>,
+    ) -> Result<Self, &'static str> {
+        let sql = sql.into();
+        match verb {
+            self::verb::QUERY => Ok(Self::Query {
+                sql,
+                connection_id: 0,
+                cancel: CancelToken::none(),
+            }),
+            self::verb::PARSE => Ok(Self::Parse {
+                sql,
+                statement: statement.into(),
+                connection_id: 0,
+                cancel: CancelToken::none(),
+            }),
+            self::verb::EXECUTE => Ok(Self::Execute {
+                sql,
+                statement: statement.into(),
+                portal: String::new(),
+                parameters,
+                connection_id: 0,
+                cancel: CancelToken::none(),
+            }),
+            _ => Err("unsupported client verb"),
         }
     }
 }
@@ -356,5 +462,92 @@ impl QueryReply {
     pub fn with_transaction(mut self, status: TxStatus) -> Self {
         self.transaction = Some(status);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn try_from_wire_query_verb_builds_the_query_variant() {
+        let request = QueryRequest::try_from_wire(verb::QUERY, "", "select 1", Vec::new())
+            .expect("QUERY must be accepted");
+        assert_eq!(request.sql(), "select 1");
+        assert!(matches!(request, QueryRequest::Query { .. }));
+    }
+
+    #[test]
+    fn try_from_wire_parse_verb_carries_the_statement_name() {
+        let request = QueryRequest::try_from_wire(verb::PARSE, "stmt1", "select $1", Vec::new())
+            .expect("PARSE must be accepted");
+        match request {
+            QueryRequest::Parse { sql, statement, .. } => {
+                assert_eq!(sql, "select $1");
+                assert_eq!(statement, "stmt1");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_from_wire_execute_verb_carries_statement_and_parameters() {
+        let request =
+            QueryRequest::try_from_wire(verb::EXECUTE, "stmt1", "select $1", vec![SqlValue::Int(7)])
+                .expect("EXECUTE must be accepted");
+        match request {
+            QueryRequest::Execute {
+                sql,
+                statement,
+                parameters,
+                ..
+            } => {
+                assert_eq!(sql, "select $1");
+                assert_eq!(statement, "stmt1");
+                assert_eq!(parameters, vec![SqlValue::Int(7)]);
+            }
+            other => panic!("expected Execute, got {other:?}"),
+        }
+    }
+
+    /// SQL-boundary fail-loud contract (post PC3-pgwire review): an
+    /// unrecognized verb at the generic-bytes construction site must be
+    /// REJECTED, never silently coerced into a live `Query` — the
+    /// pre-de-envelope client dispatch's own default arm rejected exactly
+    /// this input (`ClientError::Protocol("unsupported client verb")`), and
+    /// this restores that fail-loud behavior instead of executing the
+    /// request body as SQL.
+    #[test]
+    fn try_from_wire_unrecognized_verb_is_rejected_not_coerced_to_query() {
+        let outcome = QueryRequest::try_from_wire(b"BOGUS", "", "select 1", Vec::new());
+        assert_eq!(outcome.unwrap_err(), "unsupported client verb");
+    }
+
+    #[test]
+    fn try_from_wire_rejects_a_plausible_but_unsupported_pg_verb() {
+        // COPY_DATA is a real driver-internal verb (see verb::COPY_DATA) but
+        // is never a valid CLIENT-dispatch verb — a garbage/mismatched verb
+        // at this boundary must not silently run the body as a query either.
+        let outcome =
+            QueryRequest::try_from_wire(b"COPY_DATA", "", "delete from users", Vec::new());
+        assert_eq!(outcome.unwrap_err(), "unsupported client verb");
+    }
+
+    #[test]
+    fn connection_id_and_cancel_project_across_every_variant() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let cancel = CancelToken::from(Arc::clone(&flag));
+        let request = QueryRequest::CopyData {
+            sql: "copy t from stdin".to_string(),
+            copy_data: vec![b"1\tx\n".to_vec()],
+            copy_failed: false,
+            connection_id: 42,
+            cancel,
+        };
+        assert_eq!(request.connection_id(), 42);
+        assert!(request.cancel().is_cancelled());
+        assert_eq!(request.sql(), "copy t from stdin");
     }
 }

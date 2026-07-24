@@ -2,16 +2,16 @@
 //!
 //! Composes the sans-IO [`proxima_protocols::pgwire_codec`] (message codec +
 //! session FSM — see its docs for the wire layer) with the workspace's
-//! one primitive, `proxima_primitives::pipe::Pipe`. A SQL engine is a `Pipe`: it
-//! matches on [`pipe_contract::verb`] verbs and returns a typed
-//! [`pipe_contract::PgReply`] through `Carry`. The driver owns wire
-//! framing and the text/binary encoding of [`pipe_contract::SqlValue`],
-//! so the engine stays wire-agnostic — and every proxima middleware
-//! (`Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`, record/replay,
-//! `RoutingPipe`) composes onto SQL with zero new code.
+//! one primitive, `proxima_primitives::pipe::Pipe`. A SQL engine is a `Pipe`:
+//! it is `QueryRequest -> PgReply` (payload-no-cell — no `Request`/
+//! `Response` envelope), matching on [`pipe_contract::QueryRequest`]'s
+//! variants. The driver owns wire framing and the text/binary encoding of
+//! [`pipe_contract::SqlValue`], so the engine stays wire-agnostic — and
+//! every proxima middleware (`Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`,
+//! record/replay, `RoutingPipe`) composes onto SQL with zero new code.
 //!
-//! - [`pipe_contract`] — the verb vocabulary + typed payloads a SQL
-//!   `Pipe` exchanges
+//! - [`pipe_contract`] — the self-describing request enum + typed payloads
+//!   a SQL `Pipe` exchanges
 //! - [`connection`] — the runtime-agnostic per-connection driver over any
 //!   `futures::io` stream; usable directly from prime, tests, or a bare
 //!   event loop (`--no-default-features` keeps tokio out of the
@@ -30,6 +30,8 @@
 //! `docs/proxima-pgwire/discipline.md` (G8 CI/baseline substrate, G11
 //! stream-listener upgrade-honor).
 
+#[cfg(feature = "listen")]
+pub mod any_protocol;
 pub mod auth;
 pub mod broker;
 #[cfg(feature = "scram")]
@@ -44,8 +46,6 @@ pub mod listen;
 pub mod md5;
 #[cfg(feature = "listen")]
 pub mod pipe;
-#[cfg(feature = "listen")]
-pub mod any_protocol;
 pub mod pipe_contract;
 pub mod pipes;
 #[cfg(feature = "scram")]
@@ -57,12 +57,14 @@ pub use proxima_protocols::pgwire_codec as codec;
 // the Handler surface a SQL engine builds against — re-exported so an engine
 // author imports everything from proxima-pgwire and never reaches past it
 // into proxima-pipe / proxima-core internals (teaching surface, principle 2)
-pub use pipes::{PgPipeHandle, PgRequest, PgResponse, into_pg_handle};
+pub use pipes::{PgPipeHandle, into_pg_handle};
 pub use proxima_core::ProximaError;
 pub use proxima_primitives::pipe::SendPipe;
 pub use proxima_primitives::pipe::handler::{Handler, PipeHandle, into_handle};
 pub use proxima_primitives::pipe::request::{Request, Response};
 
+#[cfg(feature = "listen")]
+pub use any_protocol::PgWireAnyProtocol;
 pub use auth::{PasswordVerifier, PgAuth, StaticCredentials};
 pub use broker::{Notification, NotifyBroker};
 #[cfg(feature = "client")]
@@ -81,8 +83,6 @@ pub use handler::ErrorInfo;
 pub use listen::PgWireListenProtocol;
 #[cfg(feature = "listen")]
 pub use pipe::PgWireConnectionPipe;
-#[cfg(feature = "listen")]
-pub use any_protocol::PgWireAnyProtocol;
 pub use pipe_contract::{
     CancelToken, ColumnDesc, DescribeReply, ErrorReply, NoticeReply, PgReply, QueryReply,
     QueryRequest, RowStream, SqlValue, TxStatus, verb,

@@ -13,14 +13,13 @@ use proxima_core::ProximaError;
 use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_pgwire::codec::Session;
 use proxima_pgwire::{
-    ColumnDesc, DescribeReply, ErrorReply, Negotiation, PgAuth, PgPipeHandle, PgReply, PgRequest,
-    PgResponse, PgServerConfig, QueryReply, RowStream, SqlValue, StaticCredentials, into_pg_handle,
-    negotiate, serve_session, verb,
+    ColumnDesc, DescribeReply, ErrorReply, Negotiation, PgAuth, PgPipeHandle, PgReply,
+    PgServerConfig, QueryReply, QueryRequest, RowStream, SqlValue, StaticCredentials,
+    into_pg_handle, negotiate, serve_session,
 };
-use proxima_protocols::pgwire_codec::{CopyFormat, Oid};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::request::Response;
 use proxima_primitives::stream::{StreamConnection, StreamListener, StreamListenerExt};
+use proxima_protocols::pgwire_codec::{CopyFormat, Oid};
 use zeroize::Zeroizing;
 
 const OID_INT4: Oid = Oid(23);
@@ -32,24 +31,22 @@ const OID_INT4: Oid = Oid(23);
 struct EchoPipe;
 
 impl SendPipe for EchoPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.clone();
-        let parameters = request.payload.parameters.clone();
-        let reply = match request.method.as_bytes() {
-            verb::QUERY => echo_query(&sql),
-            verb::PARSE => PgReply::Describe(echo_describe(&sql)),
-            verb::EXECUTE => echo_execute(&parameters),
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let reply = match request {
+            QueryRequest::Query { sql, .. } => echo_query(&sql),
+            QueryRequest::Parse { sql, .. } => PgReply::Describe(echo_describe(&sql)),
+            QueryRequest::Execute { parameters, .. } => echo_execute(&parameters),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "echo pipe received unexpected verb {other:?}"
+                    "echo pipe received unexpected request {other:?}"
                 )));
             }
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -192,38 +189,49 @@ struct CopyPipe;
 const COPY_OUT_WITNESS: [&[u8]; 2] = [b"1\talice\n", b"2\tbob\n"];
 
 impl SendPipe for CopyPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.clone();
-        let reply = match request.method.as_bytes() {
-            verb::QUERY | verb::EXECUTE if sql.contains("TO STDOUT") => PgReply::CopyOut {
-                format: CopyFormat::Text,
-                column_formats: vec![],
-                data: COPY_OUT_WITNESS.iter().map(|row| row.to_vec()).collect(),
-            },
-            verb::QUERY | verb::EXECUTE if sql.contains("FROM STDIN") => PgReply::CopyIn {
-                format: CopyFormat::Text,
-                column_formats: vec![],
-            },
-            verb::COPY_DATA => {
-                let query = &request.payload;
-                if query.copy_failed {
-                    PgReply::Query(QueryReply::tag("ROLLBACK"))
-                } else {
-                    PgReply::Query(QueryReply::tag(format!("COPY {}", query.copy_data.len())))
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let sql = request.sql().to_owned();
+        let reply = match request {
+            QueryRequest::Query { .. } | QueryRequest::Execute { .. }
+                if sql.contains("TO STDOUT") =>
+            {
+                PgReply::CopyOut {
+                    format: CopyFormat::Text,
+                    column_formats: vec![],
+                    data: COPY_OUT_WITNESS.iter().map(|row| row.to_vec()).collect(),
                 }
             }
-            verb::PARSE => PgReply::Describe(DescribeReply::default()),
-            other => {
+            QueryRequest::Query { .. } | QueryRequest::Execute { .. }
+                if sql.contains("FROM STDIN") =>
+            {
+                PgReply::CopyIn {
+                    format: CopyFormat::Text,
+                    column_formats: vec![],
+                }
+            }
+            QueryRequest::CopyData {
+                copy_failed,
+                copy_data,
+                ..
+            } => {
+                if copy_failed {
+                    PgReply::Query(QueryReply::tag("ROLLBACK"))
+                } else {
+                    PgReply::Query(QueryReply::tag(format!("COPY {}", copy_data.len())))
+                }
+            }
+            QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply::default()),
+            _ => {
                 return Err(ProximaError::Config(format!(
-                    "copy pipe unexpected verb {other:?}"
+                    "copy pipe unexpected request sql {sql:?}"
                 )));
             }
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -238,13 +246,13 @@ struct StreamPipe {
 }
 
 impl SendPipe for StreamPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let reply = match request.method.as_bytes() {
-            verb::QUERY | verb::EXECUTE => {
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let reply = match request {
+            QueryRequest::Query { .. } | QueryRequest::Execute { .. } => {
                 let (sender, receiver) = async_channel::bounded::<Vec<SqlValue>>(4);
                 let count = self.count;
                 tokio::spawn(async move {
@@ -260,17 +268,17 @@ impl SendPipe for StreamPipe {
                     command_tag: None,
                 }
             }
-            verb::PARSE => PgReply::Describe(DescribeReply {
+            QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
                 parameter_types: vec![],
                 columns: vec![ColumnDesc::new("n", OID_INT4)],
             }),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "stream pipe unexpected verb {other:?}"
+                    "stream pipe unexpected request {other:?}"
                 )));
             }
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -329,28 +337,28 @@ async fn spawn_copy_server() -> u16 {
 struct NotifyPipe;
 
 impl SendPipe for NotifyPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.trim().to_string();
-        let reply = match request.method.as_bytes() {
-            verb::QUERY if sql.to_ascii_uppercase().starts_with("LISTEN ") => PgReply::Listen {
-                channels: vec![parse_listen_channel(&sql)],
-            },
-            verb::QUERY if sql.to_ascii_uppercase().starts_with("NOTIFY ") => {
-                let (channel, payload) = parse_notify(&sql);
-                PgReply::Notify { channel, payload }
-            }
-            verb::QUERY => PgReply::Query(QueryReply::tag("OK")),
-            other => {
-                return Err(ProximaError::Config(format!(
-                    "notify pipe unexpected verb {other:?}"
-                )));
-            }
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let QueryRequest::Query { sql, .. } = &request else {
+            return Err(ProximaError::Config(format!(
+                "notify pipe unexpected request {request:?}"
+            )));
         };
-        Ok(Response::typed(200, reply))
+        let sql = sql.trim().to_string();
+        let reply = if sql.to_ascii_uppercase().starts_with("LISTEN ") {
+            PgReply::Listen {
+                channels: vec![parse_listen_channel(&sql)],
+            }
+        } else if sql.to_ascii_uppercase().starts_with("NOTIFY ") {
+            let (channel, payload) = parse_notify(&sql);
+            PgReply::Notify { channel, payload }
+        } else {
+            PgReply::Query(QueryReply::tag("OK"))
+        };
+        Ok(reply)
     }
 }
 
@@ -706,11 +714,11 @@ mod direct_tls {
     use proxima_pgwire::{
         CancelRegistry, PgAuth, PgServerConfig, PgWireConnectionPipe, into_pg_handle,
     };
-    use proxima_protocols::pgwire_codec::backend::{BackendMessage, parse_backend};
     use proxima_primitives::pipe::SendPipe;
     use proxima_primitives::pipe::request::{Request, RequestContext};
     use proxima_primitives::pipe::upgrade::HijackedSocket;
     use proxima_primitives::stream::{StreamListener, StreamListenerExt, StreamUpstreamExt};
+    use proxima_protocols::pgwire_codec::backend::{BackendMessage, parse_backend};
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
@@ -831,7 +839,9 @@ mod direct_tls {
                 return;
             };
             let request = Request {
-                method: proxima_primitives::pipe::method::Method::from_bytes(proxima_pgwire::verb::CONNECT),
+                method: proxima_primitives::pipe::method::Method::from_bytes(
+                    proxima_pgwire::verb::CONNECT,
+                ),
                 path: Bytes::new(),
                 query: proxima_primitives::pipe::header_list::HeaderList::new(),
                 metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
@@ -858,8 +868,10 @@ mod direct_tls {
         let port = spawn_direct_tls_server(acceptor).await;
 
         let connector = futures_rustls::TlsConnector::from(Arc::new(no_verify_client_config()));
-        let upstream =
-            proxima_net::tokio::TokioTcpUpstream::new(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        let upstream = proxima_net::tokio::TokioTcpUpstream::new(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            port,
+        )));
         let stream = upstream.connect().await.expect("client tcp connect");
         let server_name = ServerName::try_from("localhost").expect("server name");
         let mut tls = connector

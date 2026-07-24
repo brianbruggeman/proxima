@@ -1,6 +1,6 @@
 //! The per-connection driver: reads frames, feeds the sans-IO session
-//! FSM, builds a `Request` per protocol operation, calls the SQL engine
-//! `Pipe`, and encodes the typed `PgReply` back onto the wire.
+//! FSM, builds a `QueryRequest` variant per protocol operation, calls the
+//! SQL engine `Pipe`, and encodes the typed `PgReply` back onto the wire.
 //!
 //! Composes `proxima_protocols::pgwire_codec` (parse / encode / `Session`) over any
 //! `futures::io` stream — no runtime, no socket type, no TLS knowledge.
@@ -11,26 +11,28 @@
 //! format-code encoding of [`SqlValue`], so the engine stays
 //! wire-agnostic (see [`crate::pipe_contract`]).
 
+#[cfg(feature = "listen")]
+use std::future::Future;
 use std::io;
+#[cfg(feature = "listen")]
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 #[cfg(feature = "listen")]
-use std::future::Future;
-#[cfg(feature = "listen")]
-use std::pin::Pin;
-#[cfg(feature = "listen")]
 use std::task::{Context, Poll};
 
-use bytes::{Buf, Bytes, BytesMut};
+#[cfg(feature = "listen")]
+use bytes::Bytes;
+use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(not(feature = "listen"))]
 use futures::FutureExt;
-#[cfg(not(feature = "listen"))]
-use futures::stream::StreamExt;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(feature = "listen")]
 use futures::stream::Stream;
+#[cfg(not(feature = "listen"))]
+use futures::stream::StreamExt;
 
 #[cfg(feature = "listen")]
 use proxima_core::markers::DropSafe;
@@ -56,10 +58,8 @@ use proxima_protocols::pgwire_codec::{
 };
 
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::request::RequestContext;
 
-use crate::pipes::{PgPipeHandle, PgRequest, PgResponse};
+use crate::pipes::PgPipeHandle;
 
 #[cfg(feature = "scram")]
 use base64::Engine as _;
@@ -71,7 +71,7 @@ use crate::error::ServeError;
 use crate::handler::{ErrorInfo, commit, error_response_size, reserve, write_error_fields};
 use crate::pipe_contract::{
     CancelToken, ColumnDesc, DescribeReply, PgReply, QueryReply, QueryRequest, RowStream, SqlValue,
-    TxStatus, verb,
+    TxStatus,
 };
 use crate::store::{
     BoundParameter, NamedSlots, PendingRows, Portal, PreparedStatement, StoreError,
@@ -413,13 +413,12 @@ struct ConnState {
 }
 
 impl ConnState {
-    /// A fresh [`QueryRequest`] keyed to this connection with the cancel
-    /// token already threaded in — every engine call goes through here so
-    /// the token reaches the engine uniformly (gate G12).
-    fn request(&self) -> QueryRequest {
-        let mut request = QueryRequest::new(self.connection_id);
-        request.cancel = self.cancel.clone();
-        request
+    /// This connection's identity threaded into every engine request: the
+    /// process-unique id (so the engine keys per-connection state) and the
+    /// cooperative cancel token (gate G12) — every `QueryRequest` variant
+    /// carries both.
+    fn identity(&self) -> (u64, CancelToken) {
+        (self.connection_id, self.cancel.clone())
     }
 }
 
@@ -441,27 +440,6 @@ fn tx_status_to_codec(status: TxStatus) -> TransactionStatus {
         TxStatus::InTransaction => TransactionStatus::InTransaction,
         TxStatus::Failed => TransactionStatus::Failed,
     }
-}
-
-/// Builds the inbound `PgRequest` for a verb the engine matches on.
-/// SQL text rides `query.sql`; the statement/portal name rides `path`.
-fn build_request(method: &'static [u8], sql: &str, mut query: QueryRequest) -> PgRequest {
-    use proxima_primitives::pipe::request::Request;
-    query.sql = sql.to_owned();
-    Request {
-        method: proxima_primitives::pipe::method::Method::from_bytes(method),
-        path: Bytes::from(query.statement.clone().into_bytes()),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: query,
-        stream: None,
-        context: RequestContext::default(),
-    }
-}
-
-/// Extracts the typed reply from an engine response.
-fn downcast_reply(response: PgResponse) -> Result<PgReply, ServeError> {
-    Ok(response.payload)
 }
 
 /// Encodes one `SqlValue` cell for the given result format code. The
@@ -838,13 +816,15 @@ where
         return Ok(false);
     };
 
-    let mut request = QueryRequest::new(connection_id);
-    request.copy_data = rows;
-    request.copy_failed = failed;
-    request.cancel = cancel.clone();
-    let response =
-        SendPipe::call(query.as_ref(), build_request(verb::COPY_DATA, sql, request)).await?;
-    match downcast_reply(response)? {
+    let request = QueryRequest::CopyData {
+        sql: sql.to_owned(),
+        copy_data: rows,
+        copy_failed: failed,
+        connection_id,
+        cancel: cancel.clone(),
+    };
+    let response = SendPipe::call(query.as_ref(), request).await?;
+    match response {
         PgReply::Query(reply) => {
             let tag = reply
                 .command_tag
@@ -1070,16 +1050,7 @@ where
 {
     let admission = unbounded_admission();
     serve_session_admitted(
-        stream,
-        session,
-        startup,
-        leftover,
-        query,
-        auth,
-        config,
-        registry,
-        broker,
-        runtime,
+        stream, session, startup, leftover, query, auth, config, registry, broker, runtime,
         admission,
     )
     .await
@@ -1521,7 +1492,8 @@ where
     let mechanisms: [&[u8]; 1] = [b"SCRAM-SHA-256"];
     let size = 9 + mechanisms.iter().map(|name| name.len() + 1).sum::<usize>() + 1;
     let start = reserve(out, size);
-    let outcome = proxima_protocols::pgwire_codec::backend::encode_auth_sasl(&mut out[start..], &mechanisms);
+    let outcome =
+        proxima_protocols::pgwire_codec::backend::encode_auth_sasl(&mut out[start..], &mechanisms);
     commit(out, start, outcome)?;
     flush_out(stream, out).await?;
 
@@ -1796,10 +1768,7 @@ impl<R: AsyncRead + Unpin> UnpinPipe for PgConnSource<'_, R> {
 
     fn call(&self, (): ()) -> impl Future<Output = Result<WireEvent, Exhausted>> + Unpin {
         match self {
-            PgConnSource::Read { read_half, scratch } => PgConnCall::Read {
-                read_half,
-                scratch,
-            },
+            PgConnSource::Read { read_half, scratch } => PgConnCall::Read { read_half, scratch },
             PgConnSource::Notify { notify_rx } => PgConnCall::Notify { notify_rx },
         }
     }
@@ -1827,7 +1796,9 @@ async fn main_loop<S>(
     state: &mut ConnState,
     query: &PgPipeHandle,
     config: &PgServerConfig,
-    #[cfg_attr(not(feature = "listen"), allow(unused_mut))] mut notify_rx: UnboundedReceiver<Notification>,
+    #[cfg_attr(not(feature = "listen"), allow(unused_mut))] mut notify_rx: UnboundedReceiver<
+        Notification,
+    >,
     admission: &AdmissionHandle,
 ) -> Result<(), ServeError>
 where
@@ -1954,7 +1925,8 @@ where
                     ],
                     Select::Fifo,
                 );
-                let outcome = proxima_listen::wait_for_wire_event(&sources, &mut write_half).await?;
+                let outcome =
+                    proxima_listen::wait_for_wire_event(&sources, &mut write_half).await?;
                 read_half = into_inner(read_lock);
                 notify_rx = into_inner(notify_lock);
                 match outcome {
@@ -1968,8 +1940,15 @@ where
             }
             #[cfg(not(feature = "listen"))]
             {
-                idle_read(&mut read_half, &mut write_half, buf, &mut scratch, out, &mut notify_rx)
-                    .await?
+                idle_read(
+                    &mut read_half,
+                    &mut write_half,
+                    buf,
+                    &mut scratch,
+                    out,
+                    &mut notify_rx,
+                )
+                .await?
             }
         } else {
             read_some(&mut read_half, buf, &mut scratch).await?
@@ -2122,12 +2101,16 @@ where
                 finish_simple(stream, out, session).await?;
                 return Ok(DispatchOutcome::Done);
             }
-            let request = build_request(verb::QUERY, sql_text, state.request());
+            let (connection_id, cancel) = state.identity();
+            let request = QueryRequest::Query {
+                sql: sql_text.to_owned(),
+                connection_id,
+                cancel,
+            };
             let response = SendPipe::call(query.as_ref(), request).await;
             #[cfg(feature = "listen")]
             admission.request_release();
-            let response = response?;
-            match downcast_reply(response)? {
+            match response? {
                 PgReply::Query(reply) => {
                     emit_query_reply(
                         &reply,
@@ -2316,11 +2299,15 @@ async fn handle_parse(
     let reply = if is_empty_query {
         DescribeReply::default()
     } else {
-        let mut request = state.request();
-        request.statement = name.to_string();
-        let response =
-            SendPipe::call(query.as_ref(), build_request(verb::PARSE, sql, request)).await?;
-        match downcast_reply(response)? {
+        let (connection_id, cancel) = state.identity();
+        let request = QueryRequest::Parse {
+            sql: sql.to_owned(),
+            statement: name.to_string(),
+            connection_id,
+            cancel,
+        };
+        let response = SendPipe::call(query.as_ref(), request).await?;
+        match response {
             PgReply::Describe(reply) => reply,
             PgReply::Error(error) => {
                 extended_fail(out, session, &ErrorInfo::from_reply(&error))?;
@@ -2684,10 +2671,7 @@ where
         append_message(out, 5, &BackendMessage::EmptyQueryResponse)?;
         return Ok(DispatchOutcome::Done);
     }
-    let mut request = state.request();
-    request.statement = portal.statement_name.clone();
-    request.portal = name_text.to_string();
-    request.parameters = portal
+    let parameters = portal
         .parameters
         .iter()
         .enumerate()
@@ -2697,9 +2681,17 @@ where
         .collect();
     let sql = statement.sql.clone();
     let result_formats = portal.result_formats.clone();
-    let response =
-        SendPipe::call(query.as_ref(), build_request(verb::EXECUTE, &sql, request)).await?;
-    let reply = match downcast_reply(response)? {
+    let (connection_id, cancel) = state.identity();
+    let request = QueryRequest::Execute {
+        sql: sql.clone(),
+        statement: portal.statement_name.clone(),
+        portal: name_text.to_string(),
+        parameters,
+        connection_id,
+        cancel,
+    };
+    let response = SendPipe::call(query.as_ref(), request).await?;
+    let reply = match response {
         PgReply::Query(reply) => reply,
         PgReply::QueryStream {
             columns,
@@ -2856,17 +2848,16 @@ mod tests {
 
     use futures::io::{AsyncRead, AsyncWrite};
     use proxima_core::ProximaError;
+    use proxima_primitives::pipe::SendPipe;
     use proxima_protocols::pgwire_codec::backend::parse_backend;
     use proxima_protocols::pgwire_codec::types::error_field;
     use proxima_protocols::pgwire_codec::{BackendMessage, Oid, Session};
-    use proxima_primitives::pipe::SendPipe;
-    use proxima_primitives::pipe::request::Response;
 
     use crate::auth::PgAuth;
     use crate::config::PgServerConfig;
     use crate::error::ServeError;
-    use crate::pipe_contract::{ColumnDesc, DescribeReply, PgReply, QueryReply, SqlValue, verb};
-    use crate::pipes::{PgPipeHandle, PgRequest, PgResponse, into_pg_handle};
+    use crate::pipe_contract::{ColumnDesc, DescribeReply, PgReply, QueryReply, SqlValue};
+    use crate::pipes::{PgPipeHandle, into_pg_handle};
 
     use super::*;
 
@@ -2929,14 +2920,13 @@ mod tests {
     struct EchoPipe;
 
     impl SendPipe for EchoPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let sql = request.payload.sql.clone();
-            let reply = match request.method.as_bytes() {
-                verb::QUERY => {
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let reply = match request {
+                QueryRequest::Query { sql, .. } => {
                     if sql.trim() == "select 1" {
                         PgReply::Query(QueryReply::rows(
                             vec![ColumnDesc::new("?column?", Oid(23))],
@@ -2949,19 +2939,21 @@ mod tests {
                         ))
                     }
                 }
-                verb::PARSE => PgReply::Describe(DescribeReply {
+                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
                     parameter_types: vec![],
                     columns: vec![ColumnDesc::new("v", Oid(23))],
                 }),
-                verb::EXECUTE => PgReply::Query(QueryReply::rows(
+                QueryRequest::Execute { .. } => PgReply::Query(QueryReply::rows(
                     vec![ColumnDesc::new("v", Oid(23))],
                     vec![vec![SqlValue::Int(1)]],
                 )),
                 other => {
-                    return Err(ProximaError::Config(format!("unexpected verb {other:?}")));
+                    return Err(ProximaError::Config(format!(
+                        "unexpected request {other:?}"
+                    )));
                 }
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 
@@ -3792,23 +3784,29 @@ mod tests {
     struct FiveRowPipe;
 
     impl SendPipe for FiveRowPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let reply = match request.method.as_bytes() {
-                verb::PARSE => PgReply::Describe(DescribeReply {
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let reply = match request {
+                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
                     parameter_types: vec![],
                     columns: vec![ColumnDesc::new("n", Oid(23))],
                 }),
-                verb::EXECUTE | verb::QUERY => PgReply::Query(QueryReply::rows(
-                    vec![ColumnDesc::new("n", Oid(23))],
-                    (1..=5).map(|number| vec![SqlValue::Int(number)]).collect(),
-                )),
-                other => return Err(ProximaError::Config(format!("unexpected verb {other:?}"))),
+                QueryRequest::Execute { .. } | QueryRequest::Query { .. } => {
+                    PgReply::Query(QueryReply::rows(
+                        vec![ColumnDesc::new("n", Oid(23))],
+                        (1..=5).map(|number| vec![SqlValue::Int(number)]).collect(),
+                    ))
+                }
+                other => {
+                    return Err(ProximaError::Config(format!(
+                        "unexpected request {other:?}"
+                    )));
+                }
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 
@@ -3969,34 +3967,49 @@ mod tests {
     struct CopyPipe;
 
     impl SendPipe for CopyPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let sql = request.payload.sql.clone();
-            let reply = match request.method.as_bytes() {
-                verb::QUERY | verb::EXECUTE if sql.contains("TO STDOUT") => PgReply::CopyOut {
-                    format: CopyFormat::Text,
-                    column_formats: vec![],
-                    data: COPY_OUT_ROWS.iter().map(|row| row.to_vec()).collect(),
-                },
-                verb::QUERY | verb::EXECUTE if sql.contains("FROM STDIN") => PgReply::CopyIn {
-                    format: CopyFormat::Text,
-                    column_formats: vec![],
-                },
-                verb::COPY_DATA => {
-                    let query = &request.payload;
-                    if query.copy_failed {
-                        PgReply::Query(QueryReply::tag("ROLLBACK"))
-                    } else {
-                        PgReply::Query(QueryReply::tag(format!("COPY {}", query.copy_data.len())))
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let sql = request.sql().to_owned();
+            let reply = match request {
+                QueryRequest::Query { .. } | QueryRequest::Execute { .. }
+                    if sql.contains("TO STDOUT") =>
+                {
+                    PgReply::CopyOut {
+                        format: CopyFormat::Text,
+                        column_formats: vec![],
+                        data: COPY_OUT_ROWS.iter().map(|row| row.to_vec()).collect(),
                     }
                 }
-                verb::PARSE => PgReply::Describe(DescribeReply::default()),
-                other => return Err(ProximaError::Config(format!("unexpected verb {other:?}"))),
+                QueryRequest::Query { .. } | QueryRequest::Execute { .. }
+                    if sql.contains("FROM STDIN") =>
+                {
+                    PgReply::CopyIn {
+                        format: CopyFormat::Text,
+                        column_formats: vec![],
+                    }
+                }
+                QueryRequest::CopyData {
+                    copy_failed,
+                    copy_data,
+                    ..
+                } => {
+                    if copy_failed {
+                        PgReply::Query(QueryReply::tag("ROLLBACK"))
+                    } else {
+                        PgReply::Query(QueryReply::tag(format!("COPY {}", copy_data.len())))
+                    }
+                }
+                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply::default()),
+                _ => {
+                    return Err(ProximaError::Config(format!(
+                        "unexpected request sql {sql:?}"
+                    )));
+                }
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 
@@ -4146,28 +4159,34 @@ mod tests {
     struct ListenNotifyPipe;
 
     impl SendPipe for ListenNotifyPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let sql = request.payload.sql.clone();
-            let reply = match request.method.as_bytes() {
-                verb::QUERY if sql.starts_with("LISTEN") => PgReply::Listen {
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let QueryRequest::Query { sql, .. } = &request else {
+                return Err(ProximaError::Config(format!(
+                    "unexpected request {request:?}"
+                )));
+            };
+            let reply = if sql.starts_with("LISTEN") {
+                PgReply::Listen {
                     channels: vec!["test".to_string()],
-                },
-                verb::QUERY if sql.starts_with("UNLISTEN") => PgReply::Unlisten {
+                }
+            } else if sql.starts_with("UNLISTEN") {
+                PgReply::Unlisten {
                     channels: vec!["test".to_string()],
                     all: false,
-                },
-                verb::QUERY if sql.starts_with("NOTIFY") => PgReply::Notify {
+                }
+            } else if sql.starts_with("NOTIFY") {
+                PgReply::Notify {
                     channel: "test".to_string(),
                     payload: "payload".to_string(),
-                },
-                verb::QUERY => PgReply::Query(QueryReply::tag("OK")),
-                other => return Err(ProximaError::Config(format!("unexpected verb {other:?}"))),
+                }
+            } else {
+                PgReply::Query(QueryReply::tag("OK"))
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 
@@ -4377,14 +4396,14 @@ mod tests {
     struct CancelObserverPipe(Arc<AtomicBool>);
 
     impl SendPipe for CancelObserverPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let observed = request.payload.cancel.is_cancelled();
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let observed = request.cancel().is_cancelled();
             self.0.store(observed, Ordering::Relaxed);
-            Ok(Response::typed(200, PgReply::Query(QueryReply::tag("OK"))))
+            Ok(PgReply::Query(QueryReply::tag("OK")))
         }
     }
 
@@ -4411,7 +4430,12 @@ mod tests {
 
         let observed = Arc::new(AtomicBool::new(false));
         let engine = CancelObserverPipe(Arc::clone(&observed));
-        let request = build_request(verb::QUERY, "select 1", state.request());
+        let (connection_id, cancel) = state.identity();
+        let request = QueryRequest::Query {
+            sql: "select 1".to_string(),
+            connection_id,
+            cancel,
+        };
         engine
             .call(request)
             .await
@@ -4429,7 +4453,12 @@ mod tests {
 
         let observed = Arc::new(AtomicBool::new(true));
         let engine = CancelObserverPipe(Arc::clone(&observed));
-        let request = build_request(verb::QUERY, "select 1", state.request());
+        let (connection_id, cancel) = state.identity();
+        let request = QueryRequest::Query {
+            sql: "select 1".to_string(),
+            connection_id,
+            cancel,
+        };
         engine
             .call(request)
             .await
@@ -4457,8 +4486,8 @@ mod tests {
 
     // ---- G10: streaming (lazy) row source ----
 
-    /// A streaming engine: on `verb::QUERY`/`verb::EXECUTE` it spawns a task
-    /// that feeds `count` int rows into an `async_channel` sender and returns
+    /// A streaming engine: on `Query`/`Execute` it spawns a task that feeds
+    /// `count` int rows into an `async_channel` sender and returns
     /// `PgReply::QueryStream` over the receiver — the driver drains them
     /// lazily, never collecting the full set.
     struct StreamPipe {
@@ -4466,17 +4495,17 @@ mod tests {
     }
 
     impl SendPipe for StreamPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let reply = match request.method.as_bytes() {
-                verb::PARSE => PgReply::Describe(DescribeReply {
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let reply = match request {
+                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
                     parameter_types: vec![],
                     columns: vec![ColumnDesc::new("n", Oid(23))],
                 }),
-                verb::QUERY | verb::EXECUTE => {
+                QueryRequest::Query { .. } | QueryRequest::Execute { .. } => {
                     let (sender, receiver) = async_channel::bounded::<Vec<SqlValue>>(4);
                     let count = self.count;
                     tokio::spawn(async move {
@@ -4492,9 +4521,13 @@ mod tests {
                         command_tag: None,
                     }
                 }
-                other => return Err(ProximaError::Config(format!("unexpected verb {other:?}"))),
+                other => {
+                    return Err(ProximaError::Config(format!(
+                        "unexpected request {other:?}"
+                    )));
+                }
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 
