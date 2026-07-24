@@ -25,7 +25,7 @@ use proxima_listen::handle::{ListenerHandle, ListenerSpec, ShutdownPolicy};
 use proxima_listen::{ListenProtocol, ListenRegistry};
 use proxima_pgwire::{
     ColumnDesc, DescribeReply, ErrorReply, PgPipeHandle, PgReply, PgWireListenProtocol, QueryReply,
-    QueryRequest, SqlValue, into_pg_handle,
+    QueryRequest, SqlValue, Verb, into_pg_handle,
 };
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::handler::into_handle;
@@ -52,13 +52,14 @@ impl SendPipe for EchoPipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let reply = match request {
-            QueryRequest::Query { sql, .. } => echo_query(&sql),
-            QueryRequest::Parse { sql, .. } => PgReply::Describe(echo_describe(&sql)),
-            QueryRequest::Execute { parameters, .. } => echo_execute(&parameters),
+        let QueryRequest { sql, verb, .. } = request;
+        let reply = match verb {
+            Verb::Query => echo_query(&sql),
+            Verb::Parse { .. } => PgReply::Describe(echo_describe(&sql)),
+            Verb::Execute { parameters, .. } => echo_execute(&parameters),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "echo pipe received unexpected request {other:?}"
+                    "echo pipe received unexpected verb {other:?}"
                 )));
             }
         };

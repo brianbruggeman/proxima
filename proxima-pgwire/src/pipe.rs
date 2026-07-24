@@ -492,7 +492,9 @@ mod tests {
     use crate::auth::PgAuth;
     use crate::config::PgServerConfig;
     use crate::connection::CancelRegistry;
-    use crate::pipe_contract::{ColumnDesc, PgReply, QueryReply, QueryRequest, SqlValue, verb};
+    use crate::pipe_contract::{
+        ColumnDesc, PgReply, QueryReply, QueryRequest, SqlValue, Verb, verb,
+    };
     use crate::pipes::into_pg_handle;
 
     use super::*;
@@ -505,8 +507,8 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let reply = match request {
-                QueryRequest::Query { .. } => PgReply::Query(QueryReply::rows(
+            let reply = match request.verb {
+                Verb::Query => PgReply::Query(QueryReply::rows(
                     vec![ColumnDesc::new("?column?", Oid(23))],
                     vec![vec![SqlValue::Int(1)]],
                 )),

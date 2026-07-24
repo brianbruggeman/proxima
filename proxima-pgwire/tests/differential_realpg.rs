@@ -25,7 +25,7 @@ use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_pgwire::codec::Session;
 use proxima_pgwire::{
     ColumnDesc, DescribeReply, Negotiation, PgAuth, PgClient, PgReply, PgServerConfig, QueryReply,
-    QueryRequest, SqlValue, into_pg_handle, negotiate, serve_session,
+    QueryRequest, SqlValue, Verb, into_pg_handle, negotiate, serve_session,
 };
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::stream::{StreamConnection, StreamListener, StreamListenerExt};
@@ -43,20 +43,18 @@ impl SendPipe for SelectOnePipe {
     type Err = ProximaError;
 
     async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-        let reply = match request {
-            QueryRequest::Query { .. } | QueryRequest::Execute { .. } => {
-                PgReply::Query(QueryReply::rows(
-                    vec![ColumnDesc::new("?column?", OID_INT4)],
-                    vec![vec![SqlValue::Int(1)]],
-                ))
-            }
-            QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
+        let reply = match request.verb {
+            Verb::Query | Verb::Execute { .. } => PgReply::Query(QueryReply::rows(
+                vec![ColumnDesc::new("?column?", OID_INT4)],
+                vec![vec![SqlValue::Int(1)]],
+            )),
+            Verb::Parse { .. } => PgReply::Describe(DescribeReply {
                 parameter_types: vec![],
                 columns: vec![ColumnDesc::new("?column?", OID_INT4)],
             }),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "select-one pipe got request {other:?}"
+                    "select-one pipe got verb {other:?}"
                 )));
             }
         };

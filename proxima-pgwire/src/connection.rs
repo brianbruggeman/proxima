@@ -71,7 +71,7 @@ use crate::error::ServeError;
 use crate::handler::{ErrorInfo, commit, error_response_size, reserve, write_error_fields};
 use crate::pipe_contract::{
     CancelToken, ColumnDesc, DescribeReply, PgReply, QueryReply, QueryRequest, RowStream, SqlValue,
-    TxStatus,
+    TxStatus, Verb,
 };
 use crate::store::{
     BoundParameter, NamedSlots, PendingRows, Portal, PreparedStatement, StoreError,
@@ -816,12 +816,14 @@ where
         return Ok(false);
     };
 
-    let request = QueryRequest::CopyData {
+    let request = QueryRequest {
         sql: sql.to_owned(),
-        copy_data: rows,
-        copy_failed: failed,
         connection_id,
         cancel: cancel.clone(),
+        verb: Verb::CopyData {
+            copy_data: rows,
+            copy_failed: failed,
+        },
     };
     let response = SendPipe::call(query.as_ref(), request).await?;
     match response {
@@ -2102,10 +2104,11 @@ where
                 return Ok(DispatchOutcome::Done);
             }
             let (connection_id, cancel) = state.identity();
-            let request = QueryRequest::Query {
+            let request = QueryRequest {
                 sql: sql_text.to_owned(),
                 connection_id,
                 cancel,
+                verb: Verb::Query,
             };
             let response = SendPipe::call(query.as_ref(), request).await;
             #[cfg(feature = "listen")]
@@ -2300,11 +2303,13 @@ async fn handle_parse(
         DescribeReply::default()
     } else {
         let (connection_id, cancel) = state.identity();
-        let request = QueryRequest::Parse {
+        let request = QueryRequest {
             sql: sql.to_owned(),
-            statement: name.to_string(),
             connection_id,
             cancel,
+            verb: Verb::Parse {
+                statement: name.to_string(),
+            },
         };
         let response = SendPipe::call(query.as_ref(), request).await?;
         match response {
@@ -2682,13 +2687,15 @@ where
     let sql = statement.sql.clone();
     let result_formats = portal.result_formats.clone();
     let (connection_id, cancel) = state.identity();
-    let request = QueryRequest::Execute {
+    let request = QueryRequest {
         sql: sql.clone(),
-        statement: portal.statement_name.clone(),
-        portal: name_text.to_string(),
-        parameters,
         connection_id,
         cancel,
+        verb: Verb::Execute {
+            statement: portal.statement_name.clone(),
+            portal: name_text.to_string(),
+            parameters,
+        },
     };
     let response = SendPipe::call(query.as_ref(), request).await?;
     let reply = match response {
@@ -2925,8 +2932,9 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let reply = match request {
-                QueryRequest::Query { sql, .. } => {
+            let QueryRequest { sql, verb, .. } = request;
+            let reply = match verb {
+                Verb::Query => {
                     if sql.trim() == "select 1" {
                         PgReply::Query(QueryReply::rows(
                             vec![ColumnDesc::new("?column?", Oid(23))],
@@ -2939,18 +2947,16 @@ mod tests {
                         ))
                     }
                 }
-                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
+                Verb::Parse { .. } => PgReply::Describe(DescribeReply {
                     parameter_types: vec![],
                     columns: vec![ColumnDesc::new("v", Oid(23))],
                 }),
-                QueryRequest::Execute { .. } => PgReply::Query(QueryReply::rows(
+                Verb::Execute { .. } => PgReply::Query(QueryReply::rows(
                     vec![ColumnDesc::new("v", Oid(23))],
                     vec![vec![SqlValue::Int(1)]],
                 )),
                 other => {
-                    return Err(ProximaError::Config(format!(
-                        "unexpected request {other:?}"
-                    )));
+                    return Err(ProximaError::Config(format!("unexpected verb {other:?}")));
                 }
             };
             Ok(reply)
@@ -3789,21 +3795,17 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let reply = match request {
-                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
+            let reply = match request.verb {
+                Verb::Parse { .. } => PgReply::Describe(DescribeReply {
                     parameter_types: vec![],
                     columns: vec![ColumnDesc::new("n", Oid(23))],
                 }),
-                QueryRequest::Execute { .. } | QueryRequest::Query { .. } => {
-                    PgReply::Query(QueryReply::rows(
-                        vec![ColumnDesc::new("n", Oid(23))],
-                        (1..=5).map(|number| vec![SqlValue::Int(number)]).collect(),
-                    ))
-                }
+                Verb::Execute { .. } | Verb::Query => PgReply::Query(QueryReply::rows(
+                    vec![ColumnDesc::new("n", Oid(23))],
+                    (1..=5).map(|number| vec![SqlValue::Int(number)]).collect(),
+                )),
                 other => {
-                    return Err(ProximaError::Config(format!(
-                        "unexpected request {other:?}"
-                    )));
+                    return Err(ProximaError::Config(format!("unexpected verb {other:?}")));
                 }
             };
             Ok(reply)
@@ -3972,26 +3974,22 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let sql = request.sql().to_owned();
-            let reply = match request {
-                QueryRequest::Query { .. } | QueryRequest::Execute { .. }
-                    if sql.contains("TO STDOUT") =>
-                {
+            let sql = request.sql.clone();
+            let reply = match request.verb {
+                Verb::Query | Verb::Execute { .. } if sql.contains("TO STDOUT") => {
                     PgReply::CopyOut {
                         format: CopyFormat::Text,
                         column_formats: vec![],
                         data: COPY_OUT_ROWS.iter().map(|row| row.to_vec()).collect(),
                     }
                 }
-                QueryRequest::Query { .. } | QueryRequest::Execute { .. }
-                    if sql.contains("FROM STDIN") =>
-                {
+                Verb::Query | Verb::Execute { .. } if sql.contains("FROM STDIN") => {
                     PgReply::CopyIn {
                         format: CopyFormat::Text,
                         column_formats: vec![],
                     }
                 }
-                QueryRequest::CopyData {
+                Verb::CopyData {
                     copy_failed,
                     copy_data,
                     ..
@@ -4002,7 +4000,7 @@ mod tests {
                         PgReply::Query(QueryReply::tag(format!("COPY {}", copy_data.len())))
                     }
                 }
-                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply::default()),
+                Verb::Parse { .. } => PgReply::Describe(DescribeReply::default()),
                 _ => {
                     return Err(ProximaError::Config(format!(
                         "unexpected request sql {sql:?}"
@@ -4164,11 +4162,12 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let QueryRequest::Query { sql, .. } = &request else {
+            if !matches!(request.verb, Verb::Query) {
                 return Err(ProximaError::Config(format!(
                     "unexpected request {request:?}"
                 )));
-            };
+            }
+            let sql = &request.sql;
             let reply = if sql.starts_with("LISTEN") {
                 PgReply::Listen {
                     channels: vec!["test".to_string()],
@@ -4401,7 +4400,7 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let observed = request.cancel().is_cancelled();
+            let observed = request.cancel.is_cancelled();
             self.0.store(observed, Ordering::Relaxed);
             Ok(PgReply::Query(QueryReply::tag("OK")))
         }
@@ -4431,10 +4430,11 @@ mod tests {
         let observed = Arc::new(AtomicBool::new(false));
         let engine = CancelObserverPipe(Arc::clone(&observed));
         let (connection_id, cancel) = state.identity();
-        let request = QueryRequest::Query {
+        let request = QueryRequest {
             sql: "select 1".to_string(),
             connection_id,
             cancel,
+            verb: Verb::Query,
         };
         engine
             .call(request)
@@ -4454,10 +4454,11 @@ mod tests {
         let observed = Arc::new(AtomicBool::new(true));
         let engine = CancelObserverPipe(Arc::clone(&observed));
         let (connection_id, cancel) = state.identity();
-        let request = QueryRequest::Query {
+        let request = QueryRequest {
             sql: "select 1".to_string(),
             connection_id,
             cancel,
+            verb: Verb::Query,
         };
         engine
             .call(request)
@@ -4500,12 +4501,12 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
-            let reply = match request {
-                QueryRequest::Parse { .. } => PgReply::Describe(DescribeReply {
+            let reply = match request.verb {
+                Verb::Parse { .. } => PgReply::Describe(DescribeReply {
                     parameter_types: vec![],
                     columns: vec![ColumnDesc::new("n", Oid(23))],
                 }),
-                QueryRequest::Query { .. } | QueryRequest::Execute { .. } => {
+                Verb::Query | Verb::Execute { .. } => {
                     let (sender, receiver) = async_channel::bounded::<Vec<SqlValue>>(4);
                     let count = self.count;
                     tokio::spawn(async move {
