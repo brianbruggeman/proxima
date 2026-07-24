@@ -16,7 +16,7 @@ pub mod config;
 pub mod pipe;
 pub mod session;
 
-pub use blocking::RedisClient;
+pub use blocking::{Active, RedisClient, Subscribed};
 pub use config::{RedisClientConfig, RedisConfigError, RespProtocol};
 pub use pipe::RedisClientUpstream;
 pub use session::{ClientError, ClientSession, PushStep, Step};
