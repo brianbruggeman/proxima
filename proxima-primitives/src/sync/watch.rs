@@ -5,11 +5,13 @@
 //! to the last value if the consumer hasn't called `changed()` in
 //! between.
 //!
-//! Hand-rolled over `event_listener::Event` + `std::sync::RwLock<T>` +
-//! per-receiver version counter. Backing this with `async-broadcast`
-//! cap=1 didn't fit — broadcast delivers every value to every
-//! receiver, watch collapses to the latest, and the semantics of
-//! "this receiver has seen this version" are watch-specific.
+//! Hand-rolled over `event_listener::Event` + `arc_swap::ArcSwap<T>` +
+//! per-receiver version counter. The value cell is a lock-free
+//! store/load, not a lock — no reader ever blocks a writer or another
+//! reader. Backing this with `async-broadcast` cap=1 didn't fit —
+//! broadcast delivers every value to every receiver, watch collapses
+//! to the latest, and the semantics of "this receiver has seen this
+//! version" are watch-specific.
 //!
 //! # Non-coverage
 //!
@@ -36,15 +38,20 @@
 //!
 //! `--cfg loom` loom-tests this exact `Sender`/`Receiver` pair (not a
 //! hand-written model): [`crate::sync::loom_atomic`] swaps `version` /
-//! `senders` / `receivers` and the `Arc`/`RwLock` for loom's
+//! `senders` / `receivers` and the outer `Arc<Inner<T>>` for loom's
 //! instrumented equivalents, and `event_listener::Event` becomes
 //! loom-instrumented too (its `loom` Cargo feature is enabled under
-//! `[target.'cfg(loom)'.dependencies]`). See the `loom_tests` module
-//! below.
+//! `[target.'cfg(loom)'.dependencies]`). The value cell itself
+//! (`arc_swap::ArcSwap<T>`) is NOT loom-instrumented — arc_swap has no
+//! loom feature and always uses real atomics. That's fine: the race
+//! these tests model is the version-bump/listener-wake handoff around
+//! `changed()`, which is unchanged by the value-cell swap. See the
+//! `loom_tests` module below.
 
+use arc_swap::ArcSwap;
 use event_listener::Event;
 
-use crate::sync::loom_atomic::{Arc, AtomicU64, AtomicUsize, Ordering, RwLock, RwLockReadGuard};
+use crate::sync::loom_atomic::{Arc, AtomicU64, AtomicUsize, Ordering};
 
 /// Returned by [`Sender::send`] when all receivers have been dropped.
 #[derive(Debug, thiserror::Error)]
@@ -58,7 +65,7 @@ pub struct SendError<T>(pub T);
 pub struct RecvError;
 
 struct Inner<T> {
-    value: RwLock<T>,
+    value: ArcSwap<T>,
     /// Bumped on every successful `send`. Receivers compare against
     /// their last-seen version to detect a new value.
     version: AtomicU64,
@@ -85,14 +92,9 @@ impl<T> Sender<T> {
         if self.inner.receivers.load(Ordering::Acquire) == 0 {
             return Err(SendError(value));
         }
-        {
-            let mut guard = self
-                .inner
-                .value
-                .write()
-                .unwrap_or_else(|err| err.into_inner());
-            *guard = value;
-        }
+        // arc_swap has no notion of loom; it always wants a real
+        // `alloc::sync::Arc`, not the loom-shimmed `Arc` imported above.
+        self.inner.value.store(alloc::sync::Arc::new(value));
         self.inner.version.fetch_add(1, Ordering::AcqRel);
         self.inner.event.notify(usize::MAX);
         Ok(())
@@ -119,11 +121,8 @@ impl<T> Sender<T> {
     /// per-receiver state.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
-            guard: self
-                .inner
-                .value
-                .read()
-                .unwrap_or_else(|err| err.into_inner()),
+            guard: self.inner.value.load(),
+            _lifetime: core::marker::PhantomData,
         }
     }
 }
@@ -192,11 +191,8 @@ impl<T> Receiver<T> {
     /// `Ok(())` if the version changed before this `borrow`.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
-            guard: self
-                .inner
-                .value
-                .read()
-                .unwrap_or_else(|err| err.into_inner()),
+            guard: self.inner.value.load(),
+            _lifetime: core::marker::PhantomData,
         }
     }
 
@@ -224,13 +220,16 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
-/// Read guard returned by `borrow` / `borrow_and_update`. Holds the
-/// shared lock for the lifetime of the borrow.
+/// Read guard returned by `borrow` / `borrow_and_update`. Wraps an
+/// `arc_swap::Guard`, which owns a lease on the current value rather
+/// than borrowing the channel — the lifetime parameter is kept only so
+/// existing call sites that name `Ref<'_, T>` do not need to change.
 pub struct Ref<'lifetime, T> {
-    guard: RwLockReadGuard<'lifetime, T>,
+    guard: arc_swap::Guard<alloc::sync::Arc<T>>,
+    _lifetime: core::marker::PhantomData<&'lifetime ()>,
 }
 
-impl<T> std::ops::Deref for Ref<'_, T> {
+impl<T> core::ops::Deref for Ref<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.guard
@@ -240,7 +239,7 @@ impl<T> std::ops::Deref for Ref<'_, T> {
 /// Build a watch channel anchored at `initial`.
 pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Inner {
-        value: RwLock::new(initial),
+        value: ArcSwap::from_pointee(initial),
         version: AtomicU64::new(0),
         event: Event::new(),
         senders: AtomicUsize::new(1),
