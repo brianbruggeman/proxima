@@ -9,27 +9,15 @@
 
 use std::net::SocketAddr;
 
-use bytes::Bytes;
 use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
-use proxima_pgwire::{
-    PgClientConfig, PgReply, PgRequest, PgwireClientUpstream, QueryRequest, verb,
-};
+use proxima_pgwire::{CancelToken, PgClientConfig, PgReply, PgwireClientUpstream, QueryRequest};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::method::Method;
-use proxima_primitives::pipe::request::RequestContext;
 
-fn make_query_request(sql: &str) -> PgRequest {
-    let mut query = QueryRequest::new(0);
-    query.sql = sql.to_string();
-    PgRequest {
-        method: Method::from_bytes(verb::QUERY),
-        path: Bytes::new(),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: query,
-        stream: None,
-        context: RequestContext::default(),
+fn make_query_request(sql: &str) -> QueryRequest {
+    QueryRequest::Query {
+        sql: sql.to_string(),
+        connection_id: 0,
+        cancel: CancelToken::none(),
     }
 }
 
@@ -66,7 +54,7 @@ async fn client_pipe_runs_simple_and_extended_against_real_pg() {
         .call(make_query_request("select 1"))
         .await
         .expect("simple query");
-    match &response.payload {
+    match &response {
         PgReply::Query(reply) => {
             assert_eq!(reply.columns.len(), 1, "select 1 -> one column");
             assert_eq!(reply.rows.len(), 1, "one row");
@@ -81,7 +69,7 @@ async fn client_pipe_runs_simple_and_extended_against_real_pg() {
         ))
         .await
         .expect("second query");
-    match &response.payload {
+    match &response {
         PgReply::Query(reply) => {
             assert_eq!(reply.columns.len(), 2, "two columns");
             assert_eq!(reply.columns[0].name, "n");
@@ -98,7 +86,7 @@ async fn client_pipe_runs_simple_and_extended_against_real_pg() {
         ))
         .await
         .expect("error query is transport-ok");
-    match &response.payload {
+    match &response {
         PgReply::Error(reply) => assert_eq!(reply.sqlstate, "42P01", "undefined_table"),
         other => panic!("expected Error reply, got {other:?}"),
     }

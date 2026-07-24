@@ -24,14 +24,14 @@ use proxima_core::ProximaError;
 use proxima_listen::handle::{ListenerHandle, ListenerSpec, ShutdownPolicy};
 use proxima_listen::{ListenProtocol, ListenRegistry};
 use proxima_pgwire::{
-    ColumnDesc, DescribeReply, ErrorReply, PgPipeHandle, PgReply, PgRequest, PgResponse,
-    PgWireListenProtocol, QueryReply, SqlValue, into_pg_handle, verb,
+    ColumnDesc, DescribeReply, ErrorReply, PgPipeHandle, PgReply, PgWireListenProtocol, QueryReply,
+    QueryRequest, SqlValue, into_pg_handle,
 };
-use proxima_protocols::pgwire_codec::Oid;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::handler::into_handle;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
+use proxima_protocols::pgwire_codec::Oid;
 use proxima_runtime::Runtime;
 
 use prime::PrimeRuntime;
@@ -47,24 +47,22 @@ const OID_INT4: Oid = Oid(23);
 struct EchoPipe;
 
 impl SendPipe for EchoPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.clone();
-        let parameters = request.payload.parameters.clone();
-        let reply = match request.method.as_bytes() {
-            verb::QUERY => echo_query(&sql),
-            verb::PARSE => PgReply::Describe(echo_describe(&sql)),
-            verb::EXECUTE => echo_execute(&parameters),
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let reply = match request {
+            QueryRequest::Query { sql, .. } => echo_query(&sql),
+            QueryRequest::Parse { sql, .. } => PgReply::Describe(echo_describe(&sql)),
+            QueryRequest::Execute { parameters, .. } => echo_execute(&parameters),
             other => {
                 return Err(ProximaError::Config(format!(
-                    "echo pipe received unexpected verb {other:?}"
+                    "echo pipe received unexpected request {other:?}"
                 )));
             }
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -162,7 +160,6 @@ impl SendPipe for NeverDispatch {
         ))
     }
 }
-
 
 fn tokio_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()

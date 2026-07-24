@@ -20,10 +20,10 @@ use bytes::Bytes;
 use proxima_core::ProximaError;
 #[cfg(feature = "tls")]
 use proxima_core::io::{FromFutures, IntoFutures, Prepend};
-use proxima_protocols::pgwire_codec::Session;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::upgrade::{HijackedSocket, UpgradeHandler};
+use proxima_protocols::pgwire_codec::Session;
 
 use crate::pipes::PgPipeHandle;
 
@@ -201,8 +201,10 @@ where
         .await;
     }
 
-    negotiate_and_serve(stream, query, auth, config, registry, broker, tls, runtime, admission)
-        .await
+    negotiate_and_serve(
+        stream, query, auth, config, registry, broker, tls, runtime, admission,
+    )
+    .await
 }
 
 /// Reads exactly one byte off the wire to classify the connection; `None`
@@ -472,7 +474,6 @@ impl SendPipe for PgWireConnectionPipe {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -484,34 +485,34 @@ mod tests {
     use bytes::Bytes;
     use futures::io::{AsyncRead, AsyncWrite};
     use proxima_core::ProximaError;
-    use proxima_protocols::pgwire_codec::Oid;
-    use proxima_primitives::pipe::request::{Request, RequestContext, Response};
+    use proxima_primitives::pipe::request::{Request, RequestContext};
     use proxima_primitives::pipe::upgrade::HijackedSocket;
+    use proxima_protocols::pgwire_codec::Oid;
 
     use crate::auth::PgAuth;
     use crate::config::PgServerConfig;
     use crate::connection::CancelRegistry;
-    use crate::pipe_contract::{ColumnDesc, PgReply, QueryReply, SqlValue, verb};
-    use crate::pipes::{PgRequest, PgResponse, into_pg_handle};
+    use crate::pipe_contract::{ColumnDesc, PgReply, QueryReply, QueryRequest, SqlValue, verb};
+    use crate::pipes::into_pg_handle;
 
     use super::*;
 
     struct EchoPipe;
 
     impl SendPipe for EchoPipe {
-        type In = PgRequest;
-        type Out = PgResponse;
+        type In = QueryRequest;
+        type Out = PgReply;
         type Err = ProximaError;
 
-        async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-            let reply = match request.method.as_bytes() {
-                verb::QUERY => PgReply::Query(QueryReply::rows(
+        async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+            let reply = match request {
+                QueryRequest::Query { .. } => PgReply::Query(QueryReply::rows(
                     vec![ColumnDesc::new("?column?", Oid(23))],
                     vec![vec![SqlValue::Int(1)]],
                 )),
                 _ => PgReply::Query(QueryReply::tag("OK")),
             };
-            Ok(Response::typed(200, reply))
+            Ok(reply)
         }
     }
 

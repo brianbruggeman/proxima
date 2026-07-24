@@ -2,9 +2,10 @@
 //! transport seam `H1ClientUpstream` uses, so the client is agnostic to the
 //! wire (prime, tokio, TLS-wrapped). It drives the sans-IO [`ClientSession`]
 //! over a futures-io connection and maps the SQL-over-Pipe contract
-//! (`verb::QUERY`/`EXECUTE` + `PgRequest.payload.sql`) to/from `PgReply`.
-//! A registered `PipeFactory` (see `crate::client::factory`) builds
-//! this, so `proxima::Client` speaks pgwire as just another protocol.
+//! ([`QueryRequest`]'s `Query`/`Parse`/`Execute` variants) to/from
+//! [`PgReply`] — no `Request`/`Response` envelope (payload-no-cell). A
+//! registered `PipeFactory` (see `crate::client::factory`) builds this, so
+//! `proxima::Client` speaks pgwire as just another protocol.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -13,14 +14,13 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::lock::Mutex;
 
 use proxima_core::ProximaError;
-use proxima_protocols::pgwire_codec::Oid;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
+use proxima_protocols::pgwire_codec::Oid;
 
 use crate::client::config::PgClientConfig;
 use crate::client::session::{ClientError, ClientSession, QueryResult, Step};
-use crate::pipe_contract::{ColumnDesc, ErrorReply, PgReply, QueryReply, SqlValue, verb};
-use crate::pipes::{PgRequest, PgResponse};
+use crate::pipe_contract::{ColumnDesc, ErrorReply, PgReply, QueryReply, QueryRequest, SqlValue};
 
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
@@ -51,11 +51,7 @@ impl<U: StreamUpstream> PgwireClientUpstream<U> {
         }
     }
 
-    async fn exchange(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.clone();
-        let parameters = request.payload.parameters.clone();
-        let method = request.method.clone();
-
+    async fn exchange(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
         let mut guard = self.cached.lock().await;
         if guard.is_none() {
             *guard = Some(self.connect().await?);
@@ -64,20 +60,12 @@ impl<U: StreamUpstream> PgwireClientUpstream<U> {
             .as_mut()
             .ok_or_else(|| ProximaError::Upstream("pgwire cache empty".into()))?;
 
-        let outcome = run_request(
-            &mut cached.session,
-            &mut cached.conn,
-            method.as_bytes(),
-            &sql,
-            &parameters,
-        )
-        .await;
+        let outcome = run_request(&mut cached.session, &mut cached.conn, request).await;
         match outcome {
-            Ok(reply) => Ok(PgResponse::typed(200, reply)),
-            Err(ClientError::Server { sqlstate, message }) => Ok(PgResponse::typed(
-                200,
-                PgReply::Error(ErrorReply::new(sqlstate, message)),
-            )),
+            Ok(reply) => Ok(reply),
+            Err(ClientError::Server { sqlstate, message }) => {
+                Ok(PgReply::Error(ErrorReply::new(sqlstate, message)))
+            }
             Err(error) => {
                 *guard = None;
                 Err(client_error_to_proxima(error))
@@ -106,14 +94,14 @@ impl<U: StreamUpstream> PgwireClientUpstream<U> {
 }
 
 impl<U: StreamUpstream> SendPipe for PgwireClientUpstream<U> {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
     fn call(
         &self,
-        request: PgRequest,
-    ) -> impl Future<Output = Result<PgResponse, ProximaError>> + Send {
+        request: QueryRequest,
+    ) -> impl Future<Output = Result<PgReply, ProximaError>> + Send {
         async move { self.exchange(request).await }
     }
 }
@@ -121,25 +109,31 @@ impl<U: StreamUpstream> SendPipe for PgwireClientUpstream<U> {
 async fn run_request<C: StreamConnection>(
     session: &mut ClientSession,
     conn: &mut C,
-    method: &[u8],
-    sql: &str,
-    parameters: &[SqlValue],
+    request: QueryRequest,
 ) -> Result<PgReply, ClientError> {
-    let result = match method {
-        verb::QUERY => {
-            session.submit_simple(sql)?;
+    let result = match request {
+        QueryRequest::Query { sql, .. } => {
+            session.submit_simple(&sql)?;
             run_query(session, conn).await?
         }
-        verb::EXECUTE | verb::PARSE => {
+        QueryRequest::Parse { sql, .. } => {
+            session.submit_extended(&sql, &[])?;
+            run_query(session, conn).await?
+        }
+        QueryRequest::Execute {
+            sql, parameters, ..
+        } => {
             let params = parameters
                 .iter()
                 .map(sql_value_to_text)
                 .collect::<Result<Vec<_>, _>>()?;
             let borrowed = params.iter().map(String::as_str).collect::<Vec<_>>();
-            session.submit_extended(sql, &borrowed)?;
+            session.submit_extended(&sql, &borrowed)?;
             run_query(session, conn).await?
         }
-        _ => return Err(ClientError::Protocol("unsupported client verb")),
+        QueryRequest::CopyData { .. } => {
+            return Err(ClientError::Protocol("unsupported client verb"));
+        }
     };
     Ok(query_result_to_reply(result))
 }

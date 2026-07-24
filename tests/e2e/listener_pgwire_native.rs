@@ -17,9 +17,7 @@ use proxima::error::ProximaError;
 use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt};
-use proxima_pgwire::{
-    ColumnDesc, PgReply, PgRequest, PgResponse, QueryReply, SqlValue, into_pg_handle,
-};
+use proxima_pgwire::{ColumnDesc, PgReply, QueryReply, QueryRequest, SqlValue, into_pg_handle};
 use proxima_primitives::pipe::SendPipe;
 use proxima_protocols::pgwire_codec::Oid;
 
@@ -28,12 +26,12 @@ const OID_INT4: Oid = Oid(23);
 struct EchoPipe;
 
 impl SendPipe for EchoPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.clone();
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let sql = request.sql().to_owned();
         let reply = if sql.trim().eq_ignore_ascii_case("select 1") {
             PgReply::Query(QueryReply::rows(
                 vec![ColumnDesc::new("?column?", OID_INT4)],
@@ -45,7 +43,7 @@ impl SendPipe for EchoPipe {
                 format!("test engine only knows select 1, got: {sql}"),
             ))
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -58,8 +56,7 @@ impl SendPipe for NeverDispatch {
 
     async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
         Err(ProximaError::Config(
-            "registry dispatch must not be reached when the protocol carries its own engine"
-                .into(),
+            "registry dispatch must not be reached when the protocol carries its own engine".into(),
         ))
     }
 }
@@ -105,7 +102,11 @@ async fn listener_builder_pgwire_serves_a_real_pgclient() {
     .expect("client thread");
 
     assert_eq!(result.rows.len(), 1, "select 1 must return exactly one row");
-    assert_eq!(result.text(0, 0), Some("1"), "the single column must decode to 1");
+    assert_eq!(
+        result.text(0, 0),
+        Some("1"),
+        "the single column must decode to 1"
+    );
 
     server.stop();
 }

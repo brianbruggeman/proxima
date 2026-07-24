@@ -8,8 +8,10 @@
 //! over the prime TCP transport ([`PrimeTcpUpstream`](crate::PrimeTcpUpstream)),
 //! exactly like the prime `http`/`grpc` factories. A client and a server are the
 //! same `Handler`; this is the initiating half. The SQL-over-Handler request shape
-//! (`verb::QUERY`/`EXECUTE` + body SQL + `QueryRequest` carry) is the caller's;
-//! this factory is purely the transport.
+//! (the universal envelope's method bytes + body SQL, mapped onto a
+//! [`QueryRequest`] variant via [`QueryRequest::try_from_wire`]) is the
+//! caller's; this factory is purely the transport. An unrecognized method
+//! is rejected rather than run as SQL — see `PgwireClientPipe::call`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde_json::Value;
 
-use proxima_pgwire::{PgClientConfig, PgReply, PgResponse, PgwireClientUpstream, QueryRequest};
+use proxima_pgwire::{PgClientConfig, PgReply, PgwireClientUpstream, QueryRequest};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
@@ -84,48 +86,35 @@ impl SendPipe for PgwireClientPipe {
     ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
         async move {
             let (request, body) = request.body_bytes().await?;
-            let mut query = QueryRequest::new(0);
-            query.sql = String::from_utf8_lossy(&body).into_owned();
-            let request = Request {
-                method: request.method,
-                path: request.path,
-                query: request.query,
-                metadata: request.metadata,
-                payload: query,
-                stream: None,
-                context: request.context,
-            };
-            let response = self.inner.call(request).await?;
-            Ok(pg_response_to_bytes(response))
+            let sql = String::from_utf8_lossy(&body).into_owned();
+            // An unrecognized method must fail loud, not silently execute
+            // `sql` as a live query — mirrors the pre-de-envelope client
+            // dispatch's own `ClientError::Protocol("unsupported client
+            // verb")` rejection (`proxima-pgwire/src/client/pipe.rs`,
+            // `run_request`'s default arm) so a caller sees identical text.
+            let query = QueryRequest::try_from_wire(request.method.as_bytes(), "", sql, Vec::new())
+                .map_err(|message| {
+                    ProximaError::Upstream(format!("pgwire client: protocol: {message}"))
+                })?;
+            let reply = self.inner.call(query).await?;
+            Ok(pg_reply_to_bytes(&reply))
         }
     }
 }
 
-
-fn pg_response_to_bytes(response: PgResponse) -> Response<Bytes> {
-    let Response {
-        status,
-        metadata,
-        payload,
-        stream,
-        upgrade,
-    } = response;
-    let body = serde_json::to_vec(&pg_reply_to_json(&payload))
+fn pg_reply_to_bytes(reply: &PgReply) -> Response<Bytes> {
+    let body = serde_json::to_vec(&pg_reply_to_json(reply))
         .unwrap_or_else(|err| format!("{{\"encode_error\":\"{err}\"}}").into_bytes());
-    let mut response = Response::new(status).with_payload(body);
-    response.metadata = metadata;
-    response.stream = stream;
-    response.upgrade = upgrade;
-    response
+    Response::new(200).with_payload(body)
 }
 
-/// `Response<PgReply>` collapses to `Response<Bytes>` at the dynamic-dispatch
-/// boundary every `PipeHandle` shares (one dispatch shape — see `Delay`/
-/// `Filter`, which hardcode the same `Response<Bytes>` for the same reason).
-/// The bytes need to actually decode back to something, so this JSON-encodes
-/// the reply rather than the previous `format!("{reply:?}")` debug string —
-/// mirrors how the `redis` client path round-trips real RESP bytes rather
-/// than threading a typed value through `Response` itself.
+/// `PgReply` collapses to `Response<Bytes>` at the dynamic-dispatch boundary
+/// every `PipeHandle` shares (one dispatch shape — see `Delay`/`Filter`,
+/// which hardcode the same `Response<Bytes>` for the same reason). The bytes
+/// need to actually decode back to something, so this JSON-encodes the reply
+/// rather than a `format!("{reply:?}")` debug string — mirrors how the
+/// `redis` client path round-trips real RESP bytes rather than threading a
+/// typed value through `Response` itself.
 ///
 /// The client driver (`proxima_pgwire::client::pipe`) only ever produces
 /// `Query` and `Error`; the other variants are server/engine-role replies
@@ -249,6 +238,41 @@ mod tests {
         assert_eq!(spec["type"], "pgwire");
         assert_eq!(spec["dsn"], "postgres://u:p@h:5432/db");
         assert_eq!(protocol.factory().name(), "pgwire");
+    }
+
+    /// SQL-boundary fail-loud contract: an unrecognized method must be
+    /// rejected by `QueryRequest::try_from_wire` BEFORE `PgwireClientPipe`
+    /// ever calls the inner client (so this needs no live server, no
+    /// runtime feature bundle, and no network I/O — the point is that the
+    /// verb check runs first). A plausible-but-unsupported pg verb (a real
+    /// driver-internal verb, `COPY_DATA`, that is never a valid client
+    /// verb) must not be silently coerced into a live `Query` that would
+    /// run `body` as SQL.
+    #[test]
+    fn unsupported_method_is_rejected_before_ever_touching_the_network() {
+        let config = PgClientConfig::builder()
+            .host("127.0.0.1")
+            .port(0)
+            .user("nobody")
+            .password(String::new())
+            .database("nobody")
+            .build();
+        let upstream = PrimeTcpUpstream::with_host(config.host.clone(), config.port);
+        let pipe = PgwireClientPipe::new(PgwireClientUpstream::new(upstream, config));
+
+        let request = Request::builder()
+            .method("COPY_DATA")
+            .path("/")
+            .body("drop table users")
+            .build()
+            .expect("builder");
+
+        let error = futures::executor::block_on(pipe.call(request))
+            .expect_err("an unsupported method must be rejected, not executed as SQL");
+        assert!(
+            format!("{error}").contains("unsupported client verb"),
+            "got: {error}"
+        );
     }
 
     /// The headline: pgwire reached through `proxima::Client` like any other

@@ -500,14 +500,14 @@ pub trait ListenerProtocolExt: Sized {
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
     /// use bytes::Bytes;
-    /// use proxima_pgwire::{PgRequest, PgResponse, into_pg_handle};
+    /// use proxima_pgwire::{PgReply, QueryRequest, into_pg_handle};
     ///
     /// struct Unimplemented;
     /// impl SendPipe for Unimplemented {
-    ///     type In = PgRequest;
-    ///     type Out = PgResponse;
+    ///     type In = QueryRequest;
+    ///     type Out = PgReply;
     ///     type Err = ProximaError;
-    ///     async fn call(&self, _request: PgRequest) -> Result<PgResponse, ProximaError> {
+    ///     async fn call(&self, _request: QueryRequest) -> Result<PgReply, ProximaError> {
     ///         unreachable!("no client connects in this doctest")
     ///     }
     /// }

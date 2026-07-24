@@ -490,7 +490,11 @@ impl ListenerBuilder {
         #[cfg(feature = "dns-listener")]
         let dns_handler = self.dns_handler;
         #[cfg(feature = "dns-listener")]
-        let dns_transport = self.spec.get("transport").and_then(Value::as_str).map(str::to_string);
+        let dns_transport = self
+            .spec
+            .get("transport")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         // Built BEFORE protocol resolution (unlike every other axis, which
         // resolves against bare spec data) — `.any()`/`.accepts()`/
         // `.accept()` need `app.any_registry()` /
@@ -633,7 +637,8 @@ impl ListenerProtocolExt for ListenerBuilder {
     ))]
     fn memcached(self, handler: proxima_memcached::MemcachedPipeHandle) -> Self {
         self.protocol(proxima_memcached::MemcachedAnyProtocol::new(
-            "memcached", handler,
+            "memcached",
+            handler,
         ))
     }
 
@@ -1375,8 +1380,8 @@ mod tests {
 
         struct NeverCalled;
         impl SendPipe for NeverCalled {
-            type In = proxima_pgwire::PgRequest;
-            type Out = proxima_pgwire::PgResponse;
+            type In = proxima_pgwire::QueryRequest;
+            type Out = proxima_pgwire::PgReply;
             type Err = ProximaError;
 
             async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {

@@ -209,7 +209,10 @@ mod tests {
             ProbeVerdict::Match { consumed: 0 }
         );
 
-        assert_eq!(protocol.probe(b"short"), ProbeVerdict::NeedMore { at_least: 8 });
+        assert_eq!(
+            protocol.probe(b"short"),
+            ProbeVerdict::NeedMore { at_least: 8 }
+        );
 
         let unknown = vec![0_u8, 0, 0, 8, 0, 0, 0, 1];
         assert_eq!(protocol.probe(&unknown), ProbeVerdict::No);
@@ -218,8 +221,8 @@ mod tests {
     struct NeverCalled;
 
     impl proxima_primitives::pipe::SendPipe for NeverCalled {
-        type In = crate::pipes::PgRequest;
-        type Out = crate::pipes::PgResponse;
+        type In = crate::pipe_contract::QueryRequest;
+        type Out = crate::pipe_contract::PgReply;
         type Err = ProximaError;
 
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {

@@ -21,8 +21,7 @@ use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt};
 use proxima_pgwire::{
-    ColumnDesc, ErrorReply, PgReply, PgRequest, PgResponse, QueryReply, SqlValue, into_pg_handle,
-    verb,
+    ColumnDesc, ErrorReply, PgReply, QueryReply, QueryRequest, SqlValue, into_pg_handle,
 };
 use proxima_primitives::pipe::SendPipe;
 use proxima_protocols::pgwire_codec::Oid;
@@ -38,29 +37,28 @@ const OID_INT4: Oid = Oid(23);
 struct EchoPipe;
 
 impl SendPipe for EchoPipe {
-    type In = PgRequest;
-    type Out = PgResponse;
+    type In = QueryRequest;
+    type Out = PgReply;
     type Err = ProximaError;
 
-    async fn call(&self, request: PgRequest) -> Result<PgResponse, ProximaError> {
-        let sql = request.payload.sql.clone();
+    async fn call(&self, request: QueryRequest) -> Result<PgReply, ProximaError> {
+        let QueryRequest::Query { sql, .. } = &request else {
+            return Err(ProximaError::Config(format!(
+                "example engine received unexpected request {request:?}"
+            )));
+        };
         let reply = if sql.trim().eq_ignore_ascii_case("select 1") {
             PgReply::Query(QueryReply::rows(
                 vec![ColumnDesc::new("?column?", OID_INT4)],
                 vec![vec![SqlValue::Int(1)]],
             ))
-        } else if request.method.as_bytes() == verb::QUERY {
+        } else {
             PgReply::Error(ErrorReply::new(
                 "42601",
                 format!("example engine only knows select 1, got: {sql}"),
             ))
-        } else {
-            return Err(ProximaError::Config(format!(
-                "example engine received unexpected verb {:?}",
-                request.method
-            )));
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -73,8 +71,7 @@ impl SendPipe for NeverDispatch {
 
     async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
         Err(ProximaError::Config(
-            "registry dispatch must not be reached when the protocol carries its own engine"
-                .into(),
+            "registry dispatch must not be reached when the protocol carries its own engine".into(),
         ))
     }
 }
@@ -125,7 +122,9 @@ fn run_client(addr: SocketAddr) -> Result<(), ProximaError> {
         )));
     }
     let _ = client.close();
-    println!("pgwire_server: select 1 round trip through Listener::builder().pgwire() OK on {addr}");
+    println!(
+        "pgwire_server: select 1 round trip through Listener::builder().pgwire() OK on {addr}"
+    );
     Ok(())
 }
 
