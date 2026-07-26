@@ -38,7 +38,7 @@ tracing = { workspace = true }
 postcard = { workspace = true, features = ["alloc"], optional = true }
 proxima-macros = { workspace = true, optional = true }
 prost = { workspace = true, features = ["std", "derive"], optional = true }
-tracing-subscriber = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }
 atomic-waker = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true, optional = true }
 pin-project-lite.workspace = true

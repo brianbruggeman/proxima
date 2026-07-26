@@ -1,13 +1,17 @@
 //! Crate-root telemetry init. [`init_telemetry`] is the one-liner a regular
 //! user reaches for: console output, `RUST_LOG` honored, ambient recorder
-//! registered, drain already running, zero required arguments.
+//! registered, drain already running, zero required arguments, **zero
+//! required features** — it works on a plain `cargo add proxima` build.
 //!
 //! ```no_run
 //! proxima::init_telemetry().expect("install console telemetry");
 //!
 //! proxima_telemetry::info!("service starting");
-//! tracing::warn!("tracing:: events land on the same console too");
 //! ```
+//!
+//! Without the `tracing-init` feature, events from the `tracing` crate
+//! itself (not `proxima_telemetry`'s own macros) are not bridged in — enable
+//! `tracing-init` for that (see [`init_tracing`]).
 //!
 //! [`init_telemetry_with`] is the escape hatch for choosing the format.
 //! [`init_tracing`]/[`init_tracing_default`] are the original names, kept
@@ -17,7 +21,11 @@
 use std::sync::Arc;
 
 use proxima_telemetry::error::Error;
+use proxima_telemetry::export::Formatter;
 use proxima_telemetry::recorder::Recorder;
+
+#[cfg(not(feature = "tracing-init"))]
+use proxima_telemetry::export::install_console_recorder_with;
 
 #[cfg(feature = "tracing-init")]
 use tracing_subscriber::EnvFilter;
@@ -25,9 +33,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 
 #[cfg(feature = "tracing-init")]
-use proxima_telemetry::export::{
-    Formatter, install_console_logging, install_console_logging_with, set_default_recorder,
-};
+use proxima_telemetry::export::{install_console_logging_with, set_default_recorder};
 #[cfg(feature = "tracing-init")]
 use proxima_telemetry::tracing_bridge::TracingLayer;
 
@@ -39,7 +45,6 @@ pub enum LogFormat {
     Json,
 }
 
-#[cfg(feature = "tracing-init")]
 impl LogFormat {
     const fn to_formatter(self) -> Formatter {
         match self {
@@ -51,12 +56,15 @@ impl LogFormat {
 
 /// The one-liner: level-routed console logging (trace/debug/info → stdout,
 /// warn/error → stderr), `RUST_LOG`-filtered, registered as the process
-/// default so both `proxima_telemetry::{info!, warn!, ...}` and bridged
-/// `tracing::*` callsites resolve to it, with a background thread already
-/// draining it. No arguments, no assembly required — delegates to
-/// [`proxima_telemetry::export::install_console_logging`], which does the
-/// real work (recorder + exporter + bridge + drain thread) so this crate
-/// carries no parallel implementation of any of it.
+/// default so `proxima_telemetry::{info!, warn!, ...}` resolves to it, with
+/// a background thread already draining it. No arguments, no assembly, no
+/// feature flag required — proxima's own telemetry needs a recorder, a
+/// sink, and a drain, not `tracing-subscriber`; that dependency is only
+/// pulled in by `tracing-init`, which additionally bridges `tracing::`-crate
+/// events (see [`init_tracing`]). Delegates to
+/// [`install_console_recorder`](proxima_telemetry::export::install_console_recorder)
+/// (or [`install_console_logging`](proxima_telemetry::export::install_console_logging)
+/// when `tracing-init` is on) — this crate carries no parallel implementation of either.
 ///
 /// The returned `Arc<Recorder>` does not need to be held for logging to keep
 /// working — [`proxima_telemetry::export::set_default_recorder`] and the
@@ -66,9 +74,8 @@ impl LogFormat {
 /// # Errors
 /// Propagates recorder-build or drain-thread-spawn failures — never returns
 /// `Ok` without a working console recorder installed.
-#[cfg(feature = "tracing-init")]
 pub fn init_telemetry() -> Result<Arc<Recorder>, Error> {
-    install_console_logging()
+    init_telemetry_with(LogFormat::Human)
 }
 
 /// [`init_telemetry`] with an explicit [`LogFormat`] (e.g. `LogFormat::Json`
@@ -81,20 +88,15 @@ pub fn init_telemetry_with(format: LogFormat) -> Result<Arc<Recorder>, Error> {
     install_console_logging_with(format.to_formatter())
 }
 
+/// [`init_telemetry`] with an explicit [`LogFormat`] (e.g. `LogFormat::Json`
+/// for structured console output). Without `tracing-init`, this installs
+/// proxima-native telemetry only — no `tracing::`-crate bridge.
+///
+/// # Errors
+/// Propagates recorder-build or drain-thread-spawn failures.
 #[cfg(not(feature = "tracing-init"))]
-pub fn init_telemetry() -> Result<Arc<Recorder>, Error> {
-    eprintln!(
-        "proxima::init_telemetry called without the `tracing-init` feature; enable it (--features tracing-init) for console telemetry"
-    );
-    Err(Error::InvalidInput)
-}
-
-#[cfg(not(feature = "tracing-init"))]
-pub fn init_telemetry_with(_format: LogFormat) -> Result<Arc<Recorder>, Error> {
-    eprintln!(
-        "proxima::init_telemetry_with called without the `tracing-init` feature; enable it (--features tracing-init) for console telemetry"
-    );
-    Err(Error::InvalidInput)
+pub fn init_telemetry_with(format: LogFormat) -> Result<Arc<Recorder>, Error> {
+    install_console_recorder_with(format.to_formatter())
 }
 
 /// Deprecated alias for [`init_telemetry_with`] — `format` is now honored
@@ -119,6 +121,11 @@ pub fn init_tracing_default(format: LogFormat) -> Result<Arc<Recorder>, Error> {
 /// build their own). `format` has no effect here: the recorder's sink
 /// formatting was already fixed when the caller built it, before this
 /// function ever saw it — kept for signature compatibility.
+///
+/// Genuinely requires `tracing-init` (unlike [`init_telemetry`]): this
+/// function's entire purpose is the `tracing`-crate bridge, which needs
+/// `tracing-subscriber`. There is no proxima-native-only half to fall back
+/// to here.
 ///
 /// # Errors
 /// Returns an error if a global `tracing` subscriber is already installed,
