@@ -295,9 +295,13 @@ mod tests {
     #[proxima::test]
     async fn fail_closed_returns_typed_error_when_full() {
         let backend: Arc<MemorySink> = Arc::new(MemorySink::default());
-        let cap_sink = BoundedRecordingSink::new(backend.clone(), 1, FailMode::FailClosed);
-        // pre-fill the ring directly to deterministically force the overflow
-        // path without racing the worker.
+        let cap_sink = sink_without_worker(
+            backend.clone(),
+            1,
+            FailMode::FailClosed,
+            Arc::new(NoopTelemetry),
+            Labels::empty(),
+        );
         fill_to_capacity(&cap_sink);
         let result = cap_sink.append(req_end(cap_sink.capacity() as u64)).await;
         assert!(matches!(result, Err(ProximaError::Record(_))));
@@ -305,15 +309,16 @@ mod tests {
     }
 
     // `BoundedRecordingSink::new` spawns a background worker that drains the
-    // queue concurrently. `DropOldest`'s eviction path wakes that worker
-    // (`pending_wakeup.notify_one()` in `enqueue`), so a manual dequeue loop
-    // right after `append` races the worker for the same items — the test
-    // then observes however the scheduler happened to split them. Build the
-    // sink without spawning the worker so this test alone owns the queue.
+    // queue concurrently, so any test asserting on a FULL queue is racing it:
+    // the worker can free a slot before the overflow `append` lands, or split
+    // the items with a manual dequeue loop. Build the sink without a worker so
+    // the test alone owns the queue.
     fn sink_without_worker(
         backend: DynRecordingSink,
         capacity: usize,
         fail_mode: FailMode,
+        telemetry: TelemetryHandle,
+        drop_labels: Labels,
     ) -> BoundedRecordingSink {
         let inner = Arc::new(BoundedInner {
             backend,
@@ -321,8 +326,8 @@ mod tests {
             pending_wakeup: Notify::new(),
             progress_signal: Notify::new(),
             counters: SinkCounters::new(),
-            telemetry: Arc::new(NoopTelemetry),
-            drop_labels: Labels::empty(),
+            telemetry,
+            drop_labels,
         });
         BoundedRecordingSink { inner }
     }
@@ -330,7 +335,13 @@ mod tests {
     #[proxima::test]
     async fn drop_oldest_evicts_oldest_event_when_queue_is_full() {
         let backend: Arc<MemorySink> = Arc::new(MemorySink::default());
-        let cap_sink = sink_without_worker(backend.clone(), 1, FailMode::DropOldest);
+        let cap_sink = sink_without_worker(
+            backend.clone(),
+            1,
+            FailMode::DropOldest,
+            Arc::new(NoopTelemetry),
+            Labels::empty(),
+        );
         fill_to_capacity(&cap_sink);
         let capacity = cap_sink.capacity() as u64;
         cap_sink
@@ -353,7 +364,7 @@ mod tests {
         let telemetry: TelemetryHandle = metrics.clone();
         let backend: Arc<MemorySink> = Arc::new(MemorySink::default());
         let labels = Labels::from_pairs(&[("pipe", "echo")]);
-        let cap_sink = BoundedRecordingSink::with_telemetry(
+        let cap_sink = sink_without_worker(
             backend.clone(),
             1,
             FailMode::DropNewest,
