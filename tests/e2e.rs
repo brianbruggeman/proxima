@@ -35,6 +35,8 @@ mod listener_pgwire_native;
 mod listener_preface_dispatch;
 #[path = "e2e/listener_streaming.rs"]
 mod listener_streaming;
+#[path = "e2e/listener_stream_and_datagram_coexist.rs"]
+mod listener_stream_and_datagram_coexist;
 #[path = "e2e/listener_streaming_iouring.rs"]
 mod listener_streaming_iouring;
 #[path = "e2e/listener_tls.rs"]

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures::channel::oneshot;
+use proxima_telemetry::warn;
 use serde_json::Value;
-use tracing::warn;
 
 use proxima_primitives::pipe::SendPipe;
 
@@ -935,7 +935,7 @@ impl App {
                             .serve(bind, dispatch, &spec, context, shutdown_rx)
                             .await
                         {
-                            warn!(?error, "listener exited with error");
+                            warn!(?error, %bind, "listener exited with error");
                         }
                         drain_notify_for_factory.notify_waiters();
                     })
