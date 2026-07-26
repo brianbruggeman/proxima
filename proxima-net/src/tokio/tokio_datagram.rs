@@ -108,7 +108,7 @@ mod tests {
     use std::future::poll_fn;
     use std::net::Ipv4Addr;
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn factory_binds_and_round_trips_a_datagram() {
         let factory = TokioDatagramFactory;
         assert_eq!(factory.backend_name(), "tokio");
@@ -139,7 +139,7 @@ mod tests {
     /// panic or corrupt state — the kernel truncates a UDP datagram to the
     /// caller-provided buffer length, mirroring
     /// `PrimeUdpListener`'s `prime_udp_listener_oversized_datagram_is_truncated_not_errored`.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn oversized_datagram_is_truncated_not_errored() {
         let factory = TokioDatagramFactory;
         let mut server = factory
