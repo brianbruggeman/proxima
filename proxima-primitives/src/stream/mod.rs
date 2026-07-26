@@ -283,4 +283,18 @@ pub trait DatagramSocket: Send {
 #[cfg(feature = "std")]
 pub trait DatagramFactory: Send + Sync + 'static {
     fn bind(&self, addr: SocketAddr) -> io::Result<Box<dyn DatagramSocket>>;
+
+    /// Name of the runtime backend this factory's `bind` output must be
+    /// polled on (`"prime"`, `"tokio"`, ...). The default `"unknown"` is
+    /// for factories that don't declare one — test doubles and in-memory
+    /// fakes never need to, since they have no reactor affinity to
+    /// violate. Real backends override this so a caller-assembled
+    /// `RuntimeSelection` (every field is `pub`) can be checked for a
+    /// factory/runtime mismatch BEFORE the first poll, rather than
+    /// discovering it via an opaque failure deep inside the wrong
+    /// reactor (e.g. prime's `CURRENT_REACTOR is null` when its
+    /// `UdpSocket` is driven from a tokio worker).
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
 }

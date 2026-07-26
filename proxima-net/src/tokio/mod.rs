@@ -2,11 +2,13 @@
 //! trait surfaces. TCP + Unix + UDP listeners and upstreams.
 
 pub mod tokio_acceptor;
+pub mod tokio_datagram;
 pub mod tokio_packet;
 pub mod tokio_stream_listener;
 pub mod tokio_stream_upstream;
 
 pub use tokio_acceptor::{TokioAcceptor, TokioAcceptorFactory};
+pub use tokio_datagram::{TokioDatagram, TokioDatagramFactory};
 pub use tokio_packet::{TokioPacketListenerFactory, TokioUdpListener};
 pub use tokio_stream_listener::{
     TokioTcpConnection, TokioTcpListener, TokioUnixConnection, TokioUnixListener,

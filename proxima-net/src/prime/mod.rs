@@ -165,6 +165,10 @@ impl DatagramFactory for PrimeDatagramFactory {
             socket: UdpSocket::bind(addr)?,
         }))
     }
+
+    fn backend_name(&self) -> &'static str {
+        "prime"
+    }
 }
 
 /// prime-backed [`DatagramSocket`] over `prime::os::net::UdpSocket`.
@@ -509,5 +513,68 @@ mod tests {
 
         let got_error = result_chan.lock().unwrap().expect("result not set");
         assert!(got_error, "expected an error on refused connect, got Ok");
+    }
+
+    /// full round-trip through `PrimeDatagramFactory`/`PrimeDatagram`: bind
+    /// two sockets via the `DatagramFactory` seam, client sends, server
+    /// receives — proves the `ServeContext::datagram_factory` injection
+    /// point actually produces a working prime UDP socket, not just that
+    /// `prime::os::net::UdpSocket` itself works (already covered by
+    /// `PrimeUdpListener`'s tests in `packet.rs`).
+    #[test]
+    fn prime_datagram_factory_binds_and_round_trips_a_datagram() {
+        use core::future::poll_fn;
+
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let result_chan: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let result_for_factory = result_chan.clone();
+
+        handle
+            .dispatch_factory(Box::new(move || {
+                let done = done_clone.clone();
+                let result_handle = result_for_factory.clone();
+                Box::pin(async move {
+                    let factory = PrimeDatagramFactory;
+                    assert_eq!(factory.backend_name(), "prime");
+
+                    let mut server = factory
+                        .bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))
+                        .expect("bind server");
+                    let server_addr = server.local_addr().expect("server addr");
+                    let mut client = factory
+                        .bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))
+                        .expect("bind client");
+                    let client_addr = client.local_addr().expect("client addr");
+
+                    poll_fn(|cx| client.poll_send_to(cx, b"ping", server_addr))
+                        .await
+                        .expect("client send");
+
+                    let mut buf = [0_u8; 16];
+                    let (len, peer) = poll_fn(|cx| server.poll_recv_from(cx, &mut buf))
+                        .await
+                        .expect("server recv");
+                    assert_eq!(peer, client_addr);
+                    *result_handle.lock().unwrap() = Some(buf[..len].to_vec());
+                    done.store(true, Ordering::Release);
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch_factory");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "datagram factory round-trip never completed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        handle.shutdown_and_join().expect("shutdown");
+
+        let received = result_chan.lock().unwrap().clone().expect("result not set");
+        assert_eq!(&received[..], b"ping");
     }
 }

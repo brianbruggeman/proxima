@@ -13,6 +13,7 @@
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
+use conflaguration::{Validate, ValidationMessage};
 use proxima_core::ProximaError;
 use proxima_primitives::stream::{AcceptorFactory, DatagramFactory};
 
@@ -90,6 +91,21 @@ pub enum RuntimeBackend {
     Other(&'static str),
 }
 
+impl RuntimeBackend {
+    /// This backend's name — the same string a matched `DatagramFactory`
+    /// reports via `DatagramFactory::backend_name`, so
+    /// [`RuntimeSelection::validate`] can compare the two without a second
+    /// vocabulary.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            RuntimeBackend::Prime => "prime",
+            RuntimeBackend::Tokio => "tokio",
+            RuntimeBackend::Other(name) => name,
+        }
+    }
+}
+
 /// A runtime + every backend-matched factory it can drive — the value a
 /// caller CHOOSES (`App::builder().runtime(selection)`) instead of the
 /// backend falling out of which Cargo features happen to be linked.
@@ -106,9 +122,18 @@ pub enum RuntimeBackend {
 /// caller hand-pick factories from different backends.
 ///
 /// `datagram_factory`/`unix_upstream_factory`/`packet_listener_factory` are
-/// `Option` because backend CAPABILITY is asymmetric, not because the
-/// bundle is partially filled: prime has all four; tokio has no
-/// `DatagramFactory` impl yet (see `proxima_net::tokio`'s doc).
+/// `Option` for forward-compatibility — a future backend need not implement
+/// every optional axis — not because today's bundle is partially filled:
+/// both prime and tokio implement all four (see
+/// [`proxima_net::tokio::TokioDatagramFactory`]).
+///
+/// Every field here is `pub`, so nothing at the type level stops a caller
+/// hand-assembling a `RuntimeSelection` whose `datagram_factory` targets a
+/// different backend than `runtime`/`backend` do — `from_prime`/`from_tokio`
+/// never produce that state, but a struct literal can. Call
+/// [`validate`](Validate::validate) (this type implements `conflaguration`'s
+/// `Validate`) to catch that mismatch with a named error before it fails
+/// opaquely at the first poll.
 #[derive(Clone)]
 pub struct RuntimeSelection {
     pub backend: RuntimeBackend,
@@ -117,6 +142,39 @@ pub struct RuntimeSelection {
     pub datagram_factory: Option<Arc<dyn DatagramFactory>>,
     pub unix_upstream_factory: Option<Arc<dyn proxima_primitives::stream::UnixUpstreamFactory>>,
     pub packet_listener_factory: Option<Arc<dyn proxima_net::packet::PacketListenerFactory>>,
+}
+
+impl Validate for RuntimeSelection {
+    /// Catch a hand-assembled mismatch — `datagram_factory` naming a
+    /// different backend than `backend`/`runtime` do — BEFORE the first
+    /// `DatagramSocket` poll, where the failure is otherwise opaque (e.g. a
+    /// prime `UdpSocket` driven off a tokio worker fails deep inside prime's
+    /// reactor with `CURRENT_REACTOR is null`, nowhere near this seam).
+    /// `from_prime`/`from_tokio` never construct the state this rejects, so
+    /// this only ever fires for a struct literal built by hand.
+    ///
+    /// A factory reporting `"unknown"` (the `DatagramFactory::backend_name`
+    /// default — test doubles and in-memory fakes) is never flagged: it has
+    /// no reactor affinity to violate.
+    fn validate(&self) -> conflaguration::Result<()> {
+        let Some(factory) = &self.datagram_factory else {
+            return Ok(());
+        };
+        let factory_backend = factory.backend_name();
+        let selection_backend = self.backend.name();
+        if factory_backend == "unknown" || factory_backend == selection_backend {
+            return Ok(());
+        }
+        Err(conflaguration::Error::Validation {
+            errors: vec![ValidationMessage::new(
+                "datagram_factory",
+                format!(
+                    "{factory_backend} datagram factory requires a {factory_backend} runtime; \
+                     got {selection_backend}"
+                ),
+            )],
+        })
+    }
 }
 
 #[cfg(all(
@@ -163,16 +221,16 @@ impl RuntimeSelection {
     /// Bundle an already-built tokio-backed runtime with its matched
     /// factories (see [`from_prime`](RuntimeSelection::from_prime) for why
     /// this takes `Arc<dyn Runtime>`, not the concrete `TokioPerCoreRuntime`).
-    /// `datagram_factory` is `None` — tokio has no `DatagramFactory` impl
-    /// yet (see `proxima_net::tokio`'s doc), so an h3-native listener is
-    /// unreachable through a tokio-backed `RuntimeSelection` today.
+    /// `datagram_factory` bundles [`proxima_net::tokio::TokioDatagramFactory`]
+    /// — an h3-native or `DatagramListenProtocol` listener is reachable
+    /// through a tokio-backed `RuntimeSelection` exactly like a prime one.
     #[must_use]
     pub fn from_tokio(runtime: Arc<dyn Runtime>) -> Self {
         Self {
             backend: RuntimeBackend::Tokio,
             runtime,
             acceptor_factory: Arc::new(proxima_net::tokio::TokioAcceptorFactory),
-            datagram_factory: None,
+            datagram_factory: Some(Arc::new(proxima_net::tokio::TokioDatagramFactory)),
             unix_upstream_factory: Some(Arc::new(proxima_net::tokio::TokioUnixUpstreamFactory)),
             packet_listener_factory: Some(Arc::new(proxima_net::tokio::TokioPacketListenerFactory)),
         }
@@ -975,9 +1033,11 @@ mod selection_by_value_tests {
             "prime bundles a DatagramFactory"
         );
         assert!(
-            tokio_selection.datagram_factory.is_none(),
-            "tokio has no DatagramFactory impl yet"
+            tokio_selection.datagram_factory.is_some(),
+            "tokio bundles a DatagramFactory too (TokioDatagramFactory)"
         );
+        prime_selection.validate().expect("from_prime always validates");
+        tokio_selection.validate().expect("from_tokio always validates");
 
         let app_prime = crate::App::builder()
             .runtime(prime_selection)
@@ -1064,5 +1124,100 @@ mod selection_by_value_tests {
             flag_foreign.load(Ordering::SeqCst),
             "app built from a RuntimeSelection with RuntimeBackend::Other must dispatch on the foreign runtime"
         );
+    }
+
+    // `RuntimeSelection`'s fields are all `pub`, so nothing at the type
+    // level stops a caller wiring a prime `DatagramFactory` onto a tokio
+    // `RuntimeSelection` (or vice-versa) via struct-literal construction.
+    // Before `Validate`, that mismatch surfaced only once the listener
+    // actually polled the wrong-backend socket: prime's `UdpSocket` driven
+    // from a tokio worker fails opaquely deep inside prime's own reactor
+    // (`CURRENT_REACTOR is null`), nowhere near the `RuntimeSelection` that
+    // caused it. These prove `validate()` names the mismatch instead.
+    #[test]
+    fn validate_rejects_a_prime_datagram_factory_on_a_tokio_selection() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let tokio_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag });
+
+        let mismatched = RuntimeSelection {
+            backend: RuntimeBackend::Tokio,
+            runtime: tokio_runtime,
+            acceptor_factory: Arc::new(proxima_net::tokio::TokioAcceptorFactory),
+            datagram_factory: Some(Arc::new(proxima_net::prime::PrimeDatagramFactory)),
+            unix_upstream_factory: None,
+            packet_listener_factory: None,
+        };
+
+        let error = mismatched
+            .validate()
+            .expect_err("a prime datagram factory on a tokio selection must fail validate()");
+        let message = error.to_string();
+        assert!(
+            message.contains("prime datagram factory requires a prime runtime"),
+            "error must name which backend the factory requires: {message}"
+        );
+        assert!(
+            message.contains("got tokio"),
+            "error must name the actual backend it got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_tokio_datagram_factory_on_a_prime_selection() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let prime_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag });
+
+        let mismatched = RuntimeSelection {
+            backend: RuntimeBackend::Prime,
+            runtime: prime_runtime,
+            acceptor_factory: Arc::new(proxima_net::prime::PrimeAcceptorFactory),
+            datagram_factory: Some(Arc::new(proxima_net::tokio::TokioDatagramFactory)),
+            unix_upstream_factory: None,
+            packet_listener_factory: None,
+        };
+
+        let error = mismatched
+            .validate()
+            .expect_err("a tokio datagram factory on a prime selection must fail validate()");
+        let message = error.to_string();
+        assert!(
+            message.contains("tokio datagram factory requires a tokio runtime"),
+            "error must name which backend the factory requires: {message}"
+        );
+        assert!(
+            message.contains("got prime"),
+            "error must name the actual backend it got: {message}"
+        );
+    }
+
+    // a `datagram_factory` reporting `"unknown"` (the default — test
+    // doubles, in-memory fakes) has no reactor affinity to violate, so it
+    // must never be flagged regardless of which backend it's paired with.
+    #[test]
+    fn validate_never_flags_a_factory_with_no_declared_backend() {
+        struct FakeFactory;
+        impl DatagramFactory for FakeFactory {
+            fn bind(
+                &self,
+                _addr: std::net::SocketAddr,
+            ) -> std::io::Result<Box<dyn proxima_primitives::stream::DatagramSocket>> {
+                Err(std::io::Error::other("fake factory never actually binds"))
+            }
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let tokio_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag });
+        let selection = RuntimeSelection {
+            backend: RuntimeBackend::Tokio,
+            runtime: tokio_runtime,
+            acceptor_factory: Arc::new(proxima_net::tokio::TokioAcceptorFactory),
+            datagram_factory: Some(Arc::new(FakeFactory)),
+            unix_upstream_factory: None,
+            packet_listener_factory: None,
+        };
+
+        selection
+            .validate()
+            .expect("an unlabeled datagram factory must never be flagged as a mismatch");
     }
 }
