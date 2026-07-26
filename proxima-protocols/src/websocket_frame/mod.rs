@@ -34,7 +34,6 @@
 //!
 //! Sub-flag: `websocket-frame` (default off).
 
-
 use alloc::vec::Vec;
 
 /// WebSocket frame opcode (low nibble of the first header byte).
@@ -267,6 +266,12 @@ pub use codec_trait::WebSocketFrameCodec;
 pub mod frame_codec_pipe;
 #[cfg(feature = "websocket_frame-frame-pipe")]
 pub use frame_codec_pipe::OwnedWsFrame;
+
+/// Sans-IO RFC 6455 SERVER session FSM built on this module's frame
+/// codec — message reassembly, control-frame automation, masking
+/// enforcement, and the closing handshake. See `session`'s module doc.
+#[cfg(feature = "websocket_frame-session")]
+pub mod session;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

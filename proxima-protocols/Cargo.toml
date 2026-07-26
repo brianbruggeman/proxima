@@ -148,6 +148,11 @@ websocket_frame-codec-trait = ["websocket_frame", "dep:proxima-codec"]
 # WebSocketFrameCodec composes as the generic `codec_pipe::FrameCodecPipe` —
 # part of the plug-and-play-floor sweep (validate/pipe-transform-sweep).
 websocket_frame-frame-pipe = ["websocket_frame-codec-trait", "codec-pipe", "dep:bytes"]
+# Sans-IO RFC 6455 SERVER session FSM (reassembly, control-frame
+# automation, masking enforcement, closing handshake) built on the base
+# `websocket_frame` codec. No new deps — pure composition over
+# `parse_frame`/`encode_header`/`unmask_in_place`. Tier-1: no_std + alloc.
+websocket_frame-session = ["websocket_frame"]
 
 websocket_handshake = ["dep:sha1", "dep:base64"]
 
