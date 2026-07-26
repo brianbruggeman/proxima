@@ -36,7 +36,7 @@
 //! | `.grpc(url)` / `.grpc()` | url-carrying | url-less — listener dispatches to `.handle(pipe)`, not a url; resolves to `"h2"` (gRPC rides h2) |
 //! | `.kafka()`/`.mqtt()`/`.amqp()`/`.memcached()`/`.redis()` | DSN, delegates to `.protocol()` | typed handle, delegates to `.protocol()` |
 //! | `.pgwire()` | DSN, delegates to `.protocol()` | typed query engine — KEEPS its bespoke fresh-registration path (TLS double-wrap guard) |
-//! | `.dns()` | DSN, delegates to `.protocol()` | the one dual-transport axis — branches on `.tcp()`/`.udp()` at `.serve()` time |
+//! | `.dns()` | DSN, delegates to `.protocol()` | registers a TCP + a UDP `AnyProtocol` candidate under one `.any()`-fanned listener — answers both transports on one port; `.tcp()`/`.udp()` no longer change what's bound (see `AnyProtocol::wants_datagram`) |
 //! | (no client twin) | — | `.websocket(handler)` — wires into h1's Upgrade seam, not a peer `AnyProtocol` |
 //! | (no client twin) | — | inherent `.h2()` — the other name for the same shared `"h2"` protocol |
 //!

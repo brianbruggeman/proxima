@@ -63,11 +63,15 @@ type DnsFramedAny = FramedAny<
     fn(ShedReason, &proxima_protocols::dns::DnsTcpOwnedFrame) -> DnsTcpOutcome,
 >;
 
-/// DNS-over-TCP wire candidate for the open universal listener. See
-/// [`crate::DnsDatagramProtocol`] for the UDP sibling — the two speak the
-/// same [`DnsPipeHandle`] but resolve onto different `ListenProtocol`
-/// machinery (this one rides `AnyListenProtocol`'s TCP accept loop; the UDP
-/// one is a standalone `DatagramProtocolListenProtocol`).
+/// DNS-over-TCP wire candidate for the open universal listener. Two UDP
+/// siblings exist, for two different callers: [`crate::DnsUdpAnyProtocol`]
+/// is the `AnyProtocol` candidate `Listener::builder().dns(handler)`
+/// registers ALONGSIDE this one, under the SAME `.any()`-fanned listener,
+/// so one bind answers both transports on one port — see that type's module
+/// doc. [`crate::DnsDatagramProtocol`] is a separate, standalone
+/// `DatagramProtocolListenProtocol` for a caller who wants a dedicated
+/// UDP-only listener with no TCP sibling at all; it shares the same
+/// [`DnsPipeHandle`] contract but is never what `.dns(handler)` registers.
 ///
 /// ```
 /// use proxima_listen::any::AnyProtocol;

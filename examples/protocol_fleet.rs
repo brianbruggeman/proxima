@@ -162,10 +162,13 @@ async fn dns_section() -> Result<(), ProximaError> {
         into_dns_handle(StaticA)
     }
 
+    // `.dns(handler)` registers BOTH a DNS-over-TCP and a DNS-over-UDP
+    // `AnyProtocol` candidate under one `.any()`-fanned listener — no
+    // `.tcp()`/`.udp()` call changes what gets bound; `Client::builder().dns(dsn)`
+    // dials UDP (`DnsClientUpstream`, `src/upstreams/dns.rs`).
     let bind = free_loopback_addr()?;
     let server = Listener::builder()
         .bind(bind)
-        .udp()
         .handle(into_handle(NullHttp))
         .dns(handle())
         .serve()
@@ -176,7 +179,7 @@ async fn dns_section() -> Result<(), ProximaError> {
     let json: serde_json::Value = response.json().await?;
     assert_eq!(json["rcode"], 0);
     assert_eq!(json["records"][0]["rdata"], serde_json::json!([203, 0, 113, 42]));
-    println!("§2 DNS: .dns(handler).udp() listener + .dns(dsn) client -> A record {}", json["records"][0]["rdata"]);
+    println!("§2 DNS: .dns(handler) listener (both transports, one port) + .dns(dsn) client -> A record {}", json["records"][0]["rdata"]);
     server.stop();
     Ok(())
 }

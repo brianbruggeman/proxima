@@ -32,7 +32,7 @@ cargo run --example protocol_fleet --features "http1-native,memcached-listener,m
 
 ```
 §1 memcached: SET then GET round trip through .memcached(handler)/.memcached(dsn) -> "VALUE greeting 0 15\r\nhello-memcached\r\nEND\r\n"
-§2 DNS: .dns(handler).udp() listener + .dns(dsn) client -> A record [203,0,113,42]
+§2 DNS: .dns(handler) listener (both transports, one port) + .dns(dsn) client -> A record [203,0,113,42]
 §3 Kafka: .kafka(handler).tcp() listener + .kafka(dsn) client -> PRODUCE acked (0 topics in reply)
 §4 MQTT: .mqtt(handler).tcp() listener + .mqtt(dsn) client -> CONNECT+PINGREQ/PINGRESP OK
 §5 AMQP: .amqp(handler).tcp() listener + .amqp(dsn) client -> basic.publish observed, routing_key="orders"
@@ -85,3 +85,7 @@ full builder-vs-TOML walkthrough, including a listener's own tuning config
   §6 above (`KafkaServerConfig`) follows.
 - `docs/tutorials/08-protocol-fleet.md` — this chapter's prose companion,
   with each protocol's own worked example and scope boundary in full.
+- `docs/tutorials/11-any-transport-agnostic.md` — why §2's `.dns(handler)`
+  needs no `.tcp()`/`.udp()` call at all: `AnyProtocol::wants_datagram()`,
+  the mechanism that lets a candidate answer over UDP through the same
+  `.any()` classifier the whole fleet above already uses.

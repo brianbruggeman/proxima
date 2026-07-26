@@ -8,9 +8,10 @@
 //! [`ListenerBuilder::protocol`](crate::listener::handle::ListenerBuilder::protocol)
 //! seam — the SAME mechanism a third-party protocol uses (see the
 //! `TestThriftExt`-style test in `tests/e2e`). `.pgwire()` (bespoke — see
-//! its own doc), `.dns()` (dual-transport — see its own doc), and
-//! `.websocket()` (h1 upgrade wiring, not a peer `AnyProtocol` — see its own
-//! doc) are the three axes that do NOT delegate straight to `.protocol()`.
+//! its own doc), `.dns()` (registers TWO candidates, TCP and UDP, under one
+//! `.any()`-fanned listener — see its own doc), and `.websocket()` (h1
+//! upgrade wiring, not a peer `AnyProtocol` — see its own doc) are the three
+//! axes that do NOT delegate straight to a single `.protocol()` call.
 //!
 //! The impl block lives in `handle.rs`, not here — `.pgwire()`/`.dns()`/
 //! `.websocket()` accumulate onto private `ListenerBuilder` fields
@@ -180,11 +181,17 @@ pub trait ListenerProtocolExt: Sized {
     /// Select Kafka as the listen protocol, delegating to `.protocol(impl
     /// AnyProtocol)`.
     ///
-    /// Every protocol axis below `.grpc()` is TCP-only (each one's
-    /// `AnyProtocol::drive` takes `Box<dyn StreamConnection>`, a byte
-    /// stream — there is no "kafka over QUIC" wire this facade speaks).
-    /// Pairing one with `.quic()` is rejected at `.serve()` with a named
-    /// [`crate::ProximaError::Config`], not a silent fallback to TCP:
+    /// None of the protocol axes below `.grpc()` speak QUIC — there is no
+    /// "kafka over QUIC" wire this facade implements, and `.any()`'s
+    /// classifier (which `.kafka(handler)` delegates to) demultiplexes by
+    /// byte prefix, a different mechanism from QUIC's own DCID connection
+    /// demux entirely. Pairing one with `.quic()` is rejected at `.serve()`
+    /// with a named [`crate::ProximaError::Config`], not a silent fallback
+    /// to TCP — `.udp()`, by contrast, is NOT rejected here: a registered
+    /// candidate's own `AnyProtocol::wants_datagram` (see
+    /// `proxima_listen::any::AnyProtocol`'s doc) already decides whether
+    /// `.any()` binds a UDP socket, so `.udp()` is redundant at worst, never
+    /// an error:
     ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, ListenerTransportExt, Request, Response, ProximaError};
@@ -225,7 +232,7 @@ pub trait ListenerProtocolExt: Sized {
     ///     .handle(into_handle(Dispatch))
     ///     .serve()
     ///     .await;
-    /// assert!(matches!(outcome, Err(ProximaError::Config(message)) if message.contains("TCP-only")));
+    /// assert!(matches!(outcome, Err(ProximaError::Config(message)) if message.contains("QUIC connection-demux")));
     /// # Ok(())
     /// # }
     /// ```
@@ -526,18 +533,21 @@ pub trait ListenerProtocolExt: Sized {
     #[must_use]
     fn pgwire(self, query: proxima_pgwire::PgPipeHandle) -> Self;
 
-    /// The one dual-transport protocol: branches on `.tcp()`/`.udp()` at
-    /// `.serve()` time rather than delegating straight to `.protocol()`.
-    /// `.tcp()` (default) resolves a single-candidate DNS-over-TCP
-    /// `AnyListenProtocol`; `.udp()` resolves a
-    /// `DatagramProtocolListenProtocol` wrapping `DnsDatagramProtocol`,
-    /// self-registered the way the native h3 listener is; `.quic()` is a
-    /// config error (DNS-over-QUIC/DoQ unimplemented). See
+    /// Registers TWO `AnyProtocol` candidates under one `.any()`-fanned
+    /// listener instead of delegating straight to a single `.protocol()`
+    /// call: DNS-over-TCP (`proxima_dns::DnsAnyProtocol`, RFC 1035 §4.2.2's
+    /// 2-byte length prefix) and DNS-over-UDP (`proxima_dns::DnsUdpAnyProtocol`,
+    /// RFC 1035 §4.2.1's raw message, `AnyProtocol::wants_datagram() ==
+    /// true`) — both reachable on the SAME port number, regardless of
+    /// whether `.tcp()`/`.udp()` was ever called (neither changes what gets
+    /// bound any more). `.quic()` stays a config error (DNS-over-QUIC/DoQ is
+    /// unimplemented — a genuinely absent mechanism, not a missing config
+    /// flag). See
     /// [`ListenerBuilder::dns`](crate::listener::handle::ListenerBuilder::dns)'s
     /// own doc.
     ///
-    /// `.dns()` alone (or paired with `.tcp()`) is DNS-over-TCP (RFC 1035
-    /// §4.2.2, a 2-byte length prefix over a byte stream):
+    /// One bind answers a real DNS-over-TCP query AND a real DNS-over-UDP
+    /// query — `.dns(handler)` alone, no `.tcp()`/`.udp()` needed:
     ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
@@ -580,8 +590,11 @@ pub trait ListenerProtocolExt: Sized {
     /// # }
     /// ```
     ///
-    /// `.dns().udp()` is the classic UDP resolver wire instead — same
-    /// handler, a completely different `ListenProtocol` underneath:
+    /// `.dns(handler).udp()` — or `.tcp()` — binds the IDENTICAL listener as
+    /// the example above; `.tcp()`/`.udp()` are accepted here only so a
+    /// caller who explicitly named a transport before this change keeps
+    /// compiling, not because either one narrows what `.dns(handler)`
+    /// serves:
     ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, ListenerTransportExt, Request, Response, ProximaError};
