@@ -873,14 +873,50 @@ mod tests {
         registry
     }
 
+    // production arms `PrimeRuntime` through `prime::config::Builder`, which
+    // defaults `background_pool` to `PoolKind::Rayon` (prime/src/config.rs)
+    // — every durable write in the recording pipe routes through
+    // `Runtime::spawn_background_blocking`, and a real pool is always
+    // attached. Bypassing the builder here (bare `PrimeRuntime::new`) left
+    // `background_pool: None`, so `spawn_background_blocking` fell back to
+    // spawning a brand-new OS thread per append/flush call (prime/src/os/runtime.rs) —
+    // thread-creation latency that balloons under host contention and raced
+    // `drain_until`'s fixed retry budget. `ProximaBackgroundPool` mirrors
+    // production's persistent-pool shape without pulling in `rayon`.
     fn armed_spigot() -> crate::recording::DeferredRuntime {
         let spigot = crate::recording::deferred_runtime();
-        spigot
-            .set(
-                std::sync::Arc::new(crate::runtime::PrimeRuntime::new(1).expect("prime runtime"))
-                    as std::sync::Arc<dyn crate::runtime::Runtime>,
+        let background_pool: std::sync::Arc<dyn crate::runtime::BackgroundPool> =
+            std::sync::Arc::new(
+                crate::runtime::prime::os::background::ProximaBackgroundPool::new()
+                    .expect("background pool"),
+            );
+        let runtime: std::sync::Arc<dyn crate::runtime::Runtime> = std::sync::Arc::new(
+            crate::runtime::PrimeRuntime::new(1)
+                .expect("prime runtime")
+                .with_background_pool(background_pool),
+        );
+        // block here (setup, off the request/assertion critical path) until
+        // core 0's worker thread has actually run one task. A freshly
+        // `thread::Builder::spawn`'d worker is kernel-scheduled but not yet
+        // CPU-scheduled; under host contention it can sit unscheduled for
+        // longer than a bounded polling loop's whole retry budget, which is
+        // exactly the race `drain_until` lost (recording pipe's drainer task
+        // never got a first turn before the poll gave up). A real blocking
+        // handshake here proves the worker is warm before any recording
+        // event is ever sent to it.
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel::<()>();
+        runtime
+            .spawn_on_core(
+                crate::runtime::CoreId(0),
+                Box::pin(async move {
+                    let _ = ready_sender.send(());
+                }),
             )
-            .ok();
+            .expect("warm up drainer core");
+        ready_receiver
+            .recv()
+            .expect("drainer core never scheduled a task");
+        spigot.set(runtime).ok();
         spigot
     }
 
@@ -908,8 +944,19 @@ mod tests {
             .any(|event| matches!(event.event, ProtocolEvent::Http(HttpEvent::Ended { .. })))
     }
 
-    // the sink drains on a background task; poll the trace until the recording
-    // is terminal rather than guessing a fixed yield count (raced on slow CI)
+    // the sink drains on a background task that lives on an entirely
+    // different OS thread than this test (the armed spigot's own
+    // `PrimeRuntime`) — a cooperative `yield_now()` only re-polls this
+    // task, it never cedes real wall-clock time to the OS scheduler, so a
+    // fixed-iteration retry loop built on it burns its whole budget in
+    // under 2ms regardless of iteration count (measured: 1024 iterations of
+    // pure `yield_now()` complete in ~1.5ms). Under host scheduling
+    // contention the drainer's worker thread can need far longer than that
+    // to get its first CPU slice, so the loop gave up before the recording
+    // ever reached disk. `std::thread::sleep` between checks trades a
+    // handful of real milliseconds for the OS to actually schedule the
+    // other thread; the condition checked each iteration is still the real
+    // terminal state on disk, not a guessed total duration.
     async fn drain_until(
         path: &std::path::Path,
         ready: fn(&[RecordingEvent]) -> bool,
@@ -919,7 +966,7 @@ mod tests {
             if ready(&collected) {
                 return collected;
             }
-            proxima_primitives::sync::task::yield_now().await;
+            std::thread::sleep(std::time::Duration::from_micros(200));
         }
         drain_events(path).await
     }
