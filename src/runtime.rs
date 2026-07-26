@@ -67,10 +67,27 @@ static INSTALLED_RUNTIME: OnceLock<RuntimeSelection> = OnceLock::new();
 /// `Default`/adaptive resolution (prime-first-if-linked) is a RESOLUTION
 /// MODE, not a member of this enum — by the time a `RuntimeSelection`
 /// exists, the backend is already picked.
+///
+/// This is a pure introspection label, never dispatched on — every field of
+/// `RuntimeSelection` is `pub`, so a foreign backend (an out-of-tree
+/// `proxima-smol`, say) can construct a `RuntimeSelection` by struct literal
+/// today. Before `Other`, such a backend had no truthful value to put in
+/// `backend`: mislabeling itself `Prime` or `Tokio` would be dishonest
+/// metadata in a public type. `Other` closes that gap without opening the
+/// config surface — `RuntimeConfig`'s `backend: auto|prime|tokio` (see
+/// `crate::app_config::RuntimeBackendSelection`) stays closed by design:
+/// config selects among the BUILT-IN backends proxima ships and resolves by
+/// name; a foreign backend is wired by value, through
+/// `App::builder().runtime(selection)` / a `RuntimeSelection` struct
+/// literal, never by string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeBackend {
     Prime,
     Tokio,
+    /// A backend supplied from outside proxima (e.g. an out-of-tree
+    /// `proxima-smol`). The `&'static str` is the backend's own name, for
+    /// diagnostics/logging — proxima never parses or matches on it.
+    Other(&'static str),
 }
 
 /// A runtime + every backend-matched factory it can drive — the value a
@@ -999,6 +1016,53 @@ mod selection_by_value_tests {
         assert!(
             flag_tokio.load(Ordering::SeqCst),
             "app built from RuntimeSelection::from_tokio must dispatch on the tokio runtime"
+        );
+    }
+
+    // Extends the value-not-feature-presence proof above one step further:
+    // `RuntimeBackend::Other` lets a backend proxima never shipped (an
+    // out-of-tree `proxima-smol`, say) name itself truthfully instead of
+    // mislabeling as `Prime`/`Tokio`. No `from_*` convenience exists for
+    // `Other` by design (see the enum's doc) — every `RuntimeSelection`
+    // field is `pub`, so the foreign backend wires through the struct
+    // literal directly, reusing the same `RecordingRuntime` double the
+    // prime/tokio proof above uses (it doesn't matter WHICH `Runtime` impl
+    // backs a selection, only that `backend` and `runtime` travel together
+    // and dispatch actually reaches the injected value).
+    #[test]
+    fn foreign_backend_can_be_constructed_and_driven_through_runtime_selection() {
+        let flag_foreign = Arc::new(AtomicBool::new(false));
+        let foreign_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime {
+            ran: flag_foreign.clone(),
+        });
+
+        let foreign_selection = RuntimeSelection {
+            backend: RuntimeBackend::Other("smol"),
+            runtime: foreign_runtime,
+            acceptor_factory: Arc::new(proxima_net::prime::PrimeAcceptorFactory),
+            datagram_factory: None,
+            unix_upstream_factory: None,
+            packet_listener_factory: None,
+        };
+        assert_eq!(foreign_selection.backend, RuntimeBackend::Other("smol"));
+        assert_ne!(foreign_selection.backend, RuntimeBackend::Prime);
+        assert_ne!(foreign_selection.backend, RuntimeBackend::Tokio);
+
+        let app_foreign = crate::App::builder()
+            .runtime(foreign_selection)
+            .with_defaults()
+            .expect("with_defaults")
+            .build()
+            .expect("build foreign-backend app");
+
+        proxima_listen::dispatch_handler(
+            app_foreign.runtime().as_ref(),
+            proxima_listen::Route::Inline,
+            Box::pin(async {}),
+        );
+        assert!(
+            flag_foreign.load(Ordering::SeqCst),
+            "app built from a RuntimeSelection with RuntimeBackend::Other must dispatch on the foreign runtime"
         );
     }
 }
