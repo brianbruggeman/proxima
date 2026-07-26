@@ -136,18 +136,18 @@ pub fn dispatch_handler(
             rt.spawn_on_current_core(conn_future);
         }
         // No runtime injected — only reachable when a caller drives a
-        // listener without going through `App`/`serve-prime`. Under
-        // `tokio`, this must land on the caller's existing `LocalSet`
-        // (byte-identical to the pre-migration behaviour). Without it,
-        // an OS thread + `block_on` gives the same "runs independently"
-        // contract with no runtime dependency.
-        #[cfg(feature = "tokio")]
+        // listener without going through `App`/`serve-prime`. Spawning is a
+        // runtime capability, so it belongs behind `ServeContext::runtime`
+        // (the seam), never behind a feature cfg here: whichever runtime
+        // crate happens to be linked must not silently change what "no
+        // runtime" means. Every build does the SAME explicit thing —
+        // drop the connection and say why.
         (None, _) => {
-            tokio::task::spawn_local(conn_future);
-        }
-        #[cfg(not(feature = "tokio"))]
-        (None, _) => {
-            std::thread::spawn(move || futures::executor::block_on(conn_future));
+            warn!(
+                "connection dropped: no runtime injected onto ServeContext, so there is \
+                 no executor to spawn the ?Send connection future onto"
+            );
+            drop(conn_future);
         }
         (Some(rt), Route::Peer(index)) => {
             let target = CoreId(usize::from(index));
@@ -582,6 +582,88 @@ mod tests {
             single_core_policy.route(&mut single_cursor),
             Route::Peer(0),
             "single core must always return core 0"
+        );
+    }
+
+    // additivity proof: `dispatch_handler` must pick its executor from the
+    // `Runtime` VALUE it is handed, never from which runtime crate happens
+    // to be linked in. Two distinct `Runtime` impls stand in for two
+    // concrete backends (e.g. prime and tokio) both compiled into the same
+    // binary — passing runtime A must run the future on A and never touch
+    // B, and vice-versa, proving dispatch follows the injected value.
+    struct RecordingRuntime {
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Runtime for RecordingRuntime {
+        fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            futures::executor::block_on(future);
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: CoreId,
+            _future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never routes to a peer core")
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: CoreId,
+            _factory: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never spawns a cross-core factory")
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<
+                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+            >,
+        ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
+            unreachable!("test never spawns background-blocking work")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("test never times out")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> CoreId {
+            CoreId(0)
+        }
+    }
+
+    #[test]
+    fn dispatch_handler_follows_the_injected_runtime_value_not_feature_presence() {
+        let flag_a = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_b = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runtime_a: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_a.clone() });
+        let runtime_b: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_b.clone() });
+
+        // both runtimes are alive simultaneously (the additivity claim: two
+        // backends linked into one binary is a supported state) — only the
+        // ONE named in this call may ever run the future.
+        dispatch_handler(Some(&runtime_a), Route::Inline, Box::pin(async move {}));
+        drop(runtime_b);
+
+        assert!(
+            flag_a.load(std::sync::atomic::Ordering::SeqCst),
+            "dispatch_handler must run the future on the injected runtime"
+        );
+        assert!(
+            !flag_b.load(std::sync::atomic::Ordering::SeqCst),
+            "an uninvolved runtime must never observe a spawn"
         );
     }
 }

@@ -62,17 +62,15 @@ fn spawn_connection(
     };
     match runtime {
         Some(runtime) => runtime.spawn_on_current_core(Box::pin(conn_future)),
-        #[cfg(feature = "tokio")]
-        None => {
-            tokio::task::spawn_local(conn_future);
-        }
-        #[cfg(not(feature = "tokio"))]
+        // No runtime injected — spawning is a runtime capability, so it
+        // belongs on the `ServeContext::runtime` seam, never behind a
+        // feature cfg here. Every build does the SAME explicit thing
+        // regardless of which runtime crate happens to be linked.
         None => {
             warn!(
                 label = %label,
-                "upgrade connection dropped: no runtime injected and the `tokio` \
-                 feature is off, so there is no executor to spawn the ?Send \
-                 connection future onto"
+                "upgrade connection dropped: no runtime injected onto ServeContext, so \
+                 there is no executor to spawn the ?Send connection future onto"
             );
             drop(conn_future);
         }
@@ -82,7 +80,9 @@ fn spawn_connection(
 /// Binds an acceptor through `factory`, then accepts connections until
 /// `shutdown` fires, driving each through `pipe` as a CONNECT →
 /// `Response.upgrade` → invoke exchange. The per-connection future runs on
-/// `runtime` (`spawn_on_current_core`) when present, else `spawn_local`.
+/// `runtime` (`spawn_on_current_core`) when present; with no runtime
+/// injected the connection is dropped with a warning (there is no executor
+/// to run it on).
 ///
 /// `label` only colors the bind/accept/connection log lines. `ready_signal`,
 /// when present, fires right after the real bind succeeds so
@@ -249,6 +249,60 @@ mod tests {
         }
     }
 
+    // test-only `Runtime` whose `spawn_on_current_core` forwards to
+    // `tokio::task::spawn_local` — stands in for an installed runtime so
+    // this test exercises the seam (`Some(runtime)`) rather than the
+    // no-runtime degradation. Must run inside a `LocalSet`.
+    struct LocalSetRuntime;
+
+    impl Runtime for LocalSetRuntime {
+        fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            tokio::task::spawn_local(future);
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never routes to a peer core")
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _factory: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never spawns a cross-core factory")
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<
+                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+            >,
+        ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
+            unreachable!("test never spawns background-blocking work")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("test never times out")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> proxima_runtime::CoreId {
+            proxima_runtime::CoreId(0)
+        }
+    }
+
     #[proxima::test(runtime = "tokio")]
     async fn serve_pipe_upgrades_drives_an_upgrade_returning_pipe_to_completion() {
         let local = tokio::task::LocalSet::new();
@@ -266,6 +320,7 @@ mod tests {
                     done: Arc::new(done_tx),
                 });
                 let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+                let runtime: Option<Arc<dyn Runtime>> = Some(Arc::new(LocalSetRuntime));
 
                 tokio::task::spawn_local(async move {
                     let _ = serve_pipe_upgrades(
@@ -273,7 +328,7 @@ mod tests {
                         SocketAddr::from(([127, 0, 0, 1], 0)),
                         TcpBindOptions::default(),
                         pipe,
-                        None,
+                        runtime,
                         shutdown_rx,
                         "test-upgrade",
                         None,

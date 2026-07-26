@@ -4,8 +4,9 @@
 //! reports time/iter + MB/s via criterion.
 //!
 //! Structure mirrors `tests/serve_parity.rs`: the tokio backend serves
-//! inside a `LocalSet` (`runtime = None` → `spawn_local`); the prime
-//! backend binds + accepts on a prime `CoreShard` worker via
+//! inside a `LocalSet` with a `LocalSetRuntime` injected via the seam
+//! (`spawn_on_current_core` → `spawn_local`); the prime backend binds +
+//! accepts on a prime `CoreShard` worker via
 //! `spawn_factory_on_core(CoreId(0), ...)` with the serve future leaked to
 //! `'static`. The pipe returns a fixed 64 KiB body (the AGENTS.md-relevant
 //! size, >=55 MB/s / sub-1ms p99 targets).
@@ -161,15 +162,70 @@ async fn keepalive_get(stream: &mut TcpStream) {
 
 // ---- tokio reference backend -----------------------------------------
 
-/// Serve `HttpListenProtocol::serve` with `TokioAcceptorFactory` and
-/// `runtime = None` inside a `LocalSet`. The serve future borrows the
-/// protocol + spec so it cannot be spawned; it races the client on the
-/// same LocalSet task. Returns once `iters` round-trips have completed.
+/// Test/bench-only [`Runtime`] whose `spawn_on_current_core` forwards to
+/// `tokio::task::spawn_local` — the tokio reference backend's stand-in for
+/// an installed runtime, so it exercises the seam (`Some(runtime)`) instead
+/// of `dispatch_handler`'s no-runtime degradation.
+struct LocalSetRuntime;
+
+impl Runtime for LocalSetRuntime {
+    fn spawn_on_current_core(&self, future: std::pin::Pin<Box<dyn Future<Output = ()> + 'static>>) {
+        tokio::task::spawn_local(future);
+    }
+
+    fn spawn_on_core(
+        &self,
+        _core_id: CoreId,
+        _future: std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    ) -> Result<(), proxima::runtime::SpawnError> {
+        unreachable!("bench never routes to a peer core")
+    }
+
+    fn spawn_factory_on_core(
+        &self,
+        _core_id: CoreId,
+        _factory: Box<
+            dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+        >,
+    ) -> Result<(), proxima::runtime::SpawnError> {
+        unreachable!("bench never spawns a cross-core factory")
+    }
+
+    fn spawn_background_blocking(
+        &self,
+        _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
+    ) -> proxima::runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
+        unreachable!("bench never spawns background-blocking work")
+    }
+
+    fn timer_at(
+        &self,
+        _deadline: std::time::Instant,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + 'static>> {
+        unreachable!("bench never times out")
+    }
+
+    fn num_cores(&self) -> usize {
+        1
+    }
+
+    fn current_core(&self) -> CoreId {
+        CoreId(0)
+    }
+}
+
+/// Serve `HttpListenProtocol::serve` with `TokioAcceptorFactory` and a
+/// `LocalSetRuntime` injected via the seam, inside a `LocalSet`. The serve
+/// future borrows the protocol + spec so it cannot be spawned; it races the
+/// client on the same LocalSet task. Returns once `iters` round-trips have
+/// completed.
 fn run_tokio_iters(runtime: &tokio::runtime::Runtime, iters: u64) -> Duration {
     let local = tokio::task::LocalSet::new();
     local.block_on(runtime, async move {
         let addr = pick_free_addr().await;
+        let injected_runtime: Arc<dyn Runtime> = Arc::new(LocalSetRuntime);
         let context = ServeContext::new(NoopTelemetry::handle())
+            .with_runtime(injected_runtime)
             .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let spec = serde_json::json!({ "name": "http" });
