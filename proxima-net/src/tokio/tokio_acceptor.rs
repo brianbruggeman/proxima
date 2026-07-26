@@ -120,7 +120,7 @@ mod tests {
     use std::future::poll_fn;
     use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn acceptor_round_trips_four_bytes() {
         let factory = TokioAcceptorFactory;
         let mut acceptor = factory

@@ -28,7 +28,19 @@ tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["cargo_bench_support"] }
-proxima = { workspace = true, features = ["test-support"] }
+# test-support-tokio (not test-support): the tokio-backed unit tests in
+# tokio_acceptor/tokio_datagram/tokio_packet/tokio_stream_listener/
+# tokio_stream_upstream bind real tokio sockets, so they pin
+# `#[proxima::test(runtime = "tokio")]` (see each site) rather than leaning
+# on the adaptive default — which resolves to prime whenever
+# proxima-test/test-prime is linked (proxima's serve-prime default always
+# forwards it), independent of this crate's own `--features tokio`. The
+# explicit pin needs proxima-test's `run_tokio*` drivers to exist at all;
+# `test-support-tokio` is the root Cargo.toml's purpose-built narrow
+# forwarder for exactly that (`proxima-test/tokio-driver`, nothing more) —
+# see its doc there. This is a dev-only addition; it does not touch
+# proxima-net's own feature graph or production dependency closure.
+proxima = { workspace = true, features = ["test-support-tokio"] }
 proxima-runtime = { workspace = true }
 rstest = { workspace = true }
 socket2 = { workspace = true }

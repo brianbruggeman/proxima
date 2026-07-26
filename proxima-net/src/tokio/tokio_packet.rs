@@ -103,7 +103,7 @@ mod tests {
     use crate::packet::PacketListenerExt;
     use std::net::Ipv4Addr;
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn udp_listener_round_trips_a_datagram() {
         let server = TokioUdpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -135,7 +135,7 @@ mod tests {
     /// `TokioUdpListener::bind`/`bind_sync` directly) — proves the `bind()`
     /// method `RuntimeSelection::tokio()` actually wires up works end to
     /// end, which nothing exercised before this test.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn factory_binds_and_round_trips_a_datagram() {
         use crate::packet::PacketListenerFactory;
 

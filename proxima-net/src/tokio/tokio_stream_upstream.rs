@@ -180,7 +180,7 @@ mod tests {
     use proxima_primitives::stream::{StreamListener, StreamListenerExt, StreamUpstreamExt};
     use std::net::Ipv4Addr;
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn tcp_upstream_connects_to_listener() {
         let listener = TokioTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await

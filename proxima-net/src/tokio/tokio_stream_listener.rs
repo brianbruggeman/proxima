@@ -279,7 +279,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn tcp_listener_round_trips_a_few_bytes() {
         let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let listener = TokioTcpListener::bind(bind).await.expect("bind");
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn unix_listener_round_trips_a_few_bytes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("proxima-stream.sock");
