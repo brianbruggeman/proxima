@@ -266,11 +266,12 @@ The telemetry layer is built on the same `Pipe` primitive as every other proxima
 - `OtlpHttpPipe` (feature `otlp-http`) — OTLP/HTTP protobuf encoding; 12% within OTel SDK on encode speed; 1.5% larger wire
 - `OtlpGrpcPipe` (feature `otlp-grpc`) — OTLP/gRPC with single-alloc backpatch framing; 10.3% faster than OTel SDK on home-turf encode+frame arm
 - `CountingPipe` — test helper; per-record-type atomic counters
+- `ResilientSink` (`telemetry::out::resilient`, feature `otlp-http` — transport-agnostic, also covers `otlp-grpc`) — bounded severity-lane buffer in front of any OTLP transport factory; enqueue never blocks on the network (own background thread), forever-retrying capped-jittered backoff (default 30s ceiling), reconnect-on-transport-error, per-severity retention-horizon shedding (defaults 10/20/30/35/40 min trace→error) with space-pressure as a second, independent eviction path, self-exported `dropped.*`/`retried_total`/`reconnected_total`/`worker_panics_total`/`backlog_depth`/`survivable_seconds.*`. Guarantees liveness (the shared drain is never blocked by a slow/unreachable collector), not losslessness (bounded buffer, at-least-once). Operator guide: `ai_docs/projections/otlp-resilient-sink.md`
 
 **Fanout:**
 - `Tee<T>` (feature `tee-generic`) — generic record fanout; `ArrayQueue`-backed per-sink queue with backpressure; replay buffer for late-arriving consumers
 
-**One-liner console init, zero features required:** `proxima::init_telemetry()` — no arguments, console output, `RUST_LOG` honored, ambient recorder + drain thread already running. Works on a plain `cargo add proxima` build: proxima-native telemetry (`proxima_telemetry::*` macros, `#[proxima::instrument]`) needs only a recorder + sink + drain, not `tracing-subscriber`. See the Tracing section below.
+**One-liner console init, zero features required:** `proxima::init_telemetry()` — no arguments, console output, `RUST_LOG` honored, ambient recorder + drain thread already running. Works on a plain `cargo add proxima` build: proxima-native telemetry (`proxima_telemetry::*` macros, `#[proxima::instrument]`) needs only a recorder + sink + drain, not `tracing-subscriber`. See the Tracing section below, and `ai_docs/projections/telemetry-init.md` for the full copy-paste guide (binary/test/library patterns, decision table, troubleshooting).
 
 **TracingLayer bridge (feature `tracing-init`, additive on top of the above):**
 - `TracingLayer` — `tracing_subscriber::Layer` that bridges upstream `tracing::info!()` / `tracing::span!()` calls from hyper, rustls, tokio, and third-party crates into proxima's per-core `Recorder`

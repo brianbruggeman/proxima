@@ -2,12 +2,15 @@
 //!
 //! the primitives below (ring, id, level, clock, tag, trace, metric, log,
 //! recorder, native exporter, config) are structural -- always-on. only
-//! consumer-facing toggles remain as features (\, \,
-//! \, \). see \ for the
-//! historical build-order log (c1..c15) that produced this crate.
+//! consumer-facing toggles remain as features (`otlp-http`, `otlp-grpc`,
+//! `tracing-init`, `tee-generic`); those primitives were built in a numbered
+//! sequence (c1..c15, e.g. `clock`'s "C9/C13" note) tracked per-component in
+//! `benches/RESULTS_bench-proxima-telemetry_m1.md`.
 //!
-//! \ carries the pre-component proxima Metrics/Labels/TelemetryHandle
-//! surface that production code still uses; new code emits via \.
+//! `legacy` carries the pre-component proxima Metrics/Labels/TelemetryHandle
+//! surface that production code still uses; new code emits via the `emit`
+//! macros (`info!`/`debug!`/`warn!`/`error!`/`trace!`) and the
+//! `recorder`/`trace`/`metric`/`log` primitives directly.
 //!
 //! Tiers: `std` (default) is the full runtime — recorder (per-core TLS + drainer
 //! thread), config loading, native/otlp exporters, pipes. `alloc` (no_std) is the
