@@ -15,16 +15,19 @@
 pub(crate) use loom::sync::Arc;
 #[cfg(loom)]
 pub(crate) use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(loom)]
+pub(crate) use loom::sync::{RwLock, RwLockReadGuard};
 
-// `Arc`/`AtomicU64`/`AtomicUsize` back `watch.rs`'s `Inner` wrapper only
-// (its value cell itself is `arc_swap::ArcSwap<T>`, which always uses real,
-// non-loom atomics — see watch.rs's loom doc comment); this module also
+// `Arc`/`AtomicU64`/`AtomicUsize`/`RwLock`/`RwLockReadGuard` back `watch.rs`
+// only, which stays std-gated in `sync/mod.rs`; this module now also
 // compiles under plain `alloc` (no std) for `notify.rs`'s `AtomicBool` +
-// `Ordering` alone, so the watch-only symbols stay behind `alloc` to avoid
-// unused-import errors when neither `watch` nor `notify` is reachable.
-#[cfg(all(not(loom), feature = "alloc"))]
+// `Ordering` alone, so the watch-only symbols stay behind `std` to avoid
+// unused-import errors at the alloc tier.
+#[cfg(all(not(loom), feature = "std"))]
 pub(crate) use alloc::sync::Arc;
 #[cfg(not(loom))]
 pub(crate) use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(all(not(loom), feature = "alloc"))]
+#[cfg(all(not(loom), feature = "std"))]
 pub(crate) use core::sync::atomic::{AtomicU64, AtomicUsize};
+#[cfg(all(not(loom), feature = "std"))]
+pub(crate) use std::sync::{RwLock, RwLockReadGuard};

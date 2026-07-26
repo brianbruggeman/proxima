@@ -8,13 +8,13 @@
 //! coupling (spawn, timers, per-core context) stays on the
 //! `Runtime` trait. See the proxima-tokio-elimination-library plan (P1.3).
 //!
-//! Tier: `notify`, `oneshot`, `shutdown`, `watch`, and `AsyncMutex` (the
+//! Tier: `notify`, `oneshot`, `shutdown`, and `AsyncMutex` (the
 //! `async-mutex` feature) compile under `no_std + alloc` (each backing
-//! crate has a no_std + alloc path; see DC-SYNC). `watch`'s value cache
-//! is `arc_swap::ArcSwap<T>` (lock-free store/load), which is also
-//! no_std + alloc. The other remaining primitives (mpsc, mutex,
-//! once_cell, rwlock, semaphore, broadcast) still gate behind `std` —
-//! full no_std + alloc landing for those is deferred per DC-SYNC.
+//! crate has a no_std + alloc path; see DC-SYNC). The `watch` primitive
+//! uses `std::sync::RwLock<T>` for its value cache and is gated behind
+//! the `std` feature, as are the other remaining primitives (mpsc,
+//! mutex, once_cell, rwlock, semaphore, broadcast) — full no_std + alloc
+//! landing for those is deferred per DC-SYNC.
 //!
 //! [`blocking`] and [`task`] fold in the former `proxima-lock` and
 //! `proxima-task` crates (Workstream F, RISC-dedup) — one runtime-agnostic
@@ -31,8 +31,9 @@ mod async_mutex;
 pub mod blocking;
 #[cfg(feature = "std")]
 pub mod broadcast;
-// alloc-tier (not std): backs notify's AtomicBool/Ordering and watch's
-// Arc/AtomicU64/AtomicUsize re-exports (see loom_atomic.rs).
+// alloc-tier (not std): only notify's AtomicBool/Ordering re-exports are
+// reachable here without std; watch.rs is the sole consumer of this module's
+// std-only RwLock re-export, and stays std-gated internally (see below).
 #[cfg(feature = "alloc")]
 mod loom_atomic;
 #[cfg(feature = "std")]
@@ -65,7 +66,7 @@ mod semaphore;
 #[cfg(feature = "alloc")]
 pub mod shutdown;
 pub mod task;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "std")]
 pub mod watch;
 
 /// Multi-party rendezvous, shape-compatible with `tokio::sync::Barrier`.

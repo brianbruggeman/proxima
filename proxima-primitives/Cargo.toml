@@ -26,10 +26,6 @@ alloc = [
     # backs sync::notify (re-gated from std, see sync/mod.rs) — event-listener
     # supports no_std + alloc, so Notify never needs proxima-primitives/std.
     "dep:event-listener",
-    # backs sync::watch's value cell (arc_swap::ArcSwap<T>, re-gated from
-    # std) — arc-swap is no_std + alloc (default-features = false), so
-    # watch never needs proxima-primitives/std either.
-    "dep:arc-swap",
 ]
 std = [
     "alloc",
@@ -42,6 +38,7 @@ std = [
     "futures/std",
     "serde/std",
     "serde_json/std",
+    "dep:arc-swap",
     "dep:tracing",
     # `futures::executor::block_on` backs the tokio-free `sync::task::JoinSet`
     # (see sync/task.rs's `portable_join_set`) — real background progress via
