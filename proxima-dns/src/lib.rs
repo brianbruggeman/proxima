@@ -52,6 +52,8 @@ pub mod config;
 pub mod datagram_protocol;
 #[cfg(feature = "listen")]
 pub mod framed_app;
+#[cfg(feature = "listen")]
+pub mod udp_any_protocol;
 
 pub use proxima_protocols::dns::{
     Flags, Header, Name, ParseError, Question, RData, Record, parse_header, parse_name,
@@ -87,3 +89,5 @@ pub use datagram_protocol::DnsDatagramProtocol;
 pub use error::DnsServeError;
 #[cfg(feature = "listen")]
 pub use framed_app::{DnsFramedApp, DnsFramedAppError, DnsTcpOutcome};
+#[cfg(feature = "listen")]
+pub use udp_any_protocol::DnsUdpAnyProtocol;

@@ -11,23 +11,17 @@ pub use proxima_http::listener as http;
 // retirement), AND `.pgwire(query)`/`.redis(handler)`'s own single-candidate
 // mounts (since `PgWireListenProtocol`/a standalone redis listener are
 // likewise retired onto it / never a thing). `proxima_http::any_listener`
-// itself is gated on `http-listener` (which pulls `http1-native`) since its
-// H1 candidate is unconditional inside the module — the umbrella's
-// `pgwire`/`redis-listener` features pull `proxima-http/http-listener`
-// transitively (see their own Cargo.toml doc) precisely so `--features
-// pgwire` alone still resolves this module without also turning on the
-// umbrella's user-facing `http1` axis. "http2 without http1-native and
-// without pgwire/redis-listener" is the one combination that can no longer
-// reach `.h2()`/`.grpc()` through this module (a real, narrow regression
-// from the standalone `H2ListenProtocol`; see `h2_listen_protocol`'s doc in
-// `src/listener/handle.rs` for the graceful-error fallback it gets instead
-// of a build failure).
-#[cfg(any(
-    feature = "http1",
-    feature = "http1-native",
-    feature = "pgwire",
-    feature = "redis-listener"
-))]
+// itself is gated on `http-listener` (which pulls `http1-native`
+// transitively, at the proxima-http crate — the H1 candidate is
+// unconditional inside that module) — `any-listener` is this umbrella's OWN
+// feature wired 1:1 onto `proxima-http/http-listener` (see the root
+// Cargo.toml's doc), so every caller of this classify machinery (`.any()`
+// itself, `.pgwire(query)`, `.redis(handler)`, `.kafka(handler)`, …) reaches
+// it through ONE flag instead of a hand-maintained OR-list of every
+// listener feature that happens to need it — the OR-list this comment used
+// to describe was already stale (kafka/mqtt/amqp/memcached/dns-listener
+// were missing from it, a real latent gap this closes).
+#[cfg(feature = "any-listener")]
 pub use proxima_http::any_listener as any;
 #[cfg(all(target_os = "linux", feature = "io-uring", feature = "http1"))]
 pub mod http_uring;
@@ -80,14 +74,9 @@ pub use proxima_redis as redis;
 #[cfg(feature = "xdp")]
 pub mod xdp_packet;
 
-#[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
+#[cfg(all(feature = "http2", feature = "any-listener"))]
 pub use any::H2PriorKnowledgeAnyProtocol;
-#[cfg(any(
-    feature = "http1",
-    feature = "http1-native",
-    feature = "pgwire",
-    feature = "redis-listener"
-))]
+#[cfg(feature = "any-listener")]
 pub use any::{AnyListenProtocol, H1AnyProtocol, RejectHook};
 #[cfg(feature = "dpdk")]
 pub use dpdk_packet::DpdkPacketListener;

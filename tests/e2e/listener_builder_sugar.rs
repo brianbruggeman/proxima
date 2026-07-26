@@ -2,8 +2,9 @@
 //! type-specific extension-trait families (`ListenerTransportExt`/
 //! `ListenerProtocolExt`, `ClientTransportExt`/`ClientSecurityExt`/
 //! `ClientProtocolExt`), the `Transport` enum dissolution (`.http().quic()`
-//! now genuinely dials/serves h3-native), the `.dns()` dual-transport
-//! branching, and the runtime validation for invalid axis compositions.
+//! now genuinely dials/serves h3-native), `.dns()` now reaching BOTH
+//! transports on one port via the `.any()` fan-in, and the runtime
+//! validation for invalid axis compositions.
 //!
 //! Kept deliberately light per composition — proving the axis RESOLVES to
 //! the right listen protocol / factory, not re-testing each protocol
@@ -226,43 +227,71 @@ mod dns_axis {
         server.stop();
     }
 
-    /// `.dns(handle).udp()` resolves a DIFFERENT listen protocol — a
-    /// `DatagramProtocolListenProtocol`, not a TCP `AnyListenProtocol`. Proof:
-    /// a raw TCP connect to the SAME bind address fails (nothing ever binds
-    /// a TCP listener on that port in the udp branch — TCP and UDP are
-    /// separate port namespaces at the OS level), unlike the `.tcp()`
-    /// variant above. This holds regardless of exactly when the UDP socket
-    /// finishes binding (no fixed sleep needed): a bounded retry loop polls
-    /// for a REFUSED connect, which is the invariant proof either way —
-    /// "not yet bound" and "genuinely UDP-only" both refuse a TCP connect.
+    /// `.dns(handle)` reaches BOTH transports on the SAME port number,
+    /// regardless of `.tcp()`/`.udp()` — the dual-transport AXIS this
+    /// module used to describe (pick TCP xor UDP by reading
+    /// `spec["transport"]`) is retired: `.dns(handler)` now registers
+    /// `DnsAnyProtocol` (DNS-over-TCP, RFC 1035 §4.2.2 framing) and
+    /// `DnsUdpAnyProtocol` (DNS-over-UDP, RFC 1035 §4.2.1, no length
+    /// prefix) as two `AnyProtocol` candidates under ONE `.any()`-fanned
+    /// listener. Proof: a real DNS-over-TCP query and a real DNS-over-UDP
+    /// query, sent to the SAME bind address, both resolve — see
+    /// `src/listener/handle.rs`'s `.dns(handler)` doc for why the old
+    /// branch is gone.
     #[proxima::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dns_udp_resolves_a_different_listen_protocol_than_tcp() {
+    async fn dns_serves_both_transports_on_one_port() {
+        use std::io::{Read, Write};
+        use std::net::UdpSocket;
+
         let bind = free_loopback_addr();
         let server = Listener::builder()
             .bind(bind)
-            .udp()
             .handle(into_handle(FixedOk))
             .dns(stub_handle())
             .serve()
             .await
-            .expect(".dns(handle).udp() serves");
+            .expect(".dns(handle) serves both transports on one port");
+        wait_until_listening(bind);
 
-        let mut still_refusing = false;
-        for _ in 0..20 {
-            if StdTcpStream::connect(bind).is_err() {
-                still_refusing = true;
-            } else {
-                still_refusing = false;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            still_refusing,
-            ".dns(handle).udp() must NOT accept a TCP connection — it bound a UDP \
-             DatagramProtocolListenProtocol, a different listen protocol than \
-             .dns(handle).tcp()'s AnyListenProtocol"
-        );
+        let mut query = Vec::new();
+        proxima_dns::encode_query(
+            42,
+            true,
+            proxima_dns::EncodeQuestion {
+                name: "example.com.",
+                qtype: 1,
+                qclass: 1,
+            },
+            &mut query,
+        )
+        .expect("encode query");
+
+        // DNS-over-TCP: 2-byte big-endian length prefix, then the message.
+        let mut tcp_conn = StdTcpStream::connect(bind).expect("dns tcp connect");
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&u16::try_from(query.len()).unwrap().to_be_bytes());
+        framed.extend_from_slice(&query);
+        tcp_conn.write_all(&framed).expect("dns tcp write");
+        let mut length_prefix = [0_u8; 2];
+        tcp_conn.read_exact(&mut length_prefix).expect("dns tcp read length");
+        let reply_len = u16::from_be_bytes(length_prefix) as usize;
+        let mut tcp_reply = vec![0_u8; reply_len];
+        tcp_conn.read_exact(&mut tcp_reply).expect("dns tcp read body");
+        let tcp_message = proxima_dns::parse_message(&tcp_reply).expect("dns tcp reply parses");
+        assert_eq!(tcp_message.header.id, 42);
+        assert!(tcp_message.header.flags.is_response());
+
+        // DNS-over-UDP: the raw message, no length prefix.
+        let udp_socket = UdpSocket::bind("127.0.0.1:0").expect("dns udp client bind");
+        udp_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        udp_socket.send_to(&query, bind).expect("dns udp send");
+        let mut udp_buf = [0_u8; 512];
+        let (udp_len, _) = udp_socket.recv_from(&mut udp_buf).expect("dns udp reply");
+        let udp_message = proxima_dns::parse_message(&udp_buf[..udp_len]).expect("dns udp reply parses");
+        assert_eq!(udp_message.header.id, 42);
+        assert!(udp_message.header.flags.is_response());
 
         server.stop();
     }
