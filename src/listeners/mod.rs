@@ -58,15 +58,28 @@ pub use proxima_listen::stream as stream_protocol;
 pub use proxima_listen::stream::default_listener as stream_default;
 #[cfg(feature = "udp")]
 pub use proxima_net::tokio::tokio_packet;
-#[cfg(any(feature = "tcp", feature = "unix"))]
+// `proxima_net::tokio` only exists under proxima-net's own `tokio` feature
+// (forwarded by this crate's umbrella `tokio` feature) — `tcp`/`unix` alone
+// no longer imply it (`tcp` rides `proxima_net::prime` by default now, via
+// the `serve-prime`-installed `PrimeAcceptorFactory`; see `src/app.rs`).
+#[cfg(feature = "websocket")]
+pub use proxima_http::websocket;
+#[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
 pub use proxima_net::tokio::tokio_stream_listener as tokio_stream;
 #[cfg(feature = "redis-listener")]
 pub use proxima_redis as redis;
-#[cfg(feature = "websocket")]
-pub use proxima_http::websocket as websocket;
 #[cfg(feature = "xdp")]
 pub mod xdp_packet;
 
+#[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
+pub use any::H2PriorKnowledgeAnyProtocol;
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "pgwire",
+    feature = "redis-listener"
+))]
+pub use any::{AnyListenProtocol, H1AnyProtocol, RejectHook};
 #[cfg(feature = "dpdk")]
 pub use dpdk_packet::DpdkPacketListener;
 #[cfg(feature = "dpdk")]
@@ -75,15 +88,6 @@ pub use dpdk_stream::{DpdkStreamConnection, DpdkStreamListener, DpdkStreamUpstre
 pub use h1::H1ListenProtocol;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
 pub use http::{HttpListenProtocol, HttpListenerSpec, serve_h1_connection};
-#[cfg(any(
-    feature = "http1",
-    feature = "http1-native",
-    feature = "pgwire",
-    feature = "redis-listener"
-))]
-pub use any::{AnyListenProtocol, H1AnyProtocol, RejectHook};
-#[cfg(all(feature = "http2", any(feature = "http1", feature = "http1-native")))]
-pub use any::H2PriorKnowledgeAnyProtocol;
 #[cfg(feature = "tokio")]
 pub use mcp::McpListenProtocol;
 // legacy quinn-backed listener; proxima-http's `http3::listener` module
@@ -101,17 +105,18 @@ pub use quic_stream::{QuicListener, QuicStreamConnection};
 pub use stream_default::StreamListenProtocol;
 #[cfg(any(feature = "tcp", feature = "unix"))]
 pub use stream_protocol::{StreamListenerProtocol, reader_to_byte_stream};
-// `ConnTransform`/`FramedListenProtocol` bake `TokioTcpConnection` into their
-// public signature — see proxima-listen/src/stream/mod.rs's doc comment.
+// `FramedListenProtocol`'s bind/accept loop is tokio-only (feature-gated
+// below); `ConnTransform` itself is backend-agnostic — see
+// proxima-listen/src/stream/mod.rs's doc comment.
+#[cfg(feature = "udp")]
+pub use stream_protocol::DatagramListenProtocol;
 #[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
 pub use stream_protocol::{ConnTransform, FramedListenProtocol};
 #[cfg(feature = "udp")]
-pub use stream_protocol::DatagramListenProtocol;
-#[cfg(feature = "udp")]
 pub use tokio_packet::TokioUdpListener;
-#[cfg(feature = "tcp")]
+#[cfg(all(feature = "tcp", feature = "tokio"))]
 pub use tokio_stream::{TokioTcpConnection, TokioTcpListener};
-#[cfg(all(feature = "unix", unix))]
+#[cfg(all(feature = "unix", unix, feature = "tokio"))]
 pub use tokio_stream::{TokioUnixConnection, TokioUnixListener};
 #[cfg(feature = "xdp")]
 pub use xdp_packet::XdpUdpListener;

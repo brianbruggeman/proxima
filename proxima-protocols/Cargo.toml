@@ -246,8 +246,11 @@ json_framing = []
 json_framing-codec-trait = ["json_framing", "dep:proxima-codec"]
 # The std reconnect/retry client (`LengthPrefixedJsonClient` +
 # `server::read_frame`/`write_frame`) over any proxima-primitives::stream
-# `StreamUpstream`. The sans-IO `json_framing` codec above is always
-# available; this pulls in tokio + the stream/time transport seam.
+# `StreamUpstream`. Tokio-free: the connection slot is a
+# `proxima_primitives::sync::AsyncMutex` (waker-based async gate, feature
+# `async-mutex`), not `tokio::sync::Mutex` — the sans-IO `json_framing`
+# codec above is always available; this pulls in the stream/time
+# transport seam only.
 # `proxima-primitives/std`: the workspace entry sets default-features =
 # false; proxima-primitives folds in the former proxima-stream, whose own
 # workspace entry had no such override (implicit std by default) — this
@@ -257,11 +260,11 @@ json_framing-std = [
     "std",
     "dep:proxima-primitives",
     "proxima-primitives/std",
+    "proxima-primitives/async-mutex",
     "dep:proxima-core",
     "dep:futures",
     "dep:serde_json",
     "dep:thiserror",
-    "dep:tokio",
     "dep:tracing",
 ]
 # Sans-IO QUIC + TLS 1.3 protocol implementation per RFC 9000 / 9001 /

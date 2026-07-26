@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 use proxima_codec::{FrameCodec, FrameError, FrameLimits, LengthDelimitedCodec};
 use proxima_core::ProximaError;
 use crate::{ListenProtocol, ServeContext};
-use proxima_net::tokio::tokio_stream_listener::{TokioTcpConnection, TokioTcpListener};
+use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::header_list::HeaderList;
@@ -50,9 +50,12 @@ const DEFAULT_READ_CHUNK: usize = 64 * 1024;
 /// tune a deployment without a recompile.
 /// Wraps an accepted connection before framing — e.g. a consumer plugging in
 /// a cipher so the length prefix itself rides inside an encrypted transport.
-/// Erased to `Box<dyn StreamConnection>` so the listener never names the
-/// consumer's concrete wrapper type.
-pub type ConnTransform = Arc<dyn Fn(TokioTcpConnection) -> Box<dyn StreamConnection> + Send + Sync>;
+/// Both the input and the output are the agnostic `Box<dyn StreamConnection>`
+/// (the accept loop boxes the connection it just accepted before handing it
+/// here): the listener never names the accepted connection's concrete type,
+/// tokio's or any other backend's, and a caller can install the same
+/// transform whichever `AcceptorFactory` bound the listener.
+pub type ConnTransform = Arc<dyn Fn(Box<dyn StreamConnection>) -> Box<dyn StreamConnection> + Send + Sync>;
 
 pub struct FramedListenProtocol {
     label: String,
@@ -179,7 +182,7 @@ impl ListenProtocol for FramedListenProtocol {
                     outcome = listener.accept() => match outcome {
                         Ok(conn) => match &conn_transform {
                             Some(transform) => spawn_framed_handler(
-                                transform(conn),
+                                transform(Box::new(conn)),
                                 dispatch.clone(), codec, idle,
                                 method.clone(), path.clone(), read_chunk, max_fps, label.clone(),
                             ),

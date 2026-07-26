@@ -1,5 +1,7 @@
-//! `type = "stream"` ListenProtocol over tokio TCP. Frames every accepted
-//! connection as `Request { method: "STREAM", path: "/", body: stream }`.
+//! `type = "stream"` ListenProtocol over any backend's `AcceptorFactory`
+//! (prime, tokio, or another runtime-agnostic implementation). Frames every
+//! accepted connection as `Request { method: "STREAM", path: "/", body:
+//! stream }`.
 
 use std::future::Future;
 use std::future::poll_fn;
@@ -22,8 +24,6 @@ use crate::{
     Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenProtocol, ListenerCore,
     ServeContext,
 };
-#[cfg(feature = "tokio")]
-use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_primitives::pipe::Method;
 use proxima_runtime::Runtime;
 use proxima_primitives::pipe::body::RequestStream;
@@ -31,8 +31,6 @@ use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::request::{Request, RequestContext};
-#[cfg(feature = "tokio")]
-use proxima_primitives::stream::StreamListenerExt;
 use proxima_primitives::stream::StreamConnection;
 
 pub struct StreamListenProtocol {
@@ -58,14 +56,13 @@ impl ListenProtocol for StreamListenProtocol {
         &self.label
     }
 
-    #[cfg_attr(not(feature = "tokio"), allow(unused_mut))]
     fn serve(
         &self,
         bind: SocketAddr,
         dispatch: PipeHandle,
         spec: &Value,
         context: ServeContext,
-        mut shutdown: oneshot::Receiver<()>,
+        shutdown: oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
         let method = spec
             .get("method")
@@ -84,9 +81,7 @@ impl ListenProtocol for StreamListenProtocol {
             .unwrap_or(super::sized::LISTENER_CHUNK_BYTES_DEFAULT);
         let label = self.label.clone();
         // futures-io serve path: an injected acceptor factory binds + accepts
-        // boxed StreamConnections, fed to the same handler as the legacy path.
-        // the tokio TokioTcpListener path below stays byte-identical without
-        // a factory.
+        // boxed StreamConnections, runtime- and backend-agnostic.
         let ready_signal = context.ready_signal.clone();
         // installed App runtime (Prime or TokioPerCoreRuntime), threaded down
         // to spawn_handler so per-conn tasks dispatch through the runtime that
@@ -108,68 +103,20 @@ impl ListenProtocol for StreamListenProtocol {
                 runtime,
             ));
         }
-        #[cfg(feature = "tokio")]
-        return Box::pin(async move {
-            let listener = TokioTcpListener::bind(bind).await.map_err(|err| {
-                ProximaError::Io(std::io::Error::other(format!("stream bind {bind}: {err}")))
-            })?;
-            if let Some(sender) = ready_signal {
-                let _ = sender.send(());
-            }
-            debug!(label = %label, %bind, "stream listener bound");
-            let mut core = ListenerCore::new(DispatchPolicy::Inline);
-            let (release_tx, mut release_rx) = mpsc::unbounded::<ConnectionHandle>();
-            loop {
-                tokio::select! {
-                    outcome = listener.accept() => match outcome {
-                        Ok(conn) => match core.admit(crate::peer_ip(conn.peer().as_ref())) {
-                            Admission::Admit { handle, .. } => spawn_handler(
-                                conn, handle, release_tx.clone(), dispatch.clone(),
-                                method.clone(), path.clone(), chunk_bytes, label.clone(),
-                                runtime.clone(),
-                            ),
-                            Admission::Shed { reason } => {
-                                debug!(?reason, label = %label, "stream connection shed");
-                                drop(conn);
-                            }
-                        },
-                        Err(error) => warn!(?error, label = %label, "stream accept error"),
-                    },
-                    released = release_rx.next() => if let Some(handle) = released {
-                        core.release(handle);
-                    },
-                    _ = &mut shutdown => match core.begin_drain() {
-                        DrainOutcome::ClosedImmediately => return Ok(()),
-                        DrainOutcome::Draining => break,
-                    },
-                }
-            }
-            drain_connections(&mut core, &mut release_rx).await;
-            Ok(())
-        });
-        // No factory and no tokio: there is no tokio-free bind path left to
-        // fall back to (only the factory + tokio legacy arms exist above).
-        #[cfg(not(feature = "tokio"))]
-        {
-            let _ = (
-                bind,
-                dispatch,
-                method,
-                path,
-                chunk_bytes,
-                label,
-                ready_signal,
-                shutdown,
-                runtime,
-            );
-            Box::pin(async move {
-                Err(ProximaError::Config(
-                    "stream listener requires an acceptor factory (no factory injected and the \
-                     `tokio` feature is off, so the legacy tokio bind path is unavailable)"
-                        .into(),
-                ))
-            })
-        }
+        // No `AcceptorFactory` injected: there is no bind seam to use, on
+        // any backend. Generic listener code must never reach for a
+        // concrete runtime's bind directly (that was the previous
+        // `TokioTcpListener::bind` fallback here, gone under the
+        // additivity fix) — this is one explicit, feature-independent
+        // configuration error instead.
+        let _ = (dispatch, method, path, chunk_bytes, ready_signal, shutdown, runtime);
+        Box::pin(async move {
+            Err(ProximaError::Config(format!(
+                "{label} listener requires an acceptor factory (none injected on \
+                 ServeContext — install one via `App`'s runtime bundle or \
+                 `ServeContext::with_acceptor_factory`)"
+            )))
+        })
     }
 }
 
@@ -269,21 +216,15 @@ fn spawn_handler<C: StreamConnection>(
     // tokio LocalSet, so calling `spawn_local` directly there panics —
     // confirmed by reading `TokioPerCoreRuntime`'s worker (wraps
     // `LocalSet::run_until`) against `PrimeRuntime`'s (no tokio at all).
-    // Falls back to `spawn_local` only for the plain-tokio default path
-    // (no App runtime installed), where the surrounding serve loop is
-    // already known to run inside a LocalSet.
+    // With no runtime injected, every build does the SAME explicit thing:
+    // drop the connection and say why — spawning is a runtime capability
+    // and belongs on the seam, never behind a feature cfg here.
     match runtime {
         Some(runtime) => runtime.spawn_on_current_core(future),
-        #[cfg(feature = "tokio")]
-        None => {
-            tokio::task::spawn_local(future);
-        }
-        #[cfg(not(feature = "tokio"))]
         None => {
             warn!(
-                "stream connection dropped: no runtime injected and the `tokio` \
-                 feature is off, so there is no executor to spawn the ?Send \
-                 connection future onto"
+                "stream connection dropped: no runtime injected onto ServeContext, so \
+                 there is no executor to spawn the ?Send connection future onto"
             );
             drop(future);
         }
@@ -364,9 +305,63 @@ mod tests {
     }
 
 
-    // proves the factory path binds, accepts, and round-trips bytes through
-    // the same handle_connection as the legacy tokio path. spawn_local backs
-    // the per-conn task, so this runs inside a LocalSet on a current-thread
+    // test-only `Runtime` whose `spawn_on_current_core` forwards to
+    // `tokio::task::spawn_local` — stands in for an installed runtime so
+    // these tests exercise the seam (`Some(runtime)`) rather than the
+    // no-runtime degradation. Must run inside a `LocalSet`.
+    struct LocalSetRuntime;
+
+    impl Runtime for LocalSetRuntime {
+        fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            tokio::task::spawn_local(future);
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never routes to a peer core")
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _factory: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never spawns a cross-core factory")
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<
+                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+            >,
+        ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
+            unreachable!("test never spawns background-blocking work")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("test never times out")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> proxima_runtime::CoreId {
+            proxima_runtime::CoreId(0)
+        }
+    }
+
+    // proves the factory path binds, accepts, and round-trips bytes with a
+    // runtime injected via the seam. `LocalSetRuntime` (above) backs the
+    // per-conn task, so this runs inside a LocalSet on a current-thread
     // runtime. serve borrows `protocol` + `server_spec`, so it is driven
     // concurrently with the client rather than spawned.
     #[proxima::test(runtime = "tokio")]
@@ -375,7 +370,9 @@ mod tests {
         local
             .run_until(async move {
                 let dispatch = into_handle(EchoPipe);
+                let runtime: Arc<dyn Runtime> = Arc::new(LocalSetRuntime);
                 let context = ServeContext::new(NoopTelemetry::handle())
+                    .with_runtime(runtime)
                     .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
