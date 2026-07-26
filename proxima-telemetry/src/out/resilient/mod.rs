@@ -70,7 +70,44 @@ impl<Clk> Shared<Clk> {
 
 /// A resilient OTLP terminal — bounded buffer, capped-backoff reconnecting
 /// sender, severity/age-horizon shedding under sustained pressure, and
-/// self-exported drop/retry/reconnect/backlog telemetry.
+/// self-exported drop/retry/reconnect/backlog telemetry. Operator-facing
+/// guide: `ai_docs/projections/otlp-resilient-sink.md`.
+///
+/// Composes into any fan-out like every other terminal sink — the workspace
+/// rule is export is never OTLP-only, so a real deployment pairs this with a
+/// local floor sink via [`crate::pipes::fan_exporters`] (`collector` below
+/// stands in for a real OTLP transport factory, e.g. `crate::out::otlp_http`;
+/// any `SendPipe` factory works, the sink is transport-agnostic):
+///
+/// ```
+/// use proxima_telemetry::export::Exporter;
+/// use proxima_telemetry::level::Level;
+/// use proxima_telemetry::out::resilient::{ResilientOtlpConfig, ResilientSink};
+/// use proxima_telemetry::pipes::{
+///     FormatterPipe, InMemoryPipe, LogFormat, fan_exporters, into_telemetry_handle,
+/// };
+/// use proxima_telemetry::recorder::Recorder;
+///
+/// let collector = InMemoryPipe::new();
+/// let factory_collector = collector.clone();
+/// let resilient = into_telemetry_handle(ResilientSink::spawn(
+///     move || into_telemetry_handle(factory_collector.clone()),
+///     ResilientOtlpConfig::default(),
+/// ));
+/// let console = into_telemetry_handle(FormatterPipe::new(std::io::stderr(), LogFormat::Human));
+/// let fanned = fan_exporters(vec![console, resilient]);
+///
+/// let recorder = Recorder::builder()
+///     .export(Exporter::pipe(fanned))
+///     .expect("compose console + resilient fan")
+///     .core_count(1)
+///     .start()
+///     .expect("start recorder");
+///
+/// recorder.log().level(Level::ERROR).message("hello").emit();
+/// recorder.drain(); // enqueues into the resilient sink's own buffer; the
+///                    // background worker (not this call) does the send.
+/// ```
 ///
 /// # Contract
 /// - `Pipe::call` never waits on the network: it enqueues and returns.
