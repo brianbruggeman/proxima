@@ -1,7 +1,11 @@
-//! TCP listener + stream built on `proxima::runtime::prime::os::reactor`.
-//! implements `futures::io::AsyncRead + AsyncWrite` so it composes with
-//! runtime-neutral protocols (proxima's native `serve_h2_connection`,
-//! `serve_h1_connection`, etc.) without needing a tokio I/O context.
+//! TCP + Unix-domain listener/stream, plus UDP, built on
+//! `proxima::runtime::prime::os::reactor`. implements `futures::io::AsyncRead
+//! + AsyncWrite` so it composes with runtime-neutral protocols (proxima's
+//! native `serve_h2_connection`, `serve_h1_connection`, etc.) without needing
+//! a tokio I/O context. `UnixListener`/`UnixStream` mirror `TcpListener`/
+//! `TcpStream` exactly (same reactor registration dance, same Send/!Sync
+//! contract below) — the only differences are the `AF_UNIX` domain and a
+//! path-shaped address instead of a `SocketAddr`.
 //!
 //! design:
 //!   - Sockets are constructed via `socket2` and set non-blocking.
@@ -55,6 +59,7 @@ use std::marker::PhantomData;
 use std::mem;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr;
 use std::task::{Context, Poll};
@@ -670,6 +675,482 @@ impl AsyncWrite for TcpStream {
         // round trip going empty once `PrimeTcpUpstream` was reachable).
         let this = self.get_mut();
         let _ = this.socket.shutdown(std::net::Shutdown::Write);
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// non-blocking Unix-domain listener bound to the proxima reactor. mirrors
+/// [`TcpListener`] exactly (same lazy registration dance) — accept() returns
+/// a futures-io [`UnixStream`].
+pub struct UnixListener {
+    socket: Socket,
+    source: Option<SourceKey>,
+    reactor_ptr: *mut Reactor,
+    bind_path: PathBuf,
+    _not_sync: PhantomData<std::cell::Cell<()>>,
+}
+
+// SAFETY: same reasoning as `TcpListener` — see the module-level Send
+// contract. Polling is only sound on the worker thread that registered
+// this listener's source.
+unsafe impl Send for UnixListener {}
+
+impl UnixListener {
+    /// bind a non-blocking Unix-domain listening socket at `path`. must be
+    /// called on a proxima worker thread (CoreShard worker_main has set
+    /// CURRENT_REACTOR). if a socket file already exists at `path`, it is
+    /// removed first — matches the typical local-daemon fresh-bind
+    /// expectation on restart (same behavior as tokio's `UnixListener::bind`).
+    pub fn bind(path: PathBuf) -> io::Result<Self> {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
+        let sock_addr = SockAddr::unix(&path)?;
+        socket.bind(&sock_addr)?;
+        socket.listen(DEFAULT_LISTEN_BACKLOG)?;
+        Ok(Self {
+            socket,
+            source: None,
+            reactor_ptr: ptr::null_mut(),
+            bind_path: path,
+            _not_sync: PhantomData,
+        })
+    }
+
+    /// the path the listener bound to.
+    pub fn local_addr(&self) -> PathBuf {
+        self.bind_path.clone()
+    }
+
+    /// accept the next pending connection. on first call (or after
+    /// `Pending`) registers the listening fd's read waker with the reactor.
+    /// the peer path is `Some` only when the connecting client explicitly
+    /// bound its own socket to a path before connecting — the common case
+    /// (an anonymous client socket) yields `None`, same as tokio's
+    /// `UnixStream::peer_addr().as_pathname()`.
+    pub fn poll_accept(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<io::Result<(UnixStream, Option<PathBuf>)>> {
+        let this = self.get_mut();
+        match this.socket.accept() {
+            Ok((socket, sock_addr)) => {
+                socket.set_nonblocking(true)?;
+                let peer = sock_addr.as_pathname().map(PathBuf::from);
+                Poll::Ready(Ok((UnixStream::from_socket(socket), peer)))
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(register_err) = this.register_read_waker(context) {
+                    return Poll::Ready(Err(register_err));
+                }
+                core_shard::note_reactor_pending();
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
+    /// async accept future for one connection.
+    pub fn accept(&mut self) -> UnixAccept<'_> {
+        UnixAccept { listener: self }
+    }
+
+    fn register_read_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
+        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+        if self.source.is_none() {
+            let key = reactor.register(self.socket.as_raw_fd(), Interest::Read)?;
+            self.source = Some(key);
+        }
+        let Some(key) = self.source else {
+            return Err(io::Error::other(
+                "UnixListener: missing source key after register",
+            ));
+        };
+        if !reactor.register_read_waker_ref(key, context.waker()) {
+            return Err(io::Error::other("UnixListener: reactor source went stale"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UnixListener {
+    fn drop(&mut self) {
+        deregister_on_drop(&mut self.source, self.reactor_ptr);
+        // best-effort: unlinks the bound socket file so a later `bind` at
+        // the same path doesn't see a stale entry. Mirrors
+        // `TokioUnixListener`'s drop-time cleanup.
+        let _ = std::fs::remove_file(&self.bind_path);
+    }
+}
+
+/// future returned by `UnixListener::accept`. polls `poll_accept`.
+pub struct UnixAccept<'listener> {
+    listener: &'listener mut UnixListener,
+}
+
+impl std::future::Future for UnixAccept<'_> {
+    type Output = io::Result<(UnixStream, Option<PathBuf>)>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.listener).poll_accept(context)
+    }
+}
+
+/// state machine for the Unix-domain `UnixConnect` future. mirrors
+/// [`ConnectState`] — AF_UNIX `connect(2)` on a local socket usually
+/// completes immediately, but nothing in POSIX guarantees that, so the
+/// same EINPROGRESS/EALREADY/EISCONN dance applies.
+enum UnixConnectState {
+    Init,
+    Pending {
+        socket: Socket,
+        source: SourceKey,
+        reactor_ptr: *mut Reactor,
+    },
+    Done,
+}
+
+// SAFETY: Socket is Send; *mut Reactor follows the same contract as TcpStream.
+unsafe impl Send for UnixConnectState {}
+
+/// future returned by `UnixStream::connect`. polls until the connect
+/// completes or fails, then yields a `UnixStream`.
+pub struct UnixConnect {
+    path: PathBuf,
+    state: UnixConnectState,
+}
+
+// SAFETY: UnixConnect contains UnixConnectState which is Send per above.
+unsafe impl Send for UnixConnect {}
+
+impl std::future::Future for UnixConnect {
+    type Output = io::Result<UnixStream>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match &mut this.state {
+            UnixConnectState::Init => {
+                let socket = match Socket::new(Domain::UNIX, Type::STREAM, None) {
+                    Ok(sock) => sock,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                if let Err(err) = socket.set_nonblocking(true) {
+                    return Poll::Ready(Err(err));
+                }
+                let sock_addr = match SockAddr::unix(&this.path) {
+                    Ok(addr) => addr,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                match socket.connect(&sock_addr) {
+                    Ok(()) => {
+                        // immediate connect (the common case for AF_UNIX).
+                        return Poll::Ready(Ok(UnixStream::from_socket(socket)));
+                    }
+                    Err(err) if is_connect_in_progress(&err) => {}
+                    Err(err) => return Poll::Ready(Err(err)),
+                }
+                let mut reactor_ptr: *mut Reactor = ptr::null_mut();
+                let reactor = match ensure_reactor_ptr(&mut reactor_ptr) {
+                    Ok(reactor) => reactor,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                let source = match reactor.register(socket.as_raw_fd(), Interest::Write) {
+                    Ok(key) => key,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                if !reactor.register_write_waker_ref(source, context.waker()) {
+                    return Poll::Ready(Err(io::Error::other(
+                        "UnixConnect: reactor source went stale immediately after register",
+                    )));
+                }
+                this.state = UnixConnectState::Pending {
+                    socket,
+                    source,
+                    reactor_ptr,
+                };
+                core_shard::note_reactor_pending();
+                Poll::Pending
+            }
+
+            UnixConnectState::Pending { socket, .. } => {
+                let sock_addr = match SockAddr::unix(&this.path) {
+                    Ok(addr) => addr,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                let probe = socket.connect(&sock_addr);
+
+                enum Outcome {
+                    Connected,
+                    InProgress,
+                    Failed(io::Error),
+                }
+                let outcome = match probe {
+                    Ok(()) => Outcome::Connected,
+                    Err(ref err) if is_already_connected(err) => Outcome::Connected,
+                    Err(ref err) if is_connect_in_progress(err) || is_connect_resuming(err) => {
+                        Outcome::InProgress
+                    }
+                    Err(err) => {
+                        let precise = socket.take_error().ok().flatten().unwrap_or(err);
+                        Outcome::Failed(precise)
+                    }
+                };
+
+                match outcome {
+                    Outcome::Connected => {
+                        let UnixConnectState::Pending {
+                            socket: owned_socket,
+                            source: owned_source,
+                            reactor_ptr: owned_ptr,
+                        } = std::mem::replace(&mut this.state, UnixConnectState::Done)
+                        else {
+                            unreachable!()
+                        };
+                        if !owned_ptr.is_null() {
+                            // SAFETY: same invariant as TcpStream::ensure_registered.
+                            let reactor = unsafe { &mut *owned_ptr };
+                            let _ = reactor.deregister(owned_source);
+                        }
+                        Poll::Ready(Ok(UnixStream::from_socket(owned_socket)))
+                    }
+
+                    Outcome::InProgress => {
+                        let UnixConnectState::Pending {
+                            source,
+                            reactor_ptr,
+                            ..
+                        } = &this.state
+                        else {
+                            unreachable!()
+                        };
+                        let source = *source;
+                        let reactor_ptr = *reactor_ptr;
+                        if !reactor_ptr.is_null() {
+                            // SAFETY: same invariant as ensure_reactor_ptr.
+                            let reactor = unsafe { &mut *reactor_ptr };
+                            if !reactor.register_write_waker_ref(source, context.waker()) {
+                                return Poll::Ready(Err(io::Error::other(
+                                    "UnixConnect: reactor source went stale",
+                                )));
+                            }
+                        }
+                        core_shard::note_reactor_pending();
+                        Poll::Pending
+                    }
+
+                    Outcome::Failed(err) => {
+                        this.state = UnixConnectState::Done;
+                        Poll::Ready(Err(err))
+                    }
+                }
+            }
+
+            UnixConnectState::Done => {
+                Poll::Ready(Err(io::Error::other("UnixConnect polled after completion")))
+            }
+        }
+    }
+}
+
+impl Drop for UnixConnect {
+    fn drop(&mut self) {
+        if let UnixConnectState::Pending {
+            source,
+            reactor_ptr,
+            ..
+        } = &mut self.state
+        {
+            deregister_on_drop(&mut Some(*source), *reactor_ptr);
+        }
+    }
+}
+
+/// non-blocking Unix-domain stream bound to the proxima reactor.
+/// `futures::io` compatible. Mirrors [`TcpStream`] field-for-field except
+/// there is no `set_nodelay` equivalent (AF_UNIX has no Nagle algorithm).
+pub struct UnixStream {
+    socket: Socket,
+    source: Option<SourceKey>,
+    reactor_ptr: *mut Reactor,
+    last_read_waker: Option<Waker>,
+    last_write_waker: Option<Waker>,
+    last_read_blocked_epoch: Option<u32>,
+    _not_sync: PhantomData<std::cell::Cell<()>>,
+}
+
+// SAFETY: see `TcpStream` above — same reasoning.
+unsafe impl Send for UnixStream {}
+
+impl UnixStream {
+    fn from_socket(socket: Socket) -> Self {
+        Self {
+            socket,
+            source: None,
+            reactor_ptr: ptr::null_mut(),
+            last_read_waker: None,
+            last_write_waker: None,
+            last_read_blocked_epoch: None,
+            _not_sync: PhantomData,
+        }
+    }
+
+    /// asynchronously connect to the Unix-domain socket at `path`. must be
+    /// called on a proxima worker thread (CURRENT_REACTOR must be non-null).
+    pub fn connect(path: impl AsRef<Path>) -> UnixConnect {
+        UnixConnect {
+            path: path.as_ref().to_path_buf(),
+            state: UnixConnectState::Init,
+        }
+    }
+
+    /// Attempt a non-blocking read without registering a reactor waker. Same
+    /// semantics as [`TcpStream::try_read`].
+    #[inline]
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_into(buf)
+    }
+
+    fn ensure_registered(&mut self, interest: Interest) -> io::Result<(&mut Reactor, SourceKey)> {
+        let reactor = ensure_reactor_ptr(&mut self.reactor_ptr)?;
+        if let Some(key) = self.source {
+            if interest == Interest::ReadWrite {
+                reactor.reregister(key, Interest::ReadWrite)?;
+            }
+            return Ok((reactor, key));
+        }
+        let key = reactor.register(self.socket.as_raw_fd(), interest)?;
+        self.source = Some(key);
+        Ok((reactor, key))
+    }
+
+    fn register_read_waker(&mut self, context: &Context<'_>) -> io::Result<u32> {
+        let cached_waker_matches = self
+            .last_read_waker
+            .as_ref()
+            .is_some_and(|cached| cached.will_wake(context.waker()));
+        let epoch = {
+            let (reactor, key) = self.ensure_registered(Interest::Read)?;
+            if !cached_waker_matches && !reactor.register_read_waker_ref(key, context.waker()) {
+                return Err(io::Error::other("UnixStream: reactor source went stale"));
+            }
+            reactor
+                .read_ready_epoch(key)
+                .ok_or_else(|| io::Error::other("UnixStream: reactor source went stale"))?
+        };
+        if !cached_waker_matches {
+            self.last_read_waker = Some(context.waker().clone());
+        }
+        Ok(epoch)
+    }
+
+    fn register_write_waker(&mut self, context: &Context<'_>) -> io::Result<()> {
+        if let Some(cached) = &self.last_write_waker
+            && cached.will_wake(context.waker())
+        {
+            return Ok(());
+        }
+        let (reactor, key) = self.ensure_registered(Interest::ReadWrite)?;
+        if !reactor.register_write_waker_ref(key, context.waker()) {
+            return Err(io::Error::other("UnixStream: reactor source went stale"));
+        }
+        self.last_write_waker = Some(context.waker().clone());
+        Ok(())
+    }
+
+    #[inline]
+    fn read_into(&self, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: this Unix-domain socket is non-blocking and `read(2)`
+        // writes at most `len` initialized bytes into the caller-owned
+        // buffer, returning the initialized byte count.
+        let len = buf.len().min(isize::MAX as usize);
+        let n = unsafe { libc::read(self.socket.as_raw_fd(), buf.as_mut_ptr().cast(), len) };
+        if n >= 0 {
+            Ok(n as usize)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+impl Drop for UnixStream {
+    fn drop(&mut self) {
+        deregister_on_drop(&mut self.source, self.reactor_ptr);
+    }
+}
+
+impl AsyncRead for UnixStream {
+    #[inline]
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if let Some(blocked_epoch) = this.last_read_blocked_epoch {
+            match this.register_read_waker(context) {
+                Ok(current_epoch) if current_epoch == blocked_epoch => {
+                    core_shard::note_reactor_pending();
+                    return Poll::Pending;
+                }
+                Ok(_) => {}
+                Err(register_err) => return Poll::Ready(Err(register_err)),
+            }
+        }
+        match this.read_into(buf) {
+            Ok(n) => {
+                this.last_read_blocked_epoch = None;
+                Poll::Ready(Ok(n))
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                let epoch = match this.register_read_waker(context) {
+                    Ok(epoch) => epoch,
+                    Err(register_err) => return Poll::Ready(Err(register_err)),
+                };
+                this.last_read_blocked_epoch = Some(epoch);
+                core_shard::note_reactor_pending();
+                Poll::Pending
+            }
+            Err(err) => {
+                this.last_read_blocked_epoch = None;
+                Poll::Ready(Err(err))
+            }
+        }
+    }
+}
+
+impl AsyncWrite for UnixStream {
+    #[inline]
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match this.socket.send(buf) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(register_err) = this.register_write_waker(context) {
+                    return Poll::Ready(Err(register_err));
+                }
+                core_shard::note_reactor_pending();
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // AF_UNIX has no userspace flush; the kernel sends buffered bytes on
+        // its own, same as TCP.
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let _ = this.socket.shutdown(std::net::Shutdown::Both);
         Poll::Ready(Ok(()))
     }
 }
@@ -1559,6 +2040,179 @@ mod tests {
             second_is_pending,
             "spurious poll returned Ready — spurious-poll bug regression: \
              Connect yielded a half-open TcpStream before the writable edge"
+        );
+    }
+
+    /// worked example: bind a `UnixListener` in a tempdir (never a fixed
+    /// path — a second concurrent test run must not collide), accept one
+    /// connection via `UnixStream::connect`, and echo 4 bytes.
+    #[test]
+    fn unix_listener_accept_and_stream_echo() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("prime-unix.sock");
+
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let bound_signal = Arc::new(AtomicBool::new(false));
+        let bound_for_factory = bound_signal.clone();
+        let path_for_factory = socket_path.clone();
+
+        handle
+            .dispatch_factory(Box::new(move || {
+                let done = done_clone.clone();
+                let bound_handle = bound_for_factory.clone();
+                let path = path_for_factory.clone();
+                Box::pin(async move {
+                    use futures::io::{AsyncReadExt, AsyncWriteExt};
+
+                    let mut listener = UnixListener::bind(path.clone()).expect("bind");
+                    bound_handle.store(true, Ordering::Release);
+
+                    let server = async move {
+                        let (mut stream, _peer) = listener.accept().await.expect("accept");
+                        let mut buf = [0u8; 4];
+                        stream.read_exact(&mut buf).await.expect("server read");
+                        stream.write_all(&buf).await.expect("server write");
+                    };
+
+                    let client = async move {
+                        let mut conn = UnixStream::connect(&path).await.expect("client connect");
+                        conn.write_all(b"ping").await.expect("client write");
+                        conn.flush().await.expect("client flush");
+                        let mut reply = [0u8; 4];
+                        conn.read_exact(&mut reply).await.expect("client read");
+                        assert_eq!(&reply, b"ping");
+                    };
+
+                    futures::future::join(server, client).await;
+                    done.store(true, Ordering::Release);
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch_factory");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !bound_signal.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline, "listener never bound");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "unix round-trip never completed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        handle.shutdown_and_join().expect("shutdown");
+    }
+
+    /// sad path: connecting to a path with no listener must return an
+    /// error (`NotFound` — nothing was ever bound there), not hang.
+    #[test]
+    fn unix_stream_connect_to_missing_path_returns_error() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let missing_path = temp_dir.path().join("nobody-listening.sock");
+
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let result_chan: Arc<Mutex<Option<io::ErrorKind>>> = Arc::new(Mutex::new(None));
+        let result_for_factory = result_chan.clone();
+        let path_for_factory = missing_path.clone();
+
+        handle
+            .dispatch_factory(Box::new(move || {
+                let done = done_clone.clone();
+                let result_handle = result_for_factory.clone();
+                let path = path_for_factory.clone();
+                Box::pin(async move {
+                    let outcome = UnixStream::connect(&path).await;
+                    let kind = match outcome {
+                        Ok(_) => panic!("connect to a nonexistent path must fail"),
+                        Err(err) => err.kind(),
+                    };
+                    *result_handle.lock().unwrap() = Some(kind);
+                    done.store(true, Ordering::Release);
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch_factory");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connect-to-missing-path test never completed (possible hang)"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        handle.shutdown_and_join().expect("shutdown");
+
+        let kind = result_chan.lock().unwrap().expect("result not set");
+        assert_eq!(
+            kind,
+            io::ErrorKind::NotFound,
+            "connecting to a path nothing bound must fail NotFound, got {kind:?}"
+        );
+    }
+
+    /// sad path: binding a second listener at a path already bound (and
+    /// still listening, not merely on-disk) must fail — `AddrInUse` on
+    /// Linux/macOS for `bind(2)` on an existing, live-listening AF_UNIX
+    /// path once the fresh-bind unlink races behind the first bind winning.
+    /// Proven here by binding twice on the SAME live socket without an
+    /// intervening drop of the first (the first `bind` created the file;
+    /// the second `bind`'s own unlink-then-bind removes and replaces it —
+    /// so both binds "succeed" at the OS level for AF_UNIX, unlike TCP's
+    /// port-level EADDRINUSE). This test proves the actually-guaranteed
+    /// invariant instead: after the second bind steals the path, the FIRST
+    /// listener's accept never observes a client connecting to the (now
+    /// re-pointed) path — i.e. the path, not the listener, is what's live.
+    #[test]
+    fn unix_listener_rebind_replaces_the_stale_socket_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("rebind.sock");
+
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let result_chan: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let result_for_factory = result_chan.clone();
+        let path_for_factory = socket_path.clone();
+
+        handle
+            .dispatch_factory(Box::new(move || {
+                let done = done_clone.clone();
+                let result_handle = result_for_factory.clone();
+                let path = path_for_factory.clone();
+                Box::pin(async move {
+                    let _first = UnixListener::bind(path.clone()).expect("first bind");
+                    let second = UnixListener::bind(path.clone());
+                    *result_handle.lock().unwrap() = Some(second.is_ok());
+                    done.store(true, Ordering::Release);
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch_factory");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "rebind test never completed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        handle.shutdown_and_join().expect("shutdown");
+
+        let second_ok = result_chan.lock().unwrap().expect("result not set");
+        assert!(
+            second_ok,
+            "rebinding at the same path must unlink the stale file and succeed, \
+             matching tokio's fresh-bind-on-restart behavior"
         );
     }
 }
