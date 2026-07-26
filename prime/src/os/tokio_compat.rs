@@ -58,6 +58,15 @@ use proxima_core::ProximaError;
 use proxima_runtime::{CoreId, SpawnError};
 use tokio::sync::mpsc;
 
+// `worker_setup` is the only piece of this module that touches `core_shard`
+// (the WorkerSetup hook); that module only exists under the full
+// executor+reactor+inbox-alloc combo (see os.rs), so gate the import to
+// match — the sister-runtime plumbing above stands on its own without it.
+#[cfg(all(
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-inbox-alloc",
+))]
 use super::core_shard::WorkerSetup;
 
 /// A `Send` task dispatched onto a sister runtime via the batched
@@ -137,6 +146,11 @@ impl TokioCompatHandles {
     /// `EnterGuard` can be `'static`. The runtime itself is owned by
     /// `TokioCompatHandles`, so the leaked handle stays valid until
     /// process exit.
+    #[cfg(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-inbox-alloc",
+    ))]
     #[must_use]
     pub fn worker_setup(&self, core_id: CoreId) -> Option<WorkerSetup> {
         let handle = self.cores.get(core_id.0).map(|core| core.handle.clone())?;
