@@ -52,8 +52,9 @@
 //! #[proxima::main]
 //! async fn main() -> Result<(), ProximaError> {
 //!     // Console logging in one call: RUST_LOG-filtered, ambient recorder
-//!     // registered, drain already running. `--features tracing-init` to
-//!     // make it real (off by default); see `LogFormat`/`init_telemetry_with`
+//!     // registered, drain already running — works with zero extra
+//!     // features. `--features tracing-init` additionally bridges events
+//!     // from the `tracing` crate itself; see `LogFormat`/`init_telemetry_with`
 //!     // for JSON output.
 //!     proxima::init_telemetry().expect("install console telemetry");
 //!

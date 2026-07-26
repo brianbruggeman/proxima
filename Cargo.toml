@@ -1566,12 +1566,13 @@ name = "differential"
 path = "examples/differential/main.rs"
 
 # the ordinary way to turn on telemetry: proxima::init_telemetry(), the
-# crate-root one-liner. See ai_docs/projections/telemetry-init.md for the
-# fuller decision table of "which entry point for which situation".
+# crate-root one-liner. Works with zero extra features (proxima-native
+# telemetry only); --features tracing-init additionally bridges tracing::
+# events. See ai_docs/projections/telemetry-init.md for the fuller decision
+# table of "which entry point for which situation".
 [[example]]
 name = "init_telemetry"
 path = "examples/init_telemetry.rs"
-required-features = ["tracing-init"]
 
 # OTLP/HTTP export: write trace/metric payloads to a collector endpoint.
 [[example]]
@@ -1918,12 +1919,14 @@ name = "otlp_grpc_prime_e2e"
 required-features = ["test-prime", "otlp-grpc", "http-prime", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tcp"]
 
 # regression guard for the `init_tracing`/`init_tracing_default` silent-failure
-# trap: proves the surviving console-logging init entry point actually emits
-# a record, so a future "returns Ok and does nothing" init helper cannot land
-# unnoticed.
+# trap: proves init_telemetry()/init_tracing_default actually emit, under
+# BOTH default features (proxima-native only) and --features tracing-init
+# (also bridges tracing::), so a future "returns Ok and does nothing" init
+# helper cannot land unnoticed in either configuration. No required-features
+# here on purpose — the default-feature tests are the whole point; the
+# tracing-init-specific ones are individually #[cfg]-gated inside the file.
 [[test]]
 name = "console_logging_regression"
-required-features = ["tracing-init"]
 
 # proxima::sync vs tokio::sync — primitive-level shootout (Phase E.0/E.2/E.5)
 # and home-turf retrofits (Phase E.HT). All require the sync-wrappers feature

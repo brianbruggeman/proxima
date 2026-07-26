@@ -294,14 +294,58 @@ impl RecorderBuilder<HasPipe> {
     }
 }
 
+/// The proxima-native half of [`install_console_logging`]: a recorder whose
+/// sink is the level-routed [`Exporter::std`] (trace/debug/info → stdout,
+/// warn/error → stderr), registered as the process-default recorder, with a
+/// background drain thread already running. No `tracing-subscriber`
+/// dependency and no `tracing-init` feature required — proxima's own
+/// `info!`/`error!`/`#[instrument]` telemetry needs a recorder + sink +
+/// drain, nothing from the `tracing` crate. See [`install_console_logging`]
+/// for the version that additionally bridges `tracing::`-crate events (that
+/// bridge is the only part that needs `tracing-init`).
+///
+/// # Errors
+///
+/// Propagates recorder-build or drain-thread-spawn failures.
+pub fn install_console_recorder() -> Result<Arc<Recorder>, Error> {
+    install_console_recorder_with(Formatter::Text)
+}
+
+/// [`install_console_recorder`] with an explicit [`Formatter`].
+///
+/// # Errors
+///
+/// Propagates recorder-build or drain-thread-spawn failures.
+pub fn install_console_recorder_with(format: Formatter) -> Result<Arc<Recorder>, Error> {
+    let recorder = Recorder::builder()
+        .export(Exporter::std().format(format))?
+        .install()?;
+
+    // Background drain so buffered records reach the console. MUST be a plain OS
+    // thread: `drain()` block_on's the terminal pipe and would deadlock on a
+    // prime executor thread. Event-driven (parks on the size trigger), not a
+    // fixed poll — see `Recorder::run_drain_loop`.
+    //
+    // a caller that needs to know the final flush landed (e.g. before process
+    // exit) calls `Recorder::drain()` directly: the rings are multi-consumer,
+    // so it is safe alongside this background pump and returns only once its
+    // own pass has actually written out.
+    let pump = Arc::clone(&recorder);
+    std::thread::Builder::new()
+        .name("telemetry-console-drain".to_string())
+        .spawn(move || pump.run_drain_loop())
+        .map_err(|error| Error::ThreadSpawn(error.to_string()))?;
+
+    Ok(recorder)
+}
+
 /// One call for the overwhelmingly common case: level-routed console logging.
 ///
-/// Builds a recorder whose sink is the level-routed [`Exporter::std`]
-/// (trace/debug/info → stdout, warn/error → stderr), registers it as the
-/// process-default recorder, bridges `tracing` events into it (so existing
-/// `tracing::warn!`/`debug!` callsites surface), and spawns a background drain
-/// thread so records reach the console. Returns the recorder (lives for the
-/// process). This is the "just give me logs" fast path — no builder dance.
+/// [`install_console_recorder`] plus the `tracing::`-crate bridge: bridges
+/// `tracing` events into the recorder (so existing `tracing::warn!`/`debug!`
+/// callsites surface) in addition to proxima's own `info!`/`error!`/etc.
+/// Returns the recorder (lives for the process). This is the "just give me
+/// logs, and bridge the `tracing` crate too" fast path — no builder dance.
 ///
 /// # Errors
 ///
@@ -321,9 +365,7 @@ pub fn install_console_logging() -> Result<Arc<Recorder>, Error> {
 pub fn install_console_logging_with(format: Formatter) -> Result<Arc<Recorder>, Error> {
     use tracing_subscriber::layer::SubscriberExt;
 
-    let recorder = Recorder::builder()
-        .export(Exporter::std().format(format))?
-        .install()?;
+    let recorder = install_console_recorder_with(format)?;
 
     // Bridge `tracing` callsites into the recorder, gated by the same
     // RUST_LOG-driven floor proxima's own emit macros honor (default
@@ -336,21 +378,6 @@ pub fn install_console_logging_with(format: Formatter) -> Result<Arc<Recorder>, 
     let layer = crate::tracing_bridge::TracingLayer::new(Arc::clone(&recorder));
     let subscriber = tracing_subscriber::registry().with(filter).with(layer);
     let _ = tracing::subscriber::set_global_default(subscriber);
-
-    // Background drain so buffered records reach the console. MUST be a plain OS
-    // thread: `drain()` block_on's the terminal pipe and would deadlock on a
-    // prime executor thread. Event-driven (parks on the size trigger), not a
-    // fixed poll — see `Recorder::run_drain_loop`.
-    //
-    // a caller that needs to know the final flush landed (e.g. before process
-    // exit) calls `Recorder::drain()` directly: the rings are multi-consumer,
-    // so it is safe alongside this background pump and returns only once its
-    // own pass has actually written out.
-    let pump = Arc::clone(&recorder);
-    std::thread::Builder::new()
-        .name("telemetry-console-drain".to_string())
-        .spawn(move || pump.run_drain_loop())
-        .map_err(|error| Error::ThreadSpawn(error.to_string()))?;
 
     Ok(recorder)
 }
