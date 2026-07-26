@@ -39,8 +39,47 @@ use super::sized;
 pub type Tick = u64;
 
 /// monotonic tick source. `now()` must be non-decreasing.
+///
+/// Deliberately abstract, resolution-agnostic ticks — NOT nanoseconds. The
+/// production impl (`os::core_shard::StdClock`) reads milliseconds; a
+/// nanosecond resolution here would shrink `TimerWheel`'s dynamic range by
+/// 10^6 for the same `LEVELS`/`BOTTOM_SLOTS` (see the module doc's "~50 days"
+/// note). This is a different, lower-level seam than
+/// `proxima_primitives::pipe::capabilities::Clock` (nanosecond-pinned,
+/// `delay`-capable — the one timer-driven pipe combinators use) and
+/// `proxima_telemetry::clock::Clock` (nanosecond-pinned, object-safe for
+/// dyn erasure) — `TimerWheel` needs neither a fixed unit nor an async
+/// `Delay`, just a cheap `u64` the caller chooses the meaning of.
 pub trait Clock {
     fn now(&self) -> Tick;
+}
+
+/// Canonical `Clock` test double for [`TimerWheel`], reachable crate-wide via
+/// `#[cfg(test)]` (both `prime::core::timer`'s own tests and `prime::lib`'s
+/// alloc-only smoke test use this one, not a bespoke fake each).
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{Clock, Tick};
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Shared-handle deterministic clock: `now()` reads an `Arc<AtomicU64>`
+    /// the test can drive directly, so a test can hold its own clone to
+    /// assert against or to advance from outside the wheel.
+    #[derive(Clone)]
+    pub(crate) struct TestClock(pub(crate) Arc<AtomicU64>);
+
+    impl TestClock {
+        pub(crate) fn new(start: Tick) -> Self {
+            Self(Arc::new(AtomicU64::new(start)))
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now(&self) -> Tick {
+            self.0.load(Ordering::Acquire)
+        }
+    }
 }
 
 /// opaque handle returned by `register`; pass to `cancel` to remove a timer
@@ -388,16 +427,10 @@ impl<C: Clock> TimerWheel<C> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use super::testing::TestClock;
     use alloc::sync::Arc as StdArc;
     use alloc::task::Wake;
     use core::sync::atomic::{AtomicU64, Ordering};
-
-    struct TestClock(StdArc<AtomicU64>);
-    impl Clock for TestClock {
-        fn now(&self) -> Tick {
-            self.0.load(Ordering::Acquire)
-        }
-    }
 
     struct FireCounter(StdArc<AtomicU64>);
     impl Wake for FireCounter {

@@ -196,15 +196,12 @@ mod tests {
     use crate::event::{FrameMetadata, HttpEvent, InteractionId, ProtocolEvent, RecordingEvent};
     use crate::{BinFormat, BinSource};
     use bytes::Bytes;
-    use core::future::Future;
     use futures::stream::StreamExt;
     use futures::task::noop_waker;
     use prime::os::runtime::PrimeRuntime;
     use proxima_primitives::pipe::SendPipe;
+    use proxima_primitives::pipe::clock::testing::MockClock;
     use proxima_runtime::Runtime;
-    use proxima_core::time::drivers::mock::MockDriver;
-    use proxima_core::time::{Driver, Instant};
-    use std::pin::Pin;
     use std::task::{Context, Poll};
 
     use crate::source::{RecordingEventStream, RecordingSource};
@@ -234,64 +231,13 @@ mod tests {
         })
     }
 
-    // ── the mock clock seam — proxima-time's deterministic MockDriver ─────────
-    //
-    // Wraps a directly-constructed `MockDriver` (proxima-time's own
-    // deterministic driver). `delay` registers the waker via the driver's real
-    // `schedule_wake`; the test fires it by calling `advance()`. This is the
-    // SAME non-polling registration path the global driver uses — never a real
-    // wait. We cannot bind the global `BOUND_DRIVER` to the mock from this
-    // crate's test build, so we inject the mock through the `Clock` seam.
-
-    #[derive(Clone)]
-    struct MockClock {
-        driver: Arc<MockDriver>,
-    }
-
-    impl MockClock {
-        fn new() -> Self {
-            Self {
-                driver: Arc::new(MockDriver::new()),
-            }
-        }
-        fn advance(&self, delta: Duration) {
-            self.driver.advance(delta);
-        }
-    }
-
-    struct MockSleep {
-        driver: Arc<MockDriver>,
-        deadline: Instant,
-    }
-
-    impl Future for MockSleep {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-            if self.driver.now() >= self.deadline {
-                Poll::Ready(())
-            } else {
-                self.driver
-                    .schedule_wake(self.deadline, context.waker().clone());
-                Poll::Pending
-            }
-        }
-    }
-
-    impl Clock for MockClock {
-        type Delay = MockSleep;
-
-        fn now_nanos(&self) -> u64 {
-            u64::try_from(self.driver.now().into_monotonic().as_nanos()).unwrap_or(u64::MAX)
-        }
-
-        fn delay(&self, duration: Duration) -> MockSleep {
-            let deadline = self.driver.now() + duration;
-            MockSleep {
-                driver: self.driver.clone(),
-                deadline,
-            }
-        }
-    }
+    // the mock clock seam: `proxima_primitives::pipe::clock::testing::MockClock`
+    // (see that module for why it, not `RecordingClock` — this test needs
+    // `delay` to genuinely pend until `advance()` crosses the deadline, the
+    // SAME non-polling `schedule_wake` registration path the global driver
+    // uses, never a real wait). We cannot bind the global `BOUND_DRIVER` to
+    // the mock from this crate's test build, so we inject it through the
+    // `Clock` seam instead.
 
     fn prime() -> Arc<dyn Runtime> {
         Arc::new(PrimeRuntime::new(1).expect("prime"))

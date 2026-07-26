@@ -77,16 +77,13 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::pipe::clock::testing::RecordingClock;
     use crate::pipe::resilience::backoff::{Backoff, Jitter};
     use crate::pipe::resilience::deadline::Deadline;
     use crate::pipe::retry_rules::RetryRules;
-    use core::cell::RefCell;
-    use core::future::{Ready, ready};
     use core::task::Poll;
-    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::vec::Vec;
 
     fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
         let mut pinned = core::pin::pin!(future);
@@ -95,41 +92,6 @@ mod tests {
             if let Poll::Ready(output) = pinned.as_mut().poll(&mut cx) {
                 return output;
             }
-        }
-    }
-
-    /// Deterministic `Clock`: `delay` resolves immediately (no wall-clock — Retry
-    /// is sequential, not a race) and records each requested duration so a test
-    /// can assert the backoff schedule.
-    #[derive(Clone)]
-    struct MockClock {
-        now_nanos: u64,
-        delays: Rc<RefCell<Vec<Duration>>>,
-    }
-
-    impl MockClock {
-        fn new() -> Self {
-            Self::at(0)
-        }
-        fn at(now_nanos: u64) -> Self {
-            Self {
-                now_nanos,
-                delays: Rc::new(RefCell::new(Vec::new())),
-            }
-        }
-        fn delays(&self) -> Vec<Duration> {
-            self.delays.borrow().clone()
-        }
-    }
-
-    impl Clock for MockClock {
-        type Delay = Ready<()>;
-        fn now_nanos(&self) -> u64 {
-            self.now_nanos
-        }
-        fn delay(&self, dur: Duration) -> Ready<()> {
-            self.delays.borrow_mut().push(dur);
-            ready(())
         }
     }
 
@@ -186,7 +148,7 @@ mod tests {
             calls: calls.clone(),
             succeed_at: 0,
         };
-        let clock = MockClock::new();
+        let clock = RecordingClock::new();
         let retry = Retry::new(
             pipe,
             controller(3, Backoff::Constant(Duration::from_millis(50))),
@@ -210,7 +172,7 @@ mod tests {
         let retry = Retry::new(
             pipe,
             controller(5, Backoff::Constant(Duration::from_millis(50))),
-            MockClock::new(),
+            RecordingClock::new(),
             0,
         );
 
@@ -234,7 +196,7 @@ mod tests {
         let retry = Retry::new(
             pipe,
             controller(3, Backoff::Constant(Duration::from_millis(50))),
-            MockClock::new(),
+            RecordingClock::new(),
             0,
         );
 
@@ -262,7 +224,7 @@ mod tests {
         let mut controller = controller(10, Backoff::Constant(Duration::from_millis(50)));
         controller.deadline = Some(Deadline::new(0, Duration::from_secs(1)));
         // clock reads 2s — past the 1s deadline, so the first failure exhausts.
-        let retry = Retry::new(pipe, controller, MockClock::at(2_000_000_000), 0);
+        let retry = Retry::new(pipe, controller, RecordingClock::at(2_000_000_000), 0);
 
         let result = block_on(Pipe::call(&retry, 0));
 
@@ -281,7 +243,7 @@ mod tests {
             calls: calls.clone(),
             succeed_at: u32::MAX,
         };
-        let clock = MockClock::new();
+        let clock = RecordingClock::new();
         let probe = clock.clone();
         let backoff = Backoff::Exponential {
             initial: Duration::from_millis(100),

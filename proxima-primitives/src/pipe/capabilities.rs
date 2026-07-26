@@ -46,8 +46,20 @@ pub trait Retryable {
 /// `Timeout`/`Hedge`) are generic over. `Delay` is an associated future, so the
 /// executor holds it inline in its state machine — no boxing, no alloc, no_std.
 ///
-/// Production impls wrap `proxima-time` (its `Sleep` is a concrete `Delay`);
-/// deterministic tests supply their own — the core owns neither clock.
+/// Production impls wrap `proxima-time` (`crate::pipe::clock::TimeClock`,
+/// whose `Sleep` is a concrete `Delay`); deterministic tests reach for
+/// `crate::pipe::clock::testing::{MockClock, RecordingClock}` — the canonical
+/// doubles, not a bespoke fake per call site.
+///
+/// Two other `Clock` traits exist in the workspace, and neither collapses
+/// into this one: `prime::core::timer::Clock` is a lower-level,
+/// resolution-agnostic tick source (NOT nanosecond-pinned — `TimerWheel`
+/// needs no `Delay` and a coarser unit) for the wheel data structure this
+/// trait's production `Sleep` is ultimately built over; `proxima_telemetry
+/// ::clock::Clock` is nanosecond-pinned like this one but deliberately
+/// object-safe (no associated type), because the per-core `Recorder` erases
+/// its clock behind `Arc<dyn Clock + Send + Sync>` — a shape this trait's
+/// `Delay` associated type cannot support without boxing.
 pub trait Clock {
     /// A concrete, `Sized` future that resolves once `dur` has elapsed.
     type Delay: Future<Output = ()>;

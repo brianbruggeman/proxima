@@ -5,7 +5,6 @@ use core::future::Future;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -13,6 +12,14 @@ use conflaguration::Validate;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::capabilities::Clock;
+// step()-driven tests use `proxima_primitives::pipe::clock::testing::RecordingClock`
+// (aliased `FakeClock` here for call-site continuity): `step()` never calls
+// `Clock::delay` (backoff is a pure `Duration` computation read off the
+// cursor) — only `worker::run`'s idle-wait would, and the step()-driven tests
+// below bypass `run()` entirely. `RecordingClock::delay` staying real (not
+// `unimplemented!`) keeps this fixture usable if a future test drives
+// `run()` directly.
+use proxima_primitives::pipe::clock::testing::RecordingClock as FakeClock;
 use proxima_primitives::pipe::request::Response;
 
 use crate::id::{SpanId, TraceId};
@@ -66,41 +73,6 @@ fn span_record(status: Status) -> SpanRecord {
         tracestate: crate::trace::tracestate::TraceState::empty(),
         module_path: "test",
         file_line: (0, 0),
-    }
-}
-
-/// Deterministic, manually-advanced clock for step()-driven tests. `delay`
-/// never actually waits — it records what was requested (for backoff
-/// assertions) and resolves immediately, matching the `FakeClock` pattern
-/// already used in `proxima-primitives`' retry tests.
-#[derive(Clone, Default)]
-struct FakeClock {
-    now_nanos: Arc<AtomicU64>,
-    delays: Arc<Mutex<alloc::vec::Vec<Duration>>>,
-}
-
-impl FakeClock {
-    fn advance(&self, duration: Duration) {
-        self.now_nanos
-            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
-    }
-}
-
-impl Clock for FakeClock {
-    type Delay = core::future::Ready<()>;
-
-    fn now_nanos(&self) -> u64 {
-        self.now_nanos.load(Ordering::Relaxed)
-    }
-
-    // `step()` never calls `Clock::delay` (backoff is a pure `Duration`
-    // computation read off the cursor); this only matters to `worker::run`'s
-    // idle-wait, which the step()-driven tests below bypass entirely. Kept
-    // real (not `unimplemented!`) so this clock stays usable if a future
-    // test drives `run()` directly.
-    fn delay(&self, duration: Duration) -> Self::Delay {
-        self.delays.lock().unwrap().push(duration);
-        core::future::ready(())
     }
 }
 

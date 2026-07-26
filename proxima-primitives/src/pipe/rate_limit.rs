@@ -1086,34 +1086,14 @@ mod tests {
     //
     // `RateLimit::with_clock` takes any `Clock` impl, so refill can be proven
     // deterministically — `advance` moves virtual time, never a real sleep.
+    // `RecordingClock` is the canonical double for this (see
+    // `crate::pipe::clock::testing` for why it, not `MockClock`).
 
-    #[derive(Clone, Default)]
-    struct FakeClock {
-        now_nanos: Arc<AtomicU64>,
-    }
-
-    impl FakeClock {
-        fn advance(&self, duration: Duration) {
-            let elapsed_ns = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-            self.now_nanos.fetch_add(elapsed_ns, Ordering::Relaxed);
-        }
-    }
-
-    impl Clock for FakeClock {
-        type Delay = std::future::Ready<()>;
-
-        fn now_nanos(&self) -> u64 {
-            self.now_nanos.load(Ordering::Relaxed)
-        }
-
-        fn delay(&self, _duration: Duration) -> Self::Delay {
-            std::future::ready(())
-        }
-    }
+    use crate::pipe::clock::testing::RecordingClock;
 
     #[proxima::test]
     async fn fake_clock_drives_fill_exhaust_advance_refill_exhaust() {
-        let clock = FakeClock::default();
+        let clock = RecordingClock::new();
         let stack = RateLimit::with_clock(
             into_handle(AlwaysOk),
             TokenBucketConfig {
@@ -1160,7 +1140,7 @@ mod tests {
 
     #[proxima::test]
     async fn fake_clock_never_refills_when_no_time_advances() {
-        let clock = FakeClock::default();
+        let clock = RecordingClock::new();
         let stack = RateLimit::with_clock(
             into_handle(AlwaysOk),
             TokenBucketConfig {

@@ -301,7 +301,7 @@ handler-shaped pipe, or a registered pipe name
 
 A natural question once you've seen `Pipe`/`PipeExt`/leaf macros/`mount` all avoid adding new nouns to the algebra: what about timing — readiness, delays, retries? Does `Pipe` have some special "are you ready yet" method?
 
-No. `proxima_primitives::pipe::capabilities::Clock` is a small, ordinary trait — not a pipe, and not a method on `Pipe` (`proxima-primitives/src/pipe/capabilities.rs:51–57`):
+No. `proxima_primitives::pipe::capabilities::Clock` is a small, ordinary trait — not a pipe, and not a method on `Pipe` (`proxima-primitives/src/pipe/capabilities.rs:63–69`):
 
 ```rust
 pub trait Clock {
