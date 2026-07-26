@@ -25,7 +25,7 @@ flate2 = "1"
 serde_json.workspace = true
 tracing.workspace = true
 webpki-roots.workspace = true
-# unconditional so dep-graph readers see the recording substrate without
+# unconditional so dep-graph readers see the recording layer without
 # chasing feature flags. functionality stays behind the `intercept-capture` /
 # `intercept-replay` cfg gates.
 proxima-recording = { version = "0.1.0", path = "../proxima-recording", features = ["pipe", "replay"] }

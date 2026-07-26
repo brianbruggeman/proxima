@@ -204,7 +204,7 @@ impl LogBuffer {
 /// read perf without the clone-per-write cost. This registry sees
 /// rare register/deregister (subprocess spawn/exit) and rare reads
 /// (`logs(name)` CLI calls), so the choice is moot at this scale —
-/// but where the choice DOES matter, the substrate's per-core
+/// but where the choice DOES matter, the runtime's per-core
 /// thread-local pattern (10× faster than either) is the answer,
 /// not ArcSwap-by-default.
 #[derive(Default)]

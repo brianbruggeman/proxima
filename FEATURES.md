@@ -246,9 +246,9 @@ All composable — each wraps an `inner: PipeHandle` and is itself a `Pipe`.
 
 ### Telemetry (`telemetry` module) — Pipe-shaped redesign
 
-The telemetry substrate is built on the same `Pipe` primitive as every other proxima component. Every telemetry record (span, log, metric, event) is wrapped in a `Request` envelope and dispatched through a terminal `Pipe`. Exporters are Pipes; fanout is `Tee<T>`; the recorder drains into a `PipeHandle`.
+The telemetry layer is built on the same `Pipe` primitive as every other proxima component. Every telemetry record (span, log, metric, event) is wrapped in a `Request` envelope and dispatched through a terminal `Pipe`. Exporters are Pipes; fanout is `Tee<T>`; the recorder drains into a `PipeHandle`.
 
-**Structural substrate (always-on, no feature flag):**
+**Structural layer (always-on, no feature flag):**
 - `ring` — per-core SPSC lock-free ring buffer; 11.6× faster than crossbeam at 1k, 4.4× at 1M
 - `id` — `TraceId` / `SpanId` + W3C traceparent SIMD-branchless parse; 5.4× faster than OTel's parser
 - `level` — custom severity levels (sub-ns compare; supports user-defined levels beyond the 5 built-ins)
@@ -324,7 +324,7 @@ The telemetry substrate is built on the same `Pipe` primitive as every other pro
 - Used by `process` upstream + `daemon control plane` for `proxima logs` CLI
 
 ### Determinism (`determinism` module)
-- `check_determinism(build, request)` — property-test substrate
+- `check_determinism(build, request)` — property-test harness
 - Runs the same request through a Pipe N times and asserts byte-identical output
 - Catches non-determinism: clocks, RNGs, HashMap iteration order, etc.
 
@@ -518,7 +518,7 @@ Structurally required (no bench applies):
 | macOS | 67.4 µs | 74.9 µs (11% slower) |
 | Linux | 62.0 µs | 76.4 µs (23% slower) |
 
-Caveat: ~95% of the 60-75 µs is kernel-side (socket bind, accept, connect, TCP handshake, EOF detect). The proxima/hyper/pingora user-space connection driver is 100-500 ns of that total. The relative gap is the substrate-driver lead; the absolute number is dominated by kernel TCP. DPDK Stage 11 eliminates the kernel side.
+Caveat: ~95% of the 60-75 µs is kernel-side (socket bind, accept, connect, TCP handshake, EOF detect). The proxima/hyper/pingora user-space connection driver is 100-500 ns of that total. The relative gap is the core-driver lead; the absolute number is dominated by kernel TCP. DPDK Stage 11 eliminates the kernel side.
 
 ### HTTP/2 head-to-head (host-b, Linux 6.15, 4 server cores)
 
@@ -586,7 +586,7 @@ legacy hyper/tokio h1 stack on top of `http1-native`, which is itself the
 tokio-free sans-IO h1 driver (`serve_connection`/`serve_h1_connection`,
 generic over `futures::io::AsyncRead`/`AsyncWrite`).
 
-Telemetry substrate primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`, `log`, `recorder`, `native`, `config`) are structural — always-on, no feature flag. Only consumer-facing toggles that change the dependency closure remain as features.
+Telemetry core primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`, `log`, `recorder`, `native`, `config`) are structural — always-on, no feature flag. Only consumer-facing toggles that change the dependency closure remain as features.
 
 | Flag | What it enables |
 |---|---|
@@ -611,7 +611,7 @@ Telemetry substrate primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`,
 | `macros` | `#[span]` proc-macro + `#[derive(SpanCarrier)]`; default on — 3.16× faster than `#[instrument]` |
 | `tracing-init` | Adds the `tracing::`-crate bridge on top of `proxima::init_telemetry()` (works without this feature too, proxima-native only): `install_console_logging`/`install_console_logging_with`, `TracingLayer` adapter |
 | `tee-generic` | Generic `Tee<T>` record-fanout primitive with replay and backpressure |
-| `runtime-prime-full` | Experimental — additional substrate hooks for span-carry across `prime::spawn`, beyond what `serve-prime` already provides by default |
+| `runtime-prime-full` | Experimental — additional runtime hooks for span-carry across `prime::spawn`, beyond what `serve-prime` already provides by default |
 
 ---
 
@@ -648,7 +648,7 @@ Hot path:
 - `per_core_vs_arcswap` (3 primitives × 3 contention regimes)
 - `swap_under_load`, `network_throughput`, `request_path`
 
-Substrate primitives:
+Core primitives:
 - `capture_drain`, `causal_record`, `causal_record_primitives`
 - `tee_backpressure`, `tee_sink_primitives`
 - `recording_sink_primitives`
@@ -663,7 +663,7 @@ Substrate primitives:
 | Stage | What | State |
 |---|---|---|
 | 8 | Reproducible bench CI gates | benches exist, no CI pipeline |
-| 10 | `LocalPipe` middleware fork (30-50 sites) | substrate primitive done; deferred-by-plan until DPDK |
+| 10 | `LocalPipe` middleware fork (30-50 sites) | core primitive done; deferred-by-plan until DPDK |
 | 11 | DPDK Runtime + L2/L3/L4 trait surface | months out |
 
 ### Bench-validated optimizations (parked with explicit trigger)
@@ -686,7 +686,7 @@ Substrate primitives:
 
 ### Strategic gap
 
-- **Anchor application**: concrete `#[test]` demonstrating end-to-end security composition (capture session → swap cipher → replay → assert byte-identical causal chains). The substrate primitives are all built; the demo proves the moat. ~300-500 LoC + a tiny MCP harness. Tracked in `parking-lot.md`.
+- **Anchor application**: concrete `#[test]` demonstrating end-to-end security composition (capture session → swap cipher → replay → assert byte-identical causal chains). The core primitives are all built; the demo proves byte-identical replay across a cipher swap. ~300-500 LoC + a tiny MCP harness. Tracked in `parking-lot.md`.
 
 ### Language bindings (planned, not started)
 

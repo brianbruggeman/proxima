@@ -66,7 +66,7 @@ std = [
 # `proxima-primitives/runtime-prime-full` (see the workspace root Cargo.toml).
 # The former proxima-pipe itself had nothing left to gate behind it -- the typed
 # `RequestContext.typed_trace_id` field this used to enable moved out with
-# trace ownership to the telemetry substrate (`establish_trace_context` +
+# trace ownership to the telemetry layer (`establish_trace_context` +
 # `RequestContext::adopt_trace_context`).
 runtime-prime-full = []
 # concurrent fan combinators (Race/ScatterGather) over futures::select_all/

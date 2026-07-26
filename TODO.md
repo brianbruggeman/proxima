@@ -1,12 +1,12 @@
 # proxima TODO
 
-## Payload substrate — no-cell design (2026-07-07)
+## Payload layer — no-cell design (2026-07-07)
 
 Status: **design settled, not code.** This note is a public design backlog,
 not part of the shipped API contract.
 
 ### The decision
-The pipe substrate moves **`P` and nothing else** — a pipe is `P -> Q`.
+The pipe algebra moves **`P` and nothing else** — a pipe is `P -> Q`.
 No `Envelope` / `Payload` container cell. No `Body` type.
 
 - **Metadata is a capability, not a slot.** Concerns are composable wrapper types

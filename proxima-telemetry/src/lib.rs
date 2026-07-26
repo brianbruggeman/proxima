@@ -1,10 +1,10 @@
-//! substrate-native telemetry for proxima: traces, metrics, logs, events.
+//! core-native telemetry for proxima: traces, metrics, logs, events.
 //!
 //! the primitives below (ring, id, level, clock, tag, trace, metric, log,
 //! recorder, native exporter, config) are structural -- always-on. only
 //! consumer-facing toggles remain as features (\, \,
 //! \, \). see \ for the
-//! historical build-order log (c1..c15) that produced this substrate.
+//! historical build-order log (c1..c15) that produced this crate.
 //!
 //! \ carries the pre-component proxima Metrics/Labels/TelemetryHandle
 //! surface that production code still uses; new code emits via \.

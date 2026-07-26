@@ -17,7 +17,7 @@ use proxima_core::ProximaError;
 /// not to proxima; if a future hyper-util release changes them, we
 /// pick up the change automatically.
 ///
-/// The substrate exposes this struct rather than hardcoding values
+/// Proxima exposes this struct rather than hardcoding values
 /// so operators can tune their proxima deployment for their workload
 /// without recompiling.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

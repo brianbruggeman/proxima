@@ -14,7 +14,7 @@
 //! times, because [`proxima_protocols::dns::frame_codec::DnsTcpQuery::name`]
 //! is a `heapless::String` inline buffer, not a heap `String`.
 //!
-//! Reuses `stats_alloc::{Region, StatsAlloc}` — the SAME counting substrate
+//! Reuses `stats_alloc::{Region, StatsAlloc}` — the SAME counting harness
 //! `tests/memcached_frame_ownership_alloc.rs` uses (RISC, P1) — over a REAL
 //! encoded wire query built via [`proxima_protocols::dns::encode::encode_query`]
 //! (P9: real bytes, not a hand-rolled struct literal), framed exactly like

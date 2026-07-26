@@ -16,7 +16,7 @@ face and `proxima.toml`. Sugar is a pure rewrite —
 
 Every example below builds a Pipe and runs it. The shapes differ
 (config file, fluent Rust, CLI one-shot) but they all produce the
-same `PipeHandle` under the hood. The substrate primitives (Tee,
+same `PipeHandle` under the hood. The core primitives (Tee,
 Diff, Isolate, Causal, SwappablePipe, WriteBack, check_determinism)
 that compose around any Pipe are documented in the `proxima::pipe`
 module rustdoc.
@@ -60,7 +60,7 @@ let client = Client::from_value(json!({
 }))?;
 ```
 
-That's the whole substrate: `upstreams` tried in order, `select`
+That's the whole mechanism: `upstreams` tried in order, `select`
 decides when to fall through, `write_back` populates the cache.
 
 ## config
@@ -107,9 +107,9 @@ write_back = [["origin", "cache"]]
 
 Sugar is the only sugar. New behaviour goes through the primitives.
 
-## substrate
+## registries
 
-| substrate | config dispatch | examples |
+| registry | config dispatch | examples |
 | --- | --- | --- |
 | listen protocol | `[[listen]] type = "..."` | http, direct_socket, mcp |
 | upstream | `type = "..."` (or shorthand) | http, kv, synth, replay, callback, process |

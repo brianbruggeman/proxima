@@ -26,7 +26,7 @@
 //!
 //! The number we want to see: per-core read latency stays flat as
 //! writer contention rises; ArcSwap read latency grows. The gap
-//! justifies the per-core substrate.
+//! justifies the per-core design.
 
 use std::cell::RefCell;
 use std::sync::Arc;

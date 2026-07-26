@@ -32,7 +32,7 @@
 //! [`Causal`](crate::Causal), [`SwappablePipe`](crate::SwappablePipe),
 //! [`WriteBack`](crate::WriteBack)) live alongside as their own
 //! top-level modules; see the [`crate::pipe`] module rustdoc for the
-//! full menu (substrate primitives, recording-as-Pipe, serving).
+//! full menu (core primitives, recording-as-Pipe, serving).
 
 pub use proxima_primitives::pipe::diff;
 pub use proxima_primitives::pipe::isolate;

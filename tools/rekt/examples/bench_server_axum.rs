@@ -1,6 +1,6 @@
 //! The incumbent baseline for the h1 matrix: axum (hyper/tokio) serving the
 //! same contract as `bench_server` — fixed `200` / `"ok"` / keep-alive — so
-//! the only variable across the two servers is the substrate underneath.
+//! the only variable across the two servers is the stack underneath.
 //!
 //!   cargo run --release --example bench_server_axum -- 127.0.0.1:8080 [cores]
 

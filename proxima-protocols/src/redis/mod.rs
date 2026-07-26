@@ -1,7 +1,7 @@
 //! Sans-IO RESP (Redis Serialization Protocol) codec — borrowed-view parser,
 //! encoder, and the client→server command framing.
 //!
-//! This is the codec substrate (workspace principle 11): an enum-shaped frame
+//! This is the codec layer (workspace principle 11): an enum-shaped frame
 //! model, bytes-in / borrowed-views-out, no I/O in the core. The async client
 //! (`proxima-redis`'s `RedisClientUpstream`) and the blocking driver
 //! (`RedisClient`) both drive the sans-IO `ClientSession` over this codec

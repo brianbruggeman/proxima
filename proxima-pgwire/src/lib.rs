@@ -27,7 +27,7 @@
 //!   statement/portal slots
 //!
 //! The remaining staged surfaces are sequenced as named gates in
-//! `docs/proxima-pgwire/discipline.md` (G8 CI/baseline substrate, G11
+//! `docs/proxima-pgwire/discipline.md` (G8 CI/baseline layer, G11
 //! stream-listener upgrade-honor).
 
 #[cfg(feature = "listen")]

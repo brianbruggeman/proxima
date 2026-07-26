@@ -1,9 +1,9 @@
-//! Integration test (Work-Queue Row 2 / §16 substrate): re-prove the observe
+//! Integration test (Work-Queue Row 2 / §16 scope): re-prove the observe
 //! path OFFLINE from vendored capture fixtures, every commit.
 //!
 //! The discipline log (C18) named `proxima_intercept_observe_paths_unregressed`
 //! as the rollback gate; that unit test proves the config-level gate (swap-off →
-//! observe byte-identical). The remaining §16 substrate it called out was
+//! observe byte-identical). The remaining §16 scope it called out was
 //! "replaying the 3 observe captures through the post-fork pipe … gated on
 //! vendored captures for codex/claude/copilot, not yet in spec/examples/." This
 //! test closes that: the captures are now checked in (`spec/examples/*-observe.jsonl`)

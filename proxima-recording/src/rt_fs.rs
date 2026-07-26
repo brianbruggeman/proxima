@@ -2,7 +2,7 @@
 //!
 //! File I/O is inherently blocking — there is no portable async file syscall;
 //! `tokio::fs` just hides a blocking thread pool. To keep the recording
-//! substrate runtime-swappable (prime first, tokio one injected backend) the
+//! layer runtime-swappable (prime first, tokio one injected backend) the
 //! on-disk formats run their `std::fs` work through
 //! [`proxima_runtime::Runtime::spawn_background_blocking`] — the same offload
 //! pool `proxima-pgwire` routes SCRAM-KDF through

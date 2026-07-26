@@ -42,7 +42,7 @@
 //! hand-rolled minimal parser. That arm is the gate-passing
 //! comparison.
 //!
-//! Six frame shapes covering the substrate's targeted coverage:
+//! Six frame shapes covering the codec's targeted coverage:
 //!
 //! - `+OK\r\n`                                 SimpleString
 //! - `-ERR unknown command 'fizz'\r\n`         Error

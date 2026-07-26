@@ -5,7 +5,7 @@
 //!
 //! Why a parallel listener: tokio-uring's I/O is owned-buffer —
 //! every `read` / `write_all` consumes a `Vec` (or any `BoundedBuf`)
-//! and returns it on completion. The substrate's main
+//! and returns it on completion. Proxima's main
 //! `serve_connection` is generic over `AsyncRead + AsyncWrite +
 //! Send + Unpin + 'static`. Bridging owned-buffer reads to the
 //! AsyncRead poll-based contract requires either self-referential

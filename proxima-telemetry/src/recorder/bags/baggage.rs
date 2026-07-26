@@ -1,4 +1,4 @@
-// v1 stub — full propagation lands in C15 (substrate hooks on prime Task).
+// v1 stub — full propagation lands in C15 (runtime hooks on prime Task).
 // Baggage carries per-task ambient context; it is not owned by Recorder.
 
 use alloc::vec::Vec;

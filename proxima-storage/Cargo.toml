@@ -1,6 +1,6 @@
 [package]
 name = "proxima-storage"
-description = "Storage substrates folded into one crate: the prime-native NVMe queue-pair engine (nvme feature) over the sans-IO proxima-protocols::nvme codec, the sans-IO persistent-memory (pmem) crash-consistency leaf (tier-3 no_std + no-alloc, unconditional), and the std DAX/file-backed mmap facade over pmem (dax feature, Linux-only fast tier). Folded from proxima-nvme + proxima-pmem + proxima-pmem-dax."
+description = "Storage layers folded into one crate: the prime-native NVMe queue-pair engine (nvme feature) over the sans-IO proxima-protocols::nvme codec, the sans-IO persistent-memory (pmem) crash-consistency leaf (tier-3 no_std + no-alloc, unconditional), and the std DAX/file-backed mmap facade over pmem (dax feature, Linux-only fast tier). Folded from proxima-nvme + proxima-pmem + proxima-pmem-dax."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

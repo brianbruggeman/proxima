@@ -39,7 +39,7 @@ pub struct TokioTcpUpstream {
     //   - Lock-free queue: doesn't help — there's only one future
     //     at a time, not a queue.
     //   - Restructure to `&mut self`: requires changing the upstream
-    //     trait surface, which would break the substrate's "Pipe
+    //     trait surface, which would break the core's "Pipe
     //     and friends are shared-ref-only" model.
     //
     // WHY this is right:

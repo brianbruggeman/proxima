@@ -66,7 +66,7 @@ curl -i http://127.0.0.1:8080/admin
 # -> 404 (per-listener router isolation)
 ```
 
-## what's in the substrate that makes this work
+## what's in the core that makes this work
 
 | nginx concept | proxima primitive |
 |---|---|

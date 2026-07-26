@@ -36,7 +36,7 @@ Architecture + scope of proxima's HTTP/1, HTTP/2, HTTP/3 implementations.
 |---|---|---|
 | HTTP/1 parser | `httparse` | Sans-io, SIMD-validated, used by hyper. Battle-tested. No reason to reimplement. |
 | HTTP/2 frames + HPACK | **`h2` (in-tree)** | Sans-io state machine + HPACK codec + connection driver, all in `src/h2/`. **Zero unsafe** on the protocol path; benchmarks 2-3× faster Huffman decode than the `h2` crate, ~50-60% higher RPS than hyper/pingora at 64 concurrent connections on the per-core runtime. The `h2` crate is retained as an optional dependency for the ALPN-multiplex listener (`http2` feature) until the native path becomes the ALPN default; it disappears entirely on `http1`-only builds. |
-| HTTP/3 + QUIC | `h3` + `quinn-proto` | Both sans-io. We own the I/O event loop and integrate with the substrate's runtime. |
+| HTTP/3 + QUIC | `h3` + `quinn-proto` | Both sans-io. We own the I/O event loop and integrate with the core's runtime. |
 | TLS | `rustls` (sans-io) + `tokio-rustls` (today) | Same pattern: sans-io core, async wrapper. Switchable when the runtime changes. |
 
 ### Why a native HTTP/2 stack
@@ -73,7 +73,7 @@ compile-time invalid-state prevention.
 - Today these are runtime-checked via the `State` enum. Typestate
   refactor pending — see "compile-time invariants" below.
 
-### Body streaming with substrate flow control
+### Body streaming with core flow control
 
 - Status: **partial.** Body decoder is a streaming state machine
   (`h1_body::BodyDecoder`); it surfaces chunks via a callback.
@@ -163,7 +163,7 @@ compile-time invalid-state prevention.
 
 ### Integration with recording / causality / swap primitives
 
-- Status: **automatic.** The substrate primitives are middleware on
+- Status: **automatic.** The core primitives are middleware on
   the `Pipe` trait — they operate on `(method, path, headers,
   body)` byte-stream tuples without caring how the request got there.
   Both the hyper-based listener (gone) and our `Connection`-driven
@@ -234,7 +234,7 @@ Per user direction: bench everything that ships. Current coverage:
 
 | What | Bench | Status |
 |---|---|---|
-| Substrate dispatch overhead | `substrate_dispatch.rs` | ✓ |
+| Core dispatch overhead | `substrate_dispatch.rs` | ✓ |
 | Full request path | `request_path.rs` | ✓ |
 | Hot-path microbenches | `perf_audit.rs` | ✓ |
 | Per-core vs ArcSwap | `per_core_vs_arcswap.rs` | ✓ |

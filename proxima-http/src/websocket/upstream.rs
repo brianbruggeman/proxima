@@ -1,4 +1,4 @@
-//! WebSocket upstream — outbound WS client wrapped as a substrate
+//! WebSocket upstream — outbound WS client wrapped as a core
 //! `Pipe`. Inbound HTTP request bodies are sent as WS messages
 //! (text for text/* MIME types, binary otherwise); response messages
 //! are returned as the HTTP response body.

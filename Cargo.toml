@@ -454,7 +454,7 @@ tracing-init = ["dep:tracing-subscriber", "proxima-telemetry/tracing-init"]
 # `App::source` entries, which `App::run_until_signal` now drives
 # unconditionally (proxima-primitives::pipe TARGET 4 — sources run once registered, the
 # same way a handler serves once mounted; no separate opt-in flag needed).
-# Default off — opt-in until the substrate is sealed.
+# Default off — opt-in until the core is sealed.
 producer-graph-config = []
 
 # `sync-wrappers` adds the runtime-agnostic `proxima::sync` + `proxima::time`
@@ -696,7 +696,7 @@ redis-listener = [
     "tcp",
     "any-listener",
 ]
-# DNS substrate (P1) — sans-IO RFC 1035 / RFC 3596 parser. minimum
+# DNS parser (P1) — sans-IO RFC 1035 / RFC 3596 parser. minimum
 # viable resolver target. compared against `hickory-proto::Message`
 # scope-mismatched + a parity-scoped hand-rolled baseline in the
 # bench harness so the Compare-bench gate cell passes honestly.
@@ -817,7 +817,7 @@ kafka-client = ["http-prime", "dep:proxima-kafka", "proxima-kafka/client"]
 # Kafka wire-format listener (P4 in docs/protocol-gap/discipline.md).
 # sans-IO parser for the 4-byte length-prefix framing + request header
 # (api_key + api_version + correlation_id + client_id). Schema-agnostic
-# enough that substrate middleware can route by API key without
+# enough that core middleware can route by API key without
 # compiling .schema files. Mounts `KafkaAnyProtocol` from the standalone
 # `proxima-kafka` crate onto `AnyListenProtocol`, mirroring
 # `redis-listener`'s shape. Sub-flag default off.
@@ -830,7 +830,7 @@ kafka-listener = [
 ]
 # WebSocket sans-IO frame codec (P11 in docs/protocol-gap/discipline.md).
 # RFC 6455 frame parsing/encoding decoupled from async-tungstenite so
-# substrate middleware can inspect frames without round-tripping through
+# core middleware can inspect frames without round-tripping through
 # the io layer. Compared in the bench harness against
 # `tungstenite::protocol::frame::FrameHeader` as the scope-matched
 # reference. default off.
@@ -977,7 +977,7 @@ prime-tokio-compat-inverted = [
     "prime/prime-tokio-compat-inverted",
 ]
 
-# telemetry substrate is structural (always-on). only consumer-facing toggles
+# telemetry layer is structural (always-on). only consumer-facing toggles
 # that change the dependency closure remain as features.
 histogram   = ["proxima-telemetry/histogram"]
 otlp-http   = ["proxima-telemetry/otlp-http", "dep:prost"]

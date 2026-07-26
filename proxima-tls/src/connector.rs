@@ -5,7 +5,7 @@
 //! session, [`TlsStreamUpstream`] wraps a *dialed* connection in a
 //! client-side TLS session. The inner backend is any `StreamUpstream`
 //! (prime `PrimeTcpUpstream` by default, tokio for tests/benches), so a
-//! TLS session runs over whatever byte transport the substrate provides.
+//! TLS session runs over whatever byte transport the core provides.
 //!
 //! Lives in proxima-tls because the rustls / futures-rustls / rcgen
 //! surface already lives here — keeping client + server TLS adapters in

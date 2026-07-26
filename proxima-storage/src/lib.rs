@@ -1,4 +1,4 @@
-//! Storage substrates: the NVMe queue-pair engine, the sans-IO persistent-memory
+//! Storage layers: the NVMe queue-pair engine, the sans-IO persistent-memory
 //! (pmem) leaf, and the std DAX/file-backed mmap facade over that leaf. Folded
 //! from the formerly separate `proxima-nvme`, `proxima-pmem`, and
 //! `proxima-pmem-dax` crates into one crate with feature-gated modules — each

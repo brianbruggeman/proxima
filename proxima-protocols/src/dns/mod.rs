@@ -1,8 +1,8 @@
-//! DNS substrate — sans-IO RFC 1035 / RFC 3596 message parser.
+//! DNS parser — sans-IO RFC 1035 / RFC 3596 message parser.
 //!
 //! Tracked as **P1** in `docs/protocol-gap/discipline.md`. Like
 //! `proxy_protocol` and `listeners::redis`, the parser is the
-//! substrate piece; an actual resolver / authoritative-server
+//! base piece; an actual resolver / authoritative-server
 //! listener wires accept loops + answer composition on top.
 //!
 //! Coverage today (first slice):
@@ -284,7 +284,7 @@ impl core::fmt::Display for ParseError {
 impl core::error::Error for ParseError {}
 
 /// Parse a DNS message header. The 12-byte fixed prefix is the
-/// substrate's foundation; everything else (sections) parses
+/// message's foundation; everything else (sections) parses
 /// relative to the same buffer with name-compression pointers.
 #[inline]
 pub fn parse_header(buf: &[u8]) -> Result<Header, ParseError> {

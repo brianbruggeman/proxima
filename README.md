@@ -7,7 +7,7 @@
 > path, and whole subsystems may be reworked or removed. Do not depend on it in
 > production. Use at your own risk.
 
-**A sans-IO substrate where everything is a `Pipe`, and big things are small
+**A sans-IO core where everything is a `Pipe`, and big things are small
 things composed.** One trait — async `In -> Result<Out, Err>` — and four roles
 (source, sink, transform, observe) express every part. A proxy, a gateway, a cache,
 a load balancer, a rate limiter, a codec, a telemetry pipeline: each is a handful
@@ -116,7 +116,7 @@ those composed, not another thing to learn. A pipe mounted behind a
 A "cache" is just a multi-upstream pipe where one upstream is kv-typed and the
 selection is `fallthrough`. A "load balancer" is the same shape with a different
 selection. A "mock" has one synthetic upstream. A "TCP proxy" is a stream
-listener over a passthrough pipe. **One substrate, every pattern.**
+listener over a passthrough pipe. **One core, every pattern.**
 
 Config and code are isomorphic: any setup expressible in TOML is expressible via
 the fluent builder, and the two round-trip through serde. Recording, replay,
@@ -149,7 +149,7 @@ trait abstracts spawn / timer / blocking-pool, and more than one runtime can run
 in one process:
 
 - **Prime** (default) — a from-scratch, tokio-free per-core runtime: one thread
-  per core, no work-stealing, no locks in substrate code (hot-path reads are
+  per core, no work-stealing, no locks in core code (hot-path reads are
   thread-local or lock-free via `ArcSwap`).
 - **Tokio** (`runtime-tokio`) — N pinned current-thread runtimes, one per core;
   the hosted backend and perf baseline. `io-uring` on Linux.

@@ -10,7 +10,7 @@
 #![cfg(all(feature = "http2", feature = "runtime-tokio"))]
 
 //! Full tail-latency sweep: **four** server impls × **three**
-//! concurrency levels. Closes the loop on the substrate composition
+//! concurrency levels. Closes the loop on the core composition
 //! claim — does the protocol-stack win compose with the runtime win
 //! as concurrency rises?
 //!

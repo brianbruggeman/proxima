@@ -100,7 +100,7 @@ pub struct RequestContext {
     pub local_upgrade_ticket: Option<u64>,
     /// Peer address for this request. When PROXY protocol is active
     /// this is the original client (not the load balancer); without
-    /// PROXY it's the raw socket peer. `None` on substrate paths
+    /// PROXY it's the raw socket peer. `None` on core paths
     /// that don't carry an address (purely in-process Pipe calls,
     /// for example).
     pub peer: Option<PeerInfo>,
@@ -198,10 +198,10 @@ impl RequestContext {
     /// clobbered by a re-adoption carrying no inbound baggage header.
     ///
     /// proxima-pipe carries no trace identifier type (no header parsing, no
-    /// generation) — that logic lives in the telemetry substrate's own
+    /// generation) — that logic lives in the telemetry layer's own
     /// propagation module, which already depends on this crate for
     /// [`HeaderList`]. This method is the seam that keeps the dependency
-    /// one-directional: the listener (already depending on that substrate)
+    /// one-directional: the listener (already depending on that layer)
     /// does the establishment and hands this crate only the resulting bytes.
     pub fn adopt_trace_context(&mut self, trace_id: Option<Bytes>, baggage: Option<Bytes>) {
         if let Some(trace_id) = trace_id {

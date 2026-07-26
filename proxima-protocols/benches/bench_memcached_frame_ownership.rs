@@ -83,7 +83,7 @@
 //!
 //! ## Reuse (P1 RISC)
 //!
-//! `stats_alloc::{Region, StatsAlloc}` — the SAME alloc-count substrate
+//! `stats_alloc::{Region, StatsAlloc}` — the SAME alloc-count harness
 //! `hpack_decode_into.rs`/`bench_c34_decode.rs`/`bench_part_source.rs`
 //! already use in this crate; no new counting allocator is hand-rolled
 //! (see also `tests/pgwire_codec_integration/alloc_counter.rs` for the

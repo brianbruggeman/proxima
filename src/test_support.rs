@@ -260,7 +260,7 @@ fn now_unix_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// A typed-on-demand config value loaded through proxima's format-agnostic
-/// registry. rstest has no config substrate; this lifts proxima's loader
+/// registry. rstest has no config layer; this lifts proxima's loader
 /// (`proxima-config` + `crate::load`) into a fixture. Config is UNTYPED
 /// `serde_json::Value` end-to-end in proxima, so [`Self::typed`] is a test-side
 /// projection. [`Self::into_pipe`] realizes the config as a live `Handler`.

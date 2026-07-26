@@ -1,7 +1,7 @@
 # hello world REST service.
 #
 # proxima fronts a synth upstream that returns a fixed response on
-# any path / method. zero application logic; the substrate is doing
+# any path / method. zero application logic; the core is doing
 # everything.
 #
 # run:

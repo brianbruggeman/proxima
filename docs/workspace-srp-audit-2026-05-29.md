@@ -65,7 +65,7 @@ defined via `conflaguration`'s `#[derive(Settings, Validate)]`, with
 `ReplayUpstream::from_config` producing the Pipe graph from config.
 
 crate boundary stays — each has a different dep cone (recording-core is
-trait substrate, recording-pipe carries causal byte-tracking + crossbeam
+trait surface only, recording-pipe carries causal byte-tracking + crossbeam
 sink, intercept carries always-on rcgen + rustls + tokio-rustls + copilot
 deps, replay is independent JSONL/Bin source matcher). collapsing all
 four into one crate would bloat replay-only and record-only users with
@@ -109,7 +109,7 @@ audit can defer them without surprising readers.
 ### streaming-shaped Pipe (defer indefinitely)
 
 `SharedRingPipe` lives at `proxima-compose/src/tee/shared_ring.rs`. it
-is the multi-consumer broadcast ring crossbeam-CachePadded substrate
+is the multi-consumer broadcast ring crossbeam-CachePadded primitive
 used INSIDE `Tee` — not a Pipe replacement.
 
 `Pipe` stays request/response shaped. composition primitives
@@ -136,7 +136,7 @@ subscriptions) — they want a `Session` abstraction, which is its own
 initiative.
 
 trigger: when a concrete consumer needs Kafka or AMQP wire integration
-on top of the proxima substrate. defer the Session abstraction design
+on top of the proxima core. defer the Session abstraction design
 until then.
 
 ### sub-1000-LOC consolidations (defer)

@@ -1,8 +1,8 @@
-// Read/format substrate (event model, Format codecs, sources, source registry)
+// Read/format layer (event model, Format codecs, sources, source registry)
 // stays at the proxima-recording crate root (folded from the former
 // proxima-recording-core). The SINK half (the RecordingSink trait,
 // BinSink/JsonlSink/BroadcastSink, the sink factory/registry) was deleted
-// from recording-core and relocated onto the spigot substrate in
+// from recording-core and relocated onto the spigot layer in
 // proxima-recording's `pipe` module (folded from the former
 // proxima-recording-pipe, C7). `sink` aliases that relocated module so
 // `crate::recording::sink::{RecordingSink, DynRecordingSink, AppendFuture}`
@@ -18,7 +18,7 @@ pub use proxima_recording::{
     RecordingSourceRegistry, RequestHeader, SourceBuildFuture, event, factory, source,
 };
 
-// sink half relocated to the spigot substrate.
+// sink half relocated to the spigot layer.
 pub use proxima_recording::pipe::event_sink as sink;
 pub use proxima_recording::pipe::{
     AccumulatingSink, AppendAck, AppendFuture, AppendLog, DeferredRuntime, DynRecordingSink,

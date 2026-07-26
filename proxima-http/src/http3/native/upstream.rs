@@ -3,7 +3,7 @@
 //! packaged as a [`proxima_primitives::pipe`] [`SendPipe`] so it drops into the same
 //! `proxima::Client` slot as [`H1ClientUpstream`] / [`H2ClientUpstream`].
 //!
-//! It composes the substrate the way the docs point: a native QUIC
+//! It composes the stack the way the docs point: a native QUIC
 //! [`Endpoint`](proxima_quic::native::Endpoint) (prime UDP socket +
 //! sans-IO [`Connection`](proxima_protocols::quic::connection::Connection))
 //! under the sans-IO H3 [`Client`](super::client::Client) state machine,

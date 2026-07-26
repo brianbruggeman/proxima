@@ -96,7 +96,7 @@ regime before flipping anything there.**
    "client library" positioning, not the bench.
 2. **Priority order by cell value**: h1 server (0.46x, biggest volume
    claim), h3 server (0.35x at 4c), h3 client (0.76x at headroom).
-   h2 is the moat cell block (6.6-7.4x) — publishable number.
+   h2 is the strongest cell block (6.6-7.4x) — publishable number.
 3. rekt-vs-wrk/h2load client parity holds everywhere servers have
    headroom except h3 (0.76x — the known structural per-op alloc gap,
    partially closed by the source path).
@@ -176,7 +176,7 @@ per-trial logs.
 | h2c | 1 / 2 / 4 | 693,912 / 1,292,669 / 1,878,517* | 87,447 / 162,297 / 305,655 | **7.94 / 7.96 / 6.15x** | 6.6–7.4x → holds |
 
 *h2 c4 CoV 16% (range 1,444,538–2,153,571, client-side scheduling swing at 2M+
-rps; nginx c4 rock-stable at 305k). Moat holds regardless.
+rps; nginx c4 rock-stable at 305k). The 6.6-7.4x lead holds regardless.
 
 Three findings that change the read of the earlier table:
 

@@ -1,6 +1,6 @@
 //! HTTP/3 load over proxima's NATIVE QUIC (`H3NativeUpstream`, prime UDP — not
 //! quinn). The native client reuses one persistent QUIC connection per upstream
-//! but is request-at-a-time (stream multiplexing is a documented substrate
+//! but is request-at-a-time (stream multiplexing is a documented
 //! follow-on), so concurrency comes from N connections per core, each firing
 //! `GET /` back-to-back. Reuses the h1/h2 drive harness (per-core prime
 //! factories, `Throughput`).

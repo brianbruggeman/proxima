@@ -14,7 +14,7 @@
 //! CI-safe half of this bench's evidence; a hard, hardware-independent
 //! `assert_eq!` here is honest where a timing threshold would be flaky.
 //!
-//! Reuses `stats_alloc::{Region, StatsAlloc}` — the SAME counting substrate
+//! Reuses `stats_alloc::{Region, StatsAlloc}` — the SAME counting harness
 //! the bench's own `print_alloc_report` uses (RISC, P1) — rather than a
 //! hand-rolled `AtomicUsize` allocator (the sibling pattern in
 //! `tests/pgwire_codec_integration/alloc_counter.rs` counts every

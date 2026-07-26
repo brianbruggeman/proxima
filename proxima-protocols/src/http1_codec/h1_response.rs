@@ -104,7 +104,7 @@ pub fn write_response_head(
 /// Minimal default reason phrases for the common statuses. Callers
 /// who care about specific text should supply it explicitly via
 /// `write_response_head`; this table only covers the codes the
-/// substrate itself produces (synth, control plane, internal errors).
+/// proxima itself produces (synth, control plane, internal errors).
 fn default_reason(status: u16) -> &'static [u8] {
     match status {
         100 => b"Continue",

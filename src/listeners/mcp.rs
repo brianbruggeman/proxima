@@ -25,7 +25,7 @@ const SERVER_NAME: &str = "proxima";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// MCP listener — JSON-RPC 2.0 over stdio or Unix domain socket.
-/// Translates `tools/call` into a substrate `Request`; tool list is
+/// Translates `tools/call` into a core `Request`; tool list is
 /// fixed to the control-plane routes (`list_pipes`,
 /// `pipe_status`, `metrics_snapshot`).
 pub struct McpListenProtocol {

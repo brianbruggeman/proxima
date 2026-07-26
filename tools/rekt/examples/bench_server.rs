@@ -1,4 +1,4 @@
-//! The bench target, but BOTH sides are the substrate now: a proxima HTTP/1.1
+//! The bench target, but BOTH sides are proxima's own stack now: a proxima HTTP/1.1
 //! server. Same contract as the std `bench_target` (fixed `200` / `"ok"` /
 //! keep-alive), served through proxima's prime h1 stack — a trivial handler
 //! Pipe (`OkHandler`) attached to `PrimeRuntime::serve_http`, so the response

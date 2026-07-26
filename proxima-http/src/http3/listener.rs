@@ -6,7 +6,7 @@
 //! does. ALPN advertises `h3`. A self-signed cert is generated when
 //! `dev_self_signed: true` is set — handy for tests and local dev.
 //!
-//! Same substrate discipline as [`crate::listeners::http`]: accept
+//! Same core discipline as [`crate::listeners::http`]: accept
 //! loop on the calling task, per-connection driver spawned on the
 //! ambient runtime (today tokio; Stage H removes the assumption).
 

@@ -37,7 +37,7 @@ the boundary, not the leak.
 
 `tokio_rustls::*` — TLS termination. Stays tokio-coupled by design. The
 prime serve_https path bridges through tokio_util::compat into
-tokio_rustls and back. No production-ready pure-prime TLS substrate
+tokio_rustls and back. No production-ready pure-prime TLS layer
 exists yet; when it does, this category moves.
 
 `tokio_uring::*` — only inside the io_uring backend gated by the

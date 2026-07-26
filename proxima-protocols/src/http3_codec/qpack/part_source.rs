@@ -337,7 +337,7 @@ const BLOCK_POOL_CAP: usize = 64;
 /// Pool-recycled queue of RAW (still-encoded) field sections plus the
 /// current-block and Huffman-scratch plumbing a connection FSM needs to
 /// hand out borrowed [`FieldSectionSource`]s one at a time. This is the
-/// shared substrate of every `Source`-mode header path (h3 client, h3
+/// shared plumbing of every `Source`-mode header path (h3 client, h3
 /// server, and the h1/h2 dispatch migrations to come): `push` copies one
 /// encoded section into a recycled buffer at feed time (steady-state 0
 /// allocations); `poll` recycles the previously handed-out block, pops

@@ -4,9 +4,9 @@ Plugins are normal Rust crates that depend on `proxima` and register
 factories on an `AppBuilder` at startup. No fork, no FFI, no
 dynamic loader.
 
-## substrate registries
+## plugin registries
 
-| substrate | trait | config dispatch |
+| registry | trait | config dispatch |
 | --- | --- | --- |
 | listen protocol | `ListenProtocol` | `[[listen]] type = "..."` |
 | pipe | `PipeFactory` | `type = "..."` (or shorthand) |
@@ -31,7 +31,7 @@ let app = App::builder()
     .build()?;
 ```
 
-Skip `with_defaults()` for an empty substrate.
+Skip `with_defaults()` to start with an empty app.
 
 ## pipe factory skeleton
 

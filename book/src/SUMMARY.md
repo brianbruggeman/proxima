@@ -16,7 +16,7 @@
   - [fan-out — a primitive: one to many](algebra/fan-out.md)
   - [fan-in — a primitive: many to one](algebra/fan-in.md)
   - [gate — a pattern: readiness by composition](algebra/gate.md)
-  - [signal — completion on the substrate](algebra/signal.md)
+  - [signal — completion at the core](algebra/signal.md)
   - [the pattern gallery — retry · auth · iam · wal · cron · etl](algebra/patterns.md)
 
 # Configure it

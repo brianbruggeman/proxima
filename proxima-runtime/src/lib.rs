@@ -274,7 +274,7 @@ fn block_on_dispatch_error(message: &str) -> ProximaError {
 pub trait Runtime: Send + Sync + 'static {
     /// Spawn a future on the current core's executor. Future is `!Send` by
     /// default — it lives on this thread until completion. Use this for
-    /// per-connection handlers, per-request work, and substrate-internal
+    /// per-connection handlers, per-request work, and runtime-internal
     /// bookkeeping.
     fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>);
 

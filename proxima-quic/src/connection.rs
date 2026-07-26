@@ -1,4 +1,4 @@
-//! Substrate-side QUIC connection façade. Wraps a single accepted
+//! Core-side QUIC connection façade. Wraps a single accepted
 //! QUIC connection. The h3 driver builds on this; future native-quic
 //! work swaps the internals to a `quinn_proto::Connection` event pump
 //! without changing the type's public shape.
@@ -28,7 +28,7 @@ impl Connection {
 
     /// Underlying [`quinn::Connection`] for bridge crates (h3-quinn).
     /// Public so `proxima-h3` can bridge; not part of the
-    /// substrate-portable surface.
+    /// core-portable surface.
     pub fn quinn(&self) -> quinn::Connection {
         self.inner.clone()
     }

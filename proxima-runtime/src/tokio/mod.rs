@@ -171,7 +171,7 @@ async fn drain_loop(spawn_rx: flume::Receiver<SpawnRequest>) {
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn run_event_loop(spawn_rx: flume::Receiver<SpawnRequest>) {
     // tokio-uring drives its own current-thread runtime + LocalSet
-    // backed by io_uring. Owned-buffer I/O, no epoll. The substrate
+    // backed by io_uring. Owned-buffer I/O, no epoll. The runtime
     // contract (LocalSet for ?Send tasks, current-thread tokio) is
     // preserved — only the I/O reactor differs.
     tokio_uring::start(drain_loop(spawn_rx));

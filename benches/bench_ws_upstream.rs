@@ -23,7 +23,7 @@
 //!   client side is hand-written against `async_tungstenite::tokio`
 //!   with no proxima wrapper. measures the floor.
 //!
-//! delta gives the substrate-tax number we record in the
+//! delta gives the core-tax number we record in the
 //! discipline.md changelog row for every tweak.
 
 use std::time::Duration;

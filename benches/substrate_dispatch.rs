@@ -8,7 +8,7 @@
     clippy::default_constructed_unit_structs
 )]
 
-// Tier-1 substrate dispatch bench. No I/O, no kernel, no socket.
+// Tier-1 core dispatch bench. No I/O, no kernel, no socket.
 // Measures Pipe::call overhead through composed middleware chains —
 // the ceiling on what proxima can do before networking enters.
 

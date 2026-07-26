@@ -1,6 +1,6 @@
 [package]
 name = "proxima-recording"
-description = "Recording substrate for proxima: event model, source/sink traits, binary and JSONL on-disk formats, index files (base/format tier); pipe-flavored capture/replay wrappers (`pipe` feature); cassette replay-by-match-key (`replay` feature)"
+description = "Recording layer for proxima: event model, source/sink traits, binary and JSONL on-disk formats, index files (base/format tier); pipe-flavored capture/replay wrappers (`pipe` feature); cassette replay-by-match-key (`replay` feature)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -81,7 +81,7 @@ toml = { workspace = true }
 [features]
 default = ["std"]
 
-# Full format substrate: source/index/factory registries, bin/jsonl format
+# Full format layer: source/index/factory registries, bin/jsonl format
 # readers, durable-log file I/O. Everything proxima-recording-core shipped
 # historically.
 std = [
@@ -126,10 +126,10 @@ alloc = [
 # BinSource. Adds BinSink::sync_now (fsync data + idx in the correct
 # order) and BinSource::events_from_offset (yields (offset, event) pairs
 # for at-least-once consumer drain via the offset cursor C7).
-# Default off — opt-in until the notify substrate is fully sealed.
+# Default off — opt-in until the notify layer is fully sealed.
 durable-wal = []
 
-# Pipe-flavored recording substrate (folded from proxima-recording-pipe):
+# Pipe-flavored recording layer (folded from proxima-recording-pipe):
 # `LiveCaptureContext`, `BoundedRecordingSink`, `Causal` (record/replay Pipe
 # wrapper with causal index), the durable spigot terminal (`LazyFanOut`,
 # `FanOut`, `AppendLog`/`ReplayLog`), and `pipe::replay::TimedReplay` (the

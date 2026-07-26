@@ -1,7 +1,7 @@
 //! Native HTTP/2 implementation. No `h2` crate dependency.
 //!
 //! Targets `futures::io::AsyncRead + AsyncWrite` so DPDK / glommio /
-//! any non-tokio transport plugs in directly via the substrate's
+//! any non-tokio transport plugs in directly via the core's
 //! `StreamConnection` trait.
 //!
 //! Built in layers, each with its own module:

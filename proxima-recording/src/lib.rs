@@ -1,4 +1,4 @@
-//! Recording substrate for proxima: event model, source traits, binary and
+//! Recording layer for proxima: event model, source traits, binary and
 //! JSONL on-disk formats, index files, and the source factory registry (the
 //! base/format tier — folded from the former `proxima-recording-core`).
 //!

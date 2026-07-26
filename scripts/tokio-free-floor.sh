@@ -13,7 +13,7 @@
 # block -- this script is that same shape, matrixed over the floor
 # crate set instead of one crate.
 #
-# Locks in an ALREADY-clean invariant (P16 proof substrate): every
+# Locks in an ALREADY-clean invariant (P16 proof harness): every
 # cell below is expected to pass today; a future regression (a floor
 # crate's `alloc` feature accidentally reaching tokio) fails CI
 # immediately instead of drifting unnoticed.
