@@ -14,13 +14,29 @@
 //! prime's thread-local, so the symbols are global yet every call stays
 //! per-core — the same Send-but-per-worker contract as the prime TCP
 //! acceptor.
+//!
+//! `#[cfg(not(test))]`: `cargo test -p prime` dev-depends (transitively,
+//! through the `proxima` umbrella crate needed for the `#[proxima::test]`
+//! macro) on a second, normally-compiled copy of this same `prime` package
+//! alongside the `--test`-compiled crate under test — mirrors
+//! `proxima-core`'s own `external.rs` test host, which self-hosts these
+//! same symbols under `#[cfg(test)]` for the opposite reason (no real
+//! provider linked there). Here a real provider IS linked (the other prime
+//! copy), so the `--test` copy must NOT also define these `#[unsafe(no_mangle)]`
+//! symbols — two definitions of an unmangled symbol in one binary is a
+//! linker error, not a Rust-level conflict (rustc's per-instantiation name
+//! hashing doesn't apply to `no_mangle`), and GNU ld/rust-lld enforce it
+//! even where the two are never both needed.
 
+#[cfg(not(test))]
 use core::task::Waker;
 
+#[cfg(not(test))]
 use crate::os::core_shard;
 
 /// Backs `proxima_core::time::now()` under prime-wheel — milliseconds since
 /// the calling worker's shard launched.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "Rust" fn proxima_time_external_now_millis() -> u64 {
     // on a prime worker: the per-core wheel (hot path, unchanged). off a
@@ -34,7 +50,7 @@ pub extern "Rust" fn proxima_time_external_now_millis() -> u64 {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(not(test), feature = "std"))]
 fn fallback_now_millis() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START
@@ -43,13 +59,14 @@ fn fallback_now_millis() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(test), not(feature = "std")))]
 fn fallback_now_millis() -> u64 {
     core_shard::current_tick()
 }
 
 /// Backs `proxima_core::time`'s `schedule_wake` — registers `waker` on the
 /// calling worker's timer wheel to fire at `deadline_millis`.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "Rust" fn proxima_time_external_schedule_wake(deadline_millis: u64, waker: Waker) {
     // on a worker: the per-core wheel. off a worker (a tokio-hosted client
@@ -63,7 +80,7 @@ pub extern "Rust" fn proxima_time_external_schedule_wake(deadline_millis: u64, w
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(not(test), feature = "std"))]
 fn fallback_schedule_wake(deadline_millis: u64, waker: Waker) {
     let delay = deadline_millis.saturating_sub(fallback_now_millis());
     std::thread::spawn(move || {
@@ -72,7 +89,7 @@ fn fallback_schedule_wake(deadline_millis: u64, waker: Waker) {
     });
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(test), not(feature = "std")))]
 fn fallback_schedule_wake(deadline_millis: u64, waker: Waker) {
     core_shard::schedule_wake(deadline_millis, waker);
 }
