@@ -9,13 +9,13 @@
 //! `stream_passthrough.rs`'s own prime test (`spawn_on_current_core` for the
 //! server half, direct `.await` for the client half). The unix socket lives
 //! under a fresh `tempfile::tempdir()` (never a fixed path — a second
-//! concurrent test run must not collide). The echo is a fixed-size
-//! read_exact/write_all round trip rather than `split()` + `futures::io::copy`
-//! — the latter, paired with an early write-half `close()`, was found to
-//! trip a reproducible `EINVAL` out of `PrimeUnixListener::poll_accept` on
-//! this host that is insensitive to call ordering and only to unrelated
-//! code shape (a UB signature, not a logic race); root-causing that belongs
-//! to a dedicated prime/socket2 investigation, not this test.
+//! concurrent test run must not collide). The echo below is a fixed-size
+//! read_exact/write_all round trip; `unix_split_copy_close_shape_round_trip`
+//! (further down) covers the `split()` + `futures::io::copy` + early
+//! write-half `close()` shape, which used to trip a reproducible `EINVAL`
+//! out of `PrimeUnixListener::poll_accept` — root-caused and fixed (see
+//! `unix_accept_after_peer_already_disconnected_does_not_einval` below and
+//! `prime::os::net::finish_accepted_unix_socket`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(feature = "unix", feature = "udp", feature = "serve-prime"))]
@@ -107,4 +107,146 @@ async fn udp_round_trip_via_prime_packet_listener_factory() {
     let mut client_buf = [0_u8; 128];
     let ack = client.recv(&mut client_buf).await.expect("recv ack");
     assert_eq!(&ack.data[..], b"ack");
+}
+
+/// Regression test for the `PrimeUnixListener::poll_accept` `EINVAL`:
+/// three clients connect, write, and drop (peer gone) *before* the
+/// server's spawned task is ever polled to call `accept()` — the exact
+/// scheduling that reproduced it. Root cause (proven via
+/// `scratchpad/rawtest2` in the investigation, syscall-isolated): on
+/// macOS, `socket2::Socket::accept()`'s convenience path additionally
+/// applies `SO_NOSIGPIPE` to the freshly-accepted fd, and the kernel
+/// rejects that `setsockopt` with `EINVAL` for an AF_UNIX peer that
+/// already disconnected — discarding an otherwise perfectly good,
+/// already-accepted connection. Fixed in `prime::os::net::UnixListener::
+/// poll_accept` by using `accept_raw()` + a tolerant
+/// `finish_accepted_unix_socket` helper. The echo shape here
+/// (`split()`/`futures::io::copy()`/early write-half `.close()`, the
+/// shape originally blamed) was proven NOT to matter — see the sibling
+/// `unix_split_copy_close_shape_round_trip` below, and TCP's
+/// `tcp_split_copy_close_shape_round_trip`, both of which exercise the
+/// exact split/copy/close shape end to end with real data assertions.
+#[proxima::test]
+async fn unix_accept_after_peer_already_disconnected_does_not_einval() {
+    let selection = RuntimeSelection::prime(1).expect("build prime runtime selection");
+    let factory = selection
+        .unix_upstream_factory
+        .clone()
+        .expect("prime bundles a UnixUpstreamFactory");
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp_dir.path().join("accept-after-peer-gone.sock");
+    let listener = PrimeUnixListener::bind(socket_path.clone()).expect("bind unix listener");
+
+    prime::os::core_shard::spawn_on_current_core(Box::pin(async move {
+        for round in 0..3 {
+            let mut conn = listener
+                .accept()
+                .await
+                .unwrap_or_else(|err| panic!("accept failed on round {round}: {err}"));
+            let mut buf = [0_u8; 22];
+            let _ = conn.read(&mut buf).await;
+        }
+    }));
+
+    for _round in 0..3 {
+        let upstream = factory.connect(socket_path.clone());
+        let mut conn = upstream.connect().await.expect("connect");
+        conn.write_all(b"hello over prime unix")
+            .await
+            .expect("write");
+        conn.flush().await.expect("flush");
+        // peer disconnects before the server ever calls `accept()` — the
+        // condition that reproduced the EINVAL.
+        drop(conn);
+    }
+}
+
+/// The originally-blamed shape, proven end to end with a real echoed
+/// round trip: `conn.split()` + `futures::io::copy()` on the server, an
+/// early write-half `.close()` (half-close, not full teardown) on both
+/// sides. Requires two fixes proven necessary while building this test:
+/// (1) the `EINVAL` fix above, and (2) `UnixStream::poll_close` using
+/// `Shutdown::Write` instead of `Shutdown::Both` — `Shutdown::Both`
+/// silently killed the still-live read half a `split()` caller needs
+/// after signaling EOF (the same bug already fixed for
+/// `TcpStream::poll_close`, undone-for-Unix regression).
+#[proxima::test]
+async fn unix_split_copy_close_shape_round_trip() {
+    const MESSAGE: &[u8] = b"hello over prime unix split copy close";
+
+    let selection = RuntimeSelection::prime(1).expect("build prime runtime selection");
+    let factory = selection
+        .unix_upstream_factory
+        .clone()
+        .expect("prime bundles a UnixUpstreamFactory");
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp_dir.path().join("split-copy-close-round-trip.sock");
+    let listener = PrimeUnixListener::bind(socket_path.clone()).expect("bind unix listener");
+
+    prime::os::core_shard::spawn_on_current_core(Box::pin(async move {
+        let conn = listener.accept().await.expect("server accept");
+        let (mut read_half, mut write_half) = conn.split();
+        futures::io::copy(&mut read_half, &mut write_half)
+            .await
+            .expect("server echo copy");
+        write_half.close().await.expect("server write-half close");
+    }));
+
+    let upstream = factory.connect(socket_path);
+    let conn = upstream.connect().await.expect("client connect");
+    let (mut read_half, mut write_half) = conn.split();
+    write_half.write_all(MESSAGE).await.expect("client write");
+    write_half.close().await.expect("client write-half close");
+
+    let mut reply = Vec::new();
+    read_half
+        .read_to_end(&mut reply)
+        .await
+        .expect("client read echo to EOF");
+    assert_eq!(reply, MESSAGE);
+}
+
+/// TCP sibling of `unix_split_copy_close_shape_round_trip` — proves the
+/// split/copy/close contract holds for both transports (TCP never showed
+/// the `EINVAL`; `TcpStream::poll_close` already used `Shutdown::Write`).
+#[proxima::test]
+async fn tcp_split_copy_close_shape_round_trip() {
+    const MESSAGE: &[u8] = b"hello over prime tcp split copy close";
+
+    let selection = RuntimeSelection::prime(1).expect("build prime runtime selection");
+    let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let mut acceptor = selection
+        .acceptor_factory
+        .bind(
+            bind_addr,
+            proxima_primitives::stream::TcpBindOptions::default(),
+        )
+        .expect("bind tcp acceptor");
+    let server_addr = acceptor.local_addr().expect("acceptor local_addr");
+
+    prime::os::core_shard::spawn_on_current_core(Box::pin(async move {
+        let conn = futures::future::poll_fn(|cx| acceptor.poll_accept(cx))
+            .await
+            .expect("server accept");
+        let (mut read_half, mut write_half) = futures::io::AsyncReadExt::split(conn);
+        futures::io::copy(&mut read_half, &mut write_half)
+            .await
+            .expect("server echo copy");
+        write_half.close().await.expect("server write-half close");
+    }));
+
+    let upstream = proxima_net::prime::PrimeTcpUpstream::new(server_addr);
+    let conn = upstream.connect().await.expect("client connect");
+    let (mut read_half, mut write_half) = conn.split();
+    write_half.write_all(MESSAGE).await.expect("client write");
+    write_half.close().await.expect("client write-half close");
+
+    let mut reply = Vec::new();
+    read_half
+        .read_to_end(&mut reply)
+        .await
+        .expect("client read echo to EOF");
+    assert_eq!(reply, MESSAGE);
 }

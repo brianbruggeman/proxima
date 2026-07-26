@@ -735,9 +735,19 @@ impl UnixListener {
         context: &mut Context<'_>,
     ) -> Poll<io::Result<(UnixStream, Option<PathBuf>)>> {
         let this = self.get_mut();
-        match this.socket.accept() {
+        // `Socket::accept_raw` (not the convenience `Socket::accept`) —
+        // on macOS `Socket::accept` additionally applies `SO_NOSIGPIPE` to
+        // the freshly-accepted fd, and the kernel rejects that setsockopt
+        // with EINVAL for an AF_UNIX peer that already disconnected before
+        // this `accept()` ran (a real, already-connected fd — `accept(2)`
+        // itself succeeded — `Socket::accept` just discards it because
+        // `set_common_flags` bubbles the EINVAL up as the whole call's
+        // error). `finish_accepted_unix_socket` applies the same flags
+        // `Socket::accept` would, but tolerates that one EINVAL instead of
+        // throwing the connection away.
+        match this.socket.accept_raw() {
             Ok((socket, sock_addr)) => {
-                socket.set_nonblocking(true)?;
+                let socket = finish_accepted_unix_socket(socket)?;
                 let peer = sock_addr.as_pathname().map(PathBuf::from);
                 Poll::Ready(Ok((UnixStream::from_socket(socket), peer)))
             }
@@ -773,6 +783,37 @@ impl UnixListener {
         }
         Ok(())
     }
+}
+
+/// applies the same flags `socket2::Socket::accept()` would to a
+/// freshly-`accept_raw()`-ed AF_UNIX connection, except it tolerates
+/// `SO_NOSIGPIPE` failing with `EINVAL` instead of discarding an
+/// already-valid, already-connected socket over it. Proven at the syscall
+/// level (`scratchpad/rawtest2`, this investigation): `setsockopt(fd,
+/// SOL_SOCKET, SO_NOSIGPIPE, 1)` returns EINVAL on macOS specifically when
+/// the connecting peer already disconnected before this process called
+/// `accept(2)` — a normal, common race (fast client write-then-close) —
+/// and succeeds whenever the peer is still connected at accept time.
+fn finish_accepted_unix_socket(socket: Socket) -> io::Result<Socket> {
+    socket.set_nonblocking(true)?;
+    // `accept_raw` skips the FD_CLOEXEC hygiene `Socket::accept` would have
+    // applied (on Linux via `accept4(SOCK_CLOEXEC)`, on the rest via this
+    // `fcntl` — never observed to fail regardless of peer state, unlike
+    // `SO_NOSIGPIPE` below, so it stays a hard error).
+    socket.set_cloexec(true)?;
+    #[cfg(any(
+        target_os = "ios",
+        target_os = "visionos",
+        target_os = "macos",
+        target_os = "tvos",
+        target_os = "watchos",
+    ))]
+    if let Err(err) = socket.set_nosigpipe(true)
+        && err.raw_os_error() != Some(libc::EINVAL)
+    {
+        return Err(err);
+    }
+    Ok(socket)
 }
 
 impl Drop for UnixListener {
@@ -1149,8 +1190,15 @@ impl AsyncWrite for UnixStream {
     }
 
     fn poll_close(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // write-only: same fix, same reason as `TcpStream::poll_close`
+        // above — a caller that `split()` the stream still needs its read
+        // half live after signaling EOF to the peer; full teardown happens
+        // on `Drop`. `Shutdown::Both` here silently killed a still-live
+        // read half too, since AF_UNIX `split()` shares one fd (this
+        // crate's `finish_accepted_unix_socket`/EINVAL investigation
+        // surfaced it while building a real split+copy+close echo test).
         let this = self.get_mut();
-        let _ = this.socket.shutdown(std::net::Shutdown::Both);
+        let _ = this.socket.shutdown(std::net::Shutdown::Write);
         Poll::Ready(Ok(()))
     }
 }
