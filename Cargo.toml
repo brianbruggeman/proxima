@@ -1670,7 +1670,12 @@ required-features = ["http2", "http-prime-deps"]
 [[example]]
 name = "any_listener"
 # names `PrimeTcpUpstream` directly — see `bench_server_h3`'s doc above.
-required-features = ["http1-native", "http-prime-deps"]
+# also names `H2ClientUpstream` directly (the h2-pinned bind's test client),
+# same as `any_listener_production`/`any_listener_client_resilience` below —
+# `http2` was missing here even though the source has always needed it; a
+# default-features build masked the gap (http2 is in `default`), a narrow
+# `--no-default-features` slice does not.
+required-features = ["http1-native", "http2", "http-prime-deps"]
 
 # The `.any()` listener grown into a production shape: telemetry,
 # accept/deny/blacklist, request-level admission rendering a real
