@@ -1041,7 +1041,7 @@ mod tests {
         let _ = source_conn.poll_request_header_source();
         let _ = source_conn.poll_request_header_source();
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let before_feed = region.change();
         source_conn
             .feed_request(StreamId(4), &frame_bytes, false)

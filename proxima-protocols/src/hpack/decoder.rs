@@ -1021,29 +1021,20 @@ mod tests {
         // construction, not of `decode_into`'s algorithm.
         let _ = wire.slice(0..1);
 
-        // the process-global stats_alloc counter also ticks for stray
-        // allocations on other runtime threads parked in-window on a loaded
-        // CI runner (observed left:4); that noise is additive-only, so the MIN
-        // delta across repeats is decode_into's true per-call cost. the wire is
-        // non-indexing, so every iteration is idempotent (no table growth).
-        let region = crate::alloc_test::exclusive_region();
-        let mut min_allocations = usize::MAX;
+        let region = crate::alloc_test::thread_local_region();
         let mut field_count = 0usize;
-        for _ in 0..8 {
-            field_count = 0;
-            let mut sink = |_: &[u8], _: &[u8]| -> Result<(), DecodeError> {
-                field_count += 1;
-                Ok(())
-            };
-            let before = region.change();
-            decode_into(&wire, &mut dynamic, 4096, &mut scratch, &mut sink).expect("decode_into");
-            let after = region.change();
-            min_allocations = min_allocations.min(after.allocations - before.allocations);
-        }
+        let mut sink = |_: &[u8], _: &[u8]| -> Result<(), DecodeError> {
+            field_count += 1;
+            Ok(())
+        };
+        let before = region.change();
+        decode_into(&wire, &mut dynamic, 4096, &mut scratch, &mut sink).expect("decode_into");
+        let after = region.change();
 
         assert_eq!(field_count, 3);
         assert_eq!(
-            min_allocations, 0,
+            after.allocations - before.allocations,
+            0,
             "decode_into must perform 0 heap allocations with no huffman + no table growth"
         );
     }
@@ -1064,7 +1055,7 @@ mod tests {
         let mut scratch = [0u8; 256];
         let _ = wire.slice(0..1); // one-time Bytes promotion, excluded (see above)
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let before = region.change();
         let mut field_count = 0usize;
         let mut sink = |_: &[u8], _: &[u8]| -> Result<(), DecodeError> {
@@ -1102,7 +1093,7 @@ mod tests {
         let wire = browser_request_wire();
         let _ = wire.slice(0..1); // same one-time promotion priming as above
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
 
         let before_decode = region.change();
         let mut decode_table = DynamicTable::new(4096);

@@ -787,7 +787,7 @@ mod tests {
         wire.extend_from_slice(&huffman_no_cache);
 
         let mut scratch = [0u8; 32];
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let decoded = collect_into(&wire, u64::MAX, &mut scratch).expect("decode huffman literal");
         assert_eq!(
             decoded,
@@ -872,7 +872,7 @@ mod tests {
         let field_count = 5usize;
         let mut scratch = [0u8; 256];
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let before = region.change();
         let mut probe_count = 0usize;
         let mut probe = |_name: &[u8], _value: &[u8]| -> Result<(), DecodeError> {
