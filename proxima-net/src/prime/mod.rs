@@ -50,6 +50,12 @@ use proxima_primitives::stream::{
 mod connect_tunnel;
 pub use connect_tunnel::ConnectTunneledUpstream;
 
+mod unix;
+pub use unix::{PrimeUnixConnection, PrimeUnixListener, PrimeUnixUpstream};
+
+mod packet;
+pub use packet::PrimeUdpListener;
+
 type ConnectFuture =
     Pin<Box<dyn std::future::Future<Output = io::Result<PrimeTcpConnection>> + Send>>;
 

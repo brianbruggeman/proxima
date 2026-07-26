@@ -20,6 +20,7 @@ criterion = { workspace = true }
 embassy-sync = "0.8"
 heapless = "0.8"
 proxima-core = { workspace = true, features = ["time-driver-prime-wheel"] }
+tempfile.workspace = true
 
 [dependencies]
 proxima-core = { workspace = true }

@@ -3319,6 +3319,7 @@ dependencies = [
  "proxima-runtime",
  "rayon",
  "socket2 0.5.10",
+ "tempfile",
  "tokio",
  "tokio-uring",
  "toml 0.8.23",
