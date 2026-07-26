@@ -274,10 +274,7 @@ pub trait ListenerProtocolExt: Sized {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(all(
-        feature = "kafka-listener",
-        any(feature = "http1", feature = "http1-native")
-    ))]
+    #[cfg(feature = "kafka-listener")]
     #[must_use]
     fn kafka(self, handler: proxima_kafka::KafkaPipeHandle) -> Self;
 
@@ -324,10 +321,7 @@ pub trait ListenerProtocolExt: Sized {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(all(
-        feature = "mqtt-listener",
-        any(feature = "http1", feature = "http1-native")
-    ))]
+    #[cfg(feature = "mqtt-listener")]
     #[must_use]
     fn mqtt(self, handler: proxima_mqtt::MqttPipeHandle) -> Self;
 
@@ -374,10 +368,7 @@ pub trait ListenerProtocolExt: Sized {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(all(
-        feature = "amqp-listener",
-        any(feature = "http1", feature = "http1-native")
-    ))]
+    #[cfg(feature = "amqp-listener")]
     #[must_use]
     fn amqp(self, handler: proxima_amqp::AmqpPipeHandle) -> Self;
 
@@ -424,10 +415,7 @@ pub trait ListenerProtocolExt: Sized {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(all(
-        feature = "memcached-listener",
-        any(feature = "http1", feature = "http1-native")
-    ))]
+    #[cfg(feature = "memcached-listener")]
     #[must_use]
     fn memcached(self, handler: proxima_memcached::MemcachedPipeHandle) -> Self;
 
@@ -477,10 +465,7 @@ pub trait ListenerProtocolExt: Sized {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(all(
-        feature = "redis-listener",
-        any(feature = "http1", feature = "http1-native")
-    ))]
+    #[cfg(feature = "redis-listener")]
     #[must_use]
     fn redis(self, handler: proxima_redis::RedisPipeHandle) -> Self;
 

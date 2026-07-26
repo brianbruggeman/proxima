@@ -468,6 +468,21 @@ sync-wrappers = [
     "dep:futures-timer",
 ]
 
+# The open universal listener (`Listener::builder().any()`/`.accepts()`/
+# `.accept()`/`.protocol()`/`.any_handler()`/`.deny()`/`.blacklist()`) is
+# classify/registry/accept-loop machinery with NO http-specific content —
+# h1/h2 are just two of its registered candidates. It needs only
+# `proxima-http/http-listener`, never `http1`/`http1-native`: every non-http
+# `.any()` consumer below (kafka/mqtt/amqp/memcached/redis/dns-listener,
+# pgwire) already proves this by pulling `proxima-http/http-listener`
+# directly without ever turning on `http1`. This is the umbrella feature
+# `ListenerBuilder`'s OWN `.any()`-family methods gate on in `src/listener/`,
+# so a caller who only wants (say) `.redis(handler)` is never ALSO forced to
+# enable `http1`/`http1-native` just to reach the builder methods that
+# resolve it — see `src/listener/handle.rs`'s `any_mode` field doc for the
+# bug this closes.
+any-listener = ["proxima-http/http-listener"]
+
 # HTTP wire version gates. `http1-native` is the tokio-free base: the
 # ALPN h1(+h2) combiner listener (`HttpListenProtocol`) served through an
 # injected `AcceptorFactory` (prime by default — see `PrimeServeExt::
@@ -480,7 +495,7 @@ sync-wrappers = [
 # — server.rs / client.rs / listener.rs's factory path are all
 # futures-io). `http3` is the native sans-IO QUIC+H3 stack (no `tokio`,
 # no quinn). No rollup — pick the wire versions you actually use.
-http1-native = ["proxima-http/http-listener"]
+http1-native = ["any-listener"]
 http1 = ["tokio", "http1-native", "proxima-http/http1"]
 http2 = ["proxima-http/http2-native"]
 http3 = ["quic-native", "proxima-http/http3-native"]
@@ -544,7 +559,7 @@ pgwire-client = ["http-prime", "dep:proxima-pgwire", "proxima-pgwire/client"]
 # WITHOUT turning on the umbrella's own `http1`/`http1-native` user-facing
 # axis (`.http()` stays unregistered unless a caller separately enables
 # one of those) — a `--features pgwire` build gets pgwire, not HTTP.
-pgwire = ["dep:proxima-pgwire", "proxima-pgwire/listen", "proxima-http/http-listener"]
+pgwire = ["dep:proxima-pgwire", "proxima-pgwire/listen", "any-listener"]
 
 # `redis-client` registers the `redis` protocol factory so `proxima::Client`
 # speaks Redis/Valkey — `{"type":"redis", "dsn": "redis://..."}` or the
@@ -679,7 +694,7 @@ redis-listener = [
     "proxima-redis/listen",
     "tokio-runtime",
     "tcp",
-    "proxima-http/http-listener",
+    "any-listener",
 ]
 # DNS substrate (P1) — sans-IO RFC 1035 / RFC 3596 parser. minimum
 # viable resolver target. compared against `hickory-proto::Message`
@@ -697,7 +712,7 @@ dns-listener = [
     "proxima-dns/listen",
     "tokio-runtime",
     "tcp",
-    "proxima-http/http-listener",
+    "any-listener",
 ]
 # proxima-side outbound HTTP/3 upstream (P7 in docs/protocol-gap/discipline.md).
 # pulls in the same h3 + h3-quinn the listener uses, plus webpki-roots for
@@ -759,7 +774,7 @@ memcached-listener = [
     "proxima-memcached/listen",
     "tokio-runtime",
     "tcp",
-    "proxima-http/http-listener",
+    "any-listener",
 ]
 # `mqtt-client` registers the `mqtt` protocol factory so `proxima::Client`
 # speaks MQTT. Mirrors `redis-client`'s shape.
@@ -777,7 +792,7 @@ mqtt-listener = [
     "proxima-mqtt/listen",
     "tokio-runtime",
     "tcp",
-    "proxima-http/http-listener",
+    "any-listener",
 ]
 # `amqp-client` registers the `amqp` protocol factory so `proxima::Client`
 # speaks AMQP 0-9-1. Mirrors `redis-client`'s shape.
@@ -794,7 +809,7 @@ amqp-listener = [
     "proxima-amqp/listen",
     "tokio-runtime",
     "tcp",
-    "proxima-http/http-listener",
+    "any-listener",
 ]
 # `kafka-client` registers the `kafka` protocol factory so `proxima::Client`
 # speaks Kafka. Mirrors `redis-client`'s shape.
@@ -811,7 +826,7 @@ kafka-listener = [
     "proxima-kafka/listen",
     "tokio-runtime",
     "tcp",
-    "proxima-http/http-listener",
+    "any-listener",
 ]
 # WebSocket sans-IO frame codec (P11 in docs/protocol-gap/discipline.md).
 # RFC 6455 frame parsing/encoding decoupled from async-tungstenite so

@@ -37,11 +37,13 @@
 
 use std::future::Future;
 use std::future::poll_fn;
+use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use futures::FutureExt;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
@@ -52,6 +54,7 @@ use tracing::{debug, warn};
 
 use proxima_core::ProximaError;
 use proxima_core::io::{FromFutures, IntoFutures, Prepend};
+use proxima_core::markers::DropSafe;
 use proxima_core::time::sleep;
 use proxima_listen::admission::{
     Admission, BlacklistTable, ConnAdmission, ConnectionHandle, DrainOutcome, ListenerCore,
@@ -63,7 +66,9 @@ use proxima_listen::any::{
 };
 use proxima_listen::{ListenProtocol, ServeContext};
 use proxima_primitives::pipe::handler::PipeHandle;
-use proxima_primitives::stream::{PeerInfo, StreamConnection};
+use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
+use proxima_primitives::stream::{DatagramFactory, DatagramSocket, PeerInfo, StreamConnection, TcpAcceptor};
+use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
 
 use crate::http1::serve::HttpListenerSpec;
 use crate::http1::serve::serve_connection as serve_h1_connection_shared;
@@ -560,6 +565,7 @@ impl ListenProtocol for AnyListenProtocol {
                         .into(),
                 ));
             };
+            let datagram_factory = context.datagram_factory.clone();
             let use_reuseport = spec_owned
                 .get(proxima_listen::handle::REUSEPORT_SPEC_KEY)
                 .and_then(Value::as_bool)
@@ -592,6 +598,7 @@ impl ListenProtocol for AnyListenProtocol {
                 };
             serve_via_factory(
                 factory,
+                datagram_factory,
                 bind,
                 label,
                 candidates,
@@ -650,6 +657,238 @@ fn peer_is_banned(blacklist: &Option<BlacklistTable>, peer_ip: std::net::IpAddr)
         .is_some_and(|table| table.is_banned(peer_ip, proxima_core::time::now()))
 }
 
+/// Largest single UDP payload this listener will ever hand a datagram
+/// candidate: the theoretical max UDP payload (65535 bytes) rounded to a
+/// clean power of two. Sized independently of `global_cap` (the STREAM
+/// classify prefix cap, typically a few KB) — a datagram candidate's own
+/// `drive` may legitimately want the WHOLE message, not just the prefix
+/// [`AnyProtocol::probe`] needed to classify it, and `recv_from` silently
+/// truncates a datagram larger than the buffer it is given.
+const DATAGRAM_RECV_SCRATCH_BYTES: usize = 65536;
+
+/// `parking_lot::Mutex` never poisons — plain passthrough, named so every
+/// call site here reads `lock(mutex)` uniformly. Mirrors
+/// `proxima_redis::wait_sources`'s identical helper.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock()
+}
+
+/// One event source for `.any()`'s accept race: either "a new TCP
+/// connection was accepted" or "a new UDP datagram arrived". Both variants
+/// resolve to the SAME `io::Result<Box<dyn StreamConnection>>` shape
+/// [`TcpAcceptor::poll_accept`] already produces — a TCP accept hands back
+/// the real accepted socket; a UDP datagram is wrapped in
+/// [`DatagramAsStream`], a one-shot adapter over the single already
+/// -received message. Nothing downstream of this enum (admission,
+/// blacklist, [`classify_and_drive`]) can tell which transport produced the
+/// value: THIS is the fan-in that makes `.any()` transport-agnostic —
+/// mirrors `RedisConnSource`'s "one enum, many wait shapes" pattern one
+/// level up, at the LISTENER's own accept step instead of a single
+/// connection's read/push/shutdown race (see
+/// `proxima_listen::serve_multiplexed`'s module doc for that sibling).
+///
+/// [`FanIn::call`] takes `&self` (`fan_in.rs`'s own contract), so the
+/// mutable acceptor/socket/scratch each variant needs live behind
+/// `proxima_primitives::sync::blocking::Mutex` — never contended (this
+/// accept loop is the only caller that ever locks the `Tcp`/`scratch`
+/// mutexes) and never held across an `.await` — exactly the tradeoff
+/// `proxima_redis::wait_sources`'s own doc explains for the identical
+/// reason.
+enum AcceptSource {
+    Tcp(Mutex<Box<dyn TcpAcceptor>>),
+    Datagram {
+        socket: Arc<Mutex<Box<dyn DatagramSocket>>>,
+        scratch: Mutex<Vec<u8>>,
+    },
+}
+
+// Dropping an in-flight accept/recv poll leaves no torn state: the kernel
+// still holds the pending connection (or datagram) for the next poll — the
+// source, not the transient call future, is what remembers readiness (see
+// `fan_in.rs`'s own module doc).
+impl DropSafe for AcceptSource {}
+
+/// The future behind [`AcceptSource::call`] — one hand-written `poll`
+/// spanning both variants, `Unpin` unconditionally (every field is a plain
+/// reference into the source's own `Mutex`es). Mirrors `RedisConnCall`.
+enum AcceptSourceCall<'source> {
+    Tcp(&'source Mutex<Box<dyn TcpAcceptor>>),
+    Datagram {
+        socket: &'source Arc<Mutex<Box<dyn DatagramSocket>>>,
+        scratch: &'source Mutex<Vec<u8>>,
+    },
+}
+
+impl Future for AcceptSourceCall<'_> {
+    type Output = Result<io::Result<Box<dyn StreamConnection>>, Exhausted>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            AcceptSourceCall::Tcp(acceptor) => {
+                let mut acceptor = lock(acceptor);
+                acceptor.poll_accept(cx).map(Ok)
+            }
+            AcceptSourceCall::Datagram { socket, scratch } => {
+                let mut socket_guard = lock(socket);
+                let mut scratch_guard = lock(scratch);
+                match socket_guard.poll_recv_from(cx, &mut scratch_guard) {
+                    Poll::Ready(Ok((len, peer))) => {
+                        let inbound = Bytes::copy_from_slice(&scratch_guard[..len]);
+                        let stream: Box<dyn StreamConnection> =
+                            Box::new(DatagramAsStream::new(Arc::clone(socket), peer, inbound));
+                        Poll::Ready(Ok(Ok(stream)))
+                    }
+                    Poll::Ready(Err(error)) => Poll::Ready(Ok(Err(error))),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+impl UnpinPipe for AcceptSource {
+    type In = ();
+    type Out = io::Result<Box<dyn StreamConnection>>;
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Unpin {
+        match self {
+            AcceptSource::Tcp(acceptor) => AcceptSourceCall::Tcp(acceptor),
+            AcceptSource::Datagram { socket, scratch } => {
+                AcceptSourceCall::Datagram { socket, scratch }
+            }
+        }
+    }
+}
+
+/// One already-received UDP datagram, presented as a
+/// [`StreamConnection`] — the "downstream of classification" shape every
+/// `AnyProtocol` already speaks, so a datagram candidate uses the exact
+/// same `probe`/`drive` contract a TCP candidate does. `poll_read` yields
+/// the datagram's bytes exactly once, then EOF (`Ok(0)`) forever after —
+/// a UDP message has no more bytes coming, mirroring how a stream reports
+/// end-of-input. Every `poll_write` before close is buffered (not sent
+/// immediately): a request/reply protocol may write a response in more
+/// than one call (headers then body, say), and UDP has no notion of a
+/// partial send — those writes coalesce into exactly ONE outbound datagram,
+/// shipped back to the sender on `poll_close`. An empty write buffer at
+/// close sends nothing (fire-and-forget, matching
+/// [`super::datagram_listener::DatagramListenProtocol`]'s own convention).
+struct DatagramAsStream {
+    socket: Arc<Mutex<Box<dyn DatagramSocket>>>,
+    peer: SocketAddr,
+    inbound: Bytes,
+    outbound: Vec<u8>,
+    closed: bool,
+}
+
+impl DatagramAsStream {
+    fn new(socket: Arc<Mutex<Box<dyn DatagramSocket>>>, peer: SocketAddr, inbound: Bytes) -> Self {
+        Self {
+            socket,
+            peer,
+            inbound,
+            outbound: Vec::new(),
+            closed: false,
+        }
+    }
+}
+
+impl AsyncRead for DatagramAsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.inbound.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let copy_len = buf.len().min(this.inbound.len());
+        buf[..copy_len].copy_from_slice(&this.inbound[..copy_len]);
+        let _ = this.inbound.split_to(copy_len);
+        Poll::Ready(Ok(copy_len))
+    }
+}
+
+impl AsyncWrite for DatagramAsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().outbound.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    /// Ships whatever was buffered as ONE outbound datagram, addressed to
+    /// the sender — the point a stream-shaped protocol signals "no more to
+    /// write". Idempotent (`closed` guards against shipping twice if a
+    /// candidate calls `close` more than once).
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.closed || this.outbound.is_empty() {
+            this.closed = true;
+            return Poll::Ready(Ok(()));
+        }
+        let mut socket = lock(&this.socket);
+        match socket.poll_send_to(cx, &this.outbound, this.peer) {
+            Poll::Ready(Ok(_)) => {
+                this.closed = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl StreamConnection for DatagramAsStream {
+    fn peer(&self) -> Option<PeerInfo> {
+        // No `PeerInfo::Udp` variant exists (nor should one: `peer_ip` and
+        // every blacklist/admission check only ever want "the IP:port this
+        // came from", not which L4 protocol carried it) — reusing `Tcp`
+        // here mirrors `UdsStream`'s own reuse of `PeerInfo::Unix` for a
+        // non-TCP peer shape.
+        Some(PeerInfo::Tcp(self.peer))
+    }
+}
+
+/// Drives `.any()`'s accept step: either the plain single-TCP-source path
+/// (`Plain` — byte-identical to every accept loop before this fan-in
+/// existed, zero `Mutex`/`FanIn` overhead) or, once at least one registered
+/// candidate's [`AnyProtocol::wants_datagram`] is `true`, `Fanned` — a
+/// [`FanIn`] racing TCP accept against UDP recv on the SAME port number.
+/// Nothing past [`Self::accept`]'s return value can tell which arm fired.
+enum AcceptDriver {
+    Plain(Box<dyn TcpAcceptor>),
+    Fanned(FanIn<AcceptSource, Select, 2>),
+}
+
+impl AcceptDriver {
+    async fn accept(&mut self) -> io::Result<Box<dyn StreamConnection>> {
+        match self {
+            AcceptDriver::Plain(acceptor) => poll_fn(|cx| acceptor.poll_accept(cx)).await,
+            AcceptDriver::Fanned(fan) => match Pipe::call(fan, ()).await {
+                Ok(result) => result,
+                // Neither a bound TCP listener nor a bound UDP socket ever
+                // legitimately "drains" (they yield a connection/datagram,
+                // an error, or Pending, forever) — this is a defect in the
+                // fan-in's own bookkeeping if it is ever observed, not a
+                // normal shutdown path, so it is reported as an I/O error
+                // rather than silently ending the accept loop.
+                Err(Exhausted) => Err(io::Error::other(
+                    "any listener: TCP+UDP accept race unexpectedly exhausted",
+                )),
+            },
+        }
+    }
+}
+
 /// `AcceptorFactory`-driven accept loop: bind (honoring SO_REUSEPORT +
 /// TCP_FASTOPEN from `spec`, matching every other TCP listener in this
 /// crate), admit each accepted connection through a [`ListenerCore`],
@@ -666,6 +905,7 @@ fn peer_is_banned(blacklist: &Option<BlacklistTable>, peer_ip: std::net::IpAddr)
 #[allow(clippy::too_many_arguments)]
 async fn serve_via_factory(
     factory: Arc<dyn proxima_primitives::stream::AcceptorFactory>,
+    datagram_factory: Option<Arc<dyn DatagramFactory>>,
     bind: SocketAddr,
     label: String,
     candidates: Arc<[Arc<dyn AnyProtocol>]>,
@@ -691,7 +931,44 @@ async fn serve_via_factory(
         reuseport: use_reuseport,
         tcp_fastopen: tcp_fastopen_queue,
     };
-    let mut acceptor = factory.bind(bind, options).map_err(ProximaError::Io)?;
+    let acceptor = factory.bind(bind, options).map_err(ProximaError::Io)?;
+    // A candidate that wants a UDP transport needs `.any()` to ALSO bind a
+    // datagram socket on the SAME port number — an honest OS constraint
+    // this hides but cannot eliminate: TCP:N and UDP:N are two distinct
+    // sockets under the hood. See `AnyProtocol::wants_datagram`'s doc.
+    let needs_datagram = candidates.iter().any(|candidate| candidate.wants_datagram());
+    #[cfg(feature = "tls")]
+    if needs_datagram && tls_acceptor.is_some() {
+        return Err(ProximaError::Config(
+            "any listener: a registered candidate wants a UDP datagram transport, but this \
+             listener also terminates TLS — DTLS is not this seam (TLS assumes a multi-round \
+             -trip byte stream, a UDP-sourced connection is one already-complete datagram); \
+             drop .tls(..) or the datagram-wanting candidate"
+                .into(),
+        ));
+    }
+    let mut accept_driver = if needs_datagram {
+        let datagram_factory = datagram_factory.ok_or_else(|| {
+            ProximaError::Config(
+                "any listener: a registered candidate wants a UDP datagram transport but no \
+                 DatagramFactory was injected into this serve context"
+                    .into(),
+            )
+        })?;
+        let datagram_socket = datagram_factory.bind(bind).map_err(ProximaError::Io)?;
+        AcceptDriver::Fanned(FanIn::new(
+            [
+                AcceptSource::Tcp(Mutex::new(acceptor)),
+                AcceptSource::Datagram {
+                    socket: Arc::new(Mutex::new(datagram_socket)),
+                    scratch: Mutex::new(vec![0_u8; DATAGRAM_RECV_SCRATCH_BYTES]),
+                },
+            ],
+            Select::Fifo,
+        ))
+    } else {
+        AcceptDriver::Plain(acceptor)
+    };
     if let Some(sender) = ready_signal {
         let _ = sender.send(());
     }
@@ -699,6 +976,7 @@ async fn serve_via_factory(
         ?bind,
         use_reuseport,
         ?tcp_fastopen_queue,
+        needs_datagram,
         "any listener bound (open classifier, factory)"
     );
     #[cfg(feature = "tls")]
@@ -721,7 +999,7 @@ async fn serve_via_factory(
             released = release_rx.next().fuse() => if let Some(handle) = released {
                 core.release(handle);
             },
-            accepted = poll_fn(|cx| acceptor.poll_accept(cx)).fuse() => match accepted {
+            accepted = accept_driver.accept().fuse() => match accepted {
                 Ok(conn) => {
                     let peer_ip = proxima_listen::peer_ip(conn.peer().as_ref());
                     // Blacklist gate BEFORE `core.admit` — never after: a
@@ -784,7 +1062,7 @@ async fn serve_via_factory(
                 released = release_rx.next().fuse() => if let Some(handle) = released {
                     core.release(handle);
                 },
-                accepted = poll_fn(|cx| acceptor.poll_accept(cx)).fuse() => match accepted {
+                accepted = accept_driver.accept().fuse() => match accepted {
                     Ok(conn) => {
                         let peer_ip = proxima_listen::peer_ip(conn.peer().as_ref());
                         // Blacklist gate BEFORE `core.admit` — never after
@@ -1195,6 +1473,26 @@ async fn classify_and_drive_plaintext(
                 }
                 break None;
             }
+            // Two or more candidates matched at the SAME winning priority —
+            // the classifier never silently picks one (see
+            // `ClassifyOutcome::AmbiguousMatch`'s own doc), and neither does
+            // this listener: the connection is dropped rather than routed
+            // to an arbitrary tied candidate. This is reachable from EITHER
+            // transport `.any()` binds — a stream candidate set with a
+            // genuine priority collision, or two datagram candidates
+            // matching the same message.
+            ClassifyOutcome::AmbiguousMatch { priority, matches } => {
+                let names: Vec<&str> = matches.iter().map(|(protocol, _)| protocol.name()).collect();
+                warn!(
+                    priority,
+                    ?names,
+                    "any listener: ambiguous match at the same priority; dropping connection"
+                );
+                break None;
+            }
+            // `ClassifyOutcome` is `#[non_exhaustive]` — a future variant
+            // this crate hasn't been taught about yet drops the connection
+            // rather than silently misrouting it.
             _ => {
                 warn!("any listener: unrecognized classify outcome variant");
                 break None;

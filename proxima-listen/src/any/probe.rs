@@ -262,6 +262,30 @@ pub trait AnyProtocol: Send + Sync + 'static {
     /// reading forever from a peer that never sends enough to resolve.
     fn max_prefix_bytes(&self) -> usize;
 
+    /// Whether `Listener::any()` must also bind a UDP socket, on the SAME
+    /// port number as its TCP accept, for this candidate to be reachable.
+    /// Defaults to `false`: an ordinary stream-only candidate (h1, h2,
+    /// pgwire, redis, kafka, …) never sees this method change, and
+    /// `.any()`'s bind behaviour for an all-`false` candidate set is
+    /// BYTE-IDENTICAL to before this method existed — no UDP socket is ever
+    /// opened unless at least one registered candidate opts in.
+    ///
+    /// A candidate whose own wire is naturally connectionless (DNS, a
+    /// custom datagram RPC) overrides this to `true`. `probe`/`drive` do NOT
+    /// change shape: classification still reads `&[u8]` (a datagram simply
+    /// arrives whole rather than incrementally — see [`ProbeVerdict`]'s
+    /// doc), and `drive` still receives a `Box<dyn StreamConnection>` — for
+    /// a UDP-sourced connection this is a one-shot adapter over the single
+    /// already-received datagram (one `read` returns it, the next is EOF;
+    /// each `write` before close is coalesced into ONE outbound datagram
+    /// back to the sender). Transport determines how bytes ARRIVE; it does
+    /// not change what classifying or driving means — see
+    /// `proxima_http::any_listener`'s accept-race doc for where the two
+    /// transports fan into this one shape.
+    fn wants_datagram(&self) -> bool {
+        false
+    }
+
     /// Pure, sans-IO classification of the bytes accumulated so far, from
     /// byte zero of the connection. No I/O, no allocation: mirrors
     /// [`crate::preface::classify_preface`]'s contract exactly, generalized
