@@ -213,21 +213,16 @@ fn spawn_handler<C: StreamConnection>(
     });
     // dispatch through the installed Runtime — see
     // default_listener::spawn_handler for why a bare `spawn_local` panics
-    // on a Prime worker (no tokio LocalSet there). Falls back to
-    // `spawn_local` only for the plain-tokio default path (no App runtime
-    // installed), where the surrounding serve loop already runs inside one.
+    // on a Prime worker (no tokio LocalSet there). With no runtime
+    // injected, every build does the SAME explicit thing: drop the
+    // connection and say why — spawning is a runtime capability and
+    // belongs on the seam, never behind a feature cfg here.
     match runtime {
         Some(runtime) => runtime.spawn_on_current_core(future),
-        #[cfg(feature = "tokio")]
-        None => {
-            tokio::task::spawn_local(future);
-        }
-        #[cfg(not(feature = "tokio"))]
         None => {
             warn!(
-                "stream connection dropped: no runtime injected and the `tokio` \
-                 feature is off, so there is no executor to spawn the ?Send \
-                 connection future onto"
+                "stream connection dropped: no runtime injected onto ServeContext, so \
+                 there is no executor to spawn the ?Send connection future onto"
             );
             drop(future);
         }

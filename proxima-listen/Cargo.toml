@@ -101,12 +101,14 @@ std = [
 # Forwarded from the umbrella so the ListenerSpec config can carry TLS
 # settings even when the actual TLS handshake lives in proxima-tls.
 tls = ["std", "dep:proxima-tls"]
-# tokio-backed legacy accept loops (`bind_reuseport_listener*`, the
-# `dispatch_handler` no-runtime fallback, `ListenerHandle`'s vestigial
-# `JoinHandle` field). Every `ListenProtocol` prefers its own
-# `AcceptorFactory` + `poll_accept` path when a runtime is injected
-# (the default, `serve-prime`, path) — this feature only restores the
-# tokio-native fallback used when no runtime is present at all.
+# tokio-backed helpers: `bind_reuseport_listener*`, `ListenerHandle`'s
+# vestigial `JoinHandle` field, and `framed_listener`'s tokio-only
+# bind/accept loop. Every `ListenProtocol` binds through its own
+# `AcceptorFactory` + `poll_accept` seam and dispatches per-connection
+# work through the injected `Runtime` — additive with (never privileged
+# over) any other runtime feature linked in. `dispatch_handler`'s
+# no-runtime case is a single feature-independent degradation, not a
+# tokio fallback restored by this feature.
 tokio = ["std", "dep:tokio", "proxima-net?/tokio"]
 # Generic byte-stream `ListenProtocol` adapters over a `StreamListener`.
 stream = [

@@ -570,9 +570,11 @@ tokio-runtime = []
 # of this crate; optional now), `tokio::process` child-process upstreams +
 # scenario orchestration, the MCP stdio/socket listener, OS signal handling
 # in `Server`'s `wait_for_signal`, `block_on_tokio`, the tokio-native
-# legacy accept-loop fallbacks in proxima-listen/proxima-http/proxima-tls
-# (used when no `AcceptorFactory` is injected or no sans-IO driver exists —
-# h1's driver, notably), and the sister-tokio-compat prime worker handle.
+# legacy accept-loop fallbacks in proxima-http/proxima-tls (used when no
+# sans-IO driver exists — h1's driver, notably; proxima-listen's own
+# no-`AcceptorFactory`/no-runtime cases are single feature-independent
+# errors, not a tokio fallback restored by this feature), and the
+# sister-tokio-compat prime worker handle.
 # Everything downstream that genuinely needs a tokio runtime (http1, tls,
 # tcp/udp/unix, quic, websocket, http-hyper, io-uring) requires this
 # feature explicitly rather than the reverse, so enabling e.g. `http2`

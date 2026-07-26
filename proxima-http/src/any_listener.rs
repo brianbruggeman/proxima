@@ -1311,6 +1311,65 @@ mod tests {
     use proxima_primitives::pipe::SendPipe;
     use proxima_primitives::pipe::handler::into_handle;
     use proxima_primitives::pipe::request::{Request, Response};
+    #[cfg(all(feature = "tls", feature = "http1"))]
+    use proxima_runtime::Runtime;
+
+    // test-only `Runtime` whose `spawn_on_current_core` forwards to
+    // `tokio::task::spawn_local` — stands in for an installed runtime so a
+    // test exercises the seam (`Some(runtime)`) rather than the no-runtime
+    // degradation. Must run inside a `LocalSet`. Only the TLS test below
+    // uses it, hence the matching cfg.
+    #[cfg(all(feature = "tls", feature = "http1"))]
+    struct LocalSetRuntime;
+
+    #[cfg(all(feature = "tls", feature = "http1"))]
+    impl Runtime for LocalSetRuntime {
+        fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            tokio::task::spawn_local(future);
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never routes to a peer core")
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _factory: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never spawns a cross-core factory")
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<
+                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+            >,
+        ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
+            unreachable!("test never spawns background-blocking work")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("test never times out")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> proxima_runtime::CoreId {
+            proxima_runtime::CoreId(0)
+        }
+    }
 
     struct ConstantOk;
 
@@ -1589,9 +1648,11 @@ mod tests {
                     proxima_tls::config_to_spec_value(&tls_config),
                 );
 
+                let runtime: Arc<dyn Runtime> = Arc::new(LocalSetRuntime);
                 let context = proxima_listen::ServeContext::new(
                     proxima_primitives::pipe::telemetry_surface::NoopTelemetry::handle(),
                 )
+                .with_runtime(runtime)
                 .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
