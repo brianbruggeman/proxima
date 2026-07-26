@@ -4,6 +4,8 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
+#[cfg(all(feature = "unix", unix))]
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -34,6 +36,16 @@ use crate::upstreams::tokio_stream::TokioUnixUpstream;
 // see the umbrella Cargo.toml doc on the `tcp` feature).
 #[cfg(all(feature = "tcp", not(feature = "tokio")))]
 use proxima_net::prime::PrimeTcpUpstream;
+// prime-backed Unix upstream: the compiled-default fallback when no
+// `RuntimeSelection` was installed ambiently (see `build_unix_stream_passthrough`).
+#[cfg(all(
+    feature = "unix",
+    unix,
+    not(feature = "tokio"),
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "linux", target_os = "macos")
+))]
+use proxima_net::prime::PrimeUnixUpstream;
 
 const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
 const DEFAULT_TRANSPORT: &str = "tcp";
@@ -157,7 +169,7 @@ fn default_chunk_bytes() -> usize {
     DEFAULT_CHUNK_BYTES
 }
 
-pub struct StreamPassthroughUpstream<U: StreamUpstream> {
+pub struct StreamPassthroughUpstream<U: StreamUpstream + ?Sized> {
     upstream: Arc<U>,
     label: String,
     chunk_bytes: usize,
@@ -171,6 +183,20 @@ impl<U: StreamUpstream> StreamPassthroughUpstream<U> {
             chunk_bytes: DEFAULT_CHUNK_BYTES,
         }
     }
+}
+
+impl<U: StreamUpstream + ?Sized> StreamPassthroughUpstream<U> {
+    /// Build from an already-erased `Arc<dyn StreamUpstream<..>>` — the seam
+    /// a `RuntimeSelection`-selected `UnixUpstreamFactory` dispatches
+    /// through (`build_unix_stream_passthrough`), since the factory hands
+    /// back one backend or the other behind the same trait-object type.
+    pub fn from_arc(upstream: Arc<U>, label: impl Into<String>) -> Self {
+        Self {
+            upstream,
+            label: label.into(),
+            chunk_bytes: DEFAULT_CHUNK_BYTES,
+        }
+    }
 
     pub fn with_chunk_bytes(mut self, chunk_bytes: usize) -> Self {
         self.chunk_bytes = chunk_bytes.max(1);
@@ -178,7 +204,7 @@ impl<U: StreamUpstream> StreamPassthroughUpstream<U> {
     }
 }
 
-impl<U: StreamUpstream + 'static> SendPipe for StreamPassthroughUpstream<U> {
+impl<U: StreamUpstream + ?Sized + 'static> SendPipe for StreamPassthroughUpstream<U> {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
     type Err = ProximaError;
@@ -324,17 +350,86 @@ fn build_tcp_stream_passthrough(
     ))
 }
 
-#[cfg(all(feature = "unix", unix, feature = "tokio"))]
+// Selects the unix upstream backend by VALUE: an ambiently-installed
+// `RuntimeSelection` (e.g. from `#[proxima::main(runtime = "tokio"|"prime")]`)
+// wins whenever one is present, so `unix`'s backend follows the caller's
+// choice rather than which of `tokio`/prime happened to be linked (C2 —
+// `unix` names no runtime in its own feature list any more, see the
+// umbrella Cargo.toml). Falls back to a compiled default only when nothing
+// was installed ambiently (e.g. `App::new()` called outside
+// `#[proxima::main]`, or a test).
+#[cfg(all(feature = "unix", unix))]
 fn build_unix_stream_passthrough(
     settings: &StreamPassthroughSettings,
 ) -> Result<PipeHandle, ProximaError> {
-    let upstream = TokioUnixUpstream::new(settings.addr.clone().into());
+    let path = PathBuf::from(settings.addr.clone());
+
+    if let Some(selection) = crate::runtime::installed_runtime()
+        && let Some(factory) = &selection.unix_upstream_factory
+    {
+        let upstream = factory.connect(path);
+        let pipe = StreamPassthroughUpstream::from_arc(upstream, settings.name.clone())
+            .with_chunk_bytes(settings.chunk_bytes);
+        return Ok(into_handle(pipe));
+    }
+
+    build_unix_stream_passthrough_compiled_default(settings, path)
+}
+
+#[cfg(all(feature = "unix", unix, feature = "tokio"))]
+fn build_unix_stream_passthrough_compiled_default(
+    settings: &StreamPassthroughSettings,
+    path: PathBuf,
+) -> Result<PipeHandle, ProximaError> {
+    let upstream = TokioUnixUpstream::new(path);
     let pipe = StreamPassthroughUpstream::new(upstream, settings.name.clone())
         .with_chunk_bytes(settings.chunk_bytes);
     Ok(into_handle(pipe))
 }
 
-#[cfg(not(all(feature = "unix", unix, feature = "tokio")))]
+#[cfg(all(
+    feature = "unix",
+    unix,
+    not(feature = "tokio"),
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "linux", target_os = "macos")
+))]
+fn build_unix_stream_passthrough_compiled_default(
+    settings: &StreamPassthroughSettings,
+    path: PathBuf,
+) -> Result<PipeHandle, ProximaError> {
+    let upstream = PrimeUnixUpstream::new(path);
+    let pipe = StreamPassthroughUpstream::new(upstream, settings.name.clone())
+        .with_chunk_bytes(settings.chunk_bytes);
+    Ok(into_handle(pipe))
+}
+
+// neither backend is linked (`unix` compiled, but no runtime capable of
+// dialing it) — a runtime `Config` error, not a compile failure: `unix`
+// alone no longer implies a runtime (C3), so this is the expected shape for
+// a caller who enabled `unix` without also naming a backend.
+#[cfg(all(
+    feature = "unix",
+    unix,
+    not(feature = "tokio"),
+    not(all(
+        feature = "runtime-prime-inbox-alloc",
+        any(target_os = "linux", target_os = "macos")
+    ))
+))]
+fn build_unix_stream_passthrough_compiled_default(
+    _settings: &StreamPassthroughSettings,
+    _path: PathBuf,
+) -> Result<PipeHandle, ProximaError> {
+    Err(ProximaError::Config(
+        "stream transport `unix`: no runtime backend linked — enable `tokio`, the prime \
+         `runtime-prime-inbox-alloc` bundle, or select one explicitly via \
+         `RuntimeSelection`/`#[proxima::main(runtime = ...)]`"
+            .into(),
+    ))
+}
+
+#[cfg(not(all(feature = "unix", unix)))]
 fn build_unix_stream_passthrough(
     _settings: &StreamPassthroughSettings,
 ) -> Result<PipeHandle, ProximaError> {

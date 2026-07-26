@@ -19,7 +19,9 @@ use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncWrite};
 use prime::os::net::{UnixListener as PrimeUnixListenerInner, UnixStream};
-use proxima_primitives::stream::{BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream};
+use proxima_primitives::stream::{
+    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream, UnixUpstreamFactory,
+};
 
 type ConnectFuture = Pin<Box<dyn std::future::Future<Output = io::Result<PrimeUnixConnection>> + Send>>;
 
@@ -167,6 +169,38 @@ impl StreamUpstream for PrimeUnixUpstream {
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+/// Type-erases `PrimeUnixUpstream::Conn` to `Box<dyn StreamConnection>` so
+/// `RuntimeSelection` can hold either backend's unix-upstream factory behind
+/// one field — the same erasure `Box<dyn StreamConnection>`'s own
+/// `StreamConnection` impl (`proxima_primitives::stream`) already
+/// established, one level up.
+struct BoxedPrimeUnixUpstream(PrimeUnixUpstream);
+
+impl StreamUpstream for BoxedPrimeUnixUpstream {
+    type Conn = Box<dyn StreamConnection>;
+
+    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
+        match self.0.poll_connect(cx) {
+            Poll::Ready(Ok(conn)) => Poll::Ready(Ok(Box::new(conn))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// prime-backed [`UnixUpstreamFactory`] — the runtime-selectable entry point
+/// `RuntimeSelection::prime()` bundles.
+pub struct PrimeUnixUpstreamFactory;
+
+impl UnixUpstreamFactory for PrimeUnixUpstreamFactory {
+    fn connect(
+        &self,
+        path: PathBuf,
+    ) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>> {
+        std::sync::Arc::new(BoxedPrimeUnixUpstream(PrimeUnixUpstream::new(path)))
     }
 }
 

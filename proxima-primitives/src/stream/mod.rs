@@ -94,6 +94,29 @@ pub trait StreamUpstreamExt: StreamUpstream {
 #[cfg(feature = "std")]
 impl<T: StreamUpstream + ?Sized> StreamUpstreamExt for T {}
 
+/// Runtime-agnostic factory that builds a [`StreamUpstream`] dialing a
+/// Unix-domain socket path — the Unix sibling of [`AcceptorFactory`], for
+/// the dispatch sites (`StreamPassthroughUpstream`) that pick a backend by
+/// transport name rather than binding a listener.
+///
+/// `Conn` is pinned to `Box<dyn StreamConnection>` so the trait stays
+/// object-safe and one backend's upstream (prime's `PrimeUnixConnection`,
+/// tokio's `TokioUnixConnection`) can sit behind the same `Arc<dyn
+/// UnixUpstreamFactory>` field as the other — the same erasure boundary
+/// `Box<dyn StreamConnection>`'s own `StreamConnection` impl above already
+/// established, one level up.
+///
+/// `connect` is cheap and synchronous, mirroring `StreamUpstream` itself:
+/// building the upstream value never touches the network — the actual dial
+/// happens lazily on the returned value's `poll_connect`/`.connect().await`.
+#[cfg(feature = "std")]
+pub trait UnixUpstreamFactory: Send + Sync + 'static {
+    fn connect(
+        &self,
+        path: std::path::PathBuf,
+    ) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>;
+}
+
 #[cfg(feature = "std")]
 pub struct Accept<'lifetime, L: StreamListener + ?Sized> {
     listener: &'lifetime L,

@@ -304,6 +304,12 @@ async fn shutdown_signal() {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    // used only by the real-signal tests below, all of which require
+    // `runtime-prime-reactor` (prime-path or tokio+prime-compat-path) — a
+    // pure tokio-only build (no prime features at all, newly reachable now
+    // that `tcp` no longer smuggles `serve-prime` in — see the umbrella
+    // Cargo.toml's `tcp` doc) compiles none of them.
+    #[cfg(feature = "runtime-prime-reactor")]
     use std::task::Poll;
 
     use super::*;

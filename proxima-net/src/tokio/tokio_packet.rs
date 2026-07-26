@@ -5,12 +5,14 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
-use crate::packet::{Packet, PacketListener};
+use crate::packet::{Packet, PacketListener, PacketListenerFactory};
 
 /// Tokio-backed UDP listener. Wraps a `tokio::net::UdpSocket`; both
 /// recv and send go through the same socket, which is the standard
@@ -23,6 +25,27 @@ pub struct TokioUdpListener {
 impl TokioUdpListener {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         let inner = UdpSocket::bind(addr).await?;
+        let local_addr = inner.local_addr().ok();
+        Ok(Self { inner, local_addr })
+    }
+
+    /// Synchronous sibling of [`bind`](Self::bind): builds the socket via
+    /// `socket2` and hands the pre-bound std socket to tokio through
+    /// `from_std` — the same bridge `TokioAcceptorFactory::bind` uses so its
+    /// listen socket never needs `.await`. Must be called from within a
+    /// future already running on a tokio worker (the reactor must be live
+    /// for `from_std`'s registration to succeed).
+    pub fn bind_sync(addr: SocketAddr) -> io::Result<Self> {
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        let std_socket: std::net::UdpSocket = socket.into();
+        let inner = UdpSocket::from_std(std_socket)?;
         let local_addr = inner.local_addr().ok();
         Ok(Self { inner, local_addr })
     }
@@ -60,6 +83,16 @@ impl PacketListener for TokioUdpListener {
 
     fn local_addr(&self) -> Option<SocketAddr> {
         self.local_addr
+    }
+}
+
+/// tokio-backed [`PacketListenerFactory`] — the runtime-selectable entry
+/// point `RuntimeSelection::tokio()` bundles.
+pub struct TokioPacketListenerFactory;
+
+impl PacketListenerFactory for TokioPacketListenerFactory {
+    fn bind(&self, addr: SocketAddr) -> io::Result<Arc<dyn PacketListener>> {
+        Ok(Arc::new(TokioUdpListener::bind_sync(addr)?))
     }
 }
 
