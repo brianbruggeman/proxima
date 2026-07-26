@@ -170,10 +170,11 @@ http3-quinn-compat = [
     "proxima-quic/quinn-compat",
     "dep:tokio",
 ]
-# the native client upstream facade (`http3/native/upstream.rs`) uses a
-# `tokio::sync::Mutex` today, so it needs `dep:tokio` even though the
-# listener side (`http3-native`) does not.
-http3-native-upstream = ["http3-native", "dep:tokio", "dep:prime"]
+# the native client upstream facade (`http3/native/upstream.rs`) serializes
+# its shared connection with `proxima_primitives::sync::AsyncMutex` — a
+# waker-based async gate, tokio-free — so this stays tokio-free too, unlike
+# `http3-quinn-compat`.
+http3-native-upstream = ["http3-native", "proxima-primitives/async-mutex", "dep:prime"]
 http3-part-source = ["http3-native-upstream", "proxima-protocols/http3_codec-part-source", "proxima-primitives/part-source"]
 
 websocket = ["dep:async-tungstenite", "dep:proxima-net", "proxima-net/tokio", "dep:tokio"]

@@ -570,9 +570,11 @@ tokio-runtime = []
 # of this crate; optional now), `tokio::process` child-process upstreams +
 # scenario orchestration, the MCP stdio/socket listener, OS signal handling
 # in `Server`'s `wait_for_signal`, `block_on_tokio`, the tokio-native
-# legacy accept-loop fallbacks in proxima-listen/proxima-http/proxima-tls
-# (used when no `AcceptorFactory` is injected or no sans-IO driver exists —
-# h1's driver, notably), and the sister-tokio-compat prime worker handle.
+# legacy accept-loop fallbacks in proxima-http/proxima-tls (used when no
+# sans-IO driver exists — h1's driver, notably; proxima-listen's own
+# no-`AcceptorFactory`/no-runtime cases are single feature-independent
+# errors, not a tokio fallback restored by this feature), and the
+# sister-tokio-compat prime worker handle.
 # Everything downstream that genuinely needs a tokio runtime (http1, tls,
 # tcp/udp/unix, quic, websocket, http-hyper, io-uring) requires this
 # feature explicitly rather than the reverse, so enabling e.g. `http2`
@@ -607,13 +609,31 @@ tokio = [
     "proxima-test/test-prime-tokio-compat",
 ]
 
-# byte-stream protocols. the only backend today (`proxima_net::tokio`)
-# is tokio-native — no prime equivalent exists yet for the generic
-# pipe-passthrough `StreamListener`/`StreamUpstream` surface — so these
-# require `tokio` explicitly. Layered separately so a future prime/DPDK
-# backend can compose tcp without pulling tokio listeners.
-tcp = ["tokio", "tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std"]
+# Tokio-free — `proxima-listen`'s `stream` module (`StreamListenProtocol`)
+# already carries a factory-injected accept loop (`serve_via_factory`) that
+# never touches tokio, and `proxima_net::prime::{PrimeAcceptorFactory,
+# PrimeTcpConnection, PrimeTcpUpstream}` is the runtime `default_runtime`
+# (`src/app.rs`/`src/runtime.rs`) installs out of the box — so plain TCP
+# listening/dialing needs no tokio at all. `serve-prime` supplies that
+# runtime standalone under `--no-default-features` (same reasoning as
+# `h3-native-upstream`). The legacy tokio-native listener/upstream impls
+# (`listeners::tokio_stream`/`upstreams::tokio_stream`) stay reachable, but
+# only under the separate `tokio` feature now — see `tokio-runtime`'s doc.
+tcp = ["tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std", "serve-prime"]
+# Still tokio-only: no prime-native Unix domain socket implementation
+# exists anywhere in the workspace today. `AcceptorFactory::bind` (the
+# trait `PrimeAcceptorFactory` implements for TCP) takes a `SocketAddr`
+# only, and `prime::os::net` has no `UnixListener`/`UnixStream` analog to
+# even build one against — unlike `tcp`, this is a real gap, not a
+# cfg-gating bug (2026-07-25 audit, tcp/unix/websocket tokio-free pass).
 unix = ["tokio", "tokio-runtime", "proxima-listen/stream"]
+# Still tokio-only: `proxima_http::websocket::{WebSocketListener,
+# WebSocketUpstream}` are hardcoded to `tokio::net::TcpListener` /
+# `async_tungstenite::tokio::connect_async` with no `AcceptorFactory`
+# seam at all (unlike `tcp`'s `StreamListenProtocol`, which already had
+# the factory-injection point built in before this pass). Making this
+# prime-native means authoring that seam — new engineering, not a
+# cfg-gating fix — so it stays on `tokio` (2026-07-25 audit, see `unix`).
 websocket = ["tokio", "tokio-runtime", "tcp", "dep:async-tungstenite", "proxima-http/websocket"]
 # proxima-side outbound WebSocket upstream (P8 in docs/protocol-gap/discipline.md).
 # pulls in the same async-tungstenite the listener uses; client-side handshake +
@@ -667,9 +687,21 @@ h3-upstream = ["http3", "http3-quinn-compat", "dep:webpki-roots"]
 # stack (C42, docs/proxima-quic/discipline.md) — the dual-surface peer of
 # `h3-upstream` (P7, quinn), selectable side-by-side per the C41 ruling.
 # Default off (disciplined-component gate-1 firewall until C43's
-# compare-bench vs the quinn upstream seals it). The native upstream facade
-# itself uses a `tokio::sync::Mutex` today, so this still needs `tokio`.
-h3-native-upstream = ["http3", "tokio", "proxima-http/http3-native-upstream", "dep:webpki-roots"]
+# compare-bench vs the quinn upstream seals it). Tokio-free — the native
+# upstream facade serializes its connection with `proxima_primitives`'s
+# waker-based `AsyncMutex`, unlike `h3-upstream` (P7, quinn), which needs
+# `tokio` for `h3-quinn`/`quinn`.
+h3-native-upstream = [
+    "http3",
+    "proxima-http/http3-native-upstream",
+    "dep:webpki-roots",
+    # `serve-prime`: the same tokio-free default runtime bundle every other
+    # regular feature rides — `run`/`run_with_cores` need SOME runtime
+    # compiled in (the full prime executor+inbox+reactor+bgpool bundle, or
+    # `tokio`); this feature no longer carries `tokio`, so it must carry the
+    # prime bundle itself to stand alone under `--no-default-features`.
+    "serve-prime",
+]
 # Routes the native h3 CLIENT response path (rekt_h3_load's part-source
 # arm) through `proxima_primitives::pipe::part::PartSource` instead of the owned
 # `H3ClientEvent::ResponseHeaders` event (design doc step 3, h3 first —

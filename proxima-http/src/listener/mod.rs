@@ -350,6 +350,7 @@ mod tests {
     use proxima_primitives::pipe::handler::into_handle;
     use proxima_primitives::pipe::request::{Request, Response};
     use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
+    use proxima_runtime::Runtime;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct ConstantOk;
@@ -368,11 +369,65 @@ mod tests {
     }
 
 
-    // the serve loop spawns per-connection work via `tokio::task::spawn_local`
-    // (runtime: None), so the whole exercise runs inside a LocalSet on a
-    // current-thread runtime. a per-core runtime can't be passed here: its
-    // `spawn_on_current_core` asserts it is on a worker thread, which the
-    // test thread is not.
+    // test-only `Runtime` whose `spawn_on_current_core` forwards to
+    // `tokio::task::spawn_local` — a real per-core runtime (`TokioPerCoreRuntime`,
+    // `PrimeRuntime`) can't be used here since its `spawn_on_current_core`
+    // asserts it is on a worker thread, which the test thread is not; this
+    // stand-in has no such assertion, so it exercises the seam
+    // (`Some(runtime)`) rather than the no-runtime degradation.
+    struct LocalSetRuntime;
+
+    impl Runtime for LocalSetRuntime {
+        fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            tokio::task::spawn_local(future);
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never routes to a peer core")
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: proxima_runtime::CoreId,
+            _factory: Box<
+                dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), proxima_runtime::SpawnError> {
+            unreachable!("test never spawns a cross-core factory")
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<
+                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+            >,
+        ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
+            unreachable!("test never spawns background-blocking work")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("test never times out")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> proxima_runtime::CoreId {
+            proxima_runtime::CoreId(0)
+        }
+    }
+
+    // the serve loop spawns per-connection work through the injected
+    // `LocalSetRuntime`, so the whole exercise runs inside a LocalSet on a
+    // current-thread runtime.
     #[proxima::test(runtime = "tokio")]
     async fn factory_path_serves_http1_get() {
         let local = tokio::task::LocalSet::new();
@@ -380,7 +435,9 @@ mod tests {
             .run_until(async move {
                 let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
                 let dispatch = into_handle(ConstantOk);
+                let runtime: Arc<dyn Runtime> = Arc::new(LocalSetRuntime);
                 let context = proxima_listen::ServeContext::new(NoopTelemetry::handle())
+                    .with_runtime(runtime)
                     .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
