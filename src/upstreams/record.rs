@@ -8,10 +8,11 @@ use bon::Builder;
 use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use futures::{FutureExt, Stream, select_biased};
+use proxima_primitives::sync::mpsc;
+use proxima_primitives::sync::oneshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
-use proxima_primitives::sync::mpsc;
 
 use crate::body::{ChunkStream, RequestStream, ResponseStream};
 use crate::capture_surface::CaptureContext;
@@ -32,7 +33,23 @@ use crate::request::{Request, Response};
 use crate::runtime::{CoreId, Runtime};
 
 // memoized sender to a RecordUpstream's single, long-lived drainer.
-type DrainerCell = Arc<OnceLock<mpsc::UnboundedSender<RecordingEvent>>>;
+type DrainerCell = Arc<OnceLock<mpsc::UnboundedSender<DrainerMessage>>>;
+
+/// A message on the drainer's ordered channel: either a recording event to
+/// append, or a barrier asking "is everything sent before me durable yet".
+/// Channel-only — never serialized, unlike [`RecordingEvent`] — so a
+/// barrier can never leak into the recorded wire format.
+// `Event` is the hot-path variant (every request sends several); boxing it
+// to shrink `Barrier` would put a heap allocation on every recorded event
+// to save stack space on a variant sent at most once per `flush()` call.
+#[allow(clippy::large_enum_variant)]
+enum DrainerMessage {
+    Event(RecordingEvent),
+    /// Reports the outcome of the flush the barrier triggered, so a caller
+    /// awaiting [`RecordUpstream::flush`] observes a real I/O error rather
+    /// than a bare "done".
+    Barrier(oneshot::Sender<Result<(), ProximaError>>),
+}
 
 /// Proxy that tees every (request, response) interaction into a
 /// recording sink. Per-chunk events preserve inter-chunk timing for
@@ -95,6 +112,81 @@ impl<Inner> RecordUpstream<Inner> {
         self.spigot = spigot;
         self
     }
+
+    /// Await durability of every interaction enqueued before this call.
+    ///
+    /// Enqueues a barrier on the SAME ordered channel recording events flow
+    /// through, so it resolves only once every event sent strictly before
+    /// it has been appended and the sink flushed — never a sleep, never a
+    /// filesystem poll. Ordering, not timing, is what makes this
+    /// deterministic. Calling it before any request has gone through starts
+    /// the drainer exactly as the first real request would (the same
+    /// `get_or_init`), so there is still exactly one channel and one
+    /// ordering to reason about — no separate "is it running yet" check to
+    /// get wrong.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` rather than resolving if there is no persistent
+    /// drainer to barrier against (no runtime armed via
+    /// [`RecordUpstream::with_runtime`]) or if the drainer task is gone —
+    /// spawn failed, panicked, or was cancelled mid-flight. A barrier that
+    /// quietly "succeeds" against a missing or dead drainer would hide
+    /// exactly the failure this API exists to surface.
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use proxima::pipe::{PipeHandle, into_handle};
+    /// use proxima::{
+    ///     AccumulatingSink, DynRecordingSink, LazyFanOut, ProximaError, RecordUpstream, Request,
+    ///     Response, SendPipe, deferred_runtime,
+    /// };
+    ///
+    /// struct EchoPipe;
+    ///
+    /// impl SendPipe for EchoPipe {
+    ///     type In = Request<Bytes>;
+    ///     type Out = Response<Bytes>;
+    ///     type Err = ProximaError;
+    ///     async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    ///         Ok(Response::ok("pong"))
+    ///     }
+    /// }
+    ///
+    /// # #[proxima::main]
+    /// # async fn main() -> Result<(), ProximaError> {
+    /// let sink: DynRecordingSink = std::sync::Arc::new(AccumulatingSink::with_defaults(
+    ///     std::sync::Arc::new(LazyFanOut::new(Vec::new(), deferred_runtime())),
+    /// ));
+    /// let inner: PipeHandle = into_handle(EchoPipe);
+    /// let upstream = RecordUpstream::new("example", inner, sink, "example");
+    ///
+    /// // no runtime armed: flush reports the gap instead of hanging forever.
+    /// assert!(upstream.flush().await.is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn flush(&self) -> impl Future<Output = Result<(), ProximaError>> + Send + 'static {
+        let sender = self
+            .spigot
+            .get()
+            .map(|runtime| instance_drainer_sender(&self.drainer, runtime, &self.sink));
+        async move {
+            let sender = sender.ok_or_else(|| {
+                ProximaError::Record(
+                    "recording drainer has no armed runtime to flush (call with_runtime first)"
+                        .into(),
+                )
+            })?;
+            let (ack_sender, ack_receiver) = oneshot::channel();
+            sender
+                .send(DrainerMessage::Barrier(ack_sender))
+                .map_err(|_| ProximaError::Record("recording drainer is gone".into()))?;
+            ack_receiver.await.map_err(|_| {
+                ProximaError::Record("recording drainer dropped before flushing".into())
+            })?
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,12 +202,12 @@ fn instance_drainer_sender(
     drainer: &DrainerCell,
     runtime: &Arc<dyn Runtime>,
     sink: &DynRecordingSink,
-) -> mpsc::UnboundedSender<RecordingEvent> {
+) -> mpsc::UnboundedSender<DrainerMessage> {
     // spawn_on_core, not spawn_on_current_core: the recording pipe is driven
     // from arbitrary call sites, not necessarily a runtime worker thread.
     drainer
         .get_or_init(|| {
-            let (sender, receiver) = mpsc::unbounded_channel::<RecordingEvent>();
+            let (sender, receiver) = mpsc::unbounded_channel::<DrainerMessage>();
             if let Err(error) =
                 runtime.spawn_on_core(CoreId(0), Box::pin(drain_forever(receiver, sink.clone())))
             {
@@ -129,21 +221,17 @@ fn instance_drainer_sender(
 // append each event, drain any burst already queued, then flush once caught
 // up — durability amortized across the burst instead of once per call.
 async fn drain_forever(
-    mut receiver: mpsc::UnboundedReceiver<RecordingEvent>,
+    mut receiver: mpsc::UnboundedReceiver<DrainerMessage>,
     sink: DynRecordingSink,
 ) {
-    while let Some(event) = receiver.recv().await {
-        if let Err(error) = sink.append(event).await {
-            tracing::error!(error = %error, "recording sink append failed");
-        }
+    while let Some(message) = receiver.recv().await {
+        drain_message(&sink, message).await;
         // drain any burst already queued without waiting for more: a
         // `now_or_never` immediate poll stands in for tokio's `try_recv`
         // (proxima's mpsc doesn't shim that non-blocking probe — see its
         // module doc's "Non-coverage" list).
-        while let Some(Some(event)) = receiver.recv().now_or_never() {
-            if let Err(error) = sink.append(event).await {
-                tracing::error!(error = %error, "recording sink append failed");
-            }
+        while let Some(Some(message)) = receiver.recv().now_or_never() {
+            drain_message(&sink, message).await;
         }
         if let Err(error) = sink.flush().await {
             tracing::error!(error = %error, "recording sink flush failed");
@@ -151,6 +239,26 @@ async fn drain_forever(
     }
     if let Err(error) = sink.flush().await {
         tracing::error!(error = %error, "recording sink flush failed");
+    }
+}
+
+// appends a durable event, or — for a barrier — flushes right away and
+// replies with the real outcome, so an awaiting caller never observes a
+// later, unrelated flush's result in place of its own.
+async fn drain_message(sink: &DynRecordingSink, message: DrainerMessage) {
+    match message {
+        DrainerMessage::Event(event) => {
+            if let Err(error) = sink.append(event).await {
+                tracing::error!(error = %error, "recording sink append failed");
+            }
+        }
+        DrainerMessage::Barrier(ack) => {
+            let result = sink.flush().await;
+            if let Err(ref error) = result {
+                tracing::error!(error = %error, "recording sink flush failed");
+            }
+            let _ = ack.send(result);
+        }
     }
 }
 
@@ -230,7 +338,7 @@ where
         // unarmed (tests / direct construction): the legacy per-call
         // drainer on the ambient tokio runtime, cancellable with the request.
         None => {
-            let (sender, mut receiver) = mpsc::unbounded_channel::<RecordingEvent>();
+            let (sender, mut receiver) = mpsc::unbounded_channel::<DrainerMessage>();
             let sink_for_task = sink.clone();
             let drainer_cancel = cancel.clone();
             // no injected runtime to spawn_on_core against: a dedicated OS
@@ -242,12 +350,8 @@ where
                     loop {
                         select_biased! {
                             _ = drainer_cancel.fired().fuse() => break,
-                            event = receiver.recv().fuse() => match event {
-                                Some(event) => {
-                                    if let Err(error) = sink_for_task.append(event).await {
-                                        tracing::error!(error = %error, "recording sink append failed");
-                                    }
-                                }
+                            message = receiver.recv().fuse() => match message {
+                                Some(message) => drain_message(&sink_for_task, message).await,
                                 None => break,
                             },
                         }
@@ -298,7 +402,7 @@ where
         .collect();
     // `protocol` is implied by ProtocolEvent::Http; the previous `protocol: String` field is dropped.
     let _ = protocol;
-    let _ = sender.send(RecordingEvent {
+    let _ = sender.send(DrainerMessage::Event(RecordingEvent {
         id,
         ts_ms: 0,
         parent: None,
@@ -313,7 +417,7 @@ where
             },
             meta: None,
         }),
-    });
+    }));
 
     let req_body = wrap_chunked(
         req_chunks,
@@ -346,7 +450,7 @@ where
             )
         })
         .collect();
-    let _ = sender.send(RecordingEvent {
+    let _ = sender.send(DrainerMessage::Event(RecordingEvent {
         id,
         ts_ms: resp_started_ms,
         parent: None,
@@ -354,7 +458,7 @@ where
             status: response.status,
             headers: header_pairs,
         }),
-    });
+    }));
 
     let status = response.status;
     let headers = response.metadata.clone();
@@ -396,7 +500,7 @@ where
         // unarmed (tests / direct construction): the legacy per-call
         // drainer on the ambient tokio runtime, cancellable with the request.
         None => {
-            let (sender, mut receiver) = mpsc::unbounded_channel::<RecordingEvent>();
+            let (sender, mut receiver) = mpsc::unbounded_channel::<DrainerMessage>();
             let sink_for_task = sink.clone();
             let drainer_cancel = cancel.clone();
             // no injected runtime to spawn_on_core against: a dedicated OS
@@ -408,12 +512,8 @@ where
                     loop {
                         select_biased! {
                             _ = drainer_cancel.fired().fuse() => break,
-                            event = receiver.recv().fuse() => match event {
-                                Some(event) => {
-                                    if let Err(error) = sink_for_task.append(event).await {
-                                        tracing::error!(error = %error, "recording sink append failed");
-                                    }
-                                }
+                            message = receiver.recv().fuse() => match message {
+                                Some(message) => drain_message(&sink_for_task, message).await,
                                 None => break,
                             },
                         }
@@ -463,7 +563,7 @@ where
         })
         .collect();
     let _ = protocol;
-    let _ = sender.send(RecordingEvent {
+    let _ = sender.send(DrainerMessage::Event(RecordingEvent {
         id,
         ts_ms: 0,
         parent: None,
@@ -478,7 +578,7 @@ where
             },
             meta: None,
         }),
-    });
+    }));
 
     let req_body = wrap_chunked(
         req_chunks,
@@ -511,7 +611,7 @@ where
             )
         })
         .collect();
-    let _ = sender.send(RecordingEvent {
+    let _ = sender.send(DrainerMessage::Event(RecordingEvent {
         id,
         ts_ms: resp_started_ms,
         parent: None,
@@ -519,7 +619,7 @@ where
             status: response.status,
             headers: header_pairs,
         }),
-    });
+    }));
 
     let status = response.status;
     let headers = response.metadata.clone();
@@ -537,7 +637,7 @@ fn wrap_chunked(
     inner: ChunkStream,
     started: Instant,
     id: InteractionId,
-    sender: mpsc::UnboundedSender<RecordingEvent>,
+    sender: mpsc::UnboundedSender<DrainerMessage>,
     phase: Phase,
     capture: Arc<LiveCaptureContext>,
 ) -> ChunkStream {
@@ -556,7 +656,7 @@ struct ChunkRecorder {
     inner: ChunkStream,
     started: Instant,
     id: InteractionId,
-    sender: Option<mpsc::UnboundedSender<RecordingEvent>>,
+    sender: Option<mpsc::UnboundedSender<DrainerMessage>>,
     phase: Phase,
     end_emitted: bool,
     capture: Arc<LiveCaptureContext>,
@@ -581,12 +681,12 @@ impl ChunkRecorder {
                     metadata,
                 },
             };
-            let _ = sender.send(RecordingEvent {
+            let _ = sender.send(DrainerMessage::Event(RecordingEvent {
                 id: self.id,
                 ts_ms,
                 parent: None,
                 event: ProtocolEvent::Http(http_event),
-            });
+            }));
         }
     }
 
@@ -604,12 +704,12 @@ impl ChunkRecorder {
                     meta: RecordMeta::default(),
                 },
             };
-            let _ = sender.send(RecordingEvent {
+            let _ = sender.send(DrainerMessage::Event(RecordingEvent {
                 id: self.id,
                 ts_ms: ts_end,
                 parent: None,
                 event: ProtocolEvent::Http(http_event),
-            });
+            }));
         }
     }
 }
@@ -657,6 +757,27 @@ impl RecordPipeFactory {
     pub fn new(upstreams: Weak<PipeFactoryRegistry>, spigot: DeferredRuntime) -> Self {
         Self { upstreams, spigot }
     }
+
+    // shared by the `PipeFactory` impl (which must return the erased
+    // `PipeHandle` for the heterogeneous registry) and tests that need the
+    // concrete `RecordUpstream` back — e.g. to await `RecordUpstream::flush`,
+    // a capability `PipeHandle`'s object-safe erasure has no room to carry.
+    async fn build_typed(&self, spec: &Value) -> Result<RecordUpstream<PipeHandle>, ProximaError> {
+        let config: RecordConfig = serde_json::from_value(spec.clone())
+            .map_err(|err| ProximaError::Config(format!("record config: {err}")))?;
+        config
+            .validate()
+            .map_err(|err| ProximaError::Config(format!("{err}")))?;
+        let label = config.name.clone();
+        let pipe_label = config.pipe.clone().unwrap_or_else(|| label.clone());
+        let sink_spec = config.sink.into_sink_spec()?;
+        let durable = Arc::new(LazyFanOut::new(vec![sink_spec], self.spigot.clone()));
+        let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(durable));
+        let inner = resolve_inner(&config.inner, &self.upstreams).await?;
+        Ok(RecordUpstream::new(label, inner, sink, pipe_label)
+            .with_protocol(config.protocol)
+            .with_runtime(self.spigot.clone()))
+    }
 }
 
 impl PipeFactory for RecordPipeFactory {
@@ -670,25 +791,7 @@ impl PipeFactory for RecordPipeFactory {
         _inner: Option<PipeHandle>,
     ) -> Pin<Box<dyn Future<Output = Result<PipeHandle, ProximaError>> + Send + '_>> {
         let spec = spec.clone();
-        let upstreams = self.upstreams.clone();
-        let spigot = self.spigot.clone();
-        Box::pin(async move {
-            let config: RecordConfig = serde_json::from_value(spec)
-                .map_err(|err| ProximaError::Config(format!("record config: {err}")))?;
-            config
-                .validate()
-                .map_err(|err| ProximaError::Config(format!("{err}")))?;
-            let label = config.name.clone();
-            let pipe_label = config.pipe.clone().unwrap_or_else(|| label.clone());
-            let sink_spec = config.sink.into_sink_spec()?;
-            let durable = Arc::new(LazyFanOut::new(vec![sink_spec], spigot.clone()));
-            let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(durable));
-            let inner = resolve_inner(&config.inner, &upstreams).await?;
-            let upstream = RecordUpstream::new(label, inner, sink, pipe_label)
-                .with_protocol(config.protocol)
-                .with_runtime(spigot.clone());
-            Ok(into_handle(upstream))
-        })
+        Box::pin(async move { Ok(into_handle(self.build_typed(&spec).await?)) })
     }
 }
 
@@ -880,9 +983,11 @@ mod tests {
     // attached. Bypassing the builder here (bare `PrimeRuntime::new`) left
     // `background_pool: None`, so `spawn_background_blocking` fell back to
     // spawning a brand-new OS thread per append/flush call (prime/src/os/runtime.rs) —
-    // thread-creation latency that balloons under host contention and raced
-    // `drain_until`'s fixed retry budget. `ProximaBackgroundPool` mirrors
-    // production's persistent-pool shape without pulling in `rayon`.
+    // thread-creation latency that balloons under host contention. A fixed
+    // retry-budget poll used to race that latency and lose; `RecordUpstream::flush`
+    // now awaits a real barrier instead, but a warm pool still keeps these tests
+    // fast. `ProximaBackgroundPool` mirrors production's persistent-pool shape
+    // without pulling in `rayon`.
     fn armed_spigot() -> crate::recording::DeferredRuntime {
         let spigot = crate::recording::deferred_runtime();
         let background_pool: std::sync::Arc<dyn crate::runtime::BackgroundPool> =
@@ -900,9 +1005,9 @@ mod tests {
         // `thread::Builder::spawn`'d worker is kernel-scheduled but not yet
         // CPU-scheduled; under host contention it can sit unscheduled for
         // longer than a bounded polling loop's whole retry budget, which is
-        // exactly the race `drain_until` lost (recording pipe's drainer task
-        // never got a first turn before the poll gave up). A real blocking
-        // handshake here proves the worker is warm before any recording
+        // exactly the race a since-removed filesystem-polling test helper
+        // lost (the drainer task never got a first turn before the poll gave
+        // up). A real blocking handshake here proves the worker is warm before any recording
         // event is ever sent to it.
         let (ready_sender, ready_receiver) = std::sync::mpsc::channel::<()>();
         runtime
@@ -920,7 +1025,10 @@ mod tests {
         spigot
     }
 
-    async fn drain_events(path: &std::path::Path) -> Vec<RecordingEvent> {
+    // a single, non-looping read: only ever called after `RecordUpstream::flush`
+    // has resolved, so the file already holds everything the barrier ordered
+    // ahead of it — no retry budget to race, nothing left to poll for.
+    async fn read_recorded_events(path: &std::path::Path) -> Vec<RecordingEvent> {
         if !path.exists() {
             return Vec::new();
         }
@@ -936,39 +1044,6 @@ mod tests {
             }
         }
         collected
-    }
-
-    fn recording_complete(events: &[RecordingEvent]) -> bool {
-        events
-            .iter()
-            .any(|event| matches!(event.event, ProtocolEvent::Http(HttpEvent::Ended { .. })))
-    }
-
-    // the sink drains on a background task that lives on an entirely
-    // different OS thread than this test (the armed spigot's own
-    // `PrimeRuntime`) — a cooperative `yield_now()` only re-polls this
-    // task, it never cedes real wall-clock time to the OS scheduler, so a
-    // fixed-iteration retry loop built on it burns its whole budget in
-    // under 2ms regardless of iteration count (measured: 1024 iterations of
-    // pure `yield_now()` complete in ~1.5ms). Under host scheduling
-    // contention the drainer's worker thread can need far longer than that
-    // to get its first CPU slice, so the loop gave up before the recording
-    // ever reached disk. `std::thread::sleep` between checks trades a
-    // handful of real milliseconds for the OS to actually schedule the
-    // other thread; the condition checked each iteration is still the real
-    // terminal state on disk, not a guessed total duration.
-    async fn drain_until(
-        path: &std::path::Path,
-        ready: fn(&[RecordingEvent]) -> bool,
-    ) -> Vec<RecordingEvent> {
-        for _ in 0..1024 {
-            let collected = drain_events(path).await;
-            if ready(&collected) {
-                return collected;
-            }
-            std::thread::sleep(std::time::Duration::from_micros(200));
-        }
-        drain_events(path).await
     }
 
     // principle-4 parity: the fluent builder and the config value must lower to
@@ -1017,19 +1092,24 @@ mod tests {
             "sink":  { "type": "jsonl", "path": path.to_string_lossy() },
             "inner": { "synth": { "status": 200, "body": "from-inner" } },
         });
-        let handle = factory.build(&spec, None).await.expect("build");
+        // `build_typed` (not the `PipeFactory::build` trait method) returns
+        // the concrete `RecordUpstream` instead of an erased `PipeHandle` —
+        // the erased handle has no room to carry `flush`, the capability this
+        // test needs to await durability deterministically.
+        let upstream = factory.build_typed(&spec).await.expect("build");
         let request = Request::builder()
             .method("POST")
             .path("/v1/chat")
             .body("hello")
             .build()
             .expect("request");
-        let response = SendPipe::call(&handle, request).await.expect("call");
+        let response = SendPipe::call(&upstream, request).await.expect("call");
         assert_eq!(response.status, 200);
         let body = response.collect_body().await.expect("collect");
         assert_eq!(&body[..], b"from-inner");
 
-        let collected = drain_until(&path, recording_complete).await;
+        upstream.flush().await.expect("flush");
+        let collected = read_recorded_events(&path).await;
         assert!(matches!(
             collected[0].event,
             ProtocolEvent::Http(HttpEvent::Started { .. })
@@ -1100,15 +1180,19 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("trace.jsonl");
+        // one spigot shared by the sink AND the upstream: `RecordUpstream`
+        // needs its own runtime armed (not just the sink's) for `flush` to
+        // have a persistent drainer to barrier against.
+        let spigot = armed_spigot();
         let durable = Arc::new(LazyFanOut::new(
             vec![SinkSpec::new(path.to_string_lossy(), FormatKind::Json)],
-            armed_spigot(),
+            spigot.clone(),
         ));
         let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(durable));
         let inner = into_handle(ClockCapturingPipe {
             clock_value: 0x0123_4567_89AB_CDEF,
         });
-        let recorder = RecordUpstream::new("recorded", inner, sink, "echo");
+        let recorder = RecordUpstream::new("recorded", inner, sink, "echo").with_runtime(spigot);
         let request = Request::builder()
             .method("POST")
             .path("/v1/chat")
@@ -1119,7 +1203,8 @@ mod tests {
         let body = response.collect_body().await.expect("collect");
         assert_eq!(&body[..], b"recorded-body");
 
-        let collected = drain_until(&path, recording_complete).await;
+        recorder.flush().await.expect("flush");
+        let collected = read_recorded_events(&path).await;
         let chunk_metadata = collected
             .iter()
             .find_map(|event| match &event.event {
@@ -1222,14 +1307,8 @@ mod tests {
             let _ = response.collect_body().await.expect("collect");
         }
 
-        let collected = drain_until(&path, |events| {
-            events
-                .iter()
-                .filter(|event| matches!(event.event, ProtocolEvent::Http(HttpEvent::Ended { .. })))
-                .count()
-                == 3
-        })
-        .await;
+        upstream.flush().await.expect("flush");
+        let collected = read_recorded_events(&path).await;
         let ended_count = collected
             .iter()
             .filter(|event| matches!(event.event, ProtocolEvent::Http(HttpEvent::Ended { .. })))
