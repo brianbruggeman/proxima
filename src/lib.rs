@@ -201,7 +201,6 @@ pub mod otlp;
 pub use proxima_http::templates;
 #[cfg(feature = "tls")]
 pub use proxima_tls as tls;
-pub mod tracing_init;
 pub use proxima_patterns::balancer::upstream_ref;
 pub use proxima_patterns::kv::write_back;
 pub use proxima_primitives::pipe::pipe_factory;
@@ -439,7 +438,6 @@ pub use telemetry::{
     HistogramSummary, Labels, Metrics, MetricsSnapshot, NoopTelemetry, Telemetry, TelemetryHandle,
 };
 pub use templates::{TemplateContext, expand as expand_template};
-pub use tracing_init::{LogFormat, init_tracing, init_tracing_default};
 pub use upgrade::{
     HijackStream, HijackedSocket, LocalHijackStream, LocalHijackedSocket, LocalUpgradeFuture,
     LocalUpgradeHandler, UpgradeFuture, UpgradeHandler,

@@ -306,10 +306,9 @@ The telemetry substrate is built on the same `Pipe` primitive as every other pro
 - Default slot count `min(num_cpus, 64)`; explicit `with_slots(N)` for high-core DPDK
 - 57 ns/record uncontested Linux, 168 ns/record at 16 concurrent recorders
 
-### Tracing (`tracing_init` module, feature `tracing-init`)
+### Tracing (feature `tracing-init`)
 - `TracingLayer` adapter bridges `tracing::` events into the per-core `Recorder` (see Telemetry section above)
-- `init_tracing(recorder, format)` installs `TracingLayer` + `EnvFilter` via `registry().with(filter).with(layer).try_init()`
-- `init_tracing_default(format)` convenience wrapper backed by a `NullPipe` recorder
+- `proxima_telemetry::export::install_console_logging()` / `install_console_logging_with(format)` is the one-call entry point: real console `Exporter`, registers the process-default recorder, bridges `tracing::` events, and spawns the background drain thread
 - Spans across `tokio::spawn` boundaries via `Instrument`
 - Per-request span carrying trace_id from `traceparent`
 
@@ -605,7 +604,7 @@ Telemetry substrate primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`,
 | `otlp-http` | `OtlpHttpPipe` OTLP/HTTP protobuf exporter (pulls `prost`) |
 | `otlp-grpc` | `OtlpGrpcPipe` OTLP/gRPC framed exporter (implies `otlp-http`) |
 | `macros` | `#[span]` proc-macro + `#[derive(SpanCarrier)]`; default on — 3.16× faster than `#[instrument]` |
-| `tracing-init` | `TracingLayer` adapter that bridges `tracing::` events into the per-core `Recorder`; `init_tracing` helper |
+| `tracing-init` | `TracingLayer` adapter that bridges `tracing::` events into the per-core `Recorder`; `install_console_logging`/`install_console_logging_with` |
 | `tee-generic` | Generic `Tee<T>` record-fanout primitive with replay and backpressure |
 | `runtime-prime-full` | Experimental — additional substrate hooks for span-carry across `prime::spawn`, beyond what `serve-prime` already provides by default |
 
