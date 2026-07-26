@@ -620,12 +620,14 @@ tokio = [
 # (`listeners::tokio_stream`/`upstreams::tokio_stream`) stay reachable, but
 # only under the separate `tokio` feature now — see `tokio-runtime`'s doc.
 tcp = ["tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std", "serve-prime"]
-# Still tokio-only: no prime-native Unix domain socket implementation
-# exists anywhere in the workspace today. `AcceptorFactory::bind` (the
-# trait `PrimeAcceptorFactory` implements for TCP) takes a `SocketAddr`
-# only, and `prime::os::net` has no `UnixListener`/`UnixStream` analog to
-# even build one against — unlike `tcp`, this is a real gap, not a
-# cfg-gating bug (2026-07-25 audit, tcp/unix/websocket tokio-free pass).
+# Still tokio-only: `prime::os::net::{UnixListener, UnixStream}` and
+# `proxima_net::prime::{PrimeUnixListener, PrimeUnixUpstream}`
+# (`StreamListener`/`StreamUpstream` impls, mirroring the TCP prime
+# backend) now exist, but nothing wires this `unix` feature or the
+# `src/listeners`/`src/upstreams` registration sites onto them yet —
+# that's the remaining gap, authoring the registration seam, not a
+# missing primitive (2026-07-25 audit note superseded same day by
+# feat/prime-unix-udp-backends; registration wiring still open).
 unix = ["tokio", "tokio-runtime", "proxima-listen/stream"]
 # Still tokio-only: `proxima_http::websocket::{WebSocketListener,
 # WebSocketUpstream}` are hardcoded to `tokio::net::TcpListener` /
