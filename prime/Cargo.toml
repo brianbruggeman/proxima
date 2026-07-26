@@ -107,7 +107,12 @@ wasm = ["alloc", "runtime-prime-executor", "runtime-prime-inbox-alloc"]
 # os/runtime.rs's compat constructors, the tokio-backed `PrimeJoinSet` +
 # `RuntimeFactory` impl in os/primitives.rs, background.rs's async job
 # arm) forwards through this feature instead.
-prime-tokio-compat = ["std", "dep:tokio"]
+# os/tokio_compat.rs unconditionally best-effort-pins each sister driver
+# thread to its prime worker's physical core (locality is part of compat
+# mode's documented cost/behavior picture, not bonus enrichment), so this
+# feature owns `dep:core_affinity` the same way it owns `dep:tokio` rather
+# than relying on runtime-prime-reactor/-bgpool happening to be enabled too.
+prime-tokio-compat = ["std", "dep:tokio", "dep:core_affinity"]
 # inverted compat (design D2): prime stays the host but each worker owns its
 # OWN sister tokio current-thread runtime and runs the executor tick inside
 # `sister.block_on(...)`, so raw `tokio::spawn` from a prime task takes tokio's

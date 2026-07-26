@@ -12,6 +12,16 @@
 //! Pure-tokio build:
 //!   cargo test --test ptu_tokio_host --no-default-features \
 //!     --features "tokio-runtime,runtime-tokio,http-hyper,http1,http2"
+//!
+//! Also runs correctly when `http-hyper` is layered ON TOP of the default
+//! (prime-bundle) feature set — the `"wire":"tokio"` spec key below is the
+//! explicit seam load.rs's `build_pipe` already uses for exactly this case
+//! (see `ptu_both_wires.rs`): it resolves to the `"http-tokio"` hyper alias
+//! when the prime bundle registered one, and falls back to plain `"http"`
+//! (which IS hyper) when it didn't. Without it, `"http"` alone silently
+//! prefers the prime factory whenever `http-prime-deps`/`runtime-prime` are
+//! also linked, which needs `CURRENT_REACTOR` — unavailable on this test's
+//! bare thread — so the dial fails for a reactor this test never asked for.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read as _, Write as _};
@@ -60,9 +70,14 @@ fn tokio_host_client_dials_off_a_bare_thread_via_injected_runtime() {
     // this libtest thread is NOT on a tokio reactor; futures' executor drives
     // send(), so dispatch must hop onto the injected host runtime to construct
     // the hyper stream. without slice 1B this fails for want of a reactor.
+    //
+    // `"wire":"tokio"` states the intent explicitly instead of leaning on
+    // whichever backend feature presence happened to register for "http" —
+    // see the module doc for why that matters in a both-features build.
     let body = futures::executor::block_on(async {
         let client = Client::builder()
             .spec("http", json!(format!("http://127.0.0.1:{port}")))
+            .spec("wire", json!("tokio"))
             .runtime(injected)
             .build()
             .expect("build client");
