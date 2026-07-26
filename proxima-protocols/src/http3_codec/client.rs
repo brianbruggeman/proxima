@@ -1032,7 +1032,7 @@ mod tests {
         let mut events: VecDeque<H3ClientEvent> = warm_events;
         events.clear();
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let before = region.change();
         apply_response_frame(StreamId(4), &mut recv, frame_obj, &mut events, u64::MAX)
             .expect("measured decode");
@@ -1079,7 +1079,7 @@ mod tests {
             panic!("expected headers frame");
         };
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let before = region.change();
         let status = decode_status(header_block, u64::MAX).expect("decode_status");
         let after = region.change();
@@ -1177,7 +1177,7 @@ mod tests {
         let _ = source_client.poll_response_header_source();
         let _ = source_client.poll_response_header_source();
 
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
         let before_source = region.change();
         source_client
             .feed_response(StreamId(4), &wire, false)
