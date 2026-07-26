@@ -12,6 +12,10 @@ pub enum Error {
     /// Carries the OS error message so the log line explains itself.
     #[cfg(feature = "std")]
     ThreadSpawn(String),
+    /// Bridging `tracing::` events into a recorder failed because a global
+    /// `tracing` subscriber was already installed elsewhere in the process.
+    #[cfg(feature = "tracing-init")]
+    GlobalSubscriberAlreadySet(String),
 }
 
 impl fmt::Display for Error {
@@ -21,6 +25,10 @@ impl fmt::Display for Error {
             Self::InvalidInput => formatter.write_str("invalid input"),
             #[cfg(feature = "std")]
             Self::ThreadSpawn(message) => write!(formatter, "thread spawn failed: {message}"),
+            #[cfg(feature = "tracing-init")]
+            Self::GlobalSubscriberAlreadySet(message) => {
+                write!(formatter, "global tracing subscriber already set: {message}")
+            }
         }
     }
 }

@@ -51,6 +51,12 @@
 //!
 //! #[proxima::main]
 //! async fn main() -> Result<(), ProximaError> {
+//!     // Console logging in one call: RUST_LOG-filtered, ambient recorder
+//!     // registered, drain already running. `--features tracing-init` to
+//!     // make it real (off by default); see `LogFormat`/`init_telemetry_with`
+//!     // for JSON output.
+//!     proxima::init_telemetry().expect("install console telemetry");
+//!
 //!     let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, 8080));
 //!
 //!     // Listener: bind, pick the wire, hand it a pipe, serve until signalled.
@@ -201,6 +207,7 @@ pub mod otlp;
 pub use proxima_http::templates;
 #[cfg(feature = "tls")]
 pub use proxima_tls as tls;
+pub mod tracing_init;
 pub use proxima_patterns::balancer::upstream_ref;
 pub use proxima_patterns::kv::write_back;
 pub use proxima_primitives::pipe::pipe_factory;
@@ -438,6 +445,12 @@ pub use telemetry::{
     HistogramSummary, Labels, Metrics, MetricsSnapshot, NoopTelemetry, Telemetry, TelemetryHandle,
 };
 pub use templates::{TemplateContext, expand as expand_template};
+// init_tracing_default is #[deprecated] in favor of init_telemetry_with;
+// re-exporting it here is not a new call site, so silence the lint here
+// rather than at every downstream caller.
+#[allow(deprecated)]
+pub use tracing_init::{LogFormat, init_tracing, init_tracing_default};
+pub use tracing_init::{init_telemetry, init_telemetry_with};
 pub use upgrade::{
     HijackStream, HijackedSocket, LocalHijackStream, LocalHijackedSocket, LocalUpgradeFuture,
     LocalUpgradeHandler, UpgradeFuture, UpgradeHandler,
