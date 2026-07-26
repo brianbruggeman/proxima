@@ -27,6 +27,8 @@ use crate::pipes::{
     FormatterPipe, LogFormat, NullPipe, TelemetryPipeHandle, into_telemetry_handle,
 };
 use crate::recorder::{HasPipe, NoPipe, Recorder, RecorderBuilder};
+#[cfg(feature = "tracing-init")]
+use tracing_subscriber::EnvFilter;
 
 static DEFAULT_RECORDER: ArcSwapOption<Recorder> = ArcSwapOption::const_empty();
 
@@ -323,10 +325,16 @@ pub fn install_console_logging_with(format: Formatter) -> Result<Arc<Recorder>, 
         .export(Exporter::std().format(format))?
         .install()?;
 
-    // Bridge `tracing` callsites into the recorder. Ignore the error if a
-    // global subscriber is already installed — console logging is best-effort.
+    // Bridge `tracing` callsites into the recorder, gated by the same
+    // RUST_LOG-driven floor proxima's own emit macros honor (default
+    // "warn,proxima=info" when unset) -- without this a dependency's
+    // tracing::trace!/debug! would reach the console unfiltered. Ignore the
+    // error if a global subscriber is already installed — console logging
+    // is best-effort.
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,proxima=info"));
     let layer = crate::tracing_bridge::TracingLayer::new(Arc::clone(&recorder));
-    let subscriber = tracing_subscriber::registry().with(layer);
+    let subscriber = tracing_subscriber::registry().with(filter).with(layer);
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     // Background drain so buffered records reach the console. MUST be a plain OS

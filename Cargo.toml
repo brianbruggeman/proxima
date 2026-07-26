@@ -1565,6 +1565,14 @@ path = "examples/deadline/main.rs"
 name = "differential"
 path = "examples/differential/main.rs"
 
+# the ordinary way to turn on telemetry: proxima::init_telemetry(), the
+# crate-root one-liner. See ai_docs/projections/telemetry-init.md for the
+# fuller decision table of "which entry point for which situation".
+[[example]]
+name = "init_telemetry"
+path = "examples/init_telemetry.rs"
+required-features = ["tracing-init"]
+
 # OTLP/HTTP export: write trace/metric payloads to a collector endpoint.
 [[example]]
 name = "export"

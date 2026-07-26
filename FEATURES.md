@@ -271,9 +271,10 @@ The telemetry substrate is built on the same `Pipe` primitive as every other pro
 - `Tee<T>` (feature `tee-generic`) — generic record fanout; `ArrayQueue`-backed per-sink queue with backpressure; replay buffer for late-arriving consumers
 
 **TracingLayer bridge (feature `tracing-init`):**
+- One-liner: `proxima::init_telemetry()` — no arguments, console output, `RUST_LOG` honored, ambient recorder + drain thread already running. See the Tracing section below.
 - `TracingLayer` — `tracing_subscriber::Layer` that bridges upstream `tracing::info!()` / `tracing::span!()` calls from hyper, rustls, tokio, and third-party crates into proxima's per-core `Recorder`
 - 1.7× faster than `tracing_subscriber::fmt` to `io::sink` (319 ns vs 546 ns per event); defers field formatting to drain time
-- Install: `registry().with(EnvFilter).with(TracingLayer::new(Arc::clone(&recorder)))`
+- Install: `registry().with(EnvFilter).with(TracingLayer::new(Arc::clone(&recorder)))` — what `init_telemetry`/`install_console_logging` do for you
 
 **End-to-end composition results (Phase K + L, Darwin aarch64):**
 - Traces: proxima 350 ns vs OTel SDK 723 ns — **proxima 2.06×**
@@ -307,8 +308,9 @@ The telemetry substrate is built on the same `Pipe` primitive as every other pro
 - 57 ns/record uncontested Linux, 168 ns/record at 16 concurrent recorders
 
 ### Tracing (feature `tracing-init`)
-- `TracingLayer` adapter bridges `tracing::` events into the per-core `Recorder` (see Telemetry section above)
-- `proxima_telemetry::export::install_console_logging()` / `install_console_logging_with(format)` is the one-call entry point: real console `Exporter`, registers the process-default recorder, bridges `tracing::` events, and spawns the background drain thread
+- `proxima::init_telemetry()` is the crate-root one-liner: zero required arguments, level-routed console output, `RUST_LOG` honored, ambient recorder registered, background drain already running. `proxima::init_telemetry_with(LogFormat::Json)` picks the format. Delegates straight to `proxima_telemetry::export::install_console_logging`/`install_console_logging_with` — no parallel implementation.
+- `proxima::init_tracing_default`/`init_tracing` are the original names, `#[deprecated]` in favor of the above; `init_tracing(recorder, format)` stays undeprecated as the one case `init_telemetry` can't cover — bridging `tracing::` events into a recorder the caller already built.
+- `TracingLayer` adapter bridges `tracing::` events into the per-core `Recorder` (see Telemetry section above), filtered by the same `RUST_LOG`-driven floor (default `warn,proxima=info`) proxima's own emit macros honor
 - Spans across `tokio::spawn` boundaries via `Instrument`
 - Per-request span carrying trace_id from `traceparent`
 
@@ -604,7 +606,7 @@ Telemetry substrate primitives (`ring`, `id`, `level`, `tag`, `trace`, `metric`,
 | `otlp-http` | `OtlpHttpPipe` OTLP/HTTP protobuf exporter (pulls `prost`) |
 | `otlp-grpc` | `OtlpGrpcPipe` OTLP/gRPC framed exporter (implies `otlp-http`) |
 | `macros` | `#[span]` proc-macro + `#[derive(SpanCarrier)]`; default on — 3.16× faster than `#[instrument]` |
-| `tracing-init` | `TracingLayer` adapter that bridges `tracing::` events into the per-core `Recorder`; `install_console_logging`/`install_console_logging_with` |
+| `tracing-init` | `proxima::init_telemetry()`/`init_telemetry_with` (crate-root one-liner) and `install_console_logging`/`install_console_logging_with`; `TracingLayer` adapter that bridges `tracing::` events into the per-core `Recorder` |
 | `tee-generic` | Generic `Tee<T>` record-fanout primitive with replay and backpressure |
 | `runtime-prime-full` | Experimental — additional substrate hooks for span-carry across `prime::spawn`, beyond what `serve-prime` already provides by default |
 
