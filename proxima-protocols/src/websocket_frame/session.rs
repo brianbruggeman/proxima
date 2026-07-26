@@ -1,5 +1,16 @@
-//! Sans-IO RFC 6455 SERVER session state machine — bytes in, [`Event`]
-//! out; queued reply bytes drained via [`Session::poll_transmit`].
+//! Sans-IO RFC 6455 session state machine — bytes in, [`Event`] out;
+//! queued reply bytes drained via [`Session::poll_transmit`]. One shared
+//! FSM serves BOTH roles: [`Session`] (bare name, `IS_CLIENT = false`)
+//! is the SERVER session; [`ClientSession`] (`Session<true>`) is the
+//! CLIENT session. RFC 6455 defines the client and server as the same
+//! framing state machine with the masking rule reversed (§5.1/§5.3) —
+//! reassembly, control-frame automation, UTF-8 validation (§8.1), and
+//! close-code semantics (§7.4) are IDENTICAL for both, so this module
+//! parameterizes the role as a `const IS_CLIENT: bool` on [`Session`]
+//! rather than forking a second FSM: every method below except the
+//! four listed in "role split" is written once, shared by both
+//! instantiations, and the masking decision reduces to a compile-time
+//! constant the optimizer folds away per monomorphization.
 //!
 //! Mirrors [`crate::redis::connection::Connection`]'s `feed_bytes` /
 //! `advance` shape (a byte-STREAM sans-IO connection, not a per-datagram
@@ -23,19 +34,72 @@
 //! fragmentation reassembly, control-frame automation (PING -> automatic
 //! PONG, CLOSE -> the closing handshake), §5.1 masking enforcement (a
 //! server MUST reject an unmasked client frame and MUST NOT mask its own
-//! frames), §8.1 UTF-8 validation, and §7.4 close-code semantics.
+//! frames; a client MUST reject a MASKED server frame and MUST mask every
+//! frame it sends, §5.3), §8.1 UTF-8 validation, and §7.4 close-code
+//! semantics.
+//!
+//! # Role split
+//!
+//! Only four methods differ by role, and only in SIGNATURE (never in the
+//! FSM logic they call into): [`Session::new`]/[`Session::server`] vs
+//! [`ClientSession::client`] (construction needs no entropy — see
+//! below), and [`Session::poll_event`]/[`Session::close`] vs
+//! [`ClientSession::poll_event`]/[`ClientSession::close`] (the CLIENT
+//! forms take a `rng: &mut R` because only a client ever needs to mask
+//! one of ITS OWN auto-generated frames — a PONG echo, a CLOSE echo, or
+//! a protocol-violation CLOSE). Same method names, different
+//! instantiations (`impl Session<false>` vs `impl Session<true>`) — no
+//! naming fork, and every existing SERVER call site (`Session::new()`,
+//! `session.poll_event()`, `session.close(code, reason)`) keeps
+//! compiling unchanged because `Session` (bare) resolves to `Session<false>`
+//! via the defaulted const generic.
+//!
+//! # Entropy (RFC 6455 §5.3)
+//!
+//! "The masking key needs to be unpredictable... derived from a strong
+//! source of entropy." This module never reaches into the OS for that
+//! entropy itself — sans-IO code has no OS to reach into, and even in an
+//! `alloc`+`std` build, owning a concrete CSPRNG here would be a real
+//! dependency this crate doesn't otherwise need (`rand_core` is a
+//! trait-only, zero-dependency, `no_std` crate: it defines `Rng` /
+//! `CryptoRng` but ships no generator). Instead, [`ClientSession::poll_event`]
+//! and [`ClientSession::close`] take `rng: &mut impl CryptoRng + Rng` as a
+//! plain per-call parameter — the exact shape `proxima_protocols::quic`
+//! already uses for the same reason (see `quic::path::PathChallenger::issue`,
+//! `quic::retry_token`'s `issue`): the caller (who has std/getrandom/whatever
+//! its runtime provides) owns and seeds the actual generator; this FSM only
+//! ever calls `rng.fill_bytes` once per call, for at most the one frame that
+//! call might emit. A poll that doesn't end up emitting a frame still draws
+//! one fresh 4-byte key and discards it — a deliberate simplicity trade
+//! (see [`ClientSession::poll_event`]'s doc): the alternative (threading a
+//! key-source object several calls deep so it's only drawn from if-and-when
+//! a reply is actually queued) was prototyped and rejected — it bought
+//! nothing observable (poll_event is a cold, per-FRAME call, not a
+//! per-byte one) for a real increase in plumbing.
 //!
 //! Auto-generated replies (a PONG echo, a CLOSE echo, a CLOSE triggered by
 //! a protocol violation) are control frames, capped at 127 bytes on the
-//! wire (2-byte header + <=125-byte payload per §5.5) — queuing them costs
-//! one small, bounded `Vec` allocation on this COLD path (RFC violations
-//! and keepalive pings are not the hot path; the existing
-//! [`super::encode_header`] signature already takes `&mut Vec<u8>`, so
-//! reusing it as-is here — rather than hand-rolling a second, fixed-buffer
-//! encoder just to dodge one cold-path alloc — is the RISC-reuse answer,
-//! principle 1). The hot path (a complete unfragmented text/binary
-//! message) allocates nothing: [`Event::Message`] borrows the wire buffer
-//! directly.
+//! wire (2-byte header + <=125-byte payload per §5.5, +4 more for a
+//! client's mask key) — queuing them costs one small, bounded `Vec`
+//! allocation on this COLD path (RFC violations and keepalive pings are
+//! not the hot path; the existing [`super::encode_header`] signature
+//! already takes `&mut Vec<u8>`, so reusing it as-is here — rather than
+//! hand-rolling a second, fixed-buffer encoder just to dodge one
+//! cold-path alloc — is the RISC-reuse answer, principle 1). The hot
+//! path (a complete unfragmented text/binary message) allocates nothing:
+//! [`Event::Message`] borrows the wire buffer directly.
+//!
+//! Sending application data (`Text`/`Binary`) is deliberately NOT owned
+//! by [`Session`] for either role — exactly as before this module grew a
+//! client role: a SERVER never masks its own data frames, so it always
+//! could build them directly with [`super::encode_header`]
+//! (`mask: None`); a CLIENT masks every frame it sends, and can build one
+//! directly the same way (`mask: Some(key)`, then [`super::unmask_in_place`]
+//! to apply the mask — its own inverse per §5.3) using ITS OWN entropy at
+//! the point it decides to send, exactly as the tests below do. `Session`'s
+//! job stays "the business rules a bare frame parser can't express";
+//! encoding an outbound application message isn't one of those rules for
+//! either role.
 //!
 //! No timers, no sockets, no async, no runtime symbols anywhere in this
 //! file — a caller on prime, tokio, a bare epoll loop, or a fuzzer drives
@@ -44,6 +108,8 @@
 
 use alloc::vec::Vec;
 use core::str;
+
+use rand_core::{CryptoRng, Rng};
 
 use super::{Opcode, ParseError, encode_header, parse_frame, unmask_in_place};
 
@@ -261,9 +327,12 @@ struct PendingFrame {
     cursor: usize,
 }
 
-/// Sans-IO RFC 6455 WebSocket SERVER session. See the module doc for the
-/// `feed` / `poll_event` / `poll_transmit` driving shape.
-pub struct Session {
+/// Sans-IO RFC 6455 WebSocket session — SERVER role by default
+/// (`IS_CLIENT = false`, the bare `Session` name), CLIENT role via
+/// [`ClientSession`] (`Session<true>`). See the module doc for the
+/// `feed` / `poll_event` / `poll_transmit` driving shape and the
+/// role-split rationale.
+pub struct Session<const IS_CLIENT: bool = false> {
     buffer: Vec<u8>,
     cursor: usize,
     state: SessionState,
@@ -278,20 +347,131 @@ pub struct Session {
     pending_outbound: Option<PendingFrame>,
 }
 
-impl Default for Session {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// A CLIENT-role [`Session`] — masks every frame it emits with a fresh
+/// key (RFC 6455 §5.1/§5.3) and rejects any inbound frame the peer
+/// masks (the mirror of the server's reject-unmasked rule). Everything
+/// else is the identical shared FSM; see the module doc.
+pub type ClientSession = Session<true>;
 
-impl Session {
+// ---- role-specific construction + the two role-specific entry points ----
+
+impl Session<false> {
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(Limits::default())
     }
 
+    /// Alias for [`Session::new`] — reads better at a call site that's
+    /// choosing a role (`Session::server()` next to `ClientSession::client()`).
+    #[must_use]
+    pub fn server() -> Self {
+        Self::new()
+    }
+
     #[must_use]
     pub fn with_limits(limits: Limits) -> Self {
+        Self::new_with_limits(limits)
+    }
+
+    /// Drive the state machine one step: try to turn the buffered,
+    /// unconsumed bytes into one [`Event`]. Call in a loop until
+    /// [`Event::Incomplete`] before feeding more bytes. A server never
+    /// masks its own frames, so — unlike [`ClientSession::poll_event`] —
+    /// this needs no entropy.
+    pub fn poll_event(&mut self) -> Event<'_> {
+        self.poll_event_inner(None)
+    }
+
+    /// Initiate the closing handshake (RFC 6455 §7.1.2). Queues a Close
+    /// frame carrying `code` + `reason` for [`Session::poll_transmit`].
+    /// Returns `false` (no-op) if the session is not `Open`, or if a
+    /// reply is already queued and undrained — the caller drains
+    /// [`Session::poll_transmit`] and retries. Returns `true` once
+    /// queued.
+    #[must_use]
+    pub fn close(&mut self, code: CloseCode, reason: &str) -> bool {
+        self.close_inner(None, code, reason)
+    }
+}
+
+impl Default for Session<false> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Session<true> {
+    #[must_use]
+    pub fn client() -> Self {
+        Self::client_with_limits(Limits::default())
+    }
+
+    /// Named distinctly from [`Session::with_limits`] (rather than
+    /// overloading the same name across `Session<false>`/`Session<true>`)
+    /// because an inherent associated FUNCTION called via the bare
+    /// `Session::` path (no receiver yet to pin the const generic) is
+    /// genuinely ambiguous between two same-named impls until a caller
+    /// forces `IS_CLIENT` some other way — `session.poll_event()` /
+    /// `session.close(..)` don't have this problem (method syntax
+    /// resolves against `session`'s already-concrete type), so only the
+    /// constructors need distinct names.
+    #[must_use]
+    pub fn client_with_limits(limits: Limits) -> Self {
+        Self::new_with_limits(limits)
+    }
+
+    /// Fresh, unpredictable RFC 6455 §5.3 masking key drawn from a
+    /// caller-supplied CSPRNG — the only place this module ever touches
+    /// entropy directly. `R: CryptoRng + Rng` is the same bound
+    /// `quic::path::PathChallenger::issue` and `quic::retry_token::issue`
+    /// already use for the identical reason (see the module doc's
+    /// "Entropy" section): `rand_core` defines the traits, the CALLER
+    /// owns the concrete generator.
+    fn fresh_mask_key<R: CryptoRng + Rng>(rng: &mut R) -> [u8; 4] {
+        let mut key = [0_u8; 4];
+        rng.fill_bytes(&mut key);
+        key
+    }
+
+    /// Drive the state machine one step; see [`Session::poll_event`]'s
+    /// doc for the general shape. `rng` sources a FRESH key for the one
+    /// frame (at most) this call might emit on the caller's behalf — a
+    /// PONG echo, a CLOSE echo, or a protocol-violation CLOSE — even
+    /// when this call ends up emitting nothing (the common case), one
+    /// `fill_bytes` call's worth of entropy is drawn and discarded: see
+    /// the module doc's "Entropy" section for why that trade is made
+    /// instead of threading a lazily-invoked key source several calls
+    /// deep.
+    pub fn poll_event<R: CryptoRng + Rng>(&mut self, rng: &mut R) -> Event<'_> {
+        let mask_key = Self::fresh_mask_key(rng);
+        self.poll_event_inner(Some(mask_key))
+    }
+
+    /// Initiate the closing handshake (RFC 6455 §7.1.2); see
+    /// [`Session::close`]'s doc. `rng` sources the fresh key masking the
+    /// queued Close frame.
+    #[must_use]
+    pub fn close<R: CryptoRng + Rng>(
+        &mut self,
+        rng: &mut R,
+        code: CloseCode,
+        reason: &str,
+    ) -> bool {
+        let mask_key = Self::fresh_mask_key(rng);
+        self.close_inner(Some(mask_key), code, reason)
+    }
+}
+
+impl Default for Session<true> {
+    fn default() -> Self {
+        Self::client()
+    }
+}
+
+// ---- shared FSM: identical for both roles ----
+
+impl<const IS_CLIENT: bool> Session<IS_CLIENT> {
+    fn new_with_limits(limits: Limits) -> Self {
         Self {
             buffer: Vec::new(),
             cursor: 0,
@@ -317,55 +497,6 @@ impl Session {
         self.state == SessionState::Closed
     }
 
-    /// Drive the state machine one step: try to turn the buffered,
-    /// unconsumed bytes into one [`Event`]. Call in a loop until
-    /// [`Event::Incomplete`] before feeding more bytes.
-    pub fn poll_event(&mut self) -> Event<'_> {
-        self.compact();
-        if self.pending_outbound.is_some() || self.state == SessionState::Closed {
-            return Event::Incomplete;
-        }
-        match parse_frame(&self.buffer[self.cursor..]) {
-            // Extracted into plain `Copy` locals (not passed as `&Frame`)
-            // before any further call: `frame`/`used` borrow `self.buffer`
-            // immutably, and every step below needs `&mut self` —
-            // holding a `Frame` across that would conflict.
-            Ok((frame, used)) => {
-                let fin = frame.fin;
-                let opcode = frame.opcode;
-                let mask = frame.mask;
-                let payload_len = frame.payload.len();
-                self.on_parsed(fin, opcode, mask, payload_len, used)
-            }
-            Err(ParseError::Short) => Event::Incomplete,
-            Err(ParseError::PartialPayload(declared_len)) => {
-                if declared_len > self.limits.max_frame_bytes as u64 {
-                    self.fail(
-                        CloseCode::MessageTooBig,
-                        "frame payload exceeds max_frame_bytes",
-                    )
-                } else {
-                    Event::Incomplete
-                }
-            }
-            Err(ParseError::PayloadTooLarge(_)) => self.fail(
-                CloseCode::MessageTooBig,
-                "declared payload length exceeds platform usize",
-            ),
-            Err(ParseError::ReservedBits) => self.fail(
-                CloseCode::ProtocolError,
-                "reserved bits set with no negotiated extension",
-            ),
-            Err(ParseError::UnknownOpcode(_)) => {
-                self.fail(CloseCode::ProtocolError, "unknown opcode")
-            }
-            Err(ParseError::OversizedControl(_)) => self.fail(
-                CloseCode::ProtocolError,
-                "control frame payload exceeds 125 bytes",
-            ),
-        }
-    }
-
     /// Drain up to `buf.len()` bytes of a queued outbound reply (an
     /// automatic PONG, a CLOSE echo, or a CLOSE this session initiated
     /// via [`Session::close`] or a protocol violation). `None` once
@@ -387,25 +518,6 @@ impl Session {
         Some(count)
     }
 
-    /// Initiate the closing handshake (RFC 6455 §7.1.2). Queues a Close
-    /// frame carrying `code` + `reason` for [`Session::poll_transmit`].
-    /// Returns `false` (no-op) if the session is not `Open`, or if a
-    /// reply is already queued and undrained — the caller drains
-    /// [`Session::poll_transmit`] and retries. Returns `true` once
-    /// queued.
-    #[must_use]
-    pub fn close(&mut self, code: CloseCode, reason: &str) -> bool {
-        if self.state != SessionState::Open || self.pending_outbound.is_some() {
-            return false;
-        }
-        let mut payload = Vec::with_capacity(2 + reason.len());
-        payload.extend_from_slice(&code.as_u16().to_be_bytes());
-        payload.extend_from_slice(reason.as_bytes());
-        self.queue_outbound(Opcode::Close, &payload);
-        self.state = SessionState::Closing;
-        true
-    }
-
     /// Drop the already-consumed prefix of the wire buffer. Safe to call
     /// at the top of `poll_event` (rather than right after consuming a
     /// frame) because any borrow the PREVIOUS `poll_event` call returned
@@ -420,6 +532,80 @@ impl Session {
         }
     }
 
+    /// Shared body behind [`Session::poll_event`] /
+    /// [`ClientSession::poll_event`]. `reply_mask_key` is the fresh key
+    /// this call's role-specific wrapper already drew (client) or `None`
+    /// (server, drew nothing) — a plain `Copy` value threaded straight
+    /// through, not a source object: at most one frame is emitted per
+    /// call (see the module doc), so one pre-drawn key always suffices.
+    fn poll_event_inner(&mut self, reply_mask_key: Option<[u8; 4]>) -> Event<'_> {
+        self.compact();
+        if self.pending_outbound.is_some() || self.state == SessionState::Closed {
+            return Event::Incomplete;
+        }
+        match parse_frame(&self.buffer[self.cursor..]) {
+            // Extracted into plain `Copy` locals (not passed as `&Frame`)
+            // before any further call: `frame`/`used` borrow `self.buffer`
+            // immutably, and every step below needs `&mut self` —
+            // holding a `Frame` across that would conflict.
+            Ok((frame, used)) => {
+                let fin = frame.fin;
+                let opcode = frame.opcode;
+                let mask = frame.mask;
+                let payload_len = frame.payload.len();
+                self.on_parsed(fin, opcode, mask, payload_len, used, reply_mask_key)
+            }
+            Err(ParseError::Short) => Event::Incomplete,
+            Err(ParseError::PartialPayload(declared_len)) => {
+                if declared_len > self.limits.max_frame_bytes as u64 {
+                    self.fail(
+                        reply_mask_key,
+                        CloseCode::MessageTooBig,
+                        "frame payload exceeds max_frame_bytes",
+                    )
+                } else {
+                    Event::Incomplete
+                }
+            }
+            Err(ParseError::PayloadTooLarge(_)) => self.fail(
+                reply_mask_key,
+                CloseCode::MessageTooBig,
+                "declared payload length exceeds platform usize",
+            ),
+            Err(ParseError::ReservedBits) => self.fail(
+                reply_mask_key,
+                CloseCode::ProtocolError,
+                "reserved bits set with no negotiated extension",
+            ),
+            Err(ParseError::UnknownOpcode(_)) => {
+                self.fail(reply_mask_key, CloseCode::ProtocolError, "unknown opcode")
+            }
+            Err(ParseError::OversizedControl(_)) => self.fail(
+                reply_mask_key,
+                CloseCode::ProtocolError,
+                "control frame payload exceeds 125 bytes",
+            ),
+        }
+    }
+
+    /// Shared body behind [`Session::close`] / [`ClientSession::close`].
+    fn close_inner(
+        &mut self,
+        reply_mask_key: Option<[u8; 4]>,
+        code: CloseCode,
+        reason: &str,
+    ) -> bool {
+        if self.state != SessionState::Open || self.pending_outbound.is_some() {
+            return false;
+        }
+        let mut payload = Vec::with_capacity(2 + reason.len());
+        payload.extend_from_slice(&code.as_u16().to_be_bytes());
+        payload.extend_from_slice(reason.as_bytes());
+        self.queue_outbound(reply_mask_key, Opcode::Close, &payload);
+        self.state = SessionState::Closing;
+        true
+    }
+
     fn on_parsed(
         &mut self,
         fin: bool,
@@ -427,42 +613,78 @@ impl Session {
         mask: Option<[u8; 4]>,
         payload_len: usize,
         used: usize,
+        reply_mask_key: Option<[u8; 4]>,
     ) -> Event<'_> {
         let frame_start = self.cursor;
         let payload_start = frame_start + (used - payload_len);
         let payload_end = frame_start + used;
         self.cursor = frame_start + used;
 
-        let Some(mask_key) = mask else {
-            return self.fail(
-                CloseCode::ProtocolError,
-                "client frame must be masked (RFC 6455 §5.1)",
-            );
-        };
+        // RFC 6455 §5.1: a server MUST reject an unmasked frame; a
+        // client MUST reject a masked one — the SAME rule, mirrored,
+        // decided at compile time per role (`IS_CLIENT` is a const
+        // generic, so this `match` monomorphizes down to one live arm
+        // per instantiation).
+        match (IS_CLIENT, mask) {
+            (false, None) => {
+                return self.fail(
+                    reply_mask_key,
+                    CloseCode::ProtocolError,
+                    "client frame must be masked (RFC 6455 §5.1)",
+                );
+            }
+            (true, Some(_)) => {
+                return self.fail(
+                    reply_mask_key,
+                    CloseCode::ProtocolError,
+                    "server frame must not be masked (RFC 6455 §5.1)",
+                );
+            }
+            _ => {}
+        }
         if payload_len > self.limits.max_frame_bytes {
             return self.fail(
+                reply_mask_key,
                 CloseCode::MessageTooBig,
                 "frame payload exceeds max_frame_bytes",
             );
         }
-        unmask_in_place(&mut self.buffer[payload_start..payload_end], mask_key);
-        self.handle_frame(fin, opcode, payload_start, payload_end)
+        if let Some(mask_key) = mask {
+            unmask_in_place(&mut self.buffer[payload_start..payload_end], mask_key);
+        }
+        self.handle_frame(fin, opcode, payload_start, payload_end, reply_mask_key)
     }
 
-    fn handle_frame(&mut self, fin: bool, opcode: Opcode, start: usize, end: usize) -> Event<'_> {
+    fn handle_frame(
+        &mut self,
+        fin: bool,
+        opcode: Opcode,
+        start: usize,
+        end: usize,
+        reply_mask_key: Option<[u8; 4]>,
+    ) -> Event<'_> {
         match opcode {
-            Opcode::Ping => self.on_ping(fin, start, end),
-            Opcode::Pong => self.on_pong(fin, start, end),
-            Opcode::Close => self.on_close(fin, start, end),
-            Opcode::Text => self.on_data_start(fin, DataOpcode::Text, start, end),
-            Opcode::Binary => self.on_data_start(fin, DataOpcode::Binary, start, end),
-            Opcode::Continuation => self.on_continuation(fin, start, end),
+            Opcode::Ping => self.on_ping(fin, start, end, reply_mask_key),
+            Opcode::Pong => self.on_pong(fin, start, end, reply_mask_key),
+            Opcode::Close => self.on_close(fin, start, end, reply_mask_key),
+            Opcode::Text => self.on_data_start(fin, DataOpcode::Text, start, end, reply_mask_key),
+            Opcode::Binary => {
+                self.on_data_start(fin, DataOpcode::Binary, start, end, reply_mask_key)
+            }
+            Opcode::Continuation => self.on_continuation(fin, start, end, reply_mask_key),
         }
     }
 
-    fn on_ping(&mut self, fin: bool, start: usize, end: usize) -> Event<'_> {
+    fn on_ping(
+        &mut self,
+        fin: bool,
+        start: usize,
+        end: usize,
+        reply_mask_key: Option<[u8; 4]>,
+    ) -> Event<'_> {
         if !fin {
             return self.fail(
+                reply_mask_key,
                 CloseCode::ProtocolError,
                 "control frame must not be fragmented (RFC 6455 §5.5)",
             );
@@ -472,14 +694,21 @@ impl Session {
         // relying on the wire-level distinction between "data" and
         // "control" to justify still replying mid-close.
         if self.state == SessionState::Open {
-            self.queue_outbound_echo(Opcode::Pong, start, end);
+            self.queue_outbound_echo(reply_mask_key, Opcode::Pong, start, end);
         }
         Event::Ping(&self.buffer[start..end])
     }
 
-    fn on_pong(&mut self, fin: bool, start: usize, end: usize) -> Event<'_> {
+    fn on_pong(
+        &mut self,
+        fin: bool,
+        start: usize,
+        end: usize,
+        reply_mask_key: Option<[u8; 4]>,
+    ) -> Event<'_> {
         if !fin {
             return self.fail(
+                reply_mask_key,
                 CloseCode::ProtocolError,
                 "control frame must not be fragmented (RFC 6455 §5.5)",
             );
@@ -487,9 +716,16 @@ impl Session {
         Event::Pong(&self.buffer[start..end])
     }
 
-    fn on_close(&mut self, fin: bool, start: usize, end: usize) -> Event<'_> {
+    fn on_close(
+        &mut self,
+        fin: bool,
+        start: usize,
+        end: usize,
+        reply_mask_key: Option<[u8; 4]>,
+    ) -> Event<'_> {
         if !fin {
             return self.fail(
+                reply_mask_key,
                 CloseCode::ProtocolError,
                 "control frame must not be fragmented (RFC 6455 §5.5)",
             );
@@ -497,6 +733,7 @@ impl Session {
         let len = end - start;
         if len == 1 {
             return self.fail(
+                reply_mask_key,
                 CloseCode::ProtocolError,
                 "close frame payload must be empty or >= 2 bytes",
             );
@@ -506,6 +743,7 @@ impl Session {
             let close_code = CloseCode::from_u16(raw);
             if !close_code.valid_on_wire() {
                 return self.fail(
+                    reply_mask_key,
                     CloseCode::ProtocolError,
                     "close status code is reserved or undefined",
                 );
@@ -516,13 +754,14 @@ impl Session {
         };
         if len > 2 && str::from_utf8(&self.buffer[start + 2..end]).is_err() {
             return self.fail(
+                reply_mask_key,
                 CloseCode::InvalidPayload,
                 "close reason is not valid UTF-8 (RFC 6455 §8.1)",
             );
         }
         let we_already_sent_close = self.state == SessionState::Closing;
         if !we_already_sent_close {
-            self.queue_outbound_echo(Opcode::Close, start, end);
+            self.queue_outbound_echo(reply_mask_key, Opcode::Close, start, end);
         }
         self.state = SessionState::Closed;
         self.reassembly = None;
@@ -540,12 +779,14 @@ impl Session {
         opcode: DataOpcode,
         start: usize,
         end: usize,
+        reply_mask_key: Option<[u8; 4]>,
     ) -> Event<'_> {
         if self.state == SessionState::Closing {
             return Event::Incomplete;
         }
         if self.reassembly.is_some() {
             return self.fail(
+                reply_mask_key,
                 CloseCode::ProtocolError,
                 "data frame started before the previous fragmented message finished (RFC 6455 §5.4)",
             );
@@ -553,12 +794,13 @@ impl Session {
         let payload_len = end - start;
         if payload_len > self.limits.max_message_bytes {
             return self.fail(
+                reply_mask_key,
                 CloseCode::MessageTooBig,
                 "message exceeds max_message_bytes",
             );
         }
         if fin {
-            return self.finish_unfragmented(opcode, start, end);
+            return self.finish_unfragmented(opcode, start, end, reply_mask_key);
         }
         let mut buffer = Vec::with_capacity(payload_len);
         buffer.extend_from_slice(&self.buffer[start..end]);
@@ -566,7 +808,13 @@ impl Session {
         Event::Incomplete
     }
 
-    fn finish_unfragmented(&mut self, opcode: DataOpcode, start: usize, end: usize) -> Event<'_> {
+    fn finish_unfragmented(
+        &mut self,
+        opcode: DataOpcode,
+        start: usize,
+        end: usize,
+        reply_mask_key: Option<[u8; 4]>,
+    ) -> Event<'_> {
         // Validated (and, on failure, `self.fail`'d) BEFORE the borrow
         // that the returned `Event` carries is taken: an arm that both
         // returns `&self.buffer[..]` for one branch's lifetime and calls
@@ -575,6 +823,7 @@ impl Session {
         // scrutinee's borrow region for the whole expression.
         if opcode == DataOpcode::Text && str::from_utf8(&self.buffer[start..end]).is_err() {
             return self.fail(
+                reply_mask_key,
                 CloseCode::InvalidPayload,
                 "text message is not valid UTF-8 (RFC 6455 §8.1)",
             );
@@ -590,12 +839,19 @@ impl Session {
         }
     }
 
-    fn on_continuation(&mut self, fin: bool, start: usize, end: usize) -> Event<'_> {
+    fn on_continuation(
+        &mut self,
+        fin: bool,
+        start: usize,
+        end: usize,
+        reply_mask_key: Option<[u8; 4]>,
+    ) -> Event<'_> {
         if self.state == SessionState::Closing {
             return Event::Incomplete;
         }
         let Some(reassembly) = self.reassembly.as_mut() else {
             return self.fail(
+                reply_mask_key,
                 CloseCode::ProtocolError,
                 "continuation frame with no fragmented message in progress (RFC 6455 §5.4)",
             );
@@ -604,6 +860,7 @@ impl Session {
         if reassembly.buffer.len() + payload_len > self.limits.max_message_bytes {
             self.reassembly = None;
             return self.fail(
+                reply_mask_key,
                 CloseCode::MessageTooBig,
                 "reassembled message exceeds max_message_bytes",
             );
@@ -614,12 +871,13 @@ impl Session {
         if !fin {
             return Event::Incomplete;
         }
-        self.finish_fragmented()
+        self.finish_fragmented(reply_mask_key)
     }
 
-    fn finish_fragmented(&mut self) -> Event<'_> {
+    fn finish_fragmented(&mut self, reply_mask_key: Option<[u8; 4]>) -> Event<'_> {
         let Some(Reassembly { opcode, buffer }) = self.reassembly.take() else {
             return self.fail(
+                reply_mask_key,
                 CloseCode::InternalError,
                 "reassembly state lost between append and completion",
             );
@@ -631,6 +889,7 @@ impl Session {
         if opcode == DataOpcode::Text && str::from_utf8(&buffer).is_err() {
             self.completed_message = buffer;
             return self.fail(
+                reply_mask_key,
                 CloseCode::InvalidPayload,
                 "text message is not valid UTF-8 (RFC 6455 §8.1)",
             );
@@ -647,9 +906,14 @@ impl Session {
     /// Force the session to `Closed` and queue a Close frame carrying
     /// `code`, built fresh (not echoed from the wire buffer) — the
     /// generic path for every RFC-violation termination.
-    fn fail(&mut self, code: CloseCode, reason: &'static str) -> Event<'static> {
+    fn fail(
+        &mut self,
+        reply_mask_key: Option<[u8; 4]>,
+        code: CloseCode,
+        reason: &'static str,
+    ) -> Event<'static> {
         let payload = code.as_u16().to_be_bytes();
-        self.queue_outbound(Opcode::Close, &payload);
+        self.queue_outbound(reply_mask_key, Opcode::Close, &payload);
         self.state = SessionState::Closed;
         self.reassembly = None;
         Event::Closed { code, reason }
@@ -657,11 +921,20 @@ impl Session {
 
     /// Queue an outbound control frame whose payload is caller-owned
     /// (not derived from `self.buffer`) — the general form used by
-    /// [`Session::fail`] and [`Session::close`].
-    fn queue_outbound(&mut self, opcode: Opcode, payload: &[u8]) {
-        let mut bytes = Vec::with_capacity(2 + payload.len());
-        encode_header(true, opcode, payload.len(), None, &mut bytes);
+    /// [`Session::fail`] and [`Session::close`]. `reply_mask_key` is
+    /// `Some` only for a CLIENT session (see [`Session::poll_event_inner`]);
+    /// its presence alone decides whether the frame is masked — this
+    /// function never consults `IS_CLIENT` itself, so it's identical
+    /// machinery for both roles.
+    fn queue_outbound(&mut self, reply_mask_key: Option<[u8; 4]>, opcode: Opcode, payload: &[u8]) {
+        let extra = if reply_mask_key.is_some() { 4 } else { 0 };
+        let mut bytes = Vec::with_capacity(2 + extra + payload.len());
+        encode_header(true, opcode, payload.len(), reply_mask_key, &mut bytes);
+        let payload_offset = bytes.len();
         bytes.extend_from_slice(payload);
+        if let Some(key) = reply_mask_key {
+            unmask_in_place(&mut bytes[payload_offset..], key);
+        }
         self.pending_outbound = Some(PendingFrame { bytes, cursor: 0 });
     }
 
@@ -671,11 +944,22 @@ impl Session {
     /// reads `self.buffer` and writes `self.pending_outbound` in one
     /// method body so the call site never needs to hold a `self.buffer`
     /// borrow across a `&mut self` call.
-    fn queue_outbound_echo(&mut self, opcode: Opcode, start: usize, end: usize) {
+    fn queue_outbound_echo(
+        &mut self,
+        reply_mask_key: Option<[u8; 4]>,
+        opcode: Opcode,
+        start: usize,
+        end: usize,
+    ) {
         let payload_len = end - start;
-        let mut bytes = Vec::with_capacity(2 + payload_len);
-        encode_header(true, opcode, payload_len, None, &mut bytes);
+        let extra = if reply_mask_key.is_some() { 4 } else { 0 };
+        let mut bytes = Vec::with_capacity(2 + extra + payload_len);
+        encode_header(true, opcode, payload_len, reply_mask_key, &mut bytes);
+        let payload_offset = bytes.len();
         bytes.extend_from_slice(&self.buffer[start..end]);
+        if let Some(key) = reply_mask_key {
+            unmask_in_place(&mut bytes[payload_offset..], key);
+        }
         self.pending_outbound = Some(PendingFrame { bytes, cursor: 0 });
     }
 }
@@ -685,7 +969,14 @@ impl Session {
 mod tests {
     use alloc::vec;
 
+    use rand_chacha::ChaCha8Rng;
+    use rand_core::SeedableRng;
+
     use super::*;
+
+    fn deterministic_rng(seed: u64) -> ChaCha8Rng {
+        ChaCha8Rng::seed_from_u64(seed)
+    }
 
     /// Build a CLIENT (masked) wire frame the way a conformant client
     /// encoder would — reuses the exact primitives `Session` itself is
@@ -701,8 +992,18 @@ mod tests {
         buf
     }
 
+    /// Build a SERVER (unmasked) wire frame — the counterpart to
+    /// `client_frame`, used by the client-role tests below to simulate
+    /// bytes arriving FROM a server.
+    fn server_frame(opcode: Opcode, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        encode_header(true, opcode, payload.len(), None, &mut buf);
+        buf.extend_from_slice(payload);
+        buf
+    }
+
     /// Drain every byte `Session::poll_transmit` currently has queued.
-    fn drain_transmit(session: &mut Session) -> Vec<u8> {
+    fn drain_transmit<const IS_CLIENT: bool>(session: &mut Session<IS_CLIENT>) -> Vec<u8> {
         let mut out = Vec::new();
         let mut scratch = [0_u8; 256];
         while let Some(count) = session.poll_transmit(&mut scratch) {
@@ -714,14 +1015,25 @@ mod tests {
         out
     }
 
-    /// A server frame (what `Session` itself emits) must never carry the
-    /// mask bit — RFC 6455 §5.1: "a server MUST NOT mask any frames."
+    /// A server frame (what a SERVER `Session` emits) must never carry
+    /// the mask bit — RFC 6455 §5.1: "a server MUST NOT mask any frames."
     fn assert_unmasked_server_frame(bytes: &[u8]) {
         assert!(!bytes.is_empty(), "empty server frame");
         assert_eq!(
             bytes[1] & 0x80,
             0,
             "server frame must not set the MASK bit: {bytes:?}"
+        );
+    }
+
+    /// A client frame (what a CLIENT `Session` emits) must always carry
+    /// the mask bit — RFC 6455 §5.1: "a client MUST mask all frames."
+    fn assert_masked_client_frame(bytes: &[u8]) {
+        assert!(!bytes.is_empty(), "empty client frame");
+        assert_eq!(
+            bytes[1] & 0x80,
+            0x80,
+            "client frame must set the MASK bit: {bytes:?}"
         );
     }
 
@@ -1234,5 +1546,228 @@ mod tests {
                 "{legal} must be valid on the wire"
             );
         }
+    }
+
+    // ---- CLIENT role: RFC 6455 §5.7 byte-exact encode oracle -----------
+
+    #[test]
+    fn client_encodes_rfc6455_section_5_7_masked_hello_byte_exact() {
+        // The RFC's own vector, from the CLIENT's perspective: encoding
+        // "Hello" with the mask key forced to 0x37fa213d must reproduce
+        // these exact bytes. `ClientSession::fresh_mask_key` (the real
+        // production entropy draw) is exercised here with a forced-key
+        // fake RNG so the test proves OUR encoder, not a hand-rolled
+        // stand-in for it.
+        let wire = [
+            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ];
+        let mut forced = ForcedKeyRng([0x37, 0xfa, 0x21, 0x3d]);
+        let key = ClientSession::fresh_mask_key(&mut forced);
+        assert_eq!(key, [0x37, 0xfa, 0x21, 0x3d]);
+
+        let mut encoded = Vec::new();
+        encode_header(true, Opcode::Text, 5, Some(key), &mut encoded);
+        let mut payload = b"Hello".to_vec();
+        unmask_in_place(&mut payload, key);
+        encoded.extend_from_slice(&payload);
+
+        assert_eq!(
+            encoded, wire,
+            "client encoder must byte-match RFC 6455 §5.7's worked example"
+        );
+    }
+
+    /// A minimal `CryptoRng + Rng` whose `fill_bytes` always yields the
+    /// same forced 4 bytes — deterministic-on-purpose so the byte-exact
+    /// oracle test above can force the RFC vector's own key. Test-only:
+    /// never used to argue that a fixed key is acceptable in production
+    /// (see the module doc's "Entropy" section — production callers pass
+    /// a real CSPRNG like `ChaCha8Rng` below).
+    struct ForcedKeyRng([u8; 4]);
+
+    impl rand_core::TryRng for ForcedKeyRng {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(u32::from_be_bytes(self.0))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(u64::from(u32::from_be_bytes(self.0)))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for (index, byte) in dst.iter_mut().enumerate() {
+                *byte = self.0[index % 4];
+            }
+            Ok(())
+        }
+    }
+
+    impl rand_core::TryCryptoRng for ForcedKeyRng {}
+
+    // ---- CLIENT role: masking enforcement (RFC 6455 §5.1 mirror) -------
+
+    #[test]
+    fn client_rejects_a_masked_frame_from_the_server() {
+        // A malicious or buggy SERVER sending a MASKED frame — the
+        // mirror of `unmasked_client_frame_is_rejected_with_protocol_error`:
+        // RFC 6455 §5.1 "a server MUST NOT mask any frames," so a
+        // conformant client rejects one that does.
+        let wire = client_frame(true, Opcode::Text, b"Hello", [1, 2, 3, 4]);
+
+        let mut rng = deterministic_rng(1);
+        let mut session = ClientSession::client();
+        session.feed(&wire);
+        match session.poll_event(&mut rng) {
+            Event::Closed {
+                code: CloseCode::ProtocolError,
+                ..
+            } => {}
+            other => panic!("expected Closed(ProtocolError), got {other:?}"),
+        }
+        assert!(session.is_closed());
+        // Even the rejection's own CLOSE frame must be masked — it's the
+        // client's own outbound frame.
+        assert_masked_client_frame(&drain_transmit(&mut session));
+    }
+
+    #[test]
+    fn client_accepts_unmasked_frames_from_the_server() {
+        let wire = server_frame(Opcode::Text, b"hello client");
+        let mut rng = deterministic_rng(2);
+        let mut session = ClientSession::client();
+        session.feed(&wire);
+        match session.poll_event(&mut rng) {
+            Event::Message(Message::Text(text)) => assert_eq!(text, "hello client"),
+            other => panic!("expected Message(Text), got {other:?}"),
+        }
+    }
+
+    // ---- CLIENT role: every outbound frame is masked, fresh key each time ---
+
+    #[test]
+    fn client_auto_pong_reply_is_masked_with_a_fresh_key_each_time() {
+        let mut rng = deterministic_rng(42);
+        let mut session = ClientSession::client();
+        let ping = server_frame(Opcode::Ping, b"hi");
+
+        session.feed(&ping);
+        let _ = session.poll_event(&mut rng);
+        let reply_one = drain_transmit(&mut session);
+        assert_masked_client_frame(&reply_one);
+
+        session.feed(&ping);
+        let _ = session.poll_event(&mut rng);
+        let reply_two = drain_transmit(&mut session);
+        assert_masked_client_frame(&reply_two);
+
+        assert_ne!(
+            reply_one, reply_two,
+            "a fresh key per frame must change the wire bytes for identical plaintext"
+        );
+        // Masked payload differs from plaintext (both wire frames' last
+        // 2 bytes decode to "hi" once unmasked, but on the wire neither
+        // equals the plaintext bytes directly).
+        assert_ne!(&reply_one[reply_one.len() - 2..], b"hi");
+        assert_ne!(&reply_two[reply_two.len() - 2..], b"hi");
+    }
+
+    #[test]
+    fn client_initiated_close_is_masked() {
+        let mut rng = deterministic_rng(9);
+        let mut session = ClientSession::client();
+        assert!(session.close(&mut rng, CloseCode::Normal, "bye"));
+        let sent = drain_transmit(&mut session);
+        assert_masked_client_frame(&sent);
+    }
+
+    // ---- CLIENT <-> SERVER loopback: the strongest correctness proof ---
+
+    #[test]
+    fn client_and_server_sessions_loop_back_every_message_shape() {
+        let mut rng = deterministic_rng(7);
+        let mut client = ClientSession::client();
+        let mut server = Session::server();
+
+        // client -> server: a plain text message.
+        server.feed(&client_frame(
+            true,
+            Opcode::Text,
+            b"hi server",
+            ClientSession::fresh_mask_key(&mut rng),
+        ));
+        match server.poll_event() {
+            Event::Message(Message::Text(text)) => assert_eq!(text, "hi server"),
+            other => panic!("expected Message(Text), got {other:?}"),
+        }
+
+        // server -> client: a plain text message.
+        client.feed(&server_frame(Opcode::Text, b"hi client"));
+        match client.poll_event(&mut rng) {
+            Event::Message(Message::Text(text)) => assert_eq!(text, "hi client"),
+            other => panic!("expected Message(Text), got {other:?}"),
+        }
+
+        // client -> server: a fragmented text message ("Hel" + "lo").
+        server.feed(&client_frame(
+            false,
+            Opcode::Text,
+            b"Hel",
+            ClientSession::fresh_mask_key(&mut rng),
+        ));
+        assert!(matches!(server.poll_event(), Event::Incomplete));
+        server.feed(&client_frame(
+            true,
+            Opcode::Continuation,
+            b"lo",
+            ClientSession::fresh_mask_key(&mut rng),
+        ));
+        match server.poll_event() {
+            Event::Message(Message::Text(text)) => assert_eq!(text, "Hello"),
+            other => panic!("expected Message(Text(\"Hello\")), got {other:?}"),
+        }
+
+        // server -> client: PING, client auto-replies masked PONG, fed
+        // straight back into the server, which reports the PONG event.
+        client.feed(&server_frame(Opcode::Ping, b"hi"));
+        match client.poll_event(&mut rng) {
+            Event::Ping(payload) => assert_eq!(payload, b"hi"),
+            other => panic!("expected Event::Ping, got {other:?}"),
+        }
+        let pong_reply = drain_transmit(&mut client);
+        assert_masked_client_frame(&pong_reply);
+        server.feed(&pong_reply);
+        match server.poll_event() {
+            Event::Pong(payload) => assert_eq!(payload, b"hi"),
+            other => panic!("expected Event::Pong, got {other:?}"),
+        }
+
+        // Closing handshake, initiated by the client: client's masked
+        // CLOSE -> server echoes (unmasked) -> client observes Closed.
+        assert!(client.close(&mut rng, CloseCode::Normal, "bye"));
+        let close_wire = drain_transmit(&mut client);
+        assert_masked_client_frame(&close_wire);
+        server.feed(&close_wire);
+        match server.poll_event() {
+            Event::Closed {
+                code: CloseCode::Normal,
+                reason,
+            } => assert_eq!(reason, "bye"),
+            other => panic!("expected Closed(Normal, \"bye\"), got {other:?}"),
+        }
+        assert!(server.is_closed());
+
+        let server_echo = drain_transmit(&mut server);
+        assert_unmasked_server_frame(&server_echo);
+        client.feed(&server_echo);
+        match client.poll_event(&mut rng) {
+            Event::Closed {
+                code: CloseCode::Normal,
+                ..
+            } => {}
+            other => panic!("expected Closed(Normal), got {other:?}"),
+        }
+        assert!(client.is_closed());
     }
 }
