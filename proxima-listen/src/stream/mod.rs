@@ -368,11 +368,13 @@ mod tests {
 pub mod default_listener;
 pub use default_listener::StreamListenProtocol;
 
-// `ConnTransform` bakes `TokioTcpConnection` directly into its public
-// signature (a real API-shape dependency, not just an accept-loop detail
-// like `default_listener`/`StreamListenerProtocol` above) — gated on
-// `tokio` rather than generalized, since generalizing it changes the
-// public type and is out of scope for this migration.
+// `FramedListenProtocol`'s own bind/accept loop stays tokio-only (module
+// gated below) — but `ConnTransform`'s signature is generalized to the
+// agnostic `Box<dyn StreamConnection>` (proxima-primitives/src/stream/mod.rs),
+// not the concrete `TokioTcpConnection`: the closure already returns a
+// generic `dyn StreamConnection`, so the input's concreteness was load-bearing
+// only at the type level, never the logic, and a framed listener over any
+// backend's accepted connection can install a transform without naming tokio.
 #[cfg(feature = "tokio")]
 pub mod framed_listener;
 #[cfg(feature = "tokio")]
