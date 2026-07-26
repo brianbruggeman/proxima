@@ -130,4 +130,36 @@ mod tests {
         assert_eq!(&received.data[..], b"ping");
         assert_eq!(received.src, client_addr);
     }
+
+    /// round-trip through the `PacketListenerFactory` seam itself (not
+    /// `TokioUdpListener::bind`/`bind_sync` directly) — proves the `bind()`
+    /// method `RuntimeSelection::tokio()` actually wires up works end to
+    /// end, which nothing exercised before this test.
+    #[proxima::test]
+    async fn factory_binds_and_round_trips_a_datagram() {
+        use crate::packet::PacketListenerFactory;
+
+        let factory = TokioPacketListenerFactory;
+        let server = factory
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind server");
+        let server_addr = server.local_addr().expect("server addr");
+
+        let client = factory
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind client");
+        let client_addr = client.local_addr().expect("client addr");
+
+        let outgoing = Packet {
+            src: server_addr,
+            dst: client_addr,
+            data: Bytes::from_static(b"ping"),
+        };
+        client.send(&outgoing).await.expect("send");
+
+        let mut buf = vec![0_u8; 1500];
+        let received = server.recv(&mut buf).await.expect("recv");
+        assert_eq!(&received.data[..], b"ping");
+        assert_eq!(received.src, client_addr);
+    }
 }

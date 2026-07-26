@@ -1,6 +1,8 @@
 // one binary instead of thirty avoids linking the whole workspace thirty times.
 #[path = "e2e/agnostic_http_spread.rs"]
 mod agnostic_http_spread;
+#[path = "e2e/datagram_factory_runtime_parity.rs"]
+mod datagram_factory_runtime_parity;
 #[path = "e2e/end_to_end.rs"]
 mod end_to_end;
 #[path = "e2e/example_nginx_multi_smoke.rs"]

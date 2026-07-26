@@ -237,4 +237,64 @@ mod tests {
             "oversized datagram must be truncated to the receiver's buffer length"
         );
     }
+
+    /// round-trip through the `PacketListenerFactory` seam itself (not
+    /// `PrimeUdpListener::bind` directly) — proves the `bind()` method
+    /// `RuntimeSelection::prime()` actually wires up works end to end,
+    /// which nothing exercised before this test.
+    #[test]
+    fn prime_packet_listener_factory_binds_and_round_trips_a_datagram() {
+        use crate::packet::PacketListenerFactory;
+
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let result_chan: ReceivedDatagram = Arc::new(std::sync::Mutex::new(None));
+        let result_for_factory = result_chan.clone();
+
+        handle
+            .dispatch_factory(Box::new(move || {
+                let done = done_clone.clone();
+                let result_handle = result_for_factory.clone();
+                Box::pin(async move {
+                    let factory = PrimePacketListenerFactory;
+                    let server = factory
+                        .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                        .expect("bind server");
+                    let server_addr = server.local_addr().expect("server addr");
+
+                    let client = factory
+                        .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                        .expect("bind client");
+                    let client_addr = client.local_addr().expect("client addr");
+
+                    let outgoing = Packet {
+                        src: server_addr,
+                        dst: client_addr,
+                        data: Bytes::from_static(b"ping"),
+                    };
+                    client.send(&outgoing).await.expect("send");
+
+                    let mut buf = vec![0_u8; 1500];
+                    let received = server.recv(&mut buf).await.expect("recv");
+                    *result_handle.lock().unwrap() = Some((received.data.to_vec(), received.src));
+                    done.store(true, Ordering::Release);
+                }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch_factory");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "packet listener factory round-trip never completed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        handle.shutdown_and_join().expect("shutdown");
+
+        let (data, _src) = result_chan.lock().unwrap().clone().expect("result not set");
+        assert_eq!(&data[..], b"ping");
+    }
 }

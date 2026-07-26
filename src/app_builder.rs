@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use conflaguration::Validate;
 
 use crate::app::App;
 use crate::codec_factory::{
@@ -382,6 +383,17 @@ impl AppBuilder {
                 .transpose()?
                 .flatten(),
         };
+        // `from_prime`/`from_tokio`/config resolution always produce a
+        // matched selection, so this only ever fires for a hand-assembled
+        // `RuntimeSelection` struct literal (every field is `pub`) whose
+        // `datagram_factory` names a different backend than `runtime` does
+        // — catch it here, with a named error, instead of at the first
+        // opaque poll failure deep inside the wrong reactor.
+        if let Some(selection) = &runtime_selection {
+            selection
+                .validate()
+                .map_err(|err| ProximaError::Config(err.to_string()))?;
+        }
         App::with_components(
             load_context,
             listen_registry,
@@ -595,6 +607,110 @@ mod tests {
         assert!(
             app.acceptor_factory().is_some(),
             "AppBuilder::build must install the default acceptor factory"
+        );
+    }
+
+    // `.runtime(selection)` is documented as the "mismatch-proof" value
+    // surface, but every `RuntimeSelection` field is `pub` — a caller can
+    // still hand-assemble one whose `datagram_factory` names a different
+    // backend than `runtime`/`backend` do. Proves `.build()` catches that
+    // BEFORE it ever reaches an `App` (and well before the opaque failure
+    // that would otherwise surface at the first datagram poll).
+    //
+    // `PrimeAcceptorFactory` needs `proxima_net::prime`, which is
+    // `target_os`-gated (see that module's own `#[cfg]`) — matches the
+    // gate on `app_builder_build_installs_runtime` just above.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[proxima::test]
+    async fn build_rejects_a_hand_assembled_selection_with_a_mismatched_datagram_factory() {
+        use crate::runtime::{RuntimeBackend, RuntimeSelection};
+        use proxima_primitives::stream::{DatagramFactory, DatagramSocket};
+        use proxima_runtime::{BackgroundHandle, CoreId, Runtime, SpawnError};
+
+        struct FakeDatagramFactory;
+        impl DatagramFactory for FakeDatagramFactory {
+            fn bind(&self, _addr: std::net::SocketAddr) -> std::io::Result<Box<dyn DatagramSocket>> {
+                Err(std::io::Error::other("fake factory never actually binds"))
+            }
+
+            fn backend_name(&self) -> &'static str {
+                "fake-backend"
+            }
+        }
+
+        // `validate()` must reject the selection before `App::with_components`
+        // ever touches it, so every method here is unreachable if the test
+        // is doing its job.
+        struct UnreachableRuntime;
+        impl Runtime for UnreachableRuntime {
+            fn spawn_on_current_core(&self, _future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
+                unreachable!("validate() must reject the selection before anything spawns")
+            }
+
+            fn spawn_on_core(
+                &self,
+                _core_id: CoreId,
+                _future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+            ) -> Result<(), SpawnError> {
+                unreachable!()
+            }
+
+            fn spawn_factory_on_core(
+                &self,
+                _core_id: CoreId,
+                _factory: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+            ) -> Result<(), SpawnError> {
+                unreachable!()
+            }
+
+            fn spawn_background_blocking(
+                &self,
+                _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
+            ) -> BackgroundHandle<Box<dyn std::any::Any + Send>> {
+                unreachable!()
+            }
+
+            fn timer_at(
+                &self,
+                _deadline: std::time::Instant,
+            ) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+                unreachable!()
+            }
+
+            fn num_cores(&self) -> usize {
+                1
+            }
+
+            fn current_core(&self) -> CoreId {
+                CoreId(0)
+            }
+        }
+
+        let selection = RuntimeSelection {
+            backend: RuntimeBackend::Prime,
+            runtime: Arc::new(UnreachableRuntime),
+            acceptor_factory: Arc::new(proxima_net::prime::PrimeAcceptorFactory),
+            datagram_factory: Some(Arc::new(FakeDatagramFactory)),
+            unix_upstream_factory: None,
+            packet_listener_factory: None,
+        };
+
+        let outcome = AppBuilder::new().runtime(selection).build();
+        // `App` has no `Debug` impl, so `expect_err`/`unwrap_err` (which
+        // would print the `Ok` value on the panic path) don't apply here.
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("mismatched datagram factory must fail build(), but it succeeded"),
+        };
+        assert!(
+            matches!(error, ProximaError::Config(_)),
+            "expected a Config error naming the mismatch, got: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("fake-backend datagram factory requires a fake-backend runtime")
+                && message.contains("got prime"),
+            "error must name both the factory's backend and the selection's: {message}"
         );
     }
 
