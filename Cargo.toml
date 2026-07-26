@@ -1909,6 +1909,14 @@ required-features = ["test-prime", "http-prime", "runtime-prime-executor", "runt
 name = "otlp_grpc_prime_e2e"
 required-features = ["test-prime", "otlp-grpc", "http-prime", "runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "tcp"]
 
+# regression guard for the `init_tracing`/`init_tracing_default` silent-failure
+# trap: proves the surviving console-logging init entry point actually emits
+# a record, so a future "returns Ok and does nothing" init helper cannot land
+# unnoticed.
+[[test]]
+name = "console_logging_regression"
+required-features = ["tracing-init"]
+
 # proxima::sync vs tokio::sync — primitive-level shootout (Phase E.0/E.2/E.5)
 # and home-turf retrofits (Phase E.HT). All require the sync-wrappers feature
 # since they exercise `proxima::sync::*` and `proxima::time::*` surfaces.
