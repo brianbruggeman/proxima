@@ -609,34 +609,42 @@ tokio = [
     "proxima-test/test-prime-tokio-compat",
 ]
 
-# Tokio-free — `proxima-listen`'s `stream` module (`StreamListenProtocol`)
-# already carries a factory-injected accept loop (`serve_via_factory`) that
-# never touches tokio, and `proxima_net::prime::{PrimeAcceptorFactory,
-# PrimeTcpConnection, PrimeTcpUpstream}` is the runtime `default_runtime`
-# (`src/app.rs`/`src/runtime.rs`) installs out of the box — so plain TCP
-# listening/dialing needs no tokio at all. `serve-prime` supplies that
-# runtime standalone under `--no-default-features` (same reasoning as
-# `h3-native-upstream`). The legacy tokio-native listener/upstream impls
-# (`listeners::tokio_stream`/`upstreams::tokio_stream`) stay reachable, but
-# only under the separate `tokio` feature now — see `tokio-runtime`'s doc.
-tcp = ["tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std", "serve-prime"]
-# Still tokio-only: `prime::os::net::{UnixListener, UnixStream}` and
-# `proxima_net::prime::{PrimeUnixListener, PrimeUnixUpstream}`
-# (`StreamListener`/`StreamUpstream` impls, mirroring the TCP prime
-# backend) now exist, but nothing wires this `unix` feature or the
-# `src/listeners`/`src/upstreams` registration sites onto them yet —
-# that's the remaining gap, authoring the registration seam, not a
-# missing primitive (2026-07-25 audit note superseded same day by
-# feat/prime-unix-udp-backends; registration wiring still open).
-unix = ["tokio", "tokio-runtime", "proxima-listen/stream"]
+# Runtime-agnostic: `proxima-listen`'s `stream` module
+# (`StreamListenProtocol`) already carries a factory-injected accept loop
+# (`serve_via_factory`) that never names a backend — the acceptor comes from
+# whichever `RuntimeSelection`/`default_runtime` resolved to (prime by
+# default, tokio when explicitly selected). `tcp` itself names no runtime
+# any more (C3) — a build needs `serve-prime` and/or `tokio` linked
+# SEPARATELY (by the consumer, not this feature) for a backend to actually
+# be present; `serve_via_factory` errors cleanly, not a compile failure, if
+# neither is. The legacy tokio-native listener/upstream impls
+# (`listeners::tokio_stream`/`upstreams::tokio_stream`) stay reachable under
+# the separate `tokio` feature, same as before.
+tcp = ["proxima-listen/stream", "proxima-protocols/json_framing-std"]
+# Runtime-agnostic (C2/C3): `proxima_net::prime::{PrimeUnixListener,
+# PrimeUnixUpstream, PrimeUnixUpstreamFactory}` and
+# `proxima_net::tokio::{TokioUnixListener, TokioUnixUpstream,
+# TokioUnixUpstreamFactory}` both exist and are wired through
+# `upstreams::stream_passthrough::build_unix_stream_passthrough`, which
+# picks the backend from the installed `RuntimeSelection` (or the compiled
+# default when none is installed). `unix` itself names no runtime any more
+# — a build needs `serve-prime` (prime unix bundle:
+# `runtime-prime-inbox-alloc` on linux/macos) and/or `tokio` linked
+# SEPARATELY for a backend to actually be present.
+unix = ["proxima-listen/stream"]
 # Still tokio-only: `proxima_http::websocket::{WebSocketListener,
 # WebSocketUpstream}` are hardcoded to `tokio::net::TcpListener` /
 # `async_tungstenite::tokio::connect_async` with no `AcceptorFactory`
 # seam at all (unlike `tcp`'s `StreamListenProtocol`, which already had
 # the factory-injection point built in before this pass). Making this
 # prime-native means authoring that seam — new engineering, not a
-# cfg-gating fix — so it stays on `tokio` (2026-07-25 audit, see `unix`).
-websocket = ["tokio", "tokio-runtime", "tcp", "dep:async-tungstenite", "proxima-http/websocket"]
+# cfg-gating fix (2026-07-25 audit, see `unix`). `websocket` itself names no
+# runtime (C3, bar (a)) — `proxima-http/websocket`'s OWN feature already
+# pulls `dep:tokio` unconditionally, so tokio still lands whenever this
+# feature is enabled; it just isn't named HERE, the same carve-out reasoning
+# as `http1`/`quic`/`http3-quinn-compat` (legacy third-party wrapper, not
+# debt this pass owns).
+websocket = ["tcp", "dep:async-tungstenite", "proxima-http/websocket"]
 # proxima-side outbound WebSocket upstream (P8 in docs/protocol-gap/discipline.md).
 # pulls in the same async-tungstenite the listener uses; client-side handshake +
 # message exchange wrapped in a `Pipe`-compatible upstream. default off.
@@ -831,9 +839,16 @@ quinn-compat = ["quic"]
 # `H3ListenProtocol` / `Http3Upstream` behind `tokio`.
 http3-quinn-compat = ["http3", "tokio", "quic", "proxima-http/http3-quinn-compat", "dep:quinn-proto", "dep:h3", "dep:h3-quinn"]
 
-# packet protocols. tokio is the only backend today; afxdp is linux-only
-# kernel-bypass; dpdk is the skeleton backend (returns Unsupported).
-udp = ["tokio", "tokio-runtime"]
+# packet protocols. Runtime-agnostic (C2/C3): `proxima_net::tokio::TokioUdpListener`
+# and `proxima_net::prime::PrimeUdpListener` both implement `PacketListener`;
+# `RuntimeSelection::packet_listener_factory` picks between them by value.
+# `udp` itself names no runtime — a build needs `tokio` and/or the prime
+# unix-socket bundle (`runtime-prime-inbox-alloc` on linux/macos) linked
+# SEPARATELY for either `PacketListenerFactory` re-export
+# (`src/listeners/mod.rs`) to be reachable. afxdp is linux-only kernel-bypass;
+# dpdk is the skeleton backend (returns Unsupported) — neither rides this
+# feature.
+udp = []
 xdp = ["proxima-net/xdp"]
 dpdk = ["proxima-net/dpdk"]
 tokio-rustls = ["tokio", "dep:tokio-rustls"]
@@ -1636,34 +1651,42 @@ required-features = ["dpdk"]
 # native h3 bench server: OkHandler over H3NativeListenProtocol + prime runtime.
 [[example]]
 name = "bench_server_h3"
-required-features = ["http3", "tracing-init"]
+# `PrimeDatagramFactory` is named directly (not just via `http3`'s own
+# transitive pull) — declared explicitly so `--no-default-features` builds
+# name the runtime themselves, per the umbrella `udp`/`tcp` docs' "the
+# consumer, not the capability feature, names it" rule.
+required-features = ["http3", "tracing-init", "http-prime-deps"]
 
 # `.h2()` through Listener::builder(): native h2c listener + a real
 # H2ClientUpstream round trip, no tokio, no external h2 crate.
 [[example]]
 name = "h2_native_server"
-required-features = ["http2"]
+# names `PrimeTcpUpstream` directly — see `bench_server_h3`'s doc above.
+required-features = ["http2", "http-prime-deps"]
 
 # `.any()`/`.accept(name)` through `Listener::builder()`: one bind that
 # sniffs h1 vs h2, and a second bind hard-pinned to h2 only — same-port vs
 # separate-port, side by side.
 [[example]]
 name = "any_listener"
-required-features = ["http1-native"]
+# names `PrimeTcpUpstream` directly — see `bench_server_h3`'s doc above.
+required-features = ["http1-native", "http-prime-deps"]
 
 # The `.any()` listener grown into a production shape: telemetry,
 # accept/deny/blacklist, request-level admission rendering a real
 # ShedReason on the wire, and same-port vs separate-port.
 [[example]]
 name = "any_listener_production"
-required-features = ["http1-native", "http2"]
+# names `PrimeTcpUpstream` directly — see `bench_server_h3`'s doc above.
+required-features = ["http1-native", "http2", "http-prime-deps"]
 
 # Client-side resilience composed from real primitives (RateLimit,
 # Retry+Backoff over the real TimeClock) around a real H2ClientUpstream —
 # and why FanIn is deliberately NOT used to race a live dial.
 [[example]]
 name = "any_listener_client_resilience"
-required-features = ["http1-native", "http2"]
+# names `PrimeTcpUpstream` directly — see `bench_server_h3`'s doc above.
+required-features = ["http1-native", "http2", "http-prime-deps"]
 
 # Conflaguration as first-class: `.blacklist(config)` driven by a real TOML
 # file (`BlacklistConfig::layered().from_path`), plus the flat-vs-nested
@@ -1791,6 +1814,14 @@ required-features = [
 [[test]]
 name = "websocket_session_prime_e2e"
 required-features = ["websocket-session", "http1-native", "serve-prime", "macros"]
+
+# C2's payoff, proven end-to-end: `RuntimeSelection::prime()`'s bundled
+# `unix_upstream_factory`/`packet_listener_factory` do real unix-socket and
+# UDP I/O with no tokio anywhere in the graph (`unix`/`udp` name no runtime
+# of their own any more — see their Cargo.toml docs).
+[[test]]
+name = "runtime_selection_prime_e2e"
+required-features = ["unix", "udp", "serve-prime", "macros"]
 
 [[test]]
 name = "e2e"

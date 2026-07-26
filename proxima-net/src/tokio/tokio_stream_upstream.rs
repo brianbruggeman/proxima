@@ -14,6 +14,8 @@ use proxima_primitives::stream::StreamUpstream;
 
 #[cfg(unix)]
 use super::tokio_stream_listener::TokioUnixConnection;
+#[cfg(unix)]
+use proxima_primitives::stream::{StreamConnection, UnixUpstreamFactory};
 
 type ConnectFuture<C> = Pin<Box<dyn std::future::Future<Output = io::Result<C>> + Send>>;
 
@@ -131,6 +133,41 @@ impl StreamUpstream for TokioUnixUpstream {
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+/// Type-erases `TokioUnixUpstream::Conn` to `Box<dyn StreamConnection>` —
+/// the tokio sibling of `proxima_net::prime::unix::BoxedPrimeUnixUpstream`.
+/// Same erasure boundary, so `RuntimeSelection` can hold either backend's
+/// unix-upstream factory behind one field.
+#[cfg(unix)]
+struct BoxedTokioUnixUpstream(TokioUnixUpstream);
+
+#[cfg(unix)]
+impl StreamUpstream for BoxedTokioUnixUpstream {
+    type Conn = Box<dyn StreamConnection>;
+
+    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
+        match self.0.poll_connect(cx) {
+            Poll::Ready(Ok(conn)) => Poll::Ready(Ok(Box::new(conn))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// tokio-backed [`UnixUpstreamFactory`] — the runtime-selectable entry
+/// point `RuntimeSelection::tokio()` bundles.
+#[cfg(unix)]
+pub struct TokioUnixUpstreamFactory;
+
+#[cfg(unix)]
+impl UnixUpstreamFactory for TokioUnixUpstreamFactory {
+    fn connect(
+        &self,
+        path: PathBuf,
+    ) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>> {
+        std::sync::Arc::new(BoxedTokioUnixUpstream(TokioUnixUpstream::new(path)))
     }
 }
 

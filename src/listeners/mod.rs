@@ -52,16 +52,25 @@ pub use proxima_quic::stream_listener as quic_stream;
 pub use proxima_http::http1::listener as h1;
 #[cfg(feature = "http3-quinn-compat")]
 pub use proxima_http::http3::listener as h3;
-#[cfg(any(feature = "tcp", feature = "unix"))]
+#[cfg(any(feature = "tcp", feature = "unix", feature = "udp"))]
 pub use proxima_listen::stream as stream_protocol;
 #[cfg(feature = "tcp")]
 pub use proxima_listen::stream::default_listener as stream_default;
-#[cfg(feature = "udp")]
+// `udp` names no runtime of its own (C3 — see the umbrella Cargo.toml's
+// `udp` doc): the tokio-backed `PacketListener` is reachable only when the
+// caller ALSO enables `tokio`; the prime-backed sibling only when the
+// caller's build carries the prime unix-socket bundle. A caller wanting
+// "whichever backend the process selected" without naming either goes
+// through `RuntimeSelection::packet_listener_factory` (`crate::runtime`)
+// instead of either re-export below.
+#[cfg(all(feature = "udp", feature = "tokio"))]
 pub use proxima_net::tokio::tokio_packet;
-// `proxima_net::tokio` only exists under proxima-net's own `tokio` feature
-// (forwarded by this crate's umbrella `tokio` feature) — `tcp`/`unix` alone
-// no longer imply it (`tcp` rides `proxima_net::prime` by default now, via
-// the `serve-prime`-installed `PrimeAcceptorFactory`; see `src/app.rs`).
+#[cfg(all(
+    feature = "udp",
+    feature = "runtime-prime-inbox-alloc",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub use proxima_net::prime::{PrimePacketListenerFactory, PrimeUdpListener};
 #[cfg(feature = "websocket")]
 pub use proxima_http::websocket;
 #[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
@@ -112,7 +121,7 @@ pub use stream_protocol::{StreamListenerProtocol, reader_to_byte_stream};
 pub use stream_protocol::DatagramListenProtocol;
 #[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
 pub use stream_protocol::{ConnTransform, FramedListenProtocol};
-#[cfg(feature = "udp")]
+#[cfg(all(feature = "udp", feature = "tokio"))]
 pub use tokio_packet::TokioUdpListener;
 #[cfg(all(feature = "tcp", feature = "tokio"))]
 pub use tokio_stream::{TokioTcpConnection, TokioTcpListener};

@@ -97,6 +97,18 @@ impl PacketListener for PrimeUdpListener {
     }
 }
 
+/// prime-backed [`PacketListenerFactory`] — the runtime-selectable entry
+/// point `RuntimeSelection::prime()` bundles. `bind` is synchronous (same
+/// contract as `PrimeUdpListener::bind`): must be called from a proxima
+/// worker thread with `CURRENT_REACTOR` live.
+pub struct PrimePacketListenerFactory;
+
+impl crate::packet::PacketListenerFactory for PrimePacketListenerFactory {
+    fn bind(&self, addr: SocketAddr) -> io::Result<std::sync::Arc<dyn PacketListener>> {
+        Ok(std::sync::Arc::new(PrimeUdpListener::bind(addr)?))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

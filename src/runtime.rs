@@ -51,41 +51,131 @@ pub use proxima_runtime::*;
 // independent runtime at `num_cpus::get()`. Two runtimes, contradictory core
 // counts, one process.
 //
-// `install_runtime` publishes the runtime (and its matching acceptor
-// factory) that a `run*` driver actually booted; `App::new()` adopts it
-// via `installed_runtime()` instead of building an independent default.
-// Set-once (a process boots one main): a second call is a no-op — the first
-// runtime installed is the one main's body actually runs on, so it's the
-// only one worth adopting.
-static INSTALLED_RUNTIME: OnceLock<InstalledRuntime> = OnceLock::new();
+// `install_runtime` publishes the `RuntimeSelection` a `run*` driver
+// actually booted; `App::new()` adopts it via `installed_runtime()` instead
+// of building an independent default. Set-once (a process boots one main): a
+// second call is a no-op — the first runtime installed is the one main's
+// body actually runs on, so it's the only one worth adopting.
+static INSTALLED_RUNTIME: OnceLock<RuntimeSelection> = OnceLock::new();
 
-/// A runtime + the acceptor factory that matches its transport (prime pairs
-/// with `PrimeAcceptorFactory`, tokio with `TokioAcceptorFactory`) —
-/// published together so an adopter never ends up with one backend's
-/// runtime and another's acceptor. `datagram_factory` is the UDP sibling
-/// (paired for h3-native's QUIC socket) — `None` when the installed backend
-/// has no matching `DatagramFactory` (e.g. tokio, which has no
-/// `DatagramFactory` impl yet — see `proxima_net::tokio`).
+/// Which runtime backend a [`RuntimeSelection`] is built for — the same two
+/// names `#[proxima::main(runtime = "prime"|"tokio")]` accepts (see
+/// `proxima_macros::runtime_args::RuntimeKind`, which the macro parses this
+/// exact vocabulary into), so the fluent, config
+/// ([`crate::app_config::RuntimeConfig`]), and macro surfaces all resolve
+/// the same two backend names rather than inventing a second vocabulary.
+/// `Default`/adaptive resolution (prime-first-if-linked) is a RESOLUTION
+/// MODE, not a member of this enum — by the time a `RuntimeSelection`
+/// exists, the backend is already picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeBackend {
+    Prime,
+    Tokio,
+}
+
+/// A runtime + every backend-matched factory it can drive — the value a
+/// caller CHOOSES (`App::builder().runtime(selection)`) instead of the
+/// backend falling out of which Cargo features happen to be linked.
+///
+/// This is the former `InstalledRuntime`'s bundled triple (prime pairs with
+/// `PrimeAcceptorFactory`, tokio with `TokioAcceptorFactory` — published
+/// together so an adopter never ends up with one backend's runtime and
+/// another's acceptor) promoted to a public, constructible value, plus the
+/// unix-upstream and packet-listener siblings `stream_passthrough`'s and
+/// `listeners::udp`'s dispatch sites need. The mismatch the sentence above
+/// warns about stays unrepresentable here too: every field is DERIVED from
+/// the one `runtime` argument by [`from_prime`](Self::from_prime)/
+/// [`from_tokio`](Self::from_tokio) — there is no constructor that lets a
+/// caller hand-pick factories from different backends.
+///
+/// `datagram_factory`/`unix_upstream_factory`/`packet_listener_factory` are
+/// `Option` because backend CAPABILITY is asymmetric, not because the
+/// bundle is partially filled: prime has all four; tokio has no
+/// `DatagramFactory` impl yet (see `proxima_net::tokio`'s doc).
 #[derive(Clone)]
-pub struct InstalledRuntime {
+pub struct RuntimeSelection {
+    pub backend: RuntimeBackend,
     pub runtime: Arc<dyn Runtime>,
     pub acceptor_factory: Arc<dyn AcceptorFactory>,
     pub datagram_factory: Option<Arc<dyn DatagramFactory>>,
+    pub unix_upstream_factory: Option<Arc<dyn proxima_primitives::stream::UnixUpstreamFactory>>,
+    pub packet_listener_factory: Option<Arc<dyn proxima_net::packet::PacketListenerFactory>>,
 }
 
-/// Publish the runtime `#[proxima::main]` (or any other `run*` driver)
-/// booted, so `App::new()` can adopt it instead of building an independent
-/// second runtime. Set-once — a later call is ignored.
-pub fn install_runtime(
-    runtime: Arc<dyn Runtime>,
-    acceptor_factory: Arc<dyn AcceptorFactory>,
-    datagram_factory: Option<Arc<dyn DatagramFactory>>,
-) {
-    let _ = INSTALLED_RUNTIME.set(InstalledRuntime {
-        runtime,
-        acceptor_factory,
-        datagram_factory,
-    });
+#[cfg(all(
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-bgpool",
+    any(target_os = "linux", target_os = "macos")
+))]
+impl RuntimeSelection {
+    /// Bundle an already-built prime-backed runtime with its matched
+    /// factories — any core count/placement the caller already configured.
+    /// Takes `Arc<dyn Runtime>` (not the concrete `PrimeRuntime`) so
+    /// wrappers like `AdoptedRuntime` (the ambient seam's driver-core split)
+    /// bundle through the same path; the factories are always the prime
+    /// ones regardless of the concrete `Runtime` impl passed, so a
+    /// mismatched acceptor/datagram/unix/packet pairing is not
+    /// constructible through this path — only "which backend did the
+    /// caller assert" is on the caller.
+    #[must_use]
+    pub fn from_prime(runtime: Arc<dyn Runtime>) -> Self {
+        Self {
+            backend: RuntimeBackend::Prime,
+            runtime,
+            acceptor_factory: Arc::new(proxima_net::prime::PrimeAcceptorFactory),
+            datagram_factory: Some(Arc::new(proxima_net::prime::PrimeDatagramFactory)),
+            unix_upstream_factory: Some(Arc::new(proxima_net::prime::PrimeUnixUpstreamFactory)),
+            packet_listener_factory: Some(Arc::new(proxima_net::prime::PrimePacketListenerFactory)),
+        }
+    }
+
+    /// Build a fresh `cores`-worker prime runtime and bundle it — the
+    /// one-liner over `from_prime(Arc::new(PrimeRuntime::new(cores)?))`.
+    ///
+    /// # Errors
+    /// Returns `ProximaError` if the prime runtime fails to build.
+    pub fn prime(cores: usize) -> Result<Self, ProximaError> {
+        Ok(Self::from_prime(Arc::new(PrimeRuntime::new(cores)?)))
+    }
+}
+
+#[cfg(feature = "runtime-tokio")]
+impl RuntimeSelection {
+    /// Bundle an already-built tokio-backed runtime with its matched
+    /// factories (see [`from_prime`](RuntimeSelection::from_prime) for why
+    /// this takes `Arc<dyn Runtime>`, not the concrete `TokioPerCoreRuntime`).
+    /// `datagram_factory` is `None` — tokio has no `DatagramFactory` impl
+    /// yet (see `proxima_net::tokio`'s doc), so an h3-native listener is
+    /// unreachable through a tokio-backed `RuntimeSelection` today.
+    #[must_use]
+    pub fn from_tokio(runtime: Arc<dyn Runtime>) -> Self {
+        Self {
+            backend: RuntimeBackend::Tokio,
+            runtime,
+            acceptor_factory: Arc::new(proxima_net::tokio::TokioAcceptorFactory),
+            datagram_factory: None,
+            unix_upstream_factory: Some(Arc::new(proxima_net::tokio::TokioUnixUpstreamFactory)),
+            packet_listener_factory: Some(Arc::new(proxima_net::tokio::TokioPacketListenerFactory)),
+        }
+    }
+
+    /// Build a fresh `cores`-worker tokio runtime and bundle it — the
+    /// one-liner over `from_tokio(Arc::new(TokioPerCoreRuntime::new(cores)?))`.
+    ///
+    /// # Errors
+    /// Returns `ProximaError` if the tokio runtime fails to build.
+    pub fn tokio(cores: usize) -> Result<Self, ProximaError> {
+        Ok(Self::from_tokio(Arc::new(TokioPerCoreRuntime::new(cores)?)))
+    }
+}
+
+/// Publish the `RuntimeSelection` `#[proxima::main]` (or any other `run*`
+/// driver) booted, so `App::new()` can adopt it instead of building an
+/// independent second one. Set-once — a later call is ignored.
+pub fn install_runtime(selection: RuntimeSelection) {
+    let _ = INSTALLED_RUNTIME.set(selection);
 }
 
 /// The runtime installed by a `run*` driver, if one has run in this
@@ -93,7 +183,7 @@ pub fn install_runtime(
 /// config-resolved default otherwise (e.g. `App::new()` called outside a
 /// `#[proxima::main]`-driven binary, or in a test).
 #[must_use]
-pub fn installed_runtime() -> Option<InstalledRuntime> {
+pub fn installed_runtime() -> Option<RuntimeSelection> {
     INSTALLED_RUNTIME.get().cloned()
 }
 
@@ -546,9 +636,7 @@ fn install_prime_ambient(inner: &Arc<PrimeRuntime>, visible_cores: usize) {
         inner: inner.clone(),
         visible_cores,
     });
-    let acceptor_factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-    let datagram_factory: Arc<dyn DatagramFactory> = Arc::new(proxima_net::prime::PrimeDatagramFactory);
-    install_runtime(runtime, acceptor_factory, Some(datagram_factory));
+    install_runtime(RuntimeSelection::from_prime(runtime));
 }
 
 #[cfg(all(
@@ -771,5 +859,146 @@ mod tests {
     fn invalid_affinity_literal_is_an_error_not_a_panic() {
         let result = run_with_cores(None, Some("not-a-valid-spec"), async {});
         assert!(result.is_err());
+    }
+}
+
+// Selection-by-value: the headline proof that an `App`'s runtime follows the
+// `RuntimeSelection` VALUE a caller injects, not which backend happens to be
+// linked. Extends `proxima_listen::registry`'s
+// `dispatch_handler_follows_the_injected_runtime_value_not_feature_presence`
+// pattern (a `RecordingRuntime` fake + `dispatch_handler`) one level up,
+// through `App::builder().runtime(selection)` — both prime and tokio are
+// compiled into this SAME test binary (the additivity claim), and only the
+// selection actually injected into a given `App` may ever record.
+#[cfg(all(
+    test,
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-bgpool",
+    feature = "runtime-tokio",
+    feature = "tokio",
+    any(target_os = "linux", target_os = "macos")
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod selection_by_value_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RecordingRuntime {
+        ran: Arc<AtomicBool>,
+    }
+
+    impl Runtime for RecordingRuntime {
+        fn spawn_on_current_core(&self, future: std::pin::Pin<Box<dyn Future<Output = ()> + 'static>>) {
+            futures::executor::block_on(future);
+            self.ran.store(true, Ordering::SeqCst);
+        }
+
+        fn spawn_on_core(
+            &self,
+            _core_id: CoreId,
+            _future: std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<(), SpawnError> {
+            unreachable!("test never routes to a peer core")
+        }
+
+        fn spawn_factory_on_core(
+            &self,
+            _core_id: CoreId,
+            _factory: Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+            >,
+        ) -> Result<(), SpawnError> {
+            unreachable!("test never spawns a cross-core factory")
+        }
+
+        fn spawn_background_blocking(
+            &self,
+            _work: Box<
+                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+            >,
+        ) -> BackgroundHandle<Box<dyn std::any::Any + Send>> {
+            unreachable!("test never spawns background-blocking work")
+        }
+
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> std::pin::Pin<Box<dyn Future<Output = ()> + 'static>> {
+            unreachable!("test never times out")
+        }
+
+        fn num_cores(&self) -> usize {
+            1
+        }
+
+        fn current_core(&self) -> CoreId {
+            CoreId(0)
+        }
+    }
+
+    #[test]
+    fn app_runtime_follows_the_injected_selection_value_not_feature_presence() {
+        let flag_prime = Arc::new(AtomicBool::new(false));
+        let flag_tokio = Arc::new(AtomicBool::new(false));
+        let prime_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_prime.clone() });
+        let tokio_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_tokio.clone() });
+
+        // `from_prime`/`from_tokio` always bundle the REAL matched factories
+        // (PrimeAcceptorFactory/TokioAcceptorFactory, ...) regardless of the
+        // injected `Runtime` — only the runtime is faked here, so this also
+        // proves the acceptor half of the pairing tracks the same value.
+        let prime_selection = RuntimeSelection::from_prime(prime_runtime);
+        let tokio_selection = RuntimeSelection::from_tokio(tokio_runtime);
+        assert_eq!(prime_selection.backend, RuntimeBackend::Prime);
+        assert_eq!(tokio_selection.backend, RuntimeBackend::Tokio);
+        assert!(
+            prime_selection.datagram_factory.is_some(),
+            "prime bundles a DatagramFactory"
+        );
+        assert!(
+            tokio_selection.datagram_factory.is_none(),
+            "tokio has no DatagramFactory impl yet"
+        );
+
+        let app_prime = crate::App::builder()
+            .runtime(prime_selection)
+            .with_defaults()
+            .expect("with_defaults")
+            .build()
+            .expect("build prime app");
+        let app_tokio = crate::App::builder()
+            .runtime(tokio_selection)
+            .with_defaults()
+            .expect("with_defaults")
+            .build()
+            .expect("build tokio app");
+
+        // both apps' runtimes are alive simultaneously (additivity) — only
+        // the ONE named in a given `dispatch_handler` call may ever record.
+        proxima_listen::dispatch_handler(
+            app_prime.runtime().as_ref(),
+            proxima_listen::Route::Inline,
+            Box::pin(async {}),
+        );
+        assert!(
+            flag_prime.load(Ordering::SeqCst),
+            "app built from RuntimeSelection::from_prime must dispatch on the prime runtime"
+        );
+        assert!(
+            !flag_tokio.load(Ordering::SeqCst),
+            "the tokio app's runtime must be untouched by the prime app's dispatch"
+        );
+
+        proxima_listen::dispatch_handler(
+            app_tokio.runtime().as_ref(),
+            proxima_listen::Route::Inline,
+            Box::pin(async {}),
+        );
+        assert!(
+            flag_tokio.load(Ordering::SeqCst),
+            "app built from RuntimeSelection::from_tokio must dispatch on the tokio runtime"
+        );
     }
 }

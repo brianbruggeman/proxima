@@ -7,8 +7,8 @@ pub mod tokio_stream_listener;
 pub mod tokio_stream_upstream;
 
 pub use tokio_acceptor::{TokioAcceptor, TokioAcceptorFactory};
-pub use tokio_packet::TokioUdpListener;
+pub use tokio_packet::{TokioPacketListenerFactory, TokioUdpListener};
 pub use tokio_stream_listener::{
     TokioTcpConnection, TokioTcpListener, TokioUnixConnection, TokioUnixListener,
 };
-pub use tokio_stream_upstream::{TokioTcpUpstream, TokioUnixUpstream};
+pub use tokio_stream_upstream::{TokioTcpUpstream, TokioUnixUpstream, TokioUnixUpstreamFactory};

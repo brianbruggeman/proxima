@@ -11,6 +11,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -49,6 +50,19 @@ pub trait PacketListenerExt: PacketListener {
 }
 
 impl<T: PacketListener + ?Sized> PacketListenerExt for T {}
+
+/// Runtime-agnostic factory that binds a [`PacketListener`] on the calling
+/// worker — the umbrella `udp` feature's dispatch seam, so a caller (or a
+/// bundled `proxima::runtime::RuntimeSelection`) picks the prime or tokio
+/// backend without either naming the other. `bind` is synchronous (matching
+/// `AcceptorFactory`/`DatagramFactory`'s split: construction is cheap, all
+/// the async work happens on the returned listener's
+/// `poll_recv`/`poll_send`) — the tokio impl binds through the same
+/// socket2-then-`from_std` bridge `TokioAcceptorFactory` already uses so its
+/// `UdpSocket::bind` never needs `.await`.
+pub trait PacketListenerFactory: Send + Sync + 'static {
+    fn bind(&self, addr: SocketAddr) -> io::Result<Arc<dyn PacketListener>>;
+}
 
 pub struct Recv<'lifetime, L: PacketListener + ?Sized> {
     listener: &'lifetime L,

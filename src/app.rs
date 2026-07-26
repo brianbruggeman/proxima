@@ -21,11 +21,11 @@ use crate::load::{LoadContext, ResolvedSpec, Spec, load};
 use crate::mount::{MethodFilter, Mount, Router};
 use crate::pipe::{Handler, PipeHandle, into_handle};
 use crate::request::{Request, Response};
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, RuntimeSelection};
 use crate::telemetry::{Metrics, TelemetryHandle};
 use proxima_listen::ListenRegistry;
 use proxima_listen::handle::{ListenerHandle, ListenerSpec};
-use proxima_primitives::stream::{AcceptorFactory, DatagramFactory};
+use proxima_primitives::stream::{AcceptorFactory, DatagramFactory, UnixUpstreamFactory};
 
 pub struct App {
     pipes: BTreeMap<String, PipeHandle>,
@@ -60,6 +60,17 @@ pub struct App {
     /// `runtime-tokio`; see `proxima_net::tokio`, which has no `DatagramFactory`
     /// impl yet), so an h3-native listener currently requires the prime runtime.
     datagram_factory: Option<Arc<dyn DatagramFactory>>,
+    /// Unix-upstream sibling of `acceptor_factory`/`datagram_factory` —
+    /// `stream_passthrough`'s unix-transport dispatch site reads this
+    /// (indirectly, via the ambient `crate::runtime::installed_runtime()`
+    /// slot `with_runtime_selection` also populates) to pick the backend
+    /// that MATCHES `runtime` rather than a hardcoded one. Populated
+    /// whenever the resolved `RuntimeSelection` carries one — both prime
+    /// and tokio do.
+    unix_upstream_factory: Option<Arc<dyn UnixUpstreamFactory>>,
+    /// Packet-listener sibling — `listeners::udp`'s `PacketListenerFactory`
+    /// for whichever backend `runtime` resolved to.
+    packet_listener_factory: Option<Arc<dyn proxima_net::packet::PacketListenerFactory>>,
     /// The open universal listener's candidate registry — `AnyProtocol`
     /// impls (h1, h2 prior-knowledge) registered once here, mirroring how
     /// `listen_registry` holds compiled `ListenProtocol`s. `Listener::any()`
@@ -114,43 +125,74 @@ fn resolve_cores(explicit: Option<usize>) -> Result<usize, ProximaError> {
     Ok(crate::app_config::RuntimeConfig::resolve_from_env()?.resolved_cores())
 }
 
-/// The default runtime plus its matching acceptor factory. `None` when no
-/// runtime backend is compiled in (e.g. non-unix without prime).
-type RuntimeAndFactory = (
+/// Resolve the runtime `App::new()`/`AppBuilder::build()` actually uses,
+/// in precedence order: (1) an EXPLICIT `RuntimeSelection` the caller
+/// passed via `AppBuilder::runtime(selection)`/`App::with_runtime_selection`
+/// — a value always wins; (2) the ambient selection `#[proxima::main]` (or
+/// any other `run*` driver) already booted and published (see
+/// `crate::runtime::install_runtime`/`installed_runtime`) — without this,
+/// `#[proxima::main(cores = 1)]` boots a 1-core runtime to drive `main`, and
+/// `App::new()` inside `main`'s body boots a SECOND, independent runtime at
+/// `num_cpus::get()`; (3) the documented backward-compatible FALLBACK:
+/// prime-first-if-linked, else tokio, else no runtime at all — see
+/// [`resolve_default_runtime_selection`].
+fn resolve_runtime_selection(
+    explicit: Option<RuntimeSelection>,
+    cores_override: Option<usize>,
+) -> Result<Option<RuntimeSelection>, ProximaError> {
+    if let Some(selection) = explicit {
+        return Ok(Some(selection));
+    }
+    if let Some(installed) = crate::runtime::installed_runtime() {
+        return Ok(Some(installed));
+    }
+    resolve_default_runtime_selection(cores_override)
+}
+
+/// Every App field a `RuntimeSelection` bundle unpacks into.
+type RuntimeSelectionFields = (
     Option<Arc<dyn Runtime>>,
     Option<Arc<dyn AcceptorFactory>>,
     Option<Arc<dyn DatagramFactory>>,
+    Option<Arc<dyn UnixUpstreamFactory>>,
+    Option<Arc<dyn proxima_net::packet::PacketListenerFactory>>,
 );
+
+/// Factored out so `App::new()` and `App::__internal_assemble` populate the
+/// identical five fields from whatever `resolve_runtime_selection` resolved,
+/// instead of duplicating the destructure.
+fn split_runtime_selection(selection: Option<RuntimeSelection>) -> RuntimeSelectionFields {
+    match selection {
+        Some(selection) => (
+            Some(selection.runtime),
+            Some(selection.acceptor_factory),
+            selection.datagram_factory,
+            selection.unix_upstream_factory,
+            selection.packet_listener_factory,
+        ),
+        None => (None, None, None, None, None),
+    }
+}
 
 // cfg-arm returns: exactly one arm compiles per build, so the early `return`
 // is that arm's natural exit. needless_return is a false positive under the
 // cfg cascade (the other arms are compiled out).
+//
+// PRIME-FIRST: when `serve-prime` is set (the default) and the prime reactor
+// is available, serve on prime even if `runtime-tokio` is ALSO linked.
+// `runtime-tokio` is pulled into many multi-crate builds by cargo feature-
+// unification (e.g. proxima's own dev-dep on proxima-h1 -> proxima-runtime-
+// tokio); letting its mere presence flip the App to a tokio runtime left the
+// prime `http` upstream's `TcpStream` polled off a reactor worker
+// (CURRENT_REACTOR null -> RetriesExhausted -> 502). Explicit tokio serve is
+// now: opt OUT of `serve-prime` AND opt INTO `runtime-tokio`. This is the
+// FALLBACK only — `resolve_runtime_selection` above tries an explicit value
+// and the ambient install first; this cfg cascade is what "nothing was
+// selected" resolves to, preserved verbatim for backward compatibility.
 #[allow(clippy::needless_return)]
-fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, ProximaError> {
-    // `#[proxima::main]` (or any other `block_on*` driver) may have already
-    // booted a runtime sized by its own `runtime = ...` / `cores = ...` /
-    // `affinity = ...` args and published it — adopt that instead of
-    // building an independent second one. Without this, `#[proxima::main(cores
-    // = 1)]` boots a 1-core runtime to drive `main`, and `App::new()` inside
-    // `main`'s body boots a SECOND, independent runtime at `num_cpus::get()`
-    // — two runtimes, contradictory core counts, one process. See
-    // `crate::runtime::install_runtime` / `installed_runtime`.
-    if let Some(installed) = crate::runtime::installed_runtime() {
-        return Ok((
-            Some(installed.runtime),
-            Some(installed.acceptor_factory),
-            installed.datagram_factory,
-        ));
-    }
-
-    // PRIME-FIRST: when `serve-prime` is set (the default) and the prime reactor
-    // is available, serve on prime even if `runtime-tokio` is ALSO linked.
-    // `runtime-tokio` is pulled into many multi-crate builds by cargo feature-
-    // unification (e.g. proxima's own dev-dep on proxima-h1 -> proxima-runtime-
-    // tokio); letting its mere presence flip the App to a tokio runtime left the
-    // prime `http` upstream's `TcpStream` polled off a reactor worker
-    // (CURRENT_REACTOR null -> RetriesExhausted -> 502). Explicit tokio serve is
-    // now: opt OUT of `serve-prime` AND opt INTO `runtime-tokio`.
+fn resolve_default_runtime_selection(
+    cores_override: Option<usize>,
+) -> Result<Option<RuntimeSelection>, ProximaError> {
     #[cfg(all(
         feature = "serve-prime",
         feature = "runtime-prime-reactor",
@@ -166,10 +208,7 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
         let runtime: Arc<dyn Runtime> = Arc::new(
             crate::runtime::PrimeRuntime::new_with_tokio_compat(resolve_cores(cores_override)?)?,
         );
-        let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-        let datagram_factory: Arc<dyn DatagramFactory> =
-            Arc::new(proxima_net::prime::PrimeDatagramFactory);
-        return Ok((Some(runtime), Some(factory), Some(datagram_factory)));
+        return Ok(Some(RuntimeSelection::from_prime(runtime)));
     }
     // tokio-free default: same prime transport, no sister tokio Handle on
     // each worker (see the `tokio`-gated arm above for that variant). User
@@ -184,10 +223,7 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
         let runtime: Arc<dyn Runtime> = Arc::new(crate::runtime::PrimeRuntime::new(
             resolve_cores(cores_override)?,
         )?);
-        let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::prime::PrimeAcceptorFactory);
-        let datagram_factory: Arc<dyn DatagramFactory> =
-            Arc::new(proxima_net::prime::PrimeDatagramFactory);
-        return Ok((Some(runtime), Some(factory), Some(datagram_factory)));
+        return Ok(Some(RuntimeSelection::from_prime(runtime)));
     }
     #[cfg(all(
         feature = "runtime-tokio",
@@ -201,10 +237,7 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
         let runtime: Arc<dyn Runtime> = Arc::new(crate::runtime::TokioPerCoreRuntime::new(
             resolve_cores(cores_override)?,
         )?);
-        let factory: Arc<dyn AcceptorFactory> = Arc::new(proxima_net::tokio::TokioAcceptorFactory);
-        // no tokio-backed DatagramFactory exists yet (see the struct field
-        // doc on `App::datagram_factory`) — h3-native has no bind path here.
-        return Ok((Some(runtime), Some(factory), None));
+        return Ok(Some(RuntimeSelection::from_tokio(runtime)));
     }
     #[cfg(all(
         not(feature = "runtime-tokio"),
@@ -216,7 +249,7 @@ fn default_runtime(cores_override: Option<usize>) -> Result<RuntimeAndFactory, P
     ))]
     {
         let _ = cores_override;
-        Ok((None, None, None))
+        Ok(None)
     }
 }
 
@@ -310,15 +343,19 @@ impl App {
         #[cfg(any(feature = "http1", feature = "http1-native"))]
         let any_default_handlers = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
-        // Adopt whatever runtime `#[proxima::main]` already booted; otherwise
-        // default to the prime per-core runtime + prime acceptor (the prime
-        // `TcpStream` only drives on a CoreShard worker's reactor). Explicit
-        // `runtime-tokio` flips both to the tokio runtime + tokio acceptor.
-        // Every chain dispatch goes through the Runtime trait (no work-stealing
-        // on the chain path). Users may override the runtime with
-        // `.with_runtime(...)`, or size the fallback default with
-        // `App::builder().with_runtime_config(...)`.
-        let (runtime, acceptor_factory, datagram_factory) = default_runtime(None)?;
+        // Resolve the runtime by VALUE-first precedence (see
+        // `resolve_runtime_selection`): nothing is explicit here, so this
+        // adopts whatever `#[proxima::main]` already booted, else falls back
+        // to the documented default (prime per-core runtime + prime
+        // acceptor — the prime `TcpStream` only drives on a CoreShard
+        // worker's reactor; explicit `runtime-tokio` flips both to the
+        // tokio runtime + tokio acceptor). Every chain dispatch goes through
+        // the Runtime trait (no work-stealing on the chain path). Users may
+        // override the runtime with `.with_runtime(...)` (mismatchable —
+        // see its doc) or `App::builder().runtime(selection)` (matched), or
+        // size the fallback default with `App::builder().with_runtime_config(...)`.
+        let (runtime, acceptor_factory, datagram_factory, unix_upstream_factory, packet_listener_factory) =
+            split_runtime_selection(resolve_runtime_selection(None, None)?);
 
         let load_context = LoadContext::with_default_registry()?;
         // arm the recording spigot with the App's runtime so a directly-called
@@ -342,6 +379,8 @@ impl App {
             runtime,
             acceptor_factory,
             datagram_factory,
+            unix_upstream_factory,
+            packet_listener_factory,
             #[cfg(any(feature = "http1", feature = "http1-native"))]
             any_registry,
             #[cfg(any(feature = "http1", feature = "http1-native"))]
@@ -349,6 +388,16 @@ impl App {
         })
     }
 
+    /// Set the runtime alone. HAZARD: this and `with_acceptor_factory`/
+    /// `with_datagram_factory` are three INDEPENDENT setters — calling only
+    /// one (or pairing a prime `runtime` with a tokio `acceptor_factory`, or
+    /// vice versa) builds an App whose chain dispatch and socket accept
+    /// disagree about which backend is live, exactly the mismatch
+    /// `RuntimeSelection` (the promoted, matched-bundle type;
+    /// `App::with_runtime_selection`/`AppBuilder::runtime`) exists to make
+    /// unrepresentable. Prefer `App::with_runtime_selection(selection)` (or
+    /// `App::builder().runtime(selection)`) unless you specifically need to
+    /// override ONE piece of an otherwise-resolved runtime.
     #[must_use]
     pub fn with_runtime(mut self, runtime: Arc<dyn crate::runtime::Runtime>) -> Self {
         self.runtime = Some(runtime);
@@ -365,6 +414,8 @@ impl App {
         self.acceptor_factory.clone()
     }
 
+    /// HAZARD: see `with_runtime`'s doc — this, `with_runtime`, and
+    /// `with_datagram_factory` are mismatchable when called independently.
     #[must_use]
     pub fn with_acceptor_factory(mut self, factory: Arc<dyn AcceptorFactory>) -> Self {
         self.acceptor_factory = Some(factory);
@@ -376,9 +427,43 @@ impl App {
         self.datagram_factory.clone()
     }
 
+    /// HAZARD: see `with_runtime`'s doc — this, `with_runtime`, and
+    /// `with_acceptor_factory` are mismatchable when called independently.
     #[must_use]
     pub fn with_datagram_factory(mut self, factory: Arc<dyn DatagramFactory>) -> Self {
         self.datagram_factory = Some(factory);
+        self
+    }
+
+    #[must_use]
+    pub fn unix_upstream_factory(&self) -> Option<Arc<dyn UnixUpstreamFactory>> {
+        self.unix_upstream_factory.clone()
+    }
+
+    #[must_use]
+    pub fn packet_listener_factory(&self) -> Option<Arc<dyn proxima_net::packet::PacketListenerFactory>> {
+        self.packet_listener_factory.clone()
+    }
+
+    /// Set the runtime — and its MATCHED acceptor/datagram/unix-upstream/
+    /// packet-listener factories, atomically, from one `RuntimeSelection` —
+    /// in one call. This is the promoted surface `with_runtime`/
+    /// `with_acceptor_factory`/`with_datagram_factory` (which a caller CAN
+    /// mismatch, see their docs) cannot be misused the same way: every
+    /// field here always comes from the SAME backend, because
+    /// `RuntimeSelection::from_prime`/`from_tokio`/`prime`/`tokio` are the
+    /// only ways to construct one. Also installs `selection` ambiently
+    /// (best-effort, set-once) so free-function dispatch sites that have no
+    /// `App` handle (`stream_passthrough`'s unix transport, `listeners::udp`)
+    /// see the same selection this `App` uses.
+    #[must_use]
+    pub fn with_runtime_selection(mut self, selection: crate::runtime::RuntimeSelection) -> Self {
+        crate::runtime::install_runtime(selection.clone());
+        self.runtime = Some(selection.runtime);
+        self.acceptor_factory = Some(selection.acceptor_factory);
+        self.datagram_factory = selection.datagram_factory;
+        self.unix_upstream_factory = selection.unix_upstream_factory;
+        self.packet_listener_factory = selection.packet_listener_factory;
         self
     }
 
@@ -701,9 +786,10 @@ impl App {
     }
 
     /// Internal — `AppBuilder::build` calls this with already-assembled
-    /// state, bypassing the default-registry path of `App::new`. Installs the
-    /// same default runtime + acceptor factory as `App::new` (ambient-adopt
-    /// first, `cores_override` as the explicit fallback sizing — see
+    /// state, bypassing the default-registry path of `App::new`. Resolves
+    /// the runtime by the same value-first precedence as `App::new`
+    /// (`runtime_selection` explicit, then ambient-adopt, then
+    /// `cores_override`-sized fallback — see `AppBuilder::runtime`/
     /// `AppBuilder::with_runtime_config`) so a builder-constructed app can
     /// `run_until_signal` without a manual `.with_runtime(...)`.
     #[doc(hidden)]
@@ -712,8 +798,20 @@ impl App {
         listen_registry: Arc<ListenRegistry>,
         router: Arc<ArcSwap<Router>>,
         cores_override: Option<usize>,
+        runtime_selection: Option<RuntimeSelection>,
     ) -> Result<Self, ProximaError> {
-        let (runtime, acceptor_factory, datagram_factory) = default_runtime(cores_override)?;
+        // an EXPLICIT selection is published ambiently too (best-effort;
+        // set-once, so a prior `#[proxima::main]` install always wins) —
+        // free-function dispatch sites (`stream_passthrough`'s unix
+        // transport, `listeners::udp`) read `installed_runtime()` directly
+        // since they have no `App` handle to thread this value through.
+        let had_explicit_selection = runtime_selection.is_some();
+        let resolved = resolve_runtime_selection(runtime_selection, cores_override)?;
+        if had_explicit_selection && let Some(selection) = &resolved {
+            crate::runtime::install_runtime(selection.clone());
+        }
+        let (runtime, acceptor_factory, datagram_factory, unix_upstream_factory, packet_listener_factory) =
+            split_runtime_selection(resolved);
         // arm the recording spigot at build (see App::new) — a builder-made App
         // whose `record` upstream is called directly still pumps.
         if let Some(rt) = &runtime {
@@ -732,6 +830,8 @@ impl App {
             runtime,
             acceptor_factory,
             datagram_factory,
+            unix_upstream_factory,
+            packet_listener_factory,
             #[cfg(any(feature = "http1", feature = "http1-native"))]
             any_registry: new_any_registry()?,
             #[cfg(any(feature = "http1", feature = "http1-native"))]

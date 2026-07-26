@@ -65,6 +65,7 @@ pub struct AppBuilder {
     metrics: Option<Arc<Metrics>>,
     http_client: Option<HttpClientHandle>,
     runtime_config: Option<crate::app_config::RuntimeConfig>,
+    runtime_selection: Option<crate::runtime::RuntimeSelection>,
     defaults_replay: bool,
     defaults_process: bool,
     defaults_record: bool,
@@ -86,6 +87,7 @@ impl Default for AppBuilder {
             metrics: None,
             http_client: None,
             runtime_config: None,
+            runtime_selection: None,
             defaults_replay: false,
             defaults_process: false,
             defaults_record: false,
@@ -289,6 +291,32 @@ impl AppBuilder {
         self.with_runtime_config(crate::app_config::RuntimeConfig::builder().cores(cores).build())
     }
 
+    /// Select the runtime by VALUE — the promoted, mismatch-proof surface
+    /// (see `RuntimeSelection`'s doc): `.build()` uses `selection`'s
+    /// `runtime`/`acceptor_factory`/`datagram_factory`/`unix_upstream_factory`/
+    /// `packet_listener_factory` together, atomically, instead of the
+    /// separately-settable `App::with_runtime`/`with_acceptor_factory`/
+    /// `with_datagram_factory` trio (which a caller CAN mismatch — see their
+    /// docs). Wins over `.with_runtime_config`/env/an ambiently-installed
+    /// `#[proxima::main]` runtime — see `resolve_runtime_selection`'s
+    /// precedence doc in `src/app.rs`.
+    ///
+    /// ```no_run
+    /// # use proxima::App;
+    /// # use proxima::runtime::RuntimeSelection;
+    /// let selection = RuntimeSelection::tokio(2)?;
+    /// let app = App::builder()
+    ///     .runtime(selection)
+    ///     .with_defaults()?
+    ///     .build()?;
+    /// # Ok::<(), proxima::ProximaError>(())
+    /// ```
+    #[must_use]
+    pub fn runtime(mut self, selection: crate::runtime::RuntimeSelection) -> Self {
+        self.runtime_selection = Some(selection);
+        self
+    }
+
     pub fn build(self) -> Result<App, ProximaError> {
         let recording_source_registry = Arc::new(self.recording_source_registry);
         let recording_spigot = self.recording_spigot;
@@ -338,12 +366,28 @@ impl AppBuilder {
             http_client,
         };
         let listen_registry = Arc::new(self.listen_registry);
-        let cores_override = self.runtime_config.map(|config| config.resolved_cores());
+        let cores_override = self.runtime_config.as_ref().map(|config| config.resolved_cores());
+        // precedence: an explicit `.runtime(selection)` always wins; else a
+        // `.with_runtime_config(...)` whose `backend` names a real backend
+        // (not `auto`) resolves to one — the config round-trip P4 asks for,
+        // so `PROXIMA_RUNTIME_BACKEND=tokio` and `.runtime(RuntimeSelection::tokio(n))`
+        // land the same App state; else `None` falls through to
+        // `resolve_runtime_selection`'s ambient/default fallback.
+        let runtime_selection = match self.runtime_selection {
+            Some(selection) => Some(selection),
+            None => self
+                .runtime_config
+                .as_ref()
+                .map(crate::app_config::RuntimeConfig::resolve_selection)
+                .transpose()?
+                .flatten(),
+        };
         App::with_components(
             load_context,
             listen_registry,
             build_router_state(),
             cores_override,
+            runtime_selection,
         )
     }
 }
@@ -358,8 +402,15 @@ impl App {
         listen_registry: Arc<ListenRegistry>,
         router: Arc<ArcSwap<Router>>,
         cores_override: Option<usize>,
+        runtime_selection: Option<crate::runtime::RuntimeSelection>,
     ) -> Result<Self, ProximaError> {
-        Self::__internal_assemble(load_context, listen_registry, router, cores_override)
+        Self::__internal_assemble(
+            load_context,
+            listen_registry,
+            router,
+            cores_override,
+            runtime_selection,
+        )
     }
 }
 

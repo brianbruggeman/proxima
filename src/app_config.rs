@@ -19,7 +19,9 @@
 //! point, or a test).
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 
 use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
@@ -27,14 +29,122 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::runtime::RuntimeSelection;
+
 use crate::error::ProximaError;
 
 fn default_cores() -> usize {
     0
 }
 
-/// The App's runtime sizing. One field today; more App-level runtime knobs
-/// land here as they earn a config surface.
+fn default_backend() -> RuntimeBackendSelection {
+    RuntimeBackendSelection::Auto
+}
+
+/// Parse error for `RuntimeConfig` fields. conflaguration's `resolve_with`
+/// plumbing demands a `std::error::Error` impl on the parser's error type —
+/// mirrors `cassette_config::ParseError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError(String);
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Which runtime backend `App::new()`/`AppBuilder::build()` resolves to —
+/// the config-shaped sibling of `App::builder().runtime(RuntimeSelection)`
+/// (principle 4: both a fluent AND a config surface). `Auto` (the default)
+/// keeps today's backward-compatible fallback (prime-first-if-linked, else
+/// tokio — see `resolve_default_runtime_selection` in `src/app.rs`);
+/// `Prime`/`Tokio` name the SAME two backends `RuntimeSelection::prime`/
+/// `::tokio` and `#[proxima::main(runtime = "prime"|"tokio")]` do, so a
+/// runtime chosen from TOML/env resolves through the identical vocabulary
+/// as the fluent and macro surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeBackendSelection {
+    /// No explicit choice — fall through to `resolve_default_runtime_selection`.
+    Auto,
+    Prime,
+    Tokio,
+}
+
+impl FromStr for RuntimeBackendSelection {
+    type Err = ParseError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "auto" => Ok(Self::Auto),
+            "prime" => Ok(Self::Prime),
+            "tokio" => Ok(Self::Tokio),
+            other => Err(ParseError(format!(
+                "unknown runtime backend `{other}` (expected auto|prime|tokio)"
+            ))),
+        }
+    }
+}
+
+impl RuntimeBackendSelection {
+    /// Build the `RuntimeSelection` this config value resolves to, sized by
+    /// `cores`. `Auto` returns `None` — the caller falls through to its own
+    /// default-resolution path.
+    ///
+    /// # Errors
+    /// `ProximaError::Config` when `Prime`/`Tokio` is selected but that
+    /// backend's Cargo features are not linked, or if the selected
+    /// backend's runtime fails to build.
+    pub fn resolve(self, cores: usize) -> Result<Option<RuntimeSelection>, ProximaError> {
+        match self {
+            Self::Auto => Ok(None),
+            Self::Prime => resolve_prime_selection(cores).map(Some),
+            Self::Tokio => resolve_tokio_selection(cores).map(Some),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-bgpool",
+    any(target_os = "linux", target_os = "macos")
+))]
+fn resolve_prime_selection(cores: usize) -> Result<RuntimeSelection, ProximaError> {
+    RuntimeSelection::prime(cores)
+}
+
+#[cfg(not(all(
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-inbox-alloc",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-bgpool",
+    any(target_os = "linux", target_os = "macos")
+)))]
+fn resolve_prime_selection(_cores: usize) -> Result<RuntimeSelection, ProximaError> {
+    Err(ProximaError::Config(
+        "runtime config selected backend `prime`, but the prime runtime bundle is not linked \
+         (enable `serve-prime` or the four `runtime-prime-*` features)"
+            .into(),
+    ))
+}
+
+#[cfg(feature = "runtime-tokio")]
+fn resolve_tokio_selection(cores: usize) -> Result<RuntimeSelection, ProximaError> {
+    RuntimeSelection::tokio(cores)
+}
+
+#[cfg(not(feature = "runtime-tokio"))]
+fn resolve_tokio_selection(_cores: usize) -> Result<RuntimeSelection, ProximaError> {
+    Err(ProximaError::Config(
+        "runtime config selected backend `tokio`, but `runtime-tokio` is not linked".into(),
+    ))
+}
+
+/// The App's runtime sizing + backend selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "PROXIMA_RUNTIME")]
 #[builder(derive(Clone, Debug))]
@@ -49,6 +159,18 @@ pub struct RuntimeConfig {
     #[serde(default = "default_cores")]
     #[builder(default = default_cores())]
     pub cores: usize,
+
+    /// Which runtime backend to use — `auto` (default, backward-compatible
+    /// prime-first-if-linked fallback), `prime`, or `tokio`.
+    /// `PROXIMA_RUNTIME_BACKEND` overrides via the env layer.
+    #[setting(default_str = "auto", resolve_with = "parse_backend")]
+    #[serde(default = "default_backend")]
+    #[builder(default = default_backend())]
+    pub backend: RuntimeBackendSelection,
+}
+
+fn parse_backend(raw: &str) -> Result<RuntimeBackendSelection, ParseError> {
+    raw.parse()
 }
 
 impl Default for RuntimeConfig {
@@ -59,7 +181,8 @@ impl Default for RuntimeConfig {
 
 impl Validate for RuntimeConfig {
     // `cores` has no invalid representation: `0` is the documented "auto"
-    // sentinel, any other value is a literal worker count.
+    // sentinel, any other value is a literal worker count. `backend` is
+    // parse-validated by `resolve_with`; nothing structural left to check.
     fn validate(&self) -> conflaguration::Result<()> {
         Ok(())
     }
@@ -80,6 +203,14 @@ impl RuntimeConfig {
         cores.max(1)
     }
 
+    /// Build the `RuntimeSelection` this config resolves to — `None` for
+    /// `backend = auto`, the caller's own default-resolution fallback.
+    /// The config-shaped sibling of `RuntimeSelection::prime`/`::tokio`; see
+    /// `RuntimeBackendSelection::resolve` for the errors this can return.
+    pub fn resolve_selection(&self) -> Result<Option<RuntimeSelection>, ProximaError> {
+        self.backend.resolve(self.resolved_cores())
+    }
+
     /// Layered fluent loader (call-order precedence: a later layer wins per
     /// field it sets). Mirrors `CassetteConfig::layered`.
     #[must_use]
@@ -96,7 +227,8 @@ impl RuntimeConfig {
     ///
     /// # Errors
     /// Returns `ProximaError::Config` on a malformed env value (e.g.
-    /// `PROXIMA_RUNTIME_CORES` set to a non-integer).
+    /// `PROXIMA_RUNTIME_CORES` set to a non-integer, or
+    /// `PROXIMA_RUNTIME_BACKEND` set to an unknown name).
     pub fn resolve_from_env() -> Result<Self, ProximaError> {
         conflaguration::builder()
             .value(Self::default())
@@ -193,6 +325,13 @@ impl RuntimeConfigLayerBuilder {
     }
 
     #[must_use]
+    pub fn with_backend(mut self, backend: RuntimeBackendSelection) -> Self {
+        self.inner.backend = backend;
+        self.touched.insert("backend".to_string());
+        self
+    }
+
+    #[must_use]
     pub fn build(self) -> RuntimeConfig {
         self.inner
     }
@@ -272,6 +411,9 @@ fn runtime_env_partial() -> Result<Value, conflaguration::Error> {
     if std::env::var("PROXIMA_RUNTIME_CORES").is_ok() {
         partial.insert("cores".to_string(), to_value(&resolved.cores)?);
     }
+    if std::env::var("PROXIMA_RUNTIME_BACKEND").is_ok() {
+        partial.insert("backend".to_string(), to_value(&resolved.backend)?);
+    }
     Ok(Value::Object(partial))
 }
 
@@ -313,7 +455,10 @@ mod tests {
 
     #[test]
     fn zero_cores_written_by_hand_clamps_to_at_least_one() {
-        let config = RuntimeConfig { cores: 0 };
+        let config = RuntimeConfig {
+            cores: 0,
+            backend: RuntimeBackendSelection::Auto,
+        };
         assert!(config.resolved_cores() >= 1);
     }
 
@@ -397,5 +542,119 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.runtime, RuntimeConfig::default());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn default_backend_is_auto() {
+        let config = RuntimeConfig::default();
+        assert_eq!(config.backend, RuntimeBackendSelection::Auto);
+    }
+
+    #[test]
+    fn auto_backend_resolves_to_none() {
+        let config = RuntimeConfig::default();
+        assert!(
+            config.resolve_selection().expect("resolve").is_none(),
+            "auto must defer to the caller's own default-resolution fallback"
+        );
+    }
+
+    #[test]
+    fn backend_env_override_parses() {
+        temp_env::with_vars([("PROXIMA_RUNTIME_BACKEND", Some("tokio"))], || {
+            let config = RuntimeConfig::from_env().expect("env config");
+            assert_eq!(config.backend, RuntimeBackendSelection::Tokio);
+        });
+    }
+
+    #[test]
+    fn malformed_backend_env_value_is_a_loud_error() {
+        temp_env::with_vars([("PROXIMA_RUNTIME_BACKEND", Some("glommio"))], || {
+            let error = RuntimeConfig::from_env().expect_err("unknown backend must error");
+            assert!(format!("{error}").contains("glommio"));
+        });
+    }
+
+    #[test]
+    fn layered_with_backend_wins_without_env() {
+        temp_env::with_vars_unset(["PROXIMA_RUNTIME_BACKEND"], || {
+            let config = RuntimeConfig::layered()
+                .with_backend(RuntimeBackendSelection::Prime)
+                .build();
+            assert_eq!(config.backend, RuntimeBackendSelection::Prime);
+        });
+    }
+
+    // P4's headline fixture: a runtime selected from config produces the
+    // SAME App state (backend + cores + capability shape) as the fluent
+    // `RuntimeSelection::tokio(..)` constructor — the config and fluent
+    // surfaces are isomorphic, not two independent paths that can drift.
+    #[cfg(feature = "runtime-tokio")]
+    #[test]
+    fn config_selected_backend_round_trips_to_the_same_selection_as_the_fluent_builder() {
+        let from_config = RuntimeConfig::builder()
+            .cores(1)
+            .backend(RuntimeBackendSelection::Tokio)
+            .build()
+            .resolve_selection()
+            .expect("resolve_selection")
+            .expect("backend = tokio must resolve to Some");
+        let from_fluent = RuntimeSelection::tokio(1).expect("RuntimeSelection::tokio");
+
+        assert_eq!(from_config.backend, from_fluent.backend);
+        assert_eq!(
+            from_config.runtime.num_cores(),
+            from_fluent.runtime.num_cores()
+        );
+        assert_eq!(
+            from_config.datagram_factory.is_some(),
+            from_fluent.datagram_factory.is_some(),
+            "capability shape (which factories are Some) must match backend-for-backend"
+        );
+        assert_eq!(
+            from_config.unix_upstream_factory.is_some(),
+            from_fluent.unix_upstream_factory.is_some()
+        );
+        assert_eq!(
+            from_config.packet_listener_factory.is_some(),
+            from_fluent.packet_listener_factory.is_some()
+        );
+    }
+
+    // the TOML-file half of the same round trip — a config FILE selecting
+    // `backend = "tokio"` resolves identically to the env/builder paths.
+    #[cfg(feature = "runtime-tokio")]
+    #[test]
+    fn config_file_selected_backend_resolves_a_runtime_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runtime.toml");
+        std::fs::write(&path, "cores = 1\nbackend = \"tokio\"\n").expect("write toml");
+        let config = RuntimeConfig::layered()
+            .from_path(&path)
+            .expect("from_path")
+            .build();
+        assert_eq!(config.backend, RuntimeBackendSelection::Tokio);
+        let selection = config
+            .resolve_selection()
+            .expect("resolve_selection")
+            .expect("backend = tokio must resolve to Some");
+        assert_eq!(selection.backend, crate::runtime::RuntimeBackend::Tokio);
+    }
+
+    // selecting a backend whose Cargo features are not linked is a runtime
+    // Config error, not a panic or a silent fallback to a different backend.
+    #[cfg(not(feature = "runtime-tokio"))]
+    #[test]
+    fn tokio_backend_without_the_feature_is_a_config_error() {
+        // `RuntimeSelection` carries `Arc<dyn Trait>` fields with no `Debug`
+        // impl (the trait objects aren't Debug), so `Result::expect_err`
+        // (which requires `T: Debug`) can't be used here — match instead.
+        let config = RuntimeConfig::builder()
+            .backend(RuntimeBackendSelection::Tokio)
+            .build();
+        match config.resolve_selection() {
+            Err(error) => assert!(format!("{error}").contains("tokio")),
+            Ok(_) => panic!("tokio backend selected without runtime-tokio must error"),
+        }
     }
 }
