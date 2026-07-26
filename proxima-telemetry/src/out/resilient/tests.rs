@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use bytes::Bytes;
+use conflaguration::Validate;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::capabilities::Clock;
@@ -974,4 +975,285 @@ fn transport_error_triggers_reconnect_before_the_next_attempt() {
         1,
         "the batch eventually landed once refusals ran out"
     );
+}
+
+// ── config validation: the retention-horizon ladder ────────────────────────
+
+#[test]
+fn inverted_ladder_is_rejected_and_names_the_fields() {
+    // debug (2400s) now exceeds info (default 1800s), and warn (default
+    // 2100s) exceeds error (600s) — two adjacent-pair inversions from one
+    // edit, both of which must be reported.
+    let horizons = super::config::RetentionHorizons::builder()
+        .debug_secs(2_400)
+        .error_secs(600)
+        .build();
+    let error = horizons
+        .validate()
+        .expect_err("inverted ladder must fail validation");
+    let conflaguration::Error::Validation { errors } = error else {
+        panic!("expected a Validation error");
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.path == "info_secs" && message.message.contains("debug_secs")),
+        "info_secs (1800s) is now shorter than debug_secs (2400s) and must be named: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.path == "error_secs" && message.message.contains("warn_secs")),
+        "error_secs (600s) is now shorter than warn_secs (2100s) and must be named: {errors:?}"
+    );
+}
+
+#[test]
+fn zero_horizon_rejected_per_severity() {
+    for (name, config) in [
+        (
+            "trace_secs",
+            super::config::RetentionHorizons::builder()
+                .trace_secs(0)
+                .build(),
+        ),
+        (
+            "debug_secs",
+            super::config::RetentionHorizons::builder()
+                .debug_secs(0)
+                .build(),
+        ),
+        (
+            "info_secs",
+            super::config::RetentionHorizons::builder()
+                .info_secs(0)
+                .build(),
+        ),
+        (
+            "warn_secs",
+            super::config::RetentionHorizons::builder()
+                .warn_secs(0)
+                .build(),
+        ),
+        (
+            "error_secs",
+            super::config::RetentionHorizons::builder()
+                .error_secs(0)
+                .build(),
+        ),
+    ] {
+        assert!(config.validate().is_err(), "{name}=0 must be rejected");
+    }
+}
+
+#[test]
+fn zero_horizon_error_names_the_offending_field() {
+    let horizons = super::config::RetentionHorizons::builder()
+        .error_secs(0)
+        .build();
+    let conflaguration::Error::Validation { errors } =
+        horizons.validate().expect_err("zero error_secs rejected")
+    else {
+        panic!("expected a Validation error");
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.path == "error_secs" && message.message.contains(">= 1")),
+        "got: {errors:?}"
+    );
+}
+
+#[test]
+fn resilient_config_reports_all_problems_at_once() {
+    let config = ResilientOtlpConfig::builder()
+        .buffer_capacity(0)
+        .horizons(
+            super::config::RetentionHorizons::builder()
+                .debug_secs(2_400)
+                .error_secs(600)
+                .build(),
+        )
+        .build();
+    let conflaguration::Error::Validation { errors } =
+        config.validate().expect_err("multiple problems must fail")
+    else {
+        panic!("expected a Validation error");
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.path == "buffer_capacity"),
+        "got: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.path == "horizons.error_secs"
+                || message.path == "horizons.warn_secs"),
+        "nested horizon errors must be namespaced under 'horizons.': {errors:?}"
+    );
+    assert!(
+        errors.len() >= 2,
+        "both the top-level and nested problems must be reported together, not one per validate() call: {errors:?}"
+    );
+}
+
+#[test]
+fn valid_config_and_valid_horizons_pass() {
+    assert!(ResilientOtlpConfig::default().validate().is_ok());
+    assert!(
+        super::config::RetentionHorizons::default()
+            .validate()
+            .is_ok()
+    );
+}
+
+// ── layered loader ──────────────────────────────────────────────────────────
+
+#[test]
+fn layered_builder_starts_at_default() {
+    let from_layered = ResilientOtlpConfig::layered().build();
+    let from_default = ResilientOtlpConfig::default();
+    assert_eq!(from_layered.buffer_capacity, from_default.buffer_capacity);
+    assert_eq!(from_layered.horizons, from_default.horizons);
+}
+
+#[test]
+fn layered_with_overrides_default_and_validates() {
+    let config = ResilientOtlpConfig::layered()
+        .with_buffer_capacity(4096)
+        .with_backoff_cap_ms(5_000)
+        .build();
+    assert_eq!(config.buffer_capacity, 4096);
+    assert_eq!(ResilientOtlpConfig::default().buffer_capacity, 65_536);
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn layered_from_path_overrides_only_touched_fields() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("resilient.toml");
+    std::fs::write(&path, "buffer_capacity = 2048\n").expect("write toml");
+    let config = ResilientOtlpConfig::layered()
+        .from_path(&path)
+        .expect("from_path")
+        .build();
+    assert_eq!(config.buffer_capacity, 2048);
+    assert_eq!(
+        config.max_batch_items,
+        ResilientOtlpConfig::default().max_batch_items,
+        "untouched field falls through to the default"
+    );
+}
+
+#[test]
+fn layered_from_path_can_set_the_whole_horizons_table() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("resilient.toml");
+    std::fs::write(
+        &path,
+        "[horizons]\ntrace_secs = 1\ndebug_secs = 2\ninfo_secs = 3\nwarn_secs = 4\nerror_secs = 5\n",
+    )
+    .expect("write toml");
+    let config = ResilientOtlpConfig::layered()
+        .from_path(&path)
+        .expect("from_path")
+        .build();
+    assert_eq!(config.horizons.error_secs, 5);
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn layered_underlay_path_never_clobbers_an_already_set_field() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("resilient.toml");
+    std::fs::write(&path, "buffer_capacity = 1024\nmax_batch_items = 64\n").expect("write toml");
+    let config = ResilientOtlpConfig::layered()
+        .with_buffer_capacity(99)
+        .underlay_path(&path)
+        .expect("underlay_path")
+        .build();
+    assert_eq!(
+        config.buffer_capacity, 99,
+        "already set by with_*; file's value dropped"
+    );
+    assert_eq!(
+        config.max_batch_items, 64,
+        "unset before underlay; the file fills it"
+    );
+}
+
+#[test]
+fn layered_from_env_overlays_scalars_and_the_nested_horizons_table() {
+    temp_env::with_vars(
+        [
+            ("PROXIMA_OTLP_RESILIENT_BUFFER_CAPACITY", Some("777")),
+            ("PROXIMA_OTLP_RESILIENT_HORIZONS_ERROR_SECS", Some("9999")),
+        ],
+        || {
+            let config = ResilientOtlpConfig::layered()
+                .from_env()
+                .expect("from_env")
+                .build();
+            assert_eq!(config.buffer_capacity, 777);
+            assert_eq!(config.horizons.error_secs, 9_999);
+            assert_eq!(
+                config.max_batch_items,
+                ResilientOtlpConfig::default().max_batch_items,
+                "untouched field falls through to the default"
+            );
+        },
+    );
+}
+
+#[test]
+fn layered_from_env_with_no_vars_set_matches_defaults() {
+    temp_env::with_vars::<&str, &str, _, _>([], || {
+        let config = ResilientOtlpConfig::layered()
+            .from_env()
+            .expect("from_env")
+            .build();
+        assert_eq!(config, ResilientOtlpConfig::builder().build());
+    });
+}
+
+// principle-4 both-ways-fixture, extended through the loader: builder,
+// direct serde, and the file-backed layered loader must all agree.
+#[test]
+fn builder_serde_and_layered_loader_agree() {
+    let via_builder = ResilientOtlpConfig::builder()
+        .buffer_capacity(2048)
+        .horizons(
+            super::config::RetentionHorizons::builder()
+                .trace_secs(60)
+                .debug_secs(120)
+                .info_secs(180)
+                .warn_secs(240)
+                .error_secs(300)
+                .build(),
+        )
+        .build();
+
+    let json = serde_json::to_string(&via_builder).expect("serialize");
+    let via_serde: ResilientOtlpConfig = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(via_serde.buffer_capacity, via_builder.buffer_capacity);
+    assert_eq!(via_serde.horizons, via_builder.horizons);
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("resilient.toml");
+    std::fs::write(
+        &path,
+        "buffer_capacity = 2048\n\
+         [horizons]\ntrace_secs = 60\ndebug_secs = 120\ninfo_secs = 180\nwarn_secs = 240\nerror_secs = 300\n",
+    )
+    .expect("write toml");
+    let via_layered = ResilientOtlpConfig::layered()
+        .from_path(&path)
+        .expect("from_path")
+        .build();
+    assert_eq!(via_layered.buffer_capacity, via_builder.buffer_capacity);
+    assert_eq!(via_layered.horizons, via_builder.horizons);
+    assert!(via_builder.validate().is_ok());
+    assert!(via_layered.validate().is_ok());
 }
