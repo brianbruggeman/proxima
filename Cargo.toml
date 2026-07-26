@@ -869,8 +869,12 @@ dpdk = ["proxima-net/dpdk"]
 tokio-rustls = ["tokio", "dep:tokio-rustls"]
 # the default `Runtime` impl: N tokio current-thread runtimes pinned per core.
 # Pulls in `core_affinity` for OS-level CPU pinning and `flume` for cross-core
-# task dispatch. Enables the `runtime::tokio_per_core` module.
-runtime-tokio = ["tokio-runtime", "proxima-runtime/tokio", "dep:core_affinity", "dep:flume"]
+# task dispatch. Enables the `runtime::tokio_per_core` module. Also needs
+# `proxima-net/tokio` — `RuntimeSelection::from_tokio` (src/runtime.rs) bundles
+# the tokio-backed acceptor/unix-upstream/packet-listener factories from that
+# module unconditionally, so this feature must carry it rather than relying on
+# a caller to also enable the (unrelated) full `tokio` umbrella feature.
+runtime-tokio = ["tokio-runtime", "proxima-runtime/tokio", "proxima-net/tokio", "dep:core_affinity", "dep:flume"]
 
 # `io-uring` enables the completion-based io_uring backend on Linux ≥6.x.
 # Composes with either runtime feature; the active runtime selects the
