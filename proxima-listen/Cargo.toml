@@ -61,6 +61,10 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time
 async-channel = { workspace = true }
 bytes = { workspace = true }
 proxima-net = { workspace = true, features = ["tokio"] }
+# proxima-primitives' canonical `Clock` test doubles
+# (`pipe::clock::testing::{MockClock, RecordingClock}`) — see
+# `proxima-primitives/src/pipe/clock.rs`.
+proxima-primitives = { workspace = true, features = ["test-support"] }
 
 [features]
 # Matches the incumbent resolved feature set (the pre-tiering crate always

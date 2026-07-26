@@ -108,16 +108,10 @@ mod tests {
     #[cfg(all(feature = "alloc", feature = "runtime-prime-timer"))]
     #[test]
     fn alloc_only_timer_wheel_is_constructible() {
-        use crate::core::timer::{Clock, Tick, TimerWheel};
+        use crate::core::timer::TimerWheel;
+        use crate::core::timer::testing::TestClock;
 
-        struct TestClock(u64);
-        impl Clock for TestClock {
-            fn now(&self) -> Tick {
-                self.0
-            }
-        }
-
-        let wheel = TimerWheel::new(TestClock(0));
+        let wheel = TimerWheel::new(TestClock::new(0));
         assert_eq!(wheel.now(), 0);
     }
 }

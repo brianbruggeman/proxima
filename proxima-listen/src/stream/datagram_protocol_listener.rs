@@ -355,6 +355,7 @@ mod tests {
     use futures::task::noop_waker;
 
     use proxima_primitives::pipe::SendPipe;
+    use proxima_primitives::pipe::clock::testing::RecordingClock;
     use proxima_primitives::pipe::handler::into_handle;
     use proxima_primitives::pipe::header_list::HeaderList;
     use proxima_primitives::pipe::request::{Request, Response};
@@ -427,21 +428,6 @@ mod tests {
     impl DatagramFactory for SharedFactory {
         fn bind(&self, _addr: SocketAddr) -> io::Result<Box<dyn DatagramSocket>> {
             Ok(Box::new(self.socket.clone()))
-        }
-    }
-
-    #[derive(Clone, Copy, Default)]
-    struct ReadyClock;
-
-    impl Clock for ReadyClock {
-        type Delay = core::future::Ready<()>;
-
-        fn now_nanos(&self) -> u64 {
-            0
-        }
-
-        fn delay(&self, _dur: Duration) -> Self::Delay {
-            core::future::ready(())
         }
     }
 
@@ -607,7 +593,7 @@ mod tests {
             on_timeout_calls: Arc::clone(&build_calls),
             reply_peer,
         };
-        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-timer", build, ReadyClock);
+        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-timer", build, RecordingClock::new());
         let spec = serde_json::json!({});
         let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -638,7 +624,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         let build_received = Arc::clone(&received);
         let build = move || EchoAckProto { received: Arc::clone(&build_received), pending_reply: None };
-        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-recv", build, ReadyClock);
+        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-recv", build, RecordingClock::new());
         let spec = serde_json::json!({});
         let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
         let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -666,7 +652,7 @@ mod tests {
         let on_timeout_calls = Arc::new(AtomicUsize::new(0));
         let build_calls = Arc::clone(&on_timeout_calls);
         let build = move || NeverTimeoutProto { on_timeout_calls: Arc::clone(&build_calls) };
-        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-quiet", build, ReadyClock);
+        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-quiet", build, RecordingClock::new());
         let spec = serde_json::json!({});
         let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

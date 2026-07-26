@@ -75,6 +75,10 @@ proxima-runtime = { workspace = true, features = ["tokio"] }
 prime = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 proxima-core = { workspace = true, features = ["time-driver-mock"] }
+# proxima-primitives' canonical `Clock` test doubles
+# (`pipe::clock::testing::{MockClock, RecordingClock}`), built over the
+# MockDriver above — see `proxima-primitives/src/pipe/clock.rs`.
+proxima-primitives = { workspace = true, features = ["test-support"] }
 time = { workspace = true, features = ["formatting", "parsing", "macros", "serde", "serde-human-readable"] }
 toml = { workspace = true }
 

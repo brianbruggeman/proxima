@@ -250,62 +250,10 @@ mod tests {
     use std::task::{Context, Poll};
 
     use futures::task::noop_waker;
-    use proxima_core::time::drivers::mock::MockDriver;
-    use proxima_core::time::{Driver, Instant};
 
     use super::*;
+    use crate::pipe::clock::testing::MockClock;
     use crate::pipe::handler::into_handle;
-
-    #[derive(Clone)]
-    struct MockClock {
-        driver: Arc<MockDriver>,
-    }
-
-    impl MockClock {
-        fn new() -> Self {
-            Self {
-                driver: Arc::new(MockDriver::new()),
-            }
-        }
-
-        fn advance(&self, delta: Duration) {
-            self.driver.advance(delta);
-        }
-    }
-
-    struct MockSleep {
-        driver: Arc<MockDriver>,
-        deadline: Instant,
-    }
-
-    impl Future for MockSleep {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-            if self.driver.now() >= self.deadline {
-                Poll::Ready(())
-            } else {
-                self.driver
-                    .schedule_wake(self.deadline, context.waker().clone());
-                Poll::Pending
-            }
-        }
-    }
-
-    impl Clock for MockClock {
-        type Delay = MockSleep;
-
-        fn now_nanos(&self) -> u64 {
-            u64::try_from(self.driver.now().into_monotonic().as_nanos()).unwrap_or(u64::MAX)
-        }
-
-        fn delay(&self, duration: Duration) -> MockSleep {
-            let deadline = self.driver.now() + duration;
-            MockSleep {
-                driver: self.driver.clone(),
-                deadline,
-            }
-        }
-    }
 
     #[derive(Clone)]
     struct RanFlag {

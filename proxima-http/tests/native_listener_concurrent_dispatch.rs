@@ -30,12 +30,10 @@ use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::task::noop_waker;
 
-use proxima_core::time::drivers::mock::MockDriver;
-use proxima_core::time::{Driver, Instant};
 use proxima_http::http3::native::{DriverState, drive_client_step};
 use proxima_listen::{ListenProtocol, ServeContext};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::capabilities::Clock;
+use proxima_primitives::pipe::clock::testing::MockClock;
 use proxima_primitives::pipe::handler::into_handle;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
@@ -48,59 +46,6 @@ use proxima_protocols::quic::tls::rustls_provider::{RustlsClientProvider, Rustls
 use proxima_protocols::quic::transport_parameters::TransportParameters;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig as RustlsClientConfig, DigitallySignedStruct, SignatureScheme};
-
-// ── injected mock clock over MockDriver (mirrors native_listener_stale_now_reap.rs) ──
-
-#[derive(Clone)]
-struct MockClock {
-    driver: Arc<MockDriver>,
-}
-
-impl MockClock {
-    fn new() -> Self {
-        Self {
-            driver: Arc::new(MockDriver::new()),
-        }
-    }
-
-    fn advance(&self, delta: Duration) {
-        self.driver.advance(delta);
-    }
-}
-
-struct MockSleep {
-    driver: Arc<MockDriver>,
-    deadline: Instant,
-}
-
-impl Future for MockSleep {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-        if self.driver.now() >= self.deadline {
-            Poll::Ready(())
-        } else {
-            self.driver
-                .schedule_wake(self.deadline, context.waker().clone());
-            Poll::Pending
-        }
-    }
-}
-
-impl Clock for MockClock {
-    type Delay = MockSleep;
-
-    fn now_nanos(&self) -> u64 {
-        u64::try_from(self.driver.now().into_monotonic().as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    fn delay(&self, duration: Duration) -> MockSleep {
-        let deadline = self.driver.now() + duration;
-        MockSleep {
-            driver: self.driver.clone(),
-            deadline,
-        }
-    }
-}
 
 // ── in-memory datagram socket, shared by both clients (distinct peer addrs) ──
 

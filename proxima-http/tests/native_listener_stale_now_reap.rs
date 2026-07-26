@@ -13,16 +13,19 @@
 //! the timer only) and a fresh `now` re-sampled AFTER the await.
 //!
 //! This test drives the REAL serve() loop over an in-memory datagram socket and
-//! an injected mock [`Clock`] (a directly-constructed `MockDriver`). It parks
-//! the loop on an idle socket, advances VIRTUAL time past a deliberately-small
-//! `handshake_completion_micros`, THEN delivers the client's Initial — the
-//! exact "long idle await then accept" the bug needs. It then completes the H3
-//! GET/200 exchange end-to-end THROUGH the serve loop. A reaped connection can
-//! serve nothing, so the response only arrives when the freshly-accepted
-//! connection survives — i.e. only with the tick_start/now split in place.
+//! an injected [`proxima_primitives::pipe::capabilities::Clock`], the
+//! canonical [`proxima_primitives::pipe::clock::testing::MockClock`] (a
+//! `MockDriver`-backed double — see that module for why it, not
+//! `RecordingClock`). It parks the loop on an idle socket, advances VIRTUAL
+//! time past a deliberately-small `handshake_completion_micros`, THEN
+//! delivers the client's Initial — the exact "long idle await then accept"
+//! the bug needs. It then completes the H3 GET/200 exchange end-to-end
+//! THROUGH the serve loop. A reaped connection can serve nothing, so the
+//! response only arrives when the freshly-accepted connection survives —
+//! i.e. only with the tick_start/now split in place.
 //!
 //! There is NO real wall-clock waiting anywhere: every "delay" is a
-//! `MockDriver::advance` of virtual time.
+//! `MockClock::advance` of virtual time.
 
 #![cfg(feature = "http3-native")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::type_complexity)]
@@ -40,12 +43,10 @@ use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::task::noop_waker;
 
-use proxima_core::time::drivers::mock::MockDriver;
-use proxima_core::time::{Driver, Instant};
 use proxima_http::http3::native::{DriverState, drive_client_step};
 use proxima_listen::{ListenProtocol, ServeContext};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::capabilities::Clock;
+use proxima_primitives::pipe::clock::testing::MockClock;
 use proxima_primitives::pipe::handler::into_handle;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
@@ -59,62 +60,6 @@ use proxima_protocols::quic::tls::rustls_provider::{RustlsClientProvider, Rustls
 use proxima_protocols::quic::transport_parameters::TransportParameters;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig as RustlsClientConfig, DigitallySignedStruct, SignatureScheme};
-
-// ── injected mock clock over MockDriver ──────────────────────────────────────
-//
-// The one clock the serve loop reads `now` from AND drives its timer sleep
-// from. Virtual time advances ONLY when the test calls `advance`.
-
-#[derive(Clone)]
-struct MockClock {
-    driver: Arc<MockDriver>,
-}
-
-impl MockClock {
-    fn new() -> Self {
-        Self {
-            driver: Arc::new(MockDriver::new()),
-        }
-    }
-
-    fn advance(&self, delta: Duration) {
-        self.driver.advance(delta);
-    }
-}
-
-struct MockSleep {
-    driver: Arc<MockDriver>,
-    deadline: Instant,
-}
-
-impl Future for MockSleep {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-        if self.driver.now() >= self.deadline {
-            Poll::Ready(())
-        } else {
-            self.driver
-                .schedule_wake(self.deadline, context.waker().clone());
-            Poll::Pending
-        }
-    }
-}
-
-impl Clock for MockClock {
-    type Delay = MockSleep;
-
-    fn now_nanos(&self) -> u64 {
-        u64::try_from(self.driver.now().into_monotonic().as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    fn delay(&self, duration: Duration) -> MockSleep {
-        let deadline = self.driver.now() + duration;
-        MockSleep {
-            driver: self.driver.clone(),
-            deadline,
-        }
-    }
-}
 
 // ── in-memory datagram socket the serve loop binds and the test drives ───────
 

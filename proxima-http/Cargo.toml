@@ -70,6 +70,10 @@ proxima = { workspace = true, features = ["test-support-tokio"] }
 # time-driver-mock compiles proxima-core's deterministic MockDriver so the
 # native-h3 listener's injected Clock can be driven by virtual time in tests.
 proxima-core = { workspace = true, features = ["time-driver-mock", "std"] }
+# proxima-primitives' canonical `Clock` test doubles
+# (`pipe::clock::testing::{MockClock, RecordingClock}`), built over the
+# MockDriver above — see `proxima-primitives/src/pipe/clock.rs`.
+proxima-primitives = { workspace = true, features = ["test-support"] }
 rstest = { workspace = true }
 toml = { workspace = true }
 proxima-net = { workspace = true, features = ["prime", "tokio"] }

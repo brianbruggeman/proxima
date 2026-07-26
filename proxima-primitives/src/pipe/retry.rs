@@ -1293,36 +1293,15 @@ mod tests {
     //
     // `Retry::with_clock` takes any `Clock` impl, so the between-attempt delay
     // can be proven deterministically — `delay` resolves instantly and records
-    // what it was asked to wait, never a real sleep.
+    // what it was asked to wait, never a real sleep. `RecordingClock` is the
+    // canonical double for this (see `crate::pipe::clock::testing` for why
+    // it, not `MockClock`).
 
-    #[derive(Clone, Default)]
-    struct FakeClock {
-        now_nanos: Arc<AtomicU64>,
-        delays: Arc<Mutex<Vec<Duration>>>,
-    }
-
-    impl FakeClock {
-        fn delays(&self) -> Vec<Duration> {
-            self.delays.lock().unwrap().clone()
-        }
-    }
-
-    impl Clock for FakeClock {
-        type Delay = std::future::Ready<()>;
-
-        fn now_nanos(&self) -> u64 {
-            self.now_nanos.load(Ordering::Relaxed)
-        }
-
-        fn delay(&self, duration: Duration) -> Self::Delay {
-            self.delays.lock().unwrap().push(duration);
-            std::future::ready(())
-        }
-    }
+    use crate::pipe::clock::testing::RecordingClock;
 
     #[proxima::test]
     async fn fake_clock_drives_backoff_between_retries_no_real_sleep() {
-        let clock = FakeClock::default();
+        let clock = RecordingClock::new();
         let svc = FailUntil {
             threshold: 3,
             observed: AtomicU32::new(0),
@@ -1330,7 +1309,7 @@ mod tests {
         };
         // a base/max delay of seconds would make a real-sleep implementation
         // take real seconds to run; this test still completes instantly
-        // because `FakeClock::delay` never actually waits.
+        // because `RecordingClock::delay` never actually waits.
         let stack = Retry::with_clock(into_handle(svc), clock.clone())
             .with_max_attempts(5)
             .with_base_delay(Duration::from_secs(5))
@@ -1360,7 +1339,7 @@ mod tests {
 
     #[proxima::test]
     async fn fake_clock_non_retryable_error_stops_after_one_attempt() {
-        let clock = FakeClock::default();
+        let clock = RecordingClock::new();
         let svc = FailUntil {
             threshold: 100,
             observed: AtomicU32::new(0),

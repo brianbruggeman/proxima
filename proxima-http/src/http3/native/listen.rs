@@ -1151,28 +1151,18 @@ mod tests {
     // read the SAME absolute epoch — an ELAPSED-since-origin `now` for one
     // and an ABSOLUTE `now` for the other reaped every connection within
     // microseconds of accepting it. A large, non-zero clock reading (as
-    // production's `TimeClock` returns; a `MockDriver` starting near zero
-    // would not have caught this) is the case that actually exposes the
-    // two-epoch mismatch.
+    // production's `TimeClock` returns; the driver-backed `MockClock`
+    // starting near zero would not have caught this) is the case that
+    // actually exposes the two-epoch mismatch — `RecordingClock::at` starts
+    // wherever asked, so it can reproduce the large-epoch shape directly.
     #[test]
     fn to_proto_instant_matches_the_absolute_epoch_core_instant_now_reads() {
-        struct FixedClock {
-            nanos: u64,
-        }
-        impl Clock for FixedClock {
-            type Delay = core::future::Ready<()>;
-            fn now_nanos(&self) -> u64 {
-                self.nanos
-            }
-            fn delay(&self, _dur: Duration) -> Self::Delay {
-                core::future::ready(())
-            }
-        }
+        use proxima_primitives::pipe::clock::testing::RecordingClock;
 
         // A large absolute reading, exactly the shape `TimeClock` returns in
         // production (nowhere near zero) — the case that actually exercises
         // the epoch mismatch this test guards against.
-        let clock = FixedClock { nanos: 1_700_000_000_123_456_000 };
+        let clock = RecordingClock::at(1_700_000_000_123_456_000);
         let now = core_instant_now(&clock);
         let proto = to_proto_instant(now);
 

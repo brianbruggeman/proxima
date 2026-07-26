@@ -110,6 +110,11 @@ io-async = ["proxima-core/io-async"]
 # (tokio-util's io traits are std::io::Error-shaped), so this stays off the
 # default `std` feature and opts in explicitly (disciplined-component firewall).
 io-bridge = ["std", "dep:tokio-util"]
+# `pipe::clock::testing` (the canonical `MockClock`/`RecordingClock` `Clock`
+# doubles) — reachable from any crate's `[dev-dependencies]`, mirroring
+# `proxima-core`'s `time-driver-mock` convention. `MockClock` wraps
+# `proxima-core`'s `MockDriver`, hence the same underlying feature.
+test-support = ["std", "proxima-core/time-driver-mock"]
 
 [dependencies]
 proxima-core    = { workspace = true, default-features = false }

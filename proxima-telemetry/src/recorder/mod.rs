@@ -2331,29 +2331,21 @@ mod tests {
     }
 
     // C5 config: a recorder-level DEFAULT budget (no explicit `#[span(budget)]`)
-    // tail-keeps a sampled-out span. StepClock advances 1000ns/read so the span's
-    // duration (>= 1000) overruns the 500ns default → trace kept despite AlwaysOff.
+    // tail-keeps a sampled-out span. `MonotonicCounter::with_step(0, 1_000)`
+    // advances 1000ns/read so the span's duration (>= 1000) overruns the
+    // 500ns default → trace kept despite AlwaysOff.
     #[cfg(feature = "instrument-metrics")]
     #[proxima::test]
     async fn default_budget_tail_keeps_unbudgeted_sampled_out_span() {
-        use core::sync::atomic::AtomicU64;
-
-        use crate::clock::Clock;
+        use crate::clock::MonotonicCounter;
         use crate::sampler::AlwaysOff;
-
-        struct StepClock(AtomicU64);
-        impl Clock for StepClock {
-            fn now_ns(&self) -> u64 {
-                self.0.fetch_add(1_000, Ordering::Relaxed)
-            }
-        }
 
         let (pipe, spans, _, _, _, _) = CountingPipe::new();
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
             .sampler(AlwaysOff)
-            .clock(StepClock(AtomicU64::new(0)))
+            .clock(MonotonicCounter::with_step(0, 1_000))
             .start()
             .expect("recorder build failed");
         recorder.set_default_budget_ns(500);
@@ -2374,28 +2366,20 @@ mod tests {
     #[cfg(feature = "instrument-metrics")]
     #[proxima::test]
     async fn kept_span_stamps_its_trace_as_the_exemplar() {
-        use core::sync::atomic::AtomicU64;
-
-        use crate::clock::Clock;
+        use crate::clock::MonotonicCounter;
         use crate::pipes::InMemoryPipe;
 
         // ExemplarCell::observe only replaces its 0 sentinel on a STRICTLY
         // greater duration (see metric/exemplar.rs) -- a real span this
         // small can measure as exactly 0ns on the system clock, silently
-        // never stamping the exemplar. A step clock guarantees a nonzero,
-        // deterministic duration between span start and close.
-        struct StepClock(AtomicU64);
-        impl Clock for StepClock {
-            fn now_ns(&self) -> u64 {
-                self.0.fetch_add(1_000, Ordering::Relaxed)
-            }
-        }
-
+        // never stamping the exemplar. A 1000/step MonotonicCounter
+        // guarantees a nonzero, deterministic duration between span start
+        // and close.
         let pipe = InMemoryPipe::new();
         let recorder = Recorder::builder()
             .pipe(pipe.clone())
             .core_count(1)
-            .clock(StepClock(AtomicU64::new(0)))
+            .clock(MonotonicCounter::with_step(0, 1_000))
             .start()
             .expect("recorder build failed");
         recorder.enable_span_metrics();
@@ -2422,26 +2406,18 @@ mod tests {
     #[cfg(all(feature = "instrument-metrics", feature = "histogram"))]
     #[proxima::test]
     async fn histogram_recorded_inside_a_span_stamps_that_span_on_its_exemplar() {
-        use core::sync::atomic::AtomicU64;
-
-        use crate::clock::Clock;
+        use crate::clock::MonotonicCounter;
         use crate::metric::Histogram;
         use crate::pipes::InMemoryPipe;
 
-        // a step clock guarantees a nonzero, deterministic value so observe()
-        // replaces its 0 sentinel (see kept_span_stamps... above for why).
-        struct StepClock(AtomicU64);
-        impl Clock for StepClock {
-            fn now_ns(&self) -> u64 {
-                self.0.fetch_add(1_000, Ordering::Relaxed)
-            }
-        }
-
+        // a 1000/step MonotonicCounter guarantees a nonzero, deterministic
+        // value so observe() replaces its 0 sentinel (see
+        // kept_span_stamps... above for why).
         let pipe = InMemoryPipe::new();
         let recorder = Recorder::builder()
             .pipe(pipe.clone())
             .core_count(1)
-            .clock(StepClock(AtomicU64::new(0)))
+            .clock(MonotonicCounter::with_step(0, 1_000))
             .start()
             .expect("recorder build failed");
 
