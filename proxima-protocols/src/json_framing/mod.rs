@@ -2,10 +2,12 @@
 //! retry, for sidecars that speak the common
 //! `[u32 BE len][payload]` shape. The sans-IO codec (encode/decode of
 //! the 4-byte length prefix) lives in [`codec`] — the reconnect +
-//! StreamUpstream-binding + tokio Mutex client stays here.
+//! StreamUpstream-binding + async-gate-`Mutex` client stays here.
 //!
-//! Tier: std + tokio (client, gated by `json_framing-std`). The
-//! [`codec`] module is no_std + alloc, gated by `json_framing`.
+//! Tier: std, tokio-free (client, gated by `json_framing-std`; the
+//! connection slot uses `proxima_primitives::sync::AsyncMutex`, the
+//! waker-based async gate — no runtime dependency). The [`codec`] module
+//! is no_std + alloc, gated by `json_framing`.
 
 pub mod codec;
 
@@ -22,11 +24,11 @@ use std::time::Duration;
 #[cfg(feature = "json_framing-std")]
 use codec::{HEADER_BYTES, decode_header, encode_header};
 #[cfg(feature = "json_framing-std")]
+use proxima_primitives::sync::AsyncMutex as Mutex;
+#[cfg(feature = "json_framing-std")]
 use serde_json::Value;
 #[cfg(feature = "json_framing-std")]
 use thiserror::Error;
-#[cfg(feature = "json_framing-std")]
-use tokio::sync::Mutex;
 #[cfg(feature = "json_framing-std")]
 use tracing::{debug, warn};
 
@@ -124,10 +126,11 @@ impl<U: StreamUpstream> LengthPrefixedJsonClient<U> {
         if guard.is_some() {
             return Ok(());
         }
-        let conn = proxima_core::time::timeout(self.config.connect_timeout, self.upstream.connect())
-            .await
-            .map_err(|_| TransportError::Timeout(self.config.connect_timeout))?
-            .map_err(|err| TransportError::Backend(format!("connect: {err}")))?;
+        let conn =
+            proxima_core::time::timeout(self.config.connect_timeout, self.upstream.connect())
+                .await
+                .map_err(|_| TransportError::Timeout(self.config.connect_timeout))?
+                .map_err(|err| TransportError::Backend(format!("connect: {err}")))?;
         self.connect_count.fetch_add(1, Ordering::Relaxed);
         debug!(label = %self.label, "framing client connected");
         *guard = Some(conn);
@@ -293,6 +296,12 @@ pub mod server {
     }
 }
 
+// `[dev-dependencies]` pulls `tokio` and `proxima-net/tokio`
+// unconditionally (see this crate's Cargo.toml) regardless of
+// `json_framing-std`'s own (now tokio-free) feature list, so these tests
+// keep using the tokio backend as a convenient, always-available test
+// harness — same reasoning as before the `AsyncMutex` swap above; only
+// the client's PRODUCTION connection slot needed to stop requiring tokio.
 #[cfg(all(test, feature = "json_framing-std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

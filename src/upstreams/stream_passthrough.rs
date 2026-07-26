@@ -26,10 +26,14 @@ use crate::pipe::{PipeHandle, into_handle};
 use crate::pipe_factory::PipeFactory;
 use crate::request::{Request, Response};
 use crate::stream::{StreamUpstream, StreamUpstreamExt};
-#[cfg(feature = "tcp")]
+#[cfg(all(feature = "tcp", feature = "tokio"))]
 use crate::upstreams::tokio_stream::TokioTcpUpstream;
-#[cfg(all(feature = "unix", unix))]
+#[cfg(all(feature = "unix", unix, feature = "tokio"))]
 use crate::upstreams::tokio_stream::TokioUnixUpstream;
+// tokio-free TCP backend — the default (`tcp` no longer implies `tokio`,
+// see the umbrella Cargo.toml doc on the `tcp` feature).
+#[cfg(all(feature = "tcp", not(feature = "tokio")))]
+use proxima_net::prime::PrimeTcpUpstream;
 
 const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
 const DEFAULT_TRANSPORT: &str = "tcp";
@@ -195,7 +199,7 @@ impl<U: StreamUpstream + 'static> SendPipe for StreamPassthroughUpstream<U> {
             let (read_half, mut write_half) = conn.split();
 
             let pump_cancel = cancel.clone();
-            tokio::spawn(async move {
+            let pump = async move {
                 let mut request_stream = request.into_chunk_stream();
                 loop {
                     let cancelled = pump_cancel.fired().fuse();
@@ -214,7 +218,15 @@ impl<U: StreamUpstream + 'static> SendPipe for StreamPassthroughUpstream<U> {
                     }
                 }
                 let _ = write_half.close().await;
-            });
+            };
+            // `serve-prime` (rides `tcp`, see the umbrella Cargo.toml) puts
+            // every connection task on a prime worker already, so this is
+            // ambient-safe the same way `tokio::spawn` is ambient-safe on
+            // the tokio path — both panic if called off their runtime.
+            #[cfg(feature = "tokio")]
+            tokio::spawn(pump);
+            #[cfg(not(feature = "tokio"))]
+            prime::os::core_shard::spawn_on_current_core(Box::pin(pump));
 
             let response_stream = reader_to_byte_stream(read_half, chunk_bytes);
             Ok(Response {
@@ -227,7 +239,6 @@ impl<U: StreamUpstream + 'static> SendPipe for StreamPassthroughUpstream<U> {
         }
     }
 }
-
 
 pub struct StreamPassthroughPipeFactory;
 
@@ -278,7 +289,7 @@ fn build_stream_passthrough(
     }
 }
 
-#[cfg(feature = "tcp")]
+#[cfg(all(feature = "tcp", feature = "tokio"))]
 fn build_tcp_stream_passthrough(
     settings: &StreamPassthroughSettings,
 ) -> Result<PipeHandle, ProximaError> {
@@ -286,6 +297,19 @@ fn build_tcp_stream_passthrough(
         ProximaError::Config(format!("stream tcp addr `{}`: {err}", settings.addr))
     })?;
     let upstream = TokioTcpUpstream::new(addr);
+    let pipe = StreamPassthroughUpstream::new(upstream, settings.name.clone())
+        .with_chunk_bytes(settings.chunk_bytes);
+    Ok(into_handle(pipe))
+}
+
+#[cfg(all(feature = "tcp", not(feature = "tokio")))]
+fn build_tcp_stream_passthrough(
+    settings: &StreamPassthroughSettings,
+) -> Result<PipeHandle, ProximaError> {
+    let addr = settings.addr.parse::<SocketAddr>().map_err(|err| {
+        ProximaError::Config(format!("stream tcp addr `{}`: {err}", settings.addr))
+    })?;
+    let upstream = PrimeTcpUpstream::new(addr);
     let pipe = StreamPassthroughUpstream::new(upstream, settings.name.clone())
         .with_chunk_bytes(settings.chunk_bytes);
     Ok(into_handle(pipe))
@@ -300,7 +324,7 @@ fn build_tcp_stream_passthrough(
     ))
 }
 
-#[cfg(all(feature = "unix", unix))]
+#[cfg(all(feature = "unix", unix, feature = "tokio"))]
 fn build_unix_stream_passthrough(
     settings: &StreamPassthroughSettings,
 ) -> Result<PipeHandle, ProximaError> {
@@ -310,7 +334,7 @@ fn build_unix_stream_passthrough(
     Ok(into_handle(pipe))
 }
 
-#[cfg(not(all(feature = "unix", unix)))]
+#[cfg(not(all(feature = "unix", unix, feature = "tokio")))]
 fn build_unix_stream_passthrough(
     _settings: &StreamPassthroughSettings,
 ) -> Result<PipeHandle, ProximaError> {
@@ -323,11 +347,36 @@ fn build_unix_stream_passthrough(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tokio")]
     use crate::listeners::tokio_stream::TokioTcpListener;
+    #[cfg(feature = "tokio")]
     use crate::stream::{StreamListener, StreamListenerExt};
+    #[cfg(feature = "tokio")]
     use crate::upstreams::tokio_stream::TokioTcpUpstream;
+    #[cfg(not(feature = "tokio"))]
+    use core::future::poll_fn;
     use std::net::{Ipv4Addr, SocketAddr};
+    // `PrimeTcpUpstream` itself is already in scope via `use super::*` above
+    // (the module-level import under `all(feature = "tcp", not(feature =
+    // "tokio"))`); only the acceptor side is test-only.
+    #[cfg(not(feature = "tokio"))]
+    use proxima_net::prime::PrimeAcceptorFactory;
+    #[cfg(not(feature = "tokio"))]
+    use proxima_primitives::stream::{AcceptorFactory, TcpBindOptions};
 
+    fn passthrough_request() -> Request<Bytes> {
+        Request {
+            method: proxima_primitives::pipe::Method::from_bytes(b"STREAM"),
+            path: Bytes::from_static(b"/"),
+            query: HeaderList::new(),
+            metadata: HeaderList::new(),
+            payload: Bytes::from_static(b"hello over passthrough"),
+            stream: None,
+            context: crate::request::RequestContext::default(),
+        }
+    }
+
+    #[cfg(feature = "tokio")]
     #[proxima::test]
     async fn passthrough_pumps_bytes_in_and_out() {
         // a tiny echo server backs the upstream side
@@ -349,16 +398,41 @@ mod tests {
         let upstream = TokioTcpUpstream::new(server_addr);
         let pipe = StreamPassthroughUpstream::new(upstream, "echo");
 
-        let request = Request {
-            method: proxima_primitives::pipe::Method::from_bytes(b"STREAM"),
-            path: Bytes::from_static(b"/"),
-            query: HeaderList::new(),
-            metadata: HeaderList::new(),
-            payload: Bytes::from_static(b"hello over passthrough"),
-            stream: None,
-            context: crate::request::RequestContext::default(),
-        };
-        let response = pipe.call(request).await.expect("call");
+        let response = pipe.call(passthrough_request()).await.expect("call");
+        let collected = response.collect_body().await.expect("collect");
+        assert_eq!(&collected[..], b"hello over passthrough");
+    }
+
+    // prime-path sibling of `passthrough_pumps_bytes_in_and_out` — same
+    // round trip, `PrimeAcceptorFactory`/`PrimeTcpUpstream` instead of the
+    // tokio types, proving `StreamPassthroughUpstream::call`'s
+    // `spawn_on_current_core` pump runs cleanly under the default
+    // tokio-free `tcp` build (see the umbrella Cargo.toml's `tcp` doc).
+    #[cfg(not(feature = "tokio"))]
+    #[proxima::test]
+    async fn passthrough_pumps_bytes_in_and_out() {
+        let mut acceptor = PrimeAcceptorFactory
+            .bind(
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                TcpBindOptions::default(),
+            )
+            .expect("bind");
+        let server_addr = acceptor.local_addr().expect("local_addr");
+
+        prime::os::core_shard::spawn_on_current_core(Box::pin(async move {
+            let conn = poll_fn(|cx| acceptor.poll_accept(cx))
+                .await
+                .expect("accept");
+            let (mut read, mut write) = futures::io::AsyncReadExt::split(conn);
+            futures::io::copy(&mut read, &mut write)
+                .await
+                .expect("echo copy");
+        }));
+
+        let upstream = PrimeTcpUpstream::new(server_addr);
+        let pipe = StreamPassthroughUpstream::new(upstream, "echo");
+
+        let response = pipe.call(passthrough_request()).await.expect("call");
         let collected = response.collect_body().await.expect("collect");
         assert_eq!(&collected[..], b"hello over passthrough");
     }
@@ -382,10 +456,22 @@ mod tests {
         from_config.validate().expect("valid settings");
     }
 
+    fn factory_request() -> Request<Bytes> {
+        Request {
+            method: proxima_primitives::pipe::Method::from_bytes(b"STREAM"),
+            path: Bytes::from_static(b"/"),
+            query: HeaderList::new(),
+            metadata: HeaderList::new(),
+            payload: Bytes::from_static(b"hello through factory"),
+            stream: None,
+            context: crate::request::RequestContext::default(),
+        }
+    }
+
     // the factory's `tcp` transport dispatch is itself gated on the `tcp`
-    // feature (see the `#[cfg(feature = "tcp")]` build_tcp arm above) —
+    // feature (see the `build_tcp_stream_passthrough` arms above) —
     // without it, `factory.build(...)` returns a Config error.
-    #[cfg(feature = "tcp")]
+    #[cfg(all(feature = "tcp", feature = "tokio"))]
     #[proxima::test]
     async fn factory_builds_tcp_stream_passthrough_from_settings() {
         let server_listener = TokioTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
@@ -414,16 +500,49 @@ mod tests {
             .build(&settings.to_value(), None)
             .await
             .expect("build stream pipe");
-        let request = Request {
-            method: proxima_primitives::pipe::Method::from_bytes(b"STREAM"),
-            path: Bytes::from_static(b"/"),
-            query: HeaderList::new(),
-            metadata: HeaderList::new(),
-            payload: Bytes::from_static(b"hello through factory"),
-            stream: None,
-            context: crate::request::RequestContext::default(),
-        };
-        let response = SendPipe::call(&handle, request).await.expect("call");
+        let response = SendPipe::call(&handle, factory_request())
+            .await
+            .expect("call");
+        let collected = response.collect_body().await.expect("collect");
+        assert_eq!(&collected[..], b"hello through factory");
+    }
+
+    // prime-path sibling of `factory_builds_tcp_stream_passthrough_from_settings`.
+    #[cfg(all(feature = "tcp", not(feature = "tokio")))]
+    #[proxima::test]
+    async fn factory_builds_tcp_stream_passthrough_from_settings() {
+        let mut acceptor = PrimeAcceptorFactory
+            .bind(
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                TcpBindOptions::default(),
+            )
+            .expect("bind");
+        let server_addr = acceptor.local_addr().expect("local_addr");
+
+        prime::os::core_shard::spawn_on_current_core(Box::pin(async move {
+            let conn = poll_fn(|cx| acceptor.poll_accept(cx))
+                .await
+                .expect("accept");
+            let (mut read, mut write) = futures::io::AsyncReadExt::split(conn);
+            futures::io::copy(&mut read, &mut write)
+                .await
+                .expect("echo copy");
+        }));
+
+        let settings = StreamPassthroughSettings::builder()
+            .transport("tcp")
+            .addr(server_addr.to_string())
+            .name("factory-echo")
+            .chunk_bytes(32)
+            .build();
+        let factory = StreamPassthroughPipeFactory::new();
+        let handle = factory
+            .build(&settings.to_value(), None)
+            .await
+            .expect("build stream pipe");
+        let response = SendPipe::call(&handle, factory_request())
+            .await
+            .expect("call");
         let collected = response.collect_body().await.expect("collect");
         assert_eq!(&collected[..], b"hello through factory");
     }

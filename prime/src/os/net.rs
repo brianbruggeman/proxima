@@ -662,8 +662,14 @@ impl AsyncWrite for TcpStream {
     }
 
     fn poll_close(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // write-only: matches tokio's `AsyncWrite::poll_shutdown` (half-close),
+        // not a full socket close — a caller that split the stream still needs
+        // its read half live after signaling EOF to the peer. full teardown
+        // happens on `Drop`. `Shutdown::Both` here silently zeroed a still-
+        // live read half (proven by `StreamPassthroughUpstream`'s prime-path
+        // round trip going empty once `PrimeTcpUpstream` was reachable).
         let this = self.get_mut();
-        let _ = this.socket.shutdown(std::net::Shutdown::Both);
+        let _ = this.socket.shutdown(std::net::Shutdown::Write);
         Poll::Ready(Ok(()))
     }
 }

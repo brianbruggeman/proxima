@@ -1,7 +1,4 @@
-#[cfg(all(
-    feature = "amqp-client",
-    any(target_os = "linux", target_os = "macos")
-))]
+#[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos")))]
 pub mod amqp;
 pub mod callback;
 pub mod callback_registry;
@@ -60,15 +57,16 @@ pub mod stream_passthrough;
 pub mod synth;
 #[cfg(feature = "h3-upstream")]
 pub use proxima_http::http3::upstream as h3;
-#[cfg(any(feature = "tcp", feature = "unix"))]
-pub use proxima_net::tokio::tokio_stream_upstream as tokio_stream;
+// `proxima_net::tokio` only exists under proxima-net's own `tokio` feature
+// (forwarded by this crate's umbrella `tokio` feature) — `tcp`/`unix` alone
+// no longer imply it (`tcp` rides `proxima_net::prime::PrimeTcpUpstream` by
+// default now).
 #[cfg(feature = "websocket-upstream")]
 pub use proxima_http::websocket::upstream as websocket;
+#[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
+pub use proxima_net::tokio::tokio_stream_upstream as tokio_stream;
 
-#[cfg(all(
-    feature = "amqp-client",
-    any(target_os = "linux", target_os = "macos")
-))]
+#[cfg(all(feature = "amqp-client", any(target_os = "linux", target_os = "macos")))]
 pub use amqp::{AmqpClientProtocol, AmqpPipeFactory};
 pub use callback::{CallbackPipeFactory, CallbackUpstream};
 pub use callback_registry::{CallbackFn, CallbackFuture, CallbackRegistry, DynCallbackFn};
@@ -128,9 +126,9 @@ pub use stream_passthrough::{
     StreamPassthroughPipeFactory, StreamPassthroughSettings, StreamPassthroughUpstream,
 };
 pub use synth::{SynthPipeFactory, SynthUpstream};
-#[cfg(feature = "tcp")]
+#[cfg(all(feature = "tcp", feature = "tokio"))]
 pub use tokio_stream::TokioTcpUpstream;
-#[cfg(all(feature = "unix", unix))]
+#[cfg(all(feature = "unix", unix, feature = "tokio"))]
 pub use tokio_stream::TokioUnixUpstream;
 #[cfg(feature = "websocket-upstream")]
 pub use websocket::WebSocketUpstream;
