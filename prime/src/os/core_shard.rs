@@ -1940,7 +1940,7 @@ mod tests {
     }
 
     // C2b cross-reactor wake. linux-only (eventfd/epoll); runs on host-b.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "prime-tokio-compat-inverted", target_os = "linux"))]
     #[test]
     fn inverted_prime_inbox_wakes_unified_park_with_sister_io_waiting() {
         // hold the worker in the unified sister park via a long-lived sister
