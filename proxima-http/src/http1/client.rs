@@ -1204,7 +1204,7 @@ mod tests {
         }
     }
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn get_roundtrip_content_length_returns_status_and_body() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -1247,7 +1247,7 @@ mod tests {
     /// arrive while the server still withholds the second half — if the client
     /// buffered the whole body, `call` (or the first `next`) would deadlock
     /// waiting for bytes the server hasn't sent, and the test would hang.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn body_streams_incrementally_before_the_full_response_is_sent() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -1299,7 +1299,7 @@ mod tests {
         assert_eq!(&rest[..], b"BBBBBBBB", "second half streams after release");
     }
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn get_roundtrip_chunked_decodes_body() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -1338,7 +1338,7 @@ mod tests {
     /// read chunk (exercises the multi-iteration pump + the keep-alive
     /// hand-back on clean EOF). Real-shaped payload: a JSON array of repeated
     /// records, content-length framed, 40 KiB > READ_CHUNK_BYTES (16 KiB).
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn streamed_body_matches_buffered_across_multiple_reads() {
         let record = b"{\"role\":\"assistant\",\"content\":\"the quick brown fox jumps\"},";
         let mut payload = Vec::with_capacity(40 * 1024);
@@ -1389,7 +1389,7 @@ mod tests {
     /// P14 parity: a tiny per-request `timeout` against a server that
     /// accepts but never responds must return `ProximaError::Timeout`,
     /// not hang. Mirrors the hyper `HttpUpstream` timeout race.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn timeout_against_silent_server_returns_timeout_error() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -1426,7 +1426,7 @@ mod tests {
     /// P14 parity: an injected request header (template-expanded) must
     /// reach the origin, and the method override must rewrite the request
     /// line. Mirrors the hyper `HttpUpstream` header/method application.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn injected_header_and_method_override_reach_server() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -1479,7 +1479,7 @@ mod tests {
     /// The `Drain+Framing` composition (load-gen profile): the client reads
     /// every response byte to advance the keep-alive boundary but returns a
     /// `Response` with no body stream and only the framing headers.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn drain_framing_discards_body_and_skips_non_framing_headers() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -1536,7 +1536,7 @@ mod tests {
     /// keep-alive connection — every one must succeed. This is the case the
     /// load bench caught failing (~19% errors) that the single-request drain
     /// test above never exercised. A `Collect` control fires the same load.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn drain_keep_alive_reuse_across_many_requests() {
         for preset in [ResponseHandling::Discard, ResponseHandling::Full] {
             let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
@@ -1599,7 +1599,7 @@ mod tests {
     /// The bytes-in/status-out fast path reuses the keep-alive connection
     /// across many sends and returns the right status each time — parity with
     /// the `Request`/`Response` Drain path, minus the envelope.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn send_raw_reuses_keep_alive_and_returns_status() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
