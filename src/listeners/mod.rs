@@ -105,8 +105,9 @@ pub use quic_stream::{QuicListener, QuicStreamConnection};
 pub use stream_default::StreamListenProtocol;
 #[cfg(any(feature = "tcp", feature = "unix"))]
 pub use stream_protocol::{StreamListenerProtocol, reader_to_byte_stream};
-// `ConnTransform`/`FramedListenProtocol` bake `TokioTcpConnection` into their
-// public signature — see proxima-listen/src/stream/mod.rs's doc comment.
+// `FramedListenProtocol`'s bind/accept loop is tokio-only (feature-gated
+// below); `ConnTransform` itself is backend-agnostic — see
+// proxima-listen/src/stream/mod.rs's doc comment.
 #[cfg(feature = "udp")]
 pub use stream_protocol::DatagramListenProtocol;
 #[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
