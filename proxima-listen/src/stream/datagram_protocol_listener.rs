@@ -47,7 +47,7 @@ use std::pin::Pin;
 
 use futures::channel::oneshot;
 use futures::future::{self, Either, select};
-use proxima_telemetry::{debug, warn};
+use proxima_telemetry::{debug, error, warn};
 use serde_json::Value;
 
 use crate::{ListenProtocol, ServeContext};
@@ -216,6 +216,14 @@ where
             let mut proto = build();
             let mut batch = DefaultDatagramBatch::new();
             let mut transmit_scratch = [0u8; TRANSMIT_SCRATCH_BYTES];
+            // `bound` only proves the socket syscall succeeded — a caller
+            // that only ever sees this line has no way to tell a healthy
+            // listener from one that died on its very first recv poll
+            // (e.g. a datagram socket driven off a worker its backend
+            // never registered a reactor for). Fires once, after the
+            // first race iteration returns without erroring or shutting
+            // down, so its absence is itself diagnostic.
+            let mut announced_serving = false;
 
             loop {
                 let tick_start = instant_now(&clock);
@@ -233,7 +241,15 @@ where
                 enum RaceEvent {
                     Recv(std::io::Result<usize>),
                     Timeout,
-                    Shutdown,
+                    /// carries WHY the shutdown future resolved: `Ok(())` is
+                    /// the normal path (`Shutdown::stop`/`Shutdown::drop`
+                    /// sent on the paired oneshot); `Err(Canceled)` means
+                    /// the [`oneshot::Sender`] was dropped WITHOUT sending —
+                    /// every production caller routes through `Shutdown`,
+                    /// whose own `Drop` always sends first, so this arm
+                    /// firing is itself a signal that something dropped the
+                    /// sender out-of-band.
+                    Shutdown(Result<(), oneshot::Canceled>),
                 }
                 let event = {
                     let timer = async {
@@ -247,13 +263,18 @@ where
                     match select(select(recv, timer), &mut shutdown).await {
                         Either::Left((Either::Left((result, _)), _)) => RaceEvent::Recv(result),
                         Either::Left((Either::Right(((), _)), _)) => RaceEvent::Timeout,
-                        Either::Right(_) => RaceEvent::Shutdown,
+                        Either::Right((reason, _)) => RaceEvent::Shutdown(reason),
                     }
                 };
 
                 match event {
                     RaceEvent::Recv(result) => {
                         let filled = result.map_err(|err| {
+                            error!(
+                                label = %label,
+                                %err,
+                                "datagram protocol recv failed; listener exiting"
+                            );
                             ProximaError::Io(io::Error::other(format!("{label} recv: {err}")))
                         })?;
                         if filled > 0 {
@@ -278,10 +299,29 @@ where
                             warn!(?error, label = %label, "datagram protocol on_timeout failed");
                         }
                     }
-                    RaceEvent::Shutdown => {
-                        debug!(label = %label, "datagram protocol listener shutting down");
+                    RaceEvent::Shutdown(Ok(())) => {
+                        debug!(
+                            label = %label,
+                            reason = "signaled",
+                            "datagram protocol listener shutting down"
+                        );
                         return Ok(());
                     }
+                    RaceEvent::Shutdown(Err(oneshot::Canceled)) => {
+                        warn!(
+                            label = %label,
+                            reason = "sender_dropped",
+                            "datagram protocol listener shutting down: shutdown sender was \
+                             dropped without signaling — this is unexpected outside a panic \
+                             unwind and likely indicates a shutdown-handle lifetime bug"
+                        );
+                        return Ok(());
+                    }
+                }
+
+                if !announced_serving {
+                    announced_serving = true;
+                    debug!(label = %label, %bind, "datagram protocol listener serving");
                 }
 
                 let now = instant_now(&clock);
