@@ -456,7 +456,16 @@ mod kqueue {
                 )
             };
             if count < 0 {
-                return Err(io::Error::last_os_error());
+                let err = io::Error::last_os_error();
+                // a delivered signal (SIGINT/SIGTERM, e.g. the shutdown
+                // signal source in os/signal.rs) interrupts a blocked
+                // kevent() the same way it interrupts epoll_wait() on
+                // Linux — treat it as a spurious zero-event wake, not a
+                // reactor failure, matching the epoll arm below.
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    return Ok(0);
+                }
+                return Err(err);
             }
             #[cfg(feature = "runtime-prime-reactor-trace")]
             if count == 0 {
