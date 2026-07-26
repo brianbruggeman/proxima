@@ -51,14 +51,19 @@ pub trait ListenerTransportExt: Sized {
     #[must_use]
     fn tcp(self) -> Self;
 
-    /// UDP — only meaningful paired with a dual-transport protocol axis
-    /// (currently `.dns()`; see [`crate::ListenerProtocolExt::dns`]'s own
-    /// doc for the worked `.dns().tcp()` vs `.dns().udp()` comparison and
-    /// the branching this feeds). Every other protocol axis (`.http()`,
-    /// `.grpc()`, `.kafka()`, …) is TCP-only; pairing `.udp()` with one of
-    /// those is rejected at `.serve()` time with a named
-    /// [`crate::ProximaError::Config`] — see
-    /// [`crate::ListenerProtocolExt::kafka`]'s doc for that error text.
+    /// UDP. Historically the one thing `.dns()` branched on — that branch
+    /// is retired: `.dns(handler)` now registers a TCP AND a UDP
+    /// `AnyProtocol` candidate under one `.any()`-fanned listener regardless
+    /// of whether `.tcp()`/`.udp()` was ever called (see
+    /// [`crate::ListenerProtocolExt::dns`]'s own doc). Pairing `.udp()` with
+    /// `.any()`/`.kafka()`/`.mqtt()`/… is likewise no longer rejected — it's
+    /// redundant at worst, since a registered candidate's own
+    /// `AnyProtocol::wants_datagram` already decides whether `.any()` binds
+    /// a UDP socket, with no `.udp()` call needed either way (see
+    /// [`crate::ListenerProtocolExt::kafka`]'s doc for the ONE transport
+    /// pairing that IS still a named [`crate::ProximaError::Config`]:
+    /// `.quic()`, whose DCID connection-demux is a different mechanism
+    /// entirely).
     #[must_use]
     fn udp(self) -> Self;
 

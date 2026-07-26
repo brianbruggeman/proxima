@@ -100,5 +100,9 @@ mechanism itself, reused.
   exactly this seam, each with its own honest scope boundary.
 - `docs/tutorials/09-extend-your-own-protocol.md` — this chapter's prose
   companion, with the full `AnyProtocol`/`ProbeVerdict` walkthrough.
+- `docs/tutorials/11-any-transport-agnostic.md` — the ONE new question on
+  top of the trait above, `AnyProtocol::wants_datagram()`, which lets your
+  candidate answer over UDP through this SAME `probe`/`drive` contract, on
+  the same port as every TCP candidate here.
 - `tests/e2e/listener_any_protocol_extension.rs` — the equivalent proof as a
   `#[proxima::test]`.

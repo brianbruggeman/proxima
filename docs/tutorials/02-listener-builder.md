@@ -187,7 +187,7 @@ assert_eq!(fluent.spec.get("transport").and_then(Value::as_str), Some("tls"));
 | `.grpc(url)` / `.grpc()` | url-carrying | url-less — listener dispatches to `.handle(pipe)`, not a url; resolves to `"h2"` (gRPC rides h2) |
 | `.kafka()`/`.mqtt()`/`.amqp()`/`.memcached()`/`.redis()` | DSN, delegates to `.protocol()` | typed handle, delegates to `.protocol()` |
 | `.pgwire()` | DSN, delegates to `.protocol()` | typed query engine — KEEPS its bespoke fresh-registration path (TLS double-wrap guard) |
-| `.dns()` | DSN, delegates to `.protocol()` | the one dual-transport axis — branches on `.tcp()`/`.udp()` at `.serve()` time |
+| `.dns()` | DSN, delegates to `.protocol()` | registers a TCP + a UDP `AnyProtocol` candidate under one `.any()`-fanned listener — answers both transports on one port, `.tcp()`/`.udp()` no longer change what's bound (see [part 8](./11-any-transport-agnostic.md)) |
 | (no client twin) | — | `.websocket(handler)` — wires into h1's Upgrade seam, not a peer `AnyProtocol` |
 | (no client twin) | — | inherent `.h2()` — the other name for the same shared `"h2"` protocol |
 
@@ -195,7 +195,7 @@ Two rows say "shadowed" territory even though the table doesn't spell that word 
 
 `.proxy(url)` is the one row with a real, load-bearing gotcha: it's real on `ClientTransportExt`, and `ListenerBuilder` does NOT implement `ClientTransportExt` — so a `ListenerBuilder` value cannot call `.proxy(url)` through that trait at all, full stop. The `.serve()` hard-error this row promises ("no listener meaning") is not defending against a caller reaching `.proxy()` via the trait (that's a compile error, not a runtime one) — it's defending against the ONE door still open regardless: the raw `SpecBuilder::set`/`.spec(key, value)` escape hatch (`builder.set("proxy", url)` compiles, since `ListenerBuilder: SpecBuilder`). §10 covers this in full.
 
-> **Drift note (unchanged from earlier passes):** `.any()`/`.accept(name)`/`.accepts([...])`/`.any_handler(name, handler)`/`.any_on_reject(hook)`/`.deny(name, literal)`/`.denies([...])`/`.blacklist(config)` (all `#[cfg(any(feature = "http1", feature = "http1-native"))]`, `src/listener/handle.rs:213–390`) don't appear in the table above — the listener on-ramp series (`docs/tutorials/04-listener-hello.md` onward) is the maintained teaching surface for that whole axis; [part 2](./05-listener-universal.md) covers `.any()`/`.accept()`/`.accepts()`, [part 3](./06-listener-production.md) covers `.deny()`/`.blacklist()`, and [part 4](./07-sugar-composition.md) covers how the transport/protocol axes in THIS table compose with each other and fail honestly when a combination has no meaning.
+> **Drift note:** `.any()`/`.accept(name)`/`.accepts([...])`/`.any_handler(name, handler)`/`.any_on_reject(hook)`/`.deny(name, literal)`/`.denies([...])`/`.blacklist(config)` (all `#[cfg(feature = "any-listener")]` — a dedicated feature, not the `http1`/`http1-native` gate earlier passes of this page cited; see `any-listener`'s own doc in the root `Cargo.toml`, `src/listener/handle.rs:125–395`) don't appear in the table above — the listener on-ramp series (`docs/tutorials/04-listener-hello.md` onward) is the maintained teaching surface for that whole axis; [part 2](./05-listener-universal.md) covers `.any()`/`.accept()`/`.accepts()`, [part 3](./06-listener-production.md) covers `.deny()`/`.blacklist()`, [part 4](./07-sugar-composition.md) covers how the transport/protocol axes in THIS table compose with each other and fail honestly when a combination has no meaning, and [part 8](./11-any-transport-agnostic.md) covers `.any()` classifying over a datagram transport too.
 
 ## 5. From spec to a concrete protocol: `resolve_listen_protocol`
 
@@ -358,10 +358,10 @@ One detail worth teaching in its own right: the registry key gets renamed to `"{
 
 ## 8. The general escape hatch: `.protocol(impl AnyProtocol)`
 
-`compose_tls` above (and `resolve_listen_protocol`'s h2/h3 arms) both produce the same shape: a registry-name string, plus an *optional*, already-built `Arc<dyn ListenProtocol>` to self-register instead of relying on a by-name lookup. That shape isn't invented by the umbrella crate — `ListenerSpec::protocol` already exists for exactly this, one layer down in `proxima-listen`. But the escape hatch a THIRD PARTY actually reaches for is one level higher and simpler: `ListenerBuilder::protocol(impl AnyProtocol)` (`src/listener/handle.rs:277–289`), the listener-side mirror of the client's `.protocol(impl ClientProtocol)` (`src/client/handle.rs:463–471`):
+`compose_tls` above (and `resolve_listen_protocol`'s h2/h3 arms) both produce the same shape: a registry-name string, plus an *optional*, already-built `Arc<dyn ListenProtocol>` to self-register instead of relying on a by-name lookup. That shape isn't invented by the umbrella crate — `ListenerSpec::protocol` already exists for exactly this, one layer down in `proxima-listen`. But the escape hatch a THIRD PARTY actually reaches for is one level higher and simpler: `ListenerBuilder::protocol(impl AnyProtocol)` (`src/listener/handle.rs:278–292`), the listener-side mirror of the client's `.protocol(impl ClientProtocol)` (`src/client/handle.rs:463–471`):
 
 ```rust
-#[cfg(any(feature = "http1", feature = "http1-native"))]
+#[cfg(feature = "any-listener")]
 #[must_use]
 pub fn protocol(mut self, protocol: impl proxima_listen::any::AnyProtocol) -> Self {
     let protocol: Arc<dyn proxima_listen::any::AnyProtocol> = Arc::new(protocol);
@@ -467,7 +467,7 @@ Two real, citable examples already exercise `Listener::builder()` end to end aga
 
 - `examples/h2_native_server.rs` — `Listener::builder().bind(bind).h2().handle(into_handle(ConstantOk)).serve().await?`, proven with a real `H2ClientUpstream` round trip, no tokio anywhere in the request path (`cargo run --example h2_native_server`; `cargo tree --example h2_native_server -e normal -i tokio` is empty).
 - `examples/any_listener.rs` — `.any()`/`.accept(name)` through the identical builder, an h1 AND a native h2 client both routed correctly off one bind (`cargo run --example any_listener --features http1-native`).
-- `tests/e2e/listener_builder_sugar.rs` — the widest single-file proof of everything this document teaches: bare `.http()`, `.http().tcp().tls(cfg)`, `.http().quic()` resolving h3-native, `.kafka(handle).tcp()` vs. the `.kafka(handle).quic()` named-error rejection, `.dns(handle).tcp()` vs `.dns(handle).udp()` binding genuinely different listen protocols, `.grpc().quic()`'s rejection, and a third-party `.thrift()` extension trait built entirely inside the test file. [Part 4](./07-sugar-composition.md) walks several of these scenarios as a runnable example.
+- `tests/e2e/listener_builder_sugar.rs` — the widest single-file proof of everything this document teaches: bare `.http()`, `.http().tcp().tls(cfg)`, `.http().quic()` resolving h3-native, `.kafka(handle).tcp()` vs. the `.kafka(handle).quic()` named-error rejection, `.dns(handle)` answering a real DNS-over-TCP AND DNS-over-UDP query on the SAME bind address (`dns_serves_both_transports_on_one_port`), `.grpc().quic()`'s rejection, and a third-party `.thrift()` extension trait built entirely inside the test file. [Part 4](./07-sugar-composition.md) walks several of these scenarios as a runnable example.
 
 The three-way comparison this section teaches — `Listener::builder()` vs. the one-liner `Listener::http(bind)`, side by side with the manual `App`/`RunConfig` baseline they both mirror — is not itself one shipped example; it's small enough to read as one block:
 
@@ -518,6 +518,7 @@ Note `hello` had to be `#[proxima::piped(send)]` here, not the bare `async fn` `
 - [Part 4: composing the sugar](./07-sugar-composition.md) — the transport/security/protocol axes from §4, taught from the reader's side, including the honest failure mode (`.kafka().quic()`) this document's §5/§9/§10 explain the MECHANISM for.
 - [Part 5: the protocol fleet](./08-protocol-fleet.md) — every `.kafka()`/`.mqtt()`/`.amqp()`/`.memcached()`/`.redis()`/`.dns()` axis in §4's table, client AND listener, with each protocol's honest scope stated.
 - [Part 6: add your own protocol](./09-extend-your-own-protocol.md) — §8's `.protocol(impl AnyProtocol)` escape hatch, in full, grounded in a real third-party extension test.
+- [Part 8: any protocol, any transport](./11-any-transport-agnostic.md) — why §4's `.dns()` row no longer branches on `.tcp()`/`.udp()`: `.any()`'s classifier reaches a UDP-sourced connection through the identical `probe`/`drive` contract §8/part 6 already taught for TCP.
 - [Foundations, part 2](./01-ergonomics.md) §8, if `IntoMountTarget`'s four shapes (referenced in §11 above) weren't already solid.
 - [Build an API gateway](./build-an-api-gateway.md) for `Client::http`/`Client::builder` used against a real upstream, end to end.
 - `docs/configuration.md`'s "typed listener configs" section for a *third*, unrelated way to reach a running listener — `HttpListener::http(addr)` / `HttpsListener::https(addr, cert, key)` (`src/settings/listener.rs`). Don't confuse it with this document's `Listener::builder()`: those are `Into<RunConfig>` typed config shapes for `App::serve(impl Into<RunConfig>)`, one layer above the spec/registry resolution this document covers, and they carry no `.tcp()`/`.tls()`/`.quic()`/`.grpc()` axis sugar at all.

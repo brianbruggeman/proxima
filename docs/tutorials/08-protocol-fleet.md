@@ -64,7 +64,7 @@ let get_response = client.call("GET", "").body("greeting").send().await?;
 
 **Scope:** UDP + TCP framing (RFC 1035 §4.2.1/§4.2.2), no DNS-over-QUIC (DoQ — `.quic()` is a config error, [part 4](./07-sugar-composition.md) §5). This facade answers AUTHORITATIVELY from whatever the handler returns — it does not walk the DNS tree or perform recursive resolution itself; you are the authority for whatever zone you wire in.
 
-**Listener:** `.dns(handler).udp()` (or `.tcp()` — [part 4](./07-sugar-composition.md) §5 covers the dual-transport branching). The handler answers a typed `DnsQuery` with a typed `DnsAnswer`:
+**Listener:** `.dns(handler)` — no `.tcp()`/`.udp()` needed; it answers both DNS-over-TCP and DNS-over-UDP on the SAME port ([part 4](./07-sugar-composition.md) §5, [part 8](./11-any-transport-agnostic.md) for the mechanism). The handler answers a typed `DnsQuery` with a typed `DnsAnswer`:
 
 ```rust
 impl SendPipe for StaticA {
@@ -94,7 +94,7 @@ let json: serde_json::Value = response.json().await?;
 ```
 
 ```
-§2 DNS: .dns(handler).udp() listener + .dns(dsn) client -> A record [203,0,113,42]
+§2 DNS: .dns(handler) listener (both transports, one port) + .dns(dsn) client -> A record [203,0,113,42]
 ```
 
 ## 3. Kafka

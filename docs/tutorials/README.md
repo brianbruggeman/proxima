@@ -26,6 +26,7 @@ A standalone, self-contained 7-page series for a reader who wants to stand up an
 - **[Part 5: the protocol fleet](./08-protocol-fleet.md)** — memcached, DNS, Kafka, MQTT, AMQP, each taught client AND listener, with the honest scope boundary stated for each (this is a demonstration fleet, not production-complete brokers).
 - **[Part 6: add your own protocol](./09-extend-your-own-protocol.md)** — `AnyProtocol` (probe + drive), a one-line ext trait, and why a downstream crate can do this with zero edits to proxima itself. The most important page in this series if you're integrating a wire proxima doesn't ship.
 - **[Part 7: conflaguration as first-class](./10-conflaguration.md)** — the house config pattern (`#[derive(Builder, Deserialize, Serialize, Settings)]` + `Validate`), builder vs. TOML file side by side, for a listener's admission/blacklist knobs and a protocol's own server config.
+- **[Part 8: any protocol, any transport](./11-any-transport-agnostic.md)** — `AnyProtocol::wants_datagram()`, the one new question that lets `.any()` classify a UDP-sourced connection through the identical `probe`/`drive` contract a TCP one uses — one port, no `.tcp()`/`.udp()` call, and why `.dns(handler)` needed no branch to answer both transports.
 
 ## Build a ... (each project is complete in itself)
 
@@ -81,13 +82,14 @@ graph TD
   ONRAMP4 --> ONRAMP5["part 5: the protocol fleet"]
   ONRAMP5 --> ONRAMP6["part 6: add your own protocol"]
   ONRAMP4 --> ONRAMP7["part 7: conflaguration as first-class"]
+  ONRAMP6 --> ONRAMP8["part 8: any protocol, any transport"]
   ONRAMP3 -.-> LB
   ONRAMP3 -.-> BASE
 ```
 
 The listener on-ramp series is intentionally standalone (no arrow INTO it) —
 it does not require Foundations first. The dashed arrows OUT of part 3 are
-"read next if you want more," not prerequisites. Parts 4-7 extend the same
+"read next if you want more," not prerequisites. Parts 4-8 extend the same
 `Listener::builder()`/`Client::builder()` shape parts 1-3 taught — no new
 serve loop, no new client type, just more axes on the identical builders.
 

@@ -100,10 +100,10 @@ pub struct ListenerBuilder {
     /// The typed query handler `.dns(handler)` carries — accumulated
     /// separately from `spec` for the same reason `pgwire_query` is: a
     /// `proxima_dns::DnsPipeHandle` doesn't fit a `serde_json::Value` spec
-    /// key. `.dns()` is the one dual-transport axis: `.serve()` branches on
-    /// `spec["transport"]` to pick a TCP single-candidate `AnyListenProtocol`
-    /// vs. a UDP `DatagramProtocolListenProtocol` — see
-    /// [`ListenerProtocolExt::dns`].
+    /// key. `.serve()` no longer reads `spec["transport"]` for this handle
+    /// at all — it registers a TCP AND a UDP `AnyProtocol` candidate under
+    /// one `.any()`-fanned listener, answering both transports on one port
+    /// — see [`ListenerProtocolExt::dns`].
     #[cfg(feature = "dns-listener")]
     dns_handler: Option<proxima_dns::DnsPipeHandle>,
     /// The reusable post-handshake handler `.websocket(handler)` carries —

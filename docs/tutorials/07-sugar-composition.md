@@ -96,41 +96,45 @@ let server_3 = Listener::builder()
 
 If you've read an older piece of proxima teaching material that mentions `.h3()` as its own method — that's stale; report it. `.quic()` is the only spelling, and it works identically on `Client::builder().http(url).quic()` (dials h3-native) and `Listener::builder().quic()` (binds h3-native).
 
-## 5. `.dns(handler).udp()` vs `.dns(handler).tcp()` — the one dual-transport axis
+## 5. `.dns(handler)` — one call, both transports, one port
 
-Every other protocol axis (`.kafka()`, `.mqtt()`, `.http()`, …) is single-transport: it either rides TCP always, or picks its OWN factory regardless of `.tcp()`/`.udp()`/`.quic()`. `.dns(handler)` is the one exception — it genuinely branches on the transport axis at `.serve()` time, binding a DIFFERENT kind of socket depending which you picked:
+Real DNS resolvers speak both DNS-over-TCP and DNS-over-UDP on the SAME port
+number. `.dns(handler)` used to make you pick — `.tcp()` (default) resolved a
+TCP `AnyListenProtocol` candidate, `.udp()` a completely different
+`DatagramProtocolListenProtocol` — genuinely two non-composable listen
+protocols, chosen by which transport method you happened to chain. That
+branch is gone: `.dns(handler)` now registers TWO `AnyProtocol` candidates
+(DNS-over-TCP, RFC 1035 §4.2.2's 2-byte length prefix; DNS-over-UDP, RFC 1035
+§4.2.1's raw message) under ONE `.any()`-fanned listener, and neither
+`.tcp()` nor `.udp()` changes what gets bound:
 
 ```rust
-let server_tcp = Listener::builder()
-    .bind(bind_tcp)
-    .tcp()
+let server = Listener::builder()
+    .bind(bind)
     .handle(into_handle(FixedOk))
     .dns(stub_handle())
     .serve()
     .await?;
-// a raw TCP connect succeeds here
-
-let server_udp = Listener::builder()
-    .bind(bind_udp)
-    .udp()
-    .handle(into_handle(FixedOk))
-    .dns(stub_handle())
-    .serve()
-    .await?;
-// a raw TCP connect to THIS bind must fail — it's a UDP socket
+// a real DNS-over-TCP query AND a real DNS-over-UDP query, sent to the
+// SAME address, both resolve — no .tcp()/.udp() call needed at all.
 ```
 
 ```
-§4: .dns(handler).tcp() accepts a raw TCP connect on 127.0.0.1:55004
-§4: .dns(handler).udp() refuses a raw TCP connect on 127.0.0.1:55006 — a genuinely
-    different listen protocol from the .tcp() variant above, not the same socket
+§4: .dns(handler) on 127.0.0.1:65510 answers BOTH a DNS-over-TCP query (id 7) and a
+    DNS-over-UDP query (id 7) on the SAME port — no .tcp()/.udp() call needed
 ```
 
-`.tcp()` (the default) resolves a TCP-shaped `AnyListenProtocol` candidate speaking DNS-over-TCP (RFC 1035 §4.2.2 framing); `.udp()` resolves a completely different `DatagramProtocolListenProtocol` wrapping `DnsDatagramProtocol` — classic DNS-over-UDP. Neither is "more correct" — real DNS resolvers speak both, on the same port number, over two different transports. `.quic()` for DNS is a config error (§6): DNS-over-QUIC (DoQ) is unimplemented.
+`.quic()` for DNS is still a config error (§6): DNS-over-QUIC (DoQ) is
+unimplemented — that mechanism is genuinely absent, unlike the old
+`.tcp()`/`.udp()` split, which was a design choice this crate no longer
+makes you deal with. [Part 8: any protocol, any transport](./11-any-transport-agnostic.md)
+is the deep dive on the mechanism `.dns(handler)` is built on
+(`AnyProtocol::wants_datagram`) — worth reading before you write your OWN
+datagram-shaped protocol candidate.
 
 ## 6. The failure mode: an invalid composition is a named error, never a silent degrade
 
-Not every axis combination has a meaning. `.kafka(handler)` delegates to `.protocol(impl AnyProtocol)`, and `AnyProtocol::drive` takes a `Box<dyn StreamConnection>` — a byte stream. `.quic()` binds a UDP-datagram socket, not a byte stream. Combining them is not "an inefficiency" or "an edge case that degrades gracefully" — it is a request for something that cannot exist, and `.serve()` says so BEFORE touching a single socket:
+Not every axis combination has a meaning. `.quic()` binds a UDP endpoint whose connections are demultiplexed by QUIC's own Destination Connection ID (DCID) — a completely different mechanism from the byte-prefix classifier `.kafka(handler)`/`.any()`/`.protocol()` are built on. Combining them is not "an inefficiency" or "an edge case that degrades gracefully" — it is a request for something that cannot exist, and `.serve()` says so BEFORE touching a single socket:
 
 ```rust
 let outcome = Listener::builder()
@@ -146,8 +150,10 @@ This is the ACTUAL error text, printed by `examples/sugar_composition.rs` on thi
 
 ```
 §5: .kafka(handler).quic() -> named ProximaError::Config:
-    config: Listener::builder(): .kafka()/.mqtt()/.amqp()/.memcached()/.redis()/.any()/.accept()/.protocol() are TCP-only (AnyProtocol::drive takes Box<dyn StreamConnection>); combining with .quic()/.udp() has no meaning — use .tcp() (the default)
+    config: Listener::builder(): .kafka()/.mqtt()/.amqp()/.memcached()/.redis()/.any()/.accept()/.protocol() have no QUIC connection-demux support (QUIC multiplexes connections by DCID, a different mechanism from this byte-prefix classifier); use .tcp() (the default) — a registered candidate whose AnyProtocol::wants_datagram() is true is already reachable over UDP with no .udp() call needed
 ```
+
+Notice what's absent from that text: `.udp()`. Unlike `.quic()`, pairing `.udp()` with `.kafka()`/`.any()`/`.protocol()` is no longer rejected — it is simply redundant, since a registered candidate's own [`AnyProtocol::wants_datagram`](./11-any-transport-agnostic.md) already decides whether `.any()` binds a UDP socket, with no `.udp()` call needed either way. `.quic()` stays rejected because it names a genuinely different, absent mechanism (QUIC's DCID demux), not a missing config flag.
 
 Same story for gRPC — it rides h2, never h3, so `.grpc().quic()` is rejected identically:
 
@@ -156,7 +162,7 @@ Same story for gRPC — it rides h2, never h3, so `.grpc().quic()` is rejected i
     config: Listener::builder(): .grpc()/.h2() + .quic(): gRPC rides h2, not QUIC; drop .quic() (the default h1+h2 ALPN combiner already carries h2)
 ```
 
-Every invalid composition this crate knows about is rejected the SAME way — a `ProximaError::Config` naming the two axes in conflict and the fix, returned from `.serve()` before `bind()` or `App::new()` ever run (`reject_invalid_axis_combinations`, `src/listener/handle.rs:690`). There is no combination that silently downgrades to a "close enough" wire.
+Every invalid composition this crate knows about is rejected the SAME way — a `ProximaError::Config` naming the two axes in conflict and the fix, returned from `.serve()` before `bind()` or `App::new()` ever run (`reject_invalid_axis_combinations`, `src/listener/handle.rs:677`). There is no combination that silently downgrades to a "close enough" wire.
 
 ## What you built
 
@@ -166,4 +172,5 @@ Every section above ran against the SAME `Listener::builder()`/`Client::builder(
 
 - [Part 5: the protocol fleet](./08-protocol-fleet.md) — every `.kafka()`/`.mqtt()`/`.amqp()`/`.memcached()`/`.redis()`/`.dns()` axis this page only sketched, taught fully (client AND listener, honest scope per protocol).
 - [Part 6: add your own protocol](./09-extend-your-own-protocol.md) — the SAME `.protocol()` seam `.kafka()`/`.mqtt()`/… delegate to, reachable from a crate that never imports `proxima-listen`.
+- [Part 8: any protocol, any transport](./11-any-transport-agnostic.md) — the mechanism §5's `.dns(handler)` is built on: how `.any()`'s classifier reaches a UDP-sourced connection through the identical `probe`/`drive` contract a TCP one uses, and how to opt your OWN `AnyProtocol` candidate in.
 - [`docs/tutorials/02-listener-builder.md`](./02-listener-builder.md) — the deep dive on WHY these are type-specific traits instead of one blanket one, and the exact source (`resolve_listen_protocol`, `reject_invalid_axis_combinations`) behind every behavior this page demonstrated.

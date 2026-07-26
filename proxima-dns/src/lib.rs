@@ -24,6 +24,14 @@
 //!   listener — also the `listen` feature. See its module doc for the
 //!   2-byte length-prefix framing gap this module fills directly rather
 //!   than extending the shared codec crate.
+//! - [`DnsUdpAnyProtocol`] — the DNS-over-UDP (RFC 1035 §4.2.1) `AnyProtocol`
+//!   candidate `proxima::ListenerProtocolExt::dns` registers ALONGSIDE
+//!   [`DnsAnyProtocol`] under one `.any()`-fanned listener, so one bind
+//!   answers both transports on one port (`AnyProtocol::wants_datagram() ==
+//!   true` — see that method's own doc). A separate type from
+//!   [`DnsDatagramProtocol`] above: that one is a standalone, dedicated
+//!   UDP-only listener with no TCP sibling, for a caller who wants exactly
+//!   that instead.
 //!
 //! ## Scope
 //!

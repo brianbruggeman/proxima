@@ -117,7 +117,7 @@ async fn main() -> Result<(), ProximaError> {
     );
     server_3.stop();
 
-    // ── §4: `.dns(handler).udp()` vs `.dns(handler).tcp()` ──────────────────
+    // ── §4: `.dns(handler)` answers BOTH transports on one port ─────────────
     dns_axis().await?;
 
     // ── §5: `.kafka(handler).tcp()` succeeds; `.quic()` is a named error ────
@@ -142,11 +142,16 @@ async fn main() -> Result<(), ProximaError> {
     Ok(())
 }
 
-/// `.dns(handler)` is the one dual-transport protocol axis: `.tcp()`
-/// (default) resolves a TCP `AnyListenProtocol`; `.udp()` resolves a
-/// DIFFERENT listen protocol (`DatagramProtocolListenProtocol`) — a raw TCP
-/// connect to the udp bind must fail, proving the two really are different
-/// sockets, not the same listener answering both ways.
+/// `.dns(handler)` used to be a dual-transport protocol axis: `.tcp()`
+/// (default) resolved a TCP `AnyListenProtocol`, `.udp()` a DIFFERENT listen
+/// protocol (`DatagramProtocolListenProtocol`) — pick one. That branch is
+/// retired: `.dns(handler)` now registers TWO `AnyProtocol` candidates
+/// (DNS-over-TCP and DNS-over-UDP) under ONE `.any()`-fanned listener, so a
+/// SINGLE bind answers both a DNS-over-TCP query (RFC 1035 §4.2.2, 2-byte
+/// length prefix) and a DNS-over-UDP query (RFC 1035 §4.2.1, raw message) —
+/// `.tcp()`/`.udp()` are no longer read by `.dns(handler)` at all. See
+/// `docs/tutorials/11-any-transport-agnostic.md` for the general mechanism
+/// (`AnyProtocol::wants_datagram`) this sugar is built on.
 async fn dns_axis() -> Result<(), ProximaError> {
     use proxima_dns::{DnsAnswer, DnsPipeHandle, DnsPipeReply, DnsPipeRequest, into_dns_handle};
 
@@ -166,37 +171,59 @@ async fn dns_axis() -> Result<(), ProximaError> {
         into_dns_handle(NameErrorDns)
     }
 
-    let bind_tcp = free_loopback_addr()?;
-    let server_tcp = Listener::builder()
-        .bind(bind_tcp)
-        .tcp()
+    let bind = free_loopback_addr()?;
+    let server = Listener::builder()
+        .bind(bind)
         .handle(into_handle(FixedOk))
         .dns(stub_handle())
         .serve()
         .await?;
-    assert!(tcp_connect_succeeds(bind_tcp), ".dns(handler).tcp() must accept a raw TCP connect");
-    println!("§4: .dns(handler).tcp() accepts a raw TCP connect on {bind_tcp}");
-    server_tcp.stop();
+    assert!(tcp_connect_succeeds(bind), ".dns(handler) must accept a raw TCP connect");
 
-    let bind_udp = free_loopback_addr()?;
-    let server_udp = Listener::builder()
-        .bind(bind_udp)
-        .udp()
-        .handle(into_handle(FixedOk))
-        .dns(stub_handle())
-        .serve()
-        .await?;
-    let still_tcp_refused = !tcp_connect_succeeds(bind_udp);
-    assert!(
-        still_tcp_refused,
-        ".dns(handler).udp() must NOT accept a TCP connection — it bound a UDP listener, a \
-         different listen protocol than .dns(handler).tcp()'s AnyListenProtocol"
-    );
+    let mut query = Vec::new();
+    proxima_dns::encode_query(
+        7,
+        true,
+        proxima_dns::EncodeQuestion {
+            name: "example.test.",
+            qtype: 1,
+            qclass: 1,
+        },
+        &mut query,
+    )
+    .map_err(|error| ProximaError::Config(format!("encode dns query: {error}")))?;
+
+    // DNS-over-TCP: 2-byte big-endian length prefix, then the message.
+    let mut tcp_conn = StdTcpStream::connect(bind)?;
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&u16::try_from(query.len()).unwrap_or(u16::MAX).to_be_bytes());
+    framed.extend_from_slice(&query);
+    std::io::Write::write_all(&mut tcp_conn, &framed)?;
+    let mut length_prefix = [0_u8; 2];
+    std::io::Read::read_exact(&mut tcp_conn, &mut length_prefix)?;
+    let reply_len = u16::from_be_bytes(length_prefix) as usize;
+    let mut tcp_reply = vec![0_u8; reply_len];
+    std::io::Read::read_exact(&mut tcp_conn, &mut tcp_reply)?;
+    let tcp_message = proxima_dns::parse_message(&tcp_reply)
+        .map_err(|error| ProximaError::Config(format!("parse dns tcp reply: {error}")))?;
+    assert_eq!(tcp_message.header.id, 7);
+
+    // DNS-over-UDP: the SAME bind address, the raw message, no length prefix.
+    let udp_socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    udp_socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    udp_socket.send_to(&query, bind)?;
+    let mut udp_buf = [0_u8; 512];
+    let (udp_len, _) = udp_socket.recv_from(&mut udp_buf)?;
+    let udp_message = proxima_dns::parse_message(&udp_buf[..udp_len])
+        .map_err(|error| ProximaError::Config(format!("parse dns udp reply: {error}")))?;
+    assert_eq!(udp_message.header.id, 7);
+
     println!(
-        "§4: .dns(handler).udp() refuses a raw TCP connect on {bind_udp} — a genuinely \
-         different listen protocol from the .tcp() variant above, not the same socket"
+        "§4: .dns(handler) on {bind} answers BOTH a DNS-over-TCP query (id {}) and a \
+         DNS-over-UDP query (id {}) on the SAME port — no .tcp()/.udp() call needed",
+        tcp_message.header.id, udp_message.header.id
     );
-    server_udp.stop();
+    server.stop();
     Ok(())
 }
 

@@ -163,5 +163,6 @@ A third-party wire protocol, registered onto the SAME open universal listener as
 ## Where to go next
 
 - [Part 5: the protocol fleet](./08-protocol-fleet.md) if you arrived here first — see the same mechanism used five more times, for real wires.
+- [Part 8: any protocol, any transport](./11-any-transport-agnostic.md) — the ONE new question on top of everything this page taught: `AnyProtocol::wants_datagram()`, which lets your candidate answer over UDP through the identical `probe`/`drive` contract, on the SAME port as every TCP candidate above.
 - [`docs/tutorials/02-listener-builder.md`](./02-listener-builder.md) §8 — the escape hatch one layer down (`ListenerSpec::protocol`), for the rarer case of a caller who needs to bypass `.any()`'s classifier entirely.
 - `tests/e2e/listener_any_protocol_extension.rs` — the equivalent proof as a `#[proxima::test]`, if you want to see this pattern inside a test harness instead of a `main`.

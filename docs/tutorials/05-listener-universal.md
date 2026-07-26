@@ -174,3 +174,8 @@ single toy listener grows into a production one.
   type-specific axis families (transport/security/protocol) and how they
   compose, once you're past `.any()`/`.accept()` and want to pick a wire
   on purpose.
+- [Part 8: any protocol, any transport](./11-any-transport-agnostic.md) —
+  `.any()` classifying a UDP-sourced connection through the SAME
+  classifier this page taught, once a registered candidate asks for one.
+  Best read after [part 6](./09-extend-your-own-protocol.md), which teaches
+  the `AnyProtocol` trait this extends.
