@@ -667,9 +667,21 @@ h3-upstream = ["http3", "http3-quinn-compat", "dep:webpki-roots"]
 # stack (C42, docs/proxima-quic/discipline.md) — the dual-surface peer of
 # `h3-upstream` (P7, quinn), selectable side-by-side per the C41 ruling.
 # Default off (disciplined-component gate-1 firewall until C43's
-# compare-bench vs the quinn upstream seals it). The native upstream facade
-# itself uses a `tokio::sync::Mutex` today, so this still needs `tokio`.
-h3-native-upstream = ["http3", "tokio", "proxima-http/http3-native-upstream", "dep:webpki-roots"]
+# compare-bench vs the quinn upstream seals it). Tokio-free — the native
+# upstream facade serializes its connection with `proxima_primitives`'s
+# waker-based `AsyncMutex`, unlike `h3-upstream` (P7, quinn), which needs
+# `tokio` for `h3-quinn`/`quinn`.
+h3-native-upstream = [
+    "http3",
+    "proxima-http/http3-native-upstream",
+    "dep:webpki-roots",
+    # `serve-prime`: the same tokio-free default runtime bundle every other
+    # regular feature rides — `run`/`run_with_cores` need SOME runtime
+    # compiled in (the full prime executor+inbox+reactor+bgpool bundle, or
+    # `tokio`); this feature no longer carries `tokio`, so it must carry the
+    # prime bundle itself to stand alone under `--no-default-features`.
+    "serve-prime",
+]
 # Routes the native h3 CLIENT response path (rekt_h3_load's part-source
 # arm) through `proxima_primitives::pipe::part::PartSource` instead of the owned
 # `H3ClientEvent::ResponseHeaders` event (design doc step 3, h3 first —

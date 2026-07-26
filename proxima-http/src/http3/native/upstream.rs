@@ -30,16 +30,16 @@ use std::time::{Duration, Instant as StdInstant};
 use bytes::{Bytes, BytesMut};
 use prime::os::core_shard;
 use rustls::pki_types::ServerName;
-use tokio::sync::Mutex as AsyncMutex;
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, Response};
-use proxima_quic::native::{ClientConfig as QuicClientConfig, Endpoint, EndpointConfig};
+use proxima_primitives::sync::AsyncMutex;
 use proxima_protocols::quic::connection::{Connection, TimerOutcome};
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::rustls_provider::{RustlsClientProvider, RustlsConfig};
+use proxima_quic::native::{ClientConfig as QuicClientConfig, Endpoint, EndpointConfig};
 use proxima_telemetry::{debug, trace};
 
 use super::client::{Client, ClientError};
