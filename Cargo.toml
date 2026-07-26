@@ -607,13 +607,31 @@ tokio = [
     "proxima-test/test-prime-tokio-compat",
 ]
 
-# byte-stream protocols. the only backend today (`proxima_net::tokio`)
-# is tokio-native — no prime equivalent exists yet for the generic
-# pipe-passthrough `StreamListener`/`StreamUpstream` surface — so these
-# require `tokio` explicitly. Layered separately so a future prime/DPDK
-# backend can compose tcp without pulling tokio listeners.
-tcp = ["tokio", "tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std"]
+# Tokio-free — `proxima-listen`'s `stream` module (`StreamListenProtocol`)
+# already carries a factory-injected accept loop (`serve_via_factory`) that
+# never touches tokio, and `proxima_net::prime::{PrimeAcceptorFactory,
+# PrimeTcpConnection, PrimeTcpUpstream}` is the runtime `default_runtime`
+# (`src/app.rs`/`src/runtime.rs`) installs out of the box — so plain TCP
+# listening/dialing needs no tokio at all. `serve-prime` supplies that
+# runtime standalone under `--no-default-features` (same reasoning as
+# `h3-native-upstream`). The legacy tokio-native listener/upstream impls
+# (`listeners::tokio_stream`/`upstreams::tokio_stream`) stay reachable, but
+# only under the separate `tokio` feature now — see `tokio-runtime`'s doc.
+tcp = ["tokio-runtime", "proxima-listen/stream", "proxima-protocols/json_framing-std", "serve-prime"]
+# Still tokio-only: no prime-native Unix domain socket implementation
+# exists anywhere in the workspace today. `AcceptorFactory::bind` (the
+# trait `PrimeAcceptorFactory` implements for TCP) takes a `SocketAddr`
+# only, and `prime::os::net` has no `UnixListener`/`UnixStream` analog to
+# even build one against — unlike `tcp`, this is a real gap, not a
+# cfg-gating bug (2026-07-25 audit, tcp/unix/websocket tokio-free pass).
 unix = ["tokio", "tokio-runtime", "proxima-listen/stream"]
+# Still tokio-only: `proxima_http::websocket::{WebSocketListener,
+# WebSocketUpstream}` are hardcoded to `tokio::net::TcpListener` /
+# `async_tungstenite::tokio::connect_async` with no `AcceptorFactory`
+# seam at all (unlike `tcp`'s `StreamListenProtocol`, which already had
+# the factory-injection point built in before this pass). Making this
+# prime-native means authoring that seam — new engineering, not a
+# cfg-gating fix — so it stays on `tokio` (2026-07-25 audit, see `unix`).
 websocket = ["tokio", "tokio-runtime", "tcp", "dep:async-tungstenite", "proxima-http/websocket"]
 # proxima-side outbound WebSocket upstream (P8 in docs/protocol-gap/discipline.md).
 # pulls in the same async-tungstenite the listener uses; client-side handshake +

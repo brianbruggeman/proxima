@@ -38,7 +38,13 @@ use proxima::runtime::Runtime;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
 
+#[cfg(not(feature = "tokio"))]
+use futures::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(feature = "tokio"))]
+use prime::os::net::TcpStream;
+#[cfg(feature = "tokio")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 
 /// Echoes the request body back — proves the per-connection handler ran
@@ -61,13 +67,11 @@ impl SendPipe for EchoPipe {
     }
 }
 
-async fn pick_free_addr() -> SocketAddr {
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("probe bind");
-    let addr = probe.local_addr().expect("probe addr");
-    drop(probe);
-    addr
+// sync std bind-then-drop — no reactor needed either way, so this one
+// helper serves both the tokio and the prime-hosted test below.
+fn pick_free_addr() -> SocketAddr {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+    probe.local_addr().expect("probe addr")
 }
 
 /// Bind + accept the real `StreamListenProtocol::serve` ON a prime worker
@@ -107,7 +111,10 @@ async fn connect_retry(addr: SocketAddr) -> TcpStream {
     for _ in 0..200 {
         match TcpStream::connect(addr).await {
             Ok(stream) => return stream,
+            #[cfg(feature = "tokio")]
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            #[cfg(not(feature = "tokio"))]
+            Err(_) => proxima::time::sleep(std::time::Duration::from_millis(20)).await,
         }
     }
     panic!("listener at {addr} never accepted a connection");
@@ -118,6 +125,7 @@ async fn connect_retry(addr: SocketAddr) -> TcpStream {
 // tokio LocalSet) — this test would hang waiting for a response that never
 // comes, rather than complete. After the fix, the connection is handled via
 // `Runtime::spawn_on_current_core` and the echo round-trips normally.
+#[cfg(feature = "tokio")]
 #[proxima::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stream_listener_round_trips_bytes_on_prime() {
     let runtime = Arc::new(
@@ -127,7 +135,7 @@ async fn stream_listener_round_trips_bytes_on_prime() {
             .build()
             .expect("build prime runtime"),
     );
-    let addr = pick_free_addr().await;
+    let addr = pick_free_addr();
     let shutdown_tx = spawn_prime_serve(&runtime, addr);
 
     let mut client = connect_retry(addr).await;
@@ -136,6 +144,42 @@ async fn stream_listener_round_trips_bytes_on_prime() {
         .await
         .expect("client write");
     client.shutdown().await.expect("client shutdown write");
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .expect("client read");
+
+    drop(shutdown_tx);
+    assert_eq!(response, b"the quick brown fox");
+}
+
+// tokio-free sibling: same regression proof, `prime::os::net::TcpStream`
+// as the raw client instead of tokio's — exercises the exact tokio-free
+// build (`--no-default-features --features serve-prime,tcp,macros`) this
+// crate now supports (see the umbrella Cargo.toml's `tcp` doc). Half-close
+// via `AsyncWriteExt::close()` (write-only on `prime::os::net::TcpStream`
+// since the `poll_close` fix below — it used to shut down both directions,
+// which would have zeroed this test's own response read too).
+#[cfg(not(feature = "tokio"))]
+#[proxima::test]
+async fn stream_listener_round_trips_bytes_on_prime() {
+    let runtime = Arc::new(
+        PrimeRuntime::builder()
+            .cores(1)
+            .background_inline()
+            .build()
+            .expect("build prime runtime"),
+    );
+    let addr = pick_free_addr();
+    let shutdown_tx = spawn_prime_serve(&runtime, addr);
+
+    let mut client = connect_retry(addr).await;
+    client
+        .write_all(b"the quick brown fox")
+        .await
+        .expect("client write");
+    client.close().await.expect("client shutdown write");
     let mut response = Vec::new();
     client
         .read_to_end(&mut response)
