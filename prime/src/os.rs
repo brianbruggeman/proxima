@@ -31,6 +31,18 @@ pub mod core_shard;
 ))]
 pub mod readiness;
 
+// process-wide SIGINT/SIGTERM wait over the self-pipe trick, parked on
+// `readiness` above — unix-only because the signal numbers/`sigaction`
+// this builds on are POSIX, not because the reactor itself is (the
+// reactor's own epoll/kqueue backends are already unix-only).
+#[cfg(all(
+    feature = "runtime-prime-executor",
+    feature = "runtime-prime-reactor",
+    feature = "runtime-prime-inbox-alloc",
+    unix,
+))]
+pub mod signal;
+
 #[cfg(all(
     feature = "runtime-prime-executor",
     feature = "runtime-prime-inbox-alloc",

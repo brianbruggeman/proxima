@@ -94,7 +94,7 @@ impl Server {
     pub async fn run_until_signal(self) {
         let notify = self.inner.shutdown_notify.clone();
         select! {
-            _ = wait_for_signal().fuse() => {}
+            _ = shutdown_signal().fuse() => {}
             _ = notify.notified().fuse() => {}
         }
         if let Some(shutdown) = take_shutdown(&self.inner.shutdown) {
@@ -109,7 +109,7 @@ impl Server {
     pub async fn run_until_signal_with_drain(self) -> ShutdownReport {
         let notify = self.inner.shutdown_notify.clone();
         select! {
-            _ = wait_for_signal().fuse() => {}
+            _ = shutdown_signal().fuse() => {}
             _ = notify.notified().fuse() => {}
         }
         match take_shutdown(&self.inner.shutdown) {
@@ -242,12 +242,23 @@ impl ControlPlane for Server {
     }
 }
 
-/// Wait for SIGTERM or SIGINT, whichever fires first. macOS / Linux —
-/// uses `tokio::signal` because that's the only Send signal source
-/// the substrate currently has. DPDK port replaces this with whatever
-/// the userspace runtime gives.
+/// Runtime-agnostic shutdown-signal seam: wait for SIGTERM or SIGINT,
+/// whichever fires first. Both `run_until_signal*` methods above call only
+/// this name — every runtime-specific implementation lives in its own
+/// adapter arm below, selected by a disjoint `cfg`, so no runtime symbol
+/// ever appears in the generic serve path itself.
+///
+/// Runtimes are additive (`tokio` and `runtime-prime-reactor` may both be
+/// linked at once — see their feature docs in `Cargo.toml`), so the arms
+/// below are mutually exclusive by construction rather than an if/else:
+/// exactly one is compiled for any feature combination, never zero, never
+/// two. Precedence when both are linked: `tokio` wins, unchanged from
+/// this function's behavior before the prime adapter existed (P14) — the
+/// tokio arm's body is untouched. The prime arm is selected exactly when
+/// tokio is absent, which is the shipped DEFAULT build (`serve-prime`, no
+/// tokio) — the bug this seam fixes.
 #[cfg(all(unix, feature = "tokio"))]
-async fn wait_for_signal() {
+async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut sigterm = match signal(SignalKind::terminate()) {
@@ -265,22 +276,36 @@ async fn wait_for_signal() {
 }
 
 #[cfg(all(not(unix), feature = "tokio"))]
-async fn wait_for_signal() {
+async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Tokio-free default: no OS signal source is wired up yet (a
-/// `signal-hook`-style no-runtime primitive is future work), so this
-/// arm never resolves — `run_until_signal` still terminates via an
-/// explicit `Server::stop()`/`Shutdown::stop()` call or process kill.
-#[cfg(not(feature = "tokio"))]
-async fn wait_for_signal() {
+/// Prime adapter: real self-pipe + reactor-backed SIGINT/SIGTERM wait
+/// (`prime::os::signal::wait_for_signal`, see that module for the design
+/// and why it's a self-pipe over the reactor rather than a dedicated
+/// thread). Selected whenever the tokio arms above aren't compiled but the
+/// prime reactor is — the default build.
+#[cfg(all(unix, not(feature = "tokio"), feature = "runtime-prime-reactor"))]
+async fn shutdown_signal() {
+    let _ = prime::os::signal::wait_for_signal().await;
+}
+
+/// No compiled-in OS signal source (neither tokio nor the prime reactor,
+/// e.g. a feature-stripped build, or non-unix without tokio) — this arm
+/// never resolves, and that is the honest, minimal-scope truth for a build
+/// with no signal source at all, not a silent gap in a shipped default:
+/// `run_until_signal` still terminates via an explicit `Server::stop()`/
+/// `Shutdown::stop()` call or process kill.
+#[cfg(not(any(feature = "tokio", all(unix, feature = "runtime-prime-reactor"))))]
+async fn shutdown_signal() {
     core::future::pending::<()>().await;
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::task::Poll;
+
     use super::*;
     use crate::control_plane::{PipeState, StaticControlPlane};
 
@@ -335,5 +360,141 @@ mod tests {
 
         server.stop();
         clone.stop(); // already consumed — no-op, shouldn't panic
+    }
+
+    // ── real signal-driven shutdown ─────────────────────────────────────
+    //
+    // These raise a genuine OS signal against the test process and assert
+    // `run_until_signal` actually resolves — the deliverable for "the
+    // prime default build has no real signal shutdown". They need
+    // `cargo nextest run` (one process per test, this workspace's default
+    // runner): raising SIGINT/SIGTERM in a shared `cargo test` process
+    // would race whatever other test is running at delivery time.
+    //
+    // Both tests manually poll `run_until_signal()` once, off a no-op
+    // waker, before raising. Signal-handler install happens synchronously
+    // inside the adapter's first poll (before its first real await point,
+    // on both the prime and tokio arms) — SIGINT/SIGTERM's default
+    // disposition terminates the process, so the handler must already be
+    // registered or `raise` below kills the test instead of the server.
+
+    /// The default (prime, no tokio) build's shutdown-signal adapter is
+    /// `prime::os::signal::wait_for_signal` (see that module). Before the
+    /// fix this arm was `core::future::pending` and this test would time
+    /// out — it is the direct proof of the bug and the fix.
+    #[cfg(all(unix, feature = "runtime-prime-reactor", not(feature = "tokio")))]
+    #[proxima::test]
+    async fn run_until_signal_resolves_on_real_sigint_prime_path() {
+        let (tx, mut rx) = futures::channel::oneshot::channel();
+        let shutdown = Shutdown::for_test_with_tx(tx);
+        let server = Server::new(shutdown, fixture_control());
+
+        let mut driving = std::pin::pin!(server.run_until_signal());
+        // scoped so the (`!Send`) `Context`/`Waker` are dropped before the
+        // `.await` below — the generated `#[proxima::test]` future must
+        // stay `Send` across every await point.
+        {
+            let waker = std::task::Waker::noop();
+            let mut context = std::task::Context::from_waker(waker);
+            assert_eq!(
+                driving.as_mut().poll(&mut context),
+                Poll::Pending,
+                "run_until_signal must park on the OS signal, not resolve immediately"
+            );
+        }
+
+        // SAFETY: raising a signal against our own process is the
+        // documented use of raise(2); the handler installed above only
+        // performs an async-signal-safe write(2) (prime::os::signal).
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+
+        proxima_core::time::timeout(std::time::Duration::from_secs(5), driving)
+            .await
+            .expect("run_until_signal must resolve within 5s of a real SIGINT");
+
+        let outcome = proxima_core::time::timeout(std::time::Duration::from_millis(100), &mut rx)
+            .await
+            .expect("Shutdown::stop() must fire the shutdown sender");
+        assert!(outcome.is_ok(), "shutdown sender fired");
+    }
+
+    /// SIGTERM sibling of the SIGINT test above — the prime adapter must
+    /// handle both.
+    #[cfg(all(unix, feature = "runtime-prime-reactor", not(feature = "tokio")))]
+    #[proxima::test]
+    async fn run_until_signal_resolves_on_real_sigterm_prime_path() {
+        let (tx, mut rx) = futures::channel::oneshot::channel();
+        let shutdown = Shutdown::for_test_with_tx(tx);
+        let server = Server::new(shutdown, fixture_control());
+
+        let mut driving = std::pin::pin!(server.run_until_signal());
+        // scoped so the (`!Send`) `Context`/`Waker` are dropped before the
+        // `.await` below — the generated `#[proxima::test]` future must
+        // stay `Send` across every await point.
+        {
+            let waker = std::task::Waker::noop();
+            let mut context = std::task::Context::from_waker(waker);
+            assert_eq!(
+                driving.as_mut().poll(&mut context),
+                Poll::Pending,
+                "run_until_signal must park on the OS signal, not resolve immediately"
+            );
+        }
+
+        // SAFETY: see the SIGINT test above.
+        unsafe {
+            libc::raise(libc::SIGTERM);
+        }
+
+        proxima_core::time::timeout(std::time::Duration::from_secs(5), driving)
+            .await
+            .expect("run_until_signal must resolve within 5s of a real SIGTERM");
+
+        let outcome = proxima_core::time::timeout(std::time::Duration::from_millis(100), &mut rx)
+            .await
+            .expect("Shutdown::stop() must fire the shutdown sender");
+        assert!(outcome.is_ok(), "shutdown sender fired");
+    }
+
+    /// Mirrors the prime-path test above on the tokio adapter — proves
+    /// P14 parity: the tokio arm's real-signal behavior is unchanged by
+    /// this fix (its body is untouched; only its name and cfg predicate
+    /// moved to make room for the prime arm).
+    #[cfg(all(unix, feature = "tokio", feature = "runtime-prime-reactor"))]
+    #[proxima::test(runtime = "tokio")]
+    async fn run_until_signal_resolves_on_real_sigint_tokio_path() {
+        let (tx, mut rx) = futures::channel::oneshot::channel();
+        let shutdown = Shutdown::for_test_with_tx(tx);
+        let server = Server::new(shutdown, fixture_control());
+
+        let mut driving = std::pin::pin!(server.run_until_signal());
+        // scoped so the (`!Send`) `Context`/`Waker` are dropped before the
+        // `.await` below — the generated `#[proxima::test]` future must
+        // stay `Send` across every await point.
+        {
+            let waker = std::task::Waker::noop();
+            let mut context = std::task::Context::from_waker(waker);
+            assert_eq!(
+                driving.as_mut().poll(&mut context),
+                Poll::Pending,
+                "run_until_signal must park on the OS signal, not resolve immediately"
+            );
+        }
+
+        // SAFETY: see the prime-path test above.
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+
+        proxima_core::time::timeout(std::time::Duration::from_secs(5), driving)
+            .await
+            .expect("run_until_signal must resolve within 5s of a real SIGINT");
+
+        let outcome = proxima_core::time::timeout(std::time::Duration::from_millis(100), &mut rx)
+            .await
+            .expect("Shutdown::stop() must fire the shutdown sender");
+        assert!(outcome.is_ok(), "shutdown sender fired");
     }
 }
