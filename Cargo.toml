@@ -626,6 +626,17 @@ websocket-upstream = ["websocket"]
 # — this rides whichever h1 build (`http1`/`http1-native`) is already
 # compiled in. See `src/listener/websocket.rs`'s module doc.
 websocket-upgrade = ["proxima-protocols/websocket_handshake"]
+# The sans-IO RFC 6455 SERVER session FSM (message reassembly,
+# control-frame automation, masking enforcement, closing handshake) —
+# `proxima_protocols::websocket_frame::session::Session` — layered onto
+# `websocket-upgrade`'s tokio-free h1 handshake so `.websocket(handler)`
+# hands the caller a REAL, drivable WebSocket connection, not just a raw
+# post-101 socket. `websocket-frame` re-exports the base frame codec at
+# the crate root (`proxima::websocket_frame`) that `Session` builds on;
+# `proxima-protocols/websocket_frame-session` compiles the FSM itself.
+# Zero tokio, zero prime symbols — drivable from any runtime, same as
+# `websocket-upgrade`. See `src/listener/websocket.rs`'s module doc.
+websocket-session = ["websocket-upgrade", "websocket-frame", "proxima-protocols/websocket_frame-session"]
 # RESP3 (Redis Serialization Protocol v3) listener (P5). sans-IO parser +
 # `RedisAnyProtocol`, mounted onto `AnyListenProtocol`'s ONE bind + accept
 # loop (`proxima-http/http-listener`, same reasoning as the `pgwire`
@@ -1737,6 +1748,15 @@ required-features = [
     "runtime-prime-reactor",
     "runtime-prime-bgpool",
 ]
+
+# tokio-free proof for the sans-IO WebSocket session: `.websocket(handler)`
+# (h1-native upgrade) driving `websocket_frame::session::Session` over a
+# real loopback socket on the prime runtime; client is a blocking
+# `std::net::TcpStream`. Deliberately separate from `h1_native_prime`
+# (above) and the `e2e` binary (below, tokio-coupled `http1`).
+[[test]]
+name = "websocket_session_prime_e2e"
+required-features = ["websocket-session", "http1-native", "serve-prime", "macros"]
 
 [[test]]
 name = "e2e"
