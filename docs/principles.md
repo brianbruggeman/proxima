@@ -34,7 +34,7 @@ For the API contract see [SHAPE.md](../SHAPE.md). For the feature inventory see 
 
 ## proxima is workflow execution at request granularity
 
-- Recording = event history. `check_determinism` = replay determinism check. Pipes = activities. Spec composition = workflow definition. Hot-swap = workflow versioning. The substrate is the same one durable-execution platforms provide, applied at request granularity instead of process granularity.
+- Recording = event history. `check_determinism` = replay determinism check. Pipes = activities. Spec composition = workflow definition. Hot-swap = workflow versioning. This mechanism is the same one durable-execution platforms provide, applied at request granularity instead of process granularity.
 - The replacement target is fragile chains of `if retry < 3 then sleep else 500`, ad-hoc database-backed state machines, and cron jobs reading workflow state out of a table. Replace them with `Retry.exponential` and `WriteBack` configured on a middleware-wrapped Pipe, with recording for replay and `explain` for diagnosis.
 - Determinism is a property of every Pipe, not a special workflow construct. The same `check_determinism` runs against any handle in the registry. Host-language Pipes that fail determinism fail loudly at the harness, not silently in production.
 
@@ -66,7 +66,7 @@ For the API contract see [SHAPE.md](../SHAPE.md). For the feature inventory see 
 - Every `Mutex` / `RwLock` carries the *WHY here / WHY NOT removable / WHY this is right* triple, with a bench citation or structural argument.
 - Every deferred optimization is recorded with a measured win and a trigger condition. We do not gold-plate today's working code; we record the path back when the trigger fires.
 - The `unsafe` surface is documented honestly. `h2` is zero-unsafe; transitive crates (rustls, hyper-util, tokio_uring) are not. The boundary is named at the trust line, not hidden.
-- ".Internal" is a feature, not a leak. `proxima::internal::*` exposes substrate primitives (`BufferPool`, `ShardedHistogram`, per-thread sharded slot patterns) for advanced consumers under an explicit instability warning. Better than users forking the crate.
+- ".Internal" is a feature, not a leak. `proxima::internal::*` exposes core primitives (`BufferPool`, `ShardedHistogram`, per-thread sharded slot patterns) for advanced consumers under an explicit instability warning. Better than users forking the crate.
 
 ## "if it compiles, it works" is a lie for IO
 
@@ -76,7 +76,7 @@ For the API contract see [SHAPE.md](../SHAPE.md). For the feature inventory see 
 
 ## pragmatism is the culture
 
-- Idealism unchecked is a production liability. The engineer who rewrites the substrate in a novel type-level encoding is not shipping. Power tools are not religions; abstraction maximalism is not engineering.
+- Idealism unchecked is a production liability. The engineer who rewrites the core in a novel type-level encoding is not shipping. Power tools are not religions; abstraction maximalism is not engineering.
 - Mechanical refactoring is leveraged ruthlessly. Change a trait; the compiler hands you every call site; work through the list methodically; done. Refactor velocity is a survival trait at any non-trivial codebase size and we protect it deliberately.
 - Ship the foundational shape, bench it, refine. [SHAPE.md](../SHAPE.md) decides what is correct; the discipline logs decide what is deferred; criterion decides what is measured. The three together are how proxima moves.
 

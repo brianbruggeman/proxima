@@ -1,7 +1,7 @@
 # nginx-style: multiple listeners, host-based routing, named pipes,
 # location-based mounts, LB pools — all config-only.
 #
-# Substrate composition:
+# Core composition:
 #   - 3 named pipes (api LB pool, static, admin synth)
 #   - 2 listeners on different ports
 #   - host-based + path-based routing per listener

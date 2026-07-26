@@ -11,7 +11,7 @@
 
 //! Head-to-head h2: proxima's `serve_h2_connection` vs hyper's
 //! `server::conn::http2::Builder`. Same h2 state-machine crate
-//! underneath; the delta isolates substrate Request/Response wiring
+//! underneath; the delta isolates core Request/Response wiring
 //! vs hyper's Body conversions.
 //!
 //! Both servers run over loopback TCP with a warm h2 connection

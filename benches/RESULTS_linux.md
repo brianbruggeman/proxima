@@ -148,7 +148,7 @@ per-core proxima is **2-3× tighter** than every default-tokio variant.
 RPS bands at conn=64 don't overlap: per-core's 95% CI is [275k, 300k]
 while hyper's is [167k, 209k] and pingora's is [146k, 203k].
 
-three layers of evidence for the substrate composition claim:
+three layers of evidence for the core composition claim:
 
 1. **median RPS**: per-core proxima ≈ 2× hyper at conn=64
 2. **tail percentiles**: per-core has consistently tighter p99 / p999
@@ -166,7 +166,7 @@ the protocol-stack win compounds with the runtime pin to deliver
 20-80% RPS advantage and 30-60% p99/p999 improvements vs hyper/pingora
 at high concurrency.
 
-**The substrate composition claim, restated:**
+**The core composition claim, restated:**
 proxima native + per-core runtime is roughly **2× hyper** and **1.6×
 pingora** at 64 concurrent connections. Even on default tokio without
 the per-core runtime, proxima is within ±5% of pingora and beats hyper.

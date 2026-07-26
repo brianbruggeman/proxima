@@ -1,6 +1,6 @@
 [package]
 name = "proxima-telemetry"
-description = "Substrate-native telemetry for proxima: traces, metrics, logs, events"
+description = "Core-native telemetry for proxima: traces, metrics, logs, events"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

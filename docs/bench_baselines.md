@@ -1,6 +1,6 @@
 # Bench baselines
 
-Substrate-wide benchmark numbers, two platforms. Each bench was run
+Workspace-wide benchmark numbers, two platforms. Each bench was run
 once via `cargo bench --bench <name> -- --quick`; `--quick`
 samples to a tight CI of variance and reports mean ± p95 within a
 few seconds per group. Numbers are middle-of-three (criterion's
@@ -69,7 +69,7 @@ intentionally tracked. Trade is "leanest hot path today" vs
 "more session-state APIs later"; both are realistic deltas as the
 prod feature set matures.
 
-## Substrate dispatch
+## Core dispatch
 
 `substrate_dispatch` — `Pipe::call` through composed middleware
 chains. No I/O, no kernel.
@@ -88,7 +88,7 @@ worker scheduling tuned for hot-path dispatch.
 ## Lock-free read primitives
 
 `per_core_vs_arcswap` — direct comparison of thread-local read vs
-`ArcSwap` read under writer contention. This is the substrate's
+`ArcSwap` read under writer contention. This is the runtime's
 core architectural claim: hot-path reads stay cache-local.
 
 | | macOS | Linux |
@@ -225,7 +225,7 @@ hot config-reload path.
 | `network_throughput.rs` | end-to-end TCP loop |
 | `per_core_vs_arcswap.rs` | thread-local vs ArcSwap reads (the architectural claim) |
 | `perf_audit.rs` | audit-style multi-primitive pass |
-| `request_path.rs` | substrate-level Request → Response through synth, cache-hit |
+| `request_path.rs` | core-level Request → Response through synth, cache-hit |
 | `simd_json_decode.rs` | simd_json vs serde_json |
 | `substrate_dispatch.rs` | `Pipe::call` through 1–16-deep chains |
 | `swap_under_load.rs` | SwappablePipe swap + read + dispatch-under-storm |

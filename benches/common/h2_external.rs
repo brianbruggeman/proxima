@@ -22,8 +22,8 @@
 //! **IO traits:** the listener requires `tokio::io::AsyncRead +
 //! AsyncWrite` on the socket type because the `h2` crate ties to
 //! those trait shapes — same coupling as the h1 listener. The
-//! substrate-level `crate::stream::{StreamConnection, StreamListener}`
-//! traits use `futures::io::*`; bridging substrate streams into h2 is
+//! core-level `crate::stream::{StreamConnection, StreamListener}`
+//! traits use `futures::io::*`; bridging core streams into h2 is
 //! a planned `tokio_util::compat`-style adapter at this listener's
 //! boundary. Until that lands, DPDK and other non-tokio transports
 //! can't feed this listener directly.
@@ -60,7 +60,7 @@ use proxima_primitives::pipe::SendPipe;
 type HandlerFuture = Pin<Box<dyn std::future::Future<Output = Result<(), ProximaError>> + Send>>;
 
 /// Drive an h2 connection to completion. Each accepted stream maps to
-/// one substrate `Pipe::call`; bodies stream both directions through
+/// one core `Pipe::call`; bodies stream both directions through
 /// the h2 flow-control machinery.
 ///
 /// Returns when the peer closes the connection or sends GOAWAY.

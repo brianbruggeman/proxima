@@ -10,7 +10,7 @@
 
 ## What it demonstrates
 
-Logging is not special machinery bolted onto the side of the substrate. It is
+Logging is not special machinery bolted onto the side of the core. It is
 the same three primitives the curriculum already covers, applied to one more
 payload shape — a `LogRecord` instead of an HTTP request or a job:
 

@@ -575,7 +575,7 @@ fn expects_100_continue(headers: &[(Bytes, Bytes)]) -> bool {
     })
 }
 
-/// Builds the substrate `Request` from a decoded HEADERS event AND
+/// Builds the core `Request` from a decoded HEADERS event AND
 /// hands the (now-empty, capacity-retained) `headers` buffer back to
 /// the caller — which passes it to
 /// [`proxima_protocols::http2_codec::connection::Connection::return_headers_buffer`]

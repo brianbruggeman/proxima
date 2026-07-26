@@ -3,7 +3,7 @@
 # and writes a results table to
 # proxima-intercept/benches/RESULTS_bench_intercept_capture_<platform>.md.
 #
-# this script is the per-component bench substrate per Principle 16: numbers
+# this script is the per-component bench harness per Principle 16: numbers
 # without a re-runnable harness are hypothesis. running it and committing the
 # results MD is the contract.
 

@@ -9,7 +9,7 @@
 )]
 
 //! `CausalIndex::record` and `CausalIndex::explain` microbenches.
-//! The causal substrate records (parent, child, byte-range) edges
+//! The causal layer records (parent, child, byte-range) edges
 //! as pipes dispatch; `explain` walks the graph backward from a
 //! recorded output byte to its ancestors. Both are hot-path
 //! observability primitives.

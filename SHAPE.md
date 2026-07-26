@@ -39,7 +39,7 @@ Anything weaker than this — callbacks, second-class handlers, "advanced" surfa
 host-language API ──▶  │   Layer 1: orchestration (App, Spec,   │  one-time boundary cost
                        │   Mount, apply, record, explain)       │  request path is pure Rust
                        ├────────────────────────────────────────┤
-                       │   Layer 0: substrate (runtime,         │  always Rust
+                       │   Layer 0: core (runtime,              │  always Rust
                        │   listeners, registries, recording,    │  invariant across bindings
                        │   causal, determinism, hot-swap)       │
                        └────────────────────────────────────────┘
@@ -47,7 +47,7 @@ host-language API ──▶  │   Layer 1: orchestration (App, Spec,   │  one
 
 | layer | who runs it | who pays | example |
 | --- | --- | --- | --- |
-| 0 — substrate | Rust, always | nobody (substrate cost) | per-core runtime, listeners, `ArcSwap` registries, `Causal`, `Tee`, `Isolate` |
+| 0 — core | Rust, always | nobody (core cost) | per-core runtime, listeners, `ArcSwap` registries, `Causal`, `Tee`, `Isolate` |
 | 1 — orchestration | host calls into Rust | setup-time boundary cost | `App.open`, `app.pipe`, `app.mount`, `app.apply`, `app.record`, `app.metrics` |
 | 2 — peer pipe | host implements `Pipe` | per-request boundary cost | Python ML model, TS handler with closure-state, integration test fixture |
 
@@ -61,7 +61,7 @@ There is no "daemon client SDK" separate from the "embedded SDK". There is one `
 
 | transport | constructor | use |
 | --- | --- | --- |
-| in-process | `App.local()` | the embedding host runs the substrate itself |
+| in-process | `App.local()` | the embedding host runs the core itself |
 | local daemon | `App.open("ipc:///run/proxima.sock")` | controller talks to a long-running daemon over UDS |
 | remote daemon | `App.open("mcp+tcp://host:port")` | controller talks to a remote daemon over MCP/TCP/TLS |
 
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     app.run("0.0.0.0:443", tls=("cert.pem", "key.pem"))
 ```
 
-Each piece of sugar desugars to a substrate construct:
+Each piece of sugar desugars to a core construct:
 
 | sugar | desugars to |
 | --- | --- |
@@ -199,10 +199,10 @@ await app.run("0.0.0.0:443", { tls: { cert: "cert.pem", key: "key.pem" } });
 
 | concern | runs in | why |
 | --- | --- | --- |
-| auth, retry, rate limit, transform, write-back, tee, diff, isolate | Rust | substrate speed (ns–µs), lock-free, observable through `proxima.*` metrics |
+| auth, retry, rate limit, transform, write-back, tee, diff, isolate | Rust | core speed (ns–µs), lock-free, observable through `proxima.*` metrics |
 | business logic, model inference, integration with host-language libraries | Python / TS | crossing the boundary is the cost of using host code |
 
-If you want a Python middleware, you actually want a Python *handler* that calls an upstream — that is Layer 2 and it is fine. The line is hard: cross-cutting concerns run in Rust at substrate speed; business logic runs in host language at boundary cost. No middle ground.
+If you want a Python middleware, you actually want a Python *handler* that calls an upstream — that is Layer 2 and it is fine. The line is hard: cross-cutting concerns run in Rust at core speed; business logic runs in host language at boundary cost. No middle ground.
 
 This is the single rule that keeps the bindings from drifting into "yet another web framework."
 
@@ -250,9 +250,9 @@ If either fails, the sugar has become a parallel universe and the binding has st
 ## what this rules out
 
 - **Fluent host-language spec DSLs** (`proxima.cache().http(...).ttl("1h")`). Spec is the architecture. A parallel builder drifts the moment the Rust types evolve. Bindings expose Pipe-authoring and Spec-loading; not Spec-construction.
-- **Callback-shaped Layer 2.** Host code reaches the substrate as `Pipe`, not as a closure leashed inside someone else's pipe. The `CallbackUpstream` registry exists for in-process Rust test fixtures; it is not the binding entry point.
+- **Callback-shaped Layer 2.** Host code reaches the core as `Pipe`, not as a closure leashed inside someone else's pipe. The `CallbackUpstream` registry exists for in-process Rust test fixtures; it is not the binding entry point.
 - **Separate "daemon client" and "embedded" SDKs.** One `App`, multiple transports. Splitting the API would force users to learn two surfaces and would let the easier one dictate the shape.
-- **Python or TS implementations of substrate middleware.** Anything in [the middleware discipline](#the-middleware-discipline) table's Rust row is off-limits to host code.
+- **Python or TS implementations of core middleware.** Anything in [the middleware discipline](#the-middleware-discipline) table's Rust row is off-limits to host code.
 - **WSGI/ASGI compatibility shims as a core feature.** Proxima has its own protocol. An ASGI adapter is a legitimate Layer 2 Pipe someone can write; it is not part of the binding surface.
 - **ORM, templating, session helpers.** Out of scope. Use whatever the host ecosystem provides.
 

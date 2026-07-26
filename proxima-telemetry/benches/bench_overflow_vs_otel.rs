@@ -3,7 +3,7 @@
 //! per-span sink. The incumbent's queue is bounded and DROPS on full by design
 //! (no backpressure to the caller); proxima's `Block`+pump PARKS the producer and
 //! drops nothing. This reports the drop count/% for each — the P14 incumbent-
-//! relative number on the dimension that matters for a lossless substrate.
+//! relative number on the dimension that matters for a lossless telemetry pipeline.
 //!
 //! Run: `cargo bench -p proxima-telemetry --bench bench_overflow_vs_otel`
 //!
@@ -231,7 +231,7 @@ fn main() {
     println!("       and keeps every span. neither is 'broken': OTel optimizes app speed and");
     println!("       treats spans as droppable; proxima treats them as data you cannot lose and");
     println!("       pays for it in producer throughput. proxima's choice is the one a memory/");
-    println!("       audit substrate needs — but the COST (throttled producers) is the emit-wall");
+    println!("       audit trail needs — but the COST (throttled producers) is the emit-wall");
     println!("       column, stated plainly, not hidden.");
 }
 

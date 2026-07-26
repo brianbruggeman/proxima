@@ -170,7 +170,7 @@ pub struct ServerConnection {
     request_header_mode: RequestHeaderMode,
     /// Raw request-HEADERS field sections queued while
     /// `request_header_mode` is `Source`, drained via
-    /// [`Self::poll_request_header_source`]. Same shared substrate as
+    /// [`Self::poll_request_header_source`]. Same shared plumbing as
     /// the client half — see
     /// [`qpack::part_source::HeaderBlockQueue`].
     #[cfg(feature = "http3_codec-part-source")]

@@ -1,5 +1,5 @@
 # `proxima replay --verify` policy for the remote_pipeline_demo
-# recording. Exercises the verify-CLI substrate against the
+# recording. Exercises the verify-CLI path against the
 # pipeline's `recording.jsonl` that proximad writes under
 # `$STATE_DIR/<pipeline_id>/`.
 #

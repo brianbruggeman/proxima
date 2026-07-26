@@ -9,7 +9,7 @@
 )]
 //! Phase 8 demo (proxima-notify initiative): heartbeat-to-stdout end-to-end.
 //!
-//! Exercises the substrate + facade composition:
+//! Exercises the core + facade composition:
 //!   S2 (producer-lifecycle driver in proxima::App)
 //!     + S3 (producer-graph in ProximaSettings — via App::pipe / Spec::Handle)
 //!     + C3 (ScheduledTriggerPipe — interval producer)

@@ -170,7 +170,7 @@ async fn uses_from_alias(#[from(answer)] aliased: u32) {
 // proxima's middleware/pipe primitives composed as a fixture stack: a
 // source/sink synth wrapped in retry middleware. rate-limit, record, and replay
 // compose identically (each wraps an inner Pipe), so a fixture can hand the body
-// any stack — the substrate primitives ARE the fixture vocabulary.
+// any stack — the core primitives ARE the fixture vocabulary.
 #[proxima::fixture]
 fn upstream_stack() -> proxima::PipeHandle {
     let synth = proxima::SynthUpstream::new("synth", 200, "ok");
@@ -193,7 +193,7 @@ async fn pipe_stack_fixture(upstream_stack: proxima::PipeHandle) {
     assert_eq!(&body[..], b"ok");
 }
 
-// config fixture: proxima's first-class config substrate as a test input —
+// config fixture: proxima's first-class config layer as a test input —
 // parsed format-agnostically, then realized as a live Pipe. rstest can't.
 #[proxima::fixture]
 async fn cache_cfg() -> proxima::test_support::ConfigFixture {

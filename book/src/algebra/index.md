@@ -136,7 +136,7 @@ job demands it.
   → [send](send.md). **Source:** `Pipe`, `SendPipe`, `UnpinPipe`,
   `UnpinSendPipe` in `proxima_primitives::pipe`
   (`proxima-primitives/src/pipe/primitives.rs`).
-- **The signal substrate** — fire-once async completion (end-of-stream, a
+- **The signal layer** — fire-once async completion (end-of-stream, a
   drain going quiet). `Signal` itself lives *below* the algebra, in
   `proxima_core::signal`; the chapter shows the algebra driving it —
   observe → filter the terminal condition → fire → await — with no polling
@@ -153,7 +153,7 @@ job demands it.
   [gallery](patterns.md) (retry, auth, sentinel, wal, cron, proxy, ETL, …)
 - **strategies** — the policy dials patterns turn (often little state machines)
 - riding alongside: the **send tier** (cross a core) and the **signal
-  substrate** (completion)
+  layer** (completion)
 
 That is the entire vocabulary. Everything later in this book — retries,
 rate limits, circuit breakers, logging, tracing, a whole HTTP gateway — is

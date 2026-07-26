@@ -1,10 +1,10 @@
 //! `RecordingSink` — the per-event durable sink trait, relocated onto the
-//! spigot substrate, plus `EventTap` for live observation.
+//! spigot layer, plus `EventTap` for live observation.
 //!
 //! RISC note (principle 1): this is NOT a new peer trait — it is the canonical
 //! recording-sink abstraction *relocated* from `proxima-recording-core` (whose
 //! `BinSink`/`JsonlSink`/`BroadcastSink`/registry are deleted) into the
-//! pipe-flavored substrate, reshaped to the spigot model. The batch-coalescing
+//! pipe-flavored layer, reshaped to the spigot model. The batch-coalescing
 //! that `append_batch` used to do now lives in [`crate::pipe::AccumulatingSink`]; the
 //! durable terminal is [`crate::pipe::LazyFanOut`]. Consumers that hold a
 //! heterogeneous per-event sink (the pipeline executor, the control planes)

@@ -1892,7 +1892,7 @@ mod tests {
     /// than fresh: two GET requests over the SAME connection, with the
     /// first request's `headers` returned to the pool before the
     /// second is fed, must yield the SAME backing pointer for both.
-    /// This is the substrate behind the e2e alloc-count claim in
+    /// This is the mechanism behind the e2e alloc-count claim in
     /// `docs/proxima-quic/discipline.md` — that claim's "steady-state
     /// warm connection" precondition IS this behavior.
     #[test]

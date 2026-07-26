@@ -1,6 +1,6 @@
-//! Substrate-side QUIC endpoint. Wraps the I/O-bound driver behind a
+//! Core-side QUIC endpoint. Wraps the I/O-bound driver behind a
 //! façade that hides whether the backend is the high-level [`quinn`]
-//! crate (today) or a [`quinn_proto`]-driven loop on the substrate
+//! crate (today) or a [`quinn_proto`]-driven loop on the runtime's
 //! `Runtime` (future).
 
 use std::io;

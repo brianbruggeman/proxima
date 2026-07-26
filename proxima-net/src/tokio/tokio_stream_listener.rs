@@ -109,7 +109,7 @@ impl TokioTcpListener {
 
     // proxima sits under transport-shaped consumers (pgwire, axum, raw
     // tcp) that already expect a tokio TcpStream. expose the raw
-    // accept so the substrate owns the bind without forcing every
+    // accept so the core owns the bind without forcing every
     // consumer onto the futures-io adapter.
     pub async fn accept_tokio(&self) -> io::Result<(tokio::net::TcpStream, SocketAddr)> {
         self.inner.accept().await

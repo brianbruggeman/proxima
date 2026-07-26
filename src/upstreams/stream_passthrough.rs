@@ -1,6 +1,6 @@
 //! Pumps the request body into a `StreamUpstream` and streams the
 //! response back. Pair with `StreamListenerProtocol` for a full
-//! byte-stream proxy that still composes with the substrate middleware.
+//! byte-stream proxy that still composes with the core middleware.
 
 use std::future::Future;
 use std::net::SocketAddr;

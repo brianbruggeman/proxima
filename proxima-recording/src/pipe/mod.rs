@@ -1,4 +1,4 @@
-//! Pipe-flavored recording substrate: `LiveCaptureContext` (concrete
+//! Pipe-flavored recording layer: `LiveCaptureContext` (concrete
 //! impl of `proxima-pipe::CaptureContext`), `BoundedRecordingSink`
 //! with telemetry-counter back-pressure, and `Causal` (the record /
 //! replay Pipe wrapper with causal index).

@@ -1,7 +1,7 @@
 //! HTTP/3 (native proxima QUIC, h3 over UDP) bench server: `H3NativeListenProtocol`
 //! on prime with a dev self-signed cert. The h3 sibling of `bench_server` /
 //! `bench_server_h3` — same `OkHandler`. Native single-task per-connection driver
-//! (server fan-out is a documented substrate follow-on).
+//! (server fan-out is a documented follow-on).
 //!
 //!   cargo run --release --features scheduler --example bench_server_h3 -- 127.0.0.1:8094 [cores]
 

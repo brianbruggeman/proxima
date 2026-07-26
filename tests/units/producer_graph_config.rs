@@ -199,7 +199,7 @@ type = "test_tick"
 
 // E2E: a producer resolved through S3's schema is picked up unconditionally
 // by S2's ProducerLifecycle driver (proxima-pipe TARGET 4 — no feature gate;
-// this is the substrate composition test).
+// this is the core composition test).
 #[proxima::test]
 async fn producer_source_picked_up_by_lifecycle_driver() {
     use std::sync::Arc;

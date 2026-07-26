@@ -65,7 +65,7 @@ mod join_set {
     //! Newtype over `tokio::task::JoinSet` that forwards `spawn` /
     //! `join_next` / `abort_all` / `len` / `is_empty`. The whole point
     //! is to give callers a `proxima::task::JoinSet` import so they
-    //! aren't reaching into `tokio::task::` directly — substrate
+    //! aren't reaching into `tokio::task::` directly — runtime
     //! coupling stays inside this module.
 
     use std::future::Future;

@@ -753,7 +753,7 @@ where
             // so it runs concurrently with the body pump below (the
             // Pipe drains `body_rx` as fast as the pump fills it,
             // bounded backpressure both ways). Mirrors h2/h3 — no
-            // tokio involved, `Runtime` is the substrate's own
+            // tokio involved, `Runtime` is the core's own
             // executor handle.
             let (resp_tx, mut resp_rx) =
                 oneshot::channel::<Result<Response<Bytes>, ProximaError>>();

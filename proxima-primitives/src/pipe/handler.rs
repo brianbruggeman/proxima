@@ -25,7 +25,7 @@
 //! [`ThreadLocalPipeHandle`] are the `!Send` sibling for `Rc` / `RefCell`
 //! per-core state.
 //!
-//! # Substrate primitives
+//! # Core primitives
 //!
 //! These are also `Handler`s — they wrap any inner handler and don't care
 //! what it does. [`Diff`](crate::pipe::Diff) runs two handlers in parallel and

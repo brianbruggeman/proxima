@@ -125,12 +125,12 @@ fn f6_middlewares_module_doc_present() {
 }
 
 /// F8 + F9 — `handler.rs` `//!` module doc contains both the
-/// "Substrate primitives" section (F9) and the "Recording wraps
+/// "Core primitives" section (F9) and the "Recording wraps
 /// any Pipe" section (F8). Folded from the deleted `docs/PIPE.md`.
 /// `pipe.rs` -> `handler.rs` (proxima-pipe TARGET 2 — the served-Pipe
 /// rename): the served-HTTP face moved, and its module doc moved with it.
 #[test]
-fn f8_f9_pipe_module_doc_has_substrate_and_recording_sections() {
+fn f8_f9_pipe_module_doc_has_core_and_recording_sections() {
     let text = read_repo_file("proxima-primitives/src/pipe/handler.rs");
     let module_doc: String = text
         .lines()
@@ -138,9 +138,9 @@ fn f8_f9_pipe_module_doc_has_substrate_and_recording_sections() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        module_doc.contains("Substrate primitives"),
+        module_doc.contains("Core primitives"),
         "audit finding F9: proxima-primitives/src/pipe/handler.rs `//!` must contain a \
-         '# Substrate primitives' section",
+         '# Core primitives' section",
     );
     assert!(
         module_doc.contains("Recording wraps any Pipe"),

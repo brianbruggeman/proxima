@@ -3,7 +3,7 @@
 //! Tracked as P11 in `docs/protocol-gap/discipline.md`. RFC 6455
 //! defines the WebSocket framing layer separately from the rest of
 //! the protocol (handshake, ping/pong semantics, close codes). This
-//! module is the framing layer alone — substrate middleware can
+//! module is the framing layer alone — core middleware can
 //! inspect frames without depending on `async-tungstenite`'s io
 //! plumbing.
 //!
@@ -27,7 +27,7 @@
 //! ```
 //!
 //! Reference: `tungstenite::protocol::frame::FrameHeader` —
-//! scope-matched ecosystem baseline. The substrate parser borrows
+//! scope-matched ecosystem baseline. The frame parser borrows
 //! from the source buffer; the payload reference is masked-as-is
 //! per the wire (callers that need unmasked bytes call
 //! [`unmask_in_place`] on a `&mut [u8]` copy).

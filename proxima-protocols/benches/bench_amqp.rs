@@ -266,7 +266,7 @@ fn bench_real_amq_protocol(criterion: &mut Criterion) {
 //
 // Workload: given an AMQP method frame, classify it by AMQP class_id
 // (connection=10 / channel=20 / exchange=40 / queue=50 / basic=60 /
-// tx=90 / confirm=85). Substrate-routing use case: deliver to the
+// tx=90 / confirm=85). Routing use case: deliver to the
 // right broker subsystem. Both arms take `&[u8]` in, return
 // `Option<u8>` (class category 0-6).
 //

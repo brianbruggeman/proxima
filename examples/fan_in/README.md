@@ -16,7 +16,7 @@ merge's own honest "not ready" answer only fires when *every* live source
 gave that same answer in the same pass.
 
 This is the plain merge — no gate, no priority, just many sources to one
-stream. It is the substrate a gated pattern builds on: wrap each source so
+stream. It is the base a gated pattern builds on: wrap each source so
 "not armed yet" becomes just another reason it answers "not ready this
 pass", with no change to the merge itself. Learn the merge here, on its
 own, before a pattern composes it with readiness.

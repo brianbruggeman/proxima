@@ -51,7 +51,7 @@ use crate::upstreams::synth::SynthPipeFactory;
 use proxima_listen::{ListenProtocol, ListenRegistry};
 
 /// Compose an `App` from built-in and plugin-registered factories.
-/// Use `with_defaults()` for the full substrate; skip it to start clean.
+/// Use `with_defaults()` for the full stack; skip it to start clean.
 pub struct AppBuilder {
     listen_registry: ListenRegistry,
     pipe_factory_registry: PipeFactoryRegistry,

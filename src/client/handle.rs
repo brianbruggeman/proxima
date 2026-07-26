@@ -89,7 +89,7 @@ impl Client {
 
     /// Build a client that dispatches straight to an in-process
     /// [`Handler`](crate::pipe::Handler) — a mounted App, a fake daemon, or any composed
-    /// handle — with no spec resolution and no socket. The substrate-native way to
+    /// handle — with no spec resolution and no socket. The native way to
     /// drive a server with the real `Client` in one process (tests, embedding);
     /// pairs with [`into_handle`](crate::pipe::into_handle) on the serve side.
     pub fn from_pipe(

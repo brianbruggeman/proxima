@@ -14,7 +14,7 @@
 //! a sibling primitive, not in scope here.
 //!
 //! Reference crates: `rumqttd`, `ntex-mqtt`. Both are full broker
-//! impls — the substrate parity baseline is a scope-matched
+//! impls — the parity baseline is a scope-matched
 //! hand-rolled parser in the bench harness.
 //!
 //! Sub-flag: `mqtt-listener` (default off).

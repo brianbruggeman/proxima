@@ -1,11 +1,11 @@
-//! HTTP/3 upstream — outbound h3 client wrapped as a substrate
+//! HTTP/3 upstream — outbound h3 client wrapped as a core
 //! `Pipe`. Inbound `Request` is translated to an `http::Request`,
 //! multiplexed over the persistent QUIC connection, and the response
 //! body is returned as the `Response` body.
 //!
 //! Tracked as P7 in `docs/protocol-gap/discipline.md`. Compared
 //! against a hand-rolled `h3-quinn` client doing the same work to
-//! size the substrate-API tax.
+//! size the core-API tax.
 //!
 //! Sub-flag: `h3-upstream` (default off; pulls in the existing
 //! `http3` feature stack — quinn + rustls + h3 + h3-quinn).

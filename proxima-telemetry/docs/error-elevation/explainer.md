@@ -275,7 +275,7 @@ So error-elevation cannot be "buffer everything, decide what to send at
 export time" — that would mean building every `trace!`/`debug!` record for
 every request, all the time, which is exactly the cost the record-time gate
 exists to avoid. Building the full tree for every trace, just in case one of
-them errors, re-creates the cost this whole substrate was built to eliminate.
+them errors, re-creates the cost this whole pipeline was built to eliminate.
 
 The only way to get "verbose detail available on error, without paying for it
 on every request" is to admit a **bounded, sampled fraction** of traces into

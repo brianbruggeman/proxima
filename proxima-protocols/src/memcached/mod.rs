@@ -6,7 +6,7 @@
 //!
 //! [1]: https://github.com/memcached/memcached/blob/master/doc/protocol.txt
 //!
-//! The parser is the substrate primitive — it returns a borrowed
+//! The parser is the core primitive — it returns a borrowed
 //! [`Command<'a>`] describing what the peer sent. Listener wire-up
 //! (TCP accept loop + dispatch + response writing) is straightforward
 //! tokio code on top.

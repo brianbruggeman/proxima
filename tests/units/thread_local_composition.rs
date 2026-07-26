@@ -1,4 +1,4 @@
-//! Stage 10 closure test: prove the per-thread substrate composes
+//! Stage 10 closure test: prove the per-thread core composes
 //! middlewares around an inner `Pipe` impl that holds `!Send` state
 //! (`Rc`/`RefCell`). The composed chain runs end-to-end on a `LocalSet`
 //! and exercises the fork pattern across the wrapper ecosystem.

@@ -6,9 +6,9 @@
 //!
 //! For the teaching surface, start at the [`mod@pipe`] module — its
 //! `//!` rustdoc is the canonical introduction to Pipe-as-the-primitive
-//! (composition, middleware, substrate primitives, recording, serving).
+//! (composition, middleware, core primitives, recording, serving).
 //! For the per-core runtime, see [`prime`]. Hot-swap, recording,
-//! replay, and `causal explain` are substrate primitives — see
+//! replay, and `causal explain` are core primitives — see
 //! [`Replay`], [`Diff`], [`Isolate`], [`Causal`], [`SwappablePipe`],
 //! [`WriteBack`], [`check_determinism`].
 //!

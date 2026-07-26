@@ -5,7 +5,7 @@ user-facing interfaces without naming it: `App`. Before you go any further —
 before the pipe algebra, before a single primitive — meet the other two, and
 see why all three are the *same shape* wearing a different hat.
 
-Every proxima program is built from three doors onto the one substrate:
+Every proxima program is built from three doors onto the one core:
 
 | interface  | direction   | question it answers                          |
 |------------|-------------|-----------------------------------------------|

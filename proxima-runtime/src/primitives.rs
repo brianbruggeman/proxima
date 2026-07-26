@@ -1,8 +1,8 @@
 //! R1 of the runtime-shaped initiative: `RuntimeFactory` sibling
 //! trait + `*Like` primitive shapes.
 //!
-//! Design constraint (locked at substrate landing): `Runtime` stays
-//! dyn-compatible because the substrate threads `&dyn Runtime` through
+//! Design constraint (locked at core landing): `Runtime` stays
+//! dyn-compatible because the runtime threads `&dyn Runtime` through
 //! per-core dispatch. Adding GAT associated-type factories to
 //! `Runtime` directly would break dyn-compat workspace-wide.
 //! Resolution: a SIBLING trait `RuntimeFactory: Runtime` carries the

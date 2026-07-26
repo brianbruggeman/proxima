@@ -32,7 +32,7 @@ chunks, `Ended` — onto a background drainer that appends them to a
 The example arms the spigot, drives one request through the recorder, then
 reads the cassette back with `JsonlSource` (the same reader `replay` and
 a downstream consumer's ingestion use) and diffs the captured response bytes against what
-the client actually received. That diff is the substrate every fake/replay
+the client actually received. That diff is the foundation every fake/replay
 example downstream depends on — if capture isn't faithful, replay can't be
 either.
 

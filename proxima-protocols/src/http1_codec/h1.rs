@@ -18,7 +18,7 @@
 //! Body decoding, response writing, and the connection state machine
 //! live in sibling modules (`h1_body`, `h1_response`, `h1_connection`)
 //! because httparse covers parsing only. Those modules ARE the
-//! substrate's own work — they implement state machines httparse
+//! core's own work — they implement state machines httparse
 //! doesn't.
 
 use core::fmt;

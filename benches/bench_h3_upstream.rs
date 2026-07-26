@@ -17,7 +17,7 @@
 //! Arms:
 //!
 //! - `proxima_h3_upstream` — `Http3Upstream::call(Request)` with a
-//!   pre-warmed connection. Substrate cost = Request → http::Request
+//!   pre-warmed connection. Core cost = Request → http::Request
 //!   translation + body drain + Response build.
 //! - `parity_h3_quinn` — direct `h3::client::SendRequest::send_request`
 //!   doing the same scope: build `http::Request`, send_data, finish,
