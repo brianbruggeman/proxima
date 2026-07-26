@@ -97,57 +97,91 @@ pub mod sized {
 }
 
 /// A counting global allocator, wired in ONLY for this crate's own
-/// `#[cfg(test)]` unit-test binary (never for normal builds, benches,
-/// or downstream consumers). [`hpack::decoder`] and
-/// [`http3_codec::qpack::decoder`] tests snapshot
-/// [`stats_alloc::Region`] around a call to assert their respective
-/// allocation-count claims mechanically, instead of by memory. Shared
-/// across both modules (rather than one static per module) because a
-/// binary may only declare one `#[global_allocator]` — `http3_codec`
-/// depends on the `hpack` feature, so both modules' tests can compile
-/// into the same test binary.
+/// `#[cfg(test)]` unit-test binary (never for normal builds, benches, or
+/// downstream consumers). [`hpack::decoder`] and
+/// [`http3_codec::qpack::decoder`] tests snapshot a [`Region`] around a
+/// call to assert their respective allocation-count claims mechanically,
+/// instead of by memory. Shared across both modules (rather than one
+/// static per module) because a binary may only declare one
+/// `#[global_allocator]` — `http3_codec` depends on the `hpack` feature,
+/// so both modules' tests can compile into the same test binary.
+///
+/// Counts are PER-THREAD, not process-global: a process-global counter
+/// (e.g. a bare `AtomicUsize`, or `stats_alloc`'s `StatsAlloc`) ticks for
+/// every allocation on every thread, so an `alloc_count_*` test's
+/// before/after snapshot also captures whatever unrelated test happens to
+/// be allocating on another thread at that moment — measured: 100%
+/// failure rate across these tests once the harness runs with default
+/// parallelism. The test harness runs each test body on its own OS
+/// thread, so scoping the counter to `thread_local!` storage makes a
+/// test's window immune to any concurrently-running test regardless of
+/// how many run at once — no lock, no retry loop, no serialization.
 #[cfg(all(test, feature = "std"))]
 pub(crate) mod alloc_test {
-    use std::alloc::System;
-    use std::sync::Mutex;
-
-    use stats_alloc::{Region, Stats};
-    use stats_alloc::StatsAlloc;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
 
     #[global_allocator]
-    pub(crate) static PROTOCOLS_TEST_ALLOC: StatsAlloc<System> = StatsAlloc::system();
+    static PROTOCOLS_TEST_ALLOC: ThreadCountingAlloc = ThreadCountingAlloc;
 
-    // the allocator above is one process-global static shared by every
-    // alloc_count_* test in this binary; the default `cargo test` harness
-    // runs tests concurrently on multiple threads, so an unguarded
-    // before/after snapshot here counts whatever ELSE is allocating on
-    // other threads at the same moment (measured: 100% failure rate
-    // across 6 tests under `cargo test`, 0/30 failures once every
-    // measurement window serializes through this lock).
-    static ALLOC_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    /// exclusive measurement window: holds `ALLOC_TEST_LOCK` for as long as
-    /// the returned value lives, so two `alloc_count_*` tests can never
-    /// observe each other's allocations regardless of which thread the test
-    /// harness schedules them on.
-    pub(crate) struct ExclusiveRegion {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        region: Region<'static, System>,
+    thread_local! {
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     }
 
-    impl ExclusiveRegion {
-        pub(crate) fn change(&self) -> Stats {
-            self.region.change()
+    struct ThreadCountingAlloc;
+
+    // SAFETY: delegates every operation to `System`; the only addition is
+    // a thread-local counter bump, which cannot race (thread-local) and
+    // cannot itself allocate (`Cell<usize>` needs no drop glue, so the
+    // `const`-initialized slot uses the non-allocating fast-TLS path).
+    unsafe impl GlobalAlloc for ThreadCountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS.with(|count| count.set(count.get() + 1));
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS.with(|count| count.set(count.get() + 1));
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // matches the prior `stats_alloc`-based measurement: growth of
+            // an existing allocation is not counted as a fresh allocation.
+            unsafe { System.realloc(ptr, layout, new_size) }
         }
     }
 
-    pub(crate) fn exclusive_region() -> ExclusiveRegion {
-        let guard = ALLOC_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ExclusiveRegion {
-            _guard: guard,
-            region: Region::new(&PROTOCOLS_TEST_ALLOC),
+    /// Allocation-count snapshot, relative to a [`Region`]'s creation.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct Stats {
+        pub(crate) allocations: usize,
+    }
+
+    /// A measurement window scoped to the calling thread's allocation
+    /// count. Call [`Region::change`] as many times as needed; each call
+    /// reports the count since this `Region` was created (not since the
+    /// last call), matching `stats_alloc::Region`'s semantics so callers
+    /// can chain consecutive windows back-to-back.
+    pub(crate) struct Region {
+        initial: usize,
+    }
+
+    impl Region {
+        pub(crate) fn change(&self) -> Stats {
+            Stats {
+                allocations: ALLOCATIONS.with(Cell::get) - self.initial,
+            }
+        }
+    }
+
+    pub(crate) fn thread_local_region() -> Region {
+        Region {
+            initial: ALLOCATIONS.with(Cell::get),
         }
     }
 }

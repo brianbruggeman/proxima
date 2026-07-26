@@ -741,8 +741,8 @@ mod tests {
     /// encode+decode round trip on a 4 KiB body performs 0 heap
     /// allocations — mirrors `decoder.rs`'s
     /// `alloc_count_decode_into_zero_when_no_huffman_and_no_table_growth`
-    /// pattern (`stats_alloc::Region` around
-    /// `crate::alloc_test::PROTOCOLS_TEST_ALLOC`).
+    /// pattern (thread-local counter around
+    /// `crate::alloc_test::thread_local_region`).
     #[test]
     #[cfg(feature = "std")]
     fn huffman_tables_are_rodata_not_heap() {
@@ -750,27 +750,20 @@ mod tests {
         let mut encoded = Vec::with_capacity(encoded_len(&input));
         let mut decoded = Vec::with_capacity(input.len());
 
-        // the process-global stats_alloc counter also ticks for stray
-        // allocations on other runtime threads parked in-window (harness,
-        // output pump) on a loaded CI runner; that noise is additive-only,
-        // so the MIN delta across repeats is encode+decode's true per-call
-        // cost. tables are `static [T; N] = const fn()`, so there is no
-        // one-time lazy-Box allocation for min to hide.
-        let region = crate::alloc_test::exclusive_region();
-        let mut min_allocations = usize::MAX;
-        for _ in 0..8 {
-            encoded.clear();
-            decoded.clear();
-            let before = region.change();
-            encode(&input, &mut encoded);
-            decode(&encoded, &mut decoded).expect("decode");
-            let after = region.change();
-            min_allocations = min_allocations.min(after.allocations - before.allocations);
-        }
+        // tables are `static [T; N] = const fn()`, so there is no one-time
+        // lazy-Box allocation to warm past — a single measured call proves
+        // the claim (the counter is thread-local, so no other test's
+        // allocations can land in this window).
+        let region = crate::alloc_test::thread_local_region();
+        let before = region.change();
+        encode(&input, &mut encoded);
+        decode(&encoded, &mut decoded).expect("decode");
+        let after = region.change();
 
         assert_eq!(decoded, input);
         assert_eq!(
-            min_allocations, 0,
+            after.allocations - before.allocations,
+            0,
             "huffman encode+decode must perform 0 heap allocations with pre-sized \
              output buffers — proves DECODE_STATE_TABLE / ROOT_BYTE_TABLE live in \
              .rodata, not behind a lazily-built Box"

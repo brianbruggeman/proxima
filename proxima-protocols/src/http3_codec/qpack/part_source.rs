@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn field_section_source_is_zero_alloc_stepping_to_exhaustion() {
         let wire = request_like_wire();
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
 
         let before = region.change();
         let mut scratch = [0u8; 256];
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn header_block_part_source_is_zero_alloc_request_drain_is_not() {
         let wire = request_like_wire();
-        let region = crate::alloc_test::exclusive_region();
+        let region = crate::alloc_test::thread_local_region();
 
         let before_source = region.change();
         let mut scratch = [0u8; 256];
