@@ -28,8 +28,16 @@ pub trait ListenerProtocolExt: Sized {
     ///
     /// Requires the `http1-native` feature (or `http1`) — the `"http"`
     /// listen protocol is not registered under bare default features.
+    /// This example only compiles and runs when one of those features is
+    /// on (`ignore`d otherwise, matching the feature the code needs, not
+    /// papered over); it runs for real in CI under `--features
+    /// http1-native,http2`.
     ///
-    /// ```
+    #[cfg_attr(any(feature = "http1", feature = "http1-native"), doc = "```")]
+    #[cfg_attr(
+        not(any(feature = "http1", feature = "http1-native")),
+        doc = "```ignore"
+    )]
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
@@ -72,8 +80,16 @@ pub trait ListenerProtocolExt: Sized {
     ///
     /// Requires the `http1-native` feature (or `http1`) — the `"http"`
     /// listen protocol is not registered under bare default features.
+    /// This example only compiles and runs when one of those features is
+    /// on (`ignore`d otherwise, matching the feature the code needs, not
+    /// papered over); it runs for real in CI under `--features
+    /// http1-native,http2`.
     ///
-    /// ```
+    #[cfg_attr(any(feature = "http1", feature = "http1-native"), doc = "```")]
+    #[cfg_attr(
+        not(any(feature = "http1", feature = "http1-native")),
+        doc = "```ignore"
+    )]
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
@@ -150,11 +166,17 @@ pub trait ListenerProtocolExt: Sized {
     /// ```
     ///
     /// Dropping `.quic()` (the default is `.tcp()`) serves it for real.
-    /// Requires a feature that pulls in `any-listener` (`http1-native`,
+    /// Requires the `any-listener` feature (pulled in by `http1-native`,
     /// `http1`, or any other `.any()` consumer) in addition to `http2` —
-    /// bare default features register neither:
+    /// bare default features register neither. This example only
+    /// compiles and runs when both are on (`ignore`d otherwise); it runs
+    /// for real in CI under `--features http1-native,http2`.
     ///
-    /// ```
+    #[cfg_attr(all(feature = "http2", feature = "any-listener"), doc = "```")]
+    #[cfg_attr(
+        not(all(feature = "http2", feature = "any-listener")),
+        doc = "```ignore"
+    )]
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
