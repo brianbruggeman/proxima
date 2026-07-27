@@ -22,15 +22,12 @@ use proxima_core::ProximaError;
 use proxima_runtime::{BackgroundHandle, BackgroundPool, CoreId, Runtime, SpawnError};
 
 use super::core_shard::{
-    self, CoreShardHandle, current_core as core_shard_current_core, spawn_on_current_core, timer_at,
+    self, CoreShardHandle, current_core as core_shard_current_core, spawn_on_current_core,
 };
 
 pub struct PrimeRuntime {
     cores: Arc<Vec<CoreShardHandle>>,
     background_pool: Option<Arc<dyn BackgroundPool>>,
-    /// epoch in std::time::Instant for translating `timer_at(deadline: Instant)`
-    /// into the timer's tick basis (ms since shard launch).
-    epoch: Instant,
     /// P2 — sister tokio runtimes (one per core) that back compat mode.
     /// `None` for native prime; `Some` when the runtime was built with
     /// `Builder::tokio_compat()`. Kept alive for the life of `PrimeRuntime`
@@ -95,7 +92,6 @@ impl PrimeRuntime {
         Ok(Self {
             cores: Arc::new(cores),
             background_pool: None,
-            epoch: Instant::now(),
             #[cfg(feature = "prime-tokio-compat")]
             tokio_compat_handles: None,
         })
@@ -205,7 +201,6 @@ impl PrimeRuntime {
         Ok(Self {
             cores: Arc::new(cores),
             background_pool: None,
-            epoch: Instant::now(),
             #[cfg(feature = "prime-tokio-compat")]
             tokio_compat_handles,
         })
@@ -372,9 +367,7 @@ impl Runtime for PrimeRuntime {
     }
 
     fn timer_at(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
-        let elapsed = deadline.saturating_duration_since(self.epoch).as_millis();
-        let tick: u64 = elapsed.min(u64::MAX as u128) as u64;
-        Box::pin(timer_at(tick))
+        Box::pin(core_shard::timer_at_deadline(deadline))
     }
 
     fn num_cores(&self) -> usize {

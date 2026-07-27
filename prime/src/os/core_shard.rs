@@ -26,6 +26,8 @@ use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use proxima_clock::coarse::TickCell;
 use proxima_core::ProximaError;
 use proxima_runtime::{CoreId, SpawnError, SpawnRequest};
 
@@ -130,6 +132,25 @@ pub fn timer_at(deadline: Tick) -> TimerAtFuture {
         deadline,
         key: None,
     }
+}
+
+/// convert an absolute wall-clock `deadline` into a [`TimerAtFuture`]
+/// keyed on the CURRENT worker's own timer-wheel clock — the same
+/// source [`current_tick`] and [`schedule_wake`] read (and, through
+/// them, the `timer_driver` no_mangle export) — instead of a
+/// separately-captured epoch. Closes the split where `PrimeRuntime`
+/// used to hold its own `Instant` anchor, sampled at runtime
+/// construction, independently of the worker's own clock, sampled at
+/// worker-thread launch: two `Instant::now()` reads at two different
+/// wall-clock moments, collapsed to one read of the wheel's own "now"
+/// plus a single fresh `Instant::now()` for the real-time delta. Must
+/// be called on a proxima worker thread; panics otherwise (same
+/// contract as [`timer_at`]).
+pub fn timer_at_deadline(deadline: Instant) -> TimerAtFuture {
+    let now_tick = current_tick();
+    let delay_millis = deadline.saturating_duration_since(Instant::now()).as_millis();
+    let delay_ticks = Tick::try_from(delay_millis).unwrap_or(Tick::MAX);
+    timer_at(now_tick.saturating_add(delay_ticks))
 }
 
 /// current tick (ms since shard launch) from the worker's timer wheel.
@@ -290,23 +311,50 @@ impl Drop for CurrentGuards {
     }
 }
 
-/// std-time monotonic clock for the timer wheel. tick = milliseconds since
-/// shard launch. lives next to `CoreShard` because it depends on `std`.
-struct StdClock {
-    epoch: Instant,
+/// monotonic clock for the per-worker timer wheel. tick = milliseconds.
+/// lives next to `CoreShard` because it depends on `std`.
+///
+/// `Real` reads `std::time::Instant` directly — unchanged production
+/// numeric behaviour (P14). `Virtual` reads a shared [`TickCell`] a test
+/// advances directly via `TickCell::set`, with zero wall-clock sleep —
+/// the SAME clock [`current_tick`]/[`schedule_wake`] read (and, through
+/// them, the `timer_driver` no_mangle export), so mocking the cell
+/// mocks every reader of prime's timers at once. An enum, not a `dyn
+/// Clock`: both call sites in this file (`worker_main`'s `TimerWheel<
+/// StdClock>` and the outer loop's own `clock` variable) stay a single
+/// concrete type, so the thread-local `CURRENT_TIMER` pointer's type
+/// never changes and production code pays nothing for the test seam.
+#[derive(Clone)]
+enum StdClock {
+    Real {
+        epoch: Instant,
+    },
+    #[cfg(test)]
+    Virtual {
+        cell: Arc<TickCell>,
+    },
 }
 
 impl StdClock {
-    fn new() -> Self {
-        Self {
+    fn real() -> Self {
+        Self::Real {
             epoch: Instant::now(),
         }
+    }
+
+    #[cfg(test)]
+    fn virtual_from(cell: Arc<TickCell>) -> Self {
+        Self::Virtual { cell }
     }
 }
 
 impl Clock for StdClock {
     fn now(&self) -> Tick {
-        self.epoch.elapsed().as_millis() as Tick
+        match self {
+            Self::Real { epoch } => epoch.elapsed().as_millis() as Tick,
+            #[cfg(test)]
+            Self::Virtual { cell } => cell.get().as_raw(),
+        }
     }
 }
 
@@ -502,6 +550,48 @@ pub fn launch_with_lanes_and_setup(
     lane_capacity: usize,
     setup: Option<WorkerSetup>,
 ) -> Result<CoreShardHandle, ProximaError> {
+    launch_with_clock(
+        core_id,
+        affinity,
+        num_lanes,
+        lane_capacity,
+        setup,
+        StdClock::real(),
+    )
+}
+
+/// test-only entry point: launches a worker whose timer wheel reads
+/// `cell` instead of `Instant::now()`, so a test can advance virtual
+/// time directly (`cell.set(...)`) with zero wall-clock sleep. Every
+/// production launcher (`launch`, `launch_with_lanes`,
+/// `launch_with_lanes_and_setup`) always passes [`StdClock::real`] —
+/// this function touches no production code path.
+#[cfg(test)]
+pub(crate) fn launch_with_virtual_clock(
+    core_id: CoreId,
+    affinity: Option<core_affinity::CoreId>,
+    num_lanes: usize,
+    lane_capacity: usize,
+    cell: Arc<TickCell>,
+) -> Result<CoreShardHandle, ProximaError> {
+    launch_with_clock(
+        core_id,
+        affinity,
+        num_lanes,
+        lane_capacity,
+        None,
+        StdClock::virtual_from(cell),
+    )
+}
+
+fn launch_with_clock(
+    core_id: CoreId,
+    affinity: Option<core_affinity::CoreId>,
+    num_lanes: usize,
+    lane_capacity: usize,
+    setup: Option<WorkerSetup>,
+    clock: StdClock,
+) -> Result<CoreShardHandle, ProximaError> {
     #[cfg(not(feature = "runtime-prime-inbox-dynamic"))]
     let (producer, consumer) =
         inbox_impl::channel::<SpawnRequest<InlineTask>>(num_lanes, lane_capacity);
@@ -525,7 +615,7 @@ pub fn launch_with_lanes_and_setup(
     let join = thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .name(format!("proxima-core-{}", core_id.0))
-        .spawn(move || worker_main(core_id, affinity, consumer, reactor, setup))
+        .spawn(move || worker_main(core_id, affinity, consumer, reactor, setup, clock))
         .map_err(|err| ProximaError::Config(format!("spawn proxima core worker: {err}")))?;
     Ok(CoreShardHandle {
         producer,
@@ -568,6 +658,7 @@ fn worker_main(
     consumer: inbox_impl::Consumer<SpawnRequest<InlineTask>>,
     reactor: Reactor,
     setup: Option<WorkerSetup>,
+    clock: StdClock,
 ) {
     let _guards = CurrentGuards;
 
@@ -599,9 +690,9 @@ fn worker_main(
     // forever — the h2_spawn_blocking/prime bench hang.
     let executor_wakeup = reactor.wakeup();
     let executor = LocalExecutor::with_remote_wake(Some(Arc::new(move || executor_wakeup.fire())));
-    let clock = StdClock::new();
-    let timer: RefCell<TimerWheel<StdClock>> =
-        RefCell::new(TimerWheel::new(StdClock { epoch: clock.epoch }));
+    // `timer`'s wheel clones the SAME `clock` this loop reads below — one
+    // source, not two independently-sampled `StdClock`s.
+    let timer: RefCell<TimerWheel<StdClock>> = RefCell::new(TimerWheel::new(clock.clone()));
     // UnsafeCell rather than RefCell: the worker thread is the unique
     // accessor for the lifetime of this scope (CoreShard is single-threaded
     // by construction). Skipping runtime borrow checks is worth ~10-30 ns
@@ -1066,9 +1157,8 @@ fn worker_main_inverted(
 
     let executor_wakeup = reactor.wakeup();
     let executor = LocalExecutor::with_remote_wake(Some(Arc::new(move || executor_wakeup.fire())));
-    let clock = StdClock::new();
-    let timer: RefCell<TimerWheel<StdClock>> =
-        RefCell::new(TimerWheel::new(StdClock { epoch: clock.epoch }));
+    let clock = StdClock::real();
+    let timer: RefCell<TimerWheel<StdClock>> = RefCell::new(TimerWheel::new(clock.clone()));
     let reactor: UnsafeCell<Reactor> = UnsafeCell::new(reactor);
 
     executor.arm();
@@ -1971,6 +2061,64 @@ mod tests {
             woke.is_ok(),
             "prime dispatch must wake the unified sister park (C2b cross-reactor bridge)",
         );
+        handle.shutdown_and_join().expect("shutdown");
+    }
+
+    /// Closes the "prime has two disconnected time sources" defect: the
+    /// worker's REAL `TimerWheel<StdClock>` (not `prime::core::timer`'s
+    /// own, already-mockable `TestClock`) now reads a shared
+    /// `proxima_clock::TickCell` in `Virtual` mode instead of
+    /// `Instant::now()`. A timer scheduled 25 SIMULATED seconds out fires
+    /// once the test advances the cell by exactly that much — no
+    /// `std::thread::sleep` anywhere in this test. `recv_timeout(2s)` is
+    /// only a hang guard: under the old always-`Instant::now()` clock the
+    /// deadline could not be reached for 25 real seconds, so this test
+    /// would time out and fail — it only passes because the fix routes
+    /// the wheel's "now" through the cell the test drives directly.
+    #[test]
+    fn virtual_clock_fires_timer_when_cell_is_advanced_with_zero_wall_clock_sleep() {
+        use proxima_clock::ticks::Ticks;
+
+        const SIMULATED_SECONDS: u64 = 25;
+        const SIMULATED_MILLIS: u64 = SIMULATED_SECONDS * 1_000;
+
+        // absolute deadline, fixed up front (NOT `current_tick() + delta`
+        // read inside the async task): that read only happens at POLL
+        // time, which — being cross-thread-scheduled — could land AFTER
+        // this test's `cell.set` below, silently pushing the deadline
+        // another `SIMULATED_MILLIS` out and turning a real bug into a
+        // flaky pass. Starting the cell at `Ticks::ZERO` makes the
+        // absolute deadline and the simulated delta the same number.
+        let cell = Arc::new(TickCell::new(Ticks::ZERO));
+        let handle = launch_with_virtual_clock(CoreId(97), None, 2, 16, cell.clone())
+            .expect("launch virtual-clock worker");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        handle
+            .dispatch_factory(Box::new(move || {
+                Box::pin(async move {
+                    timer_at(SIMULATED_MILLIS).await;
+                    let _ = done_tx.send(());
+                }) as Pin<Box<dyn Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch timer factory");
+
+        // advance the SAME cell the worker's wheel reads, then nudge the
+        // worker (any dispatch fires its `Wakeup`) so a parked reactor
+        // interrupts its in-flight `epoll_wait`/`kevent` timeout and
+        // rechecks the timer against the new tick immediately, rather
+        // than waiting out whatever real-ms timeout it last computed.
+        cell.set(Ticks::from_raw(SIMULATED_MILLIS));
+        handle
+            .dispatch_send(Box::pin(async {}))
+            .expect("nudge worker to recheck the timer wheel");
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect(
+                "timer must fire from the virtual advance alone; a real 25s wait would \
+                 exceed this 2s bound, proving no wall-clock sleep drove the fire",
+            );
         handle.shutdown_and_join().expect("shutdown");
     }
 }

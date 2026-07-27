@@ -3314,6 +3314,7 @@ dependencies = [
  "parking_lot",
  "proxima",
  "proxima-build",
+ "proxima-clock",
  "proxima-core",
  "proxima-primitives",
  "proxima-runtime",
