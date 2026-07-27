@@ -26,6 +26,9 @@ pub trait ListenerProtocolExt: Sized {
     /// [`bind_from_spec`](crate::listener::handle::bind_from_spec). Not a
     /// dial url on this side; a listener dispatches to `.handle(pipe)`.
     ///
+    /// Requires the `http1-native` feature (or `http1`) — the `"http"`
+    /// listen protocol is not registered under bare default features.
+    ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
     /// use proxima::pipe::into_handle;
@@ -66,6 +69,9 @@ pub trait ListenerProtocolExt: Sized {
     /// the scheme out of its dial url; a listener has no url to read a
     /// scheme from, so `.tls(TlsConfig)` is the only on/off switch). See
     /// [`crate::listener::handle::ListenerBuilder::tls`] for cert material.
+    ///
+    /// Requires the `http1-native` feature (or `http1`) — the `"http"`
+    /// listen protocol is not registered under bare default features.
     ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
@@ -143,7 +149,10 @@ pub trait ListenerProtocolExt: Sized {
     /// # }
     /// ```
     ///
-    /// Dropping `.quic()` (the default is `.tcp()`) serves it for real:
+    /// Dropping `.quic()` (the default is `.tcp()`) serves it for real.
+    /// Requires a feature that pulls in `any-listener` (`http1-native`,
+    /// `http1`, or any other `.any()` consumer) in addition to `http2` —
+    /// bare default features register neither:
     ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerProtocolExt, Request, Response, ProximaError};
