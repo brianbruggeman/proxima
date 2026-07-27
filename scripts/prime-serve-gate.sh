@@ -81,7 +81,10 @@ nextest_filter_check() {
     shift 2
     printf '\n-- nextest (%s) --\n' "${label}"
     local nextest_output
-    nextest_output="$(cargo nextest run -p proxima -E "${filter}" "$@" 2>&1)"
+    # --color never: nextest force-colours when it detects CI, and the escape codes
+    # land between the count and the word ("3<ESC>[0m <ESC>[32;1mpassed"), so the
+    # summary grep below matches locally and silently fails on a CI runner.
+    nextest_output="$(cargo nextest run --color never -p proxima -E "${filter}" "$@" 2>&1)"
     printf '%s\n' "${nextest_output}"
     local passed_count
     passed_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests? run: [0-9]+ passed' | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
