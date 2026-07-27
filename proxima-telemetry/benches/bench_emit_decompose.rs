@@ -13,13 +13,13 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use proxima_telemetry::clock::MonotonicCounter;
+use proxima_telemetry::clock::{Clock, MonotonicCounter};
 use proxima_telemetry::pipes::NullPipe;
 use proxima_telemetry::recorder::Recorder;
 
 const BATCH: usize = 2000;
 
-fn emit_batch(recorder: &Recorder) {
+fn emit_batch<Clk: Clock>(recorder: &Recorder<Clk>) {
     for _ in 0..BATCH {
         let guard = recorder
             .span(black_box("process"))

@@ -8,9 +8,11 @@ use std::future::Future as StdFuture;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
+use crate::clock::Clock;
 use crate::level::Level;
 use crate::log::LogRecord;
 use crate::metric::MetricSample;
+use crate::recorder::SystemClock;
 use crate::tag::{ScalarValue, Tag};
 use crate::trace::{EventRecord, SpanLink, SpanRecord};
 #[cfg(feature = "elevation")]
@@ -3124,7 +3126,7 @@ pub struct SumByPipe<P> {
 }
 
 struct SumState {
-    window_start: std::time::Instant,
+    window_start_ns: u64,
     accumulator: rustc_hash::FxHashMap<GroupKey, AccumulatedSum>,
 }
 
@@ -3157,7 +3159,7 @@ impl<P> SumByPipe<P> {
             window,
             group_by: keys,
             state: parking_lot::Mutex::new(SumState {
-                window_start: std::time::Instant::now(),
+                window_start_ns: SystemClock.now_ns(),
                 accumulator: rustc_hash::FxHashMap::default(),
             }),
         }
@@ -3245,7 +3247,7 @@ impl<P: SendPipe<In = TelemetryRequest, Out = Response<Bytes>, Err = ProximaErro
     pub async fn flush(&self) -> Result<Response<Bytes>, ProximaError> {
         let aggregates = {
             let mut state = self.state.lock();
-            state.window_start = std::time::Instant::now();
+            state.window_start_ns = SystemClock.now_ns();
             std::mem::take(&mut state.accumulator)
                 .into_values()
                 .map(|entry| {
@@ -3303,20 +3305,21 @@ fn sum_by_dispatch<
 
     let flush_batch: Option<alloc::vec::Vec<MetricSample>> = {
         let mut state = pipe.state.lock();
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(state.window_start);
+        let now_ns = SystemClock.now_ns();
+        let elapsed_ns = now_ns.saturating_sub(state.window_start_ns);
+        let window_ns = u64::try_from(window.as_nanos()).unwrap_or(u64::MAX);
 
-        let flushed = if elapsed >= window && !state.accumulator.is_empty() {
+        let flushed = if elapsed_ns >= window_ns && !state.accumulator.is_empty() {
             let value_hint = points
                 .first()
                 .map(|point| point.value.clone())
                 .unwrap_or(ScalarValue::U64(0));
             let batch = drain_to_aggregates(&mut state, &value_hint);
-            state.window_start = now;
+            state.window_start_ns = now_ns;
             Some(batch)
         } else {
-            if elapsed >= window {
-                state.window_start = now;
+            if elapsed_ns >= window_ns {
+                state.window_start_ns = now_ns;
             }
             None
         };
