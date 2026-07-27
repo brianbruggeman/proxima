@@ -14,10 +14,16 @@
 #      vector + the reactor-absence proof (Handle::try_current is Err on
 #      the prime serve path)
 #   5. full umbrella suite is green on the prime default
-#   6. doctests run under the feature set that makes every listener/
-#      client example registrable (`nextest` skips doctests by design,
-#      so this is the only place they execute); a run reporting zero
-#      passed doctests fails the gate instead of looking like success
+#   6. doctests must be fully green on default features — the command a
+#      contributor actually runs (`cargo test --doc -p proxima`) never
+#      shows red for a known, accepted gap; doctests whose backing
+#      feature is off are `ignore`d at the source (`#[cfg_attr]` on the
+#      fence), not silently failing
+#   7. those same doctests execute and pass for real under the feature
+#      set that registers every listener/client example (`nextest`
+#      skips doctests by design, so steps 6/7 are the only place they
+#      run); either step reporting zero passed fails the gate instead
+#      of looking like success
 #
 # this script never modifies the discipline log; sealing a row is a
 # manual step that reads the bench output. the compare-bench itself is
@@ -32,6 +38,26 @@ prime_feats="runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reac
 # is the tokio-free base that registers the "http" listen protocol so the
 # `.http()`/`.https()`/`.tcp()`/`.grpc()` doc examples can actually serve.
 doctest_feats="http1-native,http2"
+
+# runs `cargo test --doc -p proxima` (plus any extra args), then fails
+# loudly if the reported passed count is zero or absent — `cargo test --doc`
+# exits 0 on a vacuous "0 passed" run (verified empirically), which is
+# exactly how a feature-gating mistake hides as green.
+doctest_check() {
+    local label="$1"
+    shift
+    printf '\n-- doctests (%s) --\n' "${label}"
+    local doctest_output
+    doctest_output="$(cargo test --doc -p proxima "$@" 2>&1)"
+    printf '%s\n' "${doctest_output}"
+    local passed_count
+    passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
+    if [ -z "${passed_count}" ] || [ "${passed_count}" -eq 0 ]; then
+        printf 'ERROR: proxima doctests (%s) reported zero passed -- an empty run is not a pass\n' "${label}" >&2
+        exit 1
+    fi
+    printf 'doctests passed (%s): %s\n' "${label}" "${passed_count}"
+}
 
 printf '\n== prime-serve gate ==\n'
 
@@ -56,14 +82,10 @@ cargo nextest run -p proxima --test serve_parity --features "${prime_feats}"
 printf '\n-- 5. full umbrella suite on the prime default --\n'
 cargo nextest run -p proxima
 
-printf '\n-- 6. doctests (%s) --\n' "${doctest_feats}"
-doctest_output="$(cargo test --doc -p proxima --features "${doctest_feats}" 2>&1)"
-printf '%s\n' "${doctest_output}"
-passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
-if [ -z "${passed_count}" ] || [ "${passed_count}" -eq 0 ]; then
-    printf 'ERROR: proxima doctests reported zero passed (features: %s) -- an empty run is not a pass\n' "${doctest_feats}" >&2
-    exit 1
-fi
-printf 'doctests passed: %s\n' "${passed_count}"
+printf '\n-- 6. doctests on default features (must be fully green) --\n'
+doctest_check "default features"
+
+printf '\n-- 7. doctests under %s (exercises the feature-gated examples) --\n' "${doctest_feats}"
+doctest_check "${doctest_feats}" --features "${doctest_feats}"
 
 printf '\n== prime-serve gate: PASS ==\n'
