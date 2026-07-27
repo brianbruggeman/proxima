@@ -27,28 +27,20 @@ use crate::error::Error;
 use crate::pipes::{
     FormatterPipe, LogFormat, NullPipe, TelemetryPipeHandle, into_telemetry_handle,
 };
-use crate::recorder::{HasPipe, NoPipe, Recorder, RecorderBuilder, SystemClock};
+use crate::recorder::{HasPipe, NoPipe, Recorder, RecorderBuilder};
 #[cfg(feature = "tracing-init")]
 use tracing_subscriber::EnvFilter;
 
+// `GlobalClock` is `Recorder`/`RecorderBuilder`'s default `Clk` (see
+// `recorder::Recorder`), so this is the same type every bare-`Recorder`
+// caller already builds — no conversion between "the caller's recorder" and
+// "the ambient one" is needed, the static just holds an `Arc` clone of it.
 static DEFAULT_RECORDER: ArcSwapOption<Recorder<GlobalClock>> = ArcSwapOption::const_empty();
 
 /// Register the process-wide default recorder (also done by
 /// [`RecorderBuilder::install`]). Emit sites with no explicit recorder resolve
 /// to this — the "zero-wiring" path.
-///
-/// Takes the ordinary caller-built recorder (`SystemClock`, the default —
-/// every `#[span(recorder = ...)]` / `init_tracing` caller already has one of
-/// these) and rewraps its clock as [`GlobalClock`] for the static, which
-/// (being a `static`) names exactly one type and can't stay generic the way a
-/// locally-built `Recorder<Clk>` can. The rewrap
-/// ([`Recorder::to_global`](crate::recorder::Recorder::to_global)) shares the
-/// same `EmitShared`/`Resource`/sampler — emitting through either handle
-/// reaches the same rings and sink — but is a distinct `Recorder` value with
-/// no owned drainer thread of its own, so a caller that also passed
-/// `.managed_drainer(true)` still controls that pump through the recorder
-/// they retained, not through this one.
-pub fn set_default_recorder(recorder: Arc<Recorder<SystemClock>>) {
+pub fn set_default_recorder(recorder: Arc<Recorder>) {
     // the ambient recorder IS the `#[instrument]` target, and its drain exports
     // the per-name duration histograms — so installing it is subscribing a
     // span-metric consumer. Open the gate here so `#[instrument]` durations record
@@ -56,12 +48,12 @@ pub fn set_default_recorder(recorder: Arc<Recorder<SystemClock>>) {
     // enable_span_metrics(), which every install path forgot (mirrors capture()).
     #[cfg(feature = "instrument-metrics")]
     recorder.enable_span_metrics();
-    DEFAULT_RECORDER.store(Some(Arc::new(recorder.to_global())));
+    DEFAULT_RECORDER.store(Some(recorder));
 }
 
 /// The process-wide default recorder, if one has been installed.
 #[must_use]
-pub fn default_recorder() -> Option<Arc<Recorder<GlobalClock>>> {
+pub fn default_recorder() -> Option<Arc<Recorder>> {
     DEFAULT_RECORDER.load_full()
 }
 
@@ -297,14 +289,16 @@ impl RecorderBuilder<NoPipe> {
     }
 }
 
-impl RecorderBuilder<HasPipe, SystemClock> {
+impl RecorderBuilder<HasPipe, GlobalClock> {
     /// Build the recorder AND register it as the process default, so emit sites
     /// with no explicit recorder find it via [`default_recorder`].
     ///
-    /// Returns the ordinary `SystemClock` recorder (unchanged from before this
-    /// type gained a clock parameter) — [`set_default_recorder`] is what
-    /// rewraps a copy of it as [`GlobalClock`] for the process-wide static.
-    pub fn install(self) -> Result<Arc<Recorder<SystemClock>>, Error> {
+    /// Pinned to [`GlobalClock`] (the default `Clk` — see `recorder::Recorder`)
+    /// because that is the static's own type; installing a builder whose clock
+    /// was swapped via [`RecorderBuilder::clock`] to something else isn't
+    /// expressible here — build with `.start()` and call
+    /// [`set_default_recorder`] directly instead.
+    pub fn install(self) -> Result<Arc<Recorder<GlobalClock>>, Error> {
         let recorder = Arc::new(self.start()?);
         set_default_recorder(Arc::clone(&recorder));
         Ok(recorder)
@@ -324,7 +318,7 @@ impl RecorderBuilder<HasPipe, SystemClock> {
 /// # Errors
 ///
 /// Propagates recorder-build or drain-thread-spawn failures.
-pub fn install_console_recorder() -> Result<Arc<Recorder<SystemClock>>, Error> {
+pub fn install_console_recorder() -> Result<Arc<Recorder>, Error> {
     install_console_recorder_with(Formatter::Text)
 }
 
@@ -333,7 +327,7 @@ pub fn install_console_recorder() -> Result<Arc<Recorder<SystemClock>>, Error> {
 /// # Errors
 ///
 /// Propagates recorder-build or drain-thread-spawn failures.
-pub fn install_console_recorder_with(format: Formatter) -> Result<Arc<Recorder<SystemClock>>, Error> {
+pub fn install_console_recorder_with(format: Formatter) -> Result<Arc<Recorder>, Error> {
     let recorder = Recorder::builder()
         .export(Exporter::std().format(format))?
         .install()?;
@@ -368,7 +362,7 @@ pub fn install_console_recorder_with(format: Formatter) -> Result<Arc<Recorder<S
 ///
 /// Propagates recorder-build failures from [`RecorderBuilder::install`].
 #[cfg(feature = "tracing-init")]
-pub fn install_console_logging() -> Result<Arc<Recorder<SystemClock>>, Error> {
+pub fn install_console_logging() -> Result<Arc<Recorder>, Error> {
     install_console_logging_with(Formatter::Text)
 }
 
@@ -379,7 +373,7 @@ pub fn install_console_logging() -> Result<Arc<Recorder<SystemClock>>, Error> {
 ///
 /// Propagates recorder-build failures.
 #[cfg(feature = "tracing-init")]
-pub fn install_console_logging_with(format: Formatter) -> Result<Arc<Recorder<SystemClock>>, Error> {
+pub fn install_console_logging_with(format: Formatter) -> Result<Arc<Recorder>, Error> {
     use tracing_subscriber::layer::SubscriberExt;
 
     let recorder = install_console_recorder_with(format)?;
@@ -571,7 +565,7 @@ impl Validate for ExportConfig {
 /// the recorder, and register it as the process default — one call.
 pub fn install_from_path(
     path: impl AsRef<std::path::Path>,
-) -> Result<Arc<Recorder<SystemClock>>, conflaguration::Error> {
+) -> Result<Arc<Recorder>, conflaguration::Error> {
     let config = ExportConfig::from_path(path)?;
     install_from_config(&config)
 }
@@ -579,7 +573,7 @@ pub fn install_from_path(
 /// Build + install a recorder from a loaded [`ExportConfig`].
 pub fn install_from_config(
     config: &ExportConfig,
-) -> Result<Arc<Recorder<SystemClock>>, conflaguration::Error> {
+) -> Result<Arc<Recorder>, conflaguration::Error> {
     let exporter = config
         .into_exporter()
         .map_err(|_| conflaguration::Error::Validation {
