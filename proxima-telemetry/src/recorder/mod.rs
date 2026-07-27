@@ -531,19 +531,19 @@ impl Drop for EmitShared {
 // boxing `Active` would add a heap allocation to every sampled span start,
 // defeating the zero-alloc emit-path design; the size gap is intentional.
 #[allow(clippy::large_enum_variant, clippy::type_complexity)]
-pub enum RecorderSpanGuard {
-    Active(ActiveSpanGuard),
+pub enum RecorderSpanGuard<Clk: Clock> {
+    Active(ActiveSpanGuard<Clk>),
     /// Trace sampled out, but the metric pillar stays always-on (C2): records the
     /// duration histogram on drop with zero SpanRecord allocation, no ring push.
     #[cfg(feature = "instrument-metrics")]
-    MetricOnly(MetricOnlyGuard),
+    MetricOnly(MetricOnlyGuard<Clk>),
     Noop,
 }
 
 /// The concrete [`SpanGuard`] flavor used by the recorder: a per-core ring
 /// sink paired with the shared clock. `RingSink` is a plain struct, so the
 /// guard carries no boxed closure — no heap allocation per span start.
-type ActiveSpanGuard = SpanGuard<RingSink, Arc<dyn Clock + Send + Sync>>;
+type ActiveSpanGuard<Clk> = SpanGuard<RingSink, Arc<Clk>>;
 
 /// The metric-only span guard (C2): a trace-sampled-out span that still records
 /// its duration into the per-name histogram on drop. Carries only the name, the
@@ -551,15 +551,15 @@ type ActiveSpanGuard = SpanGuard<RingSink, Arc<dyn Clock + Send + Sync>>;
 /// Vec, no ring push. Keeps "metric always-on" without the trace-path allocation
 /// the sampler decided to skip.
 #[cfg(feature = "instrument-metrics")]
-pub struct MetricOnlyGuard {
+pub struct MetricOnlyGuard<Clk: Clock> {
     name: &'static str,
     shared: Arc<EmitShared>,
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: Arc<Clk>,
     start_ns: u64,
 }
 
 #[cfg(feature = "instrument-metrics")]
-impl Drop for MetricOnlyGuard {
+impl<Clk: Clock> Drop for MetricOnlyGuard<Clk> {
     fn drop(&mut self) {
         let duration_ns = self.clock.now_ns().saturating_sub(self.start_ns);
         self.shared.record_span_metric(self.name, duration_ns);
@@ -750,7 +750,7 @@ fn block_until_pushed<Record>(
     });
 }
 
-impl RecorderSpanGuard {
+impl<Clk: Clock> RecorderSpanGuard<Clk> {
     pub fn id(&self) -> Option<SpanId> {
         match self {
             Self::Active(guard) => guard.id(),
@@ -792,7 +792,7 @@ impl RecorderSpanGuard {
     }
 }
 
-impl crate::spanned::SpanContext for RecorderSpanGuard {
+impl<Clk: Clock> crate::spanned::SpanContext for RecorderSpanGuard<Clk> {
     fn span_context(&self) -> Option<(TraceId, SpanId)> {
         match self {
             Self::Active(guard) => guard.span_context(),
@@ -808,10 +808,10 @@ impl crate::spanned::SpanContext for RecorderSpanGuard {
 /// Wraps C5's SpanBuilder with a closure that pushes SpanRecord into the
 /// per-core span ring. Zero heap allocation on the emit path; the SpanRecord
 /// itself may allocate (attrs Vec, events Vec) as part of normal C5 behavior.
-pub struct SpanBuilderWired {
+pub struct SpanBuilderWired<Clk: Clock> {
     inner: SpanBuilder,
     shared: Arc<EmitShared>,
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: Arc<Clk>,
     scope_tags: alloc::vec::Vec<Tag>,
     // sampling is decided eagerly in `span()` (all built-in samplers are
     // stateless pure fns of the name), so the guard path never clones the
@@ -824,11 +824,11 @@ pub struct SpanBuilderWired {
     budget_ns: Option<u64>,
 }
 
-impl SpanBuilderWired {
+impl<Clk: Clock> SpanBuilderWired<Clk> {
     fn new(
         inner: SpanBuilder,
         shared: Arc<EmitShared>,
-        clock: Arc<dyn Clock + Send + Sync>,
+        clock: Arc<Clk>,
         scope_tags: alloc::vec::Vec<Tag>,
         sampled: bool,
         overflow: OverflowPolicy,
@@ -899,7 +899,7 @@ impl SpanBuilderWired {
     /// Consults the recorder's sampler BEFORE allocating any SpanRecord state.
     /// If the sampler returns `Decision::Drop`, returns `RecorderSpanGuard::Noop`
     /// — zero allocation, zero ring push.
-    pub fn start(self) -> RecorderSpanGuard {
+    pub fn start(self) -> RecorderSpanGuard<Clk> {
         self.start_with(false)
     }
 
@@ -907,11 +907,11 @@ impl SpanBuilderWired {
     /// current-span stack — for a span that rides an `async` future, where
     /// [`Spanned::scoped`](crate::spanned::Spanned::scoped) manages current-span
     /// per poll. `#[proxima::instrument]` on an `async fn` uses this.
-    pub fn start_deferred(self) -> RecorderSpanGuard {
+    pub fn start_deferred(self) -> RecorderSpanGuard<Clk> {
         self.start_with(true)
     }
 
-    fn start_with(self, defer: bool) -> RecorderSpanGuard {
+    fn start_with(self, defer: bool) -> RecorderSpanGuard<Clk> {
         // sampling already decided in span() (no sampler Arc on the hot path).
         if !self.sampled {
             // C5: a budgeted span builds its record even when head-sampled out, so a
@@ -950,7 +950,7 @@ impl SpanBuilderWired {
     /// head-sampled-in path (`Always`) and the C5 tail-sampling path (`OverBudget`).
     /// `defer` selects `enter_deferred` (async, per-poll current-scoping) over
     /// `enter` (sync, scope-lifetime current).
-    fn into_active(self, keep: KeepPolicy, defer: bool) -> RecorderSpanGuard {
+    fn into_active(self, keep: KeepPolicy, defer: bool) -> RecorderSpanGuard<Clk> {
         // one clock Arc (moved out of self) — used by-ref for the start read and
         // then moved into the guard for the duration read; no second clone.
         let clock = self.clock;
@@ -982,19 +982,19 @@ impl SpanBuilderWired {
 ///
 /// Wraps C8's LogBuilder with a closure that pushes LogRecord into the
 /// per-core log ring.
-pub struct LogBuilderWired {
+pub struct LogBuilderWired<Clk: Clock> {
     level: Level,
     shared: Arc<EmitShared>,
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: Arc<Clk>,
     sampler: Arc<alloc::boxed::Box<dyn Sampler>>,
     overflow: OverflowPolicy,
 }
 
-impl LogBuilderWired {
+impl<Clk: Clock> LogBuilderWired<Clk> {
     fn new(
         level: Level,
         shared: Arc<EmitShared>,
-        clock: Arc<dyn Clock + Send + Sync>,
+        clock: Arc<Clk>,
         sampler: Arc<alloc::boxed::Box<dyn Sampler>>,
         overflow: OverflowPolicy,
     ) -> Self {
@@ -1012,7 +1012,7 @@ impl LogBuilderWired {
         self
     }
 
-    pub fn message(self, text: &'static str) -> LogEmitBuilder {
+    pub fn message(self, text: &'static str) -> LogEmitBuilder<Clk> {
         let shared = self.shared;
         let overflow = self.overflow;
         let sink: RingLogSink = alloc::boxed::Box::new(move |record: LogRecord| {
@@ -1044,13 +1044,13 @@ impl LogBuilderWired {
 type RingLogSink = alloc::boxed::Box<dyn FnMut(LogRecord) + Send>;
 
 /// Second-stage log builder — holds message + optional attrs; .emit() fires.
-pub struct LogEmitBuilder {
-    inner: LogBuilder<RingLogSink, Arc<dyn Clock + Send + Sync>>,
+pub struct LogEmitBuilder<Clk: Clock> {
+    inner: LogBuilder<RingLogSink, Arc<Clk>>,
     sampler: Arc<alloc::boxed::Box<dyn Sampler>>,
     name: &'static str,
 }
 
-impl LogEmitBuilder {
+impl<Clk: Clock> LogEmitBuilder<Clk> {
     pub fn tag(mut self, key: &'static str, value: impl Into<ScalarValue>) -> Self {
         self.inner.push_tag(Tag::Scalar {
             key,
@@ -1087,10 +1087,10 @@ impl LogEmitBuilder {
     }
 }
 
-pub struct Recorder {
+pub struct Recorder<Clk = SystemClock> {
     shared: Arc<EmitShared>,
     resource: Arc<Resource>,
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: Arc<Clk>,
     ring_caps: RingCapacities,
     sampler: Arc<alloc::boxed::Box<dyn Sampler>>,
     /// emit-time ring overflow policy. `Block` (default) is lossless via elastic
@@ -1176,7 +1176,7 @@ impl ManagedDrainer {
     }
 }
 
-impl Drop for Recorder {
+impl<Clk> Drop for Recorder<Clk> {
     fn drop(&mut self) {
         // stop the managed pump first (release its EmitShared ref) so the final
         // flush is unraced. the ring + instrument flush itself happens in
@@ -1195,11 +1195,46 @@ impl Drop for Recorder {
     }
 }
 
-impl Recorder {
-    pub fn builder() -> RecorderBuilder<NoPipe> {
+impl Recorder<SystemClock> {
+    /// Start building a recorder with the default (real wall-clock) clock.
+    /// [`RecorderBuilder::clock`] swaps it for any other [`Clock`] impl before
+    /// [`RecorderBuilder::start`](RecorderBuilder::start) — that call is the one
+    /// place the builder's clock type parameter actually changes.
+    pub fn builder() -> RecorderBuilder<NoPipe, SystemClock> {
         RecorderBuilder::new()
     }
 
+    /// Rewrap as a [`crate::clock::GlobalClock`]-clocked recorder sharing this
+    /// one's rings/pipe/sampler. `export::set_default_recorder` is the only
+    /// caller: the process-wide static names exactly one type, so it can't
+    /// hold this recorder's own `Recorder<SystemClock>` directly.
+    ///
+    /// Takes `&self`, not `self`: the caller (e.g. `init_tracing`) hands the
+    /// ambient slot a *clone* of a recorder it keeps using — an owning
+    /// conversion can't work on a shared `Arc`. Consequently the returned
+    /// value never carries a `managed` drainer (that field is not `Clone`,
+    /// and it stays exactly where it already is: the original recorder's
+    /// `Drop` stops it). This is a distinct `Recorder` value, not an alias of
+    /// `self` — dropping it clears its own `EmitShared`'s pump-active flag,
+    /// same as any other `Recorder` referencing that `EmitShared` would; the
+    /// scenario that only matters is replacing the ambient default while a
+    /// `.managed_drainer(true)` original is still installed and running,
+    /// which no current caller does.
+    pub(crate) fn to_global(&self) -> Recorder<crate::clock::GlobalClock> {
+        Recorder {
+            shared: Arc::clone(&self.shared),
+            resource: Arc::clone(&self.resource),
+            clock: Arc::new(crate::clock::GlobalClock::System(SystemClock)),
+            ring_caps: self.ring_caps.clone(),
+            sampler: Arc::clone(&self.sampler),
+            overflow: self.overflow,
+            #[cfg(feature = "lossless-backpressure")]
+            managed: None,
+        }
+    }
+}
+
+impl<Clk: Clock> Recorder<Clk> {
     pub fn resource(&self) -> &Resource {
         &self.resource
     }
@@ -1301,7 +1336,7 @@ impl Recorder {
         self.sampler.as_ref().as_ref()
     }
 
-    pub fn span(&self, name: &'static str) -> SpanBuilderWired {
+    pub fn span(&self, name: &'static str) -> SpanBuilderWired<Clk> {
         let trace_id = TraceId::generate();
         let span_id = SpanId::generate();
         let builder = SpanBuilder::new(name, trace_id, span_id);
@@ -1316,7 +1351,7 @@ impl Recorder {
         )
     }
 
-    pub fn span_from_scope(&self, name: &'static str, scope: &ScopeHandle) -> SpanBuilderWired {
+    pub fn span_from_scope(&self, name: &'static str, scope: &ScopeHandle) -> SpanBuilderWired<Clk> {
         let trace_id = TraceId::generate();
         let span_id = SpanId::generate();
         let builder = SpanBuilder::new(name, trace_id, span_id);
@@ -1347,7 +1382,7 @@ impl Recorder {
         &self,
         name: &'static str,
         traceparent: &[u8],
-    ) -> SpanBuilderWired {
+    ) -> SpanBuilderWired<Clk> {
         self.span_from_w3c(name, traceparent, None)
     }
 
@@ -1359,7 +1394,7 @@ impl Recorder {
         name: &'static str,
         traceparent: &[u8],
         tracestate: Option<&[u8]>,
-    ) -> SpanBuilderWired {
+    ) -> SpanBuilderWired<Clk> {
         let Some((trace_id, parent_span_id, flags)) =
             crate::id::parse_traceparent(traceparent)
         else {
@@ -1384,7 +1419,7 @@ impl Recorder {
         )
     }
 
-    pub fn log(&self) -> LogBuilderWired {
+    pub fn log(&self) -> LogBuilderWired<Clk> {
         LogBuilderWired::new(
             Level::INFO,
             Arc::clone(&self.shared),
@@ -1611,20 +1646,6 @@ impl Recorder {
         });
     }
 
-    /// The process-wide ambient recorder, if one has been installed (via
-    /// [`crate::export::set_default_recorder`] / `RecorderBuilder::install`).
-    ///
-    /// This is the zero-wiring source for `#[span]` / `#[instrument]`: a span
-    /// with no explicit `recorder = ...` resolves here, and no-ops when none is
-    /// installed — the same contract the `info!` / `debug!` emit macros already
-    /// use. Returns an owned `Arc` clone (one refcount bump); the span builder
-    /// it feeds clones only the internal `EmitShared`, so the `Arc` need not
-    /// outlive the builder.
-    #[must_use]
-    pub fn current() -> Option<Arc<Recorder>> {
-        crate::export::default_recorder()
-    }
-
     /// Read the current timestamp from the recorder's clock.
     ///
     /// Used by `TracingLayer` to capture `start_ns` at `on_new_span` with
@@ -1802,15 +1823,33 @@ impl Recorder {
     }
 }
 
+impl Recorder<crate::clock::GlobalClock> {
+    /// The process-wide ambient recorder, if one has been installed (via
+    /// [`crate::export::set_default_recorder`] / `RecorderBuilder::install`).
+    ///
+    /// This is the zero-wiring source for `#[span]` / `#[instrument]`: a span
+    /// with no explicit `recorder = ...` resolves here, and no-ops when none is
+    /// installed — the same contract the `info!` / `debug!` emit macros already
+    /// use. Returns an owned `Arc` clone (one refcount bump); the span builder
+    /// it feeds clones only the internal `EmitShared`, so the `Arc` need not
+    /// outlive the builder. Pinned to [`crate::clock::GlobalClock`]: the static
+    /// behind [`crate::export::default_recorder`] names exactly one type, so
+    /// this is the one `Recorder` inherent method that isn't generic over `Clk`.
+    #[must_use]
+    pub fn current() -> Option<Arc<Recorder<crate::clock::GlobalClock>>> {
+        crate::export::default_recorder()
+    }
+}
+
 // Typestate markers for RecorderBuilder
 pub struct NoPipe;
 pub struct HasPipe;
 
-pub struct RecorderBuilder<State> {
+pub struct RecorderBuilder<State, Clk = SystemClock> {
     ring_caps: RingCapacities,
     core_count: usize,
     pipe: Option<TelemetryPipeHandle>,
-    clock: Option<Arc<dyn Clock + Send + Sync>>,
+    clock: Option<Arc<Clk>>,
     resource_tags: alloc::vec::Vec<Tag>,
     sampler: Option<alloc::boxed::Box<dyn Sampler>>,
     record_sharing: crate::config::RecordSharing,
@@ -1823,7 +1862,7 @@ pub struct RecorderBuilder<State> {
     _state: core::marker::PhantomData<State>,
 }
 
-impl RecorderBuilder<NoPipe> {
+impl<Clk> RecorderBuilder<NoPipe, Clk> {
     fn new() -> Self {
         Self {
             ring_caps: RingCapacities::default(),
@@ -1852,7 +1891,7 @@ impl RecorderBuilder<NoPipe> {
             Out = proxima_primitives::pipe::request::Response<bytes::Bytes>,
             Err = proxima_primitives::pipe::ProximaError,
         > + 'static,
-    ) -> RecorderBuilder<HasPipe> {
+    ) -> RecorderBuilder<HasPipe, Clk> {
         RecorderBuilder {
             ring_caps: self.ring_caps,
             core_count: self.core_count,
@@ -1871,7 +1910,7 @@ impl RecorderBuilder<NoPipe> {
         }
     }
 
-    pub fn pipe_handle(self, handle: TelemetryPipeHandle) -> RecorderBuilder<HasPipe> {
+    pub fn pipe_handle(self, handle: TelemetryPipeHandle) -> RecorderBuilder<HasPipe, Clk> {
         RecorderBuilder {
             ring_caps: self.ring_caps,
             core_count: self.core_count,
@@ -1891,7 +1930,7 @@ impl RecorderBuilder<NoPipe> {
     }
 }
 
-impl<State> RecorderBuilder<State> {
+impl<State, Clk> RecorderBuilder<State, Clk> {
     pub fn ring_capacity(mut self, spans: usize) -> Self {
         self.ring_caps.spans = spans;
         self.ring_caps.events = spans;
@@ -1923,9 +1962,30 @@ impl<State> RecorderBuilder<State> {
         self
     }
 
-    pub fn clock(mut self, clock: impl Clock + Send + Sync + 'static) -> Self {
-        self.clock = Some(Arc::new(clock));
-        self
+    /// Swap the builder's clock type. Type-changing (like [`pipe`](Self::pipe)
+    /// on the `NoPipe` builder): the new clock is a different `Clk`, so this
+    /// returns `RecorderBuilder<State, NewClk>`, reconstructing every field —
+    /// the only builder setter whose type parameter actually moves.
+    pub fn clock<NewClk: Clock + Send + Sync + 'static>(
+        self,
+        clock: NewClk,
+    ) -> RecorderBuilder<State, NewClk> {
+        RecorderBuilder {
+            ring_caps: self.ring_caps,
+            core_count: self.core_count,
+            pipe: self.pipe,
+            clock: Some(Arc::new(clock)),
+            resource_tags: self.resource_tags,
+            sampler: self.sampler,
+            record_sharing: self.record_sharing,
+            overflow: self.overflow,
+            #[cfg(feature = "lossless-backpressure")]
+            managed_drainer: self.managed_drainer,
+            drain_batch: self.drain_batch,
+            assist_batch: self.assist_batch,
+            flush_interval: self.flush_interval,
+            _state: core::marker::PhantomData,
+        }
     }
 
     pub fn resource_tag(mut self, key: &'static str, value: impl Into<ScalarValue>) -> Self {
@@ -2018,7 +2078,7 @@ impl<State> RecorderBuilder<State> {
     }
 }
 
-impl RecorderBuilder<HasPipe> {
+impl<Clk: Clock + Default> RecorderBuilder<HasPipe, Clk> {
     /// Override the pipe that `from_config` wired in. Useful in benches and tests
     /// where the structural config (sampler, record_sharing, ring caps) comes from
     /// a `TelemetryConfig` but the terminal sink must be a specific concrete type
@@ -2035,7 +2095,7 @@ impl RecorderBuilder<HasPipe> {
         self
     }
 
-    pub fn start(self) -> Result<Recorder, crate::error::Error> {
+    pub fn start(self) -> Result<Recorder<Clk>, crate::error::Error> {
         let caps = &self.ring_caps;
         let count = self.core_count;
 
@@ -2063,8 +2123,7 @@ impl RecorderBuilder<HasPipe> {
         }
         resource.freeze();
 
-        let clock: Arc<dyn Clock + Send + Sync> =
-            self.clock.unwrap_or_else(|| Arc::new(SystemClock));
+        let clock: Arc<Clk> = self.clock.unwrap_or_else(|| Arc::new(Clk::default()));
 
         let sampler = Arc::new(
             self.sampler
@@ -2090,7 +2149,17 @@ impl RecorderBuilder<HasPipe> {
     }
 }
 
-struct SystemClock;
+/// The default [`Clock`]: reads the OS wall clock (`SystemTime::now()`) as
+/// nanoseconds since the Unix epoch. `Recorder<Clk = SystemClock>`'s default
+/// type parameter, and the clock `RecorderBuilder::start` falls back to when
+/// no [`RecorderBuilder::clock`] override was supplied. `pub` because a
+/// generic default type parameter must be at least as visible as the type it
+/// defaults — every call site writing bare `Recorder`/`RecorderBuilder` names
+/// this type implicitly. Known non-monotonic (a wall-clock step-back can
+/// yield a negative-looking duration downstream); fixing that is a separate,
+/// dedicated monotonic-plus-anchor primitive, not this migration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ns(&self) -> u64 {
