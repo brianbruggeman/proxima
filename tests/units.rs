@@ -29,3 +29,5 @@ mod settings_round_trip;
 mod settings_to_app;
 #[path = "units/thread_local_composition.rs"]
 mod thread_local_composition;
+#[path = "units/virtual_time.rs"]
+mod virtual_time;

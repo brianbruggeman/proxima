@@ -91,6 +91,18 @@ runtime-prime-bgpool-par   = ["runtime-prime-bgpool"]
 # combo (the sync fast path + typed spawn) stays tokio-free.
 runtime-prime-bgpool-async = ["runtime-prime-bgpool", "prime-tokio-compat"]
 runtime-prime-config       = ["runtime-prime", "dep:toml"]
+# promotes `os::core_shard::StdClock::Virtual` (and the `launch_with_virtual_clock`
+# constructor) from `#[cfg(test)]`-only to a real, downstream-reachable surface: a
+# caller launches a shard whose timer wheel reads a shared `proxima_clock::TickCell`
+# instead of `Instant::now()`, then advances the cell directly — zero wall-clock
+# sleep to fire a timer. Default-off; a production build never sees the `Virtual`
+# variant or this constructor. Implies the trio `core_shard` itself needs
+# (executor/reactor/inbox-alloc) so enabling this feature alone is sufficient.
+runtime-prime-virtual-clock = [
+    "runtime-prime-executor",
+    "runtime-prime-reactor",
+    "runtime-prime-inbox-alloc",
+]
 io-uring = ["std", "dep:tokio-uring", "dep:io-uring"]
 rayon = ["dep:rayon", "proxima-runtime/rayon"]
 # wasm: the no_std + alloc core executor (run-queue, timer wheel, inbox) with

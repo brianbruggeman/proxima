@@ -3505,6 +3505,7 @@ dependencies = [
  "prometheus 0.14.0",
  "prost",
  "proxima-amqp",
+ "proxima-clock",
  "proxima-codec",
  "proxima-config",
  "proxima-core",
