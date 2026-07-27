@@ -1721,5 +1721,280 @@ mod tests {
                 }
             }
         }
+
+        // ── multi-connection interleaving proof ────────────────────────────
+        //
+        // `DETERMINISM_RUNS` single connections above prove the h1 + record
+        // path is deterministic in isolation. This extends the SAME harness
+        // to N concurrent connections sharing one `RecordUpstream` (one
+        // trace), all driven by a single `futures::executor::block_on` call
+        // — no epoll/kqueue, no OS thread hand-off for the connections
+        // themselves (the recording drainer's background thread only ever
+        // DEQUEUES; every `sender.send` that decides record ORDER happens on
+        // this one foreground thread). If the combined trace is still
+        // byte-identical across runs and processes, the only ordering input
+        // the single-connection proof couldn't exercise — the executor's own
+        // ready-queue, deciding which connection's next step runs first — is
+        // deterministic too.
+        #[cfg(feature = "http-prime-deps")]
+        mod multi_connection {
+            use super::*;
+            use proxima_primitives::stream::{PeerInfo, StreamConnection, StreamUpstream};
+
+            const MULTI_CONN_RUNS: usize = 300;
+
+            // one-shot transport: hands back the pre-built duplex half
+            // exactly once, matching `H1ClientUpstream`'s own keep-alive
+            // contract (it only ever calls `connect()` again after an
+            // error, which this scenario never produces).
+            struct SingleConnUpstream {
+                conn: std::sync::Mutex<Option<DuplexHalf>>,
+            }
+
+            impl SingleConnUpstream {
+                fn new(conn: DuplexHalf) -> Self {
+                    Self {
+                        conn: std::sync::Mutex::new(Some(conn)),
+                    }
+                }
+            }
+
+            impl StreamConnection for DuplexHalf {
+                fn peer(&self) -> Option<PeerInfo> {
+                    None
+                }
+            }
+
+            impl StreamUpstream for SingleConnUpstream {
+                type Conn = DuplexHalf;
+
+                fn poll_connect(
+                    &self,
+                    _ctx: &mut Context<'_>,
+                ) -> Poll<std::io::Result<Self::Conn>> {
+                    let mut guard = self
+                        .conn
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match guard.take() {
+                        Some(conn) => Poll::Ready(Ok(conn)),
+                        None => Poll::Ready(Err(std::io::Error::other(
+                            "single-connection upstream already connected once",
+                        ))),
+                    }
+                }
+            }
+
+            // deliberately uneven: connection 0 sends 1 request, connection
+            // 1 sends 2, ... wrapping every 4 connections, so a run mixes
+            // short- and long-lived connections instead of N identical ones.
+            fn request_count_for(connection_index: usize) -> usize {
+                1 + (connection_index % 4)
+            }
+
+            // varies 40..=290 bytes as a function of (connection, request)
+            // — no two requests in a run share a size by coincidence.
+            fn byte_count_for(connection_index: usize, request_index: usize) -> usize {
+                40 + (connection_index * 31 + request_index * 17) % 251
+            }
+
+            // a readable, real-sentence payload padded/truncated to
+            // `byte_count` — not `b"AAAA"`: the point is to prove ordering,
+            // and a legible trace is easier to eyeball if this ever fails.
+            fn scripted_body(
+                connection_index: usize,
+                request_index: usize,
+                byte_count: usize,
+            ) -> Bytes {
+                let marker = format!("conn={connection_index} req={request_index} ");
+                let filler = "the quick brown fox jumps over the lazy dog; ";
+                let mut body = marker.into_bytes();
+                while body.len() < byte_count {
+                    body.extend_from_slice(filler.as_bytes());
+                }
+                body.truncate(byte_count);
+                Bytes::from(body)
+            }
+
+            // drives one connection's whole request script, in program
+            // order, over its own keep-alive client. The interleaving
+            // ACROSS connections comes from running N of these concurrently
+            // (see `run_multi_once`), never from anything inside this fn.
+            async fn drive_client_connection(
+                client: crate::H1ClientUpstream<SingleConnUpstream>,
+                connection_index: usize,
+                request_count: usize,
+            ) {
+                for request_index in 0..request_count {
+                    let byte_count = byte_count_for(connection_index, request_index);
+                    let body = scripted_body(connection_index, request_index, byte_count);
+                    let request = Request::builder()
+                        .method("POST")
+                        .path(format!("/echo/conn-{connection_index}/req-{request_index}"))
+                        .body(body.clone())
+                        .build()
+                        .expect("request");
+                    let response = client.call(request).await.expect("client call");
+                    assert_eq!(response.status, 200);
+                    let echoed = response.collect_body().await.expect("collect body");
+                    assert_eq!(
+                        echoed, body,
+                        "echo pipe must return the exact request body for conn {connection_index} req {request_index}"
+                    );
+                }
+            }
+
+            // one full pass: `connection_count` connections sharing ONE
+            // `RecordUpstream` (one trace), driven concurrently by a single
+            // `futures::executor::block_on` call. Returns the raw recorded
+            // bytes (for the byte-identical comparison) alongside the
+            // parsed events (for the interleaving check) — both read back
+            // before the tempdir drops.
+            fn run_multi_once(connection_count: usize) -> (Vec<u8>, Vec<RecordingEvent>) {
+                let dir = tempdir().expect("tempdir");
+                let path = dir.path().join("trace.jsonl");
+                let spigot = armed_spigot();
+                let durable = Arc::new(LazyFanOut::new(
+                    vec![SinkSpec::new(path.to_string_lossy(), FormatKind::Json)],
+                    spigot.clone(),
+                ));
+                let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(durable));
+                let inner: PipeHandle = into_handle(EchoPipe);
+                let clock = RecordingClock::new();
+                let concrete = Arc::new(
+                    RecordUpstream::with_clock(
+                        "determinism-multi",
+                        inner,
+                        sink,
+                        "determinism-multi",
+                        clock,
+                        fixed_wall_epoch(),
+                        FIXED_SEED,
+                    )
+                    .with_runtime(spigot),
+                );
+                let dispatch: PipeHandle = into_handle(concrete.clone());
+
+                let mut servers = Vec::with_capacity(connection_count);
+                let mut clients = Vec::with_capacity(connection_count);
+                for connection_index in 0..connection_count {
+                    let (server_half, client_half) = test_duplex();
+                    servers.push(crate::serve_h1_connection(
+                        server_half,
+                        dispatch.clone(),
+                        None,
+                        None,
+                    ));
+                    let client = crate::H1ClientUpstream::new(
+                        SingleConnUpstream::new(client_half),
+                        "determinism.local",
+                        format!("conn-{connection_index}"),
+                    );
+                    clients.push(drive_client_connection(
+                        client,
+                        connection_index,
+                        request_count_for(connection_index),
+                    ));
+                }
+
+                let (server_results, _client_results) =
+                    futures::executor::block_on(futures::future::join(
+                        futures::future::join_all(servers),
+                        futures::future::join_all(clients),
+                    ));
+                for result in server_results {
+                    result.expect("serve_h1_connection should complete");
+                }
+
+                futures::executor::block_on(concrete.flush()).expect("flush");
+                let bytes = std::fs::read(&path).expect("read recorded trace");
+                let events = futures::executor::block_on(read_recorded_events(&path));
+                (bytes, events)
+            }
+
+            fn connection_index_from_path(path: &str) -> usize {
+                path.strip_prefix("/echo/conn-")
+                    .and_then(|rest| rest.split('/').next())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or_else(|| {
+                        panic!("recorded path did not encode a connection index: {path}")
+                    })
+            }
+
+            // the connection each `Started` event belongs to, in the order
+            // they were recorded — the sequence genuine interleaving must
+            // NOT reduce to N contiguous blocks.
+            fn started_connection_sequence(events: &[RecordingEvent]) -> Vec<usize> {
+                events
+                    .iter()
+                    .filter_map(|event| match &event.event {
+                        ProtocolEvent::Http(HttpEvent::Started { request, .. }) => {
+                            Some(connection_index_from_path(&request.path))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            // number of maximal contiguous same-value runs. A fully
+            // sequential schedule (connection 0 draining entirely, then
+            // connection 1, ...) produces exactly `connection_count` runs;
+            // genuine interleaving produces strictly more, smaller ones.
+            fn count_runs(sequence: &[usize]) -> usize {
+                if sequence.is_empty() {
+                    return 0;
+                }
+                1 + sequence
+                    .windows(2)
+                    .filter(|pair| pair[0] != pair[1])
+                    .count()
+            }
+
+            fn assert_multi_connection_determinism(connection_count: usize) {
+                let (baseline, baseline_events) = run_multi_once(connection_count);
+                assert!(!baseline.is_empty(), "recorded trace must not be empty");
+
+                let sequence = started_connection_sequence(&baseline_events);
+                let observed_runs = count_runs(&sequence);
+                assert!(
+                    observed_runs > connection_count,
+                    "connections did not genuinely interleave: {connection_count} connections \
+                     produced only {observed_runs} contiguous per-connection run(s) of Started \
+                     events (a fully-sequential schedule -- connection 0 draining completely \
+                     before connection 1 starts -- would itself produce exactly \
+                     {connection_count}); recorded sequence was {sequence:?}"
+                );
+
+                for run_index in 1..MULTI_CONN_RUNS {
+                    let (candidate, _candidate_events) = run_multi_once(connection_count);
+                    if let Some(offset) = first_divergence(&baseline, &candidate) {
+                        let window = 32;
+                        let baseline_start = offset.saturating_sub(window);
+                        let candidate_start = offset.saturating_sub(window);
+                        let baseline_snippet = String::from_utf8_lossy(
+                            &baseline[baseline_start..(offset + window).min(baseline.len())],
+                        );
+                        let candidate_snippet = String::from_utf8_lossy(
+                            &candidate[candidate_start..(offset + window).min(candidate.len())],
+                        );
+                        panic!(
+                            "run {run_index} diverged from run 0 at byte {offset} ({connection_count} connections)\n  \
+                             run 0:  ...{baseline_snippet}...\n  \
+                             run {run_index}: ...{candidate_snippet}..."
+                        );
+                    }
+                }
+            }
+
+            #[test]
+            fn multi_connection_trace_is_byte_identical_across_n_runs_four_connections() {
+                assert_multi_connection_determinism(4);
+            }
+
+            #[test]
+            fn multi_connection_trace_is_byte_identical_across_n_runs_sixteen_connections() {
+                assert_multi_connection_determinism(16);
+            }
+        }
     }
 }
