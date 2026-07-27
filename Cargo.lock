@@ -3632,6 +3632,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-clock"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "conflaguration",
+ "proptest",
+ "proxima-core",
+ "proxima-primitives",
+ "serde",
+ "temp-env",
+ "tempfile",
+]
+
+[[package]]
 name = "proxima-codec"
 version = "0.1.0"
 dependencies = [

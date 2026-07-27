@@ -1,0 +1,35 @@
+[package]
+name = "proxima-clock"
+description = "Hardware-clock source polymorphism as pipes: tick sources, wall-clock anchoring, and a coarse shared-time cell over the proxima-primitives Pipe algebra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+std = []
+# Std composition boundary for AnchorCell's initial (ticks, unix_nanos) pair
+# (guiding-principle 4): bon builder + conflaguration Settings/Validate +
+# serde. The no-alloc core (Ticks/UnixNanos/AnchorCell/TickCell/ToUnixNanos)
+# never sees this feature -- conflaguration is std-only (see rust.md's
+# "Layering caveat" / proxima-telemetry/src/config.rs's canonical pattern).
+config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+
+[dependencies]
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+proxima-primitives.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+proxima-core.workspace = true
+temp-env.workspace = true
+tempfile.workspace = true
