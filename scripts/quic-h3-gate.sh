@@ -13,7 +13,9 @@
 #     recorded in ai_docs/invariants.jsonl as
 #     proxima.decision.quic_dual_surface_native_and_quinn;
 #   - doctests for both proto crates so an indented protocol diagram
-#     in a //! comment can't silently break the nextest-only suite.
+#     in a //! comment can't silently break the nextest-only suite;
+#   - proxima-quic's own nextest suite (native Endpoint/Connection +
+#     listener FSM) — previously built here but never run.
 #
 # Not enforced (staged behind TOKIO_FREE_FACADE_ENFORCE=1):
 #   - the tokio-free production-build gate. proxima-http's http3-native
@@ -69,6 +71,11 @@ declare -a cells=(
     # profile-axis sanity — every profile must validate cleanly with the new
     # quic_impl + h3_impl axes
     "proxima-build profile axes|cargo nextest run -p proxima-build"
+
+    # proxima-quic's own test suite (native Endpoint/Connection + listener
+    # FSM) — every other cell in this file builds proxima-quic or checks its
+    # dependency tree, but until now nothing ever ran its tests.
+    "proxima-quic nextest (default features)|cargo nextest run -p proxima-quic"
 )
 
 # Quinn-free native gate — enforced unconditionally. The `--features
