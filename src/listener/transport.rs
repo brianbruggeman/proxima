@@ -24,8 +24,16 @@ pub trait ListenerTransportExt: Sized {
     ///
     /// Requires the `http1-native` feature (or `http1`) — the `"http"`
     /// listen protocol is not registered under bare default features.
+    /// This example only compiles and runs when one of those features is
+    /// on (`ignore`d otherwise, matching the feature the code needs, not
+    /// papered over); it runs for real in CI under `--features
+    /// http1-native,http2`.
     ///
-    /// ```
+    #[cfg_attr(any(feature = "http1", feature = "http1-native"), doc = "```")]
+    #[cfg_attr(
+        not(any(feature = "http1", feature = "http1-native")),
+        doc = "```ignore"
+    )]
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerTransportExt, Request, Response, ProximaError};
     /// use proxima::pipe::into_handle;
     /// use proxima::SendPipe;
