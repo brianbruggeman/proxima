@@ -38,6 +38,15 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-runtime|proxima-runtime|alloc"
     "proxima-core|proxima-core|alloc"
     "proxima-protocols|proxima-protocols|tcp,mqtt,amqp,kafka,memcached,nvme,inet,pgwire_codec,process,jsonrpc,websocket_frame,proxy_protocol,redis,hpack,http1_codec,http2_codec,http3_codec-alloc,json_framing,quic-alloc,dns,grpc_framing,protobuf_wire,websocket_handshake,codec-pipe"
+    # proxima-clock has no `alloc` feature at all -- every cell above proves
+    # the no_std + alloc tier (`--features alloc`); this one proves the
+    # strictly stricter no_std + NO-alloc floor (`--features ""`, i.e. bare
+    # `--no-default-features` with nothing turned on). Ticks/UnixNanos/
+    # AnchorCell/TickCell/ToUnixNanos never touch `alloc::`/`Box`/`Vec`/
+    # `Arc`/`String`; only the optional `config` feature (std-only,
+    # conflaguration/bon/serde) is excluded here by construction, matching
+    # this array's own contract of the FLOOR tier, not every tier.
+    "proxima-clock-bare-no-alloc|proxima-clock|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

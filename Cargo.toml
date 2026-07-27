@@ -9,6 +9,7 @@ members = [
     "proxima-amqp",
     "proxima-auth",
     "proxima-build",
+    "proxima-clock",
     "proxima-codec",
     "proxima-config",
     "proxima-core",
@@ -64,6 +65,7 @@ proxima = { path = "." }
 proxima-amqp = { path = "proxima-amqp" }
 proxima-auth = { path = "proxima-auth", default-features = false }
 proxima-build = { path = "proxima-build" }
+proxima-clock = { path = "proxima-clock", default-features = false }
 proxima-codec = { path = "proxima-codec", default-features = false }
 proxima-config = { path = "proxima-config", default-features = false }
 proxima-core = { path = "proxima-core", default-features = false }
