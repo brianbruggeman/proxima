@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
 use proxima_clock::coarse::TickCell;
+#[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
+use proxima_clock::ticks::Ticks;
 use proxima_core::ProximaError;
 use proxima_runtime::{CoreId, SpawnError, SpawnRequest};
 
@@ -884,6 +886,23 @@ fn worker_main(
             // producer will interrupt us.
             empty_parks_since_inbox = empty_parks_since_inbox.saturating_add(1);
             let next_deadline = timer.borrow().next_deadline();
+
+            // virtual-clock auto-advance: nothing runnable (fired == 0,
+            // spin found no inbox work) and a timer IS pending — jump the
+            // cell straight to that deadline instead of a real epoll/kevent
+            // park. Same technique FoundationDB/madsim/turmoil use: 30
+            // simulated seconds costs one seqlock store, not a real park.
+            // Gated on `runtime-prime-virtual-clock` so the `Real`-clock
+            // path (the `let timeout = ...` below, unchanged) is the only
+            // code a production build ever sees. Quiescence with no
+            // pending timer (`next_deadline` is `None`) falls through to
+            // the genuine park below — there is nothing to advance to.
+            #[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
+            if let (Some(deadline), StdClock::Virtual { cell }) = (next_deadline, &clock) {
+                cell.set(Ticks::from_raw(deadline));
+                continue;
+            }
+
             let timeout = match next_deadline {
                 Some(deadline) => {
                     let delta = deadline.saturating_sub(now);
@@ -2127,5 +2146,79 @@ mod tests {
                  exceed this 2s bound, proving no wall-clock sleep drove the fire",
             );
         handle.shutdown_and_join().expect("shutdown");
+    }
+
+    /// Part 2 proof: the worker itself jumps the virtual clock to the
+    /// earliest pending deadline when it finds nothing runnable — NO
+    /// `cell.set` anywhere in this test (contrast with the test above,
+    /// which drives the cell by hand). Three tasks sleep for 1s, 5s and
+    /// 30s of SIMULATED time; without auto-advance this would take 36
+    /// real seconds and this test would time out. Asserts the completion
+    /// ORDER (not just "all three eventually finish") — a buggy
+    /// auto-advance that jumps straight to the far deadline and skips the
+    /// near ones would still pass a total-time-only check but would fail
+    /// this one.
+    #[test]
+    fn auto_advance_fires_multiple_timers_in_order_with_no_manual_cell_set() {
+        const ONE_SECOND_MILLIS: u64 = 1_000;
+        const FIVE_SECONDS_MILLIS: u64 = 5_000;
+        const THIRTY_SECONDS_MILLIS: u64 = 30_000;
+
+        let cell = Arc::new(TickCell::new(Ticks::ZERO));
+        let handle = launch_with_virtual_clock(CoreId(98), None, 2, 16, cell)
+            .expect("launch virtual-clock worker");
+
+        let order: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        for deadline in [THIRTY_SECONDS_MILLIS, ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS] {
+            // dispatch order deliberately scrambled relative to deadline
+            // order — completion order must reflect DEADLINE order, not
+            // dispatch order.
+            let order_for_task = order.clone();
+            let done_tx_for_task = done_tx.clone();
+            handle
+                .dispatch_factory(Box::new(move || {
+                    Box::pin(async move {
+                        timer_at(deadline).await;
+                        order_for_task
+                            .lock()
+                            .expect("order mutex poisoned")
+                            .push(deadline);
+                        let _ = done_tx_for_task.send(());
+                    }) as Pin<Box<dyn Future<Output = ()> + 'static>>
+                }))
+                .expect("dispatch sleeper factory");
+        }
+        drop(done_tx);
+
+        let started = Instant::now();
+        // three real recvs, one per completing task — the hang guard is
+        // real time (2s); the property under test is that this NEVER
+        // gets anywhere near it because no real sleep happens at all.
+        for _ in 0..3 {
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect(
+                    "all three simulated sleeps (1s/5s/30s) must complete via auto-advance \
+                     alone; a real wait would take 36s and blow well past this 2s bound",
+                );
+        }
+        let elapsed = started.elapsed();
+
+        handle.shutdown_and_join().expect("shutdown");
+
+        assert_eq!(
+            *order.lock().expect("order mutex poisoned"),
+            vec![ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS, THIRTY_SECONDS_MILLIS],
+            "completion order must match simulated deadline order (1s, then 5s, then 30s) — \
+             proves auto-advance stepped through each deadline in turn rather than skipping \
+             straight to the last one",
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "36 simulated seconds must resolve in well under 500ms of wall clock \
+             (got {elapsed:?}) — auto-advance must jump the clock, not wait it out",
+        );
     }
 }
