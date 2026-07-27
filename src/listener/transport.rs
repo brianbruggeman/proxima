@@ -22,6 +22,9 @@ use proxima_config::sugar::SpecBuilder;
 pub trait ListenerTransportExt: Sized {
     /// The h1+h2 ALPN combiner (the default) — plaintext TCP.
     ///
+    /// Requires the `http1-native` feature (or `http1`) — the `"http"`
+    /// listen protocol is not registered under bare default features.
+    ///
     /// ```
     /// use proxima::{Listener, ListenerBuilderEntry, ListenerTransportExt, Request, Response, ProximaError};
     /// use proxima::pipe::into_handle;
