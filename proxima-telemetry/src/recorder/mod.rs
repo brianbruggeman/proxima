@@ -1087,7 +1087,7 @@ impl<Clk: Clock> LogEmitBuilder<Clk> {
     }
 }
 
-pub struct Recorder<Clk = SystemClock> {
+pub struct Recorder<Clk = crate::clock::GlobalClock> {
     shared: Arc<EmitShared>,
     resource: Arc<Resource>,
     clock: Arc<Clk>,
@@ -1195,42 +1195,15 @@ impl<Clk> Drop for Recorder<Clk> {
     }
 }
 
-impl Recorder<SystemClock> {
-    /// Start building a recorder with the default (real wall-clock) clock.
+impl Recorder {
+    /// Start building a recorder with the default clock
+    /// ([`crate::clock::GlobalClock`] — the same type the process-wide
+    /// ambient static holds, so `.install()` needs no conversion).
     /// [`RecorderBuilder::clock`] swaps it for any other [`Clock`] impl before
     /// [`RecorderBuilder::start`](RecorderBuilder::start) — that call is the one
     /// place the builder's clock type parameter actually changes.
-    pub fn builder() -> RecorderBuilder<NoPipe, SystemClock> {
+    pub fn builder() -> RecorderBuilder<NoPipe> {
         RecorderBuilder::new()
-    }
-
-    /// Rewrap as a [`crate::clock::GlobalClock`]-clocked recorder sharing this
-    /// one's rings/pipe/sampler. `export::set_default_recorder` is the only
-    /// caller: the process-wide static names exactly one type, so it can't
-    /// hold this recorder's own `Recorder<SystemClock>` directly.
-    ///
-    /// Takes `&self`, not `self`: the caller (e.g. `init_tracing`) hands the
-    /// ambient slot a *clone* of a recorder it keeps using — an owning
-    /// conversion can't work on a shared `Arc`. Consequently the returned
-    /// value never carries a `managed` drainer (that field is not `Clone`,
-    /// and it stays exactly where it already is: the original recorder's
-    /// `Drop` stops it). This is a distinct `Recorder` value, not an alias of
-    /// `self` — dropping it clears its own `EmitShared`'s pump-active flag,
-    /// same as any other `Recorder` referencing that `EmitShared` would; the
-    /// scenario that only matters is replacing the ambient default while a
-    /// `.managed_drainer(true)` original is still installed and running,
-    /// which no current caller does.
-    pub(crate) fn to_global(&self) -> Recorder<crate::clock::GlobalClock> {
-        Recorder {
-            shared: Arc::clone(&self.shared),
-            resource: Arc::clone(&self.resource),
-            clock: Arc::new(crate::clock::GlobalClock::System(SystemClock)),
-            ring_caps: self.ring_caps.clone(),
-            sampler: Arc::clone(&self.sampler),
-            overflow: self.overflow,
-            #[cfg(feature = "lossless-backpressure")]
-            managed: None,
-        }
     }
 }
 
@@ -1845,7 +1818,7 @@ impl Recorder<crate::clock::GlobalClock> {
 pub struct NoPipe;
 pub struct HasPipe;
 
-pub struct RecorderBuilder<State, Clk = SystemClock> {
+pub struct RecorderBuilder<State, Clk = crate::clock::GlobalClock> {
     ring_caps: RingCapacities,
     core_count: usize,
     pipe: Option<TelemetryPipeHandle>,
@@ -2149,15 +2122,15 @@ impl<Clk: Clock + Default> RecorderBuilder<HasPipe, Clk> {
     }
 }
 
-/// The default [`Clock`]: reads the OS wall clock (`SystemTime::now()`) as
-/// nanoseconds since the Unix epoch. `Recorder<Clk = SystemClock>`'s default
-/// type parameter, and the clock `RecorderBuilder::start` falls back to when
-/// no [`RecorderBuilder::clock`] override was supplied. `pub` because a
-/// generic default type parameter must be at least as visible as the type it
-/// defaults — every call site writing bare `Recorder`/`RecorderBuilder` names
-/// this type implicitly. Known non-monotonic (a wall-clock step-back can
-/// yield a negative-looking duration downstream); fixing that is a separate,
-/// dedicated monotonic-plus-anchor primitive, not this migration.
+/// The real wall clock: reads `SystemTime::now()` as nanoseconds since the
+/// Unix epoch. The `System` arm of [`crate::clock::GlobalClock`] —
+/// `Recorder<Clk = GlobalClock>`'s default type parameter — and directly
+/// usable on its own via [`RecorderBuilder::clock`] for a recorder that
+/// doesn't need the ambient-static indirection. `pub` because a public enum
+/// variant's field type must be at least as visible as the enum. Known
+/// non-monotonic (a wall-clock step-back can yield a negative-looking
+/// duration downstream); fixing that is a separate, dedicated
+/// monotonic-plus-anchor primitive, not this migration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 

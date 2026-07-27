@@ -102,3 +102,16 @@ impl Clock for GlobalClock {
         }
     }
 }
+
+// `Recorder<Clk = GlobalClock>`'s default clock parameter, and
+// `RecorderBuilder::start`'s no-explicit-clock fallback (`Clk: Default`):
+// the real wall clock where available, a plain atomic counter on the bare
+// `alloc` tier that never links `SystemTime`.
+impl Default for GlobalClock {
+    fn default() -> Self {
+        #[cfg(feature = "std")]
+        return Self::System(SystemClock);
+        #[cfg(not(feature = "std"))]
+        Self::Virtual(MonotonicCounter::new(0))
+    }
+}

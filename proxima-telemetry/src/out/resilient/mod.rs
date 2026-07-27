@@ -60,16 +60,11 @@ pub(crate) struct Shared<Clk> {
 
 impl<Clk> Shared<Clk> {
     /// The recorder self-instrumentation reports through: the explicit one
-    /// this sink was built with, else whatever is process-default. The two
-    /// candidates are different concrete `Recorder<_>` types (an explicit
-    /// recorder is the ordinary `SystemClock`; the ambient default is
-    /// `GlobalClock` — see `export::default_recorder`), so the explicit one
-    /// is rewrapped via [`Recorder::to_global`] to unify on one return type.
-    fn self_recorder(&self) -> Option<Arc<Recorder<crate::clock::GlobalClock>>> {
-        match &self.self_recorder {
-            Some(recorder) => Some(Arc::new(recorder.to_global())),
-            None => crate::export::default_recorder(),
-        }
+    /// this sink was built with, else whatever is process-default.
+    fn self_recorder(&self) -> Option<Arc<Recorder>> {
+        self.self_recorder
+            .clone()
+            .or_else(crate::export::default_recorder)
     }
 }
 
