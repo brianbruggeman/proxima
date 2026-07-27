@@ -1,18 +1,23 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::Duration;
 
 use bon::Builder;
 use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use futures::{FutureExt, Stream, select_biased};
+use proxima_primitives::pipe::capabilities::Clock;
+use proxima_primitives::pipe::clock::TimeClock;
 use proxima_primitives::sync::mpsc;
 use proxima_primitives::sync::oneshot;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
+use ulid::Ulid;
 
 use crate::body::{ChunkStream, RequestStream, ResponseStream};
 use crate::capture_surface::CaptureContext;
@@ -60,7 +65,7 @@ enum DrainerMessage {
 /// `Handler`; `RecordUpstream<ThreadLocalPipeHandle>` impls
 /// `ThreadLocalHandler`. Dispatch unifies through the
 /// `ThreadLocalHandler` blanket so a single body pipes both paths.
-pub struct RecordUpstream<Inner = PipeHandle> {
+pub struct RecordUpstream<Inner = PipeHandle, Clk = TimeClock> {
     label: String,
     inner: Inner,
     sink: DynRecordingSink,
@@ -70,9 +75,30 @@ pub struct RecordUpstream<Inner = PipeHandle> {
     // of per call (see `instance_drainer_sender`).
     spigot: DeferredRuntime,
     drainer: DrainerCell,
+    // the injected time seam `TimedReplay` already uses on the replay side
+    // (`proxima_primitives::pipe::capabilities::Clock`); production defaults
+    // to `TimeClock` (the real driver), `with_clock` swaps in a deterministic
+    // double so record and replay share one clock instead of record minting
+    // its own `Instant`/`OffsetDateTime::now_utc()` reads.
+    clock: Clk,
+    // a wall-clock reading captured once at construction, paired with the
+    // clock's own reading at that same instant. Every request's `ts_start`
+    // is `wall_epoch + (clock.now_nanos() - epoch_nanos)` — a pure function
+    // of the injected clock (so it can be made deterministic) that still
+    // tracks real wall time under the production `TimeClock`, instead of a
+    // fresh `now_utc()` read per request.
+    wall_epoch: OffsetDateTime,
+    epoch_nanos: u64,
+    // seeded per-instance ULID randomness feeding `InteractionId`. Production
+    // seeds this once from OS entropy (`rand::random`); `with_clock` accepts
+    // an explicit seed so a test reproduces the exact same id sequence.
+    // Mutex-guarded (never held across an `.await`) rather than lock-free,
+    // matching this crate's existing short-critical-section convention (see
+    // `pipe/causality.rs`'s `Arc<Vec<std::sync::Mutex<..>>>` slots).
+    rng: Arc<Mutex<StdRng>>,
 }
 
-impl<Inner> RecordUpstream<Inner> {
+impl<Inner> RecordUpstream<Inner, TimeClock> {
     #[must_use]
     pub fn new(
         label: impl Into<String>,
@@ -80,6 +106,8 @@ impl<Inner> RecordUpstream<Inner> {
         sink: DynRecordingSink,
         pipe_label: impl Into<String>,
     ) -> Self {
+        let clock = TimeClock;
+        let epoch_nanos = clock.now_nanos();
         Self {
             label: label.into(),
             inner,
@@ -88,6 +116,46 @@ impl<Inner> RecordUpstream<Inner> {
             protocol: "http".into(),
             spigot: deferred_runtime(),
             drainer: Arc::new(OnceLock::new()),
+            clock,
+            wall_epoch: OffsetDateTime::now_utc(),
+            epoch_nanos,
+            rng: Arc::new(Mutex::new(StdRng::seed_from_u64(rand::random()))),
+        }
+    }
+}
+
+impl<Inner, Clk> RecordUpstream<Inner, Clk>
+where
+    Clk: Clock,
+{
+    /// Build over an explicit [`Clock`] and a seeded RNG — the seam a
+    /// deterministic test injects so two runs of the same scenario mint
+    /// byte-identical `InteractionId`s and `ts_ms`/`ts_start` values.
+    /// Mirrors `TimedReplay::with_clock` on the replay side (see
+    /// `proxima-recording/src/pipe/replay.rs`).
+    #[must_use]
+    pub fn with_clock(
+        label: impl Into<String>,
+        inner: Inner,
+        sink: DynRecordingSink,
+        pipe_label: impl Into<String>,
+        clock: Clk,
+        wall_epoch: OffsetDateTime,
+        rng_seed: u64,
+    ) -> Self {
+        let epoch_nanos = clock.now_nanos();
+        Self {
+            label: label.into(),
+            inner,
+            sink,
+            pipe_label: pipe_label.into(),
+            protocol: "http".into(),
+            spigot: deferred_runtime(),
+            drainer: Arc::new(OnceLock::new()),
+            clock,
+            wall_epoch,
+            epoch_nanos,
+            rng: Arc::new(Mutex::new(StdRng::seed_from_u64(rng_seed))),
         }
     }
 
@@ -262,9 +330,10 @@ async fn drain_message(sink: &DynRecordingSink, message: DrainerMessage) {
     }
 }
 
-impl<Inner> SendPipe for RecordUpstream<Inner>
+impl<Inner, Clk> SendPipe for RecordUpstream<Inner, Clk>
 where
     Inner: Handler + Clone,
+    Clk: Clock + Clone + Send + Sync + Unpin + 'static,
 {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -282,12 +351,19 @@ where
             self.protocol.clone(),
             self.spigot.clone(),
             self.drainer.clone(),
+            self.clock.clone(),
+            self.wall_epoch,
+            self.epoch_nanos,
+            self.rng.clone(),
         )
     }
 }
 
 
-impl Pipe for RecordUpstream<ThreadLocalPipeHandle> {
+impl<Clk> Pipe for RecordUpstream<ThreadLocalPipeHandle, Clk>
+where
+    Clk: Clock + Clone + Send + Unpin + 'static,
+{
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
     type Err = ProximaError;
@@ -304,8 +380,52 @@ impl Pipe for RecordUpstream<ThreadLocalPipeHandle> {
             self.protocol.clone(),
             self.spigot.clone(),
             self.drainer.clone(),
+            self.clock.clone(),
+            self.wall_epoch,
+            self.epoch_nanos,
+            self.rng.clone(),
         )
     }
+}
+
+// derives the `InteractionId`'s wall-clock-timestamp component and the
+// `HttpEvent::Started.ts` field from the injected clock, so both are a pure
+// function of `(wall_epoch, epoch_nanos, clock.now_nanos())` instead of a
+// fresh `OffsetDateTime::now_utc()` read — the seam that makes two runs of
+// the same scenario mint identical timestamps under a deterministic clock,
+// while still tracking real wall time under the production `TimeClock`.
+fn wall_clock_now(wall_epoch: OffsetDateTime, epoch_nanos: u64, now_nanos: u64) -> OffsetDateTime {
+    wall_epoch + Duration::from_nanos(now_nanos.saturating_sub(epoch_nanos))
+}
+
+// two `next_u64` draws under one lock acquisition give the 80 bits of
+// randomness `Ulid::from_parts` keeps (it masks away the rest) — see
+// `InteractionId::new()`'s `ulid::Ulid::from_datetime_with_source`, whose
+// same-shaped msb/lsb draw this seeded path replaces.
+fn draw_interaction_random(rng: &Mutex<StdRng>) -> u128 {
+    let mut guard = rng.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let high = u128::from(guard.next_u64());
+    let low = u128::from(guard.next_u64());
+    (high << 64) | low
+}
+
+fn mint_interaction_id(
+    wall_epoch: OffsetDateTime,
+    epoch_nanos: u64,
+    now_nanos: u64,
+    rng: &Mutex<StdRng>,
+) -> (InteractionId, OffsetDateTime) {
+    let ts_start = wall_clock_now(wall_epoch, epoch_nanos, now_nanos);
+    let timestamp_ms = u64::try_from(ts_start.unix_timestamp_nanos() / 1_000_000).unwrap_or(0);
+    let random = draw_interaction_random(rng);
+    (
+        InteractionId::from_ulid(Ulid::from_parts(timestamp_ms, random)),
+        ts_start,
+    )
+}
+
+fn elapsed_ms(now_nanos: u64, started_nanos: u64) -> u64 {
+    now_nanos.saturating_sub(started_nanos) / 1_000_000
 }
 
 
@@ -314,7 +434,11 @@ impl Pipe for RecordUpstream<ThreadLocalPipeHandle> {
 /// every `Handler` automatically a `ThreadLocalHandler`, so a Send Inner
 /// still produces a Send future here and an Rc-based Inner produces a
 /// !Send one.
-async fn record_dispatch<Inner>(
+// four extra params (clock/wall_epoch/epoch_nanos/rng) over the pre-existing
+// seven thread the injected time+rng seam through from `RecordUpstream`'s
+// fields; a wrapper struct would just relocate the same plumbing.
+#[allow(clippy::too_many_arguments)]
+async fn record_dispatch<Inner, Clk>(
     inner: Inner,
     request: Request<Bytes>,
     sink: DynRecordingSink,
@@ -322,14 +446,18 @@ async fn record_dispatch<Inner>(
     protocol: String,
     spigot: DeferredRuntime,
     drainer: DrainerCell,
+    clock: Clk,
+    wall_epoch: OffsetDateTime,
+    epoch_nanos: u64,
+    rng: Arc<Mutex<StdRng>>,
 ) -> Result<Response<Bytes>, ProximaError>
 where
     Inner: Handler + Clone,
+    Clk: Clock + Clone + Send + Sync + Unpin + 'static,
 {
     let cancel = request.context.cancel.clone();
-    let id = InteractionId::new();
-    let ts_start = OffsetDateTime::now_utc();
-    let started = Instant::now();
+    let started_nanos = clock.now_nanos();
+    let (id, ts_start) = mint_interaction_id(wall_epoch, epoch_nanos, started_nanos, &rng);
 
     let sender = match spigot.get() {
         // armed: one drainer per RecordUpstream, spawned once on the
@@ -421,7 +549,8 @@ where
 
     let req_body = wrap_chunked(
         req_chunks,
-        started,
+        clock.clone(),
+        started_nanos,
         id,
         sender.clone(),
         Phase::Request,
@@ -439,7 +568,7 @@ where
     };
     let response = SendPipe::call(&inner, inbound).await?;
 
-    let resp_started_ms = started.elapsed().as_millis() as u64;
+    let resp_started_ms = elapsed_ms(clock.now_nanos(), started_nanos);
     let header_pairs: Vec<(String, String)> = response
         .metadata
         .iter()
@@ -463,7 +592,15 @@ where
     let status = response.status;
     let headers = response.metadata.clone();
     let resp_chunks = response.into_chunk_stream();
-    let resp_body = wrap_chunked(resp_chunks, started, id, sender, Phase::Response, capture);
+    let resp_body = wrap_chunked(
+        resp_chunks,
+        clock,
+        started_nanos,
+        id,
+        sender,
+        Phase::Response,
+        capture,
+    );
     let mut rebuilt =
         Response::new(status).with_stream(ResponseStream::from_chunk_stream(resp_body));
     for (name, value) in headers {
@@ -476,7 +613,9 @@ where
 // Identical body to `record_dispatch` modulo the dispatch trait. Lives separately
 // because the previous `impl<T: Handler> ThreadLocalHandler for T` blanket was removed
 // during the proxima-pipe extraction (coherence issue with downstream wrappers).
-async fn record_dispatch_local<Inner>(
+// same shape as `record_dispatch` above — see its comment.
+#[allow(clippy::too_many_arguments)]
+async fn record_dispatch_local<Inner, Clk>(
     inner: Inner,
     request: Request<Bytes>,
     sink: DynRecordingSink,
@@ -484,14 +623,18 @@ async fn record_dispatch_local<Inner>(
     protocol: String,
     spigot: DeferredRuntime,
     drainer: DrainerCell,
+    clock: Clk,
+    wall_epoch: OffsetDateTime,
+    epoch_nanos: u64,
+    rng: Arc<Mutex<StdRng>>,
 ) -> Result<Response<Bytes>, ProximaError>
 where
     Inner: ThreadLocalHandler + Clone,
+    Clk: Clock + Clone + Send + Unpin + 'static,
 {
     let cancel = request.context.cancel.clone();
-    let id = InteractionId::new();
-    let ts_start = OffsetDateTime::now_utc();
-    let started = Instant::now();
+    let started_nanos = clock.now_nanos();
+    let (id, ts_start) = mint_interaction_id(wall_epoch, epoch_nanos, started_nanos, &rng);
 
     let sender = match spigot.get() {
         // armed: one drainer per RecordUpstream, spawned once on the
@@ -582,7 +725,8 @@ where
 
     let req_body = wrap_chunked(
         req_chunks,
-        started,
+        clock.clone(),
+        started_nanos,
         id,
         sender.clone(),
         Phase::Request,
@@ -600,7 +744,7 @@ where
     };
     let response = Pipe::call(&inner, inbound).await?;
 
-    let resp_started_ms = started.elapsed().as_millis() as u64;
+    let resp_started_ms = elapsed_ms(clock.now_nanos(), started_nanos);
     let header_pairs: Vec<(String, String)> = response
         .metadata
         .iter()
@@ -624,7 +768,15 @@ where
     let status = response.status;
     let headers = response.metadata.clone();
     let resp_chunks = response.into_chunk_stream();
-    let resp_body = wrap_chunked(resp_chunks, started, id, sender, Phase::Response, capture);
+    let resp_body = wrap_chunked(
+        resp_chunks,
+        clock,
+        started_nanos,
+        id,
+        sender,
+        Phase::Response,
+        capture,
+    );
     let mut rebuilt =
         Response::new(status).with_stream(ResponseStream::from_chunk_stream(resp_body));
     for (name, value) in headers {
@@ -633,17 +785,22 @@ where
     Ok(rebuilt)
 }
 
-fn wrap_chunked(
+fn wrap_chunked<Clk>(
     inner: ChunkStream,
-    started: Instant,
+    clock: Clk,
+    started_nanos: u64,
     id: InteractionId,
     sender: mpsc::UnboundedSender<DrainerMessage>,
     phase: Phase,
     capture: Arc<LiveCaptureContext>,
-) -> ChunkStream {
+) -> ChunkStream
+where
+    Clk: Clock + Send + Unpin + 'static,
+{
     Box::pin(ChunkRecorder {
         inner,
-        started,
+        clock,
+        started_nanos,
         id,
         sender: Some(sender),
         phase,
@@ -652,9 +809,10 @@ fn wrap_chunked(
     })
 }
 
-struct ChunkRecorder {
+struct ChunkRecorder<Clk: Clock> {
     inner: ChunkStream,
-    started: Instant,
+    clock: Clk,
+    started_nanos: u64,
     id: InteractionId,
     sender: Option<mpsc::UnboundedSender<DrainerMessage>>,
     phase: Phase,
@@ -662,9 +820,9 @@ struct ChunkRecorder {
     capture: Arc<LiveCaptureContext>,
 }
 
-impl ChunkRecorder {
+impl<Clk: Clock> ChunkRecorder<Clk> {
     fn elapsed_ms(&self) -> u64 {
-        self.started.elapsed().as_millis() as u64
+        elapsed_ms(self.clock.now_nanos(), self.started_nanos)
     }
 
     fn emit_chunk(&mut self, chunk: &Bytes) {
@@ -714,14 +872,14 @@ impl ChunkRecorder {
     }
 }
 
-impl Drop for ChunkRecorder {
+impl<Clk: Clock> Drop for ChunkRecorder<Clk> {
     fn drop(&mut self) {
         // emit end-of-interaction even if the consumer drops mid-stream.
         self.emit_end();
     }
 }
 
-impl Stream for ChunkRecorder {
+impl<Clk: Clock + Send + Unpin + 'static> Stream for ChunkRecorder<Clk> {
     type Item = Result<Bytes, ProximaError>;
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1317,5 +1475,251 @@ mod tests {
             ended_count, 3,
             "all three calls recorded through the single armed drainer"
         );
+    }
+
+    // ── single-connection determinism proof ───────────────────────────────
+    //
+    // One connection, one request/response, through the FULL listener
+    // stack (in-memory duplex socket -> h1 codec -> `RecordUpstream` tee ->
+    // handler -> response) on a virtual clock and a seeded RNG. Runs the
+    // identical scenario `DETERMINISM_RUNS` times and asserts the recorded
+    // JSONL trace is byte-identical every time.
+    //
+    // Scope: single connection, single request/response — proves neither
+    // multi-connection ordering (kernel-determined reactor readiness, a
+    // separate months-scale component) nor prime's reactor timers (this
+    // scenario never awaits one: the h1 driver runs under a bare
+    // `futures::executor::block_on`, no runtime installed, and the only
+    // "clock" consulted anywhere on this path is `RecordUpstream`'s
+    // injected `RecordingClock`).
+    #[cfg(feature = "http1-native")]
+    mod determinism {
+        use super::*;
+        use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+        use proxima_primitives::pipe::clock::testing::RecordingClock;
+        use std::collections::VecDeque;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use time::macros::datetime;
+
+        const DETERMINISM_RUNS: usize = 500;
+        const FIXED_SEED: u64 = 0xC0FF_EE99_DEAD_BEEF;
+        const REQUEST_WIRE: &[u8] = b"POST /echo HTTP/1.1\r\nHost: determinism.local\r\nContent-Length: 13\r\nConnection: close\r\n\r\nhello, proxima";
+
+        // fixed wall-clock literal the deterministic `RecordingClock` is
+        // anchored to (see `RecordUpstream::with_clock`'s `wall_epoch` /
+        // `epoch_nanos` pair) — arbitrary but constant across every run.
+        fn fixed_wall_epoch() -> OffsetDateTime {
+            datetime!(2024-01-01 00:00:00 UTC)
+        }
+
+        // echoes the request body back as the response body — exercises the
+        // request-chunk AND response-chunk recording paths, not just a bare
+        // status/headers round trip.
+        struct EchoPipe;
+
+        impl SendPipe for EchoPipe {
+            type In = Request<Bytes>;
+            type Out = Response<Bytes>;
+            type Err = ProximaError;
+
+            fn call(
+                &self,
+                request: Request<Bytes>,
+            ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+                async move {
+                    let (_, body) = request.body_bytes().await?;
+                    Ok(Response::new(200)
+                        .with_body(body)
+                        .with_header("content-type", "text/plain"))
+                }
+            }
+        }
+
+        /// Byte queue shared by one direction of [`test_duplex`]. Mirrors
+        /// `proxima-http/src/http1/serve.rs`'s private test-only duplex —
+        /// `futures` (unlike `tokio`) ships no `io::duplex`, and that one is
+        /// `#[cfg(test)]`-private to a different crate, so this integration
+        /// test needs its own copy of the same minimal scaffolding.
+        #[derive(Default)]
+        struct DuplexBuf {
+            bytes: VecDeque<u8>,
+            closed: bool,
+            waker: Option<Waker>,
+        }
+
+        struct DuplexHalf {
+            read_buf: Arc<std::sync::Mutex<DuplexBuf>>,
+            write_buf: Arc<std::sync::Mutex<DuplexBuf>>,
+        }
+
+        fn test_duplex() -> (DuplexHalf, DuplexHalf) {
+            let a_to_b = Arc::new(std::sync::Mutex::new(DuplexBuf::default()));
+            let b_to_a = Arc::new(std::sync::Mutex::new(DuplexBuf::default()));
+            (
+                DuplexHalf {
+                    read_buf: b_to_a.clone(),
+                    write_buf: a_to_b.clone(),
+                },
+                DuplexHalf {
+                    read_buf: a_to_b,
+                    write_buf: b_to_a,
+                },
+            )
+        }
+
+        impl AsyncRead for DuplexHalf {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut [u8],
+            ) -> Poll<std::io::Result<usize>> {
+                let mut guard = self.read_buf.lock().unwrap();
+                if guard.bytes.is_empty() {
+                    if guard.closed {
+                        return Poll::Ready(Ok(0));
+                    }
+                    guard.waker = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+                let take = guard.bytes.len().min(buf.len());
+                for slot in buf.iter_mut().take(take) {
+                    *slot = guard.bytes.pop_front().expect("checked len above");
+                }
+                Poll::Ready(Ok(take))
+            }
+        }
+
+        impl AsyncWrite for DuplexHalf {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                let mut guard = self.write_buf.lock().unwrap();
+                guard.bytes.extend(buf.iter().copied());
+                if let Some(waker) = guard.waker.take() {
+                    waker.wake();
+                }
+                Poll::Ready(Ok(buf.len()))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                let mut guard = self.write_buf.lock().unwrap();
+                guard.closed = true;
+                if let Some(waker) = guard.waker.take() {
+                    waker.wake();
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl Drop for DuplexHalf {
+            fn drop(&mut self) {
+                let mut guard = self.write_buf.lock().unwrap();
+                guard.closed = true;
+                if let Some(waker) = guard.waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+
+        // one full pass of the scenario: fresh tempdir, fresh `RecordingClock`
+        // pinned to nanos=0, fresh armed spigot (real background pool, no
+        // per-call `std::thread::spawn` fallback), one connection, one
+        // request/response, then the raw recorded JSONL bytes off disk.
+        fn run_once() -> Vec<u8> {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("trace.jsonl");
+            let spigot = armed_spigot();
+            let durable = Arc::new(LazyFanOut::new(
+                vec![SinkSpec::new(path.to_string_lossy(), FormatKind::Json)],
+                spigot.clone(),
+            ));
+            let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(durable));
+            let inner: PipeHandle = into_handle(EchoPipe);
+            let clock = RecordingClock::new();
+            let concrete = Arc::new(
+                RecordUpstream::with_clock(
+                    "determinism",
+                    inner,
+                    sink,
+                    "determinism",
+                    clock,
+                    fixed_wall_epoch(),
+                    FIXED_SEED,
+                )
+                .with_runtime(spigot),
+            );
+            let dispatch: PipeHandle = into_handle(concrete.clone());
+
+            let (server_half, mut client_half) = test_duplex();
+            let server = crate::serve_h1_connection(server_half, dispatch, None, None);
+            let client = async move {
+                client_half
+                    .write_all(REQUEST_WIRE)
+                    .await
+                    .expect("client write");
+                let mut response = Vec::new();
+                client_half
+                    .read_to_end(&mut response)
+                    .await
+                    .expect("client read");
+                response
+            };
+            let (server_result, response) =
+                futures::executor::block_on(futures::future::join(server, client));
+            server_result.expect("serve_h1_connection should complete");
+            assert!(
+                String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"),
+                "sanity: the scenario must actually produce a 200 response"
+            );
+
+            futures::executor::block_on(concrete.flush()).expect("flush");
+            std::fs::read(&path).expect("read recorded trace")
+        }
+
+        // first index at which two byte buffers differ (or the length of the
+        // shorter one, if one is a prefix of the other) — the pinpoint this
+        // proof needs to name a real diverging leak instead of just failing.
+        fn first_divergence(expected: &[u8], actual: &[u8]) -> Option<usize> {
+            if expected == actual {
+                return None;
+            }
+            let shared = expected.len().min(actual.len());
+            (0..shared)
+                .find(|&index| expected[index] != actual[index])
+                .or(Some(shared))
+        }
+
+        #[test]
+        fn single_connection_trace_is_byte_identical_across_n_runs() {
+            let baseline = run_once();
+            assert!(!baseline.is_empty(), "recorded trace must not be empty");
+
+            for run_index in 1..DETERMINISM_RUNS {
+                let candidate = run_once();
+                if let Some(offset) = first_divergence(&baseline, &candidate) {
+                    let window = 32;
+                    let baseline_start = offset.saturating_sub(window);
+                    let candidate_start = offset.saturating_sub(window);
+                    let baseline_snippet = String::from_utf8_lossy(
+                        &baseline[baseline_start..(offset + window).min(baseline.len())],
+                    );
+                    let candidate_snippet = String::from_utf8_lossy(
+                        &candidate[candidate_start..(offset + window).min(candidate.len())],
+                    );
+                    panic!(
+                        "run {run_index} diverged from run 0 at byte {offset}\n  \
+                         run 0:  ...{baseline_snippet}...\n  \
+                         run {run_index}: ...{candidate_snippet}..."
+                    );
+                }
+            }
+        }
     }
 }
