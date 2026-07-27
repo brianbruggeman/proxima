@@ -68,7 +68,12 @@ declare -a cells=(
     # bare-metal lifts — lib must compile no_std+alloc on thumbv7m
     "proxima-patterns control_plane std (folded proxima-control-plane)|cargo build -p proxima-patterns"
     "proxima-patterns control_plane no_std+alloc on thumbv7m|cargo build -p proxima-patterns --no-default-features --features alloc,control_plane --lib --target thumbv7m-none-eabi"
-    "proxima-patterns control_plane nextest|cargo nextest run -p proxima-patterns -E 'test(control_plane::)'"
+    # the `-E 'test(control_plane::)'` filter this cell used to carry only
+    # asserted 7 of the crate's 67 default-feature tests -- alert/balancer/
+    # middleware/kv (default-on siblings of control_plane, same default
+    # feature set already compiled by the build cells above) were silently
+    # never asserted by any gate. Unfiltered: same features, full suite.
+    "proxima-patterns full default-feature suite (alert/balancer/middleware/control_plane/kv)|cargo nextest run -p proxima-patterns"
 
     "proxima-primitives shutdown std (folded proxima-shutdown)|cargo build -p proxima-primitives"
     "proxima-primitives shutdown ResourceRegistry no_std+alloc on thumbv7m|cargo build -p proxima-primitives --no-default-features --features alloc --lib --target thumbv7m-none-eabi"
@@ -99,6 +104,10 @@ declare -a cells=(
     "proxima-listen stream (folded listeners-stream) conflag bridge|cargo nextest run -p proxima-listen --features stream -E 'test(stream::)'"
     "proxima-listen conflag bridge|cargo nextest run -p proxima-listen"
     "proxima-http listener (folded listeners-http) conflag bridge|cargo nextest run -p proxima-http --features http-listener -E 'test(listener::)'"
+    # `tls` (listener-side TLS termination) is a separate feature from
+    # `http-listener` above and was never run under nextest anywhere in CI --
+    # the `-E 'test(listener::)'` filter above doesn't reach it either.
+    "proxima-http tls (listener-side TLS termination)|cargo nextest run -p proxima-http --features tls"
 
     # doctests — nextest skips them by design, and none of the cells above
     # exercise --doc. `cargo test --doc` exits 0 on a vacuous "0 passed" run
