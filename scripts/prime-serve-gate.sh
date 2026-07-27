@@ -13,15 +13,21 @@
 #   4. serve_parity runs: byte-parity prime==tokio + the 2 MiB streaming
 #      vector + the reactor-absence proof (Handle::try_current is Err on
 #      the prime serve path)
-#   5. full umbrella suite is green on the prime default
-#   6. doctests must be fully green on default features — the command a
+#   5. full umbrella suite is green on the prime default — this runs with
+#      NO features, so anything gated behind a feature off by default
+#      (e.g. http1-native) never compiles here and is invisible to this
+#      step alone; step 6 exists because of that
+#   6. the single-connection determinism proof (upstreams::record::tests::
+#      determinism) runs under http1-native, the feature it needs to even
+#      compile — step 5 alone silently never builds it, let alone runs it
+#   7. doctests must be fully green on default features — the command a
 #      contributor actually runs (`cargo test --doc -p proxima`) never
 #      shows red for a known, accepted gap; doctests whose backing
 #      feature is off are `ignore`d at the source (`#[cfg_attr]` on the
 #      fence), not silently failing
-#   7. those same doctests execute and pass for real under the feature
+#   8. those same doctests execute and pass for real under the feature
 #      set that registers every listener/client example (`nextest`
-#      skips doctests by design, so steps 6/7 are the only place they
+#      skips doctests by design, so steps 7/8 are the only place they
 #      run); either step reporting zero passed fails the gate instead
 #      of looking like success
 #
@@ -59,6 +65,33 @@ doctest_check() {
     printf 'doctests passed (%s): %s\n' "${label}" "${passed_count}"
 }
 
+# runs an `-E`-filtered `cargo nextest run -p proxima` (plus any extra
+# args), then fails loudly if the reported passed count is zero or absent.
+# Verified empirically: with nextest's current default (`--no-tests=warn`),
+# a filter matching zero tests still exits 0 ("warning: no tests to run --
+# this will become an error in the future") — the same failure mode
+# `doctest_check` above guards against, just on the nextest side instead of
+# `cargo test --doc`. This is how a feature-gated test module (needing
+# http1-native to even compile) went unnoticed by step 5's bare nextest
+# run: nothing about that run's exit code or "PASS" banner distinguishes
+# "343 tests, all green" from "343 tests, all green, plus 1 more that was
+# never in the binary at all".
+nextest_filter_check() {
+    local label="$1" filter="$2"
+    shift 2
+    printf '\n-- nextest (%s) --\n' "${label}"
+    local nextest_output
+    nextest_output="$(cargo nextest run -p proxima -E "${filter}" "$@" 2>&1)"
+    printf '%s\n' "${nextest_output}"
+    local passed_count
+    passed_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests? run: [0-9]+ passed' | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
+    if [ -z "${passed_count}" ] || [ "${passed_count}" -eq 0 ]; then
+        printf 'ERROR: proxima nextest (%s) reported zero passed -- an empty filter is not a pass\n' "${label}" >&2
+        exit 1
+    fi
+    printf 'nextest passed (%s): %s\n' "${label}" "${passed_count}"
+}
+
 printf '\n== prime-serve gate ==\n'
 
 printf '\n-- 1. default build = prime --\n'
@@ -82,10 +115,13 @@ cargo nextest run -p proxima --test serve_parity --features "${prime_feats}"
 printf '\n-- 5. full umbrella suite on the prime default --\n'
 cargo nextest run -p proxima
 
-printf '\n-- 6. doctests on default features (must be fully green) --\n'
+printf '\n-- 6. determinism proof (requires http1-native; step 5 alone never compiles it) --\n'
+nextest_filter_check "record::tests::determinism, http1-native" 'test(record::tests::determinism)' --features http1-native
+
+printf '\n-- 7. doctests on default features (must be fully green) --\n'
 doctest_check "default features"
 
-printf '\n-- 7. doctests under %s (exercises the feature-gated examples) --\n' "${doctest_feats}"
+printf '\n-- 8. doctests under %s (exercises the feature-gated examples) --\n' "${doctest_feats}"
 doctest_check "${doctest_feats}" --features "${doctest_feats}"
 
 printf '\n== prime-serve gate: PASS ==\n'
