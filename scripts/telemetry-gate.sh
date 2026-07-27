@@ -10,14 +10,19 @@
 # steps:
 #   1. default build + clippy --all-targets -D warnings (pedantic, workspace lints)
 #   2. default test suite (emit, MPSC+MPMC ring, drain, capture, native encode
-#      parity, AND the lossless-backpressure proofs: elastic producer-assist
-#      no-hang with no drainer, zero-drop under saturation, shutdown flush,
-#      managed-drainer pump). a backpressure hang regression is caught by the
-#      scoped nextest terminate-after in .config/nextest.toml.
-#   3. otlp-http build + tests (adds the OTLP protobuf parity vectors)
-#   4. feature-tier builds compile (tracing-init / macros / histogram / otlp-grpc)
-#   5. no_std tier marker builds (--no-default-features)
-#   6. doctests under otlp-http (the superset feature the crate's examples
+#      parity)
+#   3. the lossless-backpressure proofs (elastic producer-assist no-hang with
+#      no drainer, zero-drop under saturation, shutdown flush, managed-drainer
+#      pump) — `lossless-backpressure` is its own default-off feature, NOT
+#      part of step 2's default suite, so it needs its own nextest run or it
+#      compiles under nothing and never executes (this step used to be
+#      (mis)documented as part of step 2; it wasn't). a backpressure hang
+#      regression is caught by the scoped nextest terminate-after in
+#      .config/nextest.toml.
+#   4. otlp-http build + tests (adds the OTLP protobuf parity vectors)
+#   5. feature-tier builds compile (tracing-init / macros / histogram / otlp-grpc)
+#   6. no_std tier marker builds (--no-default-features)
+#   7. doctests under otlp-http (the superset feature the crate's examples
 #      need; nextest skips doctests by design, so this is the only place
 #      they execute) — a run reporting zero passed doctests fails the
 #      gate instead of looking like success
@@ -60,7 +65,11 @@ cargo clippy -p "${crate}" --all-targets -- -D warnings
 printf '\n-- 2. default test suite --\n'
 cargo nextest run -p "${crate}"
 
-printf '\n-- 3. otlp-http build + clippy + parity vectors --\n'
+printf '\n-- 3. lossless-backpressure proofs (own feature, not covered by step 2) --\n'
+cargo build -p "${crate}" --features lossless-backpressure
+cargo nextest run -p "${crate}" --features lossless-backpressure
+
+printf '\n-- 4. otlp-http build + clippy + parity vectors --\n'
 cargo build -p "${crate}" --features otlp-http
 cargo clippy -p "${crate}" --features otlp-http --all-targets -- -D warnings
 cargo nextest run -p "${crate}" --features otlp-http
@@ -72,16 +81,16 @@ cargo nextest run -p "${crate}" --features otlp-http
 #     "test-prime,otlp-http,http-prime,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool,tcp" \
 #     --test otlp_send_prime_e2e
 
-printf '\n-- 4. feature-tier builds compile --\n'
+printf '\n-- 5. feature-tier builds compile --\n'
 for feat in tracing-init macros histogram otlp-grpc tee-generic; do
     printf '   features=%s\n' "${feat}"
     cargo build -p "${crate}" --features "${feat}"
 done
 
-printf '\n-- 5. no_std tier marker builds --\n'
+printf '\n-- 6. no_std tier marker builds --\n'
 cargo build -p "${crate}" --no-default-features
 
-printf '\n-- 6. doctests (otlp-http) --\n'
+printf '\n-- 7. doctests (otlp-http) --\n'
 doctest_check "otlp-http" --features otlp-http
 
 printf '\n== telemetry gate: PASS ==\n'
