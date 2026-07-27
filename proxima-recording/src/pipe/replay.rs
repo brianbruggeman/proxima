@@ -191,17 +191,23 @@ impl ReplayConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Instant;
 
     use crate::event::{FrameMetadata, HttpEvent, InteractionId, ProtocolEvent, RecordingEvent};
     use crate::{BinFormat, BinSource};
     use bytes::Bytes;
     use futures::stream::StreamExt;
     use futures::task::noop_waker;
+    use prime::os::core_shard;
     use prime::os::runtime::PrimeRuntime;
+    use proxima_clock::coarse::TickCell;
+    use proxima_clock::ticks::Ticks;
     use proxima_primitives::pipe::SendPipe;
     use proxima_primitives::pipe::clock::testing::MockClock;
-    use proxima_runtime::Runtime;
+    use proxima_runtime::{CoreId, Runtime};
     use std::task::{Context, Poll};
 
     use crate::source::{RecordingEventStream, RecordingSource};
@@ -255,6 +261,20 @@ mod tests {
         }
     }
 
+    // same shape as `chunk`, but for a payload size only known at runtime
+    // (varying per event in the multi-connection fixture below).
+    fn chunk_owned(id: InteractionId, ts_ms: u64, data: Vec<u8>) -> RecordingEvent {
+        RecordingEvent {
+            id,
+            ts_ms,
+            parent: None,
+            event: ProtocolEvent::Http(HttpEvent::ResponseChunk {
+                data: Bytes::from(data),
+                metadata: FrameMetadata::new(),
+            }),
+        }
+    }
+
     // record three events with KNOWN ts_ms deltas (10ms, then 25ms) to a real
     // bin recording, returning the recording path + the runtime that reads it.
     fn record_three(path: &std::path::Path, runtime: &Arc<dyn Runtime>) -> Vec<RecordingEvent> {
@@ -264,6 +284,54 @@ mod tests {
             chunk(id, 110, b"second"),
             chunk(id, 135, b"third"),
         ];
+        futures::executor::block_on(async {
+            let writer = AppendLog::open(
+                path,
+                Box::new(BinFormat::new().unwrap()),
+                Arc::clone(runtime),
+            )
+            .unwrap();
+            writer.call(events.clone()).await.unwrap();
+            writer.flush().await.unwrap();
+        });
+        events
+    }
+
+    // several interleaved connections, non-uniform inter-arrival gaps (short
+    // keepalive-style ticks mixed with multi-second bursts) and varying
+    // payload sizes, spanning at least 32 recorded seconds — the fixture the
+    // memory-speed replay test proves spacing preservation against. Built
+    // through the same real AppendLog/BinFormat path as `record_three`, not
+    // hand-written JSON.
+    fn record_multi_connection_trace(
+        path: &std::path::Path,
+        runtime: &Arc<dyn Runtime>,
+    ) -> Vec<RecordingEvent> {
+        const CONNECTION_COUNT: usize = 4;
+        const MINIMUM_SPAN_MILLIS: u64 = 32_000;
+        const DELTA_PATTERN_MILLIS: [u64; 12] =
+            [15, 750, 40, 3200, 90, 2500, 20, 4800, 300, 60, 1800, 10];
+        const PAYLOAD_SIZE_PATTERN: [usize; 10] =
+            [64, 512, 128, 4096, 256, 1024, 32, 2048, 96, 768];
+
+        let connections: Vec<InteractionId> = (0..CONNECTION_COUNT)
+            .map(|_| InteractionId::new())
+            .collect();
+
+        let mut events = Vec::new();
+        let mut ts_ms = 0_u64;
+        let mut step = 0_usize;
+        loop {
+            ts_ms += DELTA_PATTERN_MILLIS[step % DELTA_PATTERN_MILLIS.len()];
+            let connection = connections[(step * 3 + 1) % CONNECTION_COUNT];
+            let payload_size = PAYLOAD_SIZE_PATTERN[step % PAYLOAD_SIZE_PATTERN.len()];
+            events.push(chunk_owned(connection, ts_ms, vec![0x5A; payload_size]));
+            step += 1;
+            if ts_ms >= MINIMUM_SPAN_MILLIS {
+                break;
+            }
+        }
+
         futures::executor::block_on(async {
             let writer = AppendLog::open(
                 path,
@@ -433,5 +501,105 @@ mod tests {
         let replay =
             TimedReplay::new(source, ReplayMode::CausalOrder).mode(ReplayMode::TimingIntact);
         assert_eq!(replay.replay_mode(), ReplayMode::TimingIntact);
+    }
+
+    // ── timing-intact at memory speed: virtual-clocked prime shard ───────────
+    //
+    // `TimedReplay<TimeClock>` is the production type — no bespoke virtual
+    // clock capability. `TimeClock::delay` resolves through
+    // `proxima_core::time::sleep`, which (this crate's dev-dependency on
+    // `proxima-core` builds against the `time-driver-prime-wheel` external
+    // driver) routes through the calling worker's own `TimerWheel`. Running
+    // the replay as a task dispatched onto a `launch_with_virtual_clock`
+    // shard means every `Clock::delay` call it makes resolves through that
+    // SAME wheel, auto-advanced by prime's existing idle-park hook — no new
+    // waker, no parallel timer mechanism.
+
+    #[test]
+    fn timing_intact_replays_a_thirty_second_trace_at_memory_speed_on_a_virtual_prime_shard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi_connection.bin");
+        let runtime = prime();
+        let written = record_multi_connection_trace(&path, &runtime);
+        let recorded_span_ms = written.last().unwrap().ts_ms - written.first().unwrap().ts_ms;
+        assert!(
+            recorded_span_ms >= 30_000,
+            "fixture must span at least 30 recorded seconds, spans {recorded_span_ms}ms"
+        );
+
+        let recorded = read_back(&path, &runtime);
+        assert_eq!(
+            recorded, written,
+            "read-back yields the real recorded events"
+        );
+
+        let source: DynRecordingSource = Arc::new(InMemorySource { events: recorded });
+        let replay = TimedReplay::new(source, ReplayMode::TimingIntact);
+
+        let cell = Arc::new(TickCell::new(Ticks::ZERO));
+        let shard = core_shard::launch_with_virtual_clock(CoreId(9001), None, 2, 16, cell)
+            .expect("launch virtual-clocked prime shard");
+
+        let captured: Arc<Mutex<Vec<(u64, RecordingEvent)>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_task = Arc::clone(&captured);
+        let (done_sender, done_receiver) = mpsc::channel::<()>();
+
+        shard
+            .dispatch_factory(Box::new(move || {
+                Box::pin(async move {
+                    let mut events = replay.events();
+                    while let Some(item) = events.next().await {
+                        let event = item.expect("replayed event");
+                        let tick = core_shard::current_tick();
+                        captured_for_task
+                            .lock()
+                            .expect("captured mutex poisoned")
+                            .push((tick, event));
+                    }
+                    let _ = done_sender.send(());
+                }) as Pin<Box<dyn Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch replay factory");
+
+        let started = Instant::now();
+        done_receiver.recv_timeout(Duration::from_secs(2)).expect(
+            "replay of a 32-simulated-second trace must complete via virtual auto-advance \
+                 alone; a real wait would take over 30s and blow well past this 2s bound",
+        );
+        let elapsed = started.elapsed();
+
+        shard
+            .shutdown_and_join()
+            .expect("shutdown virtual-clocked shard");
+
+        let captured = captured.lock().expect("captured mutex poisoned").clone();
+        let replayed_events: Vec<RecordingEvent> = captured
+            .iter()
+            .map(|(_tick, event)| event.clone())
+            .collect();
+        assert_eq!(
+            replayed_events, written,
+            "relative ordering of replayed events must match the recording exactly"
+        );
+
+        for index in 1..captured.len() {
+            let (previous_tick, _) = captured[index - 1];
+            let (current_tick, _) = captured[index];
+            let recorded_delta = written[index]
+                .ts_ms
+                .saturating_sub(written[index - 1].ts_ms);
+            let simulated_delta = current_tick.saturating_sub(previous_tick);
+            assert_eq!(
+                simulated_delta, recorded_delta,
+                "event {index} must be replayed {recorded_delta} simulated ms after its \
+                 predecessor, not collapsed to zero"
+            );
+        }
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "a {recorded_span_ms}ms recording must replay in well under 500ms of wall time, \
+             took {elapsed:?}"
+        );
     }
 }

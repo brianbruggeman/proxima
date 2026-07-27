@@ -72,13 +72,27 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "fs"]
 # runtime-swap parity harness: drives the same seam against the prime backend
 # (via `prime` below) and the tokio-backed proxima-runtime backend.
 proxima-runtime = { workspace = true, features = ["tokio"] }
-prime = { workspace = true }
+# `runtime-prime-virtual-clock` promotes `core_shard::launch_with_virtual_clock`
+# (see prime/src/os/core_shard.rs) so the timing-intact replay test can drive
+# a virtual-clocked prime shard from this crate's own test binary.
+prime = { workspace = true, features = ["runtime-prime-virtual-clock"] }
 futures = { workspace = true, features = ["executor"] }
-proxima-core = { workspace = true, features = ["time-driver-mock"] }
+# `time-driver-prime-wheel` alongside the existing `time-driver-mock`: the
+# latter still gates `pipe::clock::testing`'s MockClock/RecordingClock
+# (a per-instance seam, untouched by which driver wins BOUND_DRIVER); the
+# former makes the production `TimeClock` (proxima_core::time::sleep) route
+# through prime's per-worker TimerWheel instead of the panics-on-use unbound
+# driver, so `TimedReplay<TimeClock>` resolves its Clock::delay calls on a
+# virtual-clocked shard's own wheel — build.rs's driver-selection precedence
+# picks prime-wheel over mock when both features are active.
+proxima-core = { workspace = true, features = ["time-driver-mock", "time-driver-prime-wheel"] }
 # proxima-primitives' canonical `Clock` test doubles
 # (`pipe::clock::testing::{MockClock, RecordingClock}`), built over the
 # MockDriver above — see `proxima-primitives/src/pipe/clock.rs`.
 proxima-primitives = { workspace = true, features = ["test-support"] }
+# TickCell/Ticks — the virtual-clock cell a `launch_with_virtual_clock` shard
+# reads instead of `Instant::now()`.
+proxima-clock = { workspace = true }
 time = { workspace = true, features = ["formatting", "parsing", "macros", "serde", "serde-human-readable"] }
 toml = { workspace = true }
 
