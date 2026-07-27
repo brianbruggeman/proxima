@@ -4,11 +4,13 @@
 //! 3 Arc clones (cores/clock/sampler), 2 ID generations, 2 `clock.now_ns()`
 //! (start + duration), a tag push, build a SpanRecord, ring push.
 //!
-//! This isolates the clock cost: the default `SystemClock` calls
-//! `SystemTime::now()` twice per span; a `MonotonicCounter` is a single relaxed
-//! atomic add. The gap is the syscall/VDSO time-read cost per span. Drain is
-//! cleared in setup so every push lands (we measure successful emit, not
-//! drop-on-full).
+//! This isolates the clock cost: the default `SystemClock` reads
+//! `std::time::Instant` twice per span and extrapolates each reading against a
+//! wall anchor (`SystemTime::now()` runs once, ever, at first use — see
+//! `recorder::system_clock_anchor` — not per span); a `MonotonicCounter` is a
+//! single relaxed atomic add. The gap is the syscall/VDSO time-read cost per
+//! span. Drain is cleared in setup so every push lands (we measure successful
+//! emit, not drop-on-full).
 
 use std::hint::black_box;
 
