@@ -302,10 +302,15 @@ impl AppBuilder {
     /// `#[proxima::main]` runtime — see `resolve_runtime_selection`'s
     /// precedence doc in `src/app.rs`.
     ///
+    /// `RuntimeSelection::prime` is the constructor shown below because it's
+    /// always available under default features; `RuntimeSelection::tokio`
+    /// is the same shape but requires the `runtime-tokio` feature (off by
+    /// default — see that feature's Cargo.toml doc).
+    ///
     /// ```no_run
     /// # use proxima::App;
     /// # use proxima::runtime::RuntimeSelection;
-    /// let selection = RuntimeSelection::tokio(2)?;
+    /// let selection = RuntimeSelection::prime(2)?;
     /// let app = App::builder()
     ///     .runtime(selection)
     ///     .with_defaults()?
