@@ -64,3 +64,69 @@ fn virtual_clock_fires_timer_from_outside_prime_with_zero_wall_clock_sleep() {
         );
     handle.shutdown_and_join().expect("shutdown");
 }
+
+/// Part 2, proven from outside prime: three tasks sleeping for 1s, 5s and
+/// 30s of SIMULATED time all complete in single-digit-to-low-hundreds of
+/// milliseconds of WALL time, in deadline order — with NO `cell.set` call
+/// anywhere in this test. The worker's own idle-park hook advances the
+/// clock to the earliest pending deadline automatically; a downstream
+/// caller gets this for free just by using `launch_with_virtual_clock`.
+#[test]
+fn auto_advance_orders_multiple_simulated_sleeps_from_outside_prime() {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    const ONE_SECOND_MILLIS: u64 = 1_000;
+    const FIVE_SECONDS_MILLIS: u64 = 5_000;
+    const THIRTY_SECONDS_MILLIS: u64 = 30_000;
+
+    let cell = Arc::new(TickCell::new(Ticks::ZERO));
+    let handle = core_shard::launch_with_virtual_clock(CoreId(211), None, 2, 16, cell)
+        .expect("launch virtual-clock worker from outside prime");
+
+    let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+
+    // dispatch order deliberately scrambled relative to deadline order —
+    // completion order must reflect DEADLINE order, not dispatch order.
+    for deadline in [THIRTY_SECONDS_MILLIS, ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS] {
+        let order_for_task = order.clone();
+        let done_tx_for_task = done_tx.clone();
+        handle
+            .dispatch_factory(Box::new(move || {
+                Box::pin(async move {
+                    core_shard::timer_at(deadline).await;
+                    order_for_task
+                        .lock()
+                        .expect("order mutex poisoned")
+                        .push(deadline);
+                    let _ = done_tx_for_task.send(());
+                }) as Pin<Box<dyn Future<Output = ()> + 'static>>
+            }))
+            .expect("dispatch sleeper factory");
+    }
+    drop(done_tx);
+
+    let started = Instant::now();
+    for _ in 0..3 {
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect(
+                "all three simulated sleeps (1s/5s/30s) must complete via auto-advance \
+                 alone; a real wait would take 36s and blow well past this 2s bound",
+            );
+    }
+    let elapsed = started.elapsed();
+
+    handle.shutdown_and_join().expect("shutdown");
+
+    assert_eq!(
+        *order.lock().expect("order mutex poisoned"),
+        vec![ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS, THIRTY_SECONDS_MILLIS],
+        "completion order must match simulated deadline order (1s, then 5s, then 30s)",
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "36 simulated seconds must resolve in well under 500ms of wall clock (got {elapsed:?})",
+    );
+}
