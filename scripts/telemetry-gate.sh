@@ -17,6 +17,10 @@
 #   3. otlp-http build + tests (adds the OTLP protobuf parity vectors)
 #   4. feature-tier builds compile (tracing-init / macros / histogram / otlp-grpc)
 #   5. no_std tier marker builds (--no-default-features)
+#   6. doctests under otlp-http (the superset feature the crate's examples
+#      need; nextest skips doctests by design, so this is the only place
+#      they execute) — a run reporting zero passed doctests fails the
+#      gate instead of looking like success
 #
 # this script never modifies the discipline log; sealing a row is a manual read
 # of the bench output. the ring data-race proof (ThreadSanitizer, MPSC + MPMC)
@@ -26,6 +30,26 @@
 set -euo pipefail
 
 crate="proxima-telemetry"
+
+# runs `cargo test --doc -p <crate>` (plus any extra args), then fails loudly
+# if the reported passed count is zero or absent — `cargo test --doc` exits 0
+# on a vacuous "0 passed" run, which is exactly how a feature-gating mistake
+# hides as green (see proxima's scripts/prime-serve-gate.sh for the proof).
+doctest_check() {
+    local label="$1"
+    shift
+    printf '\n-- doctests (%s) --\n' "${label}"
+    local doctest_output
+    doctest_output="$(cargo test --doc -p "${crate}" "$@" 2>&1)"
+    printf '%s\n' "${doctest_output}"
+    local passed_count
+    passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
+    if [ -z "${passed_count}" ] || [ "${passed_count}" -eq 0 ]; then
+        printf 'ERROR: %s doctests (%s) reported zero passed -- an empty run is not a pass\n' "${crate}" "${label}" >&2
+        exit 1
+    fi
+    printf 'doctests passed (%s): %s\n' "${label}" "${passed_count}"
+}
 
 printf '\n== telemetry gate ==\n'
 
@@ -56,5 +80,8 @@ done
 
 printf '\n-- 5. no_std tier marker builds --\n'
 cargo build -p "${crate}" --no-default-features
+
+printf '\n-- 6. doctests (otlp-http) --\n'
+doctest_check "otlp-http" --features otlp-http
 
 printf '\n== telemetry gate: PASS ==\n'

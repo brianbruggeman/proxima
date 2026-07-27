@@ -99,6 +99,20 @@ declare -a cells=(
     "proxima-listen stream (folded listeners-stream) conflag bridge|cargo nextest run -p proxima-listen --features stream -E 'test(stream::)'"
     "proxima-listen conflag bridge|cargo nextest run -p proxima-listen"
     "proxima-http listener (folded listeners-http) conflag bridge|cargo nextest run -p proxima-http --features http-listener -E 'test(listener::)'"
+
+    # doctests — nextest skips them by design, and none of the cells above
+    # exercise --doc. `cargo test --doc` exits 0 on a vacuous "0 passed" run
+    # (verified empirically), so each cell greps its own output for a
+    # nonzero count instead of trusting the exit code alone; `tee /dev/stderr`
+    # keeps the raw doctest output visible in the CI log.
+    # proxima-core/proxima-patterns/proxima-recording carry zero doctests
+    # under every feature this gate exercises (verified) -- omitted rather
+    # than added as a permanently-vacuous, always-failing cell.
+    # proxima-telemetry's doctests are covered in scripts/telemetry-gate.sh,
+    # its own dedicated gate -- not duplicated here.
+    "proxima-primitives doctests|cargo test --doc -p proxima-primitives 2>&1 | tee /dev/stderr | grep -qE 'test result: ok\\. [1-9][0-9]* passed'"
+    "proxima-listen doctests|cargo test --doc -p proxima-listen --features stream 2>&1 | tee /dev/stderr | grep -qE 'test result: ok\\. [1-9][0-9]* passed'"
+    "proxima-http doctests (http-listener)|cargo test --doc -p proxima-http --features http-listener 2>&1 | tee /dev/stderr | grep -qE 'test result: ok\\. [1-9][0-9]* passed'"
 )
 
 passed=0
