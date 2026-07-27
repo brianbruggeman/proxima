@@ -4368,6 +4368,7 @@ dependencies = [
  "prometheus 0.14.0",
  "prost",
  "proxima",
+ "proxima-clock",
  "proxima-core",
  "proxima-macros",
  "proxima-primitives",

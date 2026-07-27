@@ -42,6 +42,7 @@ tracing-subscriber = { workspace = true, optional = true, features = ["env-filte
 atomic-waker = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true, optional = true }
 pin-project-lite.workspace = true
+proxima-clock = { workspace = true, optional = true }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support"] }
@@ -116,6 +117,12 @@ std = [
     # satellite crate) — arc-swap/dashmap already above; adds Notify +
     # the retained-line ring queue.
     "dep:crossbeam-queue",
+    # SystemClock's monotonic-to-wall-clock bridge (recorder/mod.rs, the
+    # crate's std boundary) — proxima-clock's core tier (Ticks/UnixNanos/
+    # AnchorCell/ToUnixNanos) is no_std + no-alloc itself, but SystemClock
+    # only exists under `std` (it wraps `std::time::Instant`), so the dep
+    # is gated here rather than at `alloc`.
+    "dep:proxima-clock",
 ]
 histogram    = ["std"]
 # instrument-metrics: the unified-instrument seam — a span's close also records its

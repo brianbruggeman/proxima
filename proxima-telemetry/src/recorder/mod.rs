@@ -19,7 +19,7 @@ use core::time::Duration;
 use core::sync::atomic::AtomicU64;
 #[cfg(any(feature = "lossless-backpressure", feature = "instrument-metrics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "lossless-backpressure")]
 use atomic_waker::AtomicWaker;
@@ -34,7 +34,12 @@ use proxima_core::park::SlotPark;
 #[cfg(feature = "lossless-backpressure")]
 use std::sync::{Condvar, Mutex};
 
+use proxima_clock::anchor::{AnchorCell, ToUnixNanos};
+use proxima_clock::ticks::Ticks;
+use proxima_clock::unix_nanos::UnixNanos;
 use proxima_core::live::{Live, LiveControl, live};
+use proxima_primitives::block_on;
+use proxima_primitives::pipe::primitives::Pipe;
 
 pub use bags::{Baggage, Resource, ScopeHandle};
 pub use drainer::Drainer;
@@ -2122,27 +2127,73 @@ impl<Clk: Clock + Default> RecorderBuilder<HasPipe, Clk> {
     }
 }
 
-/// The real wall clock: reads `SystemTime::now()` as nanoseconds since the
-/// Unix epoch. The `System` arm of [`crate::clock::GlobalClock`] —
+/// `std::time::Instant` ticks are already nanosecond-denominated, so running
+/// them through [`ToUnixNanos`] at this frequency is exact division
+/// (`1_000_000_000 / 1_000_000_000 == 1`) — never a rounding tick.
+const INSTANT_TICKS_HZ: u64 = 1_000_000_000;
+
+/// `(process-relative base instant, wall anchor)` behind every [`SystemClock`],
+/// pinned once on first use — see [`ToUnixNanos`] for the general shape this
+/// applies. A process has exactly one real wall clock, so anchoring it once,
+/// globally, answers the same question a per-`SystemClock`-instance anchor
+/// would, without paying for a fresh anchor every time a `Recorder` starts.
+fn system_clock_anchor() -> &'static (Instant, AnchorCell) {
+    static ANCHOR: std::sync::LazyLock<(Instant, AnchorCell)> = std::sync::LazyLock::new(|| {
+        let base_instant = Instant::now();
+        // Clock::now_ns returns u64 (no Result propagation path). A 0 fallback marks
+        // the clock-went-backwards edge case as "before unix epoch" — downstream exporters
+        // can detect ts_ns == 0 as a sentinel for a malformed clock if they care to.
+        let wall_now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+            .unwrap_or(0);
+        (
+            base_instant,
+            AnchorCell::new(Ticks::ZERO, UnixNanos::from_nanos(wall_now_ns)),
+        )
+    });
+    &ANCHOR
+}
+
+/// The real wall clock: derives epoch nanoseconds from `std::time::Instant`
+/// (steady — never steps backward) extrapolated against a wall-clock anchor
+/// pinned once on first use, via [`ToUnixNanos`] — the monotonic-to-wall-clock
+/// bridge from `proxima-clock`, not a fourth hand-rolled version of it (see
+/// that type's doc for the general shape; [`system_clock_anchor`] holds this
+/// clock's anchor). The `System` arm of [`crate::clock::GlobalClock`] —
 /// `Recorder<Clk = GlobalClock>`'s default type parameter — and directly
 /// usable on its own via [`RecorderBuilder::clock`] for a recorder that
 /// doesn't need the ambient-static indirection. `pub` because a public enum
-/// variant's field type must be at least as visible as the enum. Known
-/// non-monotonic (a wall-clock step-back can yield a negative-looking
-/// duration downstream); fixing that is a separate, dedicated
-/// monotonic-plus-anchor primitive, not this migration.
+/// variant's field type must be at least as visible as the enum.
+///
+/// Monotonic by construction: two `now_ns()` reads always compare the way
+/// `Instant::now()` compares, so a span's `end.saturating_sub(start)` (this
+/// module, `trace::span`) can no longer observe the wrong-or-zero duration an
+/// NTP wall-clock step-back produced from raw `SystemTime::now()` reads.
+///
+/// Trade-off, stated once here (see [`AnchorCell`]'s doc for the general
+/// case): epoch-nanos values drift away from a disciplined wall clock at
+/// whatever rate this process's `Instant` drifts from real time after the
+/// anchor point, accumulating for the life of the process — nothing here
+/// re-anchors. That is the right trade for a span timestamp (a trace
+/// consumer needs durations that never regress far more than it needs
+/// microsecond NTP alignment) and the wrong one for a caller that needs
+/// periodic re-discipline; that caller drives [`AnchorCell::set`] directly
+/// (an NTP/PTP correction loop), which this ambient, zero-config clock does
+/// not attempt on its own.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ns(&self) -> u64 {
-        // Clock::now_ns returns u64 (no Result propagation path). A 0 fallback marks
-        // the clock-went-backwards edge case as "before unix epoch" — downstream exporters
-        // can detect ts_ns == 0 as a sentinel for a malformed clock if they care to.
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|dur| dur.as_nanos() as u64)
-            .unwrap_or(0)
+        let (base_instant, anchor) = system_clock_anchor();
+        let elapsed_ticks = u64::try_from(base_instant.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let stage = ToUnixNanos::new(anchor, INSTANT_TICKS_HZ);
+        match block_on(stage.call(Ticks::from_raw(elapsed_ticks))) {
+            Ok(unix_nanos) => unix_nanos.as_nanos(),
+            Err(never) => match never {},
+        }
     }
 }
 
@@ -2166,6 +2217,8 @@ mod tests {
     extern crate std;
 
     use alloc::vec::Vec;
+    use core::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
@@ -2214,6 +2267,103 @@ mod tests {
             drop(recorder.span("op").start());
         }
         assert_eq!(recorder.dropped(), 0);
+    }
+
+    // Reproduces, without a real syscall or a sleep, exactly the bug
+    // `SystemClock` fixes: a wall-clock NTP correction landing between a
+    // span's start and finish. `SystemClock` itself derives every reading
+    // from one stable `AnchorCell` plus `Instant`-sourced monotonic ticks
+    // that only ever advance -- this test builds a small `Clock` following
+    // that identical shape (anchor + ticks, never re-anchored mid-span) so
+    // the mechanism is exercised deterministically instead of by asserting
+    // on real wall-clock behavior.
+    struct AnchoredTestClock<'anchor> {
+        anchor: &'anchor AnchorCell,
+        ticks: u64,
+    }
+
+    impl Clock for AnchoredTestClock<'_> {
+        fn now_ns(&self) -> u64 {
+            let stage = ToUnixNanos::new(self.anchor, ARM_GENERIC_TIMER_HZ);
+            match block_on(stage.call(Ticks::from_raw(self.ticks))) {
+                Ok(unix_nanos) => unix_nanos.as_nanos(),
+                Err(never) => match never {},
+            }
+        }
+    }
+
+    // 24 MHz: the ARM generic timer's real rate (matches proxima-clock's own
+    // test suite) -- not `frequency_hz: 1`, so the per-read division this
+    // clock performs is genuinely exercised, not hidden by an exact power of
+    // ten.
+    const ARM_GENERIC_TIMER_HZ: u64 = 24_000_000;
+
+    #[test]
+    fn span_duration_survives_a_wall_clock_step_back_between_start_and_finish() {
+        let pre_correction_wall_nanos: u64 = 1_753_500_005_000_000_000;
+        // the span's real, monotonic lifetime: two seconds.
+        let real_elapsed_nanos: u64 = 2_000_000_000;
+        // an NTP correction that steps the wall clock back 5 seconds --
+        // larger than `real_elapsed_nanos`, so the old raw-`SystemTime::now()`
+        // code goes negative and `saturating_sub` floors it to a wrong zero.
+        let step_back_nanos: u64 = 5_000_000_000;
+
+        // what the OLD `SystemClock` did: read the OS wall clock raw, on
+        // every call, with no shared anchor. A start read taken just before
+        // the correction, and a finish read taken after it (real_elapsed_nanos
+        // of true wall-clock time later, net of the step), demonstrates the
+        // exact bug this test guards against.
+        let naive_start_wall = pre_correction_wall_nanos;
+        let naive_end_wall = pre_correction_wall_nanos + real_elapsed_nanos - step_back_nanos;
+        let naive_duration = naive_end_wall.saturating_sub(naive_start_wall);
+        assert_eq!(
+            naive_duration, 0,
+            "sanity check on the bug this test targets: two independent \
+             raw wall-clock reads straddling a step-back larger than the \
+             real elapsed time must produce the wrong, floored-to-zero duration"
+        );
+
+        let anchor = AnchorCell::new(
+            Ticks::ZERO,
+            UnixNanos::from_nanos(pre_correction_wall_nanos),
+        );
+        // the correction lands before the span opens, at the same tick
+        // point -- `AnchorCell::set` is the exact discipline primitive an
+        // NTP/PTP loop drives; the span that follows sees one stable,
+        // already-corrected anchor for its whole lifetime, the same way
+        // `SystemClock` anchors once and never re-reads `SystemTime` again.
+        anchor.set(
+            Ticks::ZERO,
+            UnixNanos::from_nanos(pre_correction_wall_nanos - step_back_nanos),
+        );
+
+        let start_clock = AnchoredTestClock {
+            anchor: &anchor,
+            ticks: 0,
+        };
+        // two real seconds of monotonic elapsed time at the real 24 MHz rate.
+        let end_clock = AnchoredTestClock {
+            anchor: &anchor,
+            ticks: 2 * ARM_GENERIC_TIMER_HZ,
+        };
+
+        let trace_id = TraceId::from_bytes([0x11; 16]);
+        let span_id = SpanId::from_bytes([0x22; 8]);
+        let collected: Rc<RefCell<Vec<SpanRecord>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink_collected = Rc::clone(&collected);
+        let sink = move |record: SpanRecord| sink_collected.borrow_mut().push(record);
+
+        let guard = SpanBuilder::new("db.query", trace_id, span_id)
+            .start(&start_clock, sink)
+            .enter(end_clock);
+        drop(guard);
+
+        let duration_ns = collected.borrow()[0].duration_ns;
+        assert_eq!(
+            duration_ns, real_elapsed_nanos,
+            "duration must track the 2s of monotonic ticks exactly, unaffected \
+             by the 5s wall-clock step-back the anchor absorbed before the span opened"
+        );
     }
 
     // The unified-instrument seam: one span annotation must yield a trace span AND a
