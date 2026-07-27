@@ -26,7 +26,7 @@ use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
 use proxima_clock::coarse::TickCell;
 use proxima_core::ProximaError;
 use proxima_runtime::{CoreId, SpawnError, SpawnRequest};
@@ -315,21 +315,24 @@ impl Drop for CurrentGuards {
 /// lives next to `CoreShard` because it depends on `std`.
 ///
 /// `Real` reads `std::time::Instant` directly — unchanged production
-/// numeric behaviour (P14). `Virtual` reads a shared [`TickCell`] a test
-/// advances directly via `TickCell::set`, with zero wall-clock sleep —
-/// the SAME clock [`current_tick`]/[`schedule_wake`] read (and, through
-/// them, the `timer_driver` no_mangle export), so mocking the cell
-/// mocks every reader of prime's timers at once. An enum, not a `dyn
-/// Clock`: both call sites in this file (`worker_main`'s `TimerWheel<
-/// StdClock>` and the outer loop's own `clock` variable) stay a single
-/// concrete type, so the thread-local `CURRENT_TIMER` pointer's type
-/// never changes and production code pays nothing for the test seam.
+/// numeric behaviour (P14). `Virtual` reads a shared [`TickCell`] a
+/// caller advances directly via `TickCell::set`, with zero wall-clock
+/// sleep — the SAME clock [`current_tick`]/[`schedule_wake`] read (and,
+/// through them, the `timer_driver` no_mangle export), so mocking the
+/// cell mocks every reader of prime's timers at once. Gated behind
+/// `runtime-prime-virtual-clock` (default-off) so only an opted-in build
+/// carries the variant — production sees only `Real`. An enum, not a
+/// `dyn Clock`: both call sites in this file (`worker_main`'s
+/// `TimerWheel<StdClock>` and the outer loop's own `clock` variable)
+/// stay a single concrete type, so the thread-local `CURRENT_TIMER`
+/// pointer's type never changes and production code pays nothing for
+/// the test seam.
 #[derive(Clone)]
 enum StdClock {
     Real {
         epoch: Instant,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
     Virtual {
         cell: Arc<TickCell>,
     },
@@ -342,7 +345,7 @@ impl StdClock {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
     fn virtual_from(cell: Arc<TickCell>) -> Self {
         Self::Virtual { cell }
     }
@@ -352,7 +355,7 @@ impl Clock for StdClock {
     fn now(&self) -> Tick {
         match self {
             Self::Real { epoch } => epoch.elapsed().as_millis() as Tick,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
             Self::Virtual { cell } => cell.get().as_raw(),
         }
     }
@@ -560,14 +563,18 @@ pub fn launch_with_lanes_and_setup(
     )
 }
 
-/// test-only entry point: launches a worker whose timer wheel reads
-/// `cell` instead of `Instant::now()`, so a test can advance virtual
-/// time directly (`cell.set(...)`) with zero wall-clock sleep. Every
-/// production launcher (`launch`, `launch_with_lanes`,
+/// launches a worker whose timer wheel reads `cell` instead of
+/// `Instant::now()`, so a caller can advance virtual time directly
+/// (`cell.set(...)`) with zero wall-clock sleep. Gated behind
+/// `runtime-prime-virtual-clock` (also reachable from prime's own
+/// `#[cfg(test)]` builds) so a downstream crate's regression tests can
+/// drive a real prime shard's timers deterministically — see
+/// `proxima`'s `tests/units/virtual_time.rs` for a cross-crate proof.
+/// Every production launcher (`launch`, `launch_with_lanes`,
 /// `launch_with_lanes_and_setup`) always passes [`StdClock::real`] —
 /// this function touches no production code path.
-#[cfg(test)]
-pub(crate) fn launch_with_virtual_clock(
+#[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
+pub fn launch_with_virtual_clock(
     core_id: CoreId,
     affinity: Option<core_affinity::CoreId>,
     num_lanes: usize,

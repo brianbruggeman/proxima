@@ -368,6 +368,17 @@ proxima-codec = { workspace = true, features = ["alloc"] }
 # `tokio` feature on; `prime` + `runtime-prime-inbox-alloc` come from the
 # default `http-prime-deps` feature, so no separate dev-dependency is needed.
 http-body-util.workspace = true
+# tests/units/virtual_time.rs drives a virtual-clocked prime shard from
+# OUTSIDE prime — the cross-crate proof that `runtime-prime-virtual-clock`
+# is real, not just reachable from prime's own `#[cfg(test)]` tree. `prime`
+# is already an optional [dependencies] entry (activated by default via
+# `serve-prime`); this dev-dependency only ADDS the virtual-clock feature
+# for test/bench targets, exactly like prime's own Cargo.toml forces
+# proxima's features on for ITS test binary. A plain `cargo build` (no
+# dev-dependency graph) never sees this feature — production stays
+# byte-identical.
+prime = { workspace = true, features = ["runtime-prime-virtual-clock"] }
+proxima-clock = { workspace = true }
 pingora-core = { workspace = true }
 pingora-http = { workspace = true }
 # baseline for P5 — RESP3 parser comparison only, dev-only.
