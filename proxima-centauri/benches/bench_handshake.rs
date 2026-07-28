@@ -223,6 +223,83 @@ fn auth_exchange(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn rekey_exchange(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("rekey");
+
+    let authenticated = || {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI)
+            .with_identity(b"peer-a")
+            .unwrap();
+        let mut responder = Handshake::responder(PSK, RESPONDER_SPI)
+            .with_identity(b"peer-b")
+            .unwrap();
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let mut init = [0u8; 92];
+        init.copy_from_slice(initiator.outbound());
+        let _ = responder
+            .step(&init, Some(Entropy32::new(RESPONDER_SEED)), now())
+            .unwrap();
+        let mut reply = [0u8; 92];
+        reply.copy_from_slice(responder.outbound());
+        let _ = initiator.step(&reply, None, now()).unwrap();
+
+        let _ = initiator.send_auth().unwrap();
+        let mut forward = [0u8; 128];
+        let forward_len = initiator.outbound().len();
+        forward[..forward_len].copy_from_slice(initiator.outbound());
+        let _ = responder
+            .step(&forward[..forward_len], None, now())
+            .unwrap();
+        let _ = responder.send_auth().unwrap();
+        let mut back = [0u8; 128];
+        let back_len = responder.outbound().len();
+        back[..back_len].copy_from_slice(responder.outbound());
+        let _ = initiator.step(&back[..back_len], None, now()).unwrap();
+
+        (initiator, responder)
+    };
+
+    // one base-point mul plus the message write
+    group.bench_function("send_rekey", |bencher| {
+        bencher.iter_batched(
+            &authenticated,
+            |(mut initiator, _)| {
+                black_box(
+                    initiator
+                        .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                        .unwrap(),
+                )
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // the whole exchange: two curve muls a side, six derivations, both messages
+    group.bench_function("full_rekey", |bencher| {
+        bencher.iter_batched(
+            &authenticated,
+            |(mut initiator, mut responder)| {
+                let _ = initiator
+                    .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                    .unwrap();
+                let mut request = [0u8; 92];
+                request.copy_from_slice(initiator.outbound());
+                let _ = responder
+                    .step(&request, Some(Entropy32::new([0x32; 32])), now())
+                    .unwrap();
+                let mut reply = [0u8; 92];
+                reply.copy_from_slice(responder.outbound());
+                black_box(initiator.step(&reply, None, now()).unwrap())
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 fn entropy_sources(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("entropy_draw");
 
@@ -270,6 +347,7 @@ criterion_group!(
     handshake_steps,
     full_handshake,
     auth_exchange,
+    rekey_exchange,
     entropy_sources,
     primitives
 );

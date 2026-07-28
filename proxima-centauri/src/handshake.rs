@@ -54,6 +54,8 @@ const OUTBOUND_LEN: usize = if AUTH_MAX_LEN > MESSAGE_LEN {
 const IDENTITY_LEN_BYTES: usize = 2;
 const MAC_LEN: usize = 32;
 const AUTH_EXCHANGE_TYPE: u8 = 0x23;
+const REKEY_EXCHANGE_TYPE: u8 = 0x24;
+const REKEY_SKEYSEED_CONTEXT: &str = "proxima-centauri-ike-rekey-skeyseed-v1";
 const AUTH_FLAG_INITIATOR: u8 = 0x08;
 const AUTH_FLAG_RESPONDER: u8 = 0x20;
 
@@ -137,6 +139,10 @@ pub enum Progress {
     /// key only the true peer could derive. [`Handshake::peer_identity`] is
     /// available.
     Authenticated,
+    /// Fresh keys are in force. The peer's identity carries over — a rekey
+    /// chains to the authenticated SA rather than re-proving it — and the old
+    /// keys are gone.
+    Rekeyed,
 }
 
 /// The five derived keys, with role already applied.
@@ -241,11 +247,39 @@ enum Phase {
         keys: SessionKeys,
         at: Ticks,
     },
+    /// We sent our AUTH; the peer has not proved itself yet.
+    LocalAuthSent {
+        keys: SessionKeys,
+        at: Ticks,
+    },
+    /// The peer proved itself; we still owe our own AUTH. Mutual
+    /// authentication is two independent obligations, so it takes two states
+    /// rather than a `sent` flag beside a `verified` flag — a flag pair can
+    /// represent "neither", which the phase graph cannot.
+    PeerAuthenticated {
+        keys: SessionKeys,
+        at: Ticks,
+        peer_identity: [u8; AUTH_MAX_IDENTITY_BYTES],
+        peer_identity_len: usize,
+    },
+    /// Both directions proved. Only here may an SA rekey.
     Authenticated {
         keys: SessionKeys,
         at: Ticks,
         peer_identity: [u8; AUTH_MAX_IDENTITY_BYTES],
         peer_identity_len: usize,
+    },
+    /// Only the side that *initiated* a rekey waits here. The responder
+    /// derives and replies in one step, exactly as it does in SA_INIT, so
+    /// there is no "am I the rekey initiator" flag to carry — the state graph
+    /// answers it.
+    Rekeying {
+        keys: SessionKeys,
+        at: Ticks,
+        peer_identity: [u8; AUTH_MAX_IDENTITY_BYTES],
+        peer_identity_len: usize,
+        ephemeral: StaticSecret,
+        our_nonce: [u8; NONCE_LEN],
     },
 }
 
@@ -255,7 +289,10 @@ impl Phase {
             Self::Initial => "initial",
             Self::AwaitingResponse { .. } => "awaiting-response",
             Self::Established { .. } => "established",
+            Self::LocalAuthSent { .. } => "local-auth-sent",
+            Self::PeerAuthenticated { .. } => "peer-authenticated",
             Self::Authenticated { .. } => "authenticated",
+            Self::Rekeying { .. } => "rekeying",
         }
     }
 }
@@ -349,7 +386,17 @@ impl Handshake {
     #[must_use]
     pub fn peer_identity(&self) -> Option<&[u8]> {
         match &self.phase {
-            Phase::Authenticated {
+            Phase::PeerAuthenticated {
+                peer_identity,
+                peer_identity_len,
+                ..
+            }
+            | Phase::Authenticated {
+                peer_identity,
+                peer_identity_len,
+                ..
+            }
+            | Phase::Rekeying {
                 peer_identity,
                 peer_identity_len,
                 ..
@@ -383,7 +430,11 @@ impl Handshake {
     #[must_use]
     pub const fn keys(&self) -> Option<&SessionKeys> {
         match &self.phase {
-            Phase::Established { keys, .. } | Phase::Authenticated { keys, .. } => Some(keys),
+            Phase::Established { keys, .. }
+            | Phase::LocalAuthSent { keys, .. }
+            | Phase::PeerAuthenticated { keys, .. }
+            | Phase::Authenticated { keys, .. }
+            | Phase::Rekeying { keys, .. } => Some(keys),
             _ => None,
         }
     }
@@ -392,7 +443,11 @@ impl Handshake {
     #[must_use]
     pub const fn established_at(&self) -> Option<Ticks> {
         match &self.phase {
-            Phase::Established { at, .. } | Phase::Authenticated { at, .. } => Some(*at),
+            Phase::Established { at, .. }
+            | Phase::LocalAuthSent { at, .. }
+            | Phase::PeerAuthenticated { at, .. }
+            | Phase::Authenticated { at, .. }
+            | Phase::Rekeying { at, .. } => Some(*at),
             _ => None,
         }
     }
@@ -445,11 +500,15 @@ impl Handshake {
                     found: "awaiting-response",
                 })
             }
-            (_, Phase::Established { .. }) => self.receive_auth(input, now),
-            (_, Phase::Authenticated { .. }) => Err(CentauriError::InvalidTransition {
-                expected: "initial, awaiting-response, or established",
-                found: "authenticated",
+            (_, Phase::Established { .. } | Phase::LocalAuthSent { .. }) => {
+                self.receive_auth(input, now)
+            }
+            (_, Phase::PeerAuthenticated { .. }) => Err(CentauriError::InvalidTransition {
+                expected: "send_auth to complete mutual authentication",
+                found: "peer-authenticated",
             }),
+            (_, Phase::Authenticated { .. }) => self.receive_rekey(input, entropy, now),
+            (_, Phase::Rekeying { .. }) => self.complete_rekey(input, now),
         }
     }
 
@@ -528,14 +587,17 @@ impl Handshake {
     pub fn send_auth(&mut self) -> Result<Progress, CentauriError> {
         self.outbound_len = 0;
 
-        let Phase::Established { keys, .. } = &self.phase else {
-            return Err(CentauriError::InvalidTransition {
-                expected: "established",
-                found: self.phase.name(),
-            });
+        let auth_key = match &self.phase {
+            Phase::Established { keys, .. } | Phase::PeerAuthenticated { keys, .. } => {
+                *keys.auth_key()
+            }
+            other => {
+                return Err(CentauriError::InvalidTransition {
+                    expected: "established or peer-authenticated",
+                    found: other.name(),
+                });
+            }
         };
-
-        let auth_key = *keys.auth_key();
         let identity_len = self.identity_len;
         let mut identity = [0u8; AUTH_MAX_IDENTITY_BYTES];
         identity[..identity_len].copy_from_slice(&self.identity[..identity_len]);
@@ -573,6 +635,24 @@ impl Handshake {
 
         self.outbound_len = total;
 
+        // sending discharges our half of the obligation; which state that
+        // lands in depends on whether the peer has already discharged theirs
+        self.phase = match core::mem::replace(&mut self.phase, Phase::Initial) {
+            Phase::Established { keys, at } => Phase::LocalAuthSent { keys, at },
+            Phase::PeerAuthenticated {
+                keys,
+                at,
+                peer_identity,
+                peer_identity_len,
+            } => Phase::Authenticated {
+                keys,
+                at,
+                peer_identity,
+                peer_identity_len,
+            },
+            other => other,
+        };
+
         Ok(Progress::Advanced)
     }
 
@@ -608,12 +688,17 @@ impl Handshake {
             return Ok(Progress::NeedInput);
         }
 
-        let Phase::Established { keys, at } = core::mem::replace(&mut self.phase, Phase::Initial)
-        else {
-            return Err(CentauriError::InvalidTransition {
-                expected: "established",
-                found: "initial",
-            });
+        let (keys, at, we_have_sent) = match core::mem::replace(&mut self.phase, Phase::Initial) {
+            Phase::Established { keys, at } => (keys, at, false),
+            Phase::LocalAuthSent { keys, at } => (keys, at, true),
+            other => {
+                let name = other.name();
+                self.phase = other;
+                return Err(CentauriError::InvalidTransition {
+                    expected: "established or local-auth-sent",
+                    found: name,
+                });
+            }
         };
 
         let identity_at = HEADER_LEN + IDENTITY_LEN_BYTES;
@@ -630,14 +715,219 @@ impl Handshake {
         peer_identity[..identity_len]
             .copy_from_slice(&input[identity_at..identity_at + identity_len]);
 
-        self.phase = Phase::Authenticated {
-            keys,
-            at,
-            peer_identity,
-            peer_identity_len: identity_len,
+        self.phase = if we_have_sent {
+            Phase::Authenticated {
+                keys,
+                at,
+                peer_identity,
+                peer_identity_len: identity_len,
+            }
+        } else {
+            Phase::PeerAuthenticated {
+                keys,
+                at,
+                peer_identity,
+                peer_identity_len: identity_len,
+            }
         };
 
         Ok(Progress::Authenticated)
+    }
+
+    /// Open a rekey: fresh nonce, fresh DH, message on the wire.
+    ///
+    /// Legal only once the peer is authenticated. The new keys chain to the
+    /// old SA's seed, so a rekey inherits the identity proof rather than
+    /// re-running AUTH — and the fresh DH means compromising today's keys does
+    /// not yield yesterday's traffic.
+    ///
+    /// # Errors
+    ///
+    /// [`CentauriError::EntropyUnavailable`] without entropy, or
+    /// [`CentauriError::InvalidTransition`] before the peer is authenticated.
+    pub fn send_rekey(
+        &mut self,
+        entropy: Option<Entropy32>,
+        _now: Ticks,
+    ) -> Result<Progress, CentauriError> {
+        self.outbound_len = 0;
+
+        let (keys, at, peer_identity, peer_identity_len) =
+            match core::mem::replace(&mut self.phase, Phase::Initial) {
+                Phase::Authenticated {
+                    keys,
+                    at,
+                    peer_identity,
+                    peer_identity_len,
+                } => (keys, at, peer_identity, peer_identity_len),
+                other => {
+                    // put it back: refusing a rekey must not destroy a live SA
+                    let name = other.name();
+                    self.phase = other;
+                    return Err(CentauriError::InvalidTransition {
+                        expected: "authenticated",
+                        found: name,
+                    });
+                }
+            };
+
+        let (our_nonce, ephemeral) = match split_entropy(entropy) {
+            Ok(pair) => pair,
+            Err(error) => {
+                // put the SA back: a missing draw must not destroy a live
+                // session
+                self.phase = Phase::Authenticated {
+                    keys,
+                    at,
+                    peer_identity,
+                    peer_identity_len,
+                };
+                return Err(error);
+            }
+        };
+
+        let dh_public = *PublicKey::from(&ephemeral).as_bytes();
+        self.write_exchange(REKEY_EXCHANGE_TYPE, &our_nonce, &dh_public);
+
+        self.phase = Phase::Rekeying {
+            keys,
+            at,
+            peer_identity,
+            peer_identity_len,
+            ephemeral,
+            our_nonce,
+        };
+
+        Ok(Progress::Advanced)
+    }
+
+    /// The responding half: derive from the peer's nonce and DH, reply with
+    /// ours, and adopt the new keys in one step.
+    fn receive_rekey(
+        &mut self,
+        input: &[u8],
+        entropy: Option<Entropy32>,
+        now: Ticks,
+    ) -> Result<Progress, CentauriError> {
+        let Some(peer) = Message::parse_exchange(input, REKEY_EXCHANGE_TYPE)? else {
+            return Ok(Progress::NeedInput);
+        };
+
+        let (keys, peer_identity, peer_identity_len) =
+            match core::mem::replace(&mut self.phase, Phase::Initial) {
+                Phase::Authenticated {
+                    keys,
+                    peer_identity,
+                    peer_identity_len,
+                    ..
+                } => (keys, peer_identity, peer_identity_len),
+                other => {
+                    let name = other.name();
+                    self.phase = other;
+                    return Err(CentauriError::InvalidTransition {
+                        expected: "authenticated",
+                        found: name,
+                    });
+                }
+            };
+
+        let (our_nonce, ephemeral) = match split_entropy(entropy) {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.phase = Phase::Authenticated {
+                    keys,
+                    at: now,
+                    peer_identity,
+                    peer_identity_len,
+                };
+                return Err(error);
+            }
+        };
+        let dh_public = *PublicKey::from(&ephemeral).as_bytes();
+        let shared = ephemeral.diffie_hellman(&PublicKey::from(peer.dh_public));
+
+        // the rekey initiator's nonce is always first, both sides
+        let fresh = self.derive_rekey_keys(&keys, &peer.nonce, &our_nonce, shared.as_bytes());
+
+        self.write_exchange(REKEY_EXCHANGE_TYPE, &our_nonce, &dh_public);
+        self.phase = Phase::Authenticated {
+            keys: fresh,
+            at: now,
+            peer_identity,
+            peer_identity_len,
+        };
+
+        Ok(Progress::Rekeyed)
+    }
+
+    /// The initiating half completing on the peer's reply.
+    fn complete_rekey(&mut self, input: &[u8], now: Ticks) -> Result<Progress, CentauriError> {
+        let Some(peer) = Message::parse_exchange(input, REKEY_EXCHANGE_TYPE)? else {
+            return Ok(Progress::NeedInput);
+        };
+
+        let (keys, peer_identity, peer_identity_len, ephemeral, our_nonce) =
+            match core::mem::replace(&mut self.phase, Phase::Initial) {
+                Phase::Rekeying {
+                    keys,
+                    peer_identity,
+                    peer_identity_len,
+                    ephemeral,
+                    our_nonce,
+                    ..
+                } => (keys, peer_identity, peer_identity_len, ephemeral, our_nonce),
+                other => {
+                    let name = other.name();
+                    self.phase = other;
+                    return Err(CentauriError::InvalidTransition {
+                        expected: "rekeying",
+                        found: name,
+                    });
+                }
+            };
+
+        let shared = ephemeral.diffie_hellman(&PublicKey::from(peer.dh_public));
+        let fresh = self.derive_rekey_keys(&keys, &our_nonce, &peer.nonce, shared.as_bytes());
+
+        self.phase = Phase::Authenticated {
+            keys: fresh,
+            at: now,
+            peer_identity,
+            peer_identity_len,
+        };
+
+        Ok(Progress::Rekeyed)
+    }
+
+    /// New keys from the old SA's seed plus a fresh exchange.
+    ///
+    /// Chaining through `sk_d` is what lets the rekey inherit the identity
+    /// proof: only a peer that completed AUTH holds it. The fresh shared
+    /// secret is what gives forward secrecy — the old keys cannot reproduce
+    /// the new ones.
+    fn derive_rekey_keys(
+        &self,
+        old: &SessionKeys,
+        initiator_nonce: &[u8; NONCE_LEN],
+        responder_nonce: &[u8; NONCE_LEN],
+        shared: &[u8; 32],
+    ) -> SessionKeys {
+        let mut seed_input = [0u8; 32 + NONCE_LEN * 2 + 32];
+        seed_input[..32].copy_from_slice(old.seed());
+        seed_input[32..32 + NONCE_LEN].copy_from_slice(initiator_nonce);
+        seed_input[32 + NONCE_LEN..32 + NONCE_LEN * 2].copy_from_slice(responder_nonce);
+        seed_input[32 + NONCE_LEN * 2..].copy_from_slice(shared);
+
+        let skeyseed = derive_key(REKEY_SKEYSEED_CONTEXT, &seed_input);
+
+        SessionKeys {
+            role: self.role,
+            sk_d: skeyseed,
+            sk_ai: derive_key(SK_AI_CONTEXT, &skeyseed),
+            sk_ar: derive_key(SK_AR_CONTEXT, &skeyseed),
+            sk_ei: derive_key(SK_EI_CONTEXT, &skeyseed),
+            sk_er: derive_key(SK_ER_CONTEXT, &skeyseed),
+        }
     }
 
     fn derive_session_keys(
@@ -665,6 +955,15 @@ impl Handshake {
     }
 
     fn write_message(&mut self, nonce: &[u8; NONCE_LEN], dh_public: &[u8; DH_LEN]) {
+        self.write_exchange(EXCHANGE_TYPE, nonce, dh_public);
+    }
+
+    fn write_exchange(
+        &mut self,
+        exchange_type: u8,
+        nonce: &[u8; NONCE_LEN],
+        dh_public: &[u8; DH_LEN],
+    ) {
         let message_id = self.message_id;
         self.message_id = self.message_id.wrapping_add(1);
 
@@ -673,7 +972,7 @@ impl Handshake {
         out[8..16].copy_from_slice(&self.spi_responder.as_raw().to_be_bytes());
         out[16] = NEXT_PAYLOAD;
         out[17] = VERSION;
-        out[18] = EXCHANGE_TYPE;
+        out[18] = exchange_type;
         out[19] = FLAGS;
         out[20..24].copy_from_slice(&message_id.to_be_bytes());
         out[24..28].copy_from_slice(&(MESSAGE_LEN as u32).to_be_bytes());
@@ -726,6 +1025,15 @@ impl Message {
     /// `Ok(None)` means "not enough bytes yet", which is not an error — the
     /// caller may be mid-read.
     fn parse(input: &[u8]) -> Result<Option<Self>, CentauriError> {
+        Self::parse_exchange(input, EXCHANGE_TYPE)
+    }
+
+    /// SA_INIT and CREATE_CHILD_SA share a body — header, nonce, DH value —
+    /// and differ only in the exchange type, so they share a parser. Passing
+    /// the expected type in means a rekey message can never be mistaken for a
+    /// fresh handshake, which is the confusion that would let a peer reset an
+    /// established SA.
+    fn parse_exchange(input: &[u8], expected: u8) -> Result<Option<Self>, CentauriError> {
         if input.len() < MESSAGE_LEN {
             return Ok(None);
         }
@@ -744,7 +1052,7 @@ impl Message {
         if input[17] != VERSION {
             return Err(CentauriError::InvalidMessage("version"));
         }
-        if input[18] != EXCHANGE_TYPE {
+        if input[18] != expected {
             return Err(CentauriError::InvalidMessage("exchange_type"));
         }
 
@@ -1011,6 +1319,53 @@ mod tests {
     }
 
     #[test]
+    fn mutual_authentication_takes_both_directions() {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+
+        // one direction only: the responder knows the initiator, but not the
+        // reverse, and neither side is fully authenticated yet
+        let _ = initiator.send_auth().unwrap();
+        let forward = staged(&initiator);
+        let forward_len = initiator.outbound().len();
+        assert_eq!(
+            responder
+                .step(&forward[..forward_len], None, now())
+                .unwrap(),
+            Progress::Authenticated
+        );
+        assert_eq!(responder.peer_identity(), Some(&b"peer-a"[..]));
+        assert!(
+            initiator.peer_identity().is_none(),
+            "the initiator knows nobody yet"
+        );
+
+        // a rekey is refused until both directions are proved
+        assert!(
+            initiator
+                .send_rekey(Some(Entropy32::new([1; 32])), now())
+                .is_err(),
+            "rekey requires mutual authentication"
+        );
+
+        // now the reverse direction completes it
+        let _ = responder.send_auth().unwrap();
+        let back = staged(&responder);
+        let back_len = responder.outbound().len();
+        assert_eq!(
+            initiator.step(&back[..back_len], None, now()).unwrap(),
+            Progress::Authenticated
+        );
+        assert_eq!(initiator.peer_identity(), Some(&b"peer-b"[..]));
+
+        // and now it is allowed
+        assert!(
+            initiator
+                .send_rekey(Some(Entropy32::new([1; 32])), now())
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn an_authenticated_handshake_refuses_further_steps() {
         let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
         let _ = initiator.send_auth().unwrap();
@@ -1018,11 +1373,13 @@ mod tests {
         let len = initiator.outbound().len();
         let _ = responder.step(&message[..len], None, now()).unwrap();
 
+        // after verifying us the responder owes its own AUTH, so a further
+        // inbound AUTH is the wrong move for it to accept
         assert_eq!(
             responder.step(&message[..len], None, now()).err(),
             Some(CentauriError::InvalidTransition {
-                expected: "initial, awaiting-response, or established",
-                found: "authenticated",
+                expected: "send_auth to complete mutual authentication",
+                found: "peer-authenticated",
             })
         );
     }
@@ -1155,7 +1512,12 @@ mod tests {
         );
         assert_eq!(responder.peer_identity(), Some(&b"peer-a"[..]));
 
-        assert!(responder.send_auth().is_err(), "already authenticated");
+        // the responder verified the initiator but still owes its own proof:
+        // mutual authentication is two obligations, not one
+        assert!(
+            responder.send_auth().is_ok(),
+            "a peer that verified us still owes its own AUTH"
+        );
 
         // and the reverse direction, on a fresh pair
         let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
@@ -1303,9 +1665,187 @@ mod tests {
         assert_eq!(
             initiator.send_auth().err(),
             Some(CentauriError::InvalidTransition {
-                expected: "established",
+                expected: "established or peer-authenticated",
                 found: "initial",
             })
+        );
+    }
+
+    /// Both sides authenticated, ready to rekey.
+    fn authenticated_pair() -> (Handshake, Handshake) {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        let _ = initiator.send_auth().unwrap();
+        let message = staged(&initiator);
+        let len = initiator.outbound().len();
+        let _ = responder.step(&message[..len], None, now()).unwrap();
+        let _ = responder.send_auth().unwrap();
+        let reply = staged(&responder);
+        let reply_len = responder.outbound().len();
+        let _ = initiator.step(&reply[..reply_len], None, now()).unwrap();
+        (initiator, responder)
+    }
+
+    #[test]
+    fn a_rekey_leaves_both_peers_agreeing() {
+        // the property the oracle's rekey cannot satisfy: after both sides
+        // rekey, what one encrypts the other still decrypts.
+        let (mut initiator, mut responder) = authenticated_pair();
+        let before = *initiator.keys().unwrap().encrypt_key();
+
+        assert_eq!(
+            initiator
+                .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                .unwrap(),
+            Progress::Advanced
+        );
+        let request = captured(&initiator);
+
+        assert_eq!(
+            responder
+                .step(&request, Some(Entropy32::new([0x32; 32])), now())
+                .unwrap(),
+            Progress::Rekeyed
+        );
+        let reply = captured(&responder);
+
+        assert_eq!(
+            initiator.step(&reply, None, now()).unwrap(),
+            Progress::Rekeyed
+        );
+
+        let initiator_keys = initiator.keys().expect("rekeyed");
+        let responder_keys = responder.keys().expect("rekeyed");
+
+        assert_eq!(
+            initiator_keys.encrypt_key(),
+            responder_keys.decrypt_key(),
+            "a rekey that does not agree is not a rekey"
+        );
+        assert_eq!(responder_keys.encrypt_key(), initiator_keys.decrypt_key());
+        assert_ne!(
+            initiator_keys.encrypt_key(),
+            &before,
+            "the keys are actually new"
+        );
+    }
+
+    #[test]
+    fn a_rekey_preserves_the_authenticated_identity() {
+        let (mut initiator, mut responder) = authenticated_pair();
+        assert_eq!(responder.peer_identity(), Some(&b"peer-a"[..]));
+
+        let _ = initiator
+            .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+            .unwrap();
+        let request = captured(&initiator);
+        let _ = responder
+            .step(&request, Some(Entropy32::new([0x32; 32])), now())
+            .unwrap();
+        let reply = captured(&responder);
+        let _ = initiator.step(&reply, None, now()).unwrap();
+
+        assert_eq!(
+            responder.peer_identity(),
+            Some(&b"peer-a"[..]),
+            "a rekey chains to the authenticated SA rather than dropping it"
+        );
+        assert_eq!(initiator.peer_identity(), Some(&b"peer-b"[..]));
+    }
+
+    #[test]
+    fn rekeys_are_forward_secret_and_chain() {
+        // two successive rekeys must each produce fresh keys, and the second
+        // must not be derivable from the first's inputs alone.
+        let (mut initiator, mut responder) = authenticated_pair();
+        // fixed storage: a Vec here would pull an allocator into a suite that
+        // has to run at the no-alloc tier
+        let mut seen = [[0u8; 32]; 4];
+        seen[0] = *initiator.keys().unwrap().encrypt_key();
+
+        for round in 0..3u8 {
+            let _ = initiator
+                .send_rekey(Some(Entropy32::new([0x40 + round; 32])), now())
+                .unwrap();
+            let request = captured(&initiator);
+            let _ = responder
+                .step(&request, Some(Entropy32::new([0x50 + round; 32])), now())
+                .unwrap();
+            let reply = captured(&responder);
+            let _ = initiator.step(&reply, None, now()).unwrap();
+
+            let fresh = *initiator.keys().unwrap().encrypt_key();
+            assert!(
+                !seen[..=usize::from(round)].contains(&fresh),
+                "round {round} reused a key"
+            );
+            assert_eq!(
+                initiator.keys().unwrap().encrypt_key(),
+                responder.keys().unwrap().decrypt_key(),
+                "round {round} desynchronised"
+            );
+            seen[usize::from(round) + 1] = fresh;
+        }
+    }
+
+    #[test]
+    fn a_rekey_without_entropy_leaves_the_session_intact() {
+        // a missing draw must not destroy a live SA
+        let (mut initiator, _) = authenticated_pair();
+        let before = *initiator.keys().unwrap().encrypt_key();
+
+        assert_eq!(
+            initiator.send_rekey(None, now()).err(),
+            Some(CentauriError::EntropyUnavailable("step requires entropy"))
+        );
+        assert_eq!(
+            initiator.keys().unwrap().encrypt_key(),
+            &before,
+            "the old SA survives a failed rekey"
+        );
+        assert_eq!(initiator.peer_identity(), Some(&b"peer-b"[..]));
+    }
+
+    #[test]
+    fn an_sa_init_cannot_masquerade_as_a_rekey() {
+        // exchange type is checked, so a fresh handshake message cannot reset
+        // an established session
+        let (mut initiator, mut responder) = authenticated_pair();
+        let mut fresh = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = fresh
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let sa_init = captured(&fresh);
+
+        assert_eq!(
+            responder
+                .step(&sa_init, Some(Entropy32::new([0x32; 32])), now())
+                .err(),
+            Some(CentauriError::InvalidMessage("exchange_type"))
+        );
+        assert!(
+            responder.keys().is_some(),
+            "the session survived the attempt"
+        );
+        let _ = &mut initiator;
+    }
+
+    #[test]
+    fn rekey_before_authentication_is_a_transition_error() {
+        let (mut initiator, _) = established_pair(b"peer-a", b"peer-b");
+
+        assert_eq!(
+            initiator
+                .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                .err(),
+            Some(CentauriError::InvalidTransition {
+                expected: "authenticated",
+                found: "established",
+            })
+        );
+        // and the refusal did not destroy the session
+        assert!(
+            initiator.keys().is_some(),
+            "a refused rekey must leave the SA alive"
         );
     }
 
