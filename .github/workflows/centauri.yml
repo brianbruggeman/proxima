@@ -1,0 +1,68 @@
+name: centauri
+
+# Gate for proxima-centauri (vault: 20 - Proxima/Discipline/centauri).
+# Re-proves the discipline log's claims on every push without anyone's memory
+# (guiding-principle 16). The load-bearing cells are the ones a normal
+# `cargo test` cannot stand in for: the crate must BUILD for a target with no
+# allocator, its test suite must RUN with no allocator, the walkthrough example
+# must EXECUTE, and the doctest count must be nonzero.
+
+on:
+  push:
+    branches: [main, "feat/centauri*", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  centauri-gate:
+    name: centauri-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.centauri == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          # the bare-metal cell is the no-alloc proof; without this target it
+          # would silently be skipped rather than fail
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/centauri-gate.sh
+
+  # A crypto core that reaches for the operating system is not sans-IO. The
+  # handshake draws no entropy and reads no clock of its own — both are passed
+  # in — so `getrandom` must not appear in the graph at any tier. This is a
+  # structural claim the unit tests cannot make.
+  sans-io-gate:
+    name: no getrandom in the centauri graph
+    needs: changes
+    if: needs.changes.outputs.centauri == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: assert empty getrandom subtree
+        run: |
+          leaked="$(cargo tree -p proxima-centauri --no-default-features -e normal -i getrandom 2>/dev/null || true)"
+          if printf '%s' "$leaked" | grep -q '^getrandom'; then
+            printf 'FAIL: getrandom leaked into the centauri graph:\n%s\n' "$leaked"
+            printf 'entropy is an INPUT to these state machines, never something they fetch.\n'
+            exit 1
+          fi
+          echo "ok: no getrandom in the centauri graph — entropy stays an input"
