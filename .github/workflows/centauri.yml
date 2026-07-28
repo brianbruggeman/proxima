@@ -44,6 +44,29 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/centauri-gate.sh
 
+  # Instruction counts, on the one host where callgrind works. valgrind
+  # installs on macOS/aarch64 but callgrind dies with SIGSEGV there, so the
+  # gate script skips this cell locally — which means without this job it would
+  # never run anywhere. Deterministic where wall-clock is not: several deltas
+  # in the discipline log are smaller than the criterion spread that measured
+  # them, and this is what resolves those honestly.
+  cycle-counts:
+    name: callgrind instruction counts (linux)
+    needs: changes
+    if: needs.changes.outputs.centauri == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: install iai-callgrind-runner
+        run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+      - name: assert callgrind actually works before trusting the cell
+        run: valgrind --tool=callgrind --callgrind-out-file=/dev/null /bin/true
+      - run: cargo bench -p proxima-centauri --bench bench_cycles
+
   # A crypto core that reaches for the operating system is not sans-IO. The
   # handshake draws no entropy and reads no clock of its own — both are passed
   # in — so `getrandom` must not appear in the graph at any tier. This is a

@@ -48,6 +48,7 @@ workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+iai-callgrind = "0.16.1"
 proptest.workspace = true
 temp-env.workspace = true
 tempfile.workspace = true
@@ -63,3 +64,11 @@ harness = false
 
 [build-dependencies]
 toml.workspace = true
+
+[[bench]]
+name = "bench_cycles"
+harness = false
+
+[[bench]]
+name = "bench_e2e_tunnel"
+harness = false

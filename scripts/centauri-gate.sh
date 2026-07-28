@@ -67,6 +67,44 @@ declare -a cells=(
     "benches compile|cargo bench -p proxima-centauri --no-run"
 )
 
+# Second target. The curve backend and the atomic width both resolve per
+# target, so a single-architecture green is a single-architecture claim.
+# On an aarch64 host this runs x86_64 under emulation: correctness only —
+# timings from an emulated target would be a lie, and are not taken here.
+# NB: command substitution, not `rustc -vV | grep -q`. Under `set -o pipefail`
+# grep -q exits on the first match, rustc takes SIGPIPE, and pipefail reports
+# the pipeline as failed — so the condition is ALWAYS false and the cell is
+# silently skipped while the gate still says green. Found the hard way.
+RUSTC_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+case "$RUSTC_HOST" in
+    aarch64-apple-darwin) SECOND_TARGET=x86_64-apple-darwin ;;
+    x86_64-apple-darwin) SECOND_TARGET=aarch64-apple-darwin ;;
+    x86_64-unknown-linux-gnu) SECOND_TARGET=aarch64-unknown-linux-gnu ;;
+    *) SECOND_TARGET="" ;;
+esac
+
+if [ -n "$SECOND_TARGET" ] && rustup target list --installed | grep -E "^${SECOND_TARGET}$" >/dev/null; then
+    cells+=(
+        "second target ${SECOND_TARGET}: builds|cargo build -p proxima-centauri --target ${SECOND_TARGET}"
+        "second target ${SECOND_TARGET}: tests pass|cargo test -p proxima-centauri --target ${SECOND_TARGET}"
+        "second target ${SECOND_TARGET}: no-alloc tier|cargo test -p proxima-centauri --no-default-features --target ${SECOND_TARGET}"
+    )
+else
+    printf 'SKIP: second-target cells — no installed second target for host %s\n' "$RUSTC_HOST"
+fi
+
+# Instruction counts. Deterministic where wall-clock is not, which matters
+# because several deltas in the discipline log are smaller than this host's
+# 1.1-1.5%% criterion spread. callgrind SIGSEGVs on aarch64 macOS even with
+# valgrind installed, so probe by running it rather than by checking `which`.
+if command -v valgrind >/dev/null 2>&1 \
+    && command -v iai-callgrind-runner >/dev/null 2>&1 \
+    && valgrind --tool=callgrind --callgrind-out-file=/dev/null /bin/true >/dev/null 2>&1; then
+    cells+=("cycle counts (callgrind)|cargo bench -p proxima-centauri --bench bench_cycles")
+else
+    printf 'SKIP: cycle-count cell — no working callgrind on this host (runs on the Linux CI leg)\n'
+fi
+
 passed=0
 failed=0
 declare -a failures
