@@ -50,6 +50,11 @@ declare -a cells=(
     # still pass every test.
     "sized constants respond to an env override|PROXIMA_CENTAURI_REPLAY_WINDOW_PACKETS=512 cargo nextest run -p proxima-centauri"
 
+    # gate point 12: the config surface and the fluent builder must construct
+    # equivalent components, and the config must not carry key material.
+    "config + API parity (gate point 12)|cargo nextest run -p proxima-centauri --features config -E 'test(config::)'"
+    "clippy with config surface|cargo clippy -p proxima-centauri --features config --all-targets"
+
     # principle 11: the walkthrough is teaching surface only if it runs.
     "handshake walkthrough EXECUTES|cargo run -q -p proxima-centauri --example handshake_walkthrough"
 

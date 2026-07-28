@@ -287,6 +287,21 @@ impl Handshake {
         }
     }
 
+    /// Which side of the exchange this is.
+    #[must_use]
+    pub const fn role(&self) -> Role {
+        self.role
+    }
+
+    /// The SPI this side announces — its own, whichever role it plays.
+    #[must_use]
+    pub const fn announced_spi(&self) -> IkeSpi {
+        match self.role {
+            Role::Initiator => self.spi_initiator,
+            Role::Responder => self.spi_responder,
+        }
+    }
+
     /// Bytes staged for the peer. Empty when the last step produced none.
     #[must_use]
     pub fn outbound(&self) -> &[u8] {
