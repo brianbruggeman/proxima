@@ -23,7 +23,7 @@
 
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use proxima_centauri::{CounterDrbg, Entropy32, EntropyCell, Handshake, IkeSpi, hash};
 use proxima_clock::ticks::Ticks;
 
@@ -168,6 +168,61 @@ fn full_handshake(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn auth_exchange(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("auth");
+
+    // both sides through SA_INIT, ready to authenticate
+    let established = || {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI)
+            .with_identity(b"peer-a")
+            .unwrap();
+        let mut responder = Handshake::responder(PSK, RESPONDER_SPI)
+            .with_identity(b"peer-b")
+            .unwrap();
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let mut init = [0u8; 92];
+        init.copy_from_slice(initiator.outbound());
+        let _ = responder
+            .step(&init, Some(Entropy32::new(RESPONDER_SEED)), now())
+            .unwrap();
+        let mut reply = [0u8; 92];
+        reply.copy_from_slice(responder.outbound());
+        let _ = initiator.step(&reply, None, now()).unwrap();
+        (initiator, responder)
+    };
+
+    // one keyed hash over header+identity, plus the message write
+    group.bench_function("send_auth", |bencher| {
+        bencher.iter_batched(
+            &established,
+            |(mut initiator, _)| black_box(initiator.send_auth().unwrap()),
+            BatchSize::SmallInput,
+        );
+    });
+
+    // parse, recompute the MAC, constant-time compare
+    group.bench_function("verify_auth", |bencher| {
+        bencher.iter_batched(
+            || {
+                let (mut initiator, responder) = established();
+                let _ = initiator.send_auth().unwrap();
+                let mut message = [0u8; 128];
+                let len = initiator.outbound().len();
+                message[..len].copy_from_slice(initiator.outbound());
+                (responder, message, len)
+            },
+            |(mut responder, message, len)| {
+                black_box(responder.step(&message[..len], None, now()).unwrap())
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 fn entropy_sources(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("entropy_draw");
 
@@ -214,6 +269,7 @@ criterion_group!(
     benches,
     handshake_steps,
     full_handshake,
+    auth_exchange,
     entropy_sources,
     primitives
 );
