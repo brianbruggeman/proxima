@@ -84,7 +84,15 @@
 //! contract — only one caller can win the claim.
 
 use core::future::Future;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+// under `--cfg loom` the cell's atomics come from loom so its model checker can
+// drive every interleaving; everywhere else they are the real ones.
+#[cfg(feature = "loom")]
+use loom::sync::atomic::AtomicU32;
+
+#[cfg(not(feature = "loom"))]
+use core::sync::atomic::AtomicU32;
 
 use crate::sized::{EntropyCounter, EntropyCounterValue};
 
@@ -326,9 +334,21 @@ impl Default for EntropyCell {
 impl EntropyCell {
     /// An empty cell.
     #[must_use]
+    #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
         Self {
             words: [const { AtomicU32::new(0) }; 8],
+            state: AtomicU32::new(CELL_EMPTY),
+        }
+    }
+
+    /// An empty cell. Not `const` under loom — loom's atomics have no `const`
+    /// constructor, which is the one concession the model checker costs.
+    #[must_use]
+    #[cfg(feature = "loom")]
+    pub fn new() -> Self {
+        Self {
+            words: core::array::from_fn(|_| AtomicU32::new(0)),
             state: AtomicU32::new(CELL_EMPTY),
         }
     }
@@ -634,6 +654,109 @@ mod tests {
             block_on((&cell).call(())).is_err(),
             "the pipe form is take-once too"
         );
+    }
+
+    /// Threads need `std`, so these two are gated — a concurrency test cannot
+    /// run on a target with no threads. They do run in the default gate, which
+    /// is where the take-once claim has to hold: `compare_exchange` is the
+    /// enforcement, and an enforcement nobody races is an assertion.
+    #[cfg(feature = "std")]
+    mod contention {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+        use std::vec::Vec;
+
+        use super::super::EntropyCell;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 500;
+
+        #[test]
+        fn exactly_one_drawer_wins_each_claim() {
+            for round in 0..ROUNDS {
+                let cell = Arc::new(EntropyCell::new());
+                let barrier = Arc::new(Barrier::new(THREADS));
+                let winners = Arc::new(AtomicUsize::new(0));
+                cell.set([round as u8; 32]).expect("fresh cell is empty");
+
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let cell = Arc::clone(&cell);
+                        let barrier = Arc::clone(&barrier);
+                        let winners = Arc::clone(&winners);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            if cell.draw().is_ok() {
+                                winners.fetch_add(1, Ordering::Relaxed);
+                            }
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    handle.join().expect("no drawer panics");
+                }
+
+                assert_eq!(
+                    winners.load(Ordering::Relaxed),
+                    1,
+                    "round {round}: one value must be claimed exactly once, \
+                     never twice — a second winner is nonce reuse"
+                );
+            }
+        }
+
+        #[test]
+        fn a_claimed_value_is_never_handed_to_a_second_drawer() {
+            // Every round fills once and races THREADS drawers for it; the
+            // winning value is recorded. Bounded by construction — no spin
+            // loops, no waiting on another thread's progress — so this cannot
+            // hang if the property under test breaks.
+            let mut winning_values = Vec::new();
+
+            for round in 0..ROUNDS {
+                let cell = Arc::new(EntropyCell::new());
+                let barrier = Arc::new(Barrier::new(THREADS));
+                let claimed = Arc::new(Mutex::new(Vec::new()));
+
+                let mut value = [0u8; 32];
+                value[..8].copy_from_slice(&(round as u64).to_le_bytes());
+                cell.set(value).expect("fresh cell is empty");
+
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let cell = Arc::clone(&cell);
+                        let barrier = Arc::clone(&barrier);
+                        let claimed = Arc::clone(&claimed);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            if let Ok(drawn) = cell.draw() {
+                                claimed.lock().expect("not poisoned").push(*drawn.expose());
+                            }
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    handle.join().expect("no drawer panics");
+                }
+
+                let claimed = claimed.lock().expect("not poisoned");
+                assert_eq!(claimed.len(), 1, "round {round}: one drawer, not several");
+                winning_values.push(claimed[0]);
+            }
+
+            let mut deduped = winning_values.clone();
+            deduped.sort_unstable();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                winning_values.len(),
+                "each round's value must be distinct: a repeat means a value \
+                 outlived its claim"
+            );
+        }
     }
 
     #[test]
