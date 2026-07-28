@@ -9,6 +9,7 @@ use core::fmt;
 /// carried as `&'static str` (a pointer and a length, no heap) or as the
 /// integers that describe the mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CentauriError {
     /// The entropy source cannot produce bytes right now — a hardware TRNG
     /// failing its health test, a syscall-backed source refusing before the

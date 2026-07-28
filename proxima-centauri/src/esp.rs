@@ -55,6 +55,27 @@ const NONCE_BASE_LEN: usize = 4;
 const SEAL_NONCE_CONTEXT_INITIATOR: &str = "proxima-centauri-esp-nonce-i-v1";
 const SEAL_NONCE_CONTEXT_RESPONDER: &str = "proxima-centauri-esp-nonce-r-v1";
 
+/// An ESP security parameter index, identifying a child SA on the wire.
+///
+/// Distinct from [`crate::handshake::IkeSpi`] and a different width, so the
+/// two cannot be confused at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EspSpi(u32);
+
+impl EspSpi {
+    /// Wrap a raw SPI.
+    #[must_use]
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The raw value, for writing to the wire.
+    #[must_use]
+    pub const fn as_raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// A sliding replay window over the last [`REPLAY_WINDOW`] sequence numbers.
 ///
 /// Bit 0 of `bitmap[0]` is `highest`; bit *n* is `highest - n`. Strict O(1):
@@ -148,7 +169,7 @@ impl ReplayWindow {
 /// Derived from [`SessionKeys`], so the two ends agree on keys and nonce bases
 /// without exchanging anything further.
 pub struct ChildSa {
-    spi: u32,
+    spi: EspSpi,
     seal_cipher: ChaCha20Poly1305,
     open_cipher: ChaCha20Poly1305,
     seal_nonce_base: [u8; NONCE_BASE_LEN],
@@ -174,7 +195,7 @@ impl ChildSa {
     /// responder that agreed on [`SessionKeys`] also agree here — the defect
     /// that makes the oracle's `ChildSa` unusable between two peers.
     #[must_use]
-    pub fn from_session(keys: &SessionKeys, role: Role, spi: u32) -> Self {
+    pub fn from_session(keys: &SessionKeys, role: Role, spi: EspSpi) -> Self {
         let initiator_base = derive_key(SEAL_NONCE_CONTEXT_INITIATOR, keys.seed());
         let responder_base = derive_key(SEAL_NONCE_CONTEXT_RESPONDER, keys.seed());
 
@@ -201,7 +222,7 @@ impl ChildSa {
 
     /// This SA's security parameter index.
     #[must_use]
-    pub const fn spi(&self) -> u32 {
+    pub const fn spi(&self) -> EspSpi {
         self.spi
     }
 
@@ -246,7 +267,7 @@ impl ChildSa {
         // and then read back as associated data in place, so nothing on the
         // inner loop is copied except the tag the AEAD returns by value.
         let (header, rest) = buffer[..needed].split_at_mut(HEADER_LEN);
-        header[0..4].copy_from_slice(&self.spi.to_be_bytes());
+        header[0..4].copy_from_slice(&self.spi.as_raw().to_be_bytes());
         header[4..12].copy_from_slice(&seq.to_be_bytes());
         let (body, tag_slot) = rest.split_at_mut(payload_len);
 
@@ -329,19 +350,19 @@ mod tests {
     use proxima_clock::ticks::Ticks;
 
     use super::{
-        ChildSa, ESP_MAX_PAYLOAD_BYTES, HEADER_LEN, OVERHEAD, REPLAY_WINDOW, ReplayWindow,
+        ChildSa, ESP_MAX_PAYLOAD_BYTES, EspSpi, HEADER_LEN, OVERHEAD, REPLAY_WINDOW, ReplayWindow,
     };
     use crate::entropy::Entropy32;
     use crate::error::CentauriError;
-    use crate::handshake::{Handshake, Role};
+    use crate::handshake::{Handshake, IkeSpi, Role};
 
     const PSK: [u8; 32] = [0xAB; 32];
 
     /// Two SAs that agreed via a real handshake — the only honest way to build
     /// a pair, since agreement is the property under test.
     fn agreed_pair() -> (ChildSa, ChildSa) {
-        let mut initiator = Handshake::initiator(PSK, 1);
-        let mut responder = Handshake::responder(PSK, 2);
+        let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1));
+        let mut responder = Handshake::responder(PSK, IkeSpi::new(2));
         let now = Ticks::from_raw(1);
 
         let _ = initiator
@@ -359,8 +380,16 @@ mod tests {
         let _ = initiator.step(&reply, None, now).unwrap();
 
         (
-            ChildSa::from_session(initiator.keys().unwrap(), Role::Initiator, 0xAAAA),
-            ChildSa::from_session(responder.keys().unwrap(), Role::Responder, 0xBBBB),
+            ChildSa::from_session(
+                initiator.keys().unwrap(),
+                Role::Initiator,
+                EspSpi::new(0xAAAA),
+            ),
+            ChildSa::from_session(
+                responder.keys().unwrap(),
+                Role::Responder,
+                EspSpi::new(0xBBBB),
+            ),
         )
     }
 

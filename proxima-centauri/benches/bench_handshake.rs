@@ -24,12 +24,12 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use proxima_centauri::{CounterDrbg, Entropy32, EntropyCell, Handshake, hash};
+use proxima_centauri::{CounterDrbg, Entropy32, EntropyCell, Handshake, IkeSpi, hash};
 use proxima_clock::ticks::Ticks;
 
 const PSK: [u8; 32] = [0xAB; 32];
-const INITIATOR_SPI: u64 = 0x0102_0304_0506_0708;
-const RESPONDER_SPI: u64 = 0x1112_1314_1516_1718;
+const INITIATOR_SPI: IkeSpi = IkeSpi::new(0x0102_0304_0506_0708);
+const RESPONDER_SPI: IkeSpi = IkeSpi::new(0x1112_1314_1516_1718);
 const INITIATOR_SEED: [u8; 32] = [0x11; 32];
 const RESPONDER_SEED: [u8; 32] = [0x22; 32];
 
