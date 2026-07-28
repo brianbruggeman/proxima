@@ -3650,6 +3650,7 @@ name = "proxima-centauri"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "criterion",
  "proptest",
  "proxima-clock",
  "proxima-primitives",
