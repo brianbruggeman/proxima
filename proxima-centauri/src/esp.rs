@@ -1,0 +1,530 @@
+//! The child SA: per-packet AEAD with replay protection.
+//!
+//! This is the **hot path** — one seal or open per packet, versus one handshake
+//! per connection. Everything here is in-place over a caller buffer, so a
+//! packet is encrypted where it already sits.
+//!
+//! # Deliberate divergences from `csr-security::ChildSa`
+//!
+//! The handshake in [`crate::handshake`] is wire-compatible with the oracle
+//! because the relay runs it. `ChildSa` is different: it is **not** wire
+//! deployed — the relay bypasses it and drives a raw cipher with
+//! counter-based nonces, precisely because of the first defect below. With no
+//! deployed peer to stay compatible with, the format is fixed rather than
+//! reproduced.
+//!
+//! 1. **The oracle's `nonce_base` is random per instance.** Two peers each
+//!    generate their own, so neither can decrypt the other. Here both nonce
+//!    bases are *derived* from the session keys, so the two ends agree by
+//!    construction.
+//! 2. **The oracle writes a 4-byte sequence but derives the nonce from the
+//!    full `u64`.** Past 2^32 packets the wire value wraps while the nonce
+//!    does not, and the SA silently stops decrypting — reachable in about an
+//!    hour at a million packets per second. The sequence is 8 bytes here, so
+//!    the wire value and the nonce cannot diverge.
+//! 3. **The oracle holds its replay window behind a `std::sync::RwLock`**, in
+//!    the per-packet path. A sans-IO type takes `&mut self` instead: the
+//!    driver owns exclusivity, there is no lock to acquire, and it compiles
+//!    without `std`.
+//!
+//! Also added: the header is bound as AEAD associated data, so tampering with
+//! the SPI or sequence number fails authentication instead of being ignored.
+
+use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+
+use crate::error::CentauriError;
+use crate::handshake::{Role, SessionKeys};
+use crate::hash::derive_key;
+
+/// Poly1305 authentication tag.
+pub const TAG_LEN: usize = 16;
+/// SPI and sequence number, ahead of the ciphertext.
+pub const HEADER_LEN: usize = 12;
+/// Bytes a packet costs beyond its payload.
+pub const OVERHEAD: usize = HEADER_LEN + TAG_LEN;
+
+/// Packets tracked by the replay window.
+pub const REPLAY_WINDOW: u64 = 256;
+
+const NONCE_LEN: usize = 12;
+const NONCE_BASE_LEN: usize = 4;
+
+const SEAL_NONCE_CONTEXT_INITIATOR: &str = "proxima-centauri-esp-nonce-i-v1";
+const SEAL_NONCE_CONTEXT_RESPONDER: &str = "proxima-centauri-esp-nonce-r-v1";
+
+/// A sliding replay window over the last [`REPLAY_WINDOW`] sequence numbers.
+///
+/// Bit 0 of `bitmap[0]` is `highest`; bit *n* is `highest - n`. Strict O(1):
+/// a fixed four-word bitmap, shifted by whole words plus a remainder, never
+/// resized and never allocated.
+#[derive(Debug, Clone, Copy)]
+struct ReplayWindow {
+    highest: u64,
+    bitmap: [u64; 4],
+}
+
+impl ReplayWindow {
+    const fn new() -> Self {
+        Self {
+            highest: 0,
+            bitmap: [0; 4],
+        }
+    }
+
+    /// Accept `seq` and record it, or reject it as replayed or too old.
+    fn admit(&mut self, seq: u64) -> bool {
+        if seq == 0 {
+            return false;
+        }
+
+        if seq > self.highest {
+            self.shift(seq - self.highest);
+            self.highest = seq;
+            self.set(0);
+            return true;
+        }
+
+        let offset = self.highest - seq;
+        if offset >= REPLAY_WINDOW || self.is_set(offset) {
+            return false;
+        }
+
+        self.set(offset);
+        true
+    }
+
+    fn shift(&mut self, distance: u64) {
+        if distance >= REPLAY_WINDOW {
+            self.bitmap = [0; 4];
+            return;
+        }
+
+        let words = (distance / 64) as usize;
+        let bits = (distance % 64) as u32;
+
+        if words > 0 {
+            for index in (0..4).rev() {
+                self.bitmap[index] = if index >= words {
+                    self.bitmap[index - words]
+                } else {
+                    0
+                };
+            }
+        }
+
+        if bits > 0 {
+            let mut carry = 0u64;
+            for word in &mut self.bitmap {
+                let shifted = (*word << bits) | carry;
+                carry = *word >> (64 - bits);
+                *word = shifted;
+            }
+        }
+    }
+
+    fn set(&mut self, offset: u64) {
+        let word = (offset / 64) as usize;
+        let bit = offset % 64;
+        if let Some(slot) = self.bitmap.get_mut(word) {
+            *slot |= 1u64 << bit;
+        }
+    }
+
+    fn is_set(&self, offset: u64) -> bool {
+        let word = (offset / 64) as usize;
+        let bit = offset % 64;
+        self.bitmap
+            .get(word)
+            .is_some_and(|slot| slot & (1u64 << bit) != 0)
+    }
+}
+
+/// A child security association: seal outbound packets, open inbound ones.
+///
+/// Derived from [`SessionKeys`], so the two ends agree on keys and nonce bases
+/// without exchanging anything further.
+pub struct ChildSa {
+    spi: u32,
+    seal_cipher: ChaCha20Poly1305,
+    open_cipher: ChaCha20Poly1305,
+    seal_nonce_base: [u8; NONCE_BASE_LEN],
+    open_nonce_base: [u8; NONCE_BASE_LEN],
+    send_seq: u64,
+    replay: ReplayWindow,
+}
+
+impl core::fmt::Debug for ChildSa {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ChildSa")
+            .field("spi", &self.spi)
+            .field("send_seq", &self.send_seq)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChildSa {
+    /// Derive a child SA from an established handshake's keys.
+    ///
+    /// The nonce bases come from the direction keys, so an initiator and a
+    /// responder that agreed on [`SessionKeys`] also agree here — the defect
+    /// that makes the oracle's `ChildSa` unusable between two peers.
+    #[must_use]
+    pub fn from_session(keys: &SessionKeys, role: Role, spi: u32) -> Self {
+        let initiator_base = derive_key(SEAL_NONCE_CONTEXT_INITIATOR, keys.seed());
+        let responder_base = derive_key(SEAL_NONCE_CONTEXT_RESPONDER, keys.seed());
+
+        let (seal_base, open_base) = match role {
+            Role::Initiator => (initiator_base, responder_base),
+            Role::Responder => (responder_base, initiator_base),
+        };
+
+        let mut seal_nonce_base = [0u8; NONCE_BASE_LEN];
+        let mut open_nonce_base = [0u8; NONCE_BASE_LEN];
+        seal_nonce_base.copy_from_slice(&seal_base[..NONCE_BASE_LEN]);
+        open_nonce_base.copy_from_slice(&open_base[..NONCE_BASE_LEN]);
+
+        Self {
+            spi,
+            seal_cipher: ChaCha20Poly1305::new(keys.encrypt_key().into()),
+            open_cipher: ChaCha20Poly1305::new(keys.decrypt_key().into()),
+            seal_nonce_base,
+            open_nonce_base,
+            send_seq: 0,
+            replay: ReplayWindow::new(),
+        }
+    }
+
+    /// This SA's security parameter index.
+    #[must_use]
+    pub const fn spi(&self) -> u32 {
+        self.spi
+    }
+
+    /// Sequence number of the last sealed packet.
+    #[must_use]
+    pub const fn send_seq(&self) -> u64 {
+        self.send_seq
+    }
+
+    /// Seal a packet in place.
+    ///
+    /// On entry `buffer[HEADER_LEN..HEADER_LEN + payload_len]` holds the
+    /// plaintext. On return the packet occupies `buffer[..returned_len]`. The
+    /// buffer must therefore be at least `payload_len + OVERHEAD` long.
+    ///
+    /// # Errors
+    ///
+    /// [`CentauriError::BufferTooSmall`] when the buffer cannot hold the header,
+    /// payload, and tag.
+    pub fn seal(&mut self, buffer: &mut [u8], payload_len: usize) -> Result<usize, CentauriError> {
+        let needed = payload_len + OVERHEAD;
+        if buffer.len() < needed {
+            return Err(CentauriError::BufferTooSmall {
+                needed,
+                available: buffer.len(),
+            });
+        }
+
+        self.send_seq = self.send_seq.wrapping_add(1);
+        let seq = self.send_seq;
+
+        let mut header = [0u8; HEADER_LEN];
+        header[0..4].copy_from_slice(&self.spi.to_be_bytes());
+        header[4..12].copy_from_slice(&seq.to_be_bytes());
+        buffer[..HEADER_LEN].copy_from_slice(&header);
+
+        let nonce = Self::nonce(&self.seal_nonce_base, seq);
+        let tag = self
+            .seal_cipher
+            .encrypt_in_place_detached(
+                &nonce,
+                &header,
+                &mut buffer[HEADER_LEN..HEADER_LEN + payload_len],
+            )
+            .map_err(|_| CentauriError::EncryptionFailed)?;
+
+        buffer[HEADER_LEN + payload_len..needed].copy_from_slice(&tag);
+
+        Ok(needed)
+    }
+
+    /// Open a packet in place.
+    ///
+    /// Returns the payload length; the plaintext sits at
+    /// `packet[HEADER_LEN..HEADER_LEN + returned_len]`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CentauriError::InvalidMessage`] if the packet is too short to hold a
+    ///   header and a tag.
+    /// - [`CentauriError::ReplayDetected`] if the sequence number is outside the
+    ///   window or already seen. Checked *before* decryption, so a flood of
+    ///   replays costs a bitmap lookup rather than an AEAD pass.
+    /// - [`CentauriError::AuthenticationFailed`] if the tag does not verify —
+    ///   which also covers a tampered SPI or sequence number, since the header
+    ///   is bound as associated data.
+    pub fn open(&mut self, packet: &mut [u8]) -> Result<usize, CentauriError> {
+        if packet.len() < OVERHEAD {
+            return Err(CentauriError::InvalidMessage(
+                "packet shorter than overhead",
+            ));
+        }
+
+        let mut header = [0u8; HEADER_LEN];
+        header.copy_from_slice(&packet[..HEADER_LEN]);
+        let seq = u64::from_be_bytes(
+            header[4..12]
+                .try_into()
+                .map_err(|_| CentauriError::InvalidMessage("sequence"))?,
+        );
+
+        if !self.replay.admit(seq) {
+            return Err(CentauriError::ReplayDetected(seq));
+        }
+
+        let payload_len = packet.len() - OVERHEAD;
+        let mut tag = [0u8; TAG_LEN];
+        tag.copy_from_slice(&packet[HEADER_LEN + payload_len..]);
+
+        let nonce = Self::nonce(&self.open_nonce_base, seq);
+        self.open_cipher
+            .decrypt_in_place_detached(
+                &nonce,
+                &header,
+                &mut packet[HEADER_LEN..HEADER_LEN + payload_len],
+                (&tag).into(),
+            )
+            .map_err(|_| CentauriError::AuthenticationFailed)?;
+
+        Ok(payload_len)
+    }
+
+    /// `base || sequence`, so a nonce can never repeat within an SA and the
+    /// wire value and the nonce cannot disagree.
+    fn nonce(base: &[u8; NONCE_BASE_LEN], seq: u64) -> Nonce {
+        let mut bytes = [0u8; NONCE_LEN];
+        bytes[..NONCE_BASE_LEN].copy_from_slice(base);
+        bytes[NONCE_BASE_LEN..].copy_from_slice(&seq.to_be_bytes());
+        Nonce::from(bytes)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use proxima_clock::ticks::Ticks;
+
+    use super::{ChildSa, HEADER_LEN, OVERHEAD, REPLAY_WINDOW, ReplayWindow};
+    use crate::entropy::Entropy32;
+    use crate::error::CentauriError;
+    use crate::handshake::{Handshake, Role};
+
+    const PSK: [u8; 32] = [0xAB; 32];
+
+    /// Two SAs that agreed via a real handshake — the only honest way to build
+    /// a pair, since agreement is the property under test.
+    fn agreed_pair() -> (ChildSa, ChildSa) {
+        let mut initiator = Handshake::initiator(PSK, 1);
+        let mut responder = Handshake::responder(PSK, 2);
+        let now = Ticks::from_raw(1);
+
+        let _ = initiator
+            .step(&[], Some(Entropy32::new([0x11; 32])), now)
+            .unwrap();
+        let mut init = [0u8; 92];
+        init.copy_from_slice(initiator.outbound());
+
+        let _ = responder
+            .step(&init, Some(Entropy32::new([0x22; 32])), now)
+            .unwrap();
+        let mut reply = [0u8; 92];
+        reply.copy_from_slice(responder.outbound());
+
+        let _ = initiator.step(&reply, None, now).unwrap();
+
+        (
+            ChildSa::from_session(initiator.keys().unwrap(), Role::Initiator, 0xAAAA),
+            ChildSa::from_session(responder.keys().unwrap(), Role::Responder, 0xBBBB),
+        )
+    }
+
+    #[test]
+    fn sealed_packet_opens_on_the_peer() {
+        let (mut sender, mut receiver) = agreed_pair();
+        let payload = b"centauri esp payload";
+
+        let mut buffer = [0u8; 128];
+        buffer[HEADER_LEN..HEADER_LEN + payload.len()].copy_from_slice(payload);
+        let packet_len = sender.seal(&mut buffer, payload.len()).unwrap();
+
+        assert_eq!(packet_len, payload.len() + OVERHEAD);
+
+        let opened = receiver.open(&mut buffer[..packet_len]).unwrap();
+
+        assert_eq!(opened, payload.len());
+        assert_eq!(&buffer[HEADER_LEN..HEADER_LEN + opened], payload);
+    }
+
+    #[test]
+    fn both_directions_work_independently() {
+        let (mut initiator, mut responder) = agreed_pair();
+
+        let mut outbound = [0u8; 64];
+        outbound[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"i->r");
+        let len = initiator.seal(&mut outbound, 4).unwrap();
+        assert_eq!(responder.open(&mut outbound[..len]).unwrap(), 4);
+        assert_eq!(&outbound[HEADER_LEN..HEADER_LEN + 4], b"i->r");
+
+        let mut inbound = [0u8; 64];
+        inbound[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"r->i");
+        let len = responder.seal(&mut inbound, 4).unwrap();
+        assert_eq!(initiator.open(&mut inbound[..len]).unwrap(), 4);
+        assert_eq!(&inbound[HEADER_LEN..HEADER_LEN + 4], b"r->i");
+    }
+
+    #[test]
+    fn a_replayed_packet_is_rejected() {
+        let (mut sender, mut receiver) = agreed_pair();
+        let mut buffer = [0u8; 64];
+        buffer[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"once");
+        let len = sender.seal(&mut buffer, 4).unwrap();
+
+        let replay = buffer;
+        assert_eq!(receiver.open(&mut buffer[..len]).unwrap(), 4);
+
+        let mut again = replay;
+        assert_eq!(
+            receiver.open(&mut again[..len]).err(),
+            Some(CentauriError::ReplayDetected(1)),
+            "the same sequence number must not be accepted twice"
+        );
+    }
+
+    #[test]
+    fn a_tampered_header_fails_authentication() {
+        let (mut sender, mut receiver) = agreed_pair();
+        let mut buffer = [0u8; 64];
+        buffer[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"bind");
+        let len = sender.seal(&mut buffer, 4).unwrap();
+
+        buffer[0] ^= 0xFF;
+
+        assert_eq!(
+            receiver.open(&mut buffer[..len]).err(),
+            Some(CentauriError::AuthenticationFailed),
+            "the header is associated data, so editing the spi must not pass"
+        );
+    }
+
+    #[test]
+    fn a_tampered_ciphertext_fails_authentication() {
+        let (mut sender, mut receiver) = agreed_pair();
+        let mut buffer = [0u8; 64];
+        buffer[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"peek");
+        let len = sender.seal(&mut buffer, 4).unwrap();
+
+        buffer[HEADER_LEN] ^= 0x01;
+
+        assert_eq!(
+            receiver.open(&mut buffer[..len]).err(),
+            Some(CentauriError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn a_short_buffer_is_reported_with_the_shortfall() {
+        let (mut sender, _) = agreed_pair();
+        let mut buffer = [0u8; 20];
+
+        assert_eq!(
+            sender.seal(&mut buffer, 16).err(),
+            Some(CentauriError::BufferTooSmall {
+                needed: 16 + OVERHEAD,
+                available: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn a_runt_packet_is_rejected_before_decryption() {
+        let (_, mut receiver) = agreed_pair();
+        let mut runt = [0u8; OVERHEAD - 1];
+
+        assert_eq!(
+            receiver.open(&mut runt).err(),
+            Some(CentauriError::InvalidMessage(
+                "packet shorter than overhead"
+            ))
+        );
+    }
+
+    #[test]
+    fn out_of_order_within_the_window_is_accepted() {
+        let mut window = ReplayWindow::new();
+
+        assert!(window.admit(10));
+        assert!(window.admit(8), "older but inside the window");
+        assert!(window.admit(9));
+        assert!(!window.admit(9), "and not twice");
+    }
+
+    #[test]
+    fn packets_older_than_the_window_are_rejected() {
+        let mut window = ReplayWindow::new();
+
+        assert!(window.admit(REPLAY_WINDOW + 10));
+        assert!(!window.admit(1), "far outside the window");
+        assert!(window.admit(REPLAY_WINDOW + 9), "just inside it");
+    }
+
+    #[test]
+    fn a_large_jump_clears_the_window() {
+        let mut window = ReplayWindow::new();
+
+        assert!(window.admit(5));
+        assert!(window.admit(5 + REPLAY_WINDOW * 2));
+        assert!(
+            !window.admit(5),
+            "the old entry is gone, so it reads as too old"
+        );
+    }
+
+    #[test]
+    fn sequence_zero_is_never_admitted() {
+        let mut window = ReplayWindow::new();
+
+        assert!(!window.admit(0), "sealing starts at one");
+    }
+
+    #[test]
+    fn a_long_run_of_sequential_packets_all_open() {
+        let (mut sender, mut receiver) = agreed_pair();
+
+        for expected in 1..=300u64 {
+            let mut buffer = [0u8; 64];
+            buffer[HEADER_LEN..HEADER_LEN + 8].copy_from_slice(&expected.to_be_bytes());
+            let len = sender.seal(&mut buffer, 8).unwrap();
+
+            assert_eq!(sender.send_seq(), expected);
+            assert_eq!(receiver.open(&mut buffer[..len]).unwrap(), 8);
+            assert_eq!(&buffer[HEADER_LEN..HEADER_LEN + 8], &expected.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn peers_derive_matching_nonce_bases() {
+        let (initiator, responder) = agreed_pair();
+
+        assert_eq!(
+            initiator.seal_nonce_base, responder.open_nonce_base,
+            "what one seals with, the other must open with"
+        );
+        assert_eq!(initiator.open_nonce_base, responder.seal_nonce_base);
+        assert_ne!(
+            initiator.seal_nonce_base, initiator.open_nonce_base,
+            "the two directions must not share a nonce base"
+        );
+    }
+}

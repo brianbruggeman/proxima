@@ -52,11 +52,13 @@ extern crate std;
 
 pub mod entropy;
 pub mod error;
+pub mod esp;
 pub mod handshake;
 pub mod hash;
 
 pub use entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
 pub use error::CentauriError;
+pub use esp::ChildSa;
 pub use handshake::{Handshake, Progress, Role, SessionKeys};
 pub use hash::{derive_key, derive_key_into, hash, keyed_hash};
 
