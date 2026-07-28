@@ -166,6 +166,9 @@ fn main() {
         "[auth].max_identity_bytes must fit the u16 length prefix; got {max_identity}"
     );
 
+    let max_packets = sized_int(&root, "lifetime", "max_packets");
+    assert!(max_packets > 0, "[lifetime].max_packets must be non-zero");
+
     let max_payload = sized_int(&root, "esp", "max_payload_bytes");
     assert!(max_payload > 0, "[esp].max_payload_bytes must be non-zero");
 
@@ -205,6 +208,13 @@ fn main() {
         generated,
         "/// Value type behind [`EntropyCounter`].\n\
          pub type EntropyCounterValue = u{counter_bits};\n"
+    )
+    .expect("write to string");
+
+    writeln!(
+        generated,
+        "/// Packets a child SA may carry before it should be rekeyed.\n\
+         pub const LIFETIME_MAX_PACKETS: u64 = {max_packets};\n"
     )
     .expect("write to string");
 

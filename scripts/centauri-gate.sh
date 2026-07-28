@@ -69,6 +69,10 @@ declare -a cells=(
     "both suites together: tests incl. cross-suite rejection|cargo nextest run -p proxima-centauri --features aead-aes-gcm"
     "aes-gcm suite on thumbv7m (bare metal)|cargo build -p proxima-centauri --no-default-features --features aead-aes-gcm --lib --target thumbv7m-none-eabi"
 
+    # property tests quantify over arbitrary input, where the unit sweeps
+    # enumerate one message's neighbourhood exhaustively. Different questions.
+    "property tests over the wire surface|cargo test -p proxima-centauri --test property_wire"
+
     # principle 11: the walkthrough is teaching surface only if it runs.
     "handshake walkthrough EXECUTES|cargo run -q -p proxima-centauri --example handshake_walkthrough"
 

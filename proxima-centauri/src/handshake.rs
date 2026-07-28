@@ -55,6 +55,11 @@ const IDENTITY_LEN_BYTES: usize = 2;
 const MAC_LEN: usize = 32;
 const AUTH_EXCHANGE_TYPE: u8 = 0x23;
 const REKEY_EXCHANGE_TYPE: u8 = 0x24;
+const DELETE_EXCHANGE_TYPE: u8 = 0x26;
+/// Header plus a MAC. An unauthenticated teardown would be a free session
+/// kill for anyone who can send a packet, so a DELETE is authenticated like
+/// an AUTH payload.
+const DELETE_LEN: usize = HEADER_LEN + MAC_LEN;
 const REKEY_SKEYSEED_CONTEXT: &str = "proxima-centauri-ike-rekey-skeyseed-v1";
 const AUTH_FLAG_INITIATOR: u8 = 0x08;
 const AUTH_FLAG_RESPONDER: u8 = 0x20;
@@ -139,6 +144,8 @@ pub enum Progress {
     /// key only the true peer could derive. [`Handshake::peer_identity`] is
     /// available.
     Authenticated,
+    /// The SA is torn down. Keys are gone and no further step is legal.
+    Closed,
     /// Fresh keys are in force. The peer's identity carries over — a rekey
     /// chains to the authenticated SA rather than re-proving it — and the old
     /// keys are gone.
@@ -273,6 +280,9 @@ enum Phase {
     /// derives and replies in one step, exactly as it does in SA_INIT, so
     /// there is no "am I the rekey initiator" flag to carry — the state graph
     /// answers it.
+    /// Torn down. Carries nothing: the point of a close is that the key
+    /// material is unreachable, so there is no state left to hold.
+    Closed,
     Rekeying {
         keys: SessionKeys,
         at: Ticks,
@@ -293,6 +303,7 @@ impl Phase {
             Self::PeerAuthenticated { .. } => "peer-authenticated",
             Self::Authenticated { .. } => "authenticated",
             Self::Rekeying { .. } => "rekeying",
+            Self::Closed => "closed",
         }
     }
 }
@@ -405,6 +416,100 @@ impl Handshake {
         }
     }
 
+    /// Ticks since the SA was established, for a driver that wants an age
+    /// policy. `None` before establishment.
+    ///
+    /// Ticks rather than a duration: converting requires the hardware's
+    /// frequency, which this crate deliberately does not know.
+    #[must_use]
+    pub fn age(&self, now: Ticks) -> Option<u64> {
+        self.established_at().map(|at| now.wrapping_sub(at))
+    }
+
+    /// Whether this handshake has been torn down.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        matches!(self.phase, Phase::Closed)
+    }
+
+    /// Tear the SA down, emitting an authenticated DELETE.
+    ///
+    /// The keys are dropped before this returns, so a close is a close even if
+    /// the peer never receives the message.
+    ///
+    /// # Errors
+    ///
+    /// [`CentauriError::InvalidTransition`] if there is no SA to close.
+    pub fn send_delete(&mut self) -> Result<Progress, CentauriError> {
+        self.outbound_len = 0;
+
+        let auth_key = match &self.phase {
+            Phase::Established { keys, .. }
+            | Phase::LocalAuthSent { keys, .. }
+            | Phase::PeerAuthenticated { keys, .. }
+            | Phase::Authenticated { keys, .. }
+            | Phase::Rekeying { keys, .. } => *keys.auth_key(),
+            other => {
+                return Err(CentauriError::InvalidTransition {
+                    expected: "an open sa",
+                    found: other.name(),
+                });
+            }
+        };
+
+        let message_id = self.message_id;
+        self.message_id = self.message_id.wrapping_add(1);
+
+        let out = &mut self.outbound;
+        out[0..8].copy_from_slice(&self.spi_initiator.as_raw().to_be_bytes());
+        out[8..16].copy_from_slice(&self.spi_responder.as_raw().to_be_bytes());
+        out[16] = NEXT_PAYLOAD;
+        out[17] = VERSION;
+        out[18] = DELETE_EXCHANGE_TYPE;
+        out[19] = FLAGS;
+        out[20..24].copy_from_slice(&message_id.to_be_bytes());
+        out[24..28].copy_from_slice(&(DELETE_LEN as u32).to_be_bytes());
+        let mac = keyed_hash(&auth_key, &out[..HEADER_LEN]);
+        out[HEADER_LEN..DELETE_LEN].copy_from_slice(&mac);
+
+        self.outbound_len = DELETE_LEN;
+        self.phase = Phase::Closed;
+
+        Ok(Progress::Closed)
+    }
+
+    /// Verify and act on a peer's DELETE.
+    fn receive_delete(&mut self, input: &[u8]) -> Result<Progress, CentauriError> {
+        if input.len() < DELETE_LEN {
+            return Ok(Progress::NeedInput);
+        }
+
+        let peer_auth_key = match &self.phase {
+            Phase::Established { keys, .. }
+            | Phase::LocalAuthSent { keys, .. }
+            | Phase::PeerAuthenticated { keys, .. }
+            | Phase::Authenticated { keys, .. }
+            | Phase::Rekeying { keys, .. } => *keys.peer_auth_key(),
+            other => {
+                return Err(CentauriError::InvalidTransition {
+                    expected: "an open sa",
+                    found: other.name(),
+                });
+            }
+        };
+
+        let expected = keyed_hash(&peer_auth_key, &input[..HEADER_LEN]);
+        if !macs_match(&expected, &input[HEADER_LEN..DELETE_LEN]) {
+            // an unauthenticated delete is a free session kill; refusing one
+            // must leave the SA exactly as it was
+            return Err(CentauriError::AuthenticationFailed);
+        }
+
+        self.phase = Phase::Closed;
+
+        Ok(Progress::Closed)
+    }
+
     /// Which side of the exchange this is.
     #[must_use]
     pub const fn role(&self) -> Role {
@@ -490,6 +595,16 @@ impl Handshake {
     ) -> Result<Progress, CentauriError> {
         self.outbound_len = 0;
 
+        // A DELETE is legal from any open phase, so it dispatches on the
+        // message rather than the state — a peer tearing down mid-rekey is
+        // ordinary, not an error.
+        if input.len() >= DELETE_LEN
+            && input[18] == DELETE_EXCHANGE_TYPE
+            && !matches!(self.phase, Phase::Initial | Phase::Closed)
+        {
+            return self.receive_delete(input);
+        }
+
         match (self.role, &self.phase) {
             (Role::Initiator, Phase::Initial) => self.send_init(entropy),
             (Role::Responder, Phase::Initial) => self.receive_init(input, entropy, now),
@@ -509,6 +624,10 @@ impl Handshake {
             }),
             (_, Phase::Authenticated { .. }) => self.receive_rekey(input, entropy, now),
             (_, Phase::Rekeying { .. }) => self.complete_rekey(input, now),
+            (_, Phase::Closed) => Err(CentauriError::InvalidTransition {
+                expected: "an open sa",
+                found: "closed",
+            }),
         }
     }
 
@@ -1966,6 +2085,117 @@ mod tests {
                 .step(&tampered, Some(Entropy32::new([0x32; 32])), now())
                 .err(),
             Some(CentauriError::DegenerateKeyAgreement)
+        );
+    }
+
+    #[test]
+    fn a_delete_tears_down_both_sides() {
+        let (mut initiator, mut responder) = authenticated_pair();
+
+        assert_eq!(initiator.send_delete().unwrap(), Progress::Closed);
+        assert!(initiator.is_closed());
+        assert!(
+            initiator.keys().is_none(),
+            "a close must drop the keys, not merely mark a flag"
+        );
+
+        let message = staged(&initiator);
+        let len = initiator.outbound().len();
+
+        assert_eq!(
+            responder.step(&message[..len], None, now()).unwrap(),
+            Progress::Closed
+        );
+        assert!(responder.is_closed());
+        assert!(responder.keys().is_none());
+    }
+
+    #[test]
+    fn an_unauthenticated_delete_is_refused_and_the_sa_survives() {
+        // without a MAC this is a free session kill for anyone who can send a
+        // packet — the single most important property of a teardown message
+        let (mut initiator, mut responder) = authenticated_pair();
+        let before = *responder.keys().unwrap().encrypt_key();
+
+        let _ = initiator.send_delete().unwrap();
+        let mut forged = staged(&initiator);
+        let len = initiator.outbound().len();
+        forged[len - 1] ^= 0xFF;
+
+        assert_eq!(
+            responder.step(&forged[..len], None, now()).err(),
+            Some(CentauriError::AuthenticationFailed)
+        );
+        assert!(
+            !responder.is_closed(),
+            "a forged delete must not close the sa"
+        );
+        assert_eq!(responder.keys().unwrap().encrypt_key(), &before);
+    }
+
+    #[test]
+    fn a_delete_is_accepted_mid_rekey() {
+        // tearing down while a rekey is in flight is ordinary, not an error
+        let (mut initiator, mut responder) = authenticated_pair();
+        let _ = responder
+            .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+            .unwrap();
+
+        let _ = initiator.send_delete().unwrap();
+        let message = staged(&initiator);
+        let len = initiator.outbound().len();
+
+        assert_eq!(
+            responder.step(&message[..len], None, now()).unwrap(),
+            Progress::Closed
+        );
+    }
+
+    #[test]
+    fn a_closed_handshake_refuses_every_further_step() {
+        let (mut initiator, _) = authenticated_pair();
+        let _ = initiator.send_delete().unwrap();
+
+        assert_eq!(
+            initiator.step(&[0u8; 92], None, now()).err(),
+            Some(CentauriError::InvalidTransition {
+                expected: "an open sa",
+                found: "closed",
+            })
+        );
+        assert!(
+            initiator.send_delete().is_err(),
+            "closing twice is not a thing"
+        );
+        assert!(
+            initiator
+                .send_rekey(Some(Entropy32::new([1; 32])), now())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn closing_before_an_sa_exists_is_refused() {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+
+        assert_eq!(
+            initiator.send_delete().err(),
+            Some(CentauriError::InvalidTransition {
+                expected: "an open sa",
+                found: "initial",
+            })
+        );
+    }
+
+    #[test]
+    fn age_reports_ticks_since_establishment() {
+        let (initiator, _) = established_pair(b"peer-a", b"peer-b");
+
+        assert_eq!(initiator.age(Ticks::from_raw(1_500)), Some(500));
+        assert_eq!(
+            Handshake::initiator(PSK, INITIATOR_SPI).age(Ticks::from_raw(1_500)),
+            None,
+            "nothing to age before the sa exists"
         );
     }
 
