@@ -66,6 +66,7 @@ pub mod sized {
 pub mod aead;
 #[cfg(feature = "config")]
 pub mod config;
+pub mod cookie;
 pub mod entropy;
 pub mod error;
 /// Per-packet AEAD. Needs a suite, so a build with none omits it — the
@@ -79,6 +80,7 @@ pub mod session;
 
 #[cfg(feature = "config")]
 pub use config::HandshakeConfig;
+pub use cookie::{CookieSecret, Verdict};
 pub use entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
 pub use error::CentauriError;
 #[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]

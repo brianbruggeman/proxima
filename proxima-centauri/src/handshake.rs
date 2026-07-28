@@ -539,10 +539,10 @@ impl Handshake {
 
         let (our_nonce, ephemeral) = split_entropy(entropy)?;
         let dh_public = *PublicKey::from(&ephemeral).as_bytes();
-        let shared = ephemeral.diffie_hellman(&PublicKey::from(peer.dh_public));
+        let shared = agree(&ephemeral, peer.dh_public)?;
 
         // ni then nr, both sides: the initiator's nonce is always first.
-        let keys = self.derive_session_keys(&peer.nonce, &our_nonce, shared.as_bytes());
+        let keys = self.derive_session_keys(&peer.nonce, &our_nonce, &shared);
 
         self.write_message(&our_nonce, &dh_public);
         self.phase = Phase::Established { keys, at: now };
@@ -567,8 +567,8 @@ impl Handshake {
         };
 
         self.spi_responder = peer.spi_responder;
-        let shared = ephemeral.diffie_hellman(&PublicKey::from(peer.dh_public));
-        let keys = self.derive_session_keys(&our_nonce, &peer.nonce, shared.as_bytes());
+        let shared = agree(&ephemeral, peer.dh_public)?;
+        let keys = self.derive_session_keys(&our_nonce, &peer.nonce, &shared);
 
         self.phase = Phase::Established { keys, at: now };
 
@@ -844,10 +844,10 @@ impl Handshake {
             }
         };
         let dh_public = *PublicKey::from(&ephemeral).as_bytes();
-        let shared = ephemeral.diffie_hellman(&PublicKey::from(peer.dh_public));
+        let shared = agree(&ephemeral, peer.dh_public)?;
 
         // the rekey initiator's nonce is always first, both sides
-        let fresh = self.derive_rekey_keys(&keys, &peer.nonce, &our_nonce, shared.as_bytes());
+        let fresh = self.derive_rekey_keys(&keys, &peer.nonce, &our_nonce, &shared);
 
         self.write_exchange(REKEY_EXCHANGE_TYPE, &our_nonce, &dh_public);
         self.phase = Phase::Authenticated {
@@ -886,8 +886,8 @@ impl Handshake {
                 }
             };
 
-        let shared = ephemeral.diffie_hellman(&PublicKey::from(peer.dh_public));
-        let fresh = self.derive_rekey_keys(&keys, &our_nonce, &peer.nonce, shared.as_bytes());
+        let shared = agree(&ephemeral, peer.dh_public)?;
+        let fresh = self.derive_rekey_keys(&keys, &our_nonce, &peer.nonce, &shared);
 
         self.phase = Phase::Authenticated {
             keys: fresh,
@@ -919,6 +919,8 @@ impl Handshake {
         seed_input[32 + NONCE_LEN * 2..].copy_from_slice(shared);
 
         let skeyseed = derive_key(REKEY_SKEYSEED_CONTEXT, &seed_input);
+        seed_input = [0u8; 32 + NONCE_LEN * 2 + 32];
+        let _ = core::hint::black_box(&seed_input);
 
         SessionKeys {
             role: self.role,
@@ -943,6 +945,10 @@ impl Handshake {
         seed_input[NONCE_LEN * 2 + 32..].copy_from_slice(&self.psk);
 
         let skeyseed = derive_key(SKEYSEED_CONTEXT, &seed_input);
+        // the buffer held the shared secret and the PSK; a no-alloc crate has
+        // one address per secret, so wiping it actually wipes it
+        seed_input = [0u8; NONCE_LEN * 2 + 64];
+        let _ = core::hint::black_box(&seed_input);
 
         SessionKeys {
             role: self.role,
@@ -981,6 +987,29 @@ impl Handshake {
 
         self.outbound_len = MESSAGE_LEN;
     }
+}
+
+/// Agree a shared secret, refusing a degenerate one.
+///
+/// X25519 maps every low-order point to an all-zero output, and `x25519-dalek`
+/// returns it rather than erroring — verified 2026-07-28 against the all-zero
+/// point and two RFC 7748 small-order points, all three of which yield zeros.
+/// An active attacker who substitutes the peer's DH value therefore makes the
+/// ephemeral contribute **nothing**: key secrecy still rests on the PSK, but
+/// forward secrecy — the entire reason the ephemeral exists, and a property
+/// this crate claims for its rekey — is gone, silently.
+///
+/// RFC 7748 §6.1 permits rejecting the all-zero output, and this does, in
+/// constant time.
+fn agree(ephemeral: &StaticSecret, peer_public: [u8; DH_LEN]) -> Result<[u8; 32], CentauriError> {
+    let shared = ephemeral.diffie_hellman(&PublicKey::from(peer_public));
+    let bytes = *shared.as_bytes();
+
+    if bool::from(bytes.ct_eq(&[0u8; 32])) {
+        return Err(CentauriError::DegenerateKeyAgreement);
+    }
+
+    Ok(bytes)
 }
 
 /// Compare two MACs without leaking where they diverge.
@@ -1846,6 +1875,97 @@ mod tests {
         assert!(
             initiator.keys().is_some(),
             "a refused rekey must leave the SA alive"
+        );
+    }
+
+    /// The all-zero point and two RFC 7748 small-order points. Every one maps
+    /// to an all-zero shared secret under X25519, which is why they must be
+    /// refused rather than trusted to be rare.
+    const LOW_ORDER_POINTS: [[u8; 32]; 3] = [
+        [0u8; 32],
+        {
+            let mut point = [0u8; 32];
+            point[0] = 1;
+            point
+        },
+        [
+            0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f,
+            0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16,
+            0x5f, 0x49, 0xb8, 0x00,
+        ],
+    ];
+
+    #[test]
+    fn a_low_order_dh_value_is_refused_by_the_responder() {
+        // an active attacker substituting the peer's DH value would otherwise
+        // get an ephemeral that contributes nothing: key secrecy would still
+        // rest on the PSK, but forward secrecy would be gone silently.
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+
+        for (index, point) in LOW_ORDER_POINTS.iter().enumerate() {
+            let mut tampered = captured(&initiator);
+            tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(point);
+
+            let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+            assert_eq!(
+                responder
+                    .step(&tampered, Some(Entropy32::new(RESPONDER_SEED)), now())
+                    .err(),
+                Some(CentauriError::DegenerateKeyAgreement),
+                "low-order point {index} was accepted"
+            );
+            assert!(
+                responder.keys().is_none(),
+                "no keys from a degenerate agreement"
+            );
+        }
+    }
+
+    #[test]
+    fn a_low_order_dh_value_is_refused_by_the_initiator() {
+        let (mut initiator, responder) = {
+            let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+            let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+            let _ = initiator
+                .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+                .unwrap();
+            let init = captured(&initiator);
+            let _ = responder
+                .step(&init, Some(Entropy32::new(RESPONDER_SEED)), now())
+                .unwrap();
+            (initiator, responder)
+        };
+
+        let mut tampered = captured(&responder);
+        tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(&LOW_ORDER_POINTS[0]);
+
+        assert_eq!(
+            initiator.step(&tampered, None, now()).err(),
+            Some(CentauriError::DegenerateKeyAgreement),
+            "both directions must refuse, not just the responder"
+        );
+    }
+
+    #[test]
+    fn a_low_order_dh_value_is_refused_during_rekey() {
+        // the rekey is where this matters most: forward secrecy is the whole
+        // claim, and a degenerate agreement removes it while everything else
+        // still appears to work
+        let (mut initiator, mut responder) = authenticated_pair();
+        let _ = initiator
+            .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+            .unwrap();
+        let mut tampered = captured(&initiator);
+        tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(&LOW_ORDER_POINTS[2]);
+
+        assert_eq!(
+            responder
+                .step(&tampered, Some(Entropy32::new([0x32; 32])), now())
+                .err(),
+            Some(CentauriError::DegenerateKeyAgreement)
         );
     }
 

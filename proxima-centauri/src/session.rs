@@ -87,7 +87,15 @@ where
     /// message the protocol defines — which means the peer is not speaking it.
     pub fn feed(&self, bytes: &[u8]) -> Result<(), CentauriError> {
         let staged = self.inbound_len.get();
-        let end = staged + bytes.len();
+        // checked: a caller handing an enormous slice would otherwise wrap in
+        // release, pass the bound below, and panic inside copy_from_slice —
+        // a panic on attacker-shaped input is a denial of service
+        let end = staged
+            .checked_add(bytes.len())
+            .ok_or(CentauriError::BufferTooSmall {
+                needed: usize::MAX,
+                available: INBOUND_LEN,
+            })?;
         if end > INBOUND_LEN {
             return Err(CentauriError::BufferTooSmall {
                 needed: end,
