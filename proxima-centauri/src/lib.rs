@@ -63,12 +63,16 @@ pub mod sized {
     include!(concat!(env!("OUT_DIR"), "/proxima_centauri_sized.rs"));
 }
 
+#[cfg(feature = "config")]
+pub mod config;
 pub mod entropy;
 pub mod error;
 pub mod esp;
 pub mod handshake;
 pub mod hash;
 
+#[cfg(feature = "config")]
+pub use config::HandshakeConfig;
 pub use entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
 pub use error::CentauriError;
 pub use esp::{ChildSa, EspSpi};

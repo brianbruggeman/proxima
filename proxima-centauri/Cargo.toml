@@ -22,6 +22,15 @@ std = []
 # `--cfg loom` because RUSTFLAGS would apply the cfg to every crate in the
 # graph and break dependencies that carry their own loom support.
 loom = ["dep:loom"]
+# Config + fluent-builder surface for the handshake's per-session parameters
+# (gate point 12). conflaguration is std-only, so this sits at the std
+# composition boundary; the no-alloc core never sees it and takes plain values
+# in its constructors. The PSK is deliberately NOT a config field -- see
+# src/config.rs.
+config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+bon = ["dep:bon"]
+serde = ["dep:serde"]
+conflaguration = ["dep:conflaguration"]
 
 [dependencies]
 loom = { version = "0.7", optional = true }
@@ -30,6 +39,9 @@ chacha20poly1305 = { version = "0.10", default-features = false }
 proxima-clock.workspace = true
 proxima-primitives.workspace = true
 x25519-dalek = { version = "2.0.1", default-features = false, features = ["precomputed-tables", "static_secrets", "zeroize"] }
+bon = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 
 [lints]
 workspace = true
@@ -37,6 +49,9 @@ workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+temp-env.workspace = true
+tempfile.workspace = true
+toml.workspace = true
 
 [[bench]]
 name = "bench_handshake"
