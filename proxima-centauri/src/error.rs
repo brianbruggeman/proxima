@@ -34,6 +34,9 @@ pub enum CentauriError {
     /// no-alloc deployment can size packet buffers statically; exceeding it is
     /// reported rather than truncated.
     PayloadTooLarge { len: usize, max: usize },
+    /// The SA's sequence space is exhausted. The sequence is the nonce, so
+    /// continuing would repeat one; the SA must be rekeyed or torn down.
+    SequenceExhausted,
     /// AEAD sealing failed. Only reachable on a buffer-shape violation the
     /// caller-side length checks should already have caught.
     EncryptionFailed,
@@ -66,6 +69,7 @@ impl fmt::Display for CentauriError {
             Self::PayloadTooLarge { len, max } => {
                 write!(formatter, "payload too large: {len} bytes, max {max}")
             }
+            Self::SequenceExhausted => write!(formatter, "sequence space exhausted"),
             Self::EncryptionFailed => write!(formatter, "encryption failed"),
             Self::AuthenticationFailed => write!(formatter, "authentication failed"),
             Self::ReplayDetected(seq) => write!(formatter, "replay detected: seq {seq}"),
