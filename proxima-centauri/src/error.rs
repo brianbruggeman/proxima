@@ -66,6 +66,8 @@ impl std::error::Error for CentauriError {}
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use core::fmt::Write;
+
     use super::CentauriError;
 
     #[test]
@@ -91,52 +93,14 @@ mod tests {
 
     #[test]
     fn display_names_the_shortfall() {
-        let mut buffer = heapless_fmt::Buffer::new();
+        let mut buffer = crate::test_support::Buffer::new();
         let error = CentauriError::EntropyExhausted {
             drawn: 3,
             available: 2,
         };
 
-        buffer.write_display(&error);
+        write!(buffer, "{error}").expect("the message fits the buffer");
 
         assert_eq!(buffer.as_str(), "entropy exhausted: drew 3 of 2");
-    }
-
-    mod heapless_fmt {
-        use core::fmt::{self, Display, Write};
-
-        pub struct Buffer {
-            bytes: [u8; 128],
-            len: usize,
-        }
-
-        impl Buffer {
-            pub const fn new() -> Self {
-                Self {
-                    bytes: [0; 128],
-                    len: 0,
-                }
-            }
-
-            pub fn write_display(&mut self, value: &impl Display) {
-                let _ = write!(self, "{value}");
-            }
-
-            pub fn as_str(&self) -> &str {
-                core::str::from_utf8(&self.bytes[..self.len]).expect("display output is utf-8")
-            }
-        }
-
-        impl Write for Buffer {
-            fn write_str(&mut self, text: &str) -> fmt::Result {
-                let end = self.len + text.len();
-                if end > self.bytes.len() {
-                    return Err(fmt::Error);
-                }
-                self.bytes[self.len..end].copy_from_slice(text.as_bytes());
-                self.len = end;
-                Ok(())
-            }
-        }
     }
 }

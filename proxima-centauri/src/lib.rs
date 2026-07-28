@@ -52,8 +52,47 @@ extern crate std;
 
 pub mod entropy;
 pub mod error;
+pub mod handshake;
 pub mod hash;
 
 pub use entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
 pub use error::CentauriError;
+pub use handshake::{Handshake, Progress, Role, SessionKeys};
 pub use hash::{derive_key, derive_key_into, hash, keyed_hash};
+
+/// A fixed-size `core::fmt::Write` sink, so tests that inspect rendered output
+/// run at the no-alloc tier too rather than only where `format!` exists.
+#[cfg(test)]
+mod test_support {
+    use core::fmt::{self, Write};
+
+    pub struct Buffer {
+        bytes: [u8; 512],
+        len: usize,
+    }
+
+    impl Buffer {
+        pub const fn new() -> Self {
+            Self {
+                bytes: [0; 512],
+                len: 0,
+            }
+        }
+
+        pub fn as_str(&self) -> &str {
+            core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("<invalid utf-8>")
+        }
+    }
+
+    impl Write for Buffer {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            let end = self.len + text.len();
+            if end > self.bytes.len() {
+                return Err(fmt::Error);
+            }
+            self.bytes[self.len..end].copy_from_slice(text.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+}

@@ -19,7 +19,9 @@ std = []
 
 [dependencies]
 blake3 = { version = "1.8.5", default-features = false }
+proxima-clock.workspace = true
 proxima-primitives.workspace = true
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
 
 [lints]
 workspace = true
