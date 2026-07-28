@@ -34,6 +34,11 @@ pub enum CentauriError {
     /// no-alloc deployment can size packet buffers statically; exceeding it is
     /// reported rather than truncated.
     PayloadTooLarge { len: usize, max: usize },
+    /// Key agreement produced the all-zero shared secret, which every
+    /// low-order X25519 point yields. The peer's DH value is degenerate —
+    /// substituted by an attacker, or a broken implementation — and continuing
+    /// would give an ephemeral that contributes nothing.
+    DegenerateKeyAgreement,
     /// The SA's sequence space is exhausted. The sequence is the nonce, so
     /// continuing would repeat one; the SA must be rekeyed or torn down.
     SequenceExhausted,
@@ -69,6 +74,7 @@ impl fmt::Display for CentauriError {
             Self::PayloadTooLarge { len, max } => {
                 write!(formatter, "payload too large: {len} bytes, max {max}")
             }
+            Self::DegenerateKeyAgreement => write!(formatter, "degenerate key agreement"),
             Self::SequenceExhausted => write!(formatter, "sequence space exhausted"),
             Self::EncryptionFailed => write!(formatter, "encryption failed"),
             Self::AuthenticationFailed => write!(formatter, "authentication failed"),
