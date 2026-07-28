@@ -30,8 +30,9 @@
 //! Also added: the header is bound as AEAD associated data, so tampering with
 //! the SPI or sequence number fails authentication instead of being ignored.
 
-use chacha20poly1305::aead::AeadInPlace;
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag};
+use aead::{AeadInPlace, KeyInit};
+
+use crate::aead::{Nonce, Tag};
 
 use crate::error::CentauriError;
 use crate::handshake::{Role, SessionKeys};
@@ -164,14 +165,102 @@ impl ReplayWindow {
     }
 }
 
+/// The AEAD suite this SA speaks.
+///
+/// A discriminated enum, not a `Box<dyn Aead>`: the set of suites is closed and
+/// known at compile time, so `match` does the dispatch with no indirection and
+/// no allocator. Each variant exists only when its feature is on, so a binary
+/// that compiles one suite carries exactly one.
+///
+/// Additive rather than exclusive. Which suites a binary *can* speak is a build
+/// decision; which one a session *does* speak is a deployment one, and
+/// conflating them is what forces a fork per deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AeadSuite {
+    /// ChaCha20-Poly1305. Constant-time in software on every target, which is
+    /// why it is the default — a target without AES instructions running
+    /// AES-GCM in software is both slower and harder to keep constant-time.
+    #[cfg(feature = "aead-chacha20poly1305")]
+    ChaCha20Poly1305,
+    /// AES-256-GCM. Wins where AES-NI or ARM crypto extensions exist.
+    #[cfg(feature = "aead-aes-gcm")]
+    Aes256Gcm,
+}
+
+impl AeadSuite {
+    /// The suite chosen when a caller does not say. ChaCha20-Poly1305 where it
+    /// is compiled, since it is the safe answer on any target; AES only when
+    /// it is the sole suite built.
+    #[cfg(feature = "aead-chacha20poly1305")]
+    pub const DEFAULT: Self = Self::ChaCha20Poly1305;
+
+    /// See the other `DEFAULT`.
+    #[cfg(all(not(feature = "aead-chacha20poly1305"), feature = "aead-aes-gcm"))]
+    pub const DEFAULT: Self = Self::Aes256Gcm;
+}
+
+/// The keyed cipher behind a direction.
+enum DirectionCipher {
+    #[cfg(feature = "aead-chacha20poly1305")]
+    ChaCha(chacha20poly1305::ChaCha20Poly1305),
+    #[cfg(feature = "aead-aes-gcm")]
+    Aes(aes_gcm::Aes256Gcm),
+}
+
+impl DirectionCipher {
+    fn new(suite: &AeadSuite, key: &[u8; 32]) -> Self {
+        match suite {
+            #[cfg(feature = "aead-chacha20poly1305")]
+            AeadSuite::ChaCha20Poly1305 => {
+                Self::ChaCha(chacha20poly1305::ChaCha20Poly1305::new(key.into()))
+            }
+            #[cfg(feature = "aead-aes-gcm")]
+            AeadSuite::Aes256Gcm => Self::Aes(aes_gcm::Aes256Gcm::new(key.into())),
+        }
+    }
+
+    fn seal(&self, nonce: &Nonce, aad: &[u8], body: &mut [u8]) -> Result<Tag, CentauriError> {
+        match self {
+            #[cfg(feature = "aead-chacha20poly1305")]
+            Self::ChaCha(cipher) => cipher
+                .encrypt_in_place_detached(nonce, aad, body)
+                .map_err(|_| CentauriError::EncryptionFailed),
+            #[cfg(feature = "aead-aes-gcm")]
+            Self::Aes(cipher) => cipher
+                .encrypt_in_place_detached(nonce, aad, body)
+                .map_err(|_| CentauriError::EncryptionFailed),
+        }
+    }
+
+    fn open(
+        &self,
+        nonce: &Nonce,
+        aad: &[u8],
+        body: &mut [u8],
+        tag: &Tag,
+    ) -> Result<(), CentauriError> {
+        match self {
+            #[cfg(feature = "aead-chacha20poly1305")]
+            Self::ChaCha(cipher) => cipher
+                .decrypt_in_place_detached(nonce, aad, body, tag)
+                .map_err(|_| CentauriError::AuthenticationFailed),
+            #[cfg(feature = "aead-aes-gcm")]
+            Self::Aes(cipher) => cipher
+                .decrypt_in_place_detached(nonce, aad, body, tag)
+                .map_err(|_| CentauriError::AuthenticationFailed),
+        }
+    }
+}
+
 /// A child security association: seal outbound packets, open inbound ones.
 ///
 /// Derived from [`SessionKeys`], so the two ends agree on keys and nonce bases
 /// without exchanging anything further.
 pub struct ChildSa {
     spi: EspSpi,
-    seal_cipher: ChaCha20Poly1305,
-    open_cipher: ChaCha20Poly1305,
+    seal_cipher: DirectionCipher,
+    open_cipher: DirectionCipher,
     seal_nonce_base: [u8; NONCE_BASE_LEN],
     open_nonce_base: [u8; NONCE_BASE_LEN],
     send_seq: u64,
@@ -196,6 +285,17 @@ impl ChildSa {
     /// that makes the oracle's `ChildSa` unusable between two peers.
     #[must_use]
     pub fn from_session(keys: &SessionKeys, role: Role, spi: EspSpi) -> Self {
+        Self::from_session_with(keys, role, spi, &AeadSuite::DEFAULT)
+    }
+
+    /// As [`ChildSa::from_session`], choosing the AEAD suite explicitly.
+    #[must_use]
+    pub fn from_session_with(
+        keys: &SessionKeys,
+        role: Role,
+        spi: EspSpi,
+        suite: &AeadSuite,
+    ) -> Self {
         let initiator_base = derive_key(SEAL_NONCE_CONTEXT_INITIATOR, keys.seed());
         let responder_base = derive_key(SEAL_NONCE_CONTEXT_RESPONDER, keys.seed());
 
@@ -211,8 +311,8 @@ impl ChildSa {
 
         Self {
             spi,
-            seal_cipher: ChaCha20Poly1305::new(keys.encrypt_key().into()),
-            open_cipher: ChaCha20Poly1305::new(keys.decrypt_key().into()),
+            seal_cipher: DirectionCipher::new(suite, keys.encrypt_key()),
+            open_cipher: DirectionCipher::new(suite, keys.decrypt_key()),
             seal_nonce_base,
             open_nonce_base,
             send_seq: 0,
@@ -272,10 +372,7 @@ impl ChildSa {
         let (body, tag_slot) = rest.split_at_mut(payload_len);
 
         let nonce = Self::nonce(&self.seal_nonce_base, seq);
-        let tag = self
-            .seal_cipher
-            .encrypt_in_place_detached(&nonce, header, body)
-            .map_err(|_| CentauriError::EncryptionFailed)?;
+        let tag = self.seal_cipher.seal(&nonce, header, body)?;
 
         tag_slot.copy_from_slice(&tag);
 
@@ -327,9 +424,7 @@ impl ChildSa {
         let tag_ref: &Tag = (&*tag).into();
 
         let nonce = Self::nonce(&self.open_nonce_base, seq);
-        self.open_cipher
-            .decrypt_in_place_detached(&nonce, header, body, tag_ref)
-            .map_err(|_| CentauriError::AuthenticationFailed)?;
+        self.open_cipher.open(&nonce, header, body, tag_ref)?;
 
         Ok(payload_len)
     }
@@ -350,7 +445,8 @@ mod tests {
     use proxima_clock::ticks::Ticks;
 
     use super::{
-        ChildSa, ESP_MAX_PAYLOAD_BYTES, EspSpi, HEADER_LEN, OVERHEAD, REPLAY_WINDOW, ReplayWindow,
+        AeadSuite, ChildSa, ESP_MAX_PAYLOAD_BYTES, EspSpi, HEADER_LEN, OVERHEAD, REPLAY_WINDOW,
+        ReplayWindow,
     };
     use crate::entropy::Entropy32;
     use crate::error::CentauriError;
@@ -517,6 +613,96 @@ mod tests {
                 "packet shorter than overhead"
             ))
         );
+    }
+
+    /// A pair speaking a named suite, so a test can pin the choice rather
+    /// than inherit the default.
+    fn agreed_pair_with(suite: &AeadSuite) -> (ChildSa, ChildSa) {
+        let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1));
+        let mut responder = Handshake::responder(PSK, IkeSpi::new(2));
+        let now = Ticks::from_raw(1);
+
+        let _ = initiator
+            .step(&[], Some(Entropy32::new([0x11; 32])), now)
+            .unwrap();
+        let mut init = [0u8; 92];
+        init.copy_from_slice(initiator.outbound());
+        let _ = responder
+            .step(&init, Some(Entropy32::new([0x22; 32])), now)
+            .unwrap();
+        let mut reply = [0u8; 92];
+        reply.copy_from_slice(responder.outbound());
+        let _ = initiator.step(&reply, None, now).unwrap();
+
+        (
+            ChildSa::from_session_with(
+                initiator.keys().unwrap(),
+                Role::Initiator,
+                EspSpi::new(0xAAAA),
+                suite,
+            ),
+            ChildSa::from_session_with(
+                responder.keys().unwrap(),
+                Role::Responder,
+                EspSpi::new(0xBBBB),
+                suite,
+            ),
+        )
+    }
+
+    fn round_trips(suite: &AeadSuite) {
+        let (mut sender, mut receiver) = agreed_pair_with(suite);
+        let payload = b"suite round trip";
+        let mut buffer = [0u8; 128];
+        buffer[HEADER_LEN..HEADER_LEN + payload.len()].copy_from_slice(payload);
+
+        let len = sender.seal(&mut buffer, payload.len()).unwrap();
+        let opened = receiver.open(&mut buffer[..len]).unwrap();
+
+        assert_eq!(opened, payload.len(), "{suite:?}");
+        assert_eq!(
+            &buffer[HEADER_LEN..HEADER_LEN + opened],
+            payload,
+            "{suite:?}"
+        );
+    }
+
+    #[cfg(feature = "aead-chacha20poly1305")]
+    #[test]
+    fn chacha20poly1305_round_trips() {
+        round_trips(&AeadSuite::ChaCha20Poly1305);
+    }
+
+    #[cfg(feature = "aead-aes-gcm")]
+    #[test]
+    fn aes256gcm_round_trips() {
+        round_trips(&AeadSuite::Aes256Gcm);
+    }
+
+    #[cfg(all(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
+    #[test]
+    fn a_packet_sealed_with_one_suite_does_not_open_with_the_other() {
+        // the suite is a wire agreement: peers that disagree must fail closed,
+        // not silently produce garbage
+        let (mut sender, _) = agreed_pair_with(&AeadSuite::ChaCha20Poly1305);
+        let (_, mut receiver) = agreed_pair_with(&AeadSuite::Aes256Gcm);
+
+        let mut buffer = [0u8; 128];
+        buffer[HEADER_LEN..HEADER_LEN + 8].copy_from_slice(b"mismatch");
+        let len = sender.seal(&mut buffer, 8).unwrap();
+
+        assert_eq!(
+            receiver.open(&mut buffer[..len]).err(),
+            Some(CentauriError::AuthenticationFailed),
+            "a suite mismatch must fail closed"
+        );
+    }
+
+    #[cfg(feature = "aead-chacha20poly1305")]
+    #[test]
+    fn chacha_is_the_default_where_it_is_compiled() {
+        // the safe answer on any target is the one a caller gets for free
+        assert_eq!(AeadSuite::DEFAULT, AeadSuite::ChaCha20Poly1305);
     }
 
     #[test]

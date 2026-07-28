@@ -63,10 +63,15 @@ pub mod sized {
     include!(concat!(env!("OUT_DIR"), "/proxima_centauri_sized.rs"));
 }
 
+pub mod aead;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod entropy;
 pub mod error;
+/// Per-packet AEAD. Needs a suite, so a build with none omits it — the
+/// handshake stands alone, which is what a key-agreement-only deployment
+/// wants.
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
 pub mod esp;
 pub mod handshake;
 pub mod hash;
@@ -75,7 +80,8 @@ pub mod hash;
 pub use config::HandshakeConfig;
 pub use entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
 pub use error::CentauriError;
-pub use esp::{ChildSa, EspSpi};
+#[cfg(any(feature = "aead-chacha20poly1305", feature = "aead-aes-gcm"))]
+pub use esp::{AeadSuite, ChildSa, EspSpi};
 pub use handshake::{Handshake, IkeSpi, Progress, Role, SessionKeys};
 pub use hash::{derive_key, derive_key_into, hash, keyed_hash};
 
