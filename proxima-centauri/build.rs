@@ -100,6 +100,37 @@ fn resolve_counter_bits(requested: &str) -> u32 {
     }
 }
 
+/// The AES suite silently falls back to software AES unless the `aes` crate's
+/// hardware backend is switched on by a cfg flag, and cfgs do not propagate
+/// from here to a dependency — so the only thing this crate can do is say so.
+///
+/// Measured 2026-07-28 on aarch64: sealing 1200 bytes costs 9.15 µs on the
+/// software backend against 2.16 µs with `--cfg aes_armv8`. That 4.2x is
+/// enough to invert the choice between the two suites, so a build that picks
+/// AES without the flag gets the opposite of the performance it selected AES
+/// for.
+fn warn_on_software_aes() {
+    let aes_selected = env::var("CARGO_FEATURE_AEAD_AES_GCM").is_ok();
+    if !aes_selected {
+        return;
+    }
+
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let hardware_cfg = env::var("CARGO_ENCODED_RUSTFLAGS")
+        .unwrap_or_default()
+        .contains("aes_armv8");
+
+    if arch == "aarch64" && !hardware_cfg {
+        println!(
+            "cargo:warning=aead-aes-gcm on aarch64 without `--cfg aes_armv8`: \
+             the aes crate falls back to its software backend, which measured \
+             4.2x slower than the hardware one and slower than \
+             aead-chacha20poly1305. Set RUSTFLAGS=\"--cfg aes_armv8\" or use \
+             the chacha suite."
+        );
+    }
+}
+
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
@@ -190,6 +221,8 @@ fn main() {
          pub const ESP_MAX_PAYLOAD_BYTES: usize = {max_payload};"
     )
     .expect("write to string");
+
+    warn_on_software_aes();
 
     let destination = out_dir.join("proxima_centauri_sized.rs");
     fs::write(&destination, generated)

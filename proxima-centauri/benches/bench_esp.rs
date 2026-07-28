@@ -55,6 +55,71 @@ fn agreed_pair() -> (ChildSa, ChildSa) {
     )
 }
 
+/// A pair speaking a named suite.
+#[cfg(feature = "aead-aes-gcm")]
+fn agreed_pair_with(suite: &proxima_centauri::AeadSuite) -> (ChildSa, ChildSa) {
+    let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1));
+    let mut responder = Handshake::responder(PSK, IkeSpi::new(2));
+    let now = Ticks::from_raw(1);
+
+    let _ = initiator
+        .step(&[], Some(Entropy32::new([0x11; 32])), now)
+        .unwrap();
+    let mut init = [0u8; 92];
+    init.copy_from_slice(initiator.outbound());
+    let _ = responder
+        .step(&init, Some(Entropy32::new([0x22; 32])), now)
+        .unwrap();
+    let mut reply = [0u8; 92];
+    reply.copy_from_slice(responder.outbound());
+    let _ = initiator.step(&reply, None, now).unwrap();
+
+    (
+        ChildSa::from_session_with(
+            initiator.keys().unwrap(),
+            Role::Initiator,
+            EspSpi::new(0xAAAA),
+            suite,
+        ),
+        ChildSa::from_session_with(
+            responder.keys().unwrap(),
+            Role::Responder,
+            EspSpi::new(0xBBBB),
+            suite,
+        ),
+    )
+}
+
+/// Which AEAD suite to build with is a per-target decision, and this is the
+/// arm that decides it. Both suites are compiled here so the comparison is
+/// one binary on one host, not two builds compared across runs.
+#[cfg(feature = "aead-aes-gcm")]
+fn aead_suites(criterion: &mut Criterion) {
+    use proxima_centauri::AeadSuite;
+
+    let mut group = criterion.benchmark_group("esp_suite_seal");
+
+    for (label, suite) in [
+        ("chacha20poly1305", AeadSuite::ChaCha20Poly1305),
+        ("aes256gcm", AeadSuite::Aes256Gcm),
+    ] {
+        for size in [1200usize, 8 * 1024] {
+            group.throughput(Throughput::Bytes(size as u64));
+            group.bench_with_input(
+                BenchmarkId::new(label, size),
+                &(suite, size),
+                |bencher, &(suite, size)| {
+                    let (mut sender, _) = agreed_pair_with(&suite);
+                    let mut buffer = vec![0u8; size + OVERHEAD];
+                    bencher.iter(|| black_box(sender.seal(black_box(&mut buffer), size).unwrap()));
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 fn seal(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("esp_seal");
 
@@ -157,5 +222,9 @@ fn round_trip(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "aead-aes-gcm")]
+criterion_group!(benches, seal, open, replay_reject, round_trip, aead_suites);
+
+#[cfg(not(feature = "aead-aes-gcm"))]
 criterion_group!(benches, seal, open, replay_reject, round_trip);
 criterion_main!(benches);

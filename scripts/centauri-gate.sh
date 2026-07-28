@@ -33,13 +33,15 @@ declare -a cells=(
 
     # tier ladder. The last of these is the one that makes "no-alloc" a fact.
     "build std|cargo build -p proxima-centauri"
-    "build no_std + no-alloc (host)|cargo build -p proxima-centauri --no-default-features"
-    "build no_std + no-alloc on thumbv7m (bare metal, NO allocator)|cargo build -p proxima-centauri --no-default-features --lib --target thumbv7m-none-eabi"
+    "build no_std + no-alloc, handshake only (no AEAD suite)|cargo build -p proxima-centauri --no-default-features"
+    "build no_std + no-alloc + chacha suite|cargo build -p proxima-centauri --no-default-features --features aead-chacha20poly1305"
+    "build on thumbv7m, handshake only (bare metal, NO allocator)|cargo build -p proxima-centauri --no-default-features --lib --target thumbv7m-none-eabi"
+    "build on thumbv7m + chacha suite|cargo build -p proxima-centauri --no-default-features --features aead-chacha20poly1305 --lib --target thumbv7m-none-eabi"
 
     # the suite, at both tiers. The second is the load-bearing one: it proves
     # the tests themselves carry no alloc, so they can defend the tier claim.
     "nextest (std)|cargo nextest run -p proxima-centauri"
-    "test suite RUNS at no_std + no-alloc|cargo test -p proxima-centauri --no-default-features"
+    "test suite RUNS at no_std + no-alloc|cargo test -p proxima-centauri --no-default-features --features aead-chacha20poly1305"
 
     # take-once exclusivity, exhaustively rather than by sampling. Mutation
     # tested 2026-07-28: a check-then-act draw fails this cell.
@@ -54,6 +56,13 @@ declare -a cells=(
     # equivalent components, and the config must not carry key material.
     "config + API parity (gate point 12)|cargo nextest run -p proxima-centauri --features config -E 'test(config::)'"
     "clippy with config surface|cargo clippy -p proxima-centauri --features config --all-targets"
+
+    # AEAD suites are additive, so all three shapes must build and pass: each
+    # suite alone, and both together with the choice made at runtime.
+    "aes-gcm suite alone: builds|cargo build -p proxima-centauri --no-default-features --features aead-aes-gcm"
+    "aes-gcm suite alone: tests|cargo nextest run -p proxima-centauri --no-default-features --features std,aead-aes-gcm"
+    "both suites together: tests incl. cross-suite rejection|cargo nextest run -p proxima-centauri --features aead-aes-gcm"
+    "aes-gcm suite on thumbv7m (bare metal)|cargo build -p proxima-centauri --no-default-features --features aead-aes-gcm --lib --target thumbv7m-none-eabi"
 
     # principle 11: the walkthrough is teaching surface only if it runs.
     "handshake walkthrough EXECUTES|cargo run -q -p proxima-centauri --example handshake_walkthrough"
@@ -87,7 +96,7 @@ if [ -n "$SECOND_TARGET" ] && rustup target list --installed | grep -E "^${SECON
     cells+=(
         "second target ${SECOND_TARGET}: builds|cargo build -p proxima-centauri --target ${SECOND_TARGET}"
         "second target ${SECOND_TARGET}: tests pass|cargo test -p proxima-centauri --target ${SECOND_TARGET}"
-        "second target ${SECOND_TARGET}: no-alloc tier|cargo test -p proxima-centauri --no-default-features --target ${SECOND_TARGET}"
+        "second target ${SECOND_TARGET}: no-alloc tier|cargo test -p proxima-centauri --no-default-features --features aead-chacha20poly1305 --target ${SECOND_TARGET}"
     )
 else
     printf 'SKIP: second-target cells — no installed second target for host %s\n' "$RUSTC_HOST"

@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "aead-chacha20poly1305"]
 # Nothing in this crate is std-gated: the whole surface is no_std + no-alloc by
 # construction. The feature exists so a caller composing with std crates does
 # not have to write `default-features = false`, and so `std::error::Error` can
@@ -28,6 +28,19 @@ loom = ["dep:loom"]
 # in its constructors. The PSK is deliberately NOT a config field -- see
 # src/config.rs.
 config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+
+# AEAD suites. ADDITIVE, not exclusive: enabling both compiles both and the
+# choice becomes a runtime value, mirroring the runtime-selection shape
+# proxima uses for executors. A cipher suite is a wire-format agreement, so
+# the peers must match -- but which one a binary *can* speak is a build
+# decision and which one it *does* speak is a deployment one, and those are
+# different questions.
+#
+# ChaCha20-Poly1305 is the default: constant-time in software everywhere,
+# which matters on targets without AES instructions. AES-256-GCM wins where
+# AES-NI or ARM crypto extensions exist -- see the compare-bench.
+aead-chacha20poly1305 = ["dep:chacha20poly1305"]
+aead-aes-gcm = ["dep:aes-gcm"]
 bon = ["dep:bon"]
 serde = ["dep:serde"]
 conflaguration = ["dep:conflaguration"]
@@ -35,7 +48,8 @@ conflaguration = ["dep:conflaguration"]
 [dependencies]
 loom = { version = "0.7", optional = true }
 blake3 = { version = "1.8.5", default-features = false }
-chacha20poly1305 = { version = "0.10", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"], optional = true }
+chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
 proxima-clock.workspace = true
 proxima-primitives.workspace = true
 x25519-dalek = { version = "2.0.1", default-features = false, features = ["precomputed-tables", "static_secrets", "zeroize"] }
@@ -43,6 +57,7 @@ bon = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 subtle = { version = "2.6.1", default-features = false }
+aead = { version = "0.5", default-features = false }
 
 [lints]
 workspace = true
@@ -62,6 +77,7 @@ harness = false
 [[bench]]
 name = "bench_esp"
 harness = false
+required-features = ["aead-chacha20poly1305"]
 
 [build-dependencies]
 toml.workspace = true
@@ -69,7 +85,13 @@ toml.workspace = true
 [[bench]]
 name = "bench_cycles"
 harness = false
+required-features = ["aead-chacha20poly1305"]
 
 [[bench]]
 name = "bench_e2e_tunnel"
 harness = false
+required-features = ["aead-chacha20poly1305"]
+
+[[example]]
+name = "handshake_walkthrough"
+required-features = ["aead-chacha20poly1305"]
