@@ -1,0 +1,28 @@
+[package]
+name = "proxima-centauri"
+description = "Sans-IO, no-alloc cryptographic FSM substrate: entropy source polymorphism and BLAKE3 primitives over the proxima-primitives Pipe algebra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+# Nothing in this crate is std-gated: the whole surface is no_std + no-alloc by
+# construction. The feature exists so a caller composing with std crates does
+# not have to write `default-features = false`, and so `std::error::Error` can
+# be implemented where it is available.
+std = []
+
+[dependencies]
+blake3 = { version = "1.8.5", default-features = false }
+proxima-primitives.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
