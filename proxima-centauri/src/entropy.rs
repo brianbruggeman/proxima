@@ -86,6 +86,8 @@
 use core::future::Future;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use crate::sized::{EntropyCounter, EntropyCounterValue};
+
 use proxima_primitives::pipe::Pipe;
 
 use crate::error::CentauriError;
@@ -144,11 +146,11 @@ impl Drop for Entropy32 {
 /// remembered not to reuse one. `keyed_hash` is a PRF, which makes this the
 /// standard PRF-in-counter-mode construction.
 ///
-/// Lock-free and `&self`: the counter is a single [`AtomicU32`], so the
-/// source composes as a `Pipe` from any number of holders without a mutex.
-/// `AtomicU32` rather than `AtomicU64` for the same reason
-/// `proxima_clock::seq_words` chose it — Cortex-M3 has no 64-bit atomics,
-/// and 2^32 draws is far past what any handshake needs.
+/// Lock-free and `&self`: the counter is a single atomic, so the source
+/// composes as a `Pipe` from any number of holders without a mutex. Its width
+/// is [`crate::sized::ENTROPY_COUNTER_BITS`], resolved at build time against
+/// the target's advertised atomics rather than assumed in source — Cortex-M3
+/// has no 64-bit atomic instructions, so `AtomicU64` does not compile there.
 ///
 /// # Forward secrecy
 ///
@@ -160,7 +162,7 @@ impl Drop for Entropy32 {
 #[derive(Debug)]
 pub struct CounterDrbg {
     seed: [u8; 32],
-    counter: AtomicU32,
+    counter: EntropyCounter,
 }
 
 impl CounterDrbg {
@@ -171,7 +173,7 @@ impl CounterDrbg {
     pub const fn new(seed: [u8; 32]) -> Self {
         Self {
             seed,
-            counter: AtomicU32::new(0),
+            counter: EntropyCounter::new(0),
         }
     }
 
@@ -186,10 +188,12 @@ impl CounterDrbg {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
-            .map_err(|current| CentauriError::EntropyExhausted {
-                drawn: current as usize,
-                available: current as usize,
-            })?;
+            .map_err(
+                |current: EntropyCounterValue| CentauriError::EntropyExhausted {
+                    drawn: current as usize,
+                    available: current as usize,
+                },
+            )?;
 
         Ok(Entropy32::new(keyed_hash(
             &self.seed,

@@ -1,0 +1,48 @@
+# Build-time sizing for proxima-centauri (guiding principle 12).
+#
+# There is no runtime config loader in this crate: build.rs reads this file
+# once, on the host, and bakes the values into `pub const`s and type aliases
+# at OUT_DIR/proxima_centauri_sized.rs. The compiled #![no_std] artifact never
+# sees a TOML parser or a filesystem.
+#
+# Every key can be overridden at build time without editing this file:
+#   PROXIMA_CENTAURI_<SECTION>_<KEY>=value cargo build
+#
+# NOT here, deliberately: AEAD tag length, nonce length, X25519 key length,
+# the SA_INIT message layout. Those are spec, not policy — principle 12's
+# "when to NOT apply" — and they are hard-coded with a citation at the use
+# site. A tunable is something a deployment could reasonably want different;
+# a peer that disagrees with you about tag length is a broken peer.
+
+[replay]
+# Packets tracked by the ESP anti-replay window.
+#
+# Must be a multiple of 64 (the bitmap is whole `u64` words). Raising it
+# tolerates more reordering — useful over multipath or a lossy link where
+# packets arrive far out of order — at 8 bytes of state per 64 packets.
+# Lowering it saves nothing worth having above ~1 KiB of RAM, but bare-metal
+# targets counting bytes may want 64. Too small and legitimately reordered
+# traffic is rejected as replay.
+window_packets = 256
+
+[entropy]
+# Width of the DRBG draw counter, in bits: 32, 64, or "auto".
+#
+# "auto" selects 64 where the target advertises 64-bit atomics and 32
+# otherwise. This is not a preference — Cortex-M3 (thumbv7m) has no 64-bit
+# atomic instructions, so a 64-bit counter simply does not compile there.
+# Pin it explicitly only to reproduce another target's draw sequence.
+#
+# The counter bounds draws per DRBG instance: 2^32 is ~4 billion, far past
+# any handshake, and exhaustion is a reported error rather than a wrap.
+counter_bits = "auto"
+
+[esp]
+# Largest payload a caller may seal into one packet.
+#
+# Exists so a no-alloc deployment can size its packet buffers statically:
+# a buffer of `max_payload_bytes + OVERHEAD` is provably sufficient. A tunnel
+# over Ethernet wants ~1500; over a jumbo-frame fabric ~9000; a userspace
+# stack doing large writes wants more. Sealing beyond this is a
+# `BufferTooSmall` error, not a truncation.
+max_payload_bytes = 65536

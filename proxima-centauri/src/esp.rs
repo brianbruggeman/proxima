@@ -36,6 +36,7 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag};
 use crate::error::CentauriError;
 use crate::handshake::{Role, SessionKeys};
 use crate::hash::derive_key;
+use crate::sized::{ESP_MAX_PAYLOAD_BYTES, REPLAY_WINDOW_WORDS};
 
 /// Poly1305 authentication tag.
 pub const TAG_LEN: usize = 16;
@@ -44,8 +45,9 @@ pub const HEADER_LEN: usize = 12;
 /// Bytes a packet costs beyond its payload.
 pub const OVERHEAD: usize = HEADER_LEN + TAG_LEN;
 
-/// Packets tracked by the replay window.
-pub const REPLAY_WINDOW: u64 = 256;
+/// Packets tracked by the replay window. Baked from
+/// `proxima-centauri.toml`'s `[replay].window_packets`.
+pub use crate::sized::REPLAY_WINDOW_PACKETS as REPLAY_WINDOW;
 
 const NONCE_LEN: usize = 12;
 const NONCE_BASE_LEN: usize = 4;
@@ -56,19 +58,20 @@ const SEAL_NONCE_CONTEXT_RESPONDER: &str = "proxima-centauri-esp-nonce-r-v1";
 /// A sliding replay window over the last [`REPLAY_WINDOW`] sequence numbers.
 ///
 /// Bit 0 of `bitmap[0]` is `highest`; bit *n* is `highest - n`. Strict O(1):
-/// a fixed four-word bitmap, shifted by whole words plus a remainder, never
-/// resized and never allocated.
+/// a fixed bitmap of [`REPLAY_WINDOW_WORDS`] words, shifted by whole words
+/// plus a remainder, never resized and never allocated. The window size is
+/// build-time configurable, so this adapts rather than assuming 256.
 #[derive(Debug, Clone, Copy)]
 struct ReplayWindow {
     highest: u64,
-    bitmap: [u64; 4],
+    bitmap: [u64; REPLAY_WINDOW_WORDS],
 }
 
 impl ReplayWindow {
     const fn new() -> Self {
         Self {
             highest: 0,
-            bitmap: [0; 4],
+            bitmap: [0; REPLAY_WINDOW_WORDS],
         }
     }
 
@@ -96,7 +99,7 @@ impl ReplayWindow {
 
     fn shift(&mut self, distance: u64) {
         if distance >= REPLAY_WINDOW {
-            self.bitmap = [0; 4];
+            self.bitmap = [0; REPLAY_WINDOW_WORDS];
             return;
         }
 
@@ -104,7 +107,7 @@ impl ReplayWindow {
         let bits = (distance % 64) as u32;
 
         if words > 0 {
-            for index in (0..4).rev() {
+            for index in (0..REPLAY_WINDOW_WORDS).rev() {
                 self.bitmap[index] = if index >= words {
                     self.bitmap[index - words]
                 } else {
@@ -216,9 +219,18 @@ impl ChildSa {
     ///
     /// # Errors
     ///
-    /// [`CentauriError::BufferTooSmall`] when the buffer cannot hold the header,
-    /// payload, and tag.
+    /// - [`CentauriError::PayloadTooLarge`] when the payload exceeds the
+    ///   build-time `[esp].max_payload_bytes` cap.
+    /// - [`CentauriError::BufferTooSmall`] when the buffer cannot hold the
+    ///   header, payload, and tag.
     pub fn seal(&mut self, buffer: &mut [u8], payload_len: usize) -> Result<usize, CentauriError> {
+        if payload_len > ESP_MAX_PAYLOAD_BYTES {
+            return Err(CentauriError::PayloadTooLarge {
+                len: payload_len,
+                max: ESP_MAX_PAYLOAD_BYTES,
+            });
+        }
+
         let needed = payload_len + OVERHEAD;
         if buffer.len() < needed {
             return Err(CentauriError::BufferTooSmall {
@@ -316,7 +328,9 @@ impl ChildSa {
 mod tests {
     use proxima_clock::ticks::Ticks;
 
-    use super::{ChildSa, HEADER_LEN, OVERHEAD, REPLAY_WINDOW, ReplayWindow};
+    use super::{
+        ChildSa, ESP_MAX_PAYLOAD_BYTES, HEADER_LEN, OVERHEAD, REPLAY_WINDOW, ReplayWindow,
+    };
     use crate::entropy::Entropy32;
     use crate::error::CentauriError;
     use crate::handshake::{Handshake, Role};
@@ -444,6 +458,22 @@ mod tests {
                 needed: 16 + OVERHEAD,
                 available: 20,
             })
+        );
+    }
+
+    #[test]
+    fn a_payload_past_the_configured_cap_is_refused() {
+        let (mut sender, _) = agreed_pair();
+        let oversize = ESP_MAX_PAYLOAD_BYTES + 1;
+        let mut buffer = [0u8; 64];
+
+        assert_eq!(
+            sender.seal(&mut buffer, oversize).err(),
+            Some(CentauriError::PayloadTooLarge {
+                len: oversize,
+                max: ESP_MAX_PAYLOAD_BYTES,
+            }),
+            "the cap is checked before the buffer, so the caller learns the real reason"
         );
     }
 

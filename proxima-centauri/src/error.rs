@@ -29,6 +29,10 @@ pub enum CentauriError {
     /// field, not what the bytes were — error text must never carry
     /// attacker-supplied or secret material.
     InvalidMessage(&'static str),
+    /// A payload exceeded `[esp].max_payload_bytes`. The cap exists so a
+    /// no-alloc deployment can size packet buffers statically; exceeding it is
+    /// reported rather than truncated.
+    PayloadTooLarge { len: usize, max: usize },
     /// AEAD sealing failed. Only reachable on a buffer-shape violation the
     /// caller-side length checks should already have caught.
     EncryptionFailed,
@@ -57,6 +61,9 @@ impl fmt::Display for CentauriError {
                     formatter,
                     "buffer too small: need {needed} bytes, have {available}"
                 )
+            }
+            Self::PayloadTooLarge { len, max } => {
+                write!(formatter, "payload too large: {len} bytes, max {max}")
             }
             Self::EncryptionFailed => write!(formatter, "encryption failed"),
             Self::AuthenticationFailed => write!(formatter, "authentication failed"),
