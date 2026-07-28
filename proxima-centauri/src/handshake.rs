@@ -1226,6 +1226,7 @@ mod tests {
     use core::fmt::Write;
 
     use proxima_clock::ticks::Ticks;
+    use rstest::rstest;
 
     use super::{
         AUTH_MAX_LEN, DH_LEN, EPHEMERAL_CONTEXT, HEADER_LEN, Handshake, IkeSpi, MESSAGE_LEN,
@@ -2014,19 +2015,30 @@ mod tests {
         ],
     ];
 
-    #[test]
-    fn a_low_order_dh_value_is_refused_by_the_responder() {
+    // `#[rstest]` rather than `#[proxima::test]`: the latter requires an
+    // `async fn`, and nothing here awaits. rust.md reserves `#[proxima::test]`
+    // for async or parameterized-async tests and lets plain sync ones stay
+    // ordinary — `proxima-core`'s histogram cases are the in-repo precedent
+    // for sync parameterisation.
+    #[rstest]
+    #[case::all_zero(LOW_ORDER_POINTS[0])]
+    #[case::order_one(LOW_ORDER_POINTS[1])]
+    #[case::order_eight(LOW_ORDER_POINTS[2])]
+    fn a_low_order_dh_value_is_refused_by_the_responder(#[case] point: [u8; 32]) {
         // an active attacker substituting the peer's DH value would otherwise
         // get an ephemeral that contributes nothing: key secrecy would still
         // rest on the PSK, but forward secrecy would be gone silently.
+        //
+        // Cases rather than a loop: a loop stops at the first failure, so if
+        // two of the three points regressed you would only ever see one.
         let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
         let _ = initiator
             .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
             .unwrap();
 
-        for (index, point) in LOW_ORDER_POINTS.iter().enumerate() {
+        {
             let mut tampered = captured(&initiator);
-            tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(point);
+            tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(&point);
 
             let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
             assert_eq!(
@@ -2034,7 +2046,7 @@ mod tests {
                     .step(&tampered, Some(Entropy32::new(RESPONDER_SEED)), now())
                     .err(),
                 Some(CentauriError::DegenerateKeyAgreement),
-                "low-order point {index} was accepted"
+                "a low-order point was accepted"
             );
             assert!(
                 responder.keys().is_none(),

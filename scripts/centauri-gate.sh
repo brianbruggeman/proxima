@@ -69,6 +69,16 @@ declare -a cells=(
     "both suites together: tests incl. cross-suite rejection|cargo nextest run -p proxima-centauri --features aead-aes-gcm"
     "aes-gcm suite on thumbv7m (bare metal)|cargo build -p proxima-centauri --no-default-features --features aead-aes-gcm --lib --target thumbv7m-none-eabi"
 
+    # external vectors: the first check on this crate's crypto that does not
+    # come from this crate or from csr-security, an oracle proven wrong eight
+    # times over.
+    "known-answer tests (RFC 7748, BLAKE3 reference)|cargo test -p proxima-centauri --test known_answers"
+
+    # deterministic fuzz: cargo-fuzz needs nightly, and a target CI cannot run
+    # is a target that never runs. Fixed seed, so a crash reproduces from the
+    # seed rather than a saved artifact.
+    "fuzz corpus, 60k inputs across three parsers|cargo test -p proxima-centauri --test fuzz_corpus --release"
+
     # property tests quantify over arbitrary input, where the unit sweeps
     # enumerate one message's neighbourhood exhaustively. Different questions.
     "property tests over the wire surface|cargo test -p proxima-centauri --test property_wire"
