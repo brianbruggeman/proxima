@@ -224,6 +224,71 @@ fn main() {
         "no identity from a failed AUTH"
     );
 
+    // ── mutual auth, then rekey ───────────────────────────────────────────
+    step_banner("transition 7/8 — the responder proves itself in return");
+
+    println!("  authentication is two obligations, not one: the responder has");
+    println!("  verified us, and still owes its own proof before either side");
+    println!("  may rekey.");
+
+    let progress = responder.send_auth().expect("still owes its AUTH");
+    println!("  responder send_auth -> {progress:?}");
+    let mut back = [0u8; 128];
+    let back_len = responder.outbound().len();
+    back[..back_len].copy_from_slice(responder.outbound());
+
+    let progress = initiator
+        .step(&back[..back_len], None, now)
+        .expect("verifies");
+    println!("  initiator step -> {progress:?}");
+    println!(
+        "  peer identity: {:?}",
+        core::str::from_utf8(initiator.peer_identity().expect("authenticated")).unwrap()
+    );
+
+    step_banner("transition 8/8 — rekey with forward secrecy");
+
+    let before = *initiator.keys().expect("authenticated").encrypt_key();
+
+    let progress = initiator
+        .send_rekey(Some(Entropy32::new([0x31; 32])), now)
+        .expect("mutually authenticated, so rekey is legal");
+    println!(
+        "  send_rekey -> {progress:?}, {} bytes staged",
+        initiator.outbound().len()
+    );
+    let mut request = [0u8; 92];
+    request.copy_from_slice(initiator.outbound());
+
+    let progress = responder
+        .step(&request, Some(Entropy32::new([0x32; 32])), now)
+        .expect("responder rekeys and replies in one step");
+    println!("  responder step -> {progress:?}");
+    let mut reply = [0u8; 92];
+    reply.copy_from_slice(responder.outbound());
+
+    let progress = initiator
+        .step(&reply, None, now)
+        .expect("completes the rekey");
+    println!("  initiator step -> {progress:?}");
+
+    let after = *initiator.keys().expect("rekeyed").encrypt_key();
+    println!("  keys changed: {}", before != after);
+    println!(
+        "  peers still agree: {}",
+        initiator.keys().unwrap().encrypt_key() == responder.keys().unwrap().decrypt_key()
+    );
+    println!(
+        "  identity survived the rekey: {:?}",
+        core::str::from_utf8(responder.peer_identity().unwrap()).unwrap()
+    );
+    println!("  fresh DH each time, so today's keys cannot recover yesterday's traffic");
+    assert_ne!(before, after);
+    assert_eq!(
+        initiator.keys().unwrap().encrypt_key(),
+        responder.keys().unwrap().decrypt_key()
+    );
+
     // ── the keys agree ────────────────────────────────────────────────────
     step_banner("both peers derived the same keys");
 
@@ -296,6 +361,7 @@ fn main() {
     }
 
     step_banner("done");
-    println!("every legal transition exercised, both roles, AUTH, plus the refusals.");
+    println!("every legal transition exercised: SA_INIT, mutual AUTH, rekey,");
+    println!("the data path, and every refusal along the way.");
     println!("no sockets, no clock, no RNG reached for — all of it passed in.");
 }
