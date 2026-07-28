@@ -28,14 +28,34 @@
 //! forced to have a value staged for every step.
 
 use proxima_clock::ticks::Ticks;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::entropy::Entropy32;
 use crate::error::CentauriError;
-use crate::hash::derive_key;
+use crate::hash::{derive_key, keyed_hash};
+use crate::sized::AUTH_MAX_IDENTITY_BYTES;
 
 /// Bytes of an SA_INIT message: header, nonce, and DH public value.
 pub const MESSAGE_LEN: usize = HEADER_LEN + NONCE_LEN + DH_LEN;
+
+/// Bytes of the largest AUTH message: header, identity length, identity, MAC.
+pub const AUTH_MAX_LEN: usize = HEADER_LEN + IDENTITY_LEN_BYTES + AUTH_MAX_IDENTITY_BYTES + MAC_LEN;
+
+/// The staging buffer holds whichever message is larger.
+const OUTBOUND_LEN: usize = if AUTH_MAX_LEN > MESSAGE_LEN {
+    AUTH_MAX_LEN
+} else {
+    MESSAGE_LEN
+};
+
+/// Length prefix on the identity — the field that makes an AUTH message
+/// self-describing.
+const IDENTITY_LEN_BYTES: usize = 2;
+const MAC_LEN: usize = 32;
+const AUTH_EXCHANGE_TYPE: u8 = 0x23;
+const AUTH_FLAG_INITIATOR: u8 = 0x08;
+const AUTH_FLAG_RESPONDER: u8 = 0x20;
 
 const HEADER_LEN: usize = 28;
 const NONCE_LEN: usize = 32;
@@ -106,9 +126,17 @@ pub enum Progress {
     NeedInput,
     /// The handshake moved forward and is not finished.
     Advanced,
-    /// The handshake is complete and [`Handshake::keys`] is available. There
-    /// may still be a final message staged in [`Handshake::outbound`].
+    /// SA_INIT is complete and [`Handshake::keys`] is available. There may
+    /// still be a final message staged in [`Handshake::outbound`].
+    ///
+    /// The peer is **not yet authenticated** — the keys prove whoever derived
+    /// them holds the PSK and the DH secret, which is not the same as proving
+    /// *who* they are. Run the AUTH exchange for that.
     Established,
+    /// The peer proved its identity: the AUTH payload's MAC verified under a
+    /// key only the true peer could derive. [`Handshake::peer_identity`] is
+    /// available.
+    Authenticated,
 }
 
 /// The five derived keys, with role already applied.
@@ -213,6 +241,12 @@ enum Phase {
         keys: SessionKeys,
         at: Ticks,
     },
+    Authenticated {
+        keys: SessionKeys,
+        at: Ticks,
+        peer_identity: [u8; AUTH_MAX_IDENTITY_BYTES],
+        peer_identity_len: usize,
+    },
 }
 
 impl Phase {
@@ -221,6 +255,7 @@ impl Phase {
             Self::Initial => "initial",
             Self::AwaitingResponse { .. } => "awaiting-response",
             Self::Established { .. } => "established",
+            Self::Authenticated { .. } => "authenticated",
         }
     }
 }
@@ -233,7 +268,9 @@ pub struct Handshake {
     spi_initiator: IkeSpi,
     spi_responder: IkeSpi,
     message_id: u32,
-    outbound: [u8; MESSAGE_LEN],
+    identity: [u8; AUTH_MAX_IDENTITY_BYTES],
+    identity_len: usize,
+    outbound: [u8; OUTBOUND_LEN],
     outbound_len: usize,
 }
 
@@ -282,8 +319,42 @@ impl Handshake {
             spi_initiator,
             spi_responder,
             message_id: 0,
-            outbound: [0u8; MESSAGE_LEN],
+            identity: [0u8; AUTH_MAX_IDENTITY_BYTES],
+            identity_len: 0,
+            outbound: [0u8; OUTBOUND_LEN],
             outbound_len: 0,
+        }
+    }
+
+    /// Attach the identity this side presents in the AUTH exchange.
+    ///
+    /// # Errors
+    ///
+    /// [`CentauriError::PayloadTooLarge`] if the identity exceeds the
+    /// build-time `[auth].max_identity_bytes`. Refused rather than truncated:
+    /// a truncated identity authenticates as a different peer.
+    pub fn with_identity(mut self, identity: &[u8]) -> Result<Self, CentauriError> {
+        if identity.len() > AUTH_MAX_IDENTITY_BYTES {
+            return Err(CentauriError::PayloadTooLarge {
+                len: identity.len(),
+                max: AUTH_MAX_IDENTITY_BYTES,
+            });
+        }
+        self.identity[..identity.len()].copy_from_slice(identity);
+        self.identity_len = identity.len();
+        Ok(self)
+    }
+
+    /// The peer's identity, once [`Progress::Authenticated`] has been reported.
+    #[must_use]
+    pub fn peer_identity(&self) -> Option<&[u8]> {
+        match &self.phase {
+            Phase::Authenticated {
+                peer_identity,
+                peer_identity_len,
+                ..
+            } => Some(&peer_identity[..*peer_identity_len]),
+            _ => None,
         }
     }
 
@@ -312,7 +383,7 @@ impl Handshake {
     #[must_use]
     pub const fn keys(&self) -> Option<&SessionKeys> {
         match &self.phase {
-            Phase::Established { keys, .. } => Some(keys),
+            Phase::Established { keys, .. } | Phase::Authenticated { keys, .. } => Some(keys),
             _ => None,
         }
     }
@@ -321,7 +392,7 @@ impl Handshake {
     #[must_use]
     pub const fn established_at(&self) -> Option<Ticks> {
         match &self.phase {
-            Phase::Established { at, .. } => Some(*at),
+            Phase::Established { at, .. } | Phase::Authenticated { at, .. } => Some(*at),
             _ => None,
         }
     }
@@ -374,9 +445,10 @@ impl Handshake {
                     found: "awaiting-response",
                 })
             }
-            (_, Phase::Established { .. }) => Err(CentauriError::InvalidTransition {
-                expected: "initial or awaiting-response",
-                found: "established",
+            (_, Phase::Established { .. }) => self.receive_auth(input, now),
+            (_, Phase::Authenticated { .. }) => Err(CentauriError::InvalidTransition {
+                expected: "initial, awaiting-response, or established",
+                found: "authenticated",
             }),
         }
     }
@@ -444,6 +516,130 @@ impl Handshake {
         Ok(Progress::Established)
     }
 
+    /// Emit this side's AUTH payload.
+    ///
+    /// Legal only once SA_INIT has established keys — the MAC is taken under a
+    /// key derived from the shared secret, which is what makes the identity
+    /// claim unforgeable by anyone who did not complete the exchange.
+    ///
+    /// # Errors
+    ///
+    /// [`CentauriError::InvalidTransition`] before SA_INIT completes.
+    pub fn send_auth(&mut self) -> Result<Progress, CentauriError> {
+        self.outbound_len = 0;
+
+        let Phase::Established { keys, .. } = &self.phase else {
+            return Err(CentauriError::InvalidTransition {
+                expected: "established",
+                found: self.phase.name(),
+            });
+        };
+
+        let auth_key = *keys.auth_key();
+        let identity_len = self.identity_len;
+        let mut identity = [0u8; AUTH_MAX_IDENTITY_BYTES];
+        identity[..identity_len].copy_from_slice(&self.identity[..identity_len]);
+
+        let total = HEADER_LEN + IDENTITY_LEN_BYTES + identity_len + MAC_LEN;
+        let message_id = self.message_id;
+        self.message_id = self.message_id.wrapping_add(1);
+
+        let flags = match self.role {
+            Role::Initiator => AUTH_FLAG_INITIATOR,
+            Role::Responder => AUTH_FLAG_RESPONDER,
+        };
+
+        let out = &mut self.outbound;
+        out[0..8].copy_from_slice(&self.spi_initiator.as_raw().to_be_bytes());
+        out[8..16].copy_from_slice(&self.spi_responder.as_raw().to_be_bytes());
+        out[16] = AUTH_EXCHANGE_TYPE;
+        out[17] = VERSION;
+        out[18] = flags;
+        out[19] = 0x00;
+        out[20..24].copy_from_slice(&message_id.to_be_bytes());
+        out[24..28].copy_from_slice(&(total as u32).to_be_bytes());
+        let identity_len_u16 = u16::try_from(identity_len)
+            .map_err(|_| CentauriError::InvalidMessage("identity length"))?;
+        out[HEADER_LEN..HEADER_LEN + IDENTITY_LEN_BYTES]
+            .copy_from_slice(&identity_len_u16.to_be_bytes());
+        let identity_at = HEADER_LEN + IDENTITY_LEN_BYTES;
+        out[identity_at..identity_at + identity_len].copy_from_slice(&identity[..identity_len]);
+
+        // the MAC covers the header AND the length-prefixed identity, so a
+        // flipped role flag or message id cannot pass. The oracle MACs the
+        // identity alone and leaves the header unauthenticated.
+        let mac = keyed_hash(&auth_key, &out[..identity_at + identity_len]);
+        out[identity_at + identity_len..total].copy_from_slice(&mac);
+
+        self.outbound_len = total;
+
+        Ok(Progress::Advanced)
+    }
+
+    fn receive_auth(&mut self, input: &[u8], _now: Ticks) -> Result<Progress, CentauriError> {
+        let minimum = HEADER_LEN + IDENTITY_LEN_BYTES + MAC_LEN;
+        if input.len() < minimum {
+            return Ok(Progress::NeedInput);
+        }
+
+        if input[16] != AUTH_EXCHANGE_TYPE {
+            return Err(CentauriError::InvalidMessage("auth exchange type"));
+        }
+        if input[17] != VERSION {
+            return Err(CentauriError::InvalidMessage("version"));
+        }
+
+        // self-describing: the length prefix locates the MAC without the
+        // receiver having to know the peer's identity in advance
+        let identity_len = usize::from(u16::from_be_bytes(
+            input[HEADER_LEN..HEADER_LEN + IDENTITY_LEN_BYTES]
+                .try_into()
+                .map_err(|_| CentauriError::InvalidMessage("identity length"))?,
+        ));
+        if identity_len > AUTH_MAX_IDENTITY_BYTES {
+            return Err(CentauriError::PayloadTooLarge {
+                len: identity_len,
+                max: AUTH_MAX_IDENTITY_BYTES,
+            });
+        }
+
+        let total = HEADER_LEN + IDENTITY_LEN_BYTES + identity_len + MAC_LEN;
+        if input.len() < total {
+            return Ok(Progress::NeedInput);
+        }
+
+        let Phase::Established { keys, at } = core::mem::replace(&mut self.phase, Phase::Initial)
+        else {
+            return Err(CentauriError::InvalidTransition {
+                expected: "established",
+                found: "initial",
+            });
+        };
+
+        let identity_at = HEADER_LEN + IDENTITY_LEN_BYTES;
+        let expected = keyed_hash(keys.peer_auth_key(), &input[..identity_at + identity_len]);
+        let received = &input[identity_at + identity_len..total];
+
+        if !macs_match(&expected, received) {
+            // leave the handshake unusable rather than silently established:
+            // a failed AUTH must not leave keys reachable
+            return Err(CentauriError::AuthenticationFailed);
+        }
+
+        let mut peer_identity = [0u8; AUTH_MAX_IDENTITY_BYTES];
+        peer_identity[..identity_len]
+            .copy_from_slice(&input[identity_at..identity_at + identity_len]);
+
+        self.phase = Phase::Authenticated {
+            keys,
+            at,
+            peer_identity,
+            peer_identity_len: identity_len,
+        };
+
+        Ok(Progress::Authenticated)
+    }
+
     fn derive_session_keys(
         &self,
         initiator_nonce: &[u8; NONCE_LEN],
@@ -486,6 +682,19 @@ impl Handshake {
 
         self.outbound_len = MESSAGE_LEN;
     }
+}
+
+/// Compare two MACs without leaking where they diverge.
+///
+/// `subtle` is already in the dependency graph — x25519-dalek pulls it — and is
+/// built for exactly this, so no new dependency and no hand-rolled loop. A
+/// hand-rolled comparison is precisely the code an optimiser is free to
+/// short-circuit into a timing oracle.
+fn macs_match(left: &[u8; MAC_LEN], right: &[u8]) -> bool {
+    if right.len() != MAC_LEN {
+        return false;
+    }
+    left.ct_eq(right).into()
 }
 
 /// Both nonce and ephemeral secret come from one draw, domain-separated.
@@ -563,12 +772,13 @@ mod tests {
     use proxima_clock::ticks::Ticks;
 
     use super::{
-        DH_LEN, EPHEMERAL_CONTEXT, HEADER_LEN, Handshake, IkeSpi, MESSAGE_LEN, NONCE_CONTEXT,
-        NONCE_LEN, Progress, Role,
+        AUTH_MAX_LEN, DH_LEN, EPHEMERAL_CONTEXT, HEADER_LEN, Handshake, IkeSpi, MESSAGE_LEN,
+        NONCE_CONTEXT, NONCE_LEN, Progress, Role,
     };
     use crate::entropy::Entropy32;
     use crate::error::CentauriError;
     use crate::hash::derive_key;
+    use crate::sized::AUTH_MAX_IDENTITY_BYTES;
 
     const PSK: [u8; 32] = [0xAB; 32];
     const INITIATOR_SPI: IkeSpi = IkeSpi::new(0x0102_0304_0506_0708);
@@ -780,7 +990,9 @@ mod tests {
     }
 
     #[test]
-    fn step_after_established_is_a_transition_error() {
+    fn an_established_handshake_refuses_a_non_auth_message() {
+        // it no longer refuses every step -- AUTH is legal here -- but a
+        // replayed SA_INIT must still be rejected on its exchange type.
         let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
         let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
 
@@ -794,9 +1006,23 @@ mod tests {
 
         assert_eq!(
             responder.step(&init_message, None, now()).err(),
+            Some(CentauriError::InvalidMessage("auth exchange type"))
+        );
+    }
+
+    #[test]
+    fn an_authenticated_handshake_refuses_further_steps() {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        let _ = initiator.send_auth().unwrap();
+        let message = staged(&initiator);
+        let len = initiator.outbound().len();
+        let _ = responder.step(&message[..len], None, now()).unwrap();
+
+        assert_eq!(
+            responder.step(&message[..len], None, now()).err(),
             Some(CentauriError::InvalidTransition {
-                expected: "initial or awaiting-response",
-                found: "established",
+                expected: "initial, awaiting-response, or established",
+                found: "authenticated",
             })
         );
     }
@@ -878,6 +1104,208 @@ mod tests {
         assert!(
             !rendered.contains("sk_e"),
             "key field names must not appear"
+        );
+    }
+
+    /// Both sides through SA_INIT, ready for AUTH.
+    fn established_pair(
+        initiator_identity: &[u8],
+        responder_identity: &[u8],
+    ) -> (Handshake, Handshake) {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI)
+            .with_identity(initiator_identity)
+            .expect("identity fits");
+        let mut responder = Handshake::responder(PSK, RESPONDER_SPI)
+            .with_identity(responder_identity)
+            .expect("identity fits");
+
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let init = captured(&initiator);
+        let _ = responder
+            .step(&init, Some(Entropy32::new(RESPONDER_SEED)), now())
+            .unwrap();
+        let reply = captured(&responder);
+        let _ = initiator.step(&reply, None, now()).unwrap();
+
+        (initiator, responder)
+    }
+
+    fn staged(handshake: &Handshake) -> [u8; AUTH_MAX_LEN] {
+        let mut message = [0u8; AUTH_MAX_LEN];
+        let out = handshake.outbound();
+        message[..out.len()].copy_from_slice(out);
+        message
+    }
+
+    #[test]
+    fn auth_proves_identity_in_both_directions() {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+
+        assert_eq!(initiator.send_auth().unwrap(), Progress::Advanced);
+        let from_initiator = staged(&initiator);
+        let initiator_len = initiator.outbound().len();
+
+        assert_eq!(
+            responder
+                .step(&from_initiator[..initiator_len], None, now())
+                .unwrap(),
+            Progress::Authenticated
+        );
+        assert_eq!(responder.peer_identity(), Some(&b"peer-a"[..]));
+
+        assert!(responder.send_auth().is_err(), "already authenticated");
+
+        // and the reverse direction, on a fresh pair
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        assert_eq!(responder.send_auth().unwrap(), Progress::Advanced);
+        let from_responder = staged(&responder);
+        let responder_len = responder.outbound().len();
+
+        assert_eq!(
+            initiator
+                .step(&from_responder[..responder_len], None, now())
+                .unwrap(),
+            Progress::Authenticated
+        );
+        assert_eq!(initiator.peer_identity(), Some(&b"peer-b"[..]));
+    }
+
+    #[test]
+    fn keys_survive_authentication() {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        let before = *initiator.keys().unwrap().encrypt_key();
+
+        let _ = initiator.send_auth().unwrap();
+        let message = staged(&initiator);
+        let len = initiator.outbound().len();
+        let _ = responder.step(&message[..len], None, now()).unwrap();
+
+        assert_eq!(initiator.keys().unwrap().encrypt_key(), &before);
+        assert!(
+            responder.keys().is_some(),
+            "authentication does not drop the SA"
+        );
+        assert!(responder.established_at().is_some());
+    }
+
+    #[test]
+    fn a_forged_mac_is_refused_and_leaves_no_keys() {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        let _ = initiator.send_auth().unwrap();
+        let mut message = staged(&initiator);
+        let len = initiator.outbound().len();
+        message[len - 1] ^= 0xFF;
+
+        assert_eq!(
+            responder.step(&message[..len], None, now()).err(),
+            Some(CentauriError::AuthenticationFailed)
+        );
+        assert!(
+            responder.peer_identity().is_none(),
+            "a failed AUTH must not yield an authenticated peer"
+        );
+    }
+
+    #[test]
+    fn a_flipped_header_byte_fails_authentication() {
+        // the oracle MACs the identity alone, so its header is unauthenticated
+        // and this flip would pass there. Here the header is under the MAC.
+        for header_byte in [16usize, 18, 20, 23] {
+            let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+            let _ = initiator.send_auth().unwrap();
+            let mut message = staged(&initiator);
+            let len = initiator.outbound().len();
+            message[header_byte] ^= 0x01;
+
+            let outcome = responder.step(&message[..len], None, now());
+
+            assert!(
+                outcome.is_err(),
+                "byte {header_byte} of the header was not authenticated: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_substituted_identity_fails_authentication() {
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        let _ = initiator.send_auth().unwrap();
+        let mut message = staged(&initiator);
+        let len = initiator.outbound().len();
+        // swap the identity for another of the same length
+        let identity_at = 28 + 2;
+        message[identity_at..identity_at + 6].copy_from_slice(b"peer-c");
+
+        assert_eq!(
+            responder.step(&message[..len], None, now()).err(),
+            Some(CentauriError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn an_auth_message_is_self_describing() {
+        // the length prefix is what lets a receiver locate the MAC without
+        // knowing the peer's identity in advance -- the oracle's verify_auth
+        // cannot parse without being told the identity length out of band.
+        for identity in [&b""[..], b"a", b"peer-with-a-longer-name"] {
+            let (mut initiator, mut responder) = established_pair(identity, b"peer-b");
+            let _ = initiator.send_auth().unwrap();
+            let message = staged(&initiator);
+            let len = initiator.outbound().len();
+
+            assert_eq!(
+                responder.step(&message[..len], None, now()).unwrap(),
+                Progress::Authenticated,
+                "identity of {} bytes",
+                identity.len()
+            );
+            assert_eq!(responder.peer_identity(), Some(identity));
+        }
+    }
+
+    #[test]
+    fn a_truncated_auth_message_asks_for_more() {
+        let (mut initiator, _) = established_pair(b"peer-a", b"peer-b");
+        let _ = initiator.send_auth().unwrap();
+        let message = staged(&initiator);
+        let len = initiator.outbound().len();
+
+        for prefix in 0..len {
+            let mut receiver = established_pair(b"peer-a", b"peer-b").1;
+            let progress = receiver
+                .step(&message[..prefix], None, now())
+                .expect("a short auth read is not an error");
+            assert_eq!(progress, Progress::NeedInput, "prefix of {prefix}");
+        }
+    }
+
+    #[test]
+    fn an_identity_past_the_cap_is_refused_not_truncated() {
+        let oversize = [0x41u8; AUTH_MAX_IDENTITY_BYTES + 1];
+
+        assert_eq!(
+            Handshake::initiator(PSK, INITIATOR_SPI)
+                .with_identity(&oversize)
+                .err(),
+            Some(CentauriError::PayloadTooLarge {
+                len: oversize.len(),
+                max: AUTH_MAX_IDENTITY_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn auth_before_sa_init_is_a_transition_error() {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+
+        assert_eq!(
+            initiator.send_auth().err(),
+            Some(CentauriError::InvalidTransition {
+                expected: "established",
+                found: "initial",
+            })
         );
     }
 

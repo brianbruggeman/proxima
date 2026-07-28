@@ -125,6 +125,16 @@ fn main() {
     let window_words = window_packets / 64;
 
     let counter_bits = resolve_counter_bits(&sized_str(&root, "entropy", "counter_bits"));
+    let max_identity = sized_int(&root, "auth", "max_identity_bytes");
+    assert!(
+        max_identity > 0,
+        "[auth].max_identity_bytes must be non-zero"
+    );
+    assert!(
+        max_identity <= u64::from(u16::MAX),
+        "[auth].max_identity_bytes must fit the u16 length prefix; got {max_identity}"
+    );
+
     let max_payload = sized_int(&root, "esp", "max_payload_bytes");
     assert!(max_payload > 0, "[esp].max_payload_bytes must be non-zero");
 
@@ -164,6 +174,13 @@ fn main() {
         generated,
         "/// Value type behind [`EntropyCounter`].\n\
          pub type EntropyCounterValue = u{counter_bits};\n"
+    )
+    .expect("write to string");
+
+    writeln!(
+        generated,
+        "/// Largest peer identity an AUTH payload may carry.\n\
+         pub const AUTH_MAX_IDENTITY_BYTES: usize = {max_identity};\n"
     )
     .expect("write to string");
 

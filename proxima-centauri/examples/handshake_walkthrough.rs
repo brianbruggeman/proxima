@@ -70,8 +70,14 @@ fn main() {
     // ── initiator: Initial → AwaitingResponse ─────────────────────────────
     step_banner("transition 1/4 — initiator sends SA_INIT");
 
-    let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
-    let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+    // the identity is a per-session constant like the PSK, so it is attached
+    // at construction rather than mid-flow
+    let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI)
+        .with_identity(b"peer-a")
+        .expect("identity fits");
+    let mut responder = Handshake::responder(PSK, RESPONDER_SPI)
+        .with_identity(b"peer-b")
+        .expect("identity fits");
     let now = Ticks::from_raw(1_000);
 
     println!(
@@ -136,14 +142,87 @@ fn main() {
     );
 
     // ── illegal transition ────────────────────────────────────────────────
-    step_banner("an illegal transition is refused, not ignored");
+    step_banner("a replayed SA_INIT is refused, not ignored");
 
+    // an established handshake is not inert -- AUTH is legal here -- so the
+    // refusal comes from the exchange type rather than from the phase.
     match initiator.step(&response, None, now) {
-        Err(CentauriError::InvalidTransition { expected, found }) => {
-            println!("  stepping an established handshake -> expected {expected}, found {found}");
+        Err(CentauriError::InvalidMessage(field)) => {
+            println!("  replaying SA_INIT into an established handshake -> invalid {field}");
+            println!("  the phase accepts AUTH now, so the message itself is what is rejected");
         }
-        other => panic!("expected an InvalidTransition, got {other:?}"),
+        other => panic!("expected InvalidMessage, got {other:?}"),
     }
+
+    // ── AUTH: identity, on top of key agreement ───────────────────────────
+    step_banner("transition 5/6 — initiator proves its identity");
+
+    println!("  SA_INIT proved whoever derived these keys holds the PSK and the");
+    println!("  DH secret. It did NOT prove who they are — that is what AUTH is for.");
+
+    let progress = initiator
+        .send_auth()
+        .expect("established, so AUTH is legal");
+    println!(
+        "  send_auth -> {progress:?}, {} bytes staged",
+        initiator.outbound().len()
+    );
+
+    let mut auth_message = [0u8; 128];
+    let auth_len = initiator.outbound().len();
+    auth_message[..auth_len].copy_from_slice(initiator.outbound());
+    println!(
+        "  identity length prefix {:02x?} makes the message self-describing",
+        &auth_message[28..30]
+    );
+
+    step_banner("transition 6/6 — responder verifies it");
+
+    let progress = responder
+        .step(&auth_message[..auth_len], None, now)
+        .expect("a well-formed AUTH verifies");
+    println!("  step -> {progress:?}");
+    assert_eq!(progress, Progress::Authenticated);
+    println!(
+        "  peer identity: {:?}",
+        core::str::from_utf8(responder.peer_identity().expect("authenticated")).unwrap()
+    );
+
+    step_banner("a forged AUTH is refused");
+
+    let (mut fresh_initiator, mut fresh_responder) = {
+        let mut i = Handshake::initiator(PSK, INITIATOR_SPI)
+            .with_identity(b"peer-a")
+            .unwrap();
+        let mut r = Handshake::responder(PSK, RESPONDER_SPI)
+            .with_identity(b"peer-b")
+            .unwrap();
+        let _ = i.step(&[], Some(Entropy32::new([0x11; 32])), now).unwrap();
+        let mut m = [0u8; 92];
+        m.copy_from_slice(i.outbound());
+        let _ = r.step(&m, Some(Entropy32::new([0x22; 32])), now).unwrap();
+        let mut reply = [0u8; 92];
+        reply.copy_from_slice(r.outbound());
+        let _ = i.step(&reply, None, now).unwrap();
+        (i, r)
+    };
+    let _ = fresh_initiator.send_auth().unwrap();
+    let mut forged = [0u8; 128];
+    let forged_len = fresh_initiator.outbound().len();
+    forged[..forged_len].copy_from_slice(fresh_initiator.outbound());
+    forged[18] ^= 0x01; // the role flag, which the oracle leaves unauthenticated
+
+    match fresh_responder.step(&forged[..forged_len], None, now) {
+        Err(CentauriError::AuthenticationFailed) => {
+            println!("  flipped the role flag in the header -> AuthenticationFailed");
+            println!("  the header is under the MAC, so it cannot be edited unnoticed");
+        }
+        other => panic!("expected AuthenticationFailed, got {other:?}"),
+    }
+    assert!(
+        fresh_responder.peer_identity().is_none(),
+        "no identity from a failed AUTH"
+    );
 
     // ── the keys agree ────────────────────────────────────────────────────
     step_banner("both peers derived the same keys");
@@ -217,6 +296,6 @@ fn main() {
     }
 
     step_banner("done");
-    println!("every legal transition exercised, both roles, plus the refusals.");
+    println!("every legal transition exercised, both roles, AUTH, plus the refusals.");
     println!("no sockets, no clock, no RNG reached for — all of it passed in.");
 }

@@ -37,6 +37,16 @@ window_packets = 256
 # any handshake, and exhaustion is a reported error rather than a wrap.
 counter_bits = "auto"
 
+[auth]
+# Largest peer identity an AUTH payload may carry.
+#
+# Sizes the handshake's inline message buffer, so a no-alloc target pays for
+# this whether or not it uses long identities. 64 holds a UUID, a hostname, or
+# a hex certificate fingerprint; a deployment using DNs or full certificates
+# raises it and pays the bytes. An identity past this is refused, never
+# truncated — a truncated identity would authenticate as a different peer.
+max_identity_bytes = 64
+
 [esp]
 # Largest payload a caller may seal into one packet.
 #
