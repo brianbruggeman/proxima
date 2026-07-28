@@ -11,6 +11,10 @@ paths = ["scripts/prime-serve-gate.sh", ".github/workflows/prime-serve.yml"]
 packages = ["proxima-pgwire"]
 paths = ["scripts/proxima-pgwire-gate.sh", ".github/workflows/proxima-pgwire.yml"]
 
+[area.centauri]
+packages = ["proxima-centauri"]
+paths = ["scripts/centauri-gate.sh", ".github/workflows/centauri.yml", "proxima-centauri/proxima-centauri.toml"]
+
 [area.redis]
 packages = ["proxima-redis"]
 paths = ["scripts/proxima-redis-gate.sh", ".github/workflows/proxima-redis.yml"]

@@ -15,6 +15,8 @@ on:
         value: ${{ jobs.detect.outputs.pgwire }}
       redis:
         value: ${{ jobs.detect.outputs.redis }}
+      centauri:
+        value: ${{ jobs.detect.outputs.centauri }}
       protocol_fleet:
         value: ${{ jobs.detect.outputs.protocol_fleet }}
       telemetry:
@@ -31,6 +33,7 @@ jobs:
       prime_serve: ${{ steps.affected.outputs.prime_serve }}
       pgwire:      ${{ steps.affected.outputs.pgwire }}
       redis:       ${{ steps.affected.outputs.redis }}
+      centauri:    ${{ steps.affected.outputs.centauri }}
       protocol_fleet: ${{ steps.affected.outputs.protocol_fleet }}
       telemetry:   ${{ steps.affected.outputs.telemetry }}
       nostd:       ${{ steps.affected.outputs.nostd }}
