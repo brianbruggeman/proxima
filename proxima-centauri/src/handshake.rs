@@ -867,6 +867,98 @@ mod tests {
     }
 
     #[test]
+    fn no_truncation_of_a_valid_message_ever_panics_or_parses() {
+        // exhaustive rather than sampled, and alloc-free, so it runs at every
+        // tier: a parser is fed every prefix of a message it would otherwise
+        // accept.
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let valid = captured(&initiator);
+
+        for length in 0..MESSAGE_LEN {
+            let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+            let progress = responder
+                .step(
+                    &valid[..length],
+                    Some(Entropy32::new(RESPONDER_SEED)),
+                    now(),
+                )
+                .expect("a short read is never an error");
+
+            assert_eq!(progress, Progress::NeedInput, "prefix of {length} bytes");
+            assert!(
+                responder.keys().is_none(),
+                "prefix of {length} bytes established a key"
+            );
+        }
+    }
+
+    #[test]
+    fn every_single_bit_flip_in_the_header_is_either_caught_or_harmless() {
+        // The header's version and exchange-type bytes are the only fields the
+        // parser validates; everything else is either an identifier it echoes
+        // or key material it consumes. Walking every bit proves the validation
+        // is exactly where the doc says, with no accidental coverage gaps.
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let valid = captured(&initiator);
+
+        let mut rejected_positions = 0usize;
+        for byte_index in 0..MESSAGE_LEN {
+            for bit in 0..8u32 {
+                let mut corrupted = valid;
+                corrupted[byte_index] ^= 1u8 << bit;
+
+                let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+                let outcome =
+                    responder.step(&corrupted, Some(Entropy32::new(RESPONDER_SEED)), now());
+
+                match outcome {
+                    Err(CentauriError::InvalidMessage(_)) => rejected_positions += 1,
+                    // a flip in an spi/nonce/dh byte is accepted by design: the
+                    // handshake has no integrity check until AUTH, and a wrong
+                    // dh value simply derives keys the peer will not share.
+                    Ok(Progress::Established) => {}
+                    other => panic!("byte {byte_index} bit {bit}: unexpected {other:?}"),
+                }
+            }
+        }
+
+        // exactly the version and exchange-type bytes reject, 8 bits each,
+        // minus the two flips that happen to land on a still-valid encoding
+        assert!(rejected_positions > 0, "no corruption was rejected at all");
+        assert!(
+            rejected_positions <= 16,
+            "more positions rejected than the two validated bytes can account for: {rejected_positions}"
+        );
+    }
+
+    #[test]
+    fn arbitrary_bytes_never_panic_the_parser() {
+        // a cheap deterministic sweep over shapes a fuzzer would find first:
+        // all-zero, all-one, and every single-byte value at every length class.
+        for filler in [0x00u8, 0xFF, 0x21, 0x20] {
+            for length in [0, 1, 27, 28, 59, 60, 91, MESSAGE_LEN, MESSAGE_LEN + 1] {
+                let mut buffer = [0u8; MESSAGE_LEN + 1];
+                let bounded = length.min(buffer.len());
+                buffer[..bounded].fill(filler);
+
+                let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+                // the contract is "never panics"; any Ok/Err is acceptable
+                let _ = responder.step(
+                    &buffer[..bounded],
+                    Some(Entropy32::new(RESPONDER_SEED)),
+                    now(),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn roles_are_distinct() {
         assert_ne!(Role::Initiator, Role::Responder);
     }

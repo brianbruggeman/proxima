@@ -520,6 +520,84 @@ mod tests {
     }
 
     #[test]
+    fn every_single_bit_flip_in_a_packet_is_rejected() {
+        // Exhaustive, and the property is total: unlike the handshake — which
+        // validates only two header bytes — an AEAD packet has every byte
+        // under the tag, so there is no position where a flip may pass. A
+        // fresh receiver per flip, because opening advances the replay window.
+        let payload = [0x5Au8; 16];
+        let (mut sender, _) = agreed_pair();
+        let mut sealed = [0u8; 16 + OVERHEAD];
+        sealed[HEADER_LEN..HEADER_LEN + payload.len()].copy_from_slice(&payload);
+        let packet_len = sender.seal(&mut sealed, payload.len()).unwrap();
+
+        let mut authentication_failures = 0usize;
+        let mut replay_rejections = 0usize;
+
+        for byte_index in 0..packet_len {
+            for bit in 0..8u32 {
+                let (_, mut receiver) = agreed_pair();
+                let mut corrupted = sealed;
+                corrupted[byte_index] ^= 1u8 << bit;
+
+                match receiver.open(&mut corrupted[..packet_len]) {
+                    Err(CentauriError::AuthenticationFailed) => authentication_failures += 1,
+                    // flipping a sequence bit can move the packet outside the
+                    // replay window, which is refused before the AEAD runs —
+                    // still a rejection, just an earlier one
+                    Err(CentauriError::ReplayDetected(_)) => replay_rejections += 1,
+                    other => panic!("byte {byte_index} bit {bit} was NOT rejected: {other:?}"),
+                }
+            }
+        }
+
+        assert_eq!(
+            authentication_failures + replay_rejections,
+            packet_len * 8,
+            "every bit of an AEAD packet must be under the tag"
+        );
+        assert!(authentication_failures > 0 && replay_rejections > 0);
+    }
+
+    #[test]
+    fn every_truncation_of_a_packet_is_rejected() {
+        let payload = [0x5Au8; 16];
+        let (mut sender, _) = agreed_pair();
+        let mut sealed = [0u8; 16 + OVERHEAD];
+        sealed[HEADER_LEN..HEADER_LEN + payload.len()].copy_from_slice(&payload);
+        let packet_len = sender.seal(&mut sealed, payload.len()).unwrap();
+
+        for length in 0..packet_len {
+            let (_, mut receiver) = agreed_pair();
+            let mut truncated = sealed;
+
+            let outcome = receiver.open(&mut truncated[..length]);
+
+            assert!(
+                outcome.is_err(),
+                "a {length}-byte truncation of a {packet_len}-byte packet was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_bytes_never_panic_the_opener() {
+        for filler in [0x00u8, 0xFF, 0x5A] {
+            for length in [0, 1, OVERHEAD - 1, OVERHEAD, OVERHEAD + 1, 64] {
+                let (_, mut receiver) = agreed_pair();
+                let mut buffer = [0u8; 64];
+                let bounded = length.min(buffer.len());
+                buffer[..bounded].fill(filler);
+
+                // contract is "never panics"; a garbage packet must not be
+                // opened, but any Err is acceptable
+                let outcome = receiver.open(&mut buffer[..bounded]);
+                assert!(outcome.is_err(), "garbage of {bounded} bytes was opened");
+            }
+        }
+    }
+
+    #[test]
     fn out_of_order_within_the_window_is_accepted() {
         let mut window = ReplayWindow::new();
 
