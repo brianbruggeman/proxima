@@ -326,6 +326,14 @@ impl ChildSa {
         self.spi
     }
 
+    /// Test-only: drive the counter to a boundary that is otherwise
+    /// unreachable. Not `pub` — reaching 2^64 seals legitimately would take
+    /// longer than the machine will exist.
+    #[cfg(test)]
+    fn force_send_seq_for_test(&mut self, value: u64) {
+        self.send_seq = value;
+    }
+
     /// Sequence number of the last sealed packet.
     #[must_use]
     pub const fn send_seq(&self) -> u64 {
@@ -360,8 +368,18 @@ impl ChildSa {
             });
         }
 
-        self.send_seq = self.send_seq.wrapping_add(1);
-        let seq = self.send_seq;
+        // NOT wrapping_add. The sequence is the nonce, so a wrap repeats every
+        // nonce this SA ever used — keystream reuse and Poly1305 key recovery.
+        // 2^64 packets is unreachable in practice, which is exactly why a wrap
+        // here would never be caught in testing; it is refused instead. This is
+        // the same defect class as the oracle's 4-byte-wire/8-byte-nonce
+        // divergence at 2^32, and writing `wrapping_add` after criticising that
+        // was not defensible.
+        let seq = self
+            .send_seq
+            .checked_add(1)
+            .ok_or(CentauriError::SequenceExhausted)?;
+        self.send_seq = seq;
 
         // split rather than stage: the header is written where it will be sent
         // and then read back as associated data in place, so nothing on the
@@ -583,6 +601,22 @@ mod tests {
                 needed: 16 + OVERHEAD,
                 available: 20,
             })
+        );
+    }
+
+    #[test]
+    fn an_exhausted_sequence_is_refused_rather_than_wrapped() {
+        // reach the ceiling directly: 2^64 seals is not a thing a test can do,
+        // which is precisely why a wrap here would never surface naturally.
+        let (mut sender, _) = agreed_pair();
+        sender.force_send_seq_for_test(u64::MAX);
+
+        let mut buffer = [0u8; 64];
+
+        assert_eq!(
+            sender.seal(&mut buffer, 4).err(),
+            Some(CentauriError::SequenceExhausted),
+            "a wrap would repeat every nonce this SA ever used"
         );
     }
 
