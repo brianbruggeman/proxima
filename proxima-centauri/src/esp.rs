@@ -37,7 +37,7 @@ use crate::aead::{Nonce, Tag};
 use crate::error::CentauriError;
 use crate::handshake::{Role, SessionKeys};
 use crate::hash::derive_key;
-use crate::sized::{ESP_MAX_PAYLOAD_BYTES, REPLAY_WINDOW_WORDS};
+use crate::sized::{ESP_MAX_PAYLOAD_BYTES, LIFETIME_MAX_PACKETS, REPLAY_WINDOW_WORDS};
 
 /// Poly1305 authentication tag.
 pub const TAG_LEN: usize = 16;
@@ -332,6 +332,21 @@ impl ChildSa {
     #[cfg(test)]
     fn force_send_seq_for_test(&mut self, value: u64) {
         self.send_seq = value;
+    }
+
+    /// Whether this SA has carried enough packets to be rekeyed.
+    ///
+    /// Advisory: the SA keeps working past it, right up to
+    /// [`CentauriError::SequenceExhausted`]. A driver watches this and runs a
+    /// rekey at its convenience rather than being cut off mid-flight — the
+    /// hard stop is the nonce boundary, this is the polite one.
+    ///
+    /// Counted in packets rather than time because a packet count is portable;
+    /// tick frequency is a property of the hardware, so an age policy belongs
+    /// to whoever knows it. [`crate::Handshake::age`] exposes ticks for that.
+    #[must_use]
+    pub const fn needs_rekey(&self) -> bool {
+        self.send_seq >= LIFETIME_MAX_PACKETS
     }
 
     /// Sequence number of the last sealed packet.
@@ -853,6 +868,26 @@ mod tests {
         let mut window = ReplayWindow::new();
 
         assert!(!window.admit(0), "sealing starts at one");
+    }
+
+    #[test]
+    fn the_lifetime_signal_is_advisory_not_a_cutoff() {
+        let (mut sender, _) = agreed_pair();
+        assert!(!sender.needs_rekey(), "a fresh sa is not due");
+
+        sender.force_send_seq_for_test(crate::sized::LIFETIME_MAX_PACKETS);
+        assert!(
+            sender.needs_rekey(),
+            "past the budget it asks to be rekeyed"
+        );
+
+        // and it still works — the hard stop is the nonce boundary, this is
+        // the polite one
+        let mut buffer = [0u8; 64];
+        assert!(
+            sender.seal(&mut buffer, 4).is_ok(),
+            "the signal must not cut a session off mid-flight"
+        );
     }
 
     #[test]

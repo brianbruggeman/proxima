@@ -47,6 +47,19 @@ counter_bits = "auto"
 # truncated — a truncated identity would authenticate as a different peer.
 max_identity_bytes = 64
 
+[lifetime]
+# Packets a child SA may carry before it should be rekeyed.
+#
+# Counted rather than timed, because a packet count is portable and a tick
+# threshold is not — tick frequency is a property of the hardware, so an age
+# policy belongs to the driver, which knows the frequency. `Handshake::age`
+# exposes the ticks for exactly that.
+#
+# The bound that matters is cryptographic, not operational: every packet
+# consumes a nonce, and rekeying resets the sequence. 2^20 is conservative
+# against any AEAD birthday bound and cheap to raise.
+max_packets = 1048576
+
 [esp]
 # Largest payload a caller may seal into one packet.
 #
