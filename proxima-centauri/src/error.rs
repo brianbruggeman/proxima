@@ -29,6 +29,15 @@ pub enum CentauriError {
     /// field, not what the bytes were — error text must never carry
     /// attacker-supplied or secret material.
     InvalidMessage(&'static str),
+    /// AEAD sealing failed. Only reachable on a buffer-shape violation the
+    /// caller-side length checks should already have caught.
+    EncryptionFailed,
+    /// An AEAD tag did not verify. Carries nothing on purpose: a decrypt
+    /// failure must not tell an attacker which part was wrong.
+    AuthenticationFailed,
+    /// A packet's sequence number was already seen or is older than the replay
+    /// window.
+    ReplayDetected(u64),
     /// A step was attempted that the current state does not permit.
     InvalidTransition {
         expected: &'static str,
@@ -49,6 +58,9 @@ impl fmt::Display for CentauriError {
                     "buffer too small: need {needed} bytes, have {available}"
                 )
             }
+            Self::EncryptionFailed => write!(formatter, "encryption failed"),
+            Self::AuthenticationFailed => write!(formatter, "authentication failed"),
+            Self::ReplayDetected(seq) => write!(formatter, "replay detected: seq {seq}"),
             Self::InvalidMessage(field) => write!(formatter, "invalid message: {field}"),
             Self::InvalidTransition { expected, found } => {
                 write!(
