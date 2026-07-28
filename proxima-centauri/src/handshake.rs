@@ -843,4 +843,85 @@ mod tests {
     fn roles_are_distinct() {
         assert_ne!(Role::Initiator, Role::Responder);
     }
+
+    /// Decode a hex fixture into a fixed array. A `Vec`-returning parser would
+    /// pull an allocator into the suite; this keeps the oracle vectors usable
+    /// at the no-alloc tier.
+    fn hex<const N: usize>(text: &str) -> [u8; N] {
+        fn nibble(character: u8) -> u8 {
+            match character {
+                b'0'..=b'9' => character - b'0',
+                b'a'..=b'f' => character - b'a' + 10,
+                _ => panic!("fixture is not lowercase hex"),
+            }
+        }
+
+        let bytes = text.as_bytes();
+        assert_eq!(
+            bytes.len(),
+            N * 2,
+            "fixture length must match the target array"
+        );
+
+        let mut out = [0u8; N];
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = (nibble(bytes[index * 2]) << 4) | nibble(bytes[index * 2 + 1]);
+        }
+        out
+    }
+
+    // Recorded from a live `csr-security` IkeSa run — see that crate's
+    // tests/centauri_wire_vectors.rs, which feeds it the INIT this initiator
+    // produces from INITIATOR_SEED and prints these three lines. The oracle
+    // draws its own nonce and DH value from getrandom, so re-recording yields
+    // different bytes; what must not change is that both sides agree.
+    const ORACLE_RESPONSE: &str = concat!(
+        "0102030405060708329e6a0d5e4d7baa21202208000000000000005c",
+        "7ba4d7ddc8fb09c07f48cdf561dab74009a240cace68e5635e371a8b9f3d8349",
+        "0494063474b1b67fcecc0aa5eb27c321742a73d363eaaf325ac725f7c6ea4f35",
+    );
+    const ORACLE_SK_ER: &str = "621602dda6d23a04ca720136dbf480bc865c8006a53d3d71d93dab0c71f1b7ed";
+    const ORACLE_SK_EI: &str = "39a3f811687a8093326de097bdd41f672047f531cbae681bd71ff6a6919334b4";
+
+    /// The exact bytes handed to the oracle, transcribed into its test.
+    const ORACLE_WAS_FED: &str = concat!(
+        "0102030405060708000000000000000021202208000000000000005c",
+        "f859442e215e26bc5a488cd0eee4942ec66a2c5fa65d9cac704ea0ed442a1787",
+        "67ee57f76474618c387fbd0d770b95f8664c39741cd44649a1d23584c6785f3f",
+    );
+
+    #[test]
+    fn interoperates_with_a_live_csr_security_responder() {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+
+        // the oracle accepted exactly these bytes: its half of this test
+        // asserts respond() parses them without modification.
+        assert_eq!(
+            initiator.outbound(),
+            &hex::<MESSAGE_LEN>(ORACLE_WAS_FED)[..],
+            "the INIT the oracle was fed must still be what we produce"
+        );
+
+        let response = hex::<MESSAGE_LEN>(ORACLE_RESPONSE);
+        let progress = initiator.step(&response, None, now()).unwrap();
+        assert_eq!(progress, Progress::Established);
+
+        let keys = initiator
+            .keys()
+            .expect("established from the oracle's reply");
+
+        assert_eq!(
+            keys.encrypt_key(),
+            &hex::<32>(ORACLE_SK_EI),
+            "what we encrypt with must be what the oracle decrypts with"
+        );
+        assert_eq!(
+            keys.decrypt_key(),
+            &hex::<32>(ORACLE_SK_ER),
+            "and what the oracle encrypts with must be what we decrypt with"
+        );
+    }
 }
