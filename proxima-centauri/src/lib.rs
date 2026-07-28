@@ -75,6 +75,7 @@ pub mod error;
 pub mod esp;
 pub mod handshake;
 pub mod hash;
+pub mod session;
 
 #[cfg(feature = "config")]
 pub use config::HandshakeConfig;
@@ -84,6 +85,7 @@ pub use error::CentauriError;
 pub use esp::{AeadSuite, ChildSa, EspSpi};
 pub use handshake::{Handshake, IkeSpi, Progress, Role, SessionKeys};
 pub use hash::{derive_key, derive_key_into, hash, keyed_hash};
+pub use session::Session;
 
 /// A fixed-size `core::fmt::Write` sink, so tests that inspect rendered output
 /// run at the no-alloc tier too rather than only where `format!` exists.

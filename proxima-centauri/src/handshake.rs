@@ -43,7 +43,7 @@ pub const MESSAGE_LEN: usize = HEADER_LEN + NONCE_LEN + DH_LEN;
 pub const AUTH_MAX_LEN: usize = HEADER_LEN + IDENTITY_LEN_BYTES + AUTH_MAX_IDENTITY_BYTES + MAC_LEN;
 
 /// The staging buffer holds whichever message is larger.
-const OUTBOUND_LEN: usize = if AUTH_MAX_LEN > MESSAGE_LEN {
+pub const OUTBOUND_LEN: usize = if AUTH_MAX_LEN > MESSAGE_LEN {
     AUTH_MAX_LEN
 } else {
     MESSAGE_LEN
