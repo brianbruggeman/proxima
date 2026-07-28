@@ -15,8 +15,8 @@
 
 use proxima_centauri::esp::{HEADER_LEN, OVERHEAD};
 use proxima_centauri::{
-    CentauriError, ChildSa, CounterDrbg, Entropy32, EntropyCell, FixedSequence, Handshake,
-    Progress, Role,
+    CentauriError, ChildSa, CounterDrbg, Entropy32, EntropyCell, EspSpi, FixedSequence, Handshake,
+    IkeSpi, Progress, Role,
 };
 use proxima_clock::ticks::Ticks;
 
@@ -24,8 +24,8 @@ use proxima_clock::ticks::Ticks;
 /// key, so it arrives as a constructor argument.
 const PSK: [u8; 32] = [0xAB; 32];
 
-const INITIATOR_SPI: u64 = 0x0102_0304_0506_0708;
-const RESPONDER_SPI: u64 = 0x1112_1314_1516_1718;
+const INITIATOR_SPI: IkeSpi = IkeSpi::new(0x0102_0304_0506_0708);
+const RESPONDER_SPI: IkeSpi = IkeSpi::new(0x1112_1314_1516_1718);
 
 fn step_banner(title: &str) {
     println!(
@@ -165,8 +165,8 @@ fn main() {
     // ── the data path ─────────────────────────────────────────────────────
     step_banner("data path — per-packet AEAD, in place");
 
-    let mut sender = ChildSa::from_session(initiator_keys, Role::Initiator, 0xAAAA);
-    let mut receiver = ChildSa::from_session(responder_keys, Role::Responder, 0xBBBB);
+    let mut sender = ChildSa::from_session(initiator_keys, Role::Initiator, EspSpi::new(0xAAAA));
+    let mut receiver = ChildSa::from_session(responder_keys, Role::Responder, EspSpi::new(0xBBBB));
 
     let payload = b"the quick brown fox";
     let mut packet = [0u8; 128];

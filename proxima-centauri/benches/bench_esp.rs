@@ -15,7 +15,7 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use proxima_centauri::esp::{HEADER_LEN, OVERHEAD};
-use proxima_centauri::{ChildSa, Entropy32, Handshake, Role};
+use proxima_centauri::{ChildSa, Entropy32, EspSpi, Handshake, IkeSpi, Role};
 use proxima_clock::ticks::Ticks;
 
 const PSK: [u8; 32] = [0xAB; 32];
@@ -23,8 +23,8 @@ const SIZES: [usize; 4] = [16, 1200, 8 * 1024, 64 * 1024];
 
 /// Two SAs that agreed through a real handshake.
 fn agreed_pair() -> (ChildSa, ChildSa) {
-    let mut initiator = Handshake::initiator(PSK, 1);
-    let mut responder = Handshake::responder(PSK, 2);
+    let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1));
+    let mut responder = Handshake::responder(PSK, IkeSpi::new(2));
     let now = Ticks::from_raw(1);
 
     let _ = initiator
@@ -42,8 +42,16 @@ fn agreed_pair() -> (ChildSa, ChildSa) {
     let _ = initiator.step(&reply, None, now).unwrap();
 
     (
-        ChildSa::from_session(initiator.keys().unwrap(), Role::Initiator, 0xAAAA),
-        ChildSa::from_session(responder.keys().unwrap(), Role::Responder, 0xBBBB),
+        ChildSa::from_session(
+            initiator.keys().unwrap(),
+            Role::Initiator,
+            EspSpi::new(0xAAAA),
+        ),
+        ChildSa::from_session(
+            responder.keys().unwrap(),
+            Role::Responder,
+            EspSpi::new(0xBBBB),
+        ),
     )
 }
 

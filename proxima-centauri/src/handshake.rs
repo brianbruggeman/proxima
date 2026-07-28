@@ -58,6 +58,28 @@ const SK_AR_CONTEXT: &str = "csr-ike-sk_ar-v1";
 const SK_EI_CONTEXT: &str = "csr-ike-sk_ei-v1";
 const SK_ER_CONTEXT: &str = "csr-ike-sk_er-v1";
 
+/// An IKE security parameter index — this side's half of the SA identifier.
+///
+/// A newtype rather than a bare `u64` per principle 11: the handshake also
+/// carries sequence numbers and tick counts of the same width, and a newtype
+/// makes swapping them at a call site a compile error rather than a wire bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IkeSpi(u64);
+
+impl IkeSpi {
+    /// Wrap a raw SPI.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// The raw value, for writing to the wire.
+    #[must_use]
+    pub const fn as_raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// Which side of the handshake this state machine is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -71,8 +93,13 @@ pub enum Role {
 /// [`Handshake::outbound`] being non-empty, not by a variant here: the bytes
 /// are the information, and a parallel `emitted` flag would only restate them.
 /// Failure is the `Err` arm, never a variant.
+///
+/// `#[non_exhaustive]`: rekey, close, and the AUTH exchange will add variants
+/// as the state graph grows, and a downstream `match` should not break when
+/// they do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub enum Progress {
     /// Not enough input to advance. Read more bytes and call again with the
     /// larger slice; nothing was consumed and no state changed.
@@ -203,8 +230,8 @@ pub struct Handshake {
     role: Role,
     phase: Phase,
     psk: [u8; 32],
-    spi_initiator: u64,
-    spi_responder: u64,
+    spi_initiator: IkeSpi,
+    spi_responder: IkeSpi,
     message_id: u32,
     outbound: [u8; MESSAGE_LEN],
     outbound_len: usize,
@@ -236,18 +263,18 @@ impl Handshake {
     /// sans-IO state machine cannot hold a key provider, so whoever composes
     /// the handshake resolves the key first.
     #[must_use]
-    pub const fn initiator(psk: [u8; 32], spi: u64) -> Self {
-        Self::new(Role::Initiator, psk, spi, 0)
+    pub const fn initiator(psk: [u8; 32], spi: IkeSpi) -> Self {
+        Self::new(Role::Initiator, psk, spi, IkeSpi::new(0))
     }
 
     /// Start as the responder. `spi` is this side's SPI; the initiator's
     /// arrives in the first message.
     #[must_use]
-    pub const fn responder(psk: [u8; 32], spi: u64) -> Self {
-        Self::new(Role::Responder, psk, 0, spi)
+    pub const fn responder(psk: [u8; 32], spi: IkeSpi) -> Self {
+        Self::new(Role::Responder, psk, IkeSpi::new(0), spi)
     }
 
-    const fn new(role: Role, psk: [u8; 32], spi_initiator: u64, spi_responder: u64) -> Self {
+    const fn new(role: Role, psk: [u8; 32], spi_initiator: IkeSpi, spi_responder: IkeSpi) -> Self {
         Self {
             role,
             phase: Phase::Initial,
@@ -431,8 +458,8 @@ impl Handshake {
         self.message_id = self.message_id.wrapping_add(1);
 
         let out = &mut self.outbound;
-        out[0..8].copy_from_slice(&self.spi_initiator.to_be_bytes());
-        out[8..16].copy_from_slice(&self.spi_responder.to_be_bytes());
+        out[0..8].copy_from_slice(&self.spi_initiator.as_raw().to_be_bytes());
+        out[8..16].copy_from_slice(&self.spi_responder.as_raw().to_be_bytes());
         out[16] = NEXT_PAYLOAD;
         out[17] = VERSION;
         out[18] = EXCHANGE_TYPE;
@@ -465,8 +492,8 @@ fn split_entropy(
 
 /// A parsed SA_INIT message.
 struct Message {
-    spi_initiator: u64,
-    spi_responder: u64,
+    spi_initiator: IkeSpi,
+    spi_responder: IkeSpi,
     nonce: [u8; NONCE_LEN],
     dh_public: [u8; DH_LEN],
 }
@@ -479,16 +506,16 @@ impl Message {
             return Ok(None);
         }
 
-        let spi_initiator = u64::from_be_bytes(
+        let spi_initiator = IkeSpi::new(u64::from_be_bytes(
             input[0..8]
                 .try_into()
                 .map_err(|_| CentauriError::InvalidMessage("spi_initiator"))?,
-        );
-        let spi_responder = u64::from_be_bytes(
+        ));
+        let spi_responder = IkeSpi::new(u64::from_be_bytes(
             input[8..16]
                 .try_into()
                 .map_err(|_| CentauriError::InvalidMessage("spi_responder"))?,
-        );
+        ));
 
         if input[17] != VERSION {
             return Err(CentauriError::InvalidMessage("version"));
@@ -521,16 +548,16 @@ mod tests {
     use proxima_clock::ticks::Ticks;
 
     use super::{
-        DH_LEN, EPHEMERAL_CONTEXT, HEADER_LEN, Handshake, MESSAGE_LEN, NONCE_CONTEXT, NONCE_LEN,
-        Progress, Role,
+        DH_LEN, EPHEMERAL_CONTEXT, HEADER_LEN, Handshake, IkeSpi, MESSAGE_LEN, NONCE_CONTEXT,
+        NONCE_LEN, Progress, Role,
     };
     use crate::entropy::Entropy32;
     use crate::error::CentauriError;
     use crate::hash::derive_key;
 
     const PSK: [u8; 32] = [0xAB; 32];
-    const INITIATOR_SPI: u64 = 0x0102_0304_0506_0708;
-    const RESPONDER_SPI: u64 = 0x1112_1314_1516_1718;
+    const INITIATOR_SPI: IkeSpi = IkeSpi::new(0x0102_0304_0506_0708);
+    const RESPONDER_SPI: IkeSpi = IkeSpi::new(0x1112_1314_1516_1718);
     const INITIATOR_SEED: [u8; 32] = [0x11; 32];
     const RESPONDER_SEED: [u8; 32] = [0x22; 32];
 
@@ -561,7 +588,7 @@ mod tests {
         assert_eq!(message.len(), MESSAGE_LEN, "SA_INIT is a fixed 92 bytes");
         assert_eq!(
             &message[0..8],
-            &INITIATOR_SPI.to_be_bytes(),
+            &INITIATOR_SPI.as_raw().to_be_bytes(),
             "initiator spi, big endian"
         );
         assert_eq!(

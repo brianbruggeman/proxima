@@ -71,8 +71,8 @@ pub mod hash;
 
 pub use entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
 pub use error::CentauriError;
-pub use esp::ChildSa;
-pub use handshake::{Handshake, Progress, Role, SessionKeys};
+pub use esp::{ChildSa, EspSpi};
+pub use handshake::{Handshake, IkeSpi, Progress, Role, SessionKeys};
 pub use hash::{derive_key, derive_key_into, hash, keyed_hash};
 
 /// A fixed-size `core::fmt::Write` sink, so tests that inspect rendered output
