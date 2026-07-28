@@ -31,7 +31,7 @@
 //! the SPI or sequence number fails authentication instead of being ignored.
 
 use chacha20poly1305::aead::AeadInPlace;
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag};
 
 use crate::error::CentauriError;
 use crate::handshake::{Role, SessionKeys};
@@ -230,22 +230,21 @@ impl ChildSa {
         self.send_seq = self.send_seq.wrapping_add(1);
         let seq = self.send_seq;
 
-        let mut header = [0u8; HEADER_LEN];
+        // split rather than stage: the header is written where it will be sent
+        // and then read back as associated data in place, so nothing on the
+        // inner loop is copied except the tag the AEAD returns by value.
+        let (header, rest) = buffer[..needed].split_at_mut(HEADER_LEN);
         header[0..4].copy_from_slice(&self.spi.to_be_bytes());
         header[4..12].copy_from_slice(&seq.to_be_bytes());
-        buffer[..HEADER_LEN].copy_from_slice(&header);
+        let (body, tag_slot) = rest.split_at_mut(payload_len);
 
         let nonce = Self::nonce(&self.seal_nonce_base, seq);
         let tag = self
             .seal_cipher
-            .encrypt_in_place_detached(
-                &nonce,
-                &header,
-                &mut buffer[HEADER_LEN..HEADER_LEN + payload_len],
-            )
+            .encrypt_in_place_detached(&nonce, header, body)
             .map_err(|_| CentauriError::EncryptionFailed)?;
 
-        buffer[HEADER_LEN + payload_len..needed].copy_from_slice(&tag);
+        tag_slot.copy_from_slice(&tag);
 
         Ok(needed)
     }
@@ -272,10 +271,8 @@ impl ChildSa {
             ));
         }
 
-        let mut header = [0u8; HEADER_LEN];
-        header.copy_from_slice(&packet[..HEADER_LEN]);
         let seq = u64::from_be_bytes(
-            header[4..12]
+            packet[4..12]
                 .try_into()
                 .map_err(|_| CentauriError::InvalidMessage("sequence"))?,
         );
@@ -285,17 +282,20 @@ impl ChildSa {
         }
 
         let payload_len = packet.len() - OVERHEAD;
-        let mut tag = [0u8; TAG_LEN];
-        tag.copy_from_slice(&packet[HEADER_LEN + payload_len..]);
+
+        // header stays where it is and is borrowed as associated data; the tag
+        // is verified from the packet rather than copied out of it.
+        let (header, rest) = packet.split_at_mut(HEADER_LEN);
+        let (body, tag) = rest.split_at_mut(payload_len);
+
+        // `tag` is exactly TAG_LEN by construction — payload_len is
+        // packet.len() - OVERHEAD, so splitting it off leaves precisely the
+        // tag — and this borrows those 16 bytes rather than copying them.
+        let tag_ref: &Tag = (&*tag).into();
 
         let nonce = Self::nonce(&self.open_nonce_base, seq);
         self.open_cipher
-            .decrypt_in_place_detached(
-                &nonce,
-                &header,
-                &mut packet[HEADER_LEN..HEADER_LEN + payload_len],
-                (&tag).into(),
-            )
+            .decrypt_in_place_detached(&nonce, header, body, tag_ref)
             .map_err(|_| CentauriError::AuthenticationFailed)?;
 
         Ok(payload_len)
