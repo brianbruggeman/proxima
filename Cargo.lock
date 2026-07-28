@@ -3655,6 +3655,7 @@ dependencies = [
  "proptest",
  "proxima-clock",
  "proxima-primitives",
+ "toml 0.8.23",
  "x25519-dalek",
 ]
 

@@ -1,5 +1,11 @@
-//! Sans-IO, no-alloc cryptographic substrate — the core of the Centauri
-//! family.
+//! Sans-IO, no-alloc cryptographic substrate — Centauri.
+//!
+//! **One crate, not a family.** Each secure protocol lands here as a
+//! compile-time feature-gated module rather than a `proxima-centauri-*`
+//! sibling, mirroring `proxima-protocols` — which folded eleven
+//! single-purpose parser crates into one crate with a feature per protocol.
+//! A default-off feature is the firewall: nothing a deployment does not ask
+//! for is compiled, and a no-alloc target pays for nothing it does not use.
 //!
 //! Everything here compiles with no operating system, no allocator, and no
 //! runtime. That is not a portability flourish; it is the security property
@@ -49,6 +55,13 @@
 
 #[cfg(feature = "std")]
 extern crate std;
+
+/// Build-time sizing baked from `proxima-centauri.toml` (guiding principle
+/// 12). Every tunable cap lives here; nothing in source carries a magic
+/// number for an axis a deployment could reasonably want different.
+pub mod sized {
+    include!(concat!(env!("OUT_DIR"), "/proxima_centauri_sized.rs"));
+}
 
 pub mod entropy;
 pub mod error;
