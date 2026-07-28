@@ -38,10 +38,15 @@ declare -a cells=(
     "build on thumbv7m, handshake only (bare metal, NO allocator)|cargo build -p proxima-centauri --no-default-features --lib --target thumbv7m-none-eabi"
     "build on thumbv7m + chacha suite|cargo build -p proxima-centauri --no-default-features --features aead-chacha20poly1305 --lib --target thumbv7m-none-eabi"
 
-    # the suite, at both tiers. The second is the load-bearing one: it proves
-    # the tests themselves carry no alloc, so they can defend the tier claim.
+    # The suite at both tiers. NOTE what the second cell does and does not
+    # prove: it runs with the crate's `std` feature OFF, which is real, but
+    # `alloc` remains reachable in a TEST binary because dev-dependencies link
+    # it and inherent methods from `alloc` on primitives are then visible
+    # without any `extern crate alloc` here. So a test that allocates would
+    # still pass this cell. The bare-metal `--lib` build above is the binding
+    # no-alloc proof; this one proves the suite does not need std.
     "nextest (std)|cargo nextest run -p proxima-centauri"
-    "test suite RUNS at no_std + no-alloc|cargo test -p proxima-centauri --no-default-features --features aead-chacha20poly1305"
+    "test suite RUNS with std off (see note: NOT a no-alloc proof)|cargo test -p proxima-centauri --no-default-features --features aead-chacha20poly1305"
 
     # take-once exclusivity, exhaustively rather than by sampling. Mutation
     # tested 2026-07-28: a check-then-act draw fails this cell.
