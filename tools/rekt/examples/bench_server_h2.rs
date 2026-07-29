@@ -34,7 +34,6 @@ impl SendPipe for OkHandler {
     }
 }
 
-
 fn main() -> Result<(), ProximaError> {
     let mut args = std::env::args().skip(1);
     let addr_text = args
@@ -53,10 +52,7 @@ fn main() -> Result<(), ProximaError> {
     // mirror PrimeServeExt::serve_http, but register the h2c listener and select
     // it by protocol name. The acceptor factory keeps the accept loop on prime.
     let registry = ListenRegistry::new();
-    registry.register(Arc::new(AnyListenProtocol::single_candidate(
-        "h2",
-        Arc::new(H2PriorKnowledgeAnyProtocol::new()),
-    )))?;
+    registry.register(Arc::new(AnyListenProtocol::single_candidate("h2", Arc::new(H2PriorKnowledgeAnyProtocol::new()))))?;
     let runtime_dyn: Arc<dyn Runtime> = runtime.clone();
     let acceptor = Arc::new(PrimeAcceptorFactory);
     let mut spec = ListenerSpec::http(addr);
