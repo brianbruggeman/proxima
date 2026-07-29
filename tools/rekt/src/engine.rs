@@ -345,7 +345,16 @@ async fn worker(url: &str, deadline: Instant) -> (u64, u64) {
     let mut errors = 0u64;
     while Instant::now() < deadline {
         match pipe.send_raw(&request).await {
-            Ok(_status) => completed += 1,
+            // A reply that arrived and reported failure is not a completion.
+            // This bound the status to `_status` and dropped it until
+            // 2026-07-28, so a target answering 500 to every request
+            // benchmarked at full throughput. Folded into `errors` rather than
+            // counted separately: separating "answered and refused" from
+            // "stopped answering" is the better shape and needs the worker
+            // tally widened through both drive paths, which is a change worth
+            // making deliberately rather than alongside this one.
+            Ok(status) if status < 400 => completed += 1,
+            Ok(_refused) => errors += 1,
             Err(err) => {
                 if debug_errors && errors == 0 {
                     eprintln!("rekt worker first send error: {err}");
@@ -562,7 +571,14 @@ async fn fire_connection(pipe: &H1ClientUpstream<PrimeTcpUpstream>, request: &[u
     while Instant::now() < deadline {
         let send_started = Instant::now();
         match pipe.send_raw(request).await {
-            Ok(_status) => {
+            // same defect as the closed-loop path: the status arrived and was
+            // discarded, so a refusing target reported clean throughput. The
+            // RTT is still recorded for a refusal — the round trip happened and
+            // timing it is honest — but it is not a completion.
+            Ok(status) if status >= 400 => {
+                errors += 1;
+            }
+            Ok(_ok) => {
                 let elapsed_ns = send_started.elapsed().as_nanos() as u64;
                 completed += 1;
                 rtt_sum += elapsed_ns;
