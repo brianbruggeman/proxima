@@ -16,7 +16,11 @@ path = "src/main.rs"
 # this off, nothing pulls proxima. test-prime is bundled so `#[proxima::test]`
 # resolves only when the feature is opted into, keeping plain `cargo build` and
 # `cargo test` free of the whole proxima tree.
-scheduler = ["dep:proxima", "dep:proxima-runtime", "dep:bytes", "dep:futures", "dep:conflaguration", "dep:bon", "dep:proxima-net", "proxima-net/prime", "proxima-net/runtime-prime-inbox-alloc", "dep:rustls"]
+scheduler = ["dep:proxima", "dep:proxima-runtime", "dep:futures", "dep:proxima-net", "proxima-net/prime", "proxima-net/runtime-prime-inbox-alloc", "dep:rustls", "proxima/http1-native", "proxima/any-listener", "dep:proxima-recording"]
+# the prime-vs-tokio comparison bench, and the only thing in rekt that wants
+# tokio in the graph at all. Separate from `scheduler` so the default engine
+# build stays tokio-free (`cargo tree -e normal -i tokio` empty).
+tokio-compare = ["scheduler", "proxima/tokio"]
 redis-client = ["scheduler", "proxima/redis-client"]
 pgwire-client = ["scheduler", "proxima/pgwire-client"]
 h3-native-upstream = ["scheduler", "proxima/h3-native-upstream"]
@@ -24,12 +28,13 @@ all-client-protocols = ["redis-client", "pgwire-client", "h3-native-upstream"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# the dump event's payload is a `serde_json::Value` (ProtocolEvent::Custom).
 serde_json = "1"
 toml = "0.8"
 # first-class config surface for the throughput run (P4): conflaguration gives
 # the typed env + TOML loader, bon the fluent builder — pulled with the engine.
-conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
-bon = { version = "3.9.1", optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"] }
+bon = "3.9.1"
 # proxima's default features (serve-prime + http-prime-deps + http1/2/3 + macros)
 # are the supported config; its lib.rs re-exports them unconditionally, so a
 # default-features=false slim build does not compile. add only test-prime for the
@@ -41,25 +46,33 @@ proxima-runtime = { path = "../../proxima-runtime", optional = true, features = 
 # prime acceptor factory for serving h2c on prime (the bench_server_h2 example)
 proxima-net = { path = "../../proxima-net", optional = true, default-features = false }
 rustls = { version = "0.23", optional = true }
-bytes = { version = "1", optional = true }
+# `Observed` carries the sent bytes for the dump arm; already in the tree.
+bytes = "1"
 futures = { version = "0.3.32", optional = true }
 proxima-telemetry = { version = "0.1.0", path = "../../proxima-telemetry", features = ["tracing-init"] }
+# the pipe algebra itself — `FanOut` for the measurement fan. Already in the tree
+# via proxima-telemetry, so this costs no new compilation.
+proxima-primitives = { workspace = true }
+# the dump arm: LazyFanOut -> AccumulatingSink -> BoundedRecordingSink, and the
+# replay source. Gated with the engine because it needs proxima's Runtime.
+proxima-recording = { workspace = true, features = ["pipe", "replay"], optional = true }
 
 [dev-dependencies]
 bytes = "1"
+tempfile = "3"
+futures = "0.3.32"
+# the canonical Clock doubles (RecordingClock / MockClock) rather than a
+# hand-rolled AtomicU64 clock — same convention proxima-http's tests use.
+proxima-primitives = { workspace = true, features = ["test-support"] }
+serde_json = "1"
 temp-env = "0.3.6"
 axum = "0.8"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net"] }
 
 [[bench]]
-name = "bench_scheduler"
-harness = false
-required-features = ["scheduler"]
-
-[[bench]]
 name = "bench_engine"
 harness = false
-required-features = ["scheduler"]
+required-features = ["tokio-compare"]
 
 [[example]]
 name = "rekt_load"

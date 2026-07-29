@@ -18,8 +18,15 @@ use proxima::h2::connection::{Connection, ConnectionEvent};
 use proxima::h2::frame::StandardSettings;
 use proxima::{PrimeTcpUpstream, StreamUpstreamExt};
 
-use crate::engine::{Throughput, drive_replicated};
+use core::convert::Infallible;
+
+use proxima_telemetry::Metrics;
+
+use proxima::SendPipe;
+
+use crate::engine::drive_replicated;
 use crate::error::Error;
+use crate::report;
 
 const READ_CHUNK: usize = 16_384;
 /// h2 connections cannot carry more than the peer's SETTINGS_MAX_CONCURRENT_STREAMS
@@ -72,25 +79,30 @@ fn parse_target(url: &str) -> Result<(String, u16, String), Error> {
 /// Composes [`crate::engine::drive_replicated`] — see its doc-comment for why
 /// this fans via `FuturesUnordered` and not
 /// [`proxima_primitives::pipe::FanOut`]/[`proxima_primitives::pipe::ScatterGather`].
-pub fn drive_h2(url: &str, connections_per_core: usize, streams_per_conn: usize, cores: usize, duration: Duration) -> Result<Throughput, Error> {
+pub fn drive_h2(url: &str, connections_per_core: usize, streams_per_conn: usize, cores: usize, duration: Duration) -> Result<std::sync::Arc<Metrics>, Error> {
     let (host, port, authority) = parse_target(url)?;
     let streams_per_conn = streams_per_conn.clamp(1, MAX_STREAMS_PER_CONN);
     let authority = Arc::new(authority);
-    drive_replicated(cores, connections_per_core, duration, move |deadline| {
+    drive_replicated(cores, connections_per_core, duration, move |deadline, metrics| {
         let host = host.clone();
         let authority = Arc::clone(&authority);
-        async move { h2_connection(&host, port, &authority, streams_per_conn, deadline).await }
+        async move { h2_connection(&host, port, &authority, streams_per_conn, deadline, &metrics).await }
     })
 }
 
 // one persistent h2 connection multiplexing `streams` concurrent GETs: open the
 // socket once, seed `streams` streams, then refill a stream the instant it ends
 // (END_STREAM) so the connection stays saturated until the deadline.
-async fn h2_connection(host: &str, port: u16, authority: &str, streams: usize, deadline: Instant) -> (u64, u64) {
+async fn h2_connection(host: &str, port: u16, authority: &str, streams: usize, deadline: Instant, metrics: &Arc<Metrics>) {
+    let fan = report::series_fan(metrics);
+    let scenario: Arc<str> = Arc::from(report::RUN);
     let upstream = PrimeTcpUpstream::with_host(host.to_string(), port);
     let mut socket = match upstream.connect().await {
         Ok(socket) => socket,
-        Err(_) => return (0, 1),
+        Err(err) => {
+            report::record_setup_failure(metrics, &err.to_string());
+            return;
+        }
     };
     let mut connection = Connection::new_client(client_settings());
     let headers = get_headers(authority);
@@ -105,13 +117,17 @@ async fn h2_connection(host: &str, port: u16, authority: &str, streams: usize, d
         }
     }
 
-    let (mut completed, mut errors) = (0u64, 0u64);
+    // a multiplexed connection has no per-request round trip to time: streams
+    // overlap, so the honest latency here is the whole connection's, recorded
+    // once. What each event MEANS survives as its own bucket, which is strictly
+    // more than the `(completed, errors)` pair this used to collapse to.
+    let opened = Instant::now();
     let mut read_buf = vec![0u8; READ_CHUNK];
     let mut running = true;
     while running {
         let outbound = connection.take_output();
         if !outbound.is_empty() && socket.write_all(&outbound).await.is_err() {
-            errors += 1;
+            refused(&fan, &scenario, opened, "write").await;
             break;
         }
         if Instant::now() >= deadline {
@@ -121,34 +137,45 @@ async fn h2_connection(host: &str, port: u16, authority: &str, streams: usize, d
             Ok(0) => break,
             Ok(read) => read,
             Err(_) => {
-                errors += 1;
+                refused(&fan, &scenario, opened, "read").await;
                 break;
             }
         };
         if connection.feed(&read_buf[..read]).is_err() {
-            errors += 1;
+            refused(&fan, &scenario, opened, "frame_decode").await;
             break;
         }
         while let Some(event) = connection.next_event() {
             match event {
                 ConnectionEvent::ResponseHead { end_stream: true, .. } | ConnectionEvent::BodyData { end_stream: true, .. } => {
-                    completed += 1;
+                    let _ = fan
+                        .call(report::Observed::of(&scenario, 0, opened.elapsed(), Ok::<_, Infallible>("stream")))
+                        .await;
                     if Instant::now() < deadline {
                         let stream_id = connection.next_local_stream_id();
                         let _ = connection.send_request_head(stream_id, headers.clone(), true);
                     }
                 }
                 ConnectionEvent::StreamReset { .. } => {
-                    errors += 1;
+                    refused(&fan, &scenario, opened, "stream_reset").await;
                     if Instant::now() < deadline {
                         let stream_id = connection.next_local_stream_id();
                         let _ = connection.send_request_head(stream_id, headers.clone(), true);
                     }
                 }
-                ConnectionEvent::PeerGoaway { .. } => running = false,
+                ConnectionEvent::PeerGoaway { .. } => {
+                    refused(&fan, &scenario, opened, "peer_goaway").await;
+                    running = false;
+                }
                 _ => {}
             }
         }
     }
-    (completed, errors)
+}
+
+/// One h2 arrival that did not complete, bucketed by why.
+async fn refused(fan: &report::Fan, scenario: &Arc<str>, opened: Instant, reason: &'static str) {
+    let _ = fan
+        .call(report::Observed::of(scenario, 0, opened.elapsed(), Err::<Infallible, _>(reason)))
+        .await;
 }

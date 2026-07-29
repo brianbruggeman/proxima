@@ -31,9 +31,9 @@ fn main() {
 
     match drive_throughput(&url, connections, cores, Duration::from_secs(seconds)) {
         Ok(throughput) => {
-            println!("rekt: {} cores x {} conns = {} connections, {}s", throughput.cores, connections, throughput.connections, seconds);
-            println!("rekt: {} completed, {} errors", throughput.completed, throughput.errors);
-            println!("rekt: Requests/sec: {:.2}", throughput.per_sec());
+            println!("rekt: {} cores x {} conns = {} connections, {}s", cores, connections, (cores * connections), seconds);
+            println!("rekt: {} completed, {} errors", rekt::report::completed(&throughput), rekt::report::failed(&throughput));
+            println!("rekt: Requests/sec: {:.2}", rekt::report::per_sec(&throughput));
         }
         Err(error) => {
             eprintln!("rekt_load: {error}");

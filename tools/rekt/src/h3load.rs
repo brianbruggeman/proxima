@@ -10,15 +10,22 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use proxima::h3::native::bench_multiplexed;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
-use crate::engine::{Throughput, drive_replicated};
+use core::convert::Infallible;
+
+use proxima_telemetry::Metrics;
+
+use proxima::SendPipe;
+
+use crate::engine::drive_replicated;
 use crate::error::Error;
+use crate::report;
 
 /// Bench-only verifier: accept any server certificate. Localhost h3 bench against
 /// a dev self-signed server; NEVER the production path.
@@ -64,14 +71,32 @@ fn bench_client_config() -> rustls::ClientConfig {
 /// [`crate::engine::drive_replicated`] — see its doc-comment for why this
 /// fans via `FuturesUnordered` and not
 /// [`proxima_primitives::pipe::FanOut`]/[`proxima_primitives::pipe::ScatterGather`].
-pub fn drive_h3(server_addr: SocketAddr, server_name: &str, connections_per_core: usize, cores: usize, duration: Duration, streams_per_conn: usize) -> Result<Throughput, Error> {
+pub fn drive_h3(server_addr: SocketAddr, server_name: &str, connections_per_core: usize, cores: usize, duration: Duration, streams_per_conn: usize) -> Result<Arc<Metrics>, Error> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let streams_per_conn = streams_per_conn.max(1);
     let rustls_config = Arc::new(bench_client_config());
     let server_name = server_name.to_string();
-    drive_replicated(cores, connections_per_core, duration, move |deadline| {
+    drive_replicated(cores, connections_per_core, duration, move |deadline, metrics| {
         let server_name = server_name.clone();
         let rustls_config = Arc::clone(&rustls_config);
-        async move { bench_multiplexed(server_addr, &server_name, rustls_config, streams_per_conn, deadline).await }
+        async move {
+            // proxima owns the h3 multiplexed harness, so this path gets the
+            // pair back rather than recording per stream. Bucketed on arrival
+            // here instead: `stream` for what completed, `h3` for what did not.
+            let fan = report::series_fan(&metrics);
+            let scenario: Arc<str> = Arc::from(report::RUN);
+            let opened = Instant::now();
+            let (completed, errors) = bench_multiplexed(server_addr, &server_name, rustls_config, streams_per_conn, deadline).await;
+            for _ in 0..completed {
+                let _ = fan
+                    .call(report::Observed::of(&scenario, 0, opened.elapsed(), Ok::<_, Infallible>("stream")))
+                    .await;
+            }
+            for _ in 0..errors {
+                let _ = fan
+                    .call(report::Observed::of(&scenario, 0, opened.elapsed(), Err::<Infallible, _>("h3")))
+                    .await;
+            }
+        }
     })
 }
