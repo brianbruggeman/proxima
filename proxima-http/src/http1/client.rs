@@ -130,6 +130,7 @@ use proxima_protocols::http1_codec::h1_client::{
 };
 use proxima_primitives::pipe::body::ResponseStream;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::primitives::Pipe;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
 
@@ -909,6 +910,25 @@ fn apply_config(request: &mut Request<Bytes>, config: &HttpUpstreamConfig) {
 
 // ── Pipe impl ─────────────────────────────────────────────────────────────────
 
+/// The base tier is the byte path: [`Self::send_raw`], which is the same
+/// transport and the same framing decoder as the [`SendPipe`] tier below, minus
+/// the request/response envelope it builds per call.
+///
+/// It judges nothing. A 404 and a 503 are `Ok` — they are what the target said,
+/// and a status is not an error just because it is large. A caller who needs a
+/// verdict composes one (`and_then`, per `pipe::filter`'s "a decision IS a
+/// pipe"); a caller who is measuring, like a load generator, buckets the status
+/// and never needs one.
+impl<U: StreamUpstream> Pipe for H1ClientUpstream<U> {
+    type In = Bytes;
+    type Out = u16;
+    type Err = ProximaError;
+
+    fn call(&self, request: Bytes) -> impl Future<Output = Result<u16, ProximaError>> {
+        async move { self.send_raw(&request).await }
+    }
+}
+
 impl<U: StreamUpstream> SendPipe for H1ClientUpstream<U> {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -1232,7 +1252,7 @@ mod tests {
             .path("/")
             .build()
             .expect("request");
-        let response = client.call(request).await.expect("call");
+        let response = SendPipe::call(&client, request).await.expect("call");
         assert_eq!(response.status, 200);
         let body = response
             .collect_body()
@@ -1279,7 +1299,7 @@ mod tests {
             .build()
             .expect("request");
         // returns on the head — NOT after the (still-incomplete) body.
-        let response = client.call(request).await.expect("call");
+        let response = SendPipe::call(&client, request).await.expect("call");
         assert_eq!(response.status, 200);
 
         let mut stream = response.into_chunk_stream();
@@ -1324,7 +1344,7 @@ mod tests {
             .path("/")
             .build()
             .expect("request");
-        let response = client.call(request).await.expect("call");
+        let response = SendPipe::call(&client, request).await.expect("call");
         assert_eq!(response.status, 200);
         let body = response
             .collect_body()
@@ -1372,7 +1392,7 @@ mod tests {
             .path("/")
             .build()
             .expect("request");
-        let response = client.call(request).await.expect("call");
+        let response = SendPipe::call(&client, request).await.expect("call");
         assert_eq!(response.status, 200);
         let body = response
             .collect_body()
@@ -1416,7 +1436,7 @@ mod tests {
             .path("/")
             .build()
             .expect("request");
-        let outcome = client.call(request).await;
+        let outcome = SendPipe::call(&client, request).await;
         assert!(
             matches!(outcome, Err(ProximaError::Timeout(_))),
             "expected timeout, got: {outcome:?}"
@@ -1459,7 +1479,7 @@ mod tests {
             .path("/")
             .build()
             .expect("request");
-        let response = client.call(request).await.expect("call");
+        let response = SendPipe::call(&client, request).await.expect("call");
         assert_eq!(response.status, 200);
 
         let head = head_slot.lock().expect("head lock").clone();
@@ -1505,7 +1525,7 @@ mod tests {
             .path("/")
             .build()
             .expect("request");
-        let response = client.call(request).await.expect("call");
+        let response = SendPipe::call(&client, request).await.expect("call");
 
         assert_eq!(response.status, 200);
         // body was drained — stream is None, payload is empty.
@@ -1578,8 +1598,7 @@ mod tests {
                     .path("/")
                     .build()
                     .expect("request");
-                let response = client
-                    .call(request)
+                let response = SendPipe::call(&client, request)
                     .await
                     .unwrap_or_else(|err| panic!("{preset:?} request {index} failed: {err}"));
                 assert_eq!(response.status, 200, "{preset:?} request {index}");
@@ -1810,7 +1829,7 @@ mod prime_transport_tests {
                                 .path("/")
                                 .build()
                                 .expect("request");
-                            match h1.call(request).await {
+                            match SendPipe::call(&h1, request).await {
                                 Ok(response) if response.status == 200 => {}
                                 Ok(response) => {
                                     result =
@@ -1929,7 +1948,7 @@ mod prime_transport_tests {
                                 .path("/")
                                 .build()
                                 .expect("request");
-                            match h1.call(request).await {
+                            match SendPipe::call(&h1, request).await {
                                 Ok(response) if response.status == 200 => {}
                                 Ok(response) => {
                                     return Err(format!(

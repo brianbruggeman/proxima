@@ -1834,7 +1834,7 @@ mod tests {
                         .body(body.clone())
                         .build()
                         .expect("request");
-                    let response = client.call(request).await.expect("client call");
+                    let response = SendPipe::call(&client, request).await.expect("client call");
                     assert_eq!(response.status, 200);
                     let echoed = response.collect_body().await.expect("collect body");
                     assert_eq!(
