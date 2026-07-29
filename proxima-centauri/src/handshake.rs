@@ -311,7 +311,20 @@ impl Phase {
 /// An IKE-style SA_INIT handshake.
 pub struct Handshake {
     role: Role,
-    phase: Phase,
+    /// The live phase, or the failure that ended it.
+    ///
+    /// A `Result` rather than a `Failed` variant, because that is what the
+    /// type already means: once an SA fails there is no state left to advance,
+    /// only a reason, and every subsequent step should short-circuit to it.
+    ///
+    /// This started as a bug. A forged AUTH used to take a responder from
+    /// `established` back to `initial` — the phase was moved out for the
+    /// transition and never restored on the error path — so anyone able to
+    /// inject one malformed packet, with no key material at all, silently
+    /// reset an established SA into a fresh handshake. Holding the failure in
+    /// the state makes that unrepresentable: a failed SA stays failed, and it
+    /// remembers why.
+    phase: Result<Phase, CentauriError>,
     psk: [u8; 32],
     spi_initiator: IkeSpi,
     spi_responder: IkeSpi,
@@ -327,7 +340,7 @@ impl core::fmt::Debug for Handshake {
         formatter
             .debug_struct("Handshake")
             .field("role", &self.role)
-            .field("phase", &self.phase.name())
+            .field("phase", &self.phase.as_ref().map_or("failed", Phase::name))
             .field("spi_initiator", &self.spi_initiator)
             .field("spi_responder", &self.spi_responder)
             .finish_non_exhaustive()
@@ -362,7 +375,7 @@ impl Handshake {
     const fn new(role: Role, psk: [u8; 32], spi_initiator: IkeSpi, spi_responder: IkeSpi) -> Self {
         Self {
             role,
-            phase: Phase::Initial,
+            phase: Ok(Phase::Initial),
             psk,
             spi_initiator,
             spi_responder,
@@ -372,6 +385,32 @@ impl Handshake {
             outbound: [0u8; OUTBOUND_LEN],
             outbound_len: 0,
         }
+    }
+
+    /// The live phase, or the failure that ended this SA.
+    fn live(&self) -> Result<&Phase, CentauriError> {
+        self.phase.as_ref().map_err(|reason| *reason)
+    }
+
+    /// Take the phase for a transition. The caller must put one back — either
+    /// the next phase, or a failure via [`Self::fail`].
+    fn take_phase(&mut self) -> Result<Phase, CentauriError> {
+        core::mem::replace(&mut self.phase, Ok(Phase::Initial))
+    }
+
+    /// End the SA with a reason, and hand that reason back to return.
+    ///
+    /// Every failure path goes through here, so none of them can leave the
+    /// phase holding the `Initial` placeholder `take_phase` left behind.
+    fn fail(&mut self, reason: CentauriError) -> CentauriError {
+        self.phase = Err(reason);
+        reason
+    }
+
+    /// Why this SA failed, if it did.
+    #[must_use]
+    pub fn failure(&self) -> Option<CentauriError> {
+        self.phase.as_ref().err().copied()
     }
 
     /// Attach the identity this side presents in the AUTH exchange.
@@ -396,7 +435,7 @@ impl Handshake {
     /// The peer's identity, once [`Progress::Authenticated`] has been reported.
     #[must_use]
     pub fn peer_identity(&self) -> Option<&[u8]> {
-        match &self.phase {
+        match self.phase.as_ref().ok()? {
             Phase::PeerAuthenticated {
                 peer_identity,
                 peer_identity_len,
@@ -429,7 +468,7 @@ impl Handshake {
     /// Whether this handshake has been torn down.
     #[must_use]
     pub const fn is_closed(&self) -> bool {
-        matches!(self.phase, Phase::Closed)
+        matches!(self.phase, Ok(Phase::Closed))
     }
 
     /// Tear the SA down, emitting an authenticated DELETE.
@@ -443,7 +482,7 @@ impl Handshake {
     pub fn send_delete(&mut self) -> Result<Progress, CentauriError> {
         self.outbound_len = 0;
 
-        let auth_key = match &self.phase {
+        let auth_key = match self.live()? {
             Phase::Established { keys, .. }
             | Phase::LocalAuthSent { keys, .. }
             | Phase::PeerAuthenticated { keys, .. }
@@ -473,7 +512,7 @@ impl Handshake {
         out[HEADER_LEN..DELETE_LEN].copy_from_slice(&mac);
 
         self.outbound_len = DELETE_LEN;
-        self.phase = Phase::Closed;
+        self.phase = Ok(Phase::Closed);
 
         Ok(Progress::Closed)
     }
@@ -484,7 +523,7 @@ impl Handshake {
             return Ok(Progress::NeedInput);
         }
 
-        let peer_auth_key = match &self.phase {
+        let peer_auth_key = match self.live()? {
             Phase::Established { keys, .. }
             | Phase::LocalAuthSent { keys, .. }
             | Phase::PeerAuthenticated { keys, .. }
@@ -505,7 +544,7 @@ impl Handshake {
             return Err(CentauriError::AuthenticationFailed);
         }
 
-        self.phase = Phase::Closed;
+        self.phase = Ok(Phase::Closed);
 
         Ok(Progress::Closed)
     }
@@ -533,8 +572,8 @@ impl Handshake {
 
     /// The derived keys, once [`Progress::Established`] has been reported.
     #[must_use]
-    pub const fn keys(&self) -> Option<&SessionKeys> {
-        match &self.phase {
+    pub fn keys(&self) -> Option<&SessionKeys> {
+        match self.phase.as_ref().ok()? {
             Phase::Established { keys, .. }
             | Phase::LocalAuthSent { keys, .. }
             | Phase::PeerAuthenticated { keys, .. }
@@ -546,8 +585,8 @@ impl Handshake {
 
     /// When the handshake completed.
     #[must_use]
-    pub const fn established_at(&self) -> Option<Ticks> {
-        match &self.phase {
+    pub fn established_at(&self) -> Option<Ticks> {
+        match self.phase.as_ref().ok()? {
             Phase::Established { at, .. }
             | Phase::LocalAuthSent { at, .. }
             | Phase::PeerAuthenticated { at, .. }
@@ -567,7 +606,7 @@ impl Handshake {
     pub const fn needs_entropy(&self) -> bool {
         matches!(
             (self.role, &self.phase),
-            (Role::Initiator, Phase::Initial) | (Role::Responder, Phase::Initial)
+            (Role::Initiator, Ok(Phase::Initial)) | (Role::Responder, Ok(Phase::Initial))
         )
     }
 
@@ -600,12 +639,14 @@ impl Handshake {
         // ordinary, not an error.
         if input.len() >= DELETE_LEN
             && input[18] == DELETE_EXCHANGE_TYPE
-            && !matches!(self.phase, Phase::Initial | Phase::Closed)
+            && !matches!(self.phase, Ok(Phase::Initial) | Ok(Phase::Closed))
         {
             return self.receive_delete(input);
         }
 
-        match (self.role, &self.phase) {
+        // `live()?` is the short-circuit: a failed SA never reaches a
+        // transition arm, it returns the reason it failed.
+        match (self.role, self.live()?) {
             (Role::Initiator, Phase::Initial) => self.send_init(entropy),
             (Role::Responder, Phase::Initial) => self.receive_init(input, entropy, now),
             (Role::Initiator, Phase::AwaitingResponse { .. }) => self.receive_response(input, now),
@@ -636,10 +677,10 @@ impl Handshake {
         let dh_public = *PublicKey::from(&ephemeral).as_bytes();
 
         self.write_message(&our_nonce, &dh_public);
-        self.phase = Phase::AwaitingResponse {
+        self.phase = Ok(Phase::AwaitingResponse {
             ephemeral,
             our_nonce,
-        };
+        });
 
         Ok(Progress::Advanced)
     }
@@ -658,13 +699,15 @@ impl Handshake {
 
         let (our_nonce, ephemeral) = split_entropy(entropy)?;
         let dh_public = *PublicKey::from(&ephemeral).as_bytes();
-        let shared = agree(&ephemeral, peer.dh_public)?;
+        // terminal: a degenerate agreement means the peer substituted a
+        // low-order point or is broken, and either way this SA is over
+        let shared = agree(&ephemeral, peer.dh_public).map_err(|reason| self.fail(reason))?;
 
         // ni then nr, both sides: the initiator's nonce is always first.
         let keys = self.derive_session_keys(&peer.nonce, &our_nonce, &shared);
 
         self.write_message(&our_nonce, &dh_public);
-        self.phase = Phase::Established { keys, at: now };
+        self.phase = Ok(Phase::Established { keys, at: now });
 
         Ok(Progress::Established)
     }
@@ -677,7 +720,7 @@ impl Handshake {
         let Phase::AwaitingResponse {
             ephemeral,
             our_nonce,
-        } = core::mem::replace(&mut self.phase, Phase::Initial)
+        } = self.take_phase()?
         else {
             return Err(CentauriError::InvalidTransition {
                 expected: "awaiting-response",
@@ -686,10 +729,12 @@ impl Handshake {
         };
 
         self.spi_responder = peer.spi_responder;
-        let shared = agree(&ephemeral, peer.dh_public)?;
+        // terminal: a degenerate agreement means the peer substituted a
+        // low-order point or is broken, and either way this SA is over
+        let shared = agree(&ephemeral, peer.dh_public).map_err(|reason| self.fail(reason))?;
         let keys = self.derive_session_keys(&our_nonce, &peer.nonce, &shared);
 
-        self.phase = Phase::Established { keys, at: now };
+        self.phase = Ok(Phase::Established { keys, at: now });
 
         Ok(Progress::Established)
     }
@@ -706,7 +751,7 @@ impl Handshake {
     pub fn send_auth(&mut self) -> Result<Progress, CentauriError> {
         self.outbound_len = 0;
 
-        let auth_key = match &self.phase {
+        let auth_key = match self.live()? {
             Phase::Established { keys, .. } | Phase::PeerAuthenticated { keys, .. } => {
                 *keys.auth_key()
             }
@@ -756,7 +801,7 @@ impl Handshake {
 
         // sending discharges our half of the obligation; which state that
         // lands in depends on whether the peer has already discharged theirs
-        self.phase = match core::mem::replace(&mut self.phase, Phase::Initial) {
+        self.phase = Ok(match self.take_phase()? {
             Phase::Established { keys, at } => Phase::LocalAuthSent { keys, at },
             Phase::PeerAuthenticated {
                 keys,
@@ -770,7 +815,7 @@ impl Handshake {
                 peer_identity_len,
             },
             other => other,
-        };
+        });
 
         Ok(Progress::Advanced)
     }
@@ -807,12 +852,12 @@ impl Handshake {
             return Ok(Progress::NeedInput);
         }
 
-        let (keys, at, we_have_sent) = match core::mem::replace(&mut self.phase, Phase::Initial) {
+        let (keys, at, we_have_sent) = match self.take_phase()? {
             Phase::Established { keys, at } => (keys, at, false),
             Phase::LocalAuthSent { keys, at } => (keys, at, true),
             other => {
                 let name = other.name();
-                self.phase = other;
+                self.phase = Ok(other);
                 return Err(CentauriError::InvalidTransition {
                     expected: "established or local-auth-sent",
                     found: name,
@@ -825,16 +870,20 @@ impl Handshake {
         let received = &input[identity_at + identity_len..total];
 
         if !macs_match(&expected, received) {
-            // leave the handshake unusable rather than silently established:
-            // a failed AUTH must not leave keys reachable
-            return Err(CentauriError::AuthenticationFailed);
+            // Terminal, and this is the line the Result-shaped state exists
+            // for. `take_phase` has already moved the live phase out; returning
+            // a bare Err here left the placeholder behind, so a forged AUTH
+            // reset an established SA to `initial` and it could be driven again
+            // as a fresh handshake — a session reset available to anyone able
+            // to inject one packet, with no key material.
+            return Err(self.fail(CentauriError::AuthenticationFailed));
         }
 
         let mut peer_identity = [0u8; AUTH_MAX_IDENTITY_BYTES];
         peer_identity[..identity_len]
             .copy_from_slice(&input[identity_at..identity_at + identity_len]);
 
-        self.phase = if we_have_sent {
+        self.phase = Ok(if we_have_sent {
             Phase::Authenticated {
                 keys,
                 at,
@@ -848,7 +897,7 @@ impl Handshake {
                 peer_identity,
                 peer_identity_len: identity_len,
             }
-        };
+        });
 
         Ok(Progress::Authenticated)
     }
@@ -871,36 +920,35 @@ impl Handshake {
     ) -> Result<Progress, CentauriError> {
         self.outbound_len = 0;
 
-        let (keys, at, peer_identity, peer_identity_len) =
-            match core::mem::replace(&mut self.phase, Phase::Initial) {
-                Phase::Authenticated {
-                    keys,
-                    at,
-                    peer_identity,
-                    peer_identity_len,
-                } => (keys, at, peer_identity, peer_identity_len),
-                other => {
-                    // put it back: refusing a rekey must not destroy a live SA
-                    let name = other.name();
-                    self.phase = other;
-                    return Err(CentauriError::InvalidTransition {
-                        expected: "authenticated",
-                        found: name,
-                    });
-                }
-            };
+        let (keys, at, peer_identity, peer_identity_len) = match self.take_phase()? {
+            Phase::Authenticated {
+                keys,
+                at,
+                peer_identity,
+                peer_identity_len,
+            } => (keys, at, peer_identity, peer_identity_len),
+            other => {
+                // put it back: refusing a rekey must not destroy a live SA
+                let name = other.name();
+                self.phase = Ok(other);
+                return Err(CentauriError::InvalidTransition {
+                    expected: "authenticated",
+                    found: name,
+                });
+            }
+        };
 
         let (our_nonce, ephemeral) = match split_entropy(entropy) {
             Ok(pair) => pair,
             Err(error) => {
                 // put the SA back: a missing draw must not destroy a live
                 // session
-                self.phase = Phase::Authenticated {
+                self.phase = Ok(Phase::Authenticated {
                     keys,
                     at,
                     peer_identity,
                     peer_identity_len,
-                };
+                });
                 return Err(error);
             }
         };
@@ -908,14 +956,14 @@ impl Handshake {
         let dh_public = *PublicKey::from(&ephemeral).as_bytes();
         self.write_exchange(REKEY_EXCHANGE_TYPE, &our_nonce, &dh_public);
 
-        self.phase = Phase::Rekeying {
+        self.phase = Ok(Phase::Rekeying {
             keys,
             at,
             peer_identity,
             peer_identity_len,
             ephemeral,
             our_nonce,
-        };
+        });
 
         Ok(Progress::Advanced)
     }
@@ -932,49 +980,50 @@ impl Handshake {
             return Ok(Progress::NeedInput);
         };
 
-        let (keys, peer_identity, peer_identity_len) =
-            match core::mem::replace(&mut self.phase, Phase::Initial) {
-                Phase::Authenticated {
-                    keys,
-                    peer_identity,
-                    peer_identity_len,
-                    ..
-                } => (keys, peer_identity, peer_identity_len),
-                other => {
-                    let name = other.name();
-                    self.phase = other;
-                    return Err(CentauriError::InvalidTransition {
-                        expected: "authenticated",
-                        found: name,
-                    });
-                }
-            };
+        let (keys, peer_identity, peer_identity_len) = match self.take_phase()? {
+            Phase::Authenticated {
+                keys,
+                peer_identity,
+                peer_identity_len,
+                ..
+            } => (keys, peer_identity, peer_identity_len),
+            other => {
+                let name = other.name();
+                self.phase = Ok(other);
+                return Err(CentauriError::InvalidTransition {
+                    expected: "authenticated",
+                    found: name,
+                });
+            }
+        };
 
         let (our_nonce, ephemeral) = match split_entropy(entropy) {
             Ok(pair) => pair,
             Err(error) => {
-                self.phase = Phase::Authenticated {
+                self.phase = Ok(Phase::Authenticated {
                     keys,
                     at: now,
                     peer_identity,
                     peer_identity_len,
-                };
+                });
                 return Err(error);
             }
         };
         let dh_public = *PublicKey::from(&ephemeral).as_bytes();
-        let shared = agree(&ephemeral, peer.dh_public)?;
+        // terminal: a degenerate agreement means the peer substituted a
+        // low-order point or is broken, and either way this SA is over
+        let shared = agree(&ephemeral, peer.dh_public).map_err(|reason| self.fail(reason))?;
 
         // the rekey initiator's nonce is always first, both sides
         let fresh = self.derive_rekey_keys(&keys, &peer.nonce, &our_nonce, &shared);
 
         self.write_exchange(REKEY_EXCHANGE_TYPE, &our_nonce, &dh_public);
-        self.phase = Phase::Authenticated {
+        self.phase = Ok(Phase::Authenticated {
             keys: fresh,
             at: now,
             peer_identity,
             peer_identity_len,
-        };
+        });
 
         Ok(Progress::Rekeyed)
     }
@@ -986,7 +1035,7 @@ impl Handshake {
         };
 
         let (keys, peer_identity, peer_identity_len, ephemeral, our_nonce) =
-            match core::mem::replace(&mut self.phase, Phase::Initial) {
+            match self.take_phase()? {
                 Phase::Rekeying {
                     keys,
                     peer_identity,
@@ -997,7 +1046,7 @@ impl Handshake {
                 } => (keys, peer_identity, peer_identity_len, ephemeral, our_nonce),
                 other => {
                     let name = other.name();
-                    self.phase = other;
+                    self.phase = Ok(other);
                     return Err(CentauriError::InvalidTransition {
                         expected: "rekeying",
                         found: name,
@@ -1005,15 +1054,17 @@ impl Handshake {
                 }
             };
 
-        let shared = agree(&ephemeral, peer.dh_public)?;
+        // terminal: a degenerate agreement means the peer substituted a
+        // low-order point or is broken, and either way this SA is over
+        let shared = agree(&ephemeral, peer.dh_public).map_err(|reason| self.fail(reason))?;
         let fresh = self.derive_rekey_keys(&keys, &our_nonce, &peer.nonce, &shared);
 
-        self.phase = Phase::Authenticated {
+        self.phase = Ok(Phase::Authenticated {
             keys: fresh,
             at: now,
             peer_identity,
             peer_identity_len,
-        };
+        });
 
         Ok(Progress::Rekeyed)
     }
@@ -1699,6 +1750,68 @@ mod tests {
             "authentication does not drop the SA"
         );
         assert!(responder.established_at().is_some());
+    }
+
+    #[test]
+    fn a_forged_auth_kills_the_sa_rather_than_resetting_it() {
+        // Regression for a session-reset defect. A forged AUTH used to take the
+        // responder from `established` back to `initial` — the phase was moved
+        // out for the transition and never restored on the error path — so
+        // anyone able to inject one malformed packet, holding no key material
+        // at all, silently reset an established SA into a fresh handshake.
+        let (mut initiator, mut responder) = established_pair(b"peer-a", b"peer-b");
+        let _ = initiator.send_auth().unwrap();
+        let mut forged = staged(&initiator);
+        let len = initiator.outbound().len();
+        forged[len - 1] ^= 0xFF;
+
+        assert_eq!(
+            responder.step(&forged[..len], None, now()).err(),
+            Some(CentauriError::AuthenticationFailed)
+        );
+
+        // the SA is dead, and it remembers why
+        assert_eq!(
+            responder.failure(),
+            Some(CentauriError::AuthenticationFailed),
+            "a failed SA must carry its cause, not merely be unusable"
+        );
+        assert!(responder.keys().is_none());
+        assert!(responder.peer_identity().is_none());
+
+        // and it stays dead: every later step short-circuits to the original
+        // cause rather than starting a new handshake
+        let mut fresh = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = fresh
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let sa_init = captured(&fresh);
+        assert_eq!(
+            responder
+                .step(&sa_init, Some(Entropy32::new(RESPONDER_SEED)), now())
+                .err(),
+            Some(CentauriError::AuthenticationFailed),
+            "a dead SA must not accept a fresh SA_INIT"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_agreement_is_terminal_too() {
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let mut tampered = captured(&initiator);
+        tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(&LOW_ORDER_POINTS[0]);
+
+        let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
+        let _ = responder.step(&tampered, Some(Entropy32::new(RESPONDER_SEED)), now());
+
+        assert_eq!(
+            responder.failure(),
+            Some(CentauriError::DegenerateKeyAgreement),
+            "a substituted DH value ends the SA, it does not rewind it"
+        );
     }
 
     #[test]
