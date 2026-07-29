@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use rekt::error::Error;
-use rekt::scenario::Scenario;
+use rekt::scenario::LoadPlan;
 
 fn main() -> ExitCode {
     match run() {
@@ -24,21 +24,16 @@ fn run() -> Result<bool, Error> {
         .nth(1)
         .unwrap_or_else(|| "rek.toml".into());
     let text = std::fs::read_to_string(&path)?;
-    let scenario = Scenario::from_toml(&text)?;
-
-    println!("target: {}", scenario.target_url);
+    let plan = LoadPlan::from_toml(&text)?;
 
     #[cfg(feature = "scheduler")]
-    let recorder = rekt::engine::run(&scenario)?;
+    let metrics = rekt::engine::run(&plan)?;
 
+    // without `scheduler` there is no engine to drive; the run is a parse check.
     #[cfg(not(feature = "scheduler"))]
-    let recorder = {
-        // mock engine: the default-off build has no proxima to drive.
-        let mut target = rekt::driver::MockTarget::new();
-        rekt::driver::run(&scenario, &mut target)
-    };
+    let metrics = rekt::report::store();
 
-    let report = recorder.report(&scenario.thresholds);
-    print!("{}", report.render());
-    Ok(report.passed)
+    let (text, passed) = rekt::report::render(&metrics, &plan);
+    print!("{text}");
+    Ok(passed)
 }

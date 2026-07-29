@@ -1,22 +1,59 @@
 //! the monomorphic load driver.
 //!
-//! rekt holds the *concrete* pipe `P` — never a type-erased `PipeHandle`
+//! rekt defines no types and no traits, and it judges nothing. Every driver
+//! here is a generic function over two things:
+//!
+//! - **the connection is a pipe** (`Conn: Pipe`) — `In` is whatever the
+//!   protocol sends, `Out` is whatever came back. It has to be a trait: its
+//!   future borrows the connection across an await, and no `Fn` bound expresses
+//!   `for<'a> Fn(&'a Conn) -> impl Future + 'a` without boxing. That is what
+//!   `Pipe` is for, so there is nothing here to invent.
+//! - **opening is a function** (`Fn() -> Result<(Conn, Conn::In), Error>`) — it
+//!   hands back an owned pair, so there is no borrow to carry and no reason for
+//!   a type.
+//!
+//! There is no third thing. An instrument reports what happened, so `Out` goes
+//! into the report WHOLE and buckets there — 200, 403, 500, 501 — and the `Err`
+//! side buckets beside it. Every earlier shape reduced the reply first (an
+//! `ok: bool`, a `Verdict`, an `accept` predicate), and each one had to be
+//! reconstructed downstream by something guessing at what the target had
+//! already said plainly.
+//!
+//! Which is also what makes this not request/response. The envelope was HTTP's
+//! instantiation of the load model and pinning it into the engine is what
+//! stopped rekt driving a tunnel, a redis session, or a centauri handshake. The
+//! cure is not a load-generator abstraction beside the algebra: HTTP is
+//! [`open_h1`], one function, over `H1ClientUpstream`'s own base-tier `Pipe`.
+//!
+//! `Pipe` rather than `SendPipe`: the base tier is h1's byte path
+//! (`In = Bytes`, `Out = u16`), where the cross-core tier is the envelope
+//! (`Request<Bytes>`). A base-tier future is not `Send`, so every loop here is
+//! built ON the prime core it runs on.
+//!
+//! rekt holds the *concrete* pipe — never a type-erased `PipeHandle`
 //! (`Arc<dyn DynPipe>`), whose blanket `DynPipe::call_dyn` boxes a fresh future
 //! on every call (`Box::pin(SendPipe::call(..))`, proxima-pipe `pipe.rs:303`).
-//! Held as `Arc<P>` the unboxed path survives: `impl<Inner: SendPipe> SendPipe
-//! for Arc<Inner>` delegates straight to `Inner::call`, so `SendPipe::call(&p,
-//! req)` is a monomorphized `impl Future` with no per-send box. Driven on a
-//! prime core (via `proxima::runtime::run`) and awaited inline, the send
-//! hot path allocates zero futures.
+//! Monomorphized over `Conn: Pipe`, driven on a prime core, and awaited inline,
+//! the hot path allocates zero futures. `call` takes `In` by value so the item
+//! is cloned per send — chosen to be `Bytes` on the raw path, where a clone is
+//! a refcount bump rather than an allocation.
 //!
 //! proxima supplies the primitives (the concrete pipes, `SendPipe::call`, the
 //! prime runtime); rekt only composes them into the loop.
 //!
-//! Scope of this layer: the scenario runner drives the generic
-//! `proxima::Client` surface, while the `rekt_load` benchmark path drives the
-//! concrete raw H1 client. Open-loop concurrency is modeled by the scheduler
-//! primitives; the staged CLI still fires each planned stage count sequentially.
+//! Arrivals are paced against an injected `Clock` on an ABSOLUTE grid: arrival
+//! `k` is due at `stage_start + k * interval`, never at `previous_response +
+//! interval`. After a stall the arrivals that came due during it fire
+//! immediately rather than being silently dropped from the offered rate. The
+//! clock is injected so the pacing is testable in virtual time.
+//!
+//! NOT yet open-loop: the staged path awaits each send before pacing the next,
+//! so a slow reply still delays subsequent arrivals on that connection. Closing
+//! that needs a connection pool (which `adaptive_core` already has) plus an
+//! in-flight bound; until then the grid caps the rate but a stalling target can
+//! still pull the achieved rate below it.
 
+use core::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,179 +62,233 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, StreamExt};
-use proxima::client::Client;
-use proxima::request::Request;
+use proxima::SendPipe;
+use proxima::pipe::Pipe;
+use proxima::pipe::capabilities::Clock;
+use proxima::pipe::clock::TimeClock;
+use proxima::pipe::fan_in::Exhausted;
 use proxima::runtime::{CoreId, PrimeRuntime, Runtime};
-use proxima::{H1ClientUpstream, PrimeTcpUpstream, SendPipe};
+use proxima::{H1ClientUpstream, PrimeTcpUpstream};
+use proxima_recording::pipe::RecordingSink;
 use proxima_runtime::concurrency::{Concurrency, ConcurrencyController, Sample};
+use proxima_telemetry::Metrics;
 
 use crate::error::Error;
-use crate::outcome::Outcome;
-use crate::report::Recorder;
-use crate::scenario::{RequestSpec, Scenario};
+use crate::report;
+use crate::scenario::{Arrival, Dump, LoadPlan, PayloadSpec, Stage};
 
-/// a monomorphic load source over the concrete pipe `P`.
+/// Encode the scenario's payload once, into the bytes that go on the wire.
 ///
-/// Generic over what the pipe *takes*, not over HTTP. rekt drives anything
-/// shaped like a pipe: an HTTP client whose `In` is a `Request`, a redis or
-/// pgwire session whose `In` is that protocol's payload, a tunnel whose `In` is
-/// bytes. The request/response envelope was never the load model — it was one
-/// instantiation of it, and pinning `In = Request<Bytes>` here is what stopped
-/// rekt measuring anything else.
-///
-/// The workload item is prepared once and cloned per send, which is the shape
-/// the HTTP path already had. That matters more than it looks: drawing each
-/// item from a source pipe would add an `await` inside the loop rekt exists to
-/// time, so the general case would have made every measurement worse. `Clone`
-/// on `P::In` is the price of keeping the hot loop the same shape it was.
-pub struct Load<P: SendPipe>
-where
-    P::In: Clone + Send,
-{
-    pipe: Arc<P>,
-    item: P::In,
-}
-
-impl<P: SendPipe> Load<P>
-where
-    P::In: Clone + Send,
-{
-    /// Drive `pipe` with `item`, cloned per send.
-    #[must_use]
-    pub fn new(pipe: P, item: P::In) -> Self {
-        Self { pipe: Arc::new(pipe), item }
-    }
-
-    #[must_use]
-    pub fn from_arc(pipe: Arc<P>, item: P::In) -> Self {
-        Self { pipe, item }
-    }
-
-    /// fire `count` sends into `stage`, sequentially, awaited inline on a prime
-    /// core. each send is `SendPipe::call(&p, item)` — unboxed, monomorphized.
-    pub fn drive(&self, stage: usize, count: u64) -> Result<Recorder, Error> {
-        let pipe = Arc::clone(&self.pipe);
-        let template = self.item.clone();
-        proxima::runtime::run(async move {
-            let mut recorder = Recorder::new();
-            for _ in 0..count {
-                recorder.record(stage, fire(&pipe, template.clone()).await);
-            }
-            recorder
-        })
-        .map_err(|err| Error::Engine(err.to_string()))
-    }
-}
-
-impl<P: SendPipe<In = Request<Bytes>>> Load<P> {
-    /// The HTTP instantiation, kept as a convenience because it is the common
-    /// one — not because the engine knows what HTTP is.
-    pub fn http(pipe: P) -> Result<Self, Error> {
-        Ok(Self::new(pipe, default_request()?))
-    }
-
-    /// The HTTP instantiation with a caller-supplied request shape.
-    pub fn http_with(pipe: P, spec: &RequestSpec) -> Result<Self, Error> {
-        Ok(Self::new(pipe, build_request(spec)?))
-    }
-}
-
-/// the per-stage request template, built once and cloned per send. `from_static`
-/// keeps method/path off the heap; the `Request: Clone` reuse keeps the whole
-/// `RequestContext` assembly out of the hot loop.
-fn default_request() -> Result<Request<Bytes>, Error> {
-    build_request(&RequestSpec {
-        method: "GET".to_string(),
-        path: "/".to_string(),
-        body: None,
-        headers: Default::default(),
-        query: Default::default(),
-    })
-}
-
-fn build_request(spec: &RequestSpec) -> Result<Request<Bytes>, Error> {
-    let mut builder = Request::builder()
-        .method(Bytes::from(spec.method.clone()))
-        .path(Bytes::from(spec.path.clone()));
-    for (name, value) in &spec.headers {
-        builder = builder.header(name.clone(), value.clone());
-    }
-    for (name, value) in &spec.query {
-        builder = builder.query_param(name.clone(), value.clone());
-    }
-    if let Some(body) = &spec.body {
-        builder = builder.body(Bytes::from(body.clone()));
-    }
-    builder
-        .build()
-        .map_err(|err| Error::Engine(err.to_string()))
-}
-
-// one send: call the concrete pipe inline with a pre-cloned item, time it.
-// takes the item by value — a borrow can't cross the await for every payload
-// type (`Request` is `!Sync`: its streamed-body field is `Send` but not
-// `Sync`), so the caller clones the template per send and hands ownership in.
-// That constraint came from HTTP but holds generally, which is why the signature
-// keeps it rather than relaxing to a reference for the types that could.
-async fn fire<P: SendPipe>(pipe: &Arc<P>, item: P::In) -> Outcome {
-    let started = Instant::now();
-    let ok = SendPipe::call(pipe, item).await.is_ok();
-    Outcome {
-        latency: started.elapsed(),
-        ok,
-        timed_out: false,
-    }
-}
-
-pub fn run(scenario: &Scenario) -> Result<Recorder, Error> {
-    // Staged CLI path drives the generic proxima Client surface, not an HTTP
-    // switch. The target spec can be {"http": ...}, {"grpc": ...},
-    // {"type":"redis", ...}, {"type":"pgwire", ...}, {"type":"h3-native", ...},
-    // synth/replay/fs/process/etc., or any future protocol registered with
-    // Client. rekt supplies only the request shape and timing.
-    let client = Client::from_value(scenario.client_spec.clone()).map_err(|err| Error::Engine(err.to_string()))?;
-    let pipe = Arc::new(client);
-    let template = build_request(&scenario.request)?;
-    // planned arrivals per stage, owned so the drive future stays 'static.
-    let plan: Vec<u64> = scenario
-        .stages
+/// The whole item, not a struct that becomes one per send: there is no
+/// `Request` here to clone, no header map to walk, no builder to run. `Bytes`
+/// so the clone `SendPipe::call`'s by-value `In` requires is a refcount bump.
+fn encode_payload(spec: &PayloadSpec, authority: &str) -> Bytes {
+    let query = spec
+        .query
         .iter()
-        .map(|stage| {
-            (stage.rate_per_sec * stage.duration.as_secs_f64())
-                .round()
-                .max(0.0) as u64
-        })
-        .collect();
+        .enumerate()
+        .fold(String::new(), |mut acc, (index, (name, value))| {
+            acc.push(if index == 0 { '?' } else { '&' });
+            acc.push_str(name);
+            acc.push('=');
+            acc.push_str(value);
+            acc
+        });
 
-    proxima::runtime::run(async move {
-        let mut recorder = Recorder::new();
-        for (idx, count) in plan.into_iter().enumerate() {
-            for _ in 0..count {
-                recorder.record(idx, fire(&pipe, template.clone()).await);
-            }
-        }
-        recorder
-    })
-    .map_err(|err| Error::Engine(err.to_string()))
-}
-
-/// throughput of a closed-loop run: each connection keeps one request in flight,
-/// fires back-to-back for `duration`, completions summed across connections.
-#[derive(Debug, Clone, Copy)]
-pub struct Throughput {
-    pub completed: u64,
-    pub errors: u64,
-    pub connections: usize,
-    pub cores: usize,
-    pub elapsed: Duration,
-}
-
-impl Throughput {
-    #[must_use]
-    pub fn per_sec(&self) -> f64 {
-        let seconds = self.elapsed.as_secs_f64();
-        if seconds > 0.0 { self.completed as f64 / seconds } else { 0.0 }
+    let body = spec.body.as_deref().unwrap_or_default();
+    let mut wire = format!("{} {}{} HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n", spec.method, spec.path, query);
+    for (name, value) in &spec.headers {
+        wire.push_str(&format!("{name}: {value}\r\n"));
     }
+    if !body.is_empty() {
+        wire.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    wire.push_str("\r\n");
+    wire.push_str(body);
+
+    Bytes::from(wire)
+}
+
+// one send: hand the item to the pipe, time the round trip, hand back what came
+// back. The pipe.s `Result` passes through untouched -- the engine judges
+// nothing, and there is no outcome type between here and the report because
+// there is nothing to put in one.
+async fn fire<Conn: Pipe>(pipe: &Conn, item: Conn::In) -> (Duration, Result<Conn::Out, Conn::Err>) {
+    let started = Instant::now();
+    let reply = pipe.call(item).await;
+    (started.elapsed(), reply)
+}
+
+/// The staged CLI path: fire each stage's planned arrival count against the
+/// scenario's target, recording per-stage latencies.
+///
+/// Drives the same raw h1 pipe the throughput path does. It used to drive
+/// `proxima::Client`, which reaches every registered protocol — but only
+/// through `Request<Bytes>`/`Response<Bytes>`, so a redis or pgwire scenario
+/// was HTTP-shaped load wearing another protocol's name. Reaching those for
+/// real means a pipe that speaks the protocol, not an envelope that pretends.
+/// The arrivals of one stage, as a source pipe: `() -> ()`, resolving when the
+/// next one is due.
+///
+/// A schedule is a stream with a clock on it. Everything about *when* to fire
+/// lives here — the absolute grid, the catch-up after a stall, the stage
+/// deadline — so the drive loop below is just "pull, fire, record" with no
+/// timing arithmetic in it at all.
+///
+/// `Err = Exhausted` is proxima's source convention (`fan_in`, `SignalSource`,
+/// `PollSourceExt`), so this ends when the stage's duration does, and a caller
+/// who wants it as a `futures::Stream` has the bridge already.
+///
+/// `Cell` rather than atomics: a stage's arrivals belong to one connection on
+/// one core, so there is no contention to arbitrate — the same single-threaded
+/// borrow `proxima-centauri`'s `Session` uses for the same reason.
+pub struct Arrivals<Clk> {
+    clock: Clk,
+    arrival: Arrival,
+    mean_nanos: u64,
+    deadline_nanos: u64,
+    due_nanos: Cell<u64>,
+    index: Cell<u64>,
+}
+
+impl<Clk: Clock> Arrivals<Clk> {
+    /// The arrivals `stage` asks for, starting now on `clock`.
+    ///
+    /// A stage that names no rate gets a mean gap of zero — every arrival is
+    /// immediately due, which is flat out through the very same source.
+    #[must_use]
+    pub fn of(stage: &Stage, clock: Clk) -> Self {
+        let started = clock.now_nanos();
+        let mean_nanos = stage
+            .rate_per_sec
+            .filter(|rate| *rate > 0.0)
+            .map_or(0, |rate| (1_000_000_000.0 / rate) as u64);
+        Self {
+            clock,
+            arrival: stage.arrival,
+            mean_nanos,
+            deadline_nanos: started.saturating_add(u64::try_from(stage.duration.as_nanos()).unwrap_or(u64::MAX)),
+            due_nanos: Cell::new(started),
+            index: Cell::new(0),
+        }
+    }
+}
+
+impl<Clk: Clock> Pipe for Arrivals<Clk> {
+    type In = ();
+    type Out = ();
+    type Err = Exhausted;
+
+    async fn call(&self, (): ()) -> Result<(), Exhausted> {
+        if self.clock.now_nanos() >= self.deadline_nanos {
+            return Err(Exhausted);
+        }
+
+        let due = self.due_nanos.get();
+        let now = self.clock.now_nanos();
+        if due > now {
+            self.clock
+                .delay(Duration::from_nanos(due - now))
+                .await;
+        }
+
+        // the NEXT due accumulates off this one, never off `now` — that is what
+        // keeps the grid absolute, so arrivals swallowed by a stall are still
+        // offered rather than silently lowering the rate.
+        let index = self.index.get() + 1;
+        self.index.set(index);
+        self.due_nanos
+            .set(due.saturating_add(self.arrival.gap_nanos(self.mean_nanos, index)));
+        Ok(())
+    }
+}
+
+pub fn run(plan: &LoadPlan) -> Result<Arc<Metrics>, Error> {
+    let metrics = Arc::new(report::store());
+    for scenario in &plan.scenarios {
+        let (pipe, item) = open_h1(&scenario.url, &scenario.payload)?;
+        let workload = plan
+            .dump
+            .as_ref()
+            .map(|spec| (spec, item.clone()));
+        drive_stages(pipe, item, TimeClock, &scenario.name, &scenario.stages, &metrics, workload)?;
+    }
+    Ok(metrics)
+}
+
+/// Drive one scenario's stages against a pipe, recording into `metrics`.
+///
+/// A stage that names a rate is paced on an absolute grid; a stage that names
+/// none runs flat out. Both are bounded by the stage's own duration, which is
+/// why this is one loop rather than two drivers — the only difference between a
+/// closed-loop throughput bench and a paced open-loop run is whether the
+/// interval is zero.
+///
+/// Bounding by duration is also the more honest count: the old paced path fired
+/// exactly `rate * duration` arrivals however long that took, so a stalling
+/// target stretched the stage past its stated window.
+pub fn drive_stages<Conn, Clk>(pipe: Conn, item: Conn::In, clock: Clk, scenario: &str, stages: &[Stage], metrics: &Arc<Metrics>, dump: Option<(&Dump, Bytes)>) -> Result<(), Error>
+where
+    Conn: Pipe + Send + 'static,
+    Conn::In: Clone + Send + 'static,
+    Conn::Out: core::fmt::Debug + Send + 'static,
+    Clk: Clock + Clone + Send + 'static,
+{
+    // the per-core factory rather than `proxima::runtime::run`: a base-tier
+    // `Pipe` future is not `Send`, so it is built ON the core it runs on.
+    let runtime = PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?;
+    // the dump arm offloads its blocking writes onto a runtime; the one driving
+    // this run is it. Built BEFORE the factory so a bad dump config fails the
+    // run up front rather than halfway through it.
+    let dump = match dump {
+        Some((spec, workload)) => {
+            let offload = Arc::new(PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?) as Arc<dyn Runtime>;
+            Some((report::dump_sink(spec, offload, metrics)?, workload))
+        }
+        None => None,
+    };
+    let (sender, receiver) = mpsc::channel();
+    let plan: Vec<Stage> = stages.to_vec();
+    let scenario = scenario.to_string();
+    let metrics = Arc::clone(metrics);
+
+    let factory = move || -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(async move {
+            let scenario: Arc<str> = Arc::from(scenario.as_str());
+            let fan = match &dump {
+                // the workload goes down once, then every arrival links to it
+                Some((sink, sent)) => {
+                    let workload = report::dump_workload(sink, &scenario, sent).await;
+                    report::dumping_fan(&metrics, sink, workload)
+                }
+                None => report::series_fan(&metrics),
+            };
+            for (index, stage) in plan.iter().enumerate() {
+                let arrivals = Arrivals::of(stage, clock.clone());
+                while arrivals.call(()).await.is_ok() {
+                    let (latency, reply) = fire(&pipe, item.clone()).await;
+                    let _ = fan
+                        .call(report::Observed::of(&scenario, index, latency, reply))
+                        .await;
+                }
+            }
+            // drain before the run is called done. Without this the bounded
+            // queue still holds whatever the drain worker had not written and
+            // the dump is silently truncated — a capture that quietly loses its
+            // tail is worse than no capture, because it looks complete.
+            if let Some((sink, _)) = &dump {
+                let _ = sink.flush().await;
+            }
+            let _ = sender.send(());
+        })
+    };
+    runtime
+        .spawn_factory_on_core(CoreId(0), Box::new(factory))
+        .map_err(|err| Error::Engine(format!("spawn on core 0: {err:?}")))?;
+
+    receiver
+        .recv()
+        .map_err(|err| Error::Engine(err.to_string()))
 }
 
 /// Fan a per-core worker factory across `cores` prime cores: each core spawns
@@ -238,36 +329,36 @@ impl Throughput {
 ///   (`docs/rekt-h3-parity/discipline.md`'s binding CoV<5% bench discipline)
 ///   — its own fan-out overhead is not allowed to become part of what it
 ///   measures, so `FuturesUnordered` stays the mechanism.
-pub(crate) fn drive_replicated<MakeWorker, Fut>(cores: usize, per_core: usize, duration: Duration, make_worker: MakeWorker) -> Result<Throughput, Error>
+pub(crate) fn drive_replicated<MakeWorker, Fut>(cores: usize, per_core: usize, duration: Duration, make_worker: MakeWorker) -> Result<Arc<Metrics>, Error>
 where
-    MakeWorker: Fn(Instant) -> Fut + Send + Clone + 'static,
-    Fut: Future<Output = (u64, u64)> + 'static,
+    MakeWorker: Fn(Instant, Arc<Metrics>) -> Fut + Send + Clone + 'static,
+    Fut: Future<Output = ()> + 'static,
 {
     let cores = cores.max(1);
     let per_core = per_core.max(1);
     let runtime = PrimeRuntime::new(cores).map_err(|err| Error::Engine(err.to_string()))?;
+    let metrics = Arc::new(report::store());
     let started = Instant::now();
     let deadline = started + duration;
-    let (sender, receiver) = mpsc::channel::<(u64, u64)>();
+    let (sender, receiver) = mpsc::channel::<()>();
 
     for core in 0..cores {
         let sender = sender.clone();
         let make_worker = make_worker.clone();
+        let core_metrics = Arc::clone(&metrics);
         // a factory: the `Send` closure crosses to the target core and builds the
         // (?Send) per-connection drivers THERE, so each core's clients live on its
         // own reactor. FuturesUnordered polls only the workers whose socket woke.
         let factory = move || -> Pin<Box<dyn Future<Output = ()>>> {
             Box::pin(async move {
                 let mut workers: FuturesUnordered<_> = (0..per_core)
-                    .map(|_| make_worker(deadline))
+                    .map(|_| make_worker(deadline, Arc::clone(&core_metrics)))
                     .collect();
-                let mut completed = 0u64;
-                let mut errors = 0u64;
-                while let Some((ok, bad)) = workers.next().await {
-                    completed += ok;
-                    errors += bad;
-                }
-                let _ = sender.send((completed, errors));
+                // nothing to sum: every worker records into the shared store,
+                // whose histogram shards are per-thread and merged on read. The
+                // channel now carries only "this core is done".
+                while workers.next().await.is_some() {}
+                let _ = sender.send(());
             })
         };
         runtime
@@ -275,25 +366,10 @@ where
             .map_err(|err| Error::Engine(format!("spawn on core {core}: {err:?}")))?;
     }
     drop(sender);
+    while receiver.recv().is_ok() {}
 
-    let mut completed = 0u64;
-    let mut errors = 0u64;
-    for _ in 0..cores {
-        match receiver.recv() {
-            Ok((ok, bad)) => {
-                completed += ok;
-                errors += bad;
-            }
-            Err(_) => break,
-        }
-    }
-    Ok(Throughput {
-        completed,
-        errors,
-        connections: per_core * cores,
-        cores,
-        elapsed: started.elapsed(),
-    })
+    report::stamp_run(&metrics, started.elapsed(), per_core * cores, cores);
+    Ok(metrics)
 }
 
 /// closed-loop throughput drive against a real HTTP target over `cores` prime
@@ -314,62 +390,89 @@ where
 /// dodges background contention on a shared box and naturally spreads off a
 /// colocated server's busy cores. Pin explicitly for a dedicated box via the
 /// prime affinity surface (`PrimeRuntime::builder().packed()/.affinity(..)`).
-pub fn drive_throughput(url: &str, connections_per_core: usize, cores: usize, duration: Duration) -> Result<Throughput, Error> {
+pub fn drive_throughput(url: &str, connections_per_core: usize, cores: usize, duration: Duration) -> Result<Arc<Metrics>, Error> {
     let url = url.to_string();
-    drive_replicated(cores, connections_per_core, duration, move |deadline| {
-        let url = url.clone();
-        async move { worker(&url, deadline).await }
+    drive_throughput_on(move || open_h1(&url, &PayloadSpec::default()), connections_per_core, cores, duration)
+}
+
+/// The same closed loop against any pipe.
+///
+/// `drive_throughput` is now this with the h1 opener passed in — the engine no
+/// longer knows a URL from a socket path from a tunnel endpoint. `open` is a
+/// plain function because opening hands back an owned pair; `accept` is a plain
+/// function because judging a reply borrows nothing past the call. Only the
+/// send is a pipe, because only the send has to hold the connection across an
+/// await.
+pub fn drive_throughput_on<Open, Conn>(open: Open, connections_per_core: usize, cores: usize, duration: Duration) -> Result<Arc<Metrics>, Error>
+where
+    Open: Fn() -> Result<(Conn, Conn::In), Error> + Send + Clone + 'static,
+    Conn: Pipe + 'static,
+    Conn::In: Clone + 'static,
+    Conn::Out: core::fmt::Debug + 'static,
+{
+    drive_replicated(cores, connections_per_core, duration, move |deadline, metrics| {
+        let open = open.clone();
+        async move { worker(&open, deadline, &metrics).await }
     })
 }
 
-// one connection's hot loop: clone the template, send, tally, until the deadline.
+// one connection's hot loop: clone the item, call, tally, until the deadline.
 // a connect/build failure ends this worker (its tally is whatever it managed).
-async fn worker(url: &str, deadline: Instant) -> (u64, u64) {
-    // the bytes-in/status-out fast path: drive the CONCRETE prime h1 client over
-    // `send_raw`, handing it ONE pre-encoded request buffer reused every send.
-    // This skips the whole `Request`/`Response` envelope the `Pipe` call builds
-    // per request — no per-send `Request` clone, no `Response`/header alloc, no
-    // dyn box — leaving only the transport write + minimal head parse + body
-    // drain. The connection keep-alive-reuses; the load gen counts completions.
+async fn worker<Open, Conn>(open: &Open, deadline: Instant, metrics: &Arc<Metrics>)
+where
+    Open: Fn() -> Result<(Conn, Conn::In), Error>,
+    Conn: Pipe,
+    Conn::In: Clone,
+    Conn::Out: core::fmt::Debug,
+{
+    // one item, prepared once by `open` and cloned per send. For the h1 opener
+    // that clone is a `Bytes` refcount bump, so there is no per-send envelope
+    // and no dyn box — only the transport write and whatever minimal parse the
+    // protocol needs. The connection reuses; the store counts.
+    let fan = report::series_fan(metrics);
+    let scenario: Arc<str> = Arc::from(report::RUN);
     let debug_errors = std::env::var_os("REKT_DEBUG_ERRORS").is_some();
-    let (pipe, request) = match raw_pipe(url) {
+    let (pipe, item) = match open() {
         Ok(pair) => pair,
         Err(err) => {
             if debug_errors {
                 eprintln!("rekt worker setup error: {err}");
             }
-            return (0, 1);
+            report::record_setup_failure(metrics, &err.to_string());
+            return;
         }
     };
-    let mut completed = 0u64;
-    let mut errors = 0u64;
+    let mut seen_error = false;
     while Instant::now() < deadline {
-        match pipe.send_raw(&request).await {
-            // A reply that arrived and reported failure is not a completion.
-            // This bound the status to `_status` and dropped it until
-            // 2026-07-28, so a target answering 500 to every request
-            // benchmarked at full throughput. Folded into `errors` rather than
-            // counted separately: separating "answered and refused" from
-            // "stopped answering" is the better shape and needs the worker
-            // tally widened through both drive paths, which is a change worth
-            // making deliberately rather than alongside this one.
-            Ok(status) if status < 400 => completed += 1,
-            Ok(_refused) => errors += 1,
-            Err(err) => {
-                if debug_errors && errors == 0 {
-                    eprintln!("rekt worker first send error: {err}");
-                }
-                errors += 1;
-            }
+        let started = Instant::now();
+        let reply = pipe.call(item.clone()).await;
+        if debug_errors
+            && !seen_error
+            && let Err(err) = &reply
+        {
+            seen_error = true;
+            eprintln!("rekt worker first send error: {err:?}");
         }
+        // WHICH reply came back survives the trip now — it is a label on the
+        // shared store rather than a pair of integers collapsed per worker and
+        // summed over a channel. That collapse is the whole reason `Throughput`
+        // existed, and why a target answering 500 to everything used to
+        // benchmark clean.
+        let _ = fan
+            .call(report::Observed::of(&scenario, 0, started.elapsed(), reply))
+            .await;
     }
-    (completed, errors)
 }
 
-/// Build the concrete prime h1 client + the pre-encoded `GET /` request bytes
-/// for an `http://host[:port]/` target. DNS is deferred to connect time
-/// (`with_host`); the request is encoded ONCE and re-sent every call.
-fn raw_pipe(url: &str) -> Result<(H1ClientUpstream<PrimeTcpUpstream>, Vec<u8>), Error> {
+/// Open the prime h1 connection + encode the payload for an
+/// `http://host[:port]/` target. DNS is deferred to connect time
+/// (`with_host`); the payload is encoded ONCE and re-sent every call.
+///
+/// A plain function, not a source type: opening returns an owned pair, so there
+/// is no borrow to carry and nothing a `Fn` cannot say. Sending is the one that
+/// has to be a pipe — its future borrows the connection across an await, which
+/// no `Fn` bound expresses without boxing.
+pub fn open_h1(url: &str, payload: &PayloadSpec) -> Result<(H1ClientUpstream<PrimeTcpUpstream>, Bytes), Error> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| Error::Engine("throughput target must be http://host[:port]/".into()))?;
@@ -384,8 +487,7 @@ fn raw_pipe(url: &str) -> Result<(H1ClientUpstream<PrimeTcpUpstream>, Vec<u8>), 
     };
     let upstream = PrimeTcpUpstream::with_host(host, port);
     let pipe = H1ClientUpstream::new(upstream, authority, "rekt");
-    let request = format!("GET / HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n").into_bytes();
-    Ok((pipe, request))
+    Ok((pipe, encode_payload(payload, authority)))
 }
 
 // ── adaptive drive ──────────────────────────────────────────────────────────
@@ -415,21 +517,35 @@ fn build_controller(seed: usize) -> Result<Concurrency, Error> {
 /// Closed-loop adaptive throughput drive: one `PrimeRuntime`, one hillclimb
 /// controller per core, each driving a self-gating pool of keep-alive
 /// connections toward the crest. Reports completed requests over the wall-clock.
-pub fn drive_adaptive(url: &str, seed: usize, cores: usize, duration: Duration) -> Result<Throughput, Error> {
+pub fn drive_adaptive(url: &str, seed: usize, cores: usize, duration: Duration) -> Result<Arc<Metrics>, Error> {
+    let url = url.to_string();
+    drive_adaptive_on(move || open_h1(&url, &PayloadSpec::default()), seed, cores, duration)
+}
+
+/// The same adaptive loop against any pipe.
+pub fn drive_adaptive_on<Open, Conn>(open: Open, seed: usize, cores: usize, duration: Duration) -> Result<Arc<Metrics>, Error>
+where
+    Open: Fn() -> Result<(Conn, Conn::In), Error> + Send + Clone + 'static,
+    Conn: Pipe + 'static,
+    Conn::In: Clone + 'static,
+    Conn::Out: core::fmt::Debug + 'static,
+{
     let cores = cores.max(1);
     let seed = seed.max(1);
     let runtime = PrimeRuntime::new(cores).map_err(|err| Error::Engine(err.to_string()))?;
+    let metrics = Arc::new(report::store());
     let started = Instant::now();
     let deadline = started + duration;
-    let (sender, receiver) = mpsc::channel::<(u64, u64)>();
+    let (sender, receiver) = mpsc::channel::<()>();
 
     for core in 0..cores {
-        let url = url.to_string();
+        let open = open.clone();
         let sender = sender.clone();
+        let core_metrics = Arc::clone(&metrics);
         let factory = move || -> Pin<Box<dyn Future<Output = ()>>> {
             Box::pin(async move {
-                let tally = adaptive_core(&url, seed, deadline).await;
-                let _ = sender.send(tally);
+                adaptive_core(&open, seed, deadline, &core_metrics).await;
+                let _ = sender.send(());
             })
         };
         runtime
@@ -437,25 +553,10 @@ pub fn drive_adaptive(url: &str, seed: usize, cores: usize, duration: Duration) 
             .map_err(|err| Error::Engine(format!("spawn on core {core}: {err:?}")))?;
     }
     drop(sender);
+    while receiver.recv().is_ok() {}
 
-    let mut completed = 0u64;
-    let mut errors = 0u64;
-    for _ in 0..cores {
-        match receiver.recv() {
-            Ok((ok, bad)) => {
-                completed += ok;
-                errors += bad;
-            }
-            Err(_) => break,
-        }
-    }
-    Ok(Throughput {
-        completed,
-        errors,
-        connections: seed * cores,
-        cores,
-        elapsed: started.elapsed(),
-    })
+    report::stamp_run(&metrics, started.elapsed(), seed * cores, cores);
+    Ok(metrics)
 }
 
 // one core's adaptive loop. Connections are opened ONCE into a persistent pool
@@ -465,10 +566,20 @@ pub fn drive_adaptive(url: &str, seed: usize, cores: usize, duration: Duration) 
 // (`while let Some = workers.next().await`), then the controller reads the
 // window's throughput and picks the next target. The rest of the pool sits idle
 // on its keep-alive socket, ready when the target grows.
-async fn adaptive_core(url: &str, seed: usize, deadline: Instant) -> (u64, u64) {
+async fn adaptive_core<Open, Conn>(open: &Open, seed: usize, deadline: Instant, metrics: &Arc<Metrics>)
+where
+    Open: Fn() -> Result<(Conn, Conn::In), Error>,
+    Conn: Pipe,
+    Conn::In: Clone,
+    Conn::Out: core::fmt::Debug,
+{
+    let scenario: Arc<str> = Arc::from(report::RUN);
     let concurrency = match build_controller(seed) {
         Ok(concurrency) => concurrency,
-        Err(_) => return (0, 1),
+        Err(err) => {
+            report::record_setup_failure(metrics, &err.to_string());
+            return;
+        }
     };
     let mut controller = ConcurrencyController::new(concurrency);
     let window = controller
@@ -476,129 +587,100 @@ async fn adaptive_core(url: &str, seed: usize, deadline: Instant) -> (u64, u64) 
         .unwrap_or(Duration::from_millis(150));
     let max = adaptive_max(seed);
 
-    // persistent pool: built once, reused every window. `raw_pipe` defers the
+    // persistent pool: built once, reused every window. `open_h1` defers the
     // socket connect to the first send, so unused entries cost nothing.
-    let mut pool: Vec<(H1ClientUpstream<PrimeTcpUpstream>, Vec<u8>)> = Vec::with_capacity(max);
+    let mut pool: Vec<(Conn, Conn::In)> = Vec::with_capacity(max);
     for _ in 0..max {
-        match raw_pipe(url) {
+        match open() {
             Ok(pair) => pool.push(pair),
-            Err(_) => return (0, 1),
+            Err(err) => {
+                report::record_setup_failure(metrics, &err.to_string());
+                return;
+            }
         }
     }
 
-    let mut completed_total = 0u64;
-    let mut errors_total = 0u64;
     while Instant::now() < deadline {
-        let target = controller.target().clamp(1, max);
+        let in_flight = controller.target().clamp(1, max);
         let window_started = Instant::now();
         let window_deadline = (window_started + window).min(deadline);
-        let window_stats = run_window(&pool[..target], window_deadline).await;
-        completed_total += window_stats.completed;
-        errors_total += window_stats.errors;
+
+        // a fresh store per window IS the window boundary: the controller wants
+        // this window's rtt distribution, not the run's. `WindowStats` and
+        // `WorkerTally` used to hand-roll the min/sum/max fold that
+        // `histogram_summary` already computes, then approximate p50 with the
+        // mean and p99 with the max. The histogram reports the real ones.
+        // a fresh window store per window IS the window boundary; the fan hands
+        // each observation to both it and the run's report in one call.
+        let window = Arc::new(report::store());
+        let fan = report::windowed_fan(metrics, &window);
+        let completed = run_window(&pool[..in_flight], &fan, &scenario, window_deadline).await;
 
         let elapsed = window_started.elapsed().as_secs_f64();
-        let throughput = if elapsed > 0.0 { window_stats.completed as f64 / elapsed } else { 0.0 };
-        let sample = Sample {
-            concurrency: target,
-            throughput,
+        let rtt = report::window_rtt(&window);
+        let micros = |value: f64| Duration::from_secs_f64((value / 1_000_000.0).max(0.0));
+        controller.observe(Sample {
+            concurrency: in_flight,
+            throughput: if elapsed > 0.0 { completed as f64 / elapsed } else { 0.0 },
             cov: 0.0,
-            rtt_min: window_stats.rtt_min,
-            rtt_p50: window_stats.rtt_mean,
-            rtt_p99: window_stats.rtt_max,
+            rtt_min: micros(rtt.as_ref().map_or(0.0, |summary| summary.min)),
+            rtt_p50: micros(rtt.as_ref().map_or(0.0, |summary| summary.p50)),
+            rtt_p99: micros(rtt.as_ref().map_or(0.0, |summary| summary.p99)),
             util: 0.0,
-        };
-        controller.observe(sample);
+        });
     }
-    (completed_total, errors_total)
-}
-
-/// One window's aggregate across its connections.
-struct WindowStats {
-    completed: u64,
-    errors: u64,
-    rtt_min: Duration,
-    rtt_mean: Duration,
-    rtt_max: Duration,
 }
 
 // fire the given persistent connections flat-out until `deadline`, drained by the
-// same tight `workers.next().await` loop `drive_throughput` uses. Returns the
-// window's completions, errors, and rtt summary (min/mean/window-max as a p99
-// proxy). Connections are borrowed, not created — keep-alive survives the window.
-async fn run_window(connections: &[(H1ClientUpstream<PrimeTcpUpstream>, Vec<u8>)], deadline: Instant) -> WindowStats {
+// same tight `workers.next().await` loop `drive_throughput` uses. Latencies land
+// in `window`; the return is just the completed/errored counts the caller sums.
+// Connections are borrowed, not created — keep-alive survives the window.
+async fn run_window<Conn>(connections: &[(Conn, Conn::In)], fan: &report::Fan, scenario: &Arc<str>, deadline: Instant) -> u64
+where
+    Conn: Pipe,
+    Conn::In: Clone,
+    Conn::Out: core::fmt::Debug,
+{
     let mut workers: FuturesUnordered<_> = connections
         .iter()
-        .map(|(pipe, request)| fire_connection(pipe, request, deadline))
+        .map(|(pipe, item)| fire_connection(pipe, item, fan, scenario, deadline))
         .collect();
-    let (mut completed, mut errors) = (0u64, 0u64);
-    let (mut rtt_min, mut rtt_sum, mut rtt_max) = (u64::MAX, 0u64, 0u64);
-    while let Some(worker) = workers.next().await {
-        completed += worker.completed;
-        errors += worker.errors;
-        rtt_sum += worker.rtt_sum_ns;
-        if worker.completed > 0 && worker.rtt_min_ns < rtt_min {
-            rtt_min = worker.rtt_min_ns;
-        }
-        if worker.rtt_max_ns > rtt_max {
-            rtt_max = worker.rtt_max_ns;
-        }
+    let mut completed = 0u64;
+    while let Some(replies) = workers.next().await {
+        completed += replies;
     }
-    let rtt_mean = rtt_sum.checked_div(completed).unwrap_or(0);
-    WindowStats {
-        completed,
-        errors,
-        rtt_min: Duration::from_nanos(if rtt_min == u64::MAX { 0 } else { rtt_min }),
-        rtt_mean: Duration::from_nanos(rtt_mean),
-        rtt_max: Duration::from_nanos(rtt_max),
-    }
+    completed
 }
 
-/// One connection's tally for a window.
-struct WorkerTally {
-    completed: u64,
-    errors: u64,
-    rtt_min_ns: u64,
-    rtt_sum_ns: u64,
-    rtt_max_ns: u64,
-}
-
-// fire `GET /` back-to-back on an EXISTING keep-alive connection until the window
-// deadline, tally completions + rtts. Identical hot path to `drive_throughput`'s
-// `worker` — no connect here, the pool owns the socket across windows.
-async fn fire_connection(pipe: &H1ClientUpstream<PrimeTcpUpstream>, request: &[u8], deadline: Instant) -> WorkerTally {
-    let (mut completed, mut errors) = (0u64, 0u64);
-    let (mut rtt_min, mut rtt_sum, mut rtt_max) = (u64::MAX, 0u64, 0u64);
+// fire the workload item back-to-back on an EXISTING keep-alive connection until
+// the window deadline. Identical hot path to `drive_throughput`'s `worker` — no
+// connect here, the pool owns the connection across windows.
+//
+// A declined reply's latency is deliberately NOT recorded: the round trip
+// happened, but mixing refusal latency into the rtt distribution would let a
+// target that fails fast look faster to the controller than one that works.
+async fn fire_connection<Conn>(pipe: &Conn, item: &Conn::In, fan: &report::Fan, scenario: &Arc<str>, deadline: Instant) -> u64
+where
+    Conn: Pipe,
+    Conn::In: Clone,
+    Conn::Out: core::fmt::Debug,
+{
+    let mut completed = 0u64;
     while Instant::now() < deadline {
         let send_started = Instant::now();
-        match pipe.send_raw(request).await {
-            // same defect as the closed-loop path: the status arrived and was
-            // discarded, so a refusing target reported clean throughput. The
-            // RTT is still recorded for a refusal — the round trip happened and
-            // timing it is honest — but it is not a completion.
-            Ok(status) if status >= 400 => {
-                errors += 1;
-            }
-            Ok(_ok) => {
-                let elapsed_ns = send_started.elapsed().as_nanos() as u64;
-                completed += 1;
-                rtt_sum += elapsed_ns;
-                if elapsed_ns < rtt_min {
-                    rtt_min = elapsed_ns;
-                }
-                if elapsed_ns > rtt_max {
-                    rtt_max = elapsed_ns;
-                }
-            }
-            Err(_) => errors += 1,
+        let reply = pipe.call(item.clone()).await;
+        let arrived = reply.is_ok();
+        // ONE call, every store. Which arms exist and what each does with the
+        // observation is the fan's business, not this loop's — it used to write
+        // to two stores by name, which is a fan-out spelled out longhand.
+        let _ = fan
+            .call(report::Observed::of(scenario, 0, send_started.elapsed(), reply))
+            .await;
+        if arrived {
+            completed += 1;
         }
     }
-    WorkerTally {
-        completed,
-        errors,
-        rtt_min_ns: if rtt_min == u64::MAX { 0 } else { rtt_min },
-        rtt_sum_ns: rtt_sum,
-        rtt_max_ns: rtt_max,
-    }
+    completed
 }
 
 #[cfg(test)]
@@ -607,55 +689,53 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::scenario::Thresholds;
+    use proxima_primitives::pipe::clock::testing::RecordingClock;
 
-    // plain #[test]: `run` drives the loop on its own prime core, so the
-    // test must run OFF a worker (mirrors proxima's own client-on-prime tests).
-    fn synth_load() -> Load<proxima::upstreams::SynthUpstream> {
-        // `http` rather than `new`: this upstream's `In` happens to be a
-        // Request, and the convenience constructor is where that knowledge
-        // now lives instead of in the engine.
-        Load::http(proxima::upstreams::SynthUpstream::new("synth", 200, "ok".to_string())).expect("request builds")
-    }
-
-    fn open() -> Thresholds {
-        Thresholds { p99: None, error_rate: None }
-    }
-
-    /// A pipe that knows nothing about HTTP — its `In` is raw bytes, the shape
-    /// a tunnel, a redis session, or a centauri handshake presents.
+    /// A pipe that knows nothing about HTTP — its `In` is raw bytes, the shape a
+    /// tunnel, a redis session, or a centauri handshake presents.
     ///
-    /// This is the test the lift exists for: before it, `Load` could not name
-    /// this type at all, because the engine demanded `In = Request<Bytes>`.
-    struct BytesEcho {
-        seen: std::sync::atomic::AtomicU64,
-    }
+    /// This is the test the lift exists for: before it, the engine could not
+    /// name this type at all, because it demanded a `Request<Bytes>`. It needs
+    /// no adapter to get here — it is a pipe, which is the whole contract.
+    struct BytesEcho;
 
-    impl SendPipe for BytesEcho {
+    impl Pipe for BytesEcho {
         type In = Bytes;
         type Out = usize;
-        type Err = std::convert::Infallible;
+        type Err = Error;
 
-        fn call(&self, input: Bytes) -> impl Future<Output = Result<usize, Self::Err>> + Send {
-            let len = input.len();
-            self.seen
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            async move { Ok(len) }
+        async fn call(&self, item: Bytes) -> Result<usize, Error> {
+            Ok(item.len())
         }
     }
 
+    // plain #[test]: the staged drive runs on its own prime core, so the test
+    // must run OFF a worker (mirrors proxima's own client-on-prime tests).
     #[test]
     fn the_engine_drives_a_pipe_that_is_not_http() {
-        let echo = BytesEcho {
-            seen: std::sync::atomic::AtomicU64::new(0),
-        };
-        let load = Load::new(echo, Bytes::from_static(b"not a request"));
+        let metrics = Arc::new(report::store());
+        drive_stages(BytesEcho, Bytes::from_static(b"not a request"), TimeClock, "echo", &flat_out(), &metrics, None).expect("drive");
 
-        let recorder = load.drive(0, 16).expect("drive");
-        let report = recorder.report(&open());
+        assert!(report::arrivals(&metrics, "echo", 0) > 0);
+        assert_eq!(
+            report::replies(&metrics, "echo", 0, "13"),
+            report::arrivals(&metrics, "echo", 0),
+            "every arrival echoed the same 13-byte payload"
+        );
+    }
 
-        assert_eq!(report.stages[0].count, 16);
-        assert_eq!(report.stages[0].errors, 0, "a byte payload drove cleanly");
+    #[test]
+    fn distinct_replies_land_in_distinct_buckets() {
+        // the engine judges nothing: two different replies are two buckets, and
+        // which of them is "good" is a question the report leaves to whoever
+        // reads it.
+        let short = Arc::new(report::store());
+        drive_stages(BytesEcho, Bytes::from_static(b"ab"), TimeClock, "short", &flat_out(), &short, None).expect("drive");
+        let long = Arc::new(report::store());
+        drive_stages(BytesEcho, Bytes::from_static(b"abcd"), TimeClock, "long", &flat_out(), &long, None).expect("drive");
+
+        assert_eq!(report::replies(&short, "short", 0, "2"), report::arrivals(&short, "short", 0));
+        assert_eq!(report::replies(&long, "long", 0, "4"), report::arrivals(&long, "long", 0));
     }
 
     #[test]
@@ -664,27 +744,271 @@ mod tests {
         // payload at all — a poll, a tick, a keepalive.
         struct Tick;
 
-        impl SendPipe for Tick {
+        impl Pipe for Tick {
             type In = ();
             type Out = ();
-            type Err = std::convert::Infallible;
+            type Err = Error;
 
-            async fn call(&self, (): ()) -> Result<(), Self::Err> {
+            async fn call(&self, (): ()) -> Result<(), Error> {
                 Ok(())
             }
         }
 
-        let recorder = Load::new(Tick, ()).drive(0, 4).expect("drive");
-        let report = recorder.report(&open());
+        let metrics = Arc::new(report::store());
+        drive_stages(Tick, (), TimeClock, "tick", &flat_out(), &metrics, None).expect("drive");
 
-        assert_eq!(report.stages[0].count, 4);
+        let fired = report::arrivals(&metrics, "tick", 0);
+        assert!(fired > 0);
+        assert_eq!(report::replies(&metrics, "tick", 0, "()"), fired);
+    }
+
+    // the invariant the deleted `sched/` module claimed in its doc comment and
+    // never wired to anything: "arrivals are scheduled against absolute time,
+    // never against when the target happened to answer, so a slow target
+    // produces a catch-up burst rather than a silently slipped rate."
+    /// Dependency-free executor: the arrival source's future only ever awaits a
+    /// `RecordingClock` delay, which is already `Ready`.
+    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
+        let mut pinned = core::pin::pin!(future);
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        loop {
+            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
+                return output;
+            }
+        }
+    }
+
+    /// One flat-out stage, short enough to keep the suite fast.
+    fn flat_out() -> Vec<Stage> {
+        vec![Stage {
+            rate_per_sec: None,
+            duration: Duration::from_millis(20),
+            arrival: Arrival::Even,
+        }]
     }
 
     #[test]
-    fn monomorphic_send_drives_synth() {
-        let recorder = synth_load().drive(0, 8).expect("drive");
-        let report = recorder.report(&open());
-        assert_eq!(report.stages[0].count, 8);
-        assert_eq!(report.stages[0].errors, 0);
+    fn a_paced_stage_honours_its_rate() {
+        // 200/s for 100ms is ~20 arrivals. Flat out against an in-process echo
+        // it would be orders of magnitude more, which is the whole point: the
+        // rate in the file is now load-bearing.
+        let metrics = Arc::new(report::store());
+        let paced = vec![Stage {
+            rate_per_sec: Some(200.0),
+            duration: Duration::from_millis(100),
+            arrival: Arrival::Even,
+        }];
+        drive_stages(BytesEcho, Bytes::from_static(b"x"), TimeClock, "paced", &paced, &metrics, None).expect("drive");
+
+        let fired = report::arrivals(&metrics, "paced", 0);
+        assert!((5..=40).contains(&fired), "expected ~20 paced arrivals, got {fired}");
+    }
+
+    #[test]
+    fn a_stall_produces_catch_up_not_drift() {
+        // the invariant the deleted `sched/` module claimed in a doc comment and
+        // never wired to anything: arrivals are scheduled against absolute time,
+        // so a slow target produces a catch-up burst rather than a silently
+        // slipped rate. Driven on a controllable clock, so this asserts on the
+        // schedule rather than on wall-time luck.
+        let clock = RecordingClock::at(0);
+        let stage = Stage {
+            rate_per_sec: Some(1000.0), // 1ms apart
+            duration: Duration::from_millis(100),
+            arrival: Arrival::Even,
+        };
+        let arrivals = Arrivals::of(&stage, clock.clone());
+
+        // first is due immediately
+        block_on(arrivals.call(())).expect("first arrival");
+        assert!(clock.delays().is_empty(), "arrival 0 is due at once");
+
+        // the target stalls 5ms: the five arrivals that came due during it are
+        // still offered, back to back, with no wait
+        clock.advance(Duration::from_millis(5));
+        for missed in 1..=5u64 {
+            block_on(arrivals.call(())).expect("caught-up arrival");
+            assert!(clock.delays().is_empty(), "arrival {missed} came due during the stall and must not be waited on");
+        }
+
+        // and the grid is still the ORIGINAL one, not rebased on the stall
+        block_on(arrivals.call(())).expect("arrival 6");
+        assert_eq!(clock.delays(), vec![Duration::from_millis(1)], "back on the 1ms grid");
+    }
+
+    #[test]
+    fn the_source_exhausts_at_the_stage_deadline() {
+        // the stage's duration ends the stream — the drive loop has no deadline
+        // check of its own, it just pulls until the source says stop.
+        let clock = RecordingClock::at(0);
+        let stage = Stage {
+            rate_per_sec: None,
+            duration: Duration::from_millis(10),
+            arrival: Arrival::Even,
+        };
+        let arrivals = Arrivals::of(&stage, clock.clone());
+
+        assert!(block_on(arrivals.call(())).is_ok());
+        clock.advance(Duration::from_millis(10));
+        assert!(matches!(block_on(arrivals.call(())), Err(Exhausted)), "past the stage duration the source is exhausted");
+    }
+
+    #[test]
+    fn no_rate_means_every_arrival_is_already_due() {
+        let clock = RecordingClock::at(0);
+        let stage = Stage {
+            rate_per_sec: None,
+            duration: Duration::from_secs(1),
+            arrival: Arrival::Even,
+        };
+        let arrivals = Arrivals::of(&stage, clock.clone());
+
+        for _ in 0..100 {
+            block_on(arrivals.call(())).expect("flat out");
+        }
+        assert!(clock.delays().is_empty(), "flat out never sleeps");
+    }
+
+    #[test]
+    fn poisson_is_bursty_but_reproducible() {
+        let mean = 1_000_000u64; // 1ms
+        let poisson = Arrival::Poisson { seed: 42 };
+
+        let gaps: Vec<u64> = (0..1000)
+            .map(|k| poisson.gap_nanos(mean, k))
+            .collect();
+        let again: Vec<u64> = (0..1000)
+            .map(|k| poisson.gap_nanos(mean, k))
+            .collect();
+        assert_eq!(gaps, again, "same seed, same arrival pattern — on any machine");
+
+        // even is a flat line; poisson is not
+        let spread = gaps.iter().copied().max().unwrap() - gaps.iter().copied().min().unwrap();
+        assert!(spread > mean, "expected clustering, got a spread of {spread}ns");
+
+        // but the MEAN still lands on the requested rate
+        let average = gaps.iter().sum::<u64>() / gaps.len() as u64;
+        assert!((mean / 2..mean * 2).contains(&average), "mean gap {average}ns should be near the requested {mean}ns");
+
+        // a different seed is a different pattern
+        let other: Vec<u64> = (0..1000)
+            .map(|k| Arrival::Poisson { seed: 7 }.gap_nanos(mean, k))
+            .collect();
+        assert_ne!(gaps, other);
+    }
+
+    #[test]
+    fn a_dump_writes_a_readable_log() {
+        // the whole point of the dump: a run leaves an artifact you can read
+        // back. Asserted by actually reading it, not by the write compiling.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.jsonl");
+        let spec = Dump {
+            path: path.to_string_lossy().into_owned(),
+            format: "json".to_string(),
+            capacity: 1024,
+            on_full: "fail_closed".to_string(),
+            batch: 1,
+        };
+
+        let metrics = Arc::new(report::store());
+        let sent = Bytes::from_static(b"GET / HTTP/1.1\r\n\r\n");
+        drive_stages(BytesEcho, sent.clone(), TimeClock, "dumped", &flat_out(), &metrics, Some((&spec, sent))).expect("drive");
+
+        let text = std::fs::read_to_string(&path).expect("dump exists and is readable");
+        assert!(text.contains("rekt.workload"), "the payload is recorded once, as its own event");
+        assert!(text.contains("rekt.arrival"), "and every arrival is recorded");
+        assert!(text.contains("GET / HTTP/1.1"), "what we SENT is in the log, not just that we sent something");
+
+        // arrivals link back to the workload rather than repeating its bytes
+        let dumped = text.matches("rekt.arrival").count() as u64;
+        let workloads = text.matches("rekt.workload").count();
+        assert_eq!(workloads, 1, "one workload event, however many arrivals");
+        assert!(dumped > 1, "got {dumped} arrivals");
+
+        // the load-bearing invariant: a BOUNDED dump is allowed to shed under
+        // pressure, but never silently. What reached the log plus what the drop
+        // counter admits must account for every arrival the run measured.
+        let measured = report::arrivals(&metrics, "dumped", 0);
+        let dropped = report::dump_dropped(&metrics);
+        assert_eq!(dumped + dropped, measured, "dumped {dumped} + dropped {dropped} must account for all {measured} arrivals");
+    }
+
+    #[test]
+    fn stages_are_recorded_separately() {
+        let metrics = Arc::new(report::store());
+        let two = vec![
+            Stage {
+                rate_per_sec: None,
+                duration: Duration::from_millis(20),
+                arrival: Arrival::Even,
+            },
+            Stage {
+                rate_per_sec: None,
+                duration: Duration::from_millis(20),
+                arrival: Arrival::Even,
+            },
+        ];
+        drive_stages(BytesEcho, Bytes::from_static(b"x"), TimeClock, "two", &two, &metrics, None).expect("drive");
+
+        assert!(report::arrivals(&metrics, "two", 0) > 0, "stage 0 recorded");
+        assert!(report::arrivals(&metrics, "two", 1) > 0, "stage 1 recorded separately");
+    }
+
+    #[test]
+    fn the_payload_is_encoded_once_into_wire_bytes() {
+        // the whole `[request]` table becomes one byte string at connect time,
+        // so nothing in the send loop assembles anything
+        let payload = PayloadSpec {
+            method: "POST".to_string(),
+            path: "/submit".to_string(),
+            body: Some("hi".to_string()),
+            headers: [("x-test".to_string(), "yes".to_string())]
+                .into_iter()
+                .collect(),
+            query: [("a".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+        };
+
+        let wire = encode_payload(&payload, "example.test:8080");
+
+        assert_eq!(
+            wire,
+            Bytes::from_static(
+                b"POST /submit?a=1 HTTP/1.1\r\n\
+                  Host: example.test:8080\r\n\
+                  Connection: keep-alive\r\n\
+                  x-test: yes\r\n\
+                  Content-Length: 2\r\n\
+                  \r\n\
+                  hi"
+            )
+        );
+    }
+
+    #[test]
+    fn the_default_payload_is_the_benchmark_workload() {
+        let wire = encode_payload(&PayloadSpec::default(), "127.0.0.1:8080");
+
+        assert_eq!(
+            wire,
+            Bytes::from_static(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nConnection: keep-alive\r\n\r\n"),
+            "the pre-encoded GET the throughput path has always sent"
+        );
+    }
+
+    #[test]
+    fn a_plain_opener_feeds_the_throughput_drivers() {
+        // opening is a function, so a non-http target needs no type at all —
+        // this closure IS the whole integration. Compile-time claim, driven
+        // briefly to prove it also runs.
+        let metrics = drive_throughput_on(|| Ok((BytesEcho, Bytes::from_static(b"tick"))), 2, 1, Duration::from_millis(20)).expect("drive");
+
+        assert!(report::completed(&metrics) > 0, "a non-http opener drove real completions");
+        assert_eq!(report::failed(&metrics), 0);
+        assert!(report::per_sec(&metrics) > 0.0, "reqs/sec reads back out of the store");
+        // the reply survives the cross-core trip now: 4 bytes echoed, bucketed
+        assert_eq!(report::replies(&metrics, report::RUN, 0, "4"), report::completed(&metrics));
     }
 }

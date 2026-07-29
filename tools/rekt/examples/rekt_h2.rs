@@ -35,8 +35,12 @@ fn main() -> Result<(), Error> {
     let throughput = drive_h2(&url, connections, streams, cores, Duration::from_secs(secs))?;
     println!(
         "rekt h2: {} completed, {} errors ({} conn x {} streams x {} cores)",
-        throughput.completed, throughput.errors, connections, streams, cores
+        rekt::report::completed(&throughput),
+        rekt::report::failed(&throughput),
+        connections,
+        streams,
+        cores
     );
-    println!("rekt h2: Requests/sec: {:.2}", throughput.per_sec());
+    println!("rekt h2: Requests/sec: {:.2}", rekt::report::per_sec(&throughput));
     Ok(())
 }
