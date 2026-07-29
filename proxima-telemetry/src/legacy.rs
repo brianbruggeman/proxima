@@ -257,6 +257,7 @@ fn summary_from_histogram(histogram: &Histogram<u64>) -> HistogramSummary {
         mean: histogram.mean(),
         p50: histogram.value_at_percentile(50.0) as f64,
         p90: histogram.value_at_percentile(90.0) as f64,
+        p95: histogram.value_at_percentile(95.0) as f64,
         p99: histogram.value_at_percentile(99.0) as f64,
         p99_9: histogram.value_at_percentile(99.9) as f64,
     }

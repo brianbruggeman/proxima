@@ -101,6 +101,7 @@ pub struct HistogramSummary {
     pub mean: f64,
     pub p50: f64,
     pub p90: f64,
+    pub p95: f64,
     pub p99: f64,
     pub p99_9: f64,
 }
