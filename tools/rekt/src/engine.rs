@@ -37,26 +37,47 @@ use crate::report::Recorder;
 use crate::scenario::{RequestSpec, Scenario};
 
 /// a monomorphic load source over the concrete pipe `P`.
-pub struct Load<P: SendPipe<In = Request<Bytes>>> {
+///
+/// Generic over what the pipe *takes*, not over HTTP. rekt drives anything
+/// shaped like a pipe: an HTTP client whose `In` is a `Request`, a redis or
+/// pgwire session whose `In` is that protocol's payload, a tunnel whose `In` is
+/// bytes. The request/response envelope was never the load model — it was one
+/// instantiation of it, and pinning `In = Request<Bytes>` here is what stopped
+/// rekt measuring anything else.
+///
+/// The workload item is prepared once and cloned per send, which is the shape
+/// the HTTP path already had. That matters more than it looks: drawing each
+/// item from a source pipe would add an `await` inside the loop rekt exists to
+/// time, so the general case would have made every measurement worse. `Clone`
+/// on `P::In` is the price of keeping the hot loop the same shape it was.
+pub struct Load<P: SendPipe>
+where
+    P::In: Clone + Send,
+{
     pipe: Arc<P>,
+    item: P::In,
 }
 
-impl<P: SendPipe<In = Request<Bytes>>> Load<P> {
+impl<P: SendPipe> Load<P>
+where
+    P::In: Clone + Send,
+{
+    /// Drive `pipe` with `item`, cloned per send.
     #[must_use]
-    pub fn new(pipe: P) -> Self {
-        Self { pipe: Arc::new(pipe) }
+    pub fn new(pipe: P, item: P::In) -> Self {
+        Self { pipe: Arc::new(pipe), item }
     }
 
     #[must_use]
-    pub fn from_arc(pipe: Arc<P>) -> Self {
-        Self { pipe }
+    pub fn from_arc(pipe: Arc<P>, item: P::In) -> Self {
+        Self { pipe, item }
     }
 
     /// fire `count` sends into `stage`, sequentially, awaited inline on a prime
-    /// core. each send is `SendPipe::call(&p, req)` — unboxed, monomorphized.
+    /// core. each send is `SendPipe::call(&p, item)` — unboxed, monomorphized.
     pub fn drive(&self, stage: usize, count: u64) -> Result<Recorder, Error> {
         let pipe = Arc::clone(&self.pipe);
-        let template = default_request()?;
+        let template = self.item.clone();
         proxima::runtime::run(async move {
             let mut recorder = Recorder::new();
             for _ in 0..count {
@@ -65,6 +86,19 @@ impl<P: SendPipe<In = Request<Bytes>>> Load<P> {
             recorder
         })
         .map_err(|err| Error::Engine(err.to_string()))
+    }
+}
+
+impl<P: SendPipe<In = Request<Bytes>>> Load<P> {
+    /// The HTTP instantiation, kept as a convenience because it is the common
+    /// one — not because the engine knows what HTTP is.
+    pub fn http(pipe: P) -> Result<Self, Error> {
+        Ok(Self::new(pipe, default_request()?))
+    }
+
+    /// The HTTP instantiation with a caller-supplied request shape.
+    pub fn http_with(pipe: P, spec: &RequestSpec) -> Result<Self, Error> {
+        Ok(Self::new(pipe, build_request(spec)?))
     }
 }
 
@@ -99,13 +133,15 @@ fn build_request(spec: &RequestSpec) -> Result<Request<Bytes>, Error> {
         .map_err(|err| Error::Engine(err.to_string()))
 }
 
-// one send: call the concrete pipe inline with a pre-cloned request, time it.
-// takes the request by value — `&Request` can't cross the await (`Request` is
-// `!Sync`: its streamed-body field is `Send` but not `Sync`), so the caller
-// clones the template per send and hands ownership in.
-async fn fire<P: SendPipe<In = Request<Bytes>>>(pipe: &Arc<P>, request: Request<Bytes>) -> Outcome {
+// one send: call the concrete pipe inline with a pre-cloned item, time it.
+// takes the item by value — a borrow can't cross the await for every payload
+// type (`Request` is `!Sync`: its streamed-body field is `Send` but not
+// `Sync`), so the caller clones the template per send and hands ownership in.
+// That constraint came from HTTP but holds generally, which is why the signature
+// keeps it rather than relaxing to a reference for the types that could.
+async fn fire<P: SendPipe>(pipe: &Arc<P>, item: P::In) -> Outcome {
     let started = Instant::now();
-    let ok = SendPipe::call(pipe, request).await.is_ok();
+    let ok = SendPipe::call(pipe, item).await.is_ok();
     Outcome {
         latency: started.elapsed(),
         ok,
@@ -202,12 +238,7 @@ impl Throughput {
 ///   (`docs/rekt-h3-parity/discipline.md`'s binding CoV<5% bench discipline)
 ///   — its own fan-out overhead is not allowed to become part of what it
 ///   measures, so `FuturesUnordered` stays the mechanism.
-pub(crate) fn drive_replicated<MakeWorker, Fut>(
-    cores: usize,
-    per_core: usize,
-    duration: Duration,
-    make_worker: MakeWorker,
-) -> Result<Throughput, Error>
+pub(crate) fn drive_replicated<MakeWorker, Fut>(cores: usize, per_core: usize, duration: Duration, make_worker: MakeWorker) -> Result<Throughput, Error>
 where
     MakeWorker: Fn(Instant) -> Fut + Send + Clone + 'static,
     Fut: Future<Output = (u64, u64)> + 'static,
@@ -227,8 +258,9 @@ where
         // own reactor. FuturesUnordered polls only the workers whose socket woke.
         let factory = move || -> Pin<Box<dyn Future<Output = ()>>> {
             Box::pin(async move {
-                let mut workers: FuturesUnordered<_> =
-                    (0..per_core).map(|_| make_worker(deadline)).collect();
+                let mut workers: FuturesUnordered<_> = (0..per_core)
+                    .map(|_| make_worker(deadline))
+                    .collect();
                 let mut completed = 0u64;
                 let mut errors = 0u64;
                 while let Some((ok, bad)) = workers.next().await {
@@ -564,11 +596,72 @@ mod tests {
     // plain #[test]: `run` drives the loop on its own prime core, so the
     // test must run OFF a worker (mirrors proxima's own client-on-prime tests).
     fn synth_load() -> Load<proxima::upstreams::SynthUpstream> {
-        Load::new(proxima::upstreams::SynthUpstream::new("synth", 200, "ok".to_string()))
+        // `http` rather than `new`: this upstream's `In` happens to be a
+        // Request, and the convenience constructor is where that knowledge
+        // now lives instead of in the engine.
+        Load::http(proxima::upstreams::SynthUpstream::new("synth", 200, "ok".to_string())).expect("request builds")
     }
 
     fn open() -> Thresholds {
         Thresholds { p99: None, error_rate: None }
+    }
+
+    /// A pipe that knows nothing about HTTP — its `In` is raw bytes, the shape
+    /// a tunnel, a redis session, or a centauri handshake presents.
+    ///
+    /// This is the test the lift exists for: before it, `Load` could not name
+    /// this type at all, because the engine demanded `In = Request<Bytes>`.
+    struct BytesEcho {
+        seen: std::sync::atomic::AtomicU64,
+    }
+
+    impl SendPipe for BytesEcho {
+        type In = Bytes;
+        type Out = usize;
+        type Err = std::convert::Infallible;
+
+        fn call(&self, input: Bytes) -> impl Future<Output = Result<usize, Self::Err>> + Send {
+            let len = input.len();
+            self.seen
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move { Ok(len) }
+        }
+    }
+
+    #[test]
+    fn the_engine_drives_a_pipe_that_is_not_http() {
+        let echo = BytesEcho {
+            seen: std::sync::atomic::AtomicU64::new(0),
+        };
+        let load = Load::new(echo, Bytes::from_static(b"not a request"));
+
+        let recorder = load.drive(0, 16).expect("drive");
+        let report = recorder.report(&open());
+
+        assert_eq!(report.stages[0].count, 16);
+        assert_eq!(report.stages[0].errors, 0, "a byte payload drove cleanly");
+    }
+
+    #[test]
+    fn the_engine_drives_a_unit_payload() {
+        // the degenerate case, and a real one: a pipe whose input carries no
+        // payload at all — a poll, a tick, a keepalive.
+        struct Tick;
+
+        impl SendPipe for Tick {
+            type In = ();
+            type Out = ();
+            type Err = std::convert::Infallible;
+
+            async fn call(&self, (): ()) -> Result<(), Self::Err> {
+                Ok(())
+            }
+        }
+
+        let recorder = Load::new(Tick, ()).drive(0, 4).expect("drive");
+        let report = recorder.report(&open());
+
+        assert_eq!(report.stages[0].count, 4);
     }
 
     #[test]

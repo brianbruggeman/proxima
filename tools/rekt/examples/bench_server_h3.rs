@@ -30,7 +30,6 @@ impl SendPipe for OkHandler {
     }
 }
 
-
 fn main() -> Result<(), ProximaError> {
     // one-liner: level-routed console logging (info/debug→stdout, warn/error→stderr).
     let _telemetry = proxima_telemetry::export::install_console_logging();
