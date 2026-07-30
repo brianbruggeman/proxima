@@ -99,6 +99,15 @@ pub struct Scenario {
     #[serde(default = "unnamed")]
     pub name: String,
 
+    /// This scenario's share of the connection pool, relative to its siblings.
+    ///
+    /// Weights 3 and 1 give the first scenario three quarters of the
+    /// connections. It is a share of *concurrency*, not of arrivals: a stage
+    /// that names a rate already says how many arrivals it wants, and a stage
+    /// that names none wants as many as its connections can carry.
+    #[serde(default = "one")]
+    pub weight: u32,
+
     /// Target URL, e.g. `"http://127.0.0.1:8080/"`.
     pub url: String,
 
@@ -111,6 +120,10 @@ pub struct Scenario {
 
 fn unnamed() -> String {
     "load".to_string()
+}
+
+fn one() -> u32 {
+    1
 }
 
 /// What the scenario's `[request]` table describes: the workload to send, in the
@@ -306,11 +319,39 @@ impl Validate for LoadPlan {
             if scenario.url.is_empty() {
                 errors.push(ValidationMessage::new("scenario.url", format!("scenario {index} has an empty url")));
             }
+            if scenario.weight == 0 {
+                errors.push(ValidationMessage::new("scenario.weight", format!("scenario {index} has weight 0: remove it instead")));
+            }
             if scenario.stages.is_empty() {
                 errors.push(ValidationMessage::new("scenario.stage", format!("scenario {index} has no stages")));
             }
         }
         if errors.is_empty() { Ok(()) } else { Err(conflaguration::Error::Validation { errors }) }
+    }
+}
+
+impl LoadPlan {
+    /// Connections each scenario gets, apportioned by weight.
+    ///
+    /// Every scenario gets at least one — a weight small enough to round to zero
+    /// would otherwise silently drop a workload from the run.
+    #[must_use]
+    pub fn connection_shares(&self) -> Vec<usize> {
+        let total: u32 = self
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.weight)
+            .sum();
+        if total == 0 {
+            return vec![1; self.scenarios.len()];
+        }
+        self.scenarios
+            .iter()
+            .map(|scenario| {
+                let share = self.connections_per_core * scenario.weight as usize / total as usize;
+                share.max(1)
+            })
+            .collect()
     }
 }
 

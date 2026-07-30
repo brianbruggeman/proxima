@@ -61,6 +61,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use proxima::SendPipe;
 use proxima::pipe::Pipe;
@@ -69,13 +70,15 @@ use proxima::pipe::clock::TimeClock;
 use proxima::pipe::fan_in::Exhausted;
 use proxima::runtime::{CoreId, PrimeRuntime, Runtime};
 use proxima::{H1ClientUpstream, PrimeTcpUpstream};
-use proxima_recording::pipe::RecordingSink;
+use proxima_recording::pipe::{BoundedRecordingSink, RecordingSink};
+use proxima_recording::source::DynRecordingSource;
+use proxima_recording::{BinSource, JsonlSource};
 use proxima_runtime::concurrency::{Concurrency, ConcurrencyController, Sample};
 use proxima_telemetry::Metrics;
 
 use crate::error::Error;
 use crate::report;
-use crate::scenario::{Arrival, Dump, LoadPlan, PayloadSpec, Stage};
+use crate::scenario::{Arrival, Dump, LoadPlan, PayloadSpec, Scenario, Stage};
 
 /// Encode the scenario's payload once, into the bytes that go on the wire.
 ///
@@ -203,17 +206,238 @@ impl<Clk: Clock> Pipe for Arrivals<Clk> {
     }
 }
 
+/// A recorded run's arrivals, as a source pipe.
+///
+/// Identical contract to [`Arrivals`] — `() -> ()`, `Err = Exhausted` — which is
+/// the entire reason replay needed no new driver. `Arrivals` yields on a computed
+/// grid; this one yields at the offsets a previous run actually produced, jitter
+/// and stalls included. Swap the source, keep the loop.
+///
+/// The clock is injected for the same reason it is there in `Arrivals`, and it is
+/// what makes the no-IO case work: drive this against a controllable clock with a
+/// pipe that never touches a socket and a whole run's arrival pattern replays in
+/// as long as it takes to iterate a `Vec`.
+pub struct Replayed<Clk> {
+    clock: Clk,
+    started: u64,
+    offsets: Vec<Duration>,
+    index: Cell<usize>,
+}
+
+impl<Clk: Clock> Replayed<Clk> {
+    /// Replay `offsets` starting now on `clock`.
+    #[must_use]
+    pub fn of(offsets: Vec<Duration>, clock: Clk) -> Self {
+        let started = clock.now_nanos();
+        Self {
+            clock,
+            started,
+            offsets,
+            index: Cell::new(0),
+        }
+    }
+
+    /// How many arrivals are left to replay.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.offsets
+            .len()
+            .saturating_sub(self.index.get())
+    }
+}
+
+impl<Clk: Clock> Pipe for Replayed<Clk> {
+    type In = ();
+    type Out = ();
+    type Err = Exhausted;
+
+    async fn call(&self, (): ()) -> Result<(), Exhausted> {
+        let index = self.index.get();
+        let Some(offset) = self.offsets.get(index) else {
+            return Err(Exhausted);
+        };
+
+        let due = self
+            .started
+            .saturating_add(u64::try_from(offset.as_nanos()).unwrap_or(u64::MAX));
+        let now = self.clock.now_nanos();
+        if due > now {
+            self.clock
+                .delay(Duration::from_nanos(due - now))
+                .await;
+        }
+        self.index.set(index + 1);
+        Ok(())
+    }
+}
+
+/// Re-drive a dumped run against `url`, at the spacing it actually produced.
+///
+/// The workload comes out of the log too, so a replay does not need the scenario
+/// file that produced it — the dump is self-contained.
+pub fn replay(dump: &Dump, url: &str) -> Result<Arc<Metrics>, Error> {
+    let runtime = Arc::new(PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?);
+    let recorded = read_recorded(dump, Arc::clone(&runtime) as Arc<dyn Runtime>)?;
+    let (pipe, _) = open_h1(url, &PayloadSpec::default())?;
+    drive_recorded(pipe, recorded.sent, TimeClock, recorded.offsets)
+}
+
+/// Read a dump back off disk, picking the source by the format it was written in.
+fn read_recorded(dump: &Dump, runtime: Arc<dyn Runtime>) -> Result<report::Recorded, Error> {
+    let source: DynRecordingSource = match dump.format.as_str() {
+        "json" => Arc::new(JsonlSource::new(dump.path.clone(), runtime)),
+        "bin" => Arc::new(BinSource::new(dump.path.clone(), runtime)),
+        other => return Err(Error::Config(format!("dump format {other:?}: want \"bin\" or \"json\""))),
+    };
+    futures::executor::block_on(report::read_dump(&source))
+}
+
+/// Drive a recorded arrival pattern through a pipe.
+///
+/// Generic over the pipe, so the no-IO case is this same function with a pipe
+/// that answers in process and a clock you control.
+pub fn drive_recorded<Conn, Clk>(pipe: Conn, item: Conn::In, clock: Clk, offsets: Vec<Duration>) -> Result<Arc<Metrics>, Error>
+where
+    Conn: Pipe + Send + 'static,
+    Conn::In: Clone + Send + 'static,
+    Conn::Out: core::fmt::Debug + Send + 'static,
+    Clk: Clock + Send + 'static,
+{
+    let metrics = Arc::new(report::store());
+    let runtime = PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?;
+    let (sender, receiver) = mpsc::channel();
+    let recording = Arc::clone(&metrics);
+
+    let factory = move || -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(async move {
+            let fan = report::series_fan(&recording);
+            let scenario: Arc<str> = Arc::from("replay");
+            let arrivals = Replayed::of(offsets, clock);
+            while arrivals.call(()).await.is_ok() {
+                let (latency, reply) = fire(&pipe, item.clone()).await;
+                let _ = fan
+                    .call(report::Observed::of(&scenario, 0, latency, reply))
+                    .await;
+            }
+            let _ = sender.send(());
+        })
+    };
+    runtime
+        .spawn_factory_on_core(CoreId(0), Box::new(factory))
+        .map_err(|err| Error::Engine(format!("spawn on core 0: {err:?}")))?;
+
+    receiver
+        .recv()
+        .map_err(|err| Error::Engine(err.to_string()))?;
+    Ok(metrics)
+}
+
 pub fn run(plan: &LoadPlan) -> Result<Arc<Metrics>, Error> {
     let metrics = Arc::new(report::store());
-    for scenario in &plan.scenarios {
-        let (pipe, item) = open_h1(&scenario.url, &scenario.payload)?;
-        let workload = plan
-            .dump
-            .as_ref()
-            .map(|spec| (spec, item.clone()));
-        drive_stages(pipe, item, TimeClock, &scenario.name, &scenario.stages, &metrics, workload)?;
+    if plan.scenarios.is_empty() {
+        return Ok(metrics);
+    }
+
+    let cores = plan.cores.max(1);
+    let runtime = PrimeRuntime::new(cores).map_err(|err| Error::Engine(err.to_string()))?;
+
+    // one dump for the whole run, built up front so a bad config fails before any
+    // load is offered, and shared by every scenario so the log is one timeline.
+    let dump = match &plan.dump {
+        Some(spec) => {
+            let offload = Arc::new(PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?) as Arc<dyn Runtime>;
+            Some(report::dump_sink(spec, offload, &metrics)?)
+        }
+        None => None,
+    };
+
+    let work: Vec<(Scenario, usize)> = plan
+        .scenarios
+        .iter()
+        .cloned()
+        .zip(plan.connection_shares())
+        .collect();
+    let (sender, receiver) = mpsc::channel();
+
+    for core in 0..cores {
+        let work = work.clone();
+        let metrics = Arc::clone(&metrics);
+        let dump = dump.clone();
+        let sender = sender.clone();
+        let factory = move || -> Pin<Box<dyn Future<Output = ()>>> {
+            Box::pin(async move {
+                // CONCURRENTLY, not one after another. Weighting apportions the
+                // pool between scenarios, which says nothing at all if they never
+                // overlap in time — a mixed workload is scenarios running
+                // together, and running them in sequence is just several
+                // single-scenario runs sharing a report.
+                let mut drivers: FuturesUnordered<_> = work
+                    .iter()
+                    .map(|(scenario, connections)| drive_scenario(scenario, *connections, TimeClock, &metrics, dump.as_ref()))
+                    .collect();
+                while drivers.next().await.is_some() {}
+                let _ = sender.send(());
+            })
+        };
+        runtime
+            .spawn_factory_on_core(CoreId(core), Box::new(factory))
+            .map_err(|err| Error::Engine(format!("spawn on core {core}: {err:?}")))?;
+    }
+    drop(sender);
+    while receiver.recv().is_ok() {}
+
+    // flush once, after every scenario on every core is done — otherwise the
+    // bounded queue still holds the tail and the dump is silently truncated.
+    if let Some(sink) = &dump {
+        futures::executor::block_on(sink.flush()).map_err(|err| Error::Engine(err.to_string()))?;
     }
     Ok(metrics)
+}
+
+/// One scenario's whole life: open its share of the pool, then drive its stages.
+///
+/// Errors are recorded rather than returned — a scenario that cannot open its
+/// connections must not abort the scenarios running alongside it, and the failure
+/// belongs in the report where it is visible.
+async fn drive_scenario<Clk>(scenario: &Scenario, connections: usize, clock: Clk, metrics: &Arc<Metrics>, dump: Option<&Arc<BoundedRecordingSink>>)
+where
+    Clk: Clock + Clone,
+{
+    // a POOL, not a connection: an open-loop drive needs somewhere to put an
+    // arrival whose predecessor has not come back, and an h1 connection
+    // serialises on its own mutex, so a second concurrent send on the same one
+    // would queue while looking like parallelism.
+    let mut pool = Vec::with_capacity(connections);
+    let mut encoded = None;
+    for _ in 0..connections.max(1) {
+        match open_h1(&scenario.url, &scenario.payload) {
+            Ok((pipe, item)) => {
+                encoded = Some(item);
+                pool.push(pipe);
+            }
+            Err(err) => {
+                report::record_setup_failure(metrics, &err.to_string());
+                return;
+            }
+        }
+    }
+    let Some(item) = encoded else {
+        return;
+    };
+
+    let name: Arc<str> = Arc::from(scenario.name.as_str());
+    let fan = match dump {
+        Some(sink) => {
+            let workload = report::dump_workload(sink, &name, &item).await;
+            report::dumping_fan(metrics, sink, workload)
+        }
+        None => report::series_fan(metrics),
+    };
+
+    for (index, stage) in scenario.stages.iter().enumerate() {
+        let arrivals = Arrivals::of(stage, clock.clone());
+        open_loop(&pool, &item, &arrivals, &fan, &name, index).await;
+    }
 }
 
 /// Drive one scenario's stages against a pipe, recording into `metrics`.
@@ -227,7 +451,7 @@ pub fn run(plan: &LoadPlan) -> Result<Arc<Metrics>, Error> {
 /// Bounding by duration is also the more honest count: the old paced path fired
 /// exactly `rate * duration` arrivals however long that took, so a stalling
 /// target stretched the stage past its stated window.
-pub fn drive_stages<Conn, Clk>(pipe: Conn, item: Conn::In, clock: Clk, scenario: &str, stages: &[Stage], metrics: &Arc<Metrics>, dump: Option<(&Dump, Bytes)>) -> Result<(), Error>
+pub fn drive_stages<Conn, Clk>(pool: Vec<Conn>, item: Conn::In, clock: Clk, scenario: &str, stages: &[Stage], metrics: &Arc<Metrics>, dump: Option<(&Dump, Bytes)>) -> Result<(), Error>
 where
     Conn: Pipe + Send + 'static,
     Conn::In: Clone + Send + 'static,
@@ -237,9 +461,8 @@ where
     // the per-core factory rather than `proxima::runtime::run`: a base-tier
     // `Pipe` future is not `Send`, so it is built ON the core it runs on.
     let runtime = PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?;
-    // the dump arm offloads its blocking writes onto a runtime; the one driving
-    // this run is it. Built BEFORE the factory so a bad dump config fails the
-    // run up front rather than halfway through it.
+    // the dump arm offloads its blocking writes onto a runtime; built BEFORE the
+    // factory so a bad dump config fails the run up front, not halfway through.
     let dump = match dump {
         Some((spec, workload)) => {
             let offload = Arc::new(PrimeRuntime::new(1).map_err(|err| Error::Engine(err.to_string()))?) as Arc<dyn Runtime>;
@@ -265,17 +488,12 @@ where
             };
             for (index, stage) in plan.iter().enumerate() {
                 let arrivals = Arrivals::of(stage, clock.clone());
-                while arrivals.call(()).await.is_ok() {
-                    let (latency, reply) = fire(&pipe, item.clone()).await;
-                    let _ = fan
-                        .call(report::Observed::of(&scenario, index, latency, reply))
-                        .await;
-                }
+                open_loop(&pool, &item, &arrivals, &fan, &scenario, index).await;
             }
-            // drain before the run is called done. Without this the bounded
-            // queue still holds whatever the drain worker had not written and
-            // the dump is silently truncated — a capture that quietly loses its
-            // tail is worse than no capture, because it looks complete.
+            // drain before the run is called done. Without this the bounded queue
+            // still holds whatever the drain worker had not written and the dump
+            // is silently truncated — a capture that quietly loses its tail is
+            // worse than none, because it looks complete.
             if let Some((sink, _)) = &dump {
                 let _ = sink.flush().await;
             }
@@ -289,6 +507,62 @@ where
     receiver
         .recv()
         .map_err(|err| Error::Engine(err.to_string()))
+}
+
+/// Drive one stage OPEN loop: an arrival is dispatched when it is due, not when
+/// the previous one came back.
+///
+/// This is what "open loop" has to mean, and what the drive did not do until now.
+/// It awaited each send before pacing the next, so a slow reply delayed every
+/// subsequent arrival — the grid could cap the offered rate but never defend it,
+/// and a stalling target silently turned a 500/s run into whatever it felt like
+/// serving. That is coordinated omission, and it is the one error a load
+/// generator must not make, because it hides exactly the latency it exists to
+/// find.
+///
+/// In flight is bounded by the pool: one outstanding send per connection, because
+/// an h1 connection serialises on its own mutex and a second concurrent send
+/// would queue behind the first while looking like parallelism. When every
+/// connection is busy the arrival is SHED — recorded in its own bucket — rather
+/// than delayed. A shed arrival is a fact about the target's capacity; a delayed
+/// one is a lie about the offered rate.
+async fn open_loop<Conn, Src>(pool: &[Conn], item: &Conn::In, arrivals: &Src, fan: &report::Fan, scenario: &Arc<str>, stage: usize)
+where
+    Conn: Pipe,
+    Conn::In: Clone,
+    Conn::Out: core::fmt::Debug,
+    Src: Pipe<In = (), Out = (), Err = Exhausted>,
+{
+    let mut inflight = FuturesUnordered::new();
+    let mut next = 0usize;
+
+    while arrivals.call(()).await.is_ok() {
+        // reap whatever finished while we were waiting for this arrival to be
+        // due; `now_or_never` keeps that off the critical path.
+        while let Some(Some(observed)) = inflight.next().now_or_never() {
+            let _ = fan.call(observed).await;
+        }
+
+        if inflight.len() >= pool.len() {
+            let _ = fan
+                .call(report::Observed::shed(scenario, stage))
+                .await;
+            continue;
+        }
+
+        let pipe = &pool[next % pool.len()];
+        next = next.wrapping_add(1);
+        let item = item.clone();
+        inflight.push(async move {
+            let (latency, reply) = fire(pipe, item).await;
+            report::Observed::of(scenario, stage, latency, reply)
+        });
+    }
+
+    // the stage is over; the sends it already offered still deserve recording.
+    while let Some(observed) = inflight.next().await {
+        let _ = fan.call(observed).await;
+    }
 }
 
 /// Fan a per-core worker factory across `cores` prime cores: each core spawns
@@ -689,6 +963,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::scenario::Scenario;
     use proxima_primitives::pipe::clock::testing::RecordingClock;
 
     /// A pipe that knows nothing about HTTP — its `In` is raw bytes, the shape a
@@ -714,7 +989,7 @@ mod tests {
     #[test]
     fn the_engine_drives_a_pipe_that_is_not_http() {
         let metrics = Arc::new(report::store());
-        drive_stages(BytesEcho, Bytes::from_static(b"not a request"), TimeClock, "echo", &flat_out(), &metrics, None).expect("drive");
+        drive_stages(vec![BytesEcho], Bytes::from_static(b"not a request"), TimeClock, "echo", &flat_out(), &metrics, None).expect("drive");
 
         assert!(report::arrivals(&metrics, "echo", 0) > 0);
         assert_eq!(
@@ -730,9 +1005,9 @@ mod tests {
         // which of them is "good" is a question the report leaves to whoever
         // reads it.
         let short = Arc::new(report::store());
-        drive_stages(BytesEcho, Bytes::from_static(b"ab"), TimeClock, "short", &flat_out(), &short, None).expect("drive");
+        drive_stages(vec![BytesEcho], Bytes::from_static(b"ab"), TimeClock, "short", &flat_out(), &short, None).expect("drive");
         let long = Arc::new(report::store());
-        drive_stages(BytesEcho, Bytes::from_static(b"abcd"), TimeClock, "long", &flat_out(), &long, None).expect("drive");
+        drive_stages(vec![BytesEcho], Bytes::from_static(b"abcd"), TimeClock, "long", &flat_out(), &long, None).expect("drive");
 
         assert_eq!(report::replies(&short, "short", 0, "2"), report::arrivals(&short, "short", 0));
         assert_eq!(report::replies(&long, "long", 0, "4"), report::arrivals(&long, "long", 0));
@@ -755,7 +1030,7 @@ mod tests {
         }
 
         let metrics = Arc::new(report::store());
-        drive_stages(Tick, (), TimeClock, "tick", &flat_out(), &metrics, None).expect("drive");
+        drive_stages(vec![Tick], (), TimeClock, "tick", &flat_out(), &metrics, None).expect("drive");
 
         let fired = report::arrivals(&metrics, "tick", 0);
         assert!(fired > 0);
@@ -798,7 +1073,7 @@ mod tests {
             duration: Duration::from_millis(100),
             arrival: Arrival::Even,
         }];
-        drive_stages(BytesEcho, Bytes::from_static(b"x"), TimeClock, "paced", &paced, &metrics, None).expect("drive");
+        drive_stages(vec![BytesEcho], Bytes::from_static(b"x"), TimeClock, "paced", &paced, &metrics, None).expect("drive");
 
         let fired = report::arrivals(&metrics, "paced", 0);
         assert!((5..=40).contains(&fired), "expected ~20 paced arrivals, got {fired}");
@@ -898,6 +1173,213 @@ mod tests {
     }
 
     #[test]
+    fn a_dumped_run_replays_from_its_own_log() {
+        // the whole point of dump+replay: a run leaves an artifact, and the
+        // artifact re-drives without the scenario file that produced it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("replayable.jsonl");
+        let spec = Dump {
+            path: path.to_string_lossy().into_owned(),
+            format: "json".to_string(),
+            capacity: 65_536,
+            on_full: "fail_closed".to_string(),
+            batch: 1,
+        };
+
+        let sent = Bytes::from_static(b"GET / HTTP/1.1\r\n\r\n");
+        let recorded_metrics = Arc::new(report::store());
+        let paced = vec![Stage {
+            rate_per_sec: Some(500.0),
+            duration: Duration::from_millis(60),
+            arrival: Arrival::Even,
+        }];
+        drive_stages(vec![BytesEcho], sent.clone(), TimeClock, "original", &paced, &recorded_metrics, Some((&spec, sent.clone()))).expect("original run");
+
+        // read it back — the log carries the payload AND the arrival offsets, so
+        // the replay needs nothing else
+        let runtime = Arc::new(PrimeRuntime::new(1).expect("runtime")) as Arc<dyn Runtime>;
+        let recorded = read_recorded(&spec, runtime).expect("read dump");
+
+        assert_eq!(recorded.sent, sent, "the payload round-trips through the log");
+        let original = report::arrivals(&recorded_metrics, "original", 0);
+        let dropped = report::dump_dropped(&recorded_metrics);
+        assert_eq!(recorded.offsets.len() as u64 + dropped, original, "every arrival is in the log or admitted as dropped");
+        assert!(
+            recorded
+                .offsets
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1]),
+            "offsets are ordered, so a replay can walk them"
+        );
+
+        // replay it, in process, against no socket at all
+        let replayed = drive_recorded(BytesEcho, recorded.sent.clone(), TimeClock, recorded.offsets.clone()).expect("replay");
+        assert_eq!(
+            report::arrivals(&replayed, "replay", 0),
+            recorded.offsets.len() as u64,
+            "the replay fires exactly the recorded arrivals — no more, no fewer"
+        );
+    }
+
+    #[test]
+    fn a_replay_source_needs_no_io_and_obeys_a_controlled_clock() {
+        // the no-IO case: the arrival pattern replays as fast as the clock is
+        // told to move, which is what makes it usable as an overload test.
+        let clock = RecordingClock::at(0);
+        let offsets = vec![Duration::from_millis(0), Duration::from_millis(10), Duration::from_millis(25)];
+        let arrivals = Replayed::of(offsets, clock.clone());
+
+        block_on(arrivals.call(())).expect("first is due immediately");
+        assert!(clock.delays().is_empty());
+
+        block_on(arrivals.call(())).expect("second");
+        assert_eq!(clock.delays(), vec![Duration::from_millis(10)], "waited the recorded gap");
+
+        block_on(arrivals.call(())).expect("third");
+        assert_eq!(
+            clock.delays(),
+            vec![Duration::from_millis(10), Duration::from_millis(25)],
+            "each offset is absolute from the run start, not from the previous arrival"
+        );
+
+        assert_eq!(arrivals.remaining(), 0);
+        assert!(matches!(block_on(arrivals.call(())), Err(Exhausted)), "the recording ending ends the stream");
+    }
+
+    /// A pipe that takes a fixed time to answer, so a stall is deterministic.
+    struct Slow(Duration);
+
+    impl Pipe for Slow {
+        type In = ();
+        type Out = &'static str;
+        type Err = Error;
+
+        async fn call(&self, (): ()) -> Result<&'static str, Error> {
+            TimeClock.delay(self.0).await;
+            Ok("late")
+        }
+    }
+
+    #[test]
+    fn a_slow_target_sheds_instead_of_slipping_the_rate() {
+        // the coordinated-omission defect, as a test. Every reply takes 20ms and
+        // the pool holds one connection, so at 500/s most arrivals cannot be
+        // dispatched. The honest outcome is a pile of SHED arrivals — not a
+        // quietly lowered offered rate.
+        let metrics = Arc::new(report::store());
+        let paced = vec![Stage {
+            rate_per_sec: Some(500.0),
+            duration: Duration::from_millis(100),
+            arrival: Arrival::Even,
+        }];
+        drive_stages(vec![Slow(Duration::from_millis(20))], (), TimeClock, "slow", &paced, &metrics, None).expect("drive");
+
+        let offered = report::arrivals(&metrics, "slow", 0);
+        let shed = report::replies_failed(&metrics, "slow", 0, "shed");
+        let served = report::replies(&metrics, "slow", 0, "\"late\"");
+
+        assert!(offered >= 40, "500/s for 100ms should offer ~50 arrivals, offered {offered}");
+        assert!(shed > 0, "a 20ms target behind one connection must shed; shed {shed}");
+        assert_eq!(served + shed, offered, "served {served} + shed {shed} must account for every offered arrival {offered}");
+    }
+
+    #[test]
+    fn a_deeper_pool_sheds_less() {
+        // the pool IS the in-flight bound, so widening it converts shed arrivals
+        // into served ones. Same rate, same target, same duration.
+        let stage = vec![Stage {
+            rate_per_sec: Some(500.0),
+            duration: Duration::from_millis(100),
+            arrival: Arrival::Even,
+        }];
+        let shed_with = |connections: usize| {
+            let metrics = Arc::new(report::store());
+            let pool: Vec<Slow> = (0..connections)
+                .map(|_| Slow(Duration::from_millis(20)))
+                .collect();
+            drive_stages(pool, (), TimeClock, "pool", &stage, &metrics, None).expect("drive");
+            report::replies_failed(&metrics, "pool", 0, "shed")
+        };
+
+        let narrow = shed_with(1);
+        let wide = shed_with(8);
+        assert!(wide < narrow, "8 connections shed {wide}, 1 connection shed {narrow} — a deeper pool must absorb more");
+    }
+
+    #[test]
+    fn scenarios_run_concurrently_not_in_sequence() {
+        // the point of weighting: a mixed workload is scenarios overlapping in
+        // TIME. Two 80ms scenarios run together finish in ~80ms; run one after
+        // another they take ~160ms. Timed loosely, because the assertion is
+        // "overlapped" not "took exactly this long".
+        let plan = LoadPlan::builder()
+            .cores(1)
+            .connections_per_core(2)
+            .scenarios(vec![timed("first", 80), timed("second", 80)])
+            .build();
+
+        let started = Instant::now();
+        let metrics = run(&plan).expect("run");
+        let elapsed = started.elapsed();
+
+        assert!(elapsed < Duration::from_millis(140), "two 80ms scenarios took {elapsed:?} — sequential, not concurrent");
+        // and both actually ran, against a closed port, so both are recorded
+        assert!(report::arrivals(&metrics, "first", 0) > 0, "first scenario recorded");
+        assert!(report::arrivals(&metrics, "second", 0) > 0, "second scenario recorded");
+    }
+
+    fn timed(name: &str, millis: u64) -> Scenario {
+        Scenario {
+            name: name.to_string(),
+            weight: 1,
+            // port 1 refuses instantly, so this measures the DRIVE, not a target
+            url: "http://127.0.0.1:1/".to_string(),
+            payload: PayloadSpec::default(),
+            stages: vec![Stage {
+                rate_per_sec: Some(200.0),
+                duration: Duration::from_millis(millis),
+                arrival: Arrival::Even,
+            }],
+        }
+    }
+
+    #[test]
+    fn weight_apportions_the_connection_pool() {
+        let plan = LoadPlan::builder()
+            .connections_per_core(8)
+            .scenarios(vec![weighted("heavy", 3), weighted("light", 1)])
+            .build();
+
+        assert_eq!(plan.connection_shares(), vec![6, 2], "3:1 of 8 connections");
+    }
+
+    #[test]
+    fn a_tiny_weight_still_gets_a_connection() {
+        // rounding to zero would silently drop a workload from the run
+        let plan = LoadPlan::builder()
+            .connections_per_core(2)
+            .scenarios(vec![weighted("heavy", 100), weighted("sliver", 1)])
+            .build();
+
+        let shares = plan.connection_shares();
+        assert!(shares.iter().all(|share| *share >= 1), "no scenario is dropped: {shares:?}");
+    }
+
+    fn weighted(name: &str, weight: u32) -> Scenario {
+        Scenario {
+            name: name.to_string(),
+            weight,
+            url: "http://127.0.0.1:8080/".to_string(),
+            payload: PayloadSpec::default(),
+            stages: vec![Stage {
+                rate_per_sec: None,
+                duration: Duration::from_millis(1),
+                arrival: Arrival::Even,
+            }],
+        }
+    }
+
+    #[test]
     fn a_dump_writes_a_readable_log() {
         // the whole point of the dump: a run leaves an artifact you can read
         // back. Asserted by actually reading it, not by the write compiling.
@@ -913,7 +1395,7 @@ mod tests {
 
         let metrics = Arc::new(report::store());
         let sent = Bytes::from_static(b"GET / HTTP/1.1\r\n\r\n");
-        drive_stages(BytesEcho, sent.clone(), TimeClock, "dumped", &flat_out(), &metrics, Some((&spec, sent))).expect("drive");
+        drive_stages(vec![BytesEcho], sent.clone(), TimeClock, "dumped", &flat_out(), &metrics, Some((&spec, sent))).expect("drive");
 
         let text = std::fs::read_to_string(&path).expect("dump exists and is readable");
         assert!(text.contains("rekt.workload"), "the payload is recorded once, as its own event");
@@ -949,7 +1431,7 @@ mod tests {
                 arrival: Arrival::Even,
             },
         ];
-        drive_stages(BytesEcho, Bytes::from_static(b"x"), TimeClock, "two", &two, &metrics, None).expect("drive");
+        drive_stages(vec![BytesEcho], Bytes::from_static(b"x"), TimeClock, "two", &two, &metrics, None).expect("drive");
 
         assert!(report::arrivals(&metrics, "two", 0) > 0, "stage 0 recorded");
         assert!(report::arrivals(&metrics, "two", 1) > 0, "stage 1 recorded separately");
