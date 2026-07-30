@@ -16,7 +16,7 @@ path = "src/main.rs"
 # this off, nothing pulls proxima. test-prime is bundled so `#[proxima::test]`
 # resolves only when the feature is opted into, keeping plain `cargo build` and
 # `cargo test` free of the whole proxima tree.
-scheduler = ["dep:proxima", "dep:proxima-runtime", "dep:futures", "dep:proxima-net", "proxima-net/prime", "proxima-net/runtime-prime-inbox-alloc", "dep:rustls", "proxima/http1-native", "proxima/any-listener", "dep:proxima-recording"]
+scheduler = ["dep:proxima", "dep:proxima-runtime", "dep:proxima-net", "proxima-net/prime", "proxima-net/runtime-prime-inbox-alloc", "dep:rustls", "proxima/http1-native", "proxima/any-listener", "dep:proxima-recording"]
 # the prime-vs-tokio comparison bench, and the only thing in rekt that wants
 # tokio in the graph at all. Separate from `scheduler` so the default engine
 # build stays tokio-free (`cargo tree -e normal -i tokio` empty).
@@ -48,7 +48,7 @@ proxima-net = { path = "../../proxima-net", optional = true, default-features = 
 rustls = { version = "0.23", optional = true }
 # `Observed` carries the sent bytes for the dump arm; already in the tree.
 bytes = "1"
-futures = { version = "0.3.32", optional = true }
+futures = "0.3.32"
 proxima-telemetry = { version = "0.1.0", path = "../../proxima-telemetry", features = ["tracing-init"] }
 # the pipe algebra itself — `FanOut` for the measurement fan. Already in the tree
 # via proxima-telemetry, so this costs no new compilation.

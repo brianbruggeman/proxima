@@ -25,15 +25,21 @@
 use core::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "scheduler")]
+use std::time::Instant;
 
 #[cfg(feature = "scheduler")]
 use bytes::Bytes;
+#[cfg(feature = "scheduler")]
+use futures::StreamExt;
 #[cfg(feature = "scheduler")]
 use proxima::runtime::Runtime;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::fanout::{FanOut, IgnoreErrors};
 #[cfg(feature = "scheduler")]
 use proxima_recording::pipe::{AccumulatingSink, BoundedRecordingSink, DynRecordingSink, FailMode, FormatKind, LazyFanOut, RECORD_DROP_METRIC, RecordingSink, SinkSpec, deferred_runtime};
+#[cfg(feature = "scheduler")]
+use proxima_recording::source::DynRecordingSource;
 #[cfg(feature = "scheduler")]
 use proxima_recording::{InteractionId, ProtocolEvent, RecordingEvent};
 #[cfg(feature = "scheduler")]
@@ -78,6 +84,23 @@ pub struct Observed {
 }
 
 impl Observed {
+    /// An arrival that was due but could not be dispatched — every connection
+    /// was still busy.
+    ///
+    /// Its own bucket, and deliberately NOT a latency: there was no round trip to
+    /// time. Folding a shed arrival into the latency distribution would flatter
+    /// an overloaded target, and dropping it silently would overstate the rate it
+    /// actually sustained.
+    #[must_use]
+    pub fn shed(scenario: &Arc<str>, stage: usize) -> Self {
+        Self {
+            scenario: Arc::clone(scenario),
+            stage,
+            latency: Duration::ZERO,
+            bucket: Err(Arc::from("shed")),
+        }
+    }
+
     /// Render a pipe's reply into an observation.
     pub fn of<Out, Err>(scenario: &Arc<str>, stage: usize, latency: Duration, reply: Result<Out, Err>) -> Self
     where
@@ -130,7 +153,17 @@ pub enum Sink {
     /// `RecordingEvent` has for exactly this. Carrying the bytes per arrival
     /// would be the same value written a million times.
     #[cfg(feature = "scheduler")]
-    Dump { sink: Arc<BoundedRecordingSink>, workload: InteractionId },
+    Dump {
+        sink: Arc<BoundedRecordingSink>,
+        workload: InteractionId,
+        /// When the run started, so each arrival records its OFFSET.
+        ///
+        /// Without this the log has latencies but no arrival times, and a
+        /// "replay" can only re-fire at a rate it guesses. `ts_ms` is too coarse
+        /// for a load generator (a whole run can fit in one millisecond), so the
+        /// offset goes in the payload in microseconds.
+        started: Instant,
+    },
 }
 
 impl SendPipe for Sink {
@@ -151,9 +184,9 @@ impl SendPipe for Sink {
             // Swallowing it here is the policy, not an oversight: an instrument
             // that blocks on its own dump has stopped measuring the target.
             #[cfg(feature = "scheduler")]
-            Sink::Dump { sink, workload } => {
+            Sink::Dump { sink, workload, started } => {
                 let _ = sink
-                    .append(arrival_event(&observed, *workload))
+                    .append(arrival_event(&observed, *workload, started.elapsed()))
                     .await;
             }
         }
@@ -168,26 +201,81 @@ impl SendPipe for Sink {
 /// status and never materialises a `Response`, so an `HttpEvent::ResponseStarted`
 /// would have to invent headers it never read. `Custom` is the event enum's own
 /// extension point and records exactly what rekt actually observed.
-fn arrival_event(observed: &Observed, workload: InteractionId) -> RecordingEvent {
+fn arrival_event(observed: &Observed, workload: InteractionId, at: Duration) -> RecordingEvent {
     let (outcome, bucket) = match &observed.bucket {
         Ok(bucket) => ("reply", bucket),
         Err(bucket) => ("no_reply", bucket),
     };
     RecordingEvent {
         id: InteractionId::new(),
-        ts_ms: 0,
+        ts_ms: at.as_millis().min(u128::from(u64::MAX)) as u64,
         parent: Some(workload),
         event: ProtocolEvent::Custom {
             kind: "rekt.arrival".to_string(),
             payload: serde_json::json!({
                 "scenario": observed.scenario.as_ref(),
                 "stage": observed.stage,
+                "at_us": micros_of(at) as u64,
                 "latency_us": micros_of(observed.latency) as u64,
                 "outcome": outcome,
                 "bucket": bucket.as_ref(),
             }),
         },
     }
+}
+
+#[cfg(feature = "scheduler")]
+/// What a dumped run replays FROM: the bytes it sent, and when each arrival
+/// happened.
+///
+/// Read off the log rather than recomputed from the plan — the point of a replay
+/// is the run that actually occurred, jitter and stalls included, not the run the
+/// file asked for.
+pub struct Recorded {
+    /// The payload every arrival sent.
+    pub sent: Bytes,
+    /// Arrival offsets from the run's start, in order.
+    pub offsets: Vec<Duration>,
+}
+
+#[cfg(feature = "scheduler")]
+/// Read a dump back into the shape a replay drives from.
+pub async fn read_dump(source: &DynRecordingSource) -> Result<Recorded, Error> {
+    let mut sent = Bytes::new();
+    let mut offsets = Vec::new();
+    let mut events = source.events();
+
+    while let Some(event) = events.next().await {
+        let event = event.map_err(|err| Error::Config(format!("read dump: {err}")))?;
+        let ProtocolEvent::Custom { kind, payload } = &event.event else {
+            continue;
+        };
+        match kind.as_str() {
+            "rekt.workload" => {
+                if let Some(bytes) = payload
+                    .get("bytes")
+                    .and_then(|value| value.as_str())
+                {
+                    sent = Bytes::from(bytes.to_owned());
+                }
+            }
+            "rekt.arrival" => {
+                if let Some(at) = payload
+                    .get("at_us")
+                    .and_then(serde_json::Value::as_u64)
+                {
+                    offsets.push(Duration::from_micros(at));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if sent.is_empty() {
+        return Err(Error::Config("dump has no rekt.workload event: nothing to replay".into()));
+    }
+    offsets.sort_unstable();
+    Ok(Recorded { sent, offsets })
 }
 
 #[cfg(feature = "scheduler")]
@@ -281,7 +369,14 @@ pub async fn dump_workload(sink: &Arc<BoundedRecordingSink>, scenario: &str, sen
 /// The same fan with a durable capture arm appended.
 #[must_use]
 pub fn dumping_fan(metrics: &Arc<Metrics>, sink: &Arc<BoundedRecordingSink>, workload: InteractionId) -> Fan {
-    FanOut::new(vec![Sink::Series(Arc::clone(metrics)), Sink::Dump { sink: Arc::clone(sink), workload }])
+    FanOut::new(vec![
+        Sink::Series(Arc::clone(metrics)),
+        Sink::Dump {
+            sink: Arc::clone(sink),
+            workload,
+            started: Instant::now(),
+        },
+    ])
 }
 
 /// The fan the adaptive drive records through: the run's report and the
@@ -501,6 +596,14 @@ pub fn replies(metrics: &Metrics, scenario: &str, stage: usize, bucket: &str) ->
         .unwrap_or(0)
 }
 
+/// Read one FAILURE bucket back — shed arrivals, transport errors, refusals.
+#[must_use]
+pub fn replies_failed(metrics: &Metrics, scenario: &str, stage: usize, bucket: &str) -> u64 {
+    metrics
+        .counter(FAILURES, &Labels::from_pairs(&[("scenario", scenario), ("stage", &stage.to_string()), ("failure", bucket)]))
+        .unwrap_or(0)
+}
+
 /// Arrivals recorded for a stage.
 #[must_use]
 pub fn arrivals(metrics: &Metrics, scenario: &str, stage: usize) -> u64 {
@@ -536,6 +639,7 @@ mod tests {
             .thresholds(thresholds.clone())
             .scenarios(vec![Scenario {
                 name: "load".to_string(),
+                weight: 1,
                 url: "http://127.0.0.1:8080/".to_string(),
                 payload: PayloadSpec::default(),
                 stages: vec![Stage {
