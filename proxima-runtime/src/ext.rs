@@ -263,6 +263,20 @@ mod tests {
 
     use super::*;
 
+    /// no `futures` dependency: this crate does not carry one outside
+    /// `--all-features`, and the stub's background impl resolves on the first
+    /// poll, so a bare loop is sufficient and cannot spin.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = core::pin::pin!(future);
+        let waker = core::task::Waker::noop();
+        let mut cx = core::task::Context::from_waker(waker);
+        loop {
+            if let core::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
     #[derive(Default)]
     struct StubRuntime {
         on_core: AtomicUsize,
@@ -463,7 +477,7 @@ mod tests {
         let erased: Arc<dyn Runtime> = stub.clone();
 
         let fut = erased.blocking(|| Ok(7u32)).spawn();
-        let value = futures::executor::block_on(fut).expect("background work");
+        let value = block_on(fut).expect("background work");
 
         assert_eq!(value, 7u32);
         assert_eq!(stub.background.load(Ordering::Relaxed), 1);

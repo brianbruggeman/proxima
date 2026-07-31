@@ -18,11 +18,12 @@ pub mod background_rayon;
 pub use background_rayon::RayonBackgroundPool;
 
 #[cfg(feature = "concurrency")]
+pub mod concurrency;
+
 /// Fluent spawn surface over the object-safe `Runtime`. Carries the axis
 /// combinations the trait's named methods pre-combine.
 #[cfg(feature = "alloc")]
 pub mod ext;
-pub mod concurrency;
 
 #[cfg(feature = "alloc")]
 pub mod primitives;
