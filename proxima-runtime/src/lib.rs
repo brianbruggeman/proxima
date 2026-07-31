@@ -18,6 +18,10 @@ pub mod background_rayon;
 pub use background_rayon::RayonBackgroundPool;
 
 #[cfg(feature = "concurrency")]
+/// Fluent spawn surface over the object-safe `Runtime`. Carries the axis
+/// combinations the trait's named methods pre-combine.
+#[cfg(feature = "alloc")]
+pub mod ext;
 pub mod concurrency;
 
 #[cfg(feature = "alloc")]
@@ -91,6 +95,12 @@ impl<Inline> core::fmt::Debug for SpawnRequest<Inline> {
 /// map 1:1 onto OS CPU ids. Construction is implementation-specific.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CoreId(pub usize);
+
+impl From<usize> for CoreId {
+    fn from(index: usize) -> Self {
+        CoreId(index)
+    }
+}
 
 impl CoreId {
     #[must_use]
