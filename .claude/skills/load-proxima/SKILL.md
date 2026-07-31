@@ -31,7 +31,7 @@ That is the whole of what this skill asserts. For anything else, read the pointe
 | agent bootstrap / task routing | `ai_docs/AGENT.md` → `ai_docs/index.jsonl` → `ai_docs/task-routes.jsonl` |
 | learn it as a human, from zero | `docs/tutorials/README.md` → `docs/tutorials/00-foundations.md` |
 | runnable, compile-tested code | `examples/hello/main.rs`; `examples/README.md` for the curriculum |
-| the binding rules in full | `~/.claude/skills/guiding-principles/SKILL.md`, `~/.claude/rules/rust.md` |
+| the binding rules in full | `.claude/skills/guiding-principles/SKILL.md`, `AGENTS.md` |
 
 **Don't hand-roll dataflow.** Before writing a loop or channel for filtering, fan-out, merging, backpressure, retry, or rate-limiting, check `ai_docs/examples-index.jsonl` — the combinator probably exists, typed.
 

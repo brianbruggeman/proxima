@@ -19,7 +19,7 @@ the caller uses to compose a single commit+push.
 
 ## Binding context (read before deciding any fix)
 
-- `~/.claude/skills/guiding-principles` — principles 11 (sans-IO/alloc), 14
+- `.claude/skills/guiding-principles/SKILL.md` — principles 11 (sans-IO/alloc), 14
   (incumbent wins on correctness), 15 (no defer/punt), 16 (execution must not
   outrun proof) bind hardest here. You may NOT paper over a real failure: no
   threshold bumps, no `#[ignore]`, no `sleep` in tests, no swallowed errors.
