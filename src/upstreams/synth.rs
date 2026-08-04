@@ -154,8 +154,10 @@ impl SendPipe for SynthUpstream {
                 .keys()
                 .any(|name| name.eq_ignore_ascii_case("content-length"));
             if !user_supplied_content_length && let Some(length) = static_body_len {
-                response = response
-                    .with_header(proxima_primitives::pipe::HeaderName::ContentLength, length.to_string());
+                response = response.with_header(
+                    proxima_primitives::pipe::HeaderName::ContentLength,
+                    length.to_string(),
+                );
             }
             for (name, value) in headers {
                 response = response.with_header(name, value);
@@ -164,7 +166,6 @@ impl SendPipe for SynthUpstream {
         }
     }
 }
-
 
 async fn expand_template_body(
     template: &str,

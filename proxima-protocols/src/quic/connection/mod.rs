@@ -1289,7 +1289,10 @@ impl<P: TlsProvider> Connection<P> {
     pub fn take_readable(
         &mut self,
     ) -> ConnectionResult<
-        heapless::Vec<crate::quic::streams::StreamId, { crate::quic::connection::state::READABLE_CAP }>,
+        heapless::Vec<
+            crate::quic::streams::StreamId,
+            { crate::quic::connection::state::READABLE_CAP },
+        >,
     > {
         match &mut self.state {
             ConnectionState::Established(state) => {
@@ -1325,7 +1328,10 @@ impl<P: TlsProvider> Connection<P> {
     /// Returns [`ConnectionError::IllegalInState`] when called outside
     /// `Established` and [`ConnectionError::ProtocolViolation`] when
     /// the stream ID is unknown.
-    pub fn stream_recv_finished(&self, stream: crate::quic::streams::StreamId) -> ConnectionResult<bool> {
+    pub fn stream_recv_finished(
+        &self,
+        stream: crate::quic::streams::StreamId,
+    ) -> ConnectionResult<bool> {
         match &self.state {
             ConnectionState::Established(state) => {
                 let entry =
@@ -1493,41 +1499,45 @@ impl<P: TlsProvider> Connection<P> {
                         .ok_or(ConnectionError::ProtocolViolation {
                             reason: "close_send on unknown stream",
                         })?;
-                let next =
-                    match core::mem::replace(&mut entry.send, crate::quic::streams::SendState::Ready) {
-                        crate::quic::streams::SendState::Ready => crate::quic::streams::SendState::DataSent {
+                let next = match core::mem::replace(
+                    &mut entry.send,
+                    crate::quic::streams::SendState::Ready,
+                ) {
+                    crate::quic::streams::SendState::Ready => {
+                        crate::quic::streams::SendState::DataSent {
                             offset_final: 0,
                             offset_acked: 0,
-                        },
-                        crate::quic::streams::SendState::Send {
-                            send_buffer,
-                            offset_next,
-                            offset_acked,
-                            fin_pending: _,
-                        } => {
-                            // Keep buffered bytes; mark fin_pending so the
-                            // emitter ships them with FIN on the final
-                            // STREAM frame. Premature transition to
-                            // DataSent would drop the buffer.
-                            if send_buffer.is_empty() {
-                                crate::quic::streams::SendState::DataSent {
-                                    offset_final: offset_next,
-                                    offset_acked,
-                                }
-                            } else {
-                                crate::quic::streams::SendState::Send {
-                                    send_buffer,
-                                    offset_next,
-                                    offset_acked,
-                                    fin_pending: true,
-                                }
+                        }
+                    }
+                    crate::quic::streams::SendState::Send {
+                        send_buffer,
+                        offset_next,
+                        offset_acked,
+                        fin_pending: _,
+                    } => {
+                        // Keep buffered bytes; mark fin_pending so the
+                        // emitter ships them with FIN on the final
+                        // STREAM frame. Premature transition to
+                        // DataSent would drop the buffer.
+                        if send_buffer.is_empty() {
+                            crate::quic::streams::SendState::DataSent {
+                                offset_final: offset_next,
+                                offset_acked,
+                            }
+                        } else {
+                            crate::quic::streams::SendState::Send {
+                                send_buffer,
+                                offset_next,
+                                offset_acked,
+                                fin_pending: true,
                             }
                         }
-                        already @ (crate::quic::streams::SendState::DataSent { .. }
-                        | crate::quic::streams::SendState::DataRecvd { .. }
-                        | crate::quic::streams::SendState::ResetSent { .. }
-                        | crate::quic::streams::SendState::ResetRecvd { .. }) => already,
-                    };
+                    }
+                    already @ (crate::quic::streams::SendState::DataSent { .. }
+                    | crate::quic::streams::SendState::DataRecvd { .. }
+                    | crate::quic::streams::SendState::ResetSent { .. }
+                    | crate::quic::streams::SendState::ResetRecvd { .. }) => already,
+                };
                 entry.send = next;
                 Ok(())
             }
@@ -1986,7 +1996,8 @@ impl<P: TlsProvider> Connection<P> {
             let handshake_secrets = advance.handshake_secrets;
             let app_secrets_staged = advance.app_secrets_staged;
             // Pull any pending CRYPTO bytes for the Handshake epoch.
-            let mut crypto_send_handshake = crate::quic::connection::state::CryptoEpochBuffer::new();
+            let mut crypto_send_handshake =
+                crate::quic::connection::state::CryptoEpochBuffer::new();
             pump_handshake(&mut self.tls, Epoch::Handshake, &mut crypto_send_handshake)?;
             let new_state = transition_initial_to_handshake(
                 core::mem::replace(state, sentinel_initial(now)),
@@ -2455,8 +2466,8 @@ impl<P: TlsProvider> Connection<P> {
         // so the per-pass hot path stays alloc-free; the cap matches
         // the absolute stream-table cap so the snapshot can never
         // overflow.
-        const MAX_PER_PASS_GRANTS: usize =
-            crate::quic::connection::state::MAX_BIDI_STREAMS + crate::quic::connection::state::MAX_UNI_STREAMS;
+        const MAX_PER_PASS_GRANTS: usize = crate::quic::connection::state::MAX_BIDI_STREAMS
+            + crate::quic::connection::state::MAX_UNI_STREAMS;
         let mut pending_max_stream_data_grants: heapless::Vec<
             (crate::quic::streams::StreamId, u64),
             MAX_PER_PASS_GRANTS,
@@ -2502,8 +2513,12 @@ impl<P: TlsProvider> Connection<P> {
         // stream appears at most once per pass, so (id, offset) is a
         // unique key — no need to compare data bytes downstream.
         let stream_emissions = collect_stream_emissions(state);
-        let mut stream_emission_meta: alloc::vec::Vec<(crate::quic::streams::StreamId, u64, bool, u32)> =
-            alloc::vec::Vec::with_capacity(stream_emissions.len());
+        let mut stream_emission_meta: alloc::vec::Vec<(
+            crate::quic::streams::StreamId,
+            u64,
+            bool,
+            u32,
+        )> = alloc::vec::Vec::with_capacity(stream_emissions.len());
         for emission in stream_emissions {
             stream_emission_meta.push((
                 emission.stream_id,
@@ -3578,8 +3593,8 @@ fn build_established_datagram(
         }
         let _ = frames_scratch.try_push(0x31);
         let mut tmp = [0u8; 9];
-        let written =
-            crate::quic::varint::encode(payload.len() as u64, &mut tmp).map_err(map_varint_encode_err)?;
+        let written = crate::quic::varint::encode(payload.len() as u64, &mut tmp)
+            .map_err(map_varint_encode_err)?;
         let _ = frames_scratch.try_extend_from_slice(&tmp[..written]);
         let _ = frames_scratch.try_extend_from_slice(payload);
         is_ack_eliciting = true;
@@ -3737,11 +3752,11 @@ fn encode_intent(
             let written = crate::quic::varint::encode(stream_id.as_u64(), &mut tmp)
                 .map_err(map_varint_encode_err)?;
             let _ = out.try_extend_from_slice(&tmp[..written]);
-            let written =
-                crate::quic::varint::encode(*error_code, &mut tmp).map_err(map_varint_encode_err)?;
+            let written = crate::quic::varint::encode(*error_code, &mut tmp)
+                .map_err(map_varint_encode_err)?;
             let _ = out.try_extend_from_slice(&tmp[..written]);
-            let written =
-                crate::quic::varint::encode(*final_size, &mut tmp).map_err(map_varint_encode_err)?;
+            let written = crate::quic::varint::encode(*final_size, &mut tmp)
+                .map_err(map_varint_encode_err)?;
             let _ = out.try_extend_from_slice(&tmp[..written]);
         }
         FrameIntent::Stream {
@@ -3861,11 +3876,13 @@ fn build_close_datagram_for_closing(
     if frame_type_byte == 0x1c {
         // Transport-level close also carries triggering_frame_type.
         let triggering = state.close_frame.triggering_frame_type.unwrap_or(0);
-        let written = crate::quic::varint::encode(triggering, &mut tmp).map_err(map_varint_encode_err)?;
+        let written =
+            crate::quic::varint::encode(triggering, &mut tmp).map_err(map_varint_encode_err)?;
         let _ = frame_scratch.try_extend_from_slice(&tmp[..written]);
     }
     let reason_len = state.close_frame.reason.len() as u64;
-    let written = crate::quic::varint::encode(reason_len, &mut tmp).map_err(map_varint_encode_err)?;
+    let written =
+        crate::quic::varint::encode(reason_len, &mut tmp).map_err(map_varint_encode_err)?;
     let _ = frame_scratch.try_extend_from_slice(&tmp[..written]);
     let _ = frame_scratch.try_extend_from_slice(&state.close_frame.reason);
 
@@ -4334,10 +4351,11 @@ fn parse_and_apply_established(
     // RFC 9000 §17.3. (Once C8 NEW_CONNECTION_ID rotation lands, the
     // peer may address us via any issued CID with the same length.)
     // Peer's first byte must indicate short-header (high bit clear).
-    let form =
-        crate::quic::packet::header::peek_form(datagram).ok_or(ConnectionError::ProtocolViolation {
+    let form = crate::quic::packet::header::peek_form(datagram).ok_or(
+        ConnectionError::ProtocolViolation {
             reason: "empty datagram in Established",
-        })?;
+        },
+    )?;
     let pn_offset = match form {
         crate::quic::packet::header::Form::Short => {
             // byte 0 + DCID bytes. The inbound short-header DCID is the
@@ -4441,9 +4459,11 @@ fn parse_and_apply_established(
             Err(crate::quic::frame::DecodeError::UnknownFrameType(_)) => {
                 // Try multipath extension frames per
                 // draft-ietf-quic-multipath-21 §4.
-                let (mp_frame, mp_consumed) = crate::quic::multipath::frame::parse(&plaintext[cursor..])
-                    .map_err(|_| ConnectionError::ProtocolViolation {
-                        reason: "unknown frame type (not RFC 9000 or multipath)",
+                let (mp_frame, mp_consumed) =
+                    crate::quic::multipath::frame::parse(&plaintext[cursor..]).map_err(|_| {
+                        ConnectionError::ProtocolViolation {
+                            reason: "unknown frame type (not RFC 9000 or multipath)",
+                        }
                     })?;
                 cursor += mp_consumed;
                 apply_multipath_frame(state, mp_frame, last_now)?;
@@ -4650,7 +4670,10 @@ fn parse_and_apply_established(
                 let is_new_peer = !id.is_local(state.side) && state.streams.get(id).is_none();
                 let stream = state
                     .streams
-                    .get_or_create_peer(id, crate::quic::streams::StreamFlowControl::new(send, recv))
+                    .get_or_create_peer(
+                        id,
+                        crate::quic::streams::StreamFlowControl::new(send, recv),
+                    )
                     .map_err(|_| ConnectionError::ProtocolViolation {
                         reason: "stream-table at MAX_BIDI/MAX_UNI cap (RESET_STREAM)",
                     })?;
@@ -4844,7 +4867,10 @@ fn parse_and_apply_established(
                 let is_new_peer = !id.is_local(state.side) && state.streams.get(id).is_none();
                 let entry = state
                     .streams
-                    .get_or_create_peer(id, crate::quic::streams::StreamFlowControl::new(send, recv))
+                    .get_or_create_peer(
+                        id,
+                        crate::quic::streams::StreamFlowControl::new(send, recv),
+                    )
                     .map_err(|_| ConnectionError::ProtocolViolation {
                         reason: "stream-table at MAX_BIDI/MAX_UNI cap",
                     })?;
@@ -5225,11 +5251,12 @@ fn transition_handshake_to_established(
             3u64, // RFC 9000 §18.2 default
         )
     } else {
-        let parsed = crate::quic::transport_parameters::parse(&peer_transport_params).map_err(|_| {
-            ConnectionError::ProtocolViolation {
-                reason: "malformed peer transport parameters",
-            }
-        })?;
+        let parsed =
+            crate::quic::transport_parameters::parse(&peer_transport_params).map_err(|_| {
+                ConnectionError::ProtocolViolation {
+                    reason: "malformed peer transport parameters",
+                }
+            })?;
         let credit_send = parsed.initial_max_data.unwrap_or(local_credit_recv);
         // RFC 9000 §10.1 — effective idle timeout is the min of both
         // endpoints' advertised values (when both are non-zero). 0
@@ -5379,8 +5406,10 @@ fn sentinel_handshake(now: Instant) -> HandshakeState {
                 iv: [0u8; crate::quic::crypto::initial_keys::QUIC_IV_LEN],
                 hp: [0u8; crate::quic::crypto::initial_keys::QUIC_HP_LEN],
             },
-            client_initial_secret: [0u8; crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
-            server_initial_secret: [0u8; crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
+            client_initial_secret: [0u8;
+                crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
+            server_initial_secret: [0u8;
+                crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
         },
         handshake_send: crate::quic::packet_number::SendSpace::new(),
         handshake_recv: crate::quic::packet_number::RecvSpace::new(),
@@ -5477,8 +5506,10 @@ fn sentinel_initial(now: Instant) -> InitialState {
                 iv: [0u8; crate::quic::crypto::initial_keys::QUIC_IV_LEN],
                 hp: [0u8; crate::quic::crypto::initial_keys::QUIC_HP_LEN],
             },
-            client_initial_secret: [0u8; crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
-            server_initial_secret: [0u8; crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
+            client_initial_secret: [0u8;
+                crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
+            server_initial_secret: [0u8;
+                crate::quic::crypto::initial_keys::QUIC_INITIAL_SECRET_LEN],
         },
         initial_ack_scheduler: crate::quic::ack::AckScheduler::new(),
         anti_amplification: AntiAmplificationCounter::new(Side::Client),
@@ -5570,11 +5601,13 @@ fn build_initial_packet_into(
     // Retry, the client MUST echo the Retry token in every subsequent
     // Initial; empty before any Retry. quiche validates addresses via
     // Retry by default, so a missing token loops it forever.
-    let token_field_len = crate::quic::varint::encoded_len(retry_token.len() as u64) + retry_token.len();
+    let token_field_len =
+        crate::quic::varint::encoded_len(retry_token.len() as u64) + retry_token.len();
     let length_varint_max = 2usize;
 
     let header_total = header_fixed_len + token_field_len + length_varint_max + pn_byte_len;
-    let payload_budget = MIN_INITIAL_DATAGRAM_BYTES - header_total - crate::quic::crypto::aead::TAG_LEN;
+    let payload_budget =
+        MIN_INITIAL_DATAGRAM_BYTES - header_total - crate::quic::crypto::aead::TAG_LEN;
 
     // Fragment CRYPTO across Initial packets: a real ClientHello (ALPN +
     // transport params + key share) or a server first flight can exceed a
@@ -5615,7 +5648,8 @@ fn build_initial_packet_into(
     }
     let padding_len = payload_budget - frames_len;
     let payload_len = frames_len + padding_len;
-    let remaining_field_value = (pn_byte_len + payload_len + crate::quic::crypto::aead::TAG_LEN) as u64;
+    let remaining_field_value =
+        (pn_byte_len + payload_len + crate::quic::crypto::aead::TAG_LEN) as u64;
 
     // ---- write header into buffer ----
     let mut write_cursor = 0usize;
@@ -5938,10 +5972,12 @@ fn remove_external_short_header(
                     crate::quic::crypto::packet_protection::PacketProtectionError::from(err),
                 )
             })?;
-    Ok(crate::quic::crypto::packet_protection::HeaderProtectionResult {
-        full_pn,
-        plaintext_offset: pn_offset + pn_byte_len,
-    })
+    Ok(
+        crate::quic::crypto::packet_protection::HeaderProtectionResult {
+            full_pn,
+            plaintext_offset: pn_offset + pn_byte_len,
+        },
+    )
 }
 
 #[cfg(feature = "quic-tls-rustls")]
@@ -6343,8 +6379,12 @@ fn handle_inbound_retry<P: TlsProvider>(
     let pseudo_input_len = datagram.len() - crate::quic::packet::header::RETRY_INTEGRITY_TAG_LEN;
     let pseudo_input = &datagram[..pseudo_input_len];
     let original_dcid = state.local_initial_dcid.as_slice();
-    if crate::quic::crypto::retry_integrity::verify_retry_tag(original_dcid, pseudo_input, &integrity_tag)
-        .is_err()
+    if crate::quic::crypto::retry_integrity::verify_retry_tag(
+        original_dcid,
+        pseudo_input,
+        &integrity_tag,
+    )
+    .is_err()
     {
         return Ok(InitialDatagramOutcome::default());
     }
@@ -6479,15 +6519,16 @@ fn encode_ack_frame(
     }
     out[cursor] = 0x02; // ACK frame, no ECN
     cursor += 1;
-    cursor += crate::quic::varint::encode(largest, &mut out[cursor..]).map_err(map_varint_encode_err)?;
+    cursor +=
+        crate::quic::varint::encode(largest, &mut out[cursor..]).map_err(map_varint_encode_err)?;
     cursor += crate::quic::varint::encode(0, &mut out[cursor..]).map_err(map_varint_encode_err)?; // ack_delay (we don't measure)
-    cursor +=
-        crate::quic::varint::encode(range_count, &mut out[cursor..]).map_err(map_varint_encode_err)?;
-    cursor +=
-        crate::quic::varint::encode(first_range, &mut out[cursor..]).map_err(map_varint_encode_err)?;
+    cursor += crate::quic::varint::encode(range_count, &mut out[cursor..])
+        .map_err(map_varint_encode_err)?;
+    cursor += crate::quic::varint::encode(first_range, &mut out[cursor..])
+        .map_err(map_varint_encode_err)?;
     for pair in scheduler.ack_range_pairs() {
-        cursor +=
-            crate::quic::varint::encode(pair.gap, &mut out[cursor..]).map_err(map_varint_encode_err)?;
+        cursor += crate::quic::varint::encode(pair.gap, &mut out[cursor..])
+            .map_err(map_varint_encode_err)?;
         cursor += crate::quic::varint::encode(pair.length, &mut out[cursor..])
             .map_err(map_varint_encode_err)?;
     }

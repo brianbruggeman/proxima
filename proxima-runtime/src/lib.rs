@@ -261,9 +261,9 @@ where
             ));
         }
     }
-    receiver
-        .recv()
-        .map_err(|_| block_on_dispatch_error("runtime worker dropped the block_on completion channel"))
+    receiver.recv().map_err(|_| {
+        block_on_dispatch_error("runtime worker dropped the block_on completion channel")
+    })
 }
 
 #[cfg(all(feature = "alloc", feature = "std"))]

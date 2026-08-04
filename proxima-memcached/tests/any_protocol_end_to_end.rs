@@ -78,7 +78,13 @@ async fn accept_and_drive(
     let connection: Box<dyn StreamConnection> = Box::new(TokioTcpConnection::from_tokio(stream));
     let handler = erase_handler(());
     protocol
-        .drive(connection, handler, &serde_json::Value::Null, None, &admission)
+        .drive(
+            connection,
+            handler,
+            &serde_json::Value::Null,
+            None,
+            &admission,
+        )
         .await
 }
 
@@ -86,7 +92,11 @@ async fn accept_and_drive(
 async fn get_hit_reaches_the_handler() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream.write_all(b"get k\r\nquit\r\n").await.expect("write");
@@ -100,7 +110,11 @@ async fn get_hit_reaches_the_handler() {
 async fn set_reaches_the_handler_and_replies_stored() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream
@@ -117,7 +131,11 @@ async fn set_reaches_the_handler_and_replies_stored() {
 async fn noreply_set_never_writes_a_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream
@@ -137,7 +155,11 @@ async fn noreply_set_never_writes_a_reply() {
 async fn a_noreply_command_pipelined_behind_a_normal_one_only_suppresses_its_own_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream
@@ -156,7 +178,11 @@ async fn a_noreply_command_pipelined_behind_a_normal_one_only_suppresses_its_own
 async fn quit_closes_the_connection_with_no_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream.write_all(b"quit\r\n").await.expect("write");
@@ -175,7 +201,11 @@ async fn quit_closes_the_connection_with_no_reply() {
 async fn unknown_command_closes_the_connection_with_an_error() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream
@@ -201,9 +231,15 @@ async fn an_oversized_value_closes_with_a_message_too_large_server_error() {
     // 8 is already exceeded before the declared 1000-byte value even
     // starts arriving, so `parse_frame` folds this into a `Violation`
     // instead of waiting forever for bytes that never come.
-    let config = MemcachedServerConfig::builder().max_message_bytes(8).build();
+    let config = MemcachedServerConfig::builder()
+        .max_message_bytes(8)
+        .build();
     let protocol = MemcachedAnyProtocol::new("memcached", handler()).with_config(config);
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     stream

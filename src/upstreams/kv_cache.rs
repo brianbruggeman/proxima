@@ -443,7 +443,9 @@ pub fn parse_duration(raw: &str) -> Result<Duration, ProximaError> {
     Ok(Duration::from_secs(amount * multiplier_seconds))
 }
 
-pub use proxima_patterns::kv::{cache_key_for_storage, cache_key_from_request, cache_key_with_version};
+pub use proxima_patterns::kv::{
+    cache_key_for_storage, cache_key_from_request, cache_key_with_version,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

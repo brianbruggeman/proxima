@@ -88,7 +88,11 @@ fn fan_in_arbitrates_across_two_redundant_tick_sources_with_no_bespoke_machinery
     let fourth = block_on(fan.call(())).expect("local oscillator still live");
     assert_eq!(fourth, Ticks::from_raw(2_000));
 
-    assert_eq!(fan.live_count(), 2, "both sources still marked live before their final call");
+    assert_eq!(
+        fan.live_count(),
+        2,
+        "both sources still marked live before their final call"
+    );
 
     let fifth = block_on(fan.call(()));
     assert_eq!(

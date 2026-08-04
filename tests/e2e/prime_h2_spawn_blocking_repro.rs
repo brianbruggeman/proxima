@@ -122,7 +122,6 @@ impl SendPipe for BlockingHashPipe {
     }
 }
 
-
 /// Same wiring as BlockingHashPipe but the handler is sync — does NOT
 /// hit the BgPool. If the prime repro test hangs with this handler too,
 /// the bug is in the h2-on-prime path itself, not the BgPool/oneshot
@@ -149,7 +148,6 @@ impl SendPipe for SyncHashPipe {
         }
     }
 }
-
 
 fn payload() -> Arc<[u8; PAYLOAD_LEN]> {
     let mut buf = [0u8; PAYLOAD_LEN];
@@ -212,8 +210,7 @@ fn start_prime_with_pool(use_bg_pool: bool) -> std::net::SocketAddr {
                                     proxima_listen::admission::ConnAdmission::unbounded();
                                 eprintln!("[repro/serve] entering serve_h2_connection");
                                 let result =
-                                    serve_h2_connection(socket, dispatch, admission, None)
-                                        .await;
+                                    serve_h2_connection(socket, dispatch, admission, None).await;
                                 eprintln!("[repro/serve] serve_h2_connection -> {result:?}");
                             },
                         ));

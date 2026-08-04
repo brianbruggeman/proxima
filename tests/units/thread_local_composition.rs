@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use proxima::RoutingPipe;
 use proxima::causality::{Causal, CausalIndex};
 use proxima::error::ProximaError;
 use proxima::middlewares::auth::Auth;
@@ -33,7 +34,6 @@ use proxima::middlewares::retry::{Retry, RetryPredicate};
 use proxima::middlewares::transform::{RequestOp, ResponseOp, Transform};
 use proxima::pipe::{ThreadLocalPipeHandle, into_thread_local_handle};
 use proxima::request::{Request, Response};
-use proxima::RoutingPipe;
 use proxima_primitives::pipe::Pipe;
 
 // Counts requests in `Rc<RefCell<u64>>` — deliberately `!Send` so it
@@ -61,7 +61,6 @@ impl Pipe for LocalCounter {
         }
     }
 }
-
 
 fn request_with_auth(token: &str, path: &str) -> Request<Bytes> {
     Request::builder()
@@ -224,9 +223,7 @@ async fn causal_wrapper_records_around_local_inner() {
                 .body("payload")
                 .build()
                 .expect("builder");
-            let response = Pipe::call(&recorder_handle, request)
-                .await
-                .expect("call");
+            let response = Pipe::call(&recorder_handle, request).await.expect("call");
             assert_eq!(response.status, 200);
             let body = response.collect_body().await.expect("collect");
             assert_eq!(&body[..], b"leaf");

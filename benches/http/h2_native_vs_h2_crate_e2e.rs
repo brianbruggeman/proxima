@@ -88,7 +88,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 struct BrowserStyleResponse;
 
 impl SendPipe for BrowserStyleResponse {
@@ -111,7 +110,6 @@ impl SendPipe for BrowserStyleResponse {
     }
 }
 
-
 struct EchoBody;
 
 impl SendPipe for EchoBody {
@@ -129,7 +127,6 @@ impl SendPipe for EchoBody {
         }
     }
 }
-
 
 fn start_h2_crate_server(
     runtime: &tokio::runtime::Runtime,

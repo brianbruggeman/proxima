@@ -53,7 +53,8 @@ fn proxima_level(level: Level) -> ProximaLevel {
 
 #[test]
 fn proxima_env_filter_matches_tracing_on_a_matrix() {
-    const FILTER: &str = "proxima::h2=debug,proxima::h2::hpack=trace,proxima=info,downstream::store=warn";
+    const FILTER: &str =
+        "proxima::h2=debug,proxima::h2::hpack=trace,proxima=info,downstream::store=warn";
 
     // drive real callsites through the real EnvFilter; capture survivors.
     let captured = Arc::new(Mutex::new(Vec::new()));

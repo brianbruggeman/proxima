@@ -7,10 +7,10 @@
 //! become plain, `'static` business data (see [`crate::pipes`]'s module
 //! doc for why).
 
-use proxima_protocols::dns::codec_trait::Message;
-use proxima_protocols::dns::encode;
 #[cfg(feature = "client")]
 use proxima_protocols::dns::RData;
+use proxima_protocols::dns::codec_trait::Message;
+use proxima_protocols::dns::encode;
 
 use crate::pipes::DnsAnswer;
 #[cfg(feature = "client")]

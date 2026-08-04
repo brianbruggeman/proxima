@@ -50,7 +50,6 @@ async fn third_party_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, P
         .with_body(VENDOR_BODY))
 }
 
-
 // `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
 // to give `main` an async context to `.await` on (no tokio anywhere in the
 // build). That boot publishes an AMBIENT runtime (`crate::runtime::
@@ -211,7 +210,9 @@ async fn main() -> Result<(), ProximaError> {
     let edge_fake_runtime = edge_fake_app
         .runtime()
         .ok_or_else(|| ProximaError::Config("edge fake app has no runtime installed".into()))?;
-    let edge_fake_report = ShutdownBarrier::new(edge_fake_runtime).broadcast_drop().await;
+    let edge_fake_report = ShutdownBarrier::new(edge_fake_runtime)
+        .broadcast_drop()
+        .await;
     println!(
         "edge (fake) drained: cores_acked={} hooks_drained={}",
         edge_fake_report.cores_acked, edge_fake_report.hooks_drained

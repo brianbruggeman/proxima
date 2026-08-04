@@ -89,7 +89,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 async fn hyper_handler(
     _request: hyper::Request<hyper::body::Incoming>,
 ) -> Result<hyper::Response<Full<Bytes>>, Infallible> {

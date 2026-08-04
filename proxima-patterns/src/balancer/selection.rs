@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::balancer::upstream_ref::{ThreadLocalUpstreamRef, UpstreamRef};
 use bytes::Bytes;
 use proxima_core::ProximaError;
-use proxima_primitives::transport::{DEFAULT_REPLAY_CAP_BYTES, Replay};
 use proxima_primitives::pipe::body::{ChunkStream, RequestStream};
-use proxima_primitives::pipe::{Pipe, SendPipe};
 #[cfg(test)]
 use proxima_primitives::pipe::handler::Handler;
 use proxima_primitives::pipe::request::{Request, Response};
+use proxima_primitives::pipe::{Pipe, SendPipe};
+use proxima_primitives::transport::{DEFAULT_REPLAY_CAP_BYTES, Replay};
 
 fn source_stream(body: Bytes, stream: Option<RequestStream>) -> ChunkStream {
     match stream {
@@ -871,7 +871,6 @@ mod tests {
         }
     }
 
-
     fn build_request() -> Request<Bytes> {
         Request::builder()
             .method("GET")
@@ -1076,7 +1075,6 @@ mod tests {
         }
     }
 
-
     #[proxima::test]
     async fn empty_upstreams_returns_config_error() {
         let select = Fallthrough::miss_on_no_data();
@@ -1109,7 +1107,6 @@ mod tests {
             }
         }
     }
-
 
     fn local_upstream(
         label: &str,

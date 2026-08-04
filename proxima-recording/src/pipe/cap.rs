@@ -364,13 +364,8 @@ mod tests {
         let telemetry: TelemetryHandle = metrics.clone();
         let backend: Arc<MemorySink> = Arc::new(MemorySink::default());
         let labels = Labels::from_pairs(&[("pipe", "echo")]);
-        let cap_sink = sink_without_worker(
-            backend.clone(),
-            1,
-            FailMode::DropNewest,
-            telemetry,
-            labels,
-        );
+        let cap_sink =
+            sink_without_worker(backend.clone(), 1, FailMode::DropNewest, telemetry, labels);
         fill_to_capacity(&cap_sink);
         cap_sink
             .append(req_end(cap_sink.capacity() as u64))

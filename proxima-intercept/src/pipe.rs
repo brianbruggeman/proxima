@@ -12,9 +12,9 @@ use crate::capture::Capture;
 use bytes::Bytes;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::handler::PipeHandle;
 #[cfg(not(feature = "intercept-config"))]
 use proxima_primitives::pipe::handler::into_handle;
-use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::upgrade::{HijackedSocket, UpgradeHandler};
 use proxima_primitives::pipe::{Request, Response};
@@ -91,7 +91,10 @@ impl InterceptPipe {
     /// Requires the `delta-tee` feature.
     #[cfg(feature = "delta-tee")]
     #[must_use]
-    pub fn with_delta_tee(mut self, sender: proxima_primitives::sync::broadcast::Sender<bytes::Bytes>) -> Self {
+    pub fn with_delta_tee(
+        mut self,
+        sender: proxima_primitives::sync::broadcast::Sender<bytes::Bytes>,
+    ) -> Self {
         self.delta_tx = Some(sender);
         self
     }
@@ -521,7 +524,6 @@ impl SendPipe for InterceptPipe {
         }
     }
 }
-
 
 /// Hosts whose traffic is TLS-terminated as h2 and captured for offline decode.
 /// True if `host` contains any comma-separated substring in `list`. The host
@@ -1313,7 +1315,10 @@ struct FuturesIoToTokio {
 }
 
 impl FuturesIoToTokio {
-    fn new(stream: Box<dyn proxima_primitives::pipe::upgrade::HijackStream>, leftover: Bytes) -> Self {
+    fn new(
+        stream: Box<dyn proxima_primitives::pipe::upgrade::HijackStream>,
+        leftover: Bytes,
+    ) -> Self {
         Self {
             inner: stream,
             leftover: leftover.to_vec(),

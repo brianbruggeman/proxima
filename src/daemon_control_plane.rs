@@ -4,9 +4,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use proxima_primitives::sync::Mutex as TokioMutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use proxima_primitives::sync::Mutex as TokioMutex;
 use tracing::debug;
 
 use crate::app::{App, MountTarget};

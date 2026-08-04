@@ -84,7 +84,9 @@ fn bench_macro_emit(criterion: &mut Criterion) {
     // simple-form guarantee is that this collapses to the pre-elevation cost.
     let none_config = config_none();
     none_config.validate().expect("none config validates");
-    let none_recorder = Recorder::from_config(&none_config).start().expect("recorder");
+    let none_recorder = Recorder::from_config(&none_config)
+        .start()
+        .expect("recorder");
     current::set_verbose_ratio(0.0);
     current::restore(None);
     group.bench_function("none_not_verbose", |bencher| {
@@ -103,7 +105,9 @@ fn bench_macro_emit(criterion: &mut Criterion) {
     // ratio 1.0 -- every trace admitted below the callsite floor.
     let verbose_config = config_verbose(1.0);
     verbose_config.validate().expect("verbose config validates");
-    let verbose_recorder = Recorder::from_config(&verbose_config).start().expect("recorder");
+    let verbose_recorder = Recorder::from_config(&verbose_config)
+        .start()
+        .expect("recorder");
     let parent = current::enter(TraceId::from_bytes([9; 16]), SpanId::from_bytes([1; 8]));
     group.bench_function("verbose_admit_below_floor", |bencher| {
         bencher.iter(|| {

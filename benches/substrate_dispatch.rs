@@ -72,7 +72,6 @@ impl SendPipe for Noop {
     }
 }
 
-
 fn context_with_noop(runtime: &Runtime) -> LoadContext {
     let context = runtime
         .block_on(async { LoadContext::with_default_registry() })

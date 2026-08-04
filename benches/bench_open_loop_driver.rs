@@ -78,7 +78,6 @@ impl SendPipe for EchoPipe {
     }
 }
 
-
 // yields once per request so workers genuinely interleave — `EchoPipe` never
 // suspends, so the first-polled worker drains everything and concurrency is
 // illusory. this exposes how the closed-loop driver's `join_all` scales with
@@ -100,7 +99,6 @@ impl SendPipe for YieldPipe {
         }
     }
 }
-
 
 fn build_runtime() -> Arc<dyn Runtime> {
     Arc::new(TokioPerCoreRuntime::new(1).expect("build TokioPerCoreRuntime"))

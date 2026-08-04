@@ -33,7 +33,7 @@ use futures::channel::oneshot;
 use proxima::error::ProximaError;
 use proxima::listen::{ListenProtocol, ServeContext};
 use proxima::listeners::H3NativeListenProtocol;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::telemetry::NoopTelemetry;
 use proxima_http::http3::native::H3NativeUpstream;

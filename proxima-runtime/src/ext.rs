@@ -59,7 +59,10 @@ pub trait RuntimeExt: Runtime {
     /// Bind the placement axis to a specific core. Terminal `spawn` then
     /// returns `Result<(), SpawnError>` rather than swallowing back-pressure.
     fn core(&self, placement: impl Into<Placement>) -> OnCore<'_, Self> {
-        OnCore { runtime: self, placement: placement.into() }
+        OnCore {
+            runtime: self,
+            placement: placement.into(),
+        }
     }
 
     /// Bind the payload axis to work that occupies a thread. Nothing here
@@ -133,8 +136,12 @@ impl Placement {
         match self {
             Placement::Only(core_id) => alloc::vec![*core_id],
             Placement::AnyOf(list) => list.clone(),
-            Placement::Any => (0..cores).map(|offset| CoreId((current.0 + offset) % cores)).collect(),
-            Placement::AnyOther => (1..cores).map(|offset| CoreId((current.0 + offset) % cores)).collect(),
+            Placement::Any => (0..cores)
+                .map(|offset| CoreId((current.0 + offset) % cores))
+                .collect(),
+            Placement::AnyOther => (1..cores)
+                .map(|offset| CoreId((current.0 + offset) % cores))
+                .collect(),
         }
     }
 }
@@ -254,7 +261,6 @@ where
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -287,7 +293,11 @@ mod tests {
     }
 
     impl Runtime for StubRuntime {
-        fn spawn_on_current_core(&self, _f: core::pin::Pin<Box<dyn Future<Output = ()> + 'static>>) {}
+        fn spawn_on_current_core(
+            &self,
+            _f: core::pin::Pin<Box<dyn Future<Output = ()> + 'static>>,
+        ) {
+        }
 
         fn spawn_on_core(
             &self,
@@ -304,7 +314,9 @@ mod tests {
         fn spawn_factory_on_core(
             &self,
             _core_id: CoreId,
-            _factory: Box<dyn FnOnce() -> core::pin::Pin<Box<dyn Future<Output = ()> + 'static>> + Send>,
+            _factory: Box<
+                dyn FnOnce() -> core::pin::Pin<Box<dyn Future<Output = ()> + 'static>> + Send,
+            >,
         ) -> Result<(), SpawnError> {
             Ok(())
         }
@@ -318,7 +330,10 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn timer_at(&self, _deadline: std::time::Instant) -> core::pin::Pin<Box<dyn Future<Output = ()>>> {
+        fn timer_at(
+            &self,
+            _deadline: std::time::Instant,
+        ) -> core::pin::Pin<Box<dyn Future<Output = ()>>> {
             Box::pin(async {})
         }
 
@@ -389,7 +404,10 @@ mod tests {
         let stub = Arc::new(StubRuntime::default());
         let erased: Arc<dyn Runtime> = stub.clone();
 
-        erased.core([1, 2, 3]).spawn(async {}).expect("first candidate");
+        erased
+            .core([1, 2, 3])
+            .spawn(async {})
+            .expect("first candidate");
         assert_eq!(stub.on_core.load(Ordering::Relaxed), 1);
     }
 
@@ -417,7 +435,11 @@ mod tests {
             .spawn_with(|| async {}, |_, err| *err == SpawnError::InboxFull);
 
         assert_eq!(outcome, Ok(CoreId(2)), "reports which core took it");
-        assert_eq!(stub.on_core.load(Ordering::Relaxed), 3, "two full, third accepted");
+        assert_eq!(
+            stub.on_core.load(Ordering::Relaxed),
+            3,
+            "two full, third accepted"
+        );
     }
 
     /// the caller owns the policy: declining on the first error stops, even
@@ -432,9 +454,16 @@ mod tests {
 
         assert_eq!(
             outcome,
-            Err(Exhausted { attempts: 1, last: Some(SpawnError::InboxFull) })
+            Err(Exhausted {
+                attempts: 1,
+                last: Some(SpawnError::InboxFull)
+            })
         );
-        assert_eq!(stub.on_core.load(Ordering::Relaxed), 1, "stopped after the first");
+        assert_eq!(
+            stub.on_core.load(Ordering::Relaxed),
+            1,
+            "stopped after the first"
+        );
     }
 
     /// zero candidates is not a failed spawn -- nothing was attempted, so
@@ -449,7 +478,13 @@ mod tests {
             .core(Placement::AnyOther)
             .spawn_with(|| async {}, |_, _| true);
 
-        assert_eq!(outcome, Err(Exhausted { attempts: 0, last: None }));
+        assert_eq!(
+            outcome,
+            Err(Exhausted {
+                attempts: 0,
+                last: None
+            })
+        );
         assert_eq!(stub.on_core.load(Ordering::Relaxed), 0);
     }
 
@@ -461,13 +496,14 @@ mod tests {
         stub.full_for_first.store(9, Ordering::Relaxed);
         let erased: Arc<dyn Runtime> = stub.clone();
 
-        let outcome = erased
-            .core([0, 1, 2])
-            .spawn_with(|| async {}, |_, _| true);
+        let outcome = erased.core([0, 1, 2]).spawn_with(|| async {}, |_, _| true);
 
         assert_eq!(
             outcome,
-            Err(Exhausted { attempts: 3, last: Some(SpawnError::InboxFull) })
+            Err(Exhausted {
+                attempts: 3,
+                last: Some(SpawnError::InboxFull)
+            })
         );
     }
 

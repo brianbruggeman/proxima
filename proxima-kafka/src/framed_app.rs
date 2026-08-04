@@ -33,7 +33,9 @@ use proxima_listen::admission::ShedReason;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
 
-use crate::frame_codec::{KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, Violation, empty_response_for};
+use crate::frame_codec::{
+    KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, Violation, empty_response_for,
+};
 use crate::pipes::KafkaPipeHandle;
 use crate::wire::{ApiVersionsResponse, RequestBody, ResponseBody};
 
@@ -64,7 +66,10 @@ fn resolve_violation(violation: &Violation) -> KafkaOutcome {
             tracing::error!("kafka request body could not be decoded");
             KafkaOutcome::Close
         }
-        Violation::UnsupportedVersion { correlation_id, body } => {
+        Violation::UnsupportedVersion {
+            correlation_id,
+            body,
+        } => {
             tracing::warn!(correlation_id, "kafka unsupported api_version");
             KafkaOutcome::Reply {
                 correlation_id: *correlation_id,
@@ -79,16 +84,28 @@ fn resolve_violation(violation: &Violation) -> KafkaOutcome {
 /// `CloseWithReply`/`Close` write (or don't) a final frame and then stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KafkaOutcome {
-    Reply { correlation_id: i32, body: ResponseBody },
-    CloseWithReply { correlation_id: i32, body: ResponseBody },
+    Reply {
+        correlation_id: i32,
+        body: ResponseBody,
+    },
+    CloseWithReply {
+        correlation_id: i32,
+        body: ResponseBody,
+    },
     Close,
 }
 
 impl AsFrame<KafkaCodec> for KafkaOutcome {
     fn as_frame(&self) -> Option<KafkaFrame<'_>> {
         match self {
-            KafkaOutcome::Reply { correlation_id, body }
-            | KafkaOutcome::CloseWithReply { correlation_id, body } => Some(KafkaFrame::Reply {
+            KafkaOutcome::Reply {
+                correlation_id,
+                body,
+            }
+            | KafkaOutcome::CloseWithReply {
+                correlation_id,
+                body,
+            } => Some(KafkaFrame::Reply {
                 correlation_id: *correlation_id,
                 body,
             }),
@@ -97,7 +114,10 @@ impl AsFrame<KafkaCodec> for KafkaOutcome {
     }
 
     fn keep_serving(&self) -> bool {
-        !matches!(self, KafkaOutcome::CloseWithReply { .. } | KafkaOutcome::Close)
+        !matches!(
+            self,
+            KafkaOutcome::CloseWithReply { .. } | KafkaOutcome::Close
+        )
     }
 }
 
@@ -164,7 +184,12 @@ impl SendPipe for KafkaFramedApp {
 /// reached) — mirrors the deleted `connection::dispatch`'s handler-call
 /// arm exactly, minus the admission check `FramedAny`'s `AdmittedApp` now
 /// performs generically.
-async fn dispatch(handler: &KafkaPipeHandle, correlation_id: i32, api_key: i16, body: RequestBody) -> KafkaOutcome {
+async fn dispatch(
+    handler: &KafkaPipeHandle,
+    correlation_id: i32,
+    api_key: i16,
+    body: RequestBody,
+) -> KafkaOutcome {
     match SendPipe::call(handler.as_ref(), body).await {
         Ok(response) => KafkaOutcome::Reply {
             correlation_id,
@@ -199,7 +224,11 @@ pub fn shed_reply(reason: ShedReason, input: &KafkaOwnedFrame) -> KafkaOutcome {
             api_key,
             ..
         } => {
-            tracing::warn!(api_key, ?reason, "kafka request shed under admission policy");
+            tracing::warn!(
+                api_key,
+                ?reason,
+                "kafka request shed under admission policy"
+            );
             KafkaOutcome::Reply {
                 correlation_id: *correlation_id,
                 body: empty_response_for(*api_key),
@@ -226,7 +255,9 @@ mod tests {
 
         async fn call(&self, request: RequestBody) -> Result<Self::Out, ProximaError> {
             match request {
-                RequestBody::Produce(_) => Ok(ResponseBody::Produce(wire::ProduceResponse::default())),
+                RequestBody::Produce(_) => {
+                    Ok(ResponseBody::Produce(wire::ProduceResponse::default()))
+                }
                 _ => Err(ProximaError::Upstream("unexpected api".into())),
             }
         }
@@ -317,7 +348,9 @@ mod tests {
     #[proxima::test(runtime = "tokio")]
     async fn a_message_too_large_violation_closes_with_no_reply() {
         let outcome = app()
-            .call(KafkaOwnedFrame::Violation(Violation::MessageTooLarge { limit: 1024 }))
+            .call(KafkaOwnedFrame::Violation(Violation::MessageTooLarge {
+                limit: 1024,
+            }))
             .await
             .expect("call");
         assert_eq!(outcome, KafkaOutcome::Close);

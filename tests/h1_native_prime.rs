@@ -68,7 +68,9 @@ fn http_listen_protocol_serves_h1_over_prime_acceptor_factory_with_no_tokio() {
     let handle = runtime
         .serve_http(bind, pipe)
         .expect("serve_http should bind through the prime AcceptorFactory");
-    let addr = handle.bind_addr().expect("listener reports its bound address");
+    let addr = handle
+        .bind_addr()
+        .expect("listener reports its bound address");
 
     let mut stream = TcpStream::connect(addr).expect("connect to the tokio-free listener");
     stream

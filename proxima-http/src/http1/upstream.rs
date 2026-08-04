@@ -7,13 +7,13 @@ use hyper::body::Incoming;
 use serde_json::Value;
 use tracing::warn;
 
-use crate::http1::hyper_body::StreamingHyperBody;
 use crate::http1::http_config::{HttpConfig, HttpUpstreamConfig};
+use crate::http1::hyper_body::StreamingHyperBody;
 use crate::http1::shared_http::SharedHttpClient;
 use crate::templates::{TemplateContext, expand};
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::body::ResponseStream;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::body::ResponseStream;
 use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::request::{Request, Response};
@@ -165,7 +165,8 @@ impl SendPipe for HttpUpstream {
             // origin so a single trace spans the hop. an operator-injected
             // header above wins (insert_if_absent).
             if let Some(trace_id_bytes) = trace_id.as_deref() {
-                headers.insert_if_absent(proxima_telemetry::propagation::TRACEPARENT, trace_id_bytes);
+                headers
+                    .insert_if_absent(proxima_telemetry::propagation::TRACEPARENT, trace_id_bytes);
             }
             if let Some(baggage_bytes) = baggage.as_deref() {
                 headers.insert_if_absent(proxima_telemetry::propagation::BAGGAGE, baggage_bytes);

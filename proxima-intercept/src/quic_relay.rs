@@ -19,13 +19,13 @@ use proxima_http::http3::native::driver::{DriverState, drive_client_step};
 use proxima_protocols::http3_codec::client::{ClientConnection, H3ClientEvent};
 use proxima_protocols::http3_codec::qpack::decoder::{DecodeError, decode_into};
 use proxima_protocols::http3_codec::settings::Settings;
-use proxima_protocols::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN;
 use proxima_protocols::quic::connection::{Connection, ConnectionState, DatagramWrite};
 use proxima_protocols::quic::time::Instant as ProtoInstant;
 #[cfg(test)]
 use proxima_protocols::quic::tls::rustls_provider::RustlsServerProvider;
 use proxima_protocols::quic::tls::rustls_provider::{RustlsClientProvider, RustlsConfig};
 use proxima_protocols::quic::transport_parameters::TransportParameters;
+use proxima_protocols::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN;
 use rustls::pki_types::ServerName;
 use tokio::net::UdpSocket;
 use tracing::{debug, trace, warn};
@@ -367,7 +367,8 @@ async fn drive_h3_request(
                     ..
                 } => {
                     response_status = status;
-                    let mut scratch = [0u8; PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
+                    let mut scratch =
+                        [0u8; PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
                     let mut sink = |name: &[u8], value: &[u8]| -> Result<(), DecodeError> {
                         if name.first() != Some(&b':') {
                             response_headers.push((
@@ -697,7 +698,8 @@ fn in_memory_h3_round_trip_inner(
                     ..
                 } => {
                     resp_status = status;
-                    let mut scratch = [0u8; PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
+                    let mut scratch =
+                        [0u8; PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
                     let mut sink = |name: &[u8], value: &[u8]| -> Result<(), DecodeError> {
                         if name.first() != Some(&b':') {
                             resp_headers_out.push((

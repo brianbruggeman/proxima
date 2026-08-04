@@ -595,10 +595,7 @@ fn prime_run_dispatch_error(message: &str) -> ProximaError {
     feature = "runtime-prime-reactor",
     feature = "runtime-prime-bgpool"
 ))]
-fn build_prime_run_runtime(
-    placement: Vec<usize>,
-    pin: bool,
-) -> Result<PrimeRuntime, ProximaError> {
+fn build_prime_run_runtime(placement: Vec<usize>, pin: bool) -> Result<PrimeRuntime, ProximaError> {
     #[cfg(feature = "run-prime-tokio-compat")]
     {
         PrimeRuntime::new_inner_placed(placement, pin, true)
@@ -668,9 +665,7 @@ impl Runtime for AdoptedRuntime {
 
     fn spawn_background_blocking(
         &self,
-        work: Box<
-            dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-        >,
+        work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
     ) -> BackgroundHandle<Box<dyn std::any::Any + Send>> {
         self.inner.spawn_background_blocking(work)
     }
@@ -965,7 +960,10 @@ mod selection_by_value_tests {
     }
 
     impl Runtime for RecordingRuntime {
-        fn spawn_on_current_core(&self, future: std::pin::Pin<Box<dyn Future<Output = ()> + 'static>>) {
+        fn spawn_on_current_core(
+            &self,
+            future: std::pin::Pin<Box<dyn Future<Output = ()> + 'static>>,
+        ) {
             futures::executor::block_on(future);
             self.ran.store(true, Ordering::SeqCst);
         }
@@ -982,7 +980,9 @@ mod selection_by_value_tests {
             &self,
             _core_id: CoreId,
             _factory: Box<
-                dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+                dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ()> + 'static>>
+                    + Send
+                    + 'static,
             >,
         ) -> Result<(), SpawnError> {
             unreachable!("test never spawns a cross-core factory")
@@ -990,9 +990,7 @@ mod selection_by_value_tests {
 
         fn spawn_background_blocking(
             &self,
-            _work: Box<
-                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-            >,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
         ) -> BackgroundHandle<Box<dyn std::any::Any + Send>> {
             unreachable!("test never spawns background-blocking work")
         }
@@ -1017,8 +1015,12 @@ mod selection_by_value_tests {
     fn app_runtime_follows_the_injected_selection_value_not_feature_presence() {
         let flag_prime = Arc::new(AtomicBool::new(false));
         let flag_tokio = Arc::new(AtomicBool::new(false));
-        let prime_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_prime.clone() });
-        let tokio_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_tokio.clone() });
+        let prime_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime {
+            ran: flag_prime.clone(),
+        });
+        let tokio_runtime: Arc<dyn Runtime> = Arc::new(RecordingRuntime {
+            ran: flag_tokio.clone(),
+        });
 
         // `from_prime`/`from_tokio` always bundle the REAL matched factories
         // (PrimeAcceptorFactory/TokioAcceptorFactory, ...) regardless of the
@@ -1036,8 +1038,12 @@ mod selection_by_value_tests {
             tokio_selection.datagram_factory.is_some(),
             "tokio bundles a DatagramFactory too (TokioDatagramFactory)"
         );
-        prime_selection.validate().expect("from_prime always validates");
-        tokio_selection.validate().expect("from_tokio always validates");
+        prime_selection
+            .validate()
+            .expect("from_prime always validates");
+        tokio_selection
+            .validate()
+            .expect("from_tokio always validates");
 
         let app_prime = crate::App::builder()
             .runtime(prime_selection)

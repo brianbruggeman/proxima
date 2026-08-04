@@ -118,9 +118,9 @@ impl ListenProtocol for DatagramListenProtocol {
             let datagram_factory = datagram_factory.ok_or_else(|| {
                 ProximaError::Config("datagram listener requires a datagram factory".into())
             })?;
-            let mut socket = datagram_factory
-                .bind(bind)
-                .map_err(|err| ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {err}"))))?;
+            let mut socket = datagram_factory.bind(bind).map_err(|err| {
+                ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {err}")))
+            })?;
             if let Some(sender) = ready_signal {
                 let _ = sender.send(());
             }
@@ -234,13 +234,16 @@ pub(crate) async fn flush_send(
     }
     let staged = batch.send.len();
     let mut span_offset = 0;
-    let flush = poll_fn(|cx| match socket.poll_drive_send_batch(cx, &batch.send, &mut span_offset) {
-        Poll::Ready(Ok(())) if span_offset >= staged => Poll::Ready(Ok(())),
-        Poll::Ready(Ok(())) => Poll::Pending,
-        Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-        Poll::Pending => Poll::Pending,
-    })
-    .await;
+    let flush =
+        poll_fn(
+            |cx| match socket.poll_drive_send_batch(cx, &batch.send, &mut span_offset) {
+                Poll::Ready(Ok(())) if span_offset >= staged => Poll::Ready(Ok(())),
+                Poll::Ready(Ok(())) => Poll::Pending,
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            },
+        )
+        .await;
     batch.send.reset();
     flush.map_err(|err| ProximaError::Io(io::Error::other(format!("{label} send: {err}"))))
 }
@@ -256,8 +259,8 @@ mod tests {
     use futures::task::noop_waker;
     use proxima_primitives::pipe::handler::into_handle;
     use proxima_primitives::pipe::request::Response;
-    use proxima_primitives::stream::{DatagramFactory, DatagramSocket};
     use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
+    use proxima_primitives::stream::{DatagramFactory, DatagramSocket};
 
     use super::*;
 
@@ -279,7 +282,10 @@ mod tests {
 
     impl SharedSocket {
         fn new(local: SocketAddr) -> Self {
-            Self { state: Arc::new(Mutex::new(SocketState::default())), local }
+            Self {
+                state: Arc::new(Mutex::new(SocketState::default())),
+                local,
+            }
         }
 
         fn inject(&self, bytes: Vec<u8>, from: SocketAddr) {
@@ -296,7 +302,11 @@ mod tests {
     }
 
     impl DatagramSocket for SharedSocket {
-        fn poll_recv_from(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<(usize, SocketAddr)>> {
+        fn poll_recv_from(
+            &mut self,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
             let mut state = self.state.lock().unwrap();
             match state.inbound.pop_front() {
                 Some((bytes, from)) => {
@@ -311,7 +321,12 @@ mod tests {
             }
         }
 
-        fn poll_send_to(&mut self, _cx: &mut Context<'_>, buf: &[u8], peer: SocketAddr) -> Poll<io::Result<usize>> {
+        fn poll_send_to(
+            &mut self,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+            peer: SocketAddr,
+        ) -> Poll<io::Result<usize>> {
             self.state.lock().unwrap().sent.push((buf.to_vec(), peer));
             Poll::Ready(Ok(buf.len()))
         }
@@ -340,7 +355,10 @@ mod tests {
         type Out = Response<Bytes>;
         type Err = ProximaError;
 
-        fn call(&self, request: Request<Bytes>) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        fn call(
+            &self,
+            request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
             async move {
                 let (_, bytes) = request.body_bytes().await?;
                 let upper: Vec<u8> = bytes.iter().map(u8::to_ascii_uppercase).collect();
@@ -364,7 +382,10 @@ mod tests {
         type Out = Response<Bytes>;
         type Err = ProximaError;
 
-        fn call(&self, _request: Request<Bytes>) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        fn call(
+            &self,
+            _request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
             async move {
                 Ok(Response {
                     status: 200,
@@ -377,14 +398,21 @@ mod tests {
         }
     }
 
-    fn drive_until<P: SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError> + Send + Sync + 'static>(
+    fn drive_until<
+        P: SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>
+            + Send
+            + Sync
+            + 'static,
+    >(
         pipe: P,
         inject: &[(&[u8], SocketAddr)],
         stop: impl Fn(&SharedSocket) -> bool,
     ) -> SharedSocket {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5300);
         let socket = SharedSocket::new(bind);
-        let factory = Arc::new(SharedFactory { socket: socket.clone() });
+        let factory = Arc::new(SharedFactory {
+            socket: socket.clone(),
+        });
         let protocol = DatagramListenProtocol::new("dgram-test");
         let dispatch = into_handle(pipe);
         let spec = serde_json::json!({});
@@ -411,10 +439,15 @@ mod tests {
     #[proxima::test]
     async fn datagram_round_trips_reply_to_its_peer() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)), 40000);
-        let socket = drive_until(UppercasePipe, &[(b"hello datagram", peer)], |s| !s.sent().is_empty());
+        let socket = drive_until(UppercasePipe, &[(b"hello datagram", peer)], |s| {
+            !s.sent().is_empty()
+        });
         let sent = socket.sent();
         assert_eq!(sent.len(), 1, "exactly one reply datagram");
-        assert_eq!(sent[0].0, b"HELLO DATAGRAM", "reply body is the pipe output");
+        assert_eq!(
+            sent[0].0, b"HELLO DATAGRAM",
+            "reply body is the pipe output"
+        );
         assert_eq!(sent[0].1, peer, "reply is addressed back to the sender");
     }
 
@@ -422,7 +455,9 @@ mod tests {
     async fn two_datagrams_from_two_peers_each_get_their_own_reply() {
         let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 41000);
         let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 42000);
-        let socket = drive_until(UppercasePipe, &[(b"one", a), (b"two", b)], |s| s.sent().len() >= 2);
+        let socket = drive_until(UppercasePipe, &[(b"one", a), (b"two", b)], |s| {
+            s.sent().len() >= 2
+        });
         let sent = socket.sent();
         assert_eq!(sent.len(), 2);
         assert!(sent.contains(&(b"ONE".to_vec(), a)), "peer a gets ONE");

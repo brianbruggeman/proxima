@@ -84,8 +84,7 @@ mod tests {
         let codec: FrameCodecPipe<WebSocketFrameCodec> = FrameCodecPipe::default();
         let wire = real_text_frame();
         let input = Bytes::copy_from_slice(&wire);
-        let outcome =
-            block_on(Pipe::call(&codec, input.clone())).expect("real WS frame parses");
+        let outcome = block_on(Pipe::call(&codec, input.clone())).expect("real WS frame parses");
         let (frame, consumed) = outcome.expect("complete frame, not partial");
         assert_eq!(&frame.payload[..], b"hello");
         assert_eq!(frame.opcode, Opcode::Text);

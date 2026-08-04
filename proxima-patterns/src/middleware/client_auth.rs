@@ -229,7 +229,6 @@ where
     }
 }
 
-
 /// Factory for the `client-auth` key. Holds a `Weak<PipeFactoryRegistry>` so the
 /// oauth scheme can build its token-endpoint sub-pipe through the same registry
 /// (the exchange edge resolves like any other upstream — mirrors
@@ -586,7 +585,6 @@ impl SendPipe for OauthAuthPipe {
     }
 }
 
-
 /// AWS SigV4 request-signing pipe (auth form #5) — the signing edge. Computes
 /// an `Authorization` value per outbound request from the request bytes + the
 /// derived signing key (it does not attach a static credential). Drives the
@@ -681,7 +679,6 @@ where
         }
     }
 }
-
 
 /// HTTP Digest challenge-response pipe (auth form #4, RFC 7616) — the
 /// challenge-response edge. Sends the request; on a `401` carrying
@@ -820,7 +817,6 @@ fn clone_request(request: &Request<Bytes>) -> Result<Request<Bytes>, ProximaErro
     cloned.build()
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -850,7 +846,6 @@ mod tests {
             async move { Ok(Response::new(200)) }
         }
     }
-
 
     fn run(spec: Value) -> Option<String> {
         let seen = Arc::new(Mutex::new(None));
@@ -936,7 +931,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn oauth_fetches_token_then_injects_bearer() {
@@ -1138,7 +1132,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn digest_pipe_answers_a_401_challenge_and_retries() {
         let seen = Arc::new(Mutex::new(None));
@@ -1221,7 +1214,6 @@ mod tests {
         }
     }
 
-
     /// refresh-ahead non-blocking serve-old: with a 1-second token and a large
     /// refresh-ahead window, the SECOND request lands inside the refresh window.
     /// The FSM serves the still-valid OLD token (`at-1`) to that request while a
@@ -1287,7 +1279,6 @@ mod tests {
             async move { Err(ProximaError::Upstream("token endpoint down".into())) }
         }
     }
-
 
     #[test]
     fn oauth_cold_start_fetch_failure_returns_an_error_not_a_hang() {

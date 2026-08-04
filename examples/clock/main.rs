@@ -22,9 +22,9 @@ use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use std::rc::Rc;
 
-use proxima_primitives::pipe::clock::TimeClock;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::pipe::capabilities::Clock;
+use proxima_primitives::pipe::clock::TimeClock;
 
 /// A `Clock` backed by a shared `Cell<u64>` instead of the wall. `now_nanos`
 /// reads the cell; nothing else can move it forward — `advance` is the only

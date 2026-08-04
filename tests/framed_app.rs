@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use proxima::listeners::FramedListenProtocol;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::{App, HeaderList, MountTarget, ProximaError, RunConfig, Spec, TokioPerCoreRuntime};
 use proxima_primitives::pipe::SendPipe;
@@ -45,7 +45,6 @@ impl SendPipe for UppercasePipe {
         }
     }
 }
-
 
 fn find_free_port() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");

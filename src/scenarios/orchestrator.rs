@@ -1064,7 +1064,6 @@ mod tests {
         }
     }
 
-
     fn fixture_workload(target_rps: u64, secs: u64) -> WorkloadSpec {
         WorkloadSpec::new_open_loop("echo", target_rps, DurationSpec::from_secs(secs))
             .with_concurrency(64)
@@ -1270,7 +1269,6 @@ mod tests {
             }
         }
     }
-
 }
 
 // the rewrite's whole point, proven on the prime-native runtime with zero
@@ -1307,7 +1305,6 @@ mod prime_tests {
             async move { Ok(Response::ok(bytes::Bytes::from_static(b"ok"))) }
         }
     }
-
 
     #[test]
     fn open_loop_drives_on_prime_runtime() {

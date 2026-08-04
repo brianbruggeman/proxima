@@ -677,9 +677,9 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::*;
     use super::super::error::{EncodeError, ParseError};
     use super::super::types::{FormatCode, ProtocolVersion};
+    use super::*;
 
     fn encode_initial(msg: &InitialMessage<'_>) -> Vec<u8> {
         let mut buf = vec![0u8; 1024];
@@ -715,7 +715,8 @@ mod tests {
     fn startup_with_params_round_trips() {
         let raw_params = b"user\0alice\0database\0appdb\0\0";
         let mut reader = super::super::cursor::Reader::new(raw_params, 0);
-        let params = super::super::views::StartupParams::validate(&mut reader).expect("params validate");
+        let params =
+            super::super::views::StartupParams::validate(&mut reader).expect("params validate");
         let msg = InitialMessage::Startup(Startup {
             version: ProtocolVersion::V3_0,
             parameters: params,
@@ -939,7 +940,8 @@ mod tests {
     fn truncated_startup_returns_none_until_frame_complete() {
         let raw_params = b"user\0alice\0\0";
         let mut reader = super::super::cursor::Reader::new(raw_params, 0);
-        let params = super::super::views::StartupParams::validate(&mut reader).expect("params validate");
+        let params =
+            super::super::views::StartupParams::validate(&mut reader).expect("params validate");
         let msg = InitialMessage::Startup(Startup {
             version: ProtocolVersion::V3_0,
             parameters: params,

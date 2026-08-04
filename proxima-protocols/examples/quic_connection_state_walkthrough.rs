@@ -28,7 +28,10 @@ const RFC_9001_A1_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x0
 const LOCAL_SCID: [u8; 8] = [0xc0, 0xff, 0xee, 0xba, 0xbe, 0x12, 0x34, 0x56];
 const SERVER_SCID: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
 
-fn print_state<P: proxima_protocols::quic::tls::TlsProvider>(label: &str, connection: &Connection<P>) {
+fn print_state<P: proxima_protocols::quic::tls::TlsProvider>(
+    label: &str,
+    connection: &Connection<P>,
+) {
     println!("[{label}] state = {}", connection.state().label());
 }
 

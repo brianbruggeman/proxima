@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use proxima::error::ProximaError;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::prime::PrimeRuntime;
 use proxima::request::{Request, Response};
 use proxima::runtime::PrimeServeExt;
@@ -57,7 +57,6 @@ impl SendPipe for BlockingHandler {
         }
     }
 }
-
 
 fn reserve_port() -> SocketAddr {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");

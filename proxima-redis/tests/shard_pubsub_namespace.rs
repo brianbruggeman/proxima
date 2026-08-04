@@ -121,7 +121,11 @@ async fn read_reply(stream: &mut TcpStream, buffered: &mut Vec<u8>) -> RespValue
 /// short deadline is enough because the driver's push race
 /// (`proxima_listen::wait_for_wire_event`) delivers same-process traffic
 /// near-instantly when it IS going to arrive at all.
-async fn assert_no_frame_arrives(stream: &mut TcpStream, buffered: &mut Vec<u8>, timeout: Duration) {
+async fn assert_no_frame_arrives(
+    stream: &mut TcpStream,
+    buffered: &mut Vec<u8>,
+    timeout: Duration,
+) {
     match parse(buffered) {
         Ok((frame, _)) => panic!("unexpected frame already buffered: {frame:?}"),
         Err(ParseError::Malformed(reason)) => panic!("malformed bytes already buffered: {reason}"),
@@ -145,7 +149,9 @@ async fn assert_no_frame_arrives(stream: &mut TcpStream, buffered: &mut Vec<u8>,
 #[proxima::test(runtime = "tokio")]
 async fn spublish_is_delivered_to_an_ssubscribe_connection_as_smessage() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"SSUBSCRIBE", b"orders"]).await;
@@ -158,7 +164,9 @@ async fn spublish_is_delivered_to_an_ssubscribe_connection_as_smessage() {
         ])
     );
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"SPUBLISH", b"orders", b"shipped"]).await;
     assert_eq!(
@@ -182,13 +190,17 @@ async fn spublish_is_delivered_to_an_ssubscribe_connection_as_smessage() {
 #[proxima::test(runtime = "tokio")]
 async fn spublish_does_not_cross_into_a_regular_subscribe_connection() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"SUBSCRIBE", b"orders"]).await;
     let _ack = read_reply(&mut subscriber, &mut subscriber_buf).await;
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"SPUBLISH", b"orders", b"shipped"]).await;
     assert_eq!(
@@ -197,7 +209,12 @@ async fn spublish_does_not_cross_into_a_regular_subscribe_connection() {
         "SPUBLISH must report zero shard subscribers even though a regular SUBSCRIBE exists"
     );
 
-    assert_no_frame_arrives(&mut subscriber, &mut subscriber_buf, Duration::from_millis(200)).await;
+    assert_no_frame_arrives(
+        &mut subscriber,
+        &mut subscriber_buf,
+        Duration::from_millis(200),
+    )
+    .await;
 }
 
 /// The reverse direction: a regular `PUBLISH orders` must NOT reach a
@@ -205,13 +222,17 @@ async fn spublish_does_not_cross_into_a_regular_subscribe_connection() {
 #[proxima::test(runtime = "tokio")]
 async fn publish_does_not_cross_into_an_ssubscribe_connection() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"SSUBSCRIBE", b"orders"]).await;
     let _ack = read_reply(&mut subscriber, &mut subscriber_buf).await;
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"PUBLISH", b"orders", b"regular"]).await;
     assert_eq!(
@@ -220,7 +241,12 @@ async fn publish_does_not_cross_into_an_ssubscribe_connection() {
         "PUBLISH must report zero regular subscribers even though an SSUBSCRIBE exists"
     );
 
-    assert_no_frame_arrives(&mut subscriber, &mut subscriber_buf, Duration::from_millis(200)).await;
+    assert_no_frame_arrives(
+        &mut subscriber,
+        &mut subscriber_buf,
+        Duration::from_millis(200),
+    )
+    .await;
 }
 
 /// Regression: the regular pub/sub path stays unbroken — `PUBLISH` still
@@ -229,13 +255,17 @@ async fn publish_does_not_cross_into_an_ssubscribe_connection() {
 #[proxima::test(runtime = "tokio")]
 async fn publish_still_reaches_a_regular_subscribe_connection_as_message() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"SUBSCRIBE", b"orders"]).await;
     let _ack = read_reply(&mut subscriber, &mut subscriber_buf).await;
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"PUBLISH", b"orders", b"regular"]).await;
     assert_eq!(
@@ -302,7 +332,10 @@ async fn bare_sunsubscribe_clears_every_shard_subscription_and_exits_subscriber_
     );
 
     send_command(&mut client, &[b"GET", b"k"]).await;
-    assert_eq!(read_reply(&mut client, &mut buffered).await, RespValue::Null);
+    assert_eq!(
+        read_reply(&mut client, &mut buffered).await,
+        RespValue::Null
+    );
 }
 
 /// A live regular subscription keeps the connection gated even after every

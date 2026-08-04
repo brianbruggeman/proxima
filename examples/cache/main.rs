@@ -180,7 +180,6 @@ impl SendPipe for CachedOriginDispatch {
     }
 }
 
-
 // ── the origin: a synth upstream with a call counter ────────────────────────
 //
 // SynthUpstream itself doesn't count calls; this wrapper is the same
@@ -208,4 +207,3 @@ impl SendPipe for CountingOrigin {
         async move { SendPipe::call(inner.as_ref(), request).await }
     }
 }
-

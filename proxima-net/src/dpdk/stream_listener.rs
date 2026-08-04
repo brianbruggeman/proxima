@@ -14,17 +14,19 @@
 
 use super::port::{self, Port};
 use super::{DpdkError, Eal, Mempool, RawMbuf};
-use core::future::Future;
-use core::pin::pin;
-use futures::io::{AsyncRead, AsyncWrite};
-use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
-use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
-use proxima_protocols::inet::tcp::{self, TcpHeader};
 use crate::stack::{self, Action};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
-use proxima_primitives::stream::{BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream};
+use core::future::Future;
+use core::pin::pin;
+use futures::io::{AsyncRead, AsyncWrite};
+use proxima_primitives::stream::{
+    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+};
 use proxima_primitives::sync::{AsyncMutex, AsyncMutexGuard};
+use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
+use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
+use proxima_protocols::inet::tcp::{self, TcpHeader};
 use proxima_protocols::tcp::time::Instant as TcpInstant;
 use std::collections::HashMap;
 use std::io;

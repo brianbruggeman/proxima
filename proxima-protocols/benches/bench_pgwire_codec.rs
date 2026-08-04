@@ -12,9 +12,13 @@ use pgwire::messages::extendedquery::{
 use pgwire::messages::response::{ReadyForQuery, TransactionStatus as PgTransactionStatus};
 use pgwire::messages::startup::{Authentication, BackendKeyData, ParameterStatus};
 use proxima_protocols::pgwire_codec::AuthRequest;
-use proxima_protocols::pgwire_codec::backend::{BackendMessage, DataRowWriter, RowDescriptionWriter};
+use proxima_protocols::pgwire_codec::backend::{
+    BackendMessage, DataRowWriter, RowDescriptionWriter,
+};
 use proxima_protocols::pgwire_codec::frontend::{parse_frontend, parse_initial};
-use proxima_protocols::pgwire_codec::types::{FormatCode, Oid, PgStr, ProtocolVersion, TransactionStatus};
+use proxima_protocols::pgwire_codec::types::{
+    FormatCode, Oid, PgStr, ProtocolVersion, TransactionStatus,
+};
 use proxima_protocols::pgwire_codec::views::FieldDescription as ProxFieldDescription;
 
 const MEASUREMENT_SECS: u64 = 2;

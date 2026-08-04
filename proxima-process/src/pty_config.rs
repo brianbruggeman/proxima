@@ -144,7 +144,8 @@ impl PtyConfig {
     /// size, all wired through the typestate builder.
     pub fn into_pty_command_pipe(
         self,
-    ) -> Result<PtyCommandPipe<alloc_tier::PipeHandle<ChildRequest, ChildResponse>>, ProximaError> {
+    ) -> Result<PtyCommandPipe<alloc_tier::PipeHandle<ChildRequest, ChildResponse>>, ProximaError>
+    {
         self.validate()
             .map_err(|err| ProximaError::Body(format!("{err}")))?;
         let chain = self.command.dispatch.clone().into_dyn_chain();

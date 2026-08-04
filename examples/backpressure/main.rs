@@ -17,8 +17,8 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use proxima_core::live::{Live, LiveControl, live};
-use proxima_primitives::pipe::{BatchSource, SendPipe};
 use proxima_primitives::pipe::{AtomicGate, Batch, BoundedQueue, Demand, EnqueueOutcome, FailMode};
+use proxima_primitives::pipe::{BatchSource, SendPipe};
 
 #[proxima::main(cores = 1)]
 async fn main() {

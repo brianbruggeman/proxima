@@ -70,7 +70,6 @@ impl SendPipe for Offload {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -162,7 +161,6 @@ mod tests {
         }
     }
 
-
     struct FixedBody;
 
     impl SendPipe for FixedBody {
@@ -177,7 +175,6 @@ mod tests {
             async move { Ok(Response::ok("payload")) }
         }
     }
-
 
     fn request() -> Request<Bytes> {
         Request::builder()

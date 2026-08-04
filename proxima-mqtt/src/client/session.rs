@@ -28,7 +28,7 @@ use std::collections::VecDeque;
 use proxima_protocols::mqtt::encode::{
     encode_connect, encode_pingreq, encode_publish, encode_subscribe, encode_unsubscribe,
 };
-use proxima_protocols::mqtt::{MqttReply, PacketType, ParseError, Packet, parse_packet};
+use proxima_protocols::mqtt::{MqttReply, Packet, PacketType, ParseError, parse_packet};
 
 use crate::client::config::MqttClientConfig;
 
@@ -170,10 +170,22 @@ impl ClientSession {
             }
             1 => {
                 let id = self.alloc_packet_id();
-                encode_publish(topic, Some(id), payload, 1, false, retain, &mut self.outbound);
+                encode_publish(
+                    topic,
+                    Some(id),
+                    payload,
+                    1,
+                    false,
+                    retain,
+                    &mut self.outbound,
+                );
                 self.pending = Some(Pending::PubAck(id));
             }
-            _ => return Err(ClientError::Protocol("qos 2 publish is not supported by this client")),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "qos 2 publish is not supported by this client",
+                ));
+            }
         }
         Ok(())
     }
@@ -257,10 +269,20 @@ impl ClientSession {
             Some(Inbound::SubAck { packet_id, granted }) => {
                 Ok(PushStep::Frame(MqttReply::SubAck { packet_id, granted }))
             }
-            Some(Inbound::Publish { topic, payload, qos, retain }) => {
-                Ok(PushStep::Frame(MqttReply::Publish { topic, payload, qos, retain }))
-            }
-            Some(_) => Err(ClientError::Protocol("unexpected packet while awaiting pub/sub pushes")),
+            Some(Inbound::Publish {
+                topic,
+                payload,
+                qos,
+                retain,
+            }) => Ok(PushStep::Frame(MqttReply::Publish {
+                topic,
+                payload,
+                qos,
+                retain,
+            })),
+            Some(_) => Err(ClientError::Protocol(
+                "unexpected packet while awaiting pub/sub pushes",
+            )),
         }
     }
 
@@ -274,7 +296,9 @@ impl ClientSession {
                 self.phase = Phase::Ready;
                 Ok(Step::Ready)
             }
-            Some(_) => Err(ClientError::Protocol("expected CONNACK during the handshake")),
+            Some(_) => Err(ClientError::Protocol(
+                "expected CONNACK during the handshake",
+            )),
         }
     }
 
@@ -301,24 +325,37 @@ impl ClientSession {
                 return Err(ClientError::Protocol("invalid packet type"));
             }
             Err(ParseError::RemainingLengthOverflow) => {
-                return Err(ClientError::Protocol("remaining-length varint exceeds 4 bytes"));
+                return Err(ClientError::Protocol(
+                    "remaining-length varint exceeds 4 bytes",
+                ));
             }
             Err(ParseError::Malformed(reason)) => return Err(ClientError::Protocol(reason)),
             Ok(result) => result,
         };
         let inbound = match packet {
             Packet::ConnAck { return_code, .. } => Inbound::ConnAck { return_code },
-            Packet::Ack { packet_type: PacketType::PubAck, packet_id } => {
-                Inbound::PubAck { packet_id }
-            }
-            Packet::Ack { packet_type: PacketType::UnsubAck, packet_id } => {
-                Inbound::UnsubAck { packet_id }
-            }
-            Packet::SubAck { packet_id, return_codes } => {
-                Inbound::SubAck { packet_id, granted: return_codes.to_vec() }
-            }
+            Packet::Ack {
+                packet_type: PacketType::PubAck,
+                packet_id,
+            } => Inbound::PubAck { packet_id },
+            Packet::Ack {
+                packet_type: PacketType::UnsubAck,
+                packet_id,
+            } => Inbound::UnsubAck { packet_id },
+            Packet::SubAck {
+                packet_id,
+                return_codes,
+            } => Inbound::SubAck {
+                packet_id,
+                granted: return_codes.to_vec(),
+            },
             Packet::PingResp => Inbound::PingResp,
-            Packet::Publish { flags, topic, payload, .. } => Inbound::Publish {
+            Packet::Publish {
+                flags,
+                topic,
+                payload,
+                ..
+            } => Inbound::Publish {
                 topic: topic.to_vec(),
                 payload: payload.to_vec(),
                 qos: flags.qos,
@@ -335,12 +372,26 @@ impl ClientSession {
 /// analogue of `RespValue::from_frame`'s borrowed-to-owned lift, scoped to
 /// exactly the packet shapes a broker legitimately sends this client.
 enum Inbound {
-    ConnAck { return_code: u8 },
-    PubAck { packet_id: u16 },
-    SubAck { packet_id: u16, granted: Vec<u8> },
-    UnsubAck { packet_id: u16 },
+    ConnAck {
+        return_code: u8,
+    },
+    PubAck {
+        packet_id: u16,
+    },
+    SubAck {
+        packet_id: u16,
+        granted: Vec<u8>,
+    },
+    UnsubAck {
+        packet_id: u16,
+    },
     PingResp,
-    Publish { topic: Vec<u8>, payload: Vec<u8>, qos: u8, retain: bool },
+    Publish {
+        topic: Vec<u8>,
+        payload: Vec<u8>,
+        qos: u8,
+        retain: bool,
+    },
 }
 
 fn complete_pending(pending: Pending, inbound: Inbound) -> Result<MqttReply, ClientError> {
@@ -352,7 +403,9 @@ fn complete_pending(pending: Pending, inbound: Inbound) -> Result<MqttReply, Cli
             Ok(MqttReply::UnsubAck { packet_id })
         }
         (Pending::PingResp, Inbound::PingResp) => Ok(MqttReply::Pong),
-        _ => Err(ClientError::Protocol("reply did not match the pending request")),
+        _ => Err(ClientError::Protocol(
+            "reply did not match the pending request",
+        )),
     }
 }
 
@@ -372,7 +425,9 @@ fn connack_error(return_code: u8) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_protocols::mqtt::encode::{encode_connack, encode_pingresp, encode_publish as encode_publish_frame, encode_suback};
+    use proxima_protocols::mqtt::encode::{
+        encode_connack, encode_pingresp, encode_publish as encode_publish_frame, encode_suback,
+    };
 
     fn drive_handshake(session: &mut ClientSession, server_replies: &[&[u8]]) {
         let mut reply_index = 0;
@@ -443,7 +498,9 @@ mod tests {
         let mut session = ClientSession::new(&config);
         drive_handshake(&mut session, &[connack(0).as_slice()]);
 
-        session.submit_publish(b"a/b", b"hi", 0, false).expect("submit");
+        session
+            .submit_publish(b"a/b", b"hi", 0, false)
+            .expect("submit");
         match session.advance().expect("advance") {
             Step::Send => {}
             other => panic!("expected Send (PUBLISH), got {other:?}"),
@@ -461,15 +518,25 @@ mod tests {
         let mut session = ClientSession::new(&config);
         drive_handshake(&mut session, &[connack(0).as_slice()]);
 
-        session.submit_publish(b"a/b", b"hi", 1, false).expect("submit");
+        session
+            .submit_publish(b"a/b", b"hi", 1, false)
+            .expect("submit");
         let sent = session.take_outbound();
         let (packet, _) = proxima_protocols::mqtt::parse_packet(&sent).expect("valid PUBLISH");
-        let proxima_protocols::mqtt::Packet::Publish { packet_id: Some(id), .. } = packet else {
+        let proxima_protocols::mqtt::Packet::Publish {
+            packet_id: Some(id),
+            ..
+        } = packet
+        else {
             panic!("expected a QoS 1 PUBLISH with a packet id");
         };
 
         let mut ack = Vec::new();
-        proxima_protocols::mqtt::encode::encode_ack(proxima_protocols::mqtt::PacketType::PubAck, id, &mut ack);
+        proxima_protocols::mqtt::encode::encode_ack(
+            proxima_protocols::mqtt::PacketType::PubAck,
+            id,
+            &mut ack,
+        );
         session.feed(&ack);
         match session.advance().expect("advance") {
             Step::Complete(MqttReply::PubAck { packet_id }) => assert_eq!(packet_id, id),
@@ -529,6 +596,9 @@ mod tests {
         let mut pong = Vec::new();
         encode_pingresp(&mut pong);
         session.feed(&pong);
-        assert!(matches!(session.advance().expect("advance"), Step::Complete(MqttReply::Pong)));
+        assert!(matches!(
+            session.advance().expect("advance"),
+            Step::Complete(MqttReply::Pong)
+        ));
     }
 }

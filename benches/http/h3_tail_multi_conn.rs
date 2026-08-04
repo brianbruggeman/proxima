@@ -52,7 +52,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 fn multi_conn(criterion: &mut Criterion) {
     let runtime = h3_setup::build_runtime();
     let dispatch: PipeHandle = into_handle(ConstantOk);

@@ -56,14 +56,14 @@ use rustc_hash::FxHashMap;
 
 use proxima_core::ProximaError;
 use proxima_listen::admission::{ConnAdmission, RequestAdmit};
-use proxima_protocols::http2_codec::connection::{Connection, ConnectionEvent, SendOutcome};
-use proxima_protocols::http2_codec::frame::StandardSettings;
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::body::{ChunkStream, RequestStream};
-use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
 use proxima_primitives::stream::PeerInfo;
+use proxima_protocols::http2_codec::connection::{Connection, ConnectionEvent, SendOutcome};
+use proxima_protocols::http2_codec::frame::StandardSettings;
 
 /// INTERNAL_ERROR code per RFC 7540 §7.
 const INTERNAL_ERROR: u32 = 0x2;
@@ -515,7 +515,11 @@ fn process_handler_completion(
             match emit_response_head_and_first_pull(connection, stream_id, response) {
                 Ok(pull) => chunk_pulls.push(pull),
                 Err(render_error) => {
-                    tracing::warn!(?render_error, stream_id, "h2 native rejection render failed");
+                    tracing::warn!(
+                        ?render_error,
+                        stream_id,
+                        "h2 native rejection render failed"
+                    );
                     let _ = connection.send_rst(stream_id, INTERNAL_ERROR);
                 }
             }
@@ -611,8 +615,7 @@ fn build_request(
         peer,
         ..RequestContext::default()
     };
-    let (trace_id, baggage) =
-        proxima_telemetry::propagation::establish_trace_context(&header_list);
+    let (trace_id, baggage) = proxima_telemetry::propagation::establish_trace_context(&header_list);
     context.adopt_trace_context(trace_id, baggage);
     let request = Request {
         method: Method::from_wire(method_bytes),

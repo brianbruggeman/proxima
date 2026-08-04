@@ -44,9 +44,9 @@ use crate::source::{DynRecordingSource, RecordingSource};
 #[cfg(feature = "std")]
 use proxima_core::ProximaError;
 #[cfg(feature = "std")]
-use proxima_primitives::pipe::body::ResponseStream;
-#[cfg(feature = "std")]
 use proxima_primitives::pipe::SendPipe;
+#[cfg(feature = "std")]
+use proxima_primitives::pipe::body::ResponseStream;
 #[cfg(feature = "std")]
 use proxima_primitives::pipe::handler::{PipeHandle, into_handle};
 #[cfg(feature = "std")]

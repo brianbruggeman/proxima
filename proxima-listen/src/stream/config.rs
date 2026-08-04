@@ -280,7 +280,10 @@ mod tests {
         // the env-overlay (from_env, no vars set) must agree with the const too.
         temp_env::with_vars::<&str, &str, _, _>([], || {
             let from_env = ListenerStreamConfig::from_env().expect("from_env");
-            assert_eq!(from_env.method, super::super::sized::LISTENER_METHOD_DEFAULT);
+            assert_eq!(
+                from_env.method,
+                super::super::sized::LISTENER_METHOD_DEFAULT
+            );
             assert_eq!(from_env.path, super::super::sized::LISTENER_PATH_DEFAULT);
             assert_eq!(
                 from_env.chunk_bytes,

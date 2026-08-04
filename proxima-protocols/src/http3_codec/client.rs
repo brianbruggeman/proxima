@@ -18,7 +18,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// Map cap — pulled from `sized.rs`. heapless requires a power of two.
-const STREAMS_CAP: usize = crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_CLIENT_MAX_CONCURRENT_REQUESTS;
+const STREAMS_CAP: usize =
+    crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_CLIENT_MAX_CONCURRENT_REQUESTS;
 /// Ceiling on recycled outbound buffers kept in the free-list.
 const OUTBOUND_POOL_CAP: usize = 64;
 type StreamMap = heapless::index_map::FnvIndexMap<u64, StreamEntry, STREAMS_CAP>;
@@ -252,8 +253,9 @@ impl ClientConnection {
     #[cfg(feature = "http3_codec-part-source")]
     pub fn enable_header_source_mode(&mut self) {
         self.response_header_mode = ResponseHeaderMode::Source;
-        self.header_source_queue
-            .size_scratch(crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN);
+        self.header_source_queue.size_scratch(
+            crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN,
+        );
     }
 
     /// Drain one queued response-HEADERS field section as a borrowed
@@ -789,7 +791,8 @@ fn apply_response_frame(
 /// `decode_bounded` performed happens here too — only the "own every field"
 /// step is skipped. `None` if `:status` is absent or not a valid `u16`.
 fn decode_status(header_block: &[u8], cap: u64) -> Result<Option<u16>, ClientError> {
-    let mut scratch = [0u8; crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
+    let mut scratch =
+        [0u8; crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
     let mut status = None;
     let mut sink = |name: &[u8], value: &[u8]| -> Result<(), qpack::decoder::DecodeError> {
         if name == b":status" {
@@ -809,7 +812,8 @@ fn decode_status(header_block: &[u8], cap: u64) -> Result<Option<u16>, ClientErr
 /// same cap-enforcement / malformed-input rejection `decode_bounded`
 /// provided before this redesign.
 fn validate_trailers(header_block: &[u8], cap: u64) -> Result<(), ClientError> {
-    let mut scratch = [0u8; crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
+    let mut scratch =
+        [0u8; crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
     let mut sink = |_: &[u8], _: &[u8]| -> Result<(), qpack::decoder::DecodeError> { Ok(()) };
     qpack::decoder::decode_into(header_block, cap, &mut scratch, &mut sink)?;
     Ok(())

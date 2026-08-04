@@ -5,9 +5,9 @@ use crate::pipe::delay::{Delay, Dist};
 #[cfg(feature = "std")]
 use crate::pipe::filter::{FilterConfig, Predicate, RejectMode};
 #[cfg(feature = "std")]
-use crate::pipe::mutate::{MutateOp, Mutation};
-#[cfg(feature = "std")]
 use crate::pipe::handler::{PipeHandle, into_handle};
+#[cfg(feature = "std")]
+use crate::pipe::mutate::{MutateOp, Mutation};
 #[cfg(feature = "std")]
 use crate::pipe::transform::{ResponseOp, Transform};
 #[cfg(feature = "std")]
@@ -194,9 +194,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use crate::pipe::SendPipe;
     use bytes::Bytes;
     use proxima_core::ProximaError;
-    use crate::pipe::SendPipe;
 
     use crate::pipe::handler::into_handle;
     use crate::pipe::request::{Request, Response};
@@ -233,7 +233,6 @@ mod tests {
             }
         }
     }
-
 
     const PAYLOAD: &[u8] = b"the quick brown fox jumps over the lazy dog";
 

@@ -24,7 +24,7 @@ use futures::channel::oneshot;
 use proxima::error::ProximaError;
 use proxima::listen::ListenProtocol;
 use proxima::listeners::H3ListenProtocol;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::telemetry::NoopTelemetry;
 use proxima_primitives::pipe::SendPipe;
@@ -43,7 +43,6 @@ impl SendPipe for ConstantOk {
         async move { Ok(Response::ok(Bytes::from_static(b"ok"))) }
     }
 }
-
 
 #[derive(Debug)]
 struct AcceptAnyCert;
@@ -217,7 +216,9 @@ impl SendPipe for FilterRoutedPipe {
     }
 }
 
-async fn drain_body(stream: &mut h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>) -> Vec<u8> {
+async fn drain_body(
+    stream: &mut h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+) -> Vec<u8> {
     let mut body = bytes::BytesMut::new();
     while let Some(mut chunk) = stream.recv_data().await.unwrap() {
         while bytes::Buf::has_remaining(&chunk) {
@@ -295,7 +296,10 @@ async fn h3_listener_filter_rejection_renders_403_and_connection_survives() {
     rejected_stream.finish().await.unwrap();
     let response = rejected_stream.recv_response().await.unwrap();
     assert_eq!(response.status(), 403, "filter rejection renders as 403");
-    assert_eq!(&drain_body(&mut rejected_stream).await[..], b"blocked by filter");
+    assert_eq!(
+        &drain_body(&mut rejected_stream).await[..],
+        b"blocked by filter"
+    );
 
     // Same connection, next request: proves the rejection didn't
     // kill the underlying QUIC connection — the h3 bug's actual

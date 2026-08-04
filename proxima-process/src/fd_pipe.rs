@@ -34,7 +34,9 @@ use bytes::Bytes;
 use futures::executor::block_on;
 use futures::stream::{self, StreamExt};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::{ChunkStream, ProximaError, Request, RequestStream, Response, ResponseStream};
+use proxima_primitives::pipe::{
+    ChunkStream, ProximaError, Request, RequestStream, Response, ResponseStream,
+};
 use proxima_primitives::sync::mpsc;
 
 /// Allocate a `pipe(2)` and return `(read_end, write_end)`.
@@ -124,7 +126,6 @@ impl SendPipe for FdPairPipe {
         }
     }
 }
-
 
 /// Drain `request_body` into `write_end` on a worker thread.
 /// Closing `write_end` (dropped on closure exit) signals EOF to

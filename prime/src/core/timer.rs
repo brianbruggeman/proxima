@@ -426,8 +426,8 @@ impl<C: Clock> TimerWheel<C> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::testing::TestClock;
+    use super::*;
     use alloc::sync::Arc as StdArc;
     use alloc::task::Wake;
     use core::sync::atomic::{AtomicU64, Ordering};

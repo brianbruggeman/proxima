@@ -9,16 +9,16 @@ use bytes::Bytes;
 use smallvec::SmallVec;
 
 use crate::clock::Clock;
+#[cfg(feature = "elevation")]
+use crate::id::TraceId;
 use crate::level::Level;
 use crate::log::LogRecord;
+#[cfg(feature = "elevation")]
+use crate::log_buffer::ring::LogRing;
 use crate::metric::MetricSample;
 use crate::recorder::SystemClock;
 use crate::tag::{ScalarValue, Tag};
 use crate::trace::{EventRecord, SpanLink, SpanRecord};
-#[cfg(feature = "elevation")]
-use crate::id::TraceId;
-#[cfg(feature = "elevation")]
-use crate::log_buffer::ring::LogRing;
 #[cfg(feature = "elevation")]
 use core::sync::atomic::AtomicU64;
 #[cfg(feature = "elevation")]
@@ -64,7 +64,8 @@ pub type TelemetryRequest = Request<TelemetryRecord>;
 /// generic erased form `proxima_primitives::pipe::PipeHandle<In, Out>` — parallel
 /// to the HTTP-shaped `proxima_primitives::pipe::handler::PipeHandle` but typed for
 /// `TelemetryRequest` instead of `Request<Bytes>`.
-pub type TelemetryPipeHandle = proxima_primitives::pipe::alloc_tier::PipeHandle<TelemetryRequest, Response<Bytes>>;
+pub type TelemetryPipeHandle =
+    proxima_primitives::pipe::alloc_tier::PipeHandle<TelemetryRequest, Response<Bytes>>;
 
 pub use proxima_primitives::pipe::alloc_tier::into_handle as into_telemetry_handle;
 
@@ -196,7 +197,8 @@ impl SendPipe for FloorFilter {
         request: TelemetryRequest,
     ) -> impl StdFuture<Output = Result<Response<Bytes>, ProximaError>> + Send {
         // filtering is synchronous; the returned future is the inner handle's own.
-        self.inner.call_dyn(retain_floor(request, self.floor_severity))
+        self.inner
+            .call_dyn(retain_floor(request, self.floor_severity))
     }
 }
 
@@ -1824,7 +1826,12 @@ fn format_log(buf: &mut proxima_core::batch::BatchBuffer, record: &LogRecord, fo
             if tags.is_empty() {
                 alloc::format!("{ts} {level} {}:{span} {}\n", record.module_path, body)
             } else {
-                alloc::format!("{ts} {level} {}:{span} {} {}\n", record.module_path, body, tags)
+                alloc::format!(
+                    "{ts} {level} {}:{span} {} {}\n",
+                    record.module_path,
+                    body,
+                    tags
+                )
             }
         }
         LogFormat::Json => {
@@ -4617,7 +4624,12 @@ mod elevation_sink_tests {
             }
         }
         fn timestamps(&self) -> Vec<u64> {
-            self.seen.lock().unwrap().iter().map(|record| record.ts_ns).collect()
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|record| record.ts_ns)
+                .collect()
         }
     }
 
@@ -4707,7 +4719,10 @@ mod elevation_sink_tests {
             ]),
         ))
         .expect("buffer ok");
-        assert!(capture.timestamps().is_empty(), "no trigger yet: nothing replayed");
+        assert!(
+            capture.timestamps().is_empty(),
+            "no trigger yet: nothing replayed"
+        );
 
         block_on(SendPipe::call(
             &sink,
@@ -4730,8 +4745,15 @@ mod elevation_sink_tests {
         let trace = trace_id(3);
         let mut record = verbose_log(trace, Level::ERROR, 100);
         record.trace_flags = TraceFlags::SAMPLED; // not verbose-buffered
-        block_on(SendPipe::call(&sink, log_batch_request(alloc::vec![record]))).expect("ok");
-        assert!(capture.timestamps().is_empty(), "non-verbose error is not replayed");
+        block_on(SendPipe::call(
+            &sink,
+            log_batch_request(alloc::vec![record]),
+        ))
+        .expect("ok");
+        assert!(
+            capture.timestamps().is_empty(),
+            "non-verbose error is not replayed"
+        );
     }
 
     // root-span close is the completion signal: an untriggered trace's buffer is
@@ -4746,7 +4768,11 @@ mod elevation_sink_tests {
             log_batch_request(alloc::vec![verbose_log(trace, Level::INFO, 100)]),
         ))
         .expect("ok");
-        block_on(SendPipe::call(&sink, span_batch_request(alloc::vec![root_span(trace)]))).expect("ok");
+        block_on(SendPipe::call(
+            &sink,
+            span_batch_request(alloc::vec![root_span(trace)]),
+        ))
+        .expect("ok");
         block_on(SendPipe::call(
             &sink,
             log_batch_request(alloc::vec![verbose_log(trace, Level::ERROR, 200)]),
@@ -4768,7 +4794,11 @@ mod elevation_sink_tests {
         for (index, byte) in [10u8, 11, 12].into_iter().enumerate() {
             block_on(SendPipe::call(
                 &sink,
-                log_batch_request(alloc::vec![verbose_log(trace_id(byte), Level::INFO, index as u64 + 1)]),
+                log_batch_request(alloc::vec![verbose_log(
+                    trace_id(byte),
+                    Level::INFO,
+                    index as u64 + 1
+                )]),
             ))
             .expect("ok");
         }

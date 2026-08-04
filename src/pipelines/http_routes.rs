@@ -70,7 +70,6 @@ impl SendPipe for PipelineControlPlanePipe {
     }
 }
 
-
 async fn route(
     plane: DynPipelineControlPlane,
     request: Request<Bytes>,

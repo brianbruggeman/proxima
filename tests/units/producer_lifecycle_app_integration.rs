@@ -53,10 +53,7 @@ impl SendPipe for CountingSource {
     }
 }
 
-fn spawn_all(
-    app: &App,
-    lifecycle: &mut proxima_primitives::pipe::ProducerLifecycle,
-) {
+fn spawn_all(app: &App, lifecycle: &mut proxima_primitives::pipe::ProducerLifecycle) {
     for name in app.sources().map(str::to_string).collect::<Vec<_>>() {
         let handle = app.lookup_source(&name).expect("registered source");
         lifecycle.spawn_from_source(&name, &handle);

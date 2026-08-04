@@ -58,7 +58,6 @@ impl SendPipe for SharedCounterPipe {
     }
 }
 
-
 // `#[proxima::main(cores = 1)]` supplies the one throwaway core
 // `App::builder()` needs before `.with_runtime(...)` below overrides each
 // app's runtime with the real prime/tokio one — no env var, no reaching

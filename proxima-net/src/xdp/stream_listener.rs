@@ -27,14 +27,16 @@ use super::sized;
 use super::sys;
 use super::uapi::{self, xdp_desc};
 use super::xsk::{RingSizes, UmemConfig, XskSocket};
-use futures::io::{AsyncRead, AsyncWrite};
-use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
-use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
-use proxima_protocols::inet::tcp::{self, TcpHeader};
 use crate::stack::{self, Action};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
-use proxima_primitives::stream::{BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream};
+use futures::io::{AsyncRead, AsyncWrite};
+use proxima_primitives::stream::{
+    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+};
+use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
+use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
+use proxima_protocols::inet::tcp::{self, TcpHeader};
 use proxima_protocols::tcp::time::Instant as TcpInstant;
 use std::collections::HashMap;
 use std::io;

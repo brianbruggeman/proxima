@@ -41,9 +41,9 @@ use bytes::Bytes;
 use proxima_codec::FrameCodec;
 
 use crate::codec_pipe::{Incomplete, OwnFrame};
-use crate::dns::codec_trait::parse_message;
 #[cfg(not(proxima_alloc))]
 use crate::dns::Name;
+use crate::dns::codec_trait::parse_message;
 
 /// RFC 1035 §4.2.2 length-prefix width, in bytes.
 const TCP_LENGTH_PREFIX_BYTES: usize = 2;
@@ -368,7 +368,9 @@ mod tests {
     #[test]
     fn encode_frame_prefixes_the_length_and_copies_the_body() {
         let mut dest = Vec::new();
-        codec().encode_frame(&b"hello".as_slice(), &mut dest).expect("encode");
+        codec()
+            .encode_frame(&b"hello".as_slice(), &mut dest)
+            .expect("encode");
         assert_eq!(dest, [0u8, 5, b'h', b'e', b'l', b'l', b'o']);
     }
 

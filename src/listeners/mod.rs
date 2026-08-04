@@ -57,16 +57,16 @@ pub use proxima_listen::stream::default_listener as stream_default;
 // "whichever backend the process selected" without naming either goes
 // through `RuntimeSelection::packet_listener_factory` (`crate::runtime`)
 // instead of either re-export below.
-#[cfg(all(feature = "udp", feature = "tokio"))]
-pub use proxima_net::tokio::tokio_packet;
+#[cfg(feature = "websocket")]
+pub use proxima_http::websocket;
 #[cfg(all(
     feature = "udp",
     feature = "runtime-prime-inbox-alloc",
     any(target_os = "linux", target_os = "macos")
 ))]
 pub use proxima_net::prime::{PrimePacketListenerFactory, PrimeUdpListener};
-#[cfg(feature = "websocket")]
-pub use proxima_http::websocket;
+#[cfg(all(feature = "udp", feature = "tokio"))]
+pub use proxima_net::tokio::tokio_packet;
 #[cfg(all(any(feature = "tcp", feature = "unix"), feature = "tokio"))]
 pub use proxima_net::tokio::tokio_stream_listener as tokio_stream;
 #[cfg(feature = "redis-listener")]

@@ -79,7 +79,10 @@ pub enum Advanced<'a> {
     /// frame detail; `consumed` is always 0 (a framing violation leaves no
     /// trustworthy frame boundary to skip past) — the driver closes the
     /// connection rather than trying to resync.
-    ProtocolError { reason: &'static str, consumed: usize },
+    ProtocolError {
+        reason: &'static str,
+        consumed: usize,
+    },
     /// A still-incomplete frame already exceeds
     /// [`Limits::max_message_bytes`] — the DoS guard tripped. The driver
     /// closes the connection.
@@ -170,7 +173,10 @@ impl Connection {
     pub fn advance(&mut self) -> Advanced<'_> {
         match parse(&self.buffer[self.cursor..]) {
             Ok((frame, consumed)) => Advanced::Command { frame, consumed },
-            Err(ParseError::Malformed(reason)) => Advanced::ProtocolError { reason, consumed: 0 },
+            Err(ParseError::Malformed(reason)) => Advanced::ProtocolError {
+                reason,
+                consumed: 0,
+            },
             Err(ParseError::NeedMore) => {
                 if self.buffer.len() - self.cursor > self.limits.max_message_bytes {
                     Advanced::MessageTooLarge
@@ -350,10 +356,7 @@ mod tests {
         match connection.advance() {
             Advanced::Command { frame, consumed } => {
                 assert_eq!(consumed, wire.len());
-                assert_eq!(
-                    frame,
-                    Frame::Array(vec![Frame::BlobString(b"PING")])
-                );
+                assert_eq!(frame, Frame::Array(vec![Frame::BlobString(b"PING")]));
             }
             other => panic!("expected Command, got {other:?}"),
         }
@@ -371,7 +374,9 @@ mod tests {
 
     #[test]
     fn oversized_incomplete_frame_trips_message_too_large() {
-        let mut connection = Connection::with_limits(Limits { max_message_bytes: 10 });
+        let mut connection = Connection::with_limits(Limits {
+            max_message_bytes: 10,
+        });
         // a bulk string declaring a huge length, but only a few payload
         // bytes actually sent — NeedMore forever unless the guard trips.
         // 16 buffered bytes > the 10-byte cap.
@@ -381,7 +386,9 @@ mod tests {
 
     #[test]
     fn small_incomplete_frame_stays_need_more_under_the_cap() {
-        let mut connection = Connection::with_limits(Limits { max_message_bytes: 16 });
+        let mut connection = Connection::with_limits(Limits {
+            max_message_bytes: 16,
+        });
         connection.feed_bytes(b"$5\r\nhel");
         assert!(matches!(connection.advance(), Advanced::NeedMore));
     }
@@ -494,8 +501,16 @@ mod tests {
         connection.subscribe_shard(b"orders".to_vec());
         connection.subscribe_shard(b"payments".to_vec());
 
-        assert_eq!(connection.subscription_count(), 1, "regular count excludes shard channels");
-        assert_eq!(connection.shard_subscription_count(), 2, "shard count excludes regular channels");
+        assert_eq!(
+            connection.subscription_count(),
+            1,
+            "regular count excludes shard channels"
+        );
+        assert_eq!(
+            connection.shard_subscription_count(),
+            2,
+            "shard count excludes regular channels"
+        );
     }
 
     #[test]

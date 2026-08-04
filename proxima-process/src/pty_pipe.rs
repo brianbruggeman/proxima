@@ -313,7 +313,6 @@ where
     }
 }
 
-
 /// Cancel handle for the size-follower thread. Dropping the handle
 /// closes the cancel pipe's write end → the follower's poll wakes
 /// on POLLHUP → follower exits cleanly.

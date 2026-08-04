@@ -32,7 +32,9 @@ struct EchoDatagramProtocol {
 
 impl EchoDatagramProtocol {
     fn new() -> Self {
-        Self { pending_reply: None }
+        Self {
+            pending_reply: None,
+        }
     }
 }
 
@@ -66,7 +68,8 @@ impl DatagramProtocol for EchoDatagramProtocol {
         &mut self,
         _now: Instant,
         buf: &mut [u8],
-    ) -> impl std::future::Future<Output = Result<Option<(usize, SocketAddr)>, Self::Err>> + Send {
+    ) -> impl std::future::Future<Output = Result<Option<(usize, SocketAddr)>, Self::Err>> + Send
+    {
         let outcome = self.pending_reply.take().map(|(reply, peer)| {
             let len = reply.len().min(buf.len());
             buf[..len].copy_from_slice(&reply[..len]);

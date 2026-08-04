@@ -96,7 +96,12 @@ pub trait DatagramProtocol {
     /// older self-only elision rule and produce a future whose captured
     /// `datagram` borrow the trait signature never promised, which fails
     /// to typecheck at every impl site.
-    fn on_datagram(&mut self, now: Instant, peer: SocketAddr, datagram: &[u8]) -> impl Future<Output = Result<(), Self::Err>> + Send;
+    fn on_datagram(
+        &mut self,
+        now: Instant,
+        peer: SocketAddr,
+        datagram: &[u8],
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
 
     /// Fire the elapsed timer. Async for the same reason as
     /// [`on_datagram`](Self::on_datagram).
@@ -115,7 +120,11 @@ pub trait DatagramProtocol {
     /// Async for the same reason as [`on_datagram`](Self::on_datagram) —
     /// named `transmit` rather than `poll_transmit` now that it awaits
     /// rather than polls.
-    fn transmit(&mut self, now: Instant, buf: &mut [u8]) -> impl Future<Output = Result<Option<(usize, SocketAddr)>, Self::Err>> + Send;
+    fn transmit(
+        &mut self,
+        now: Instant,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<Option<(usize, SocketAddr)>, Self::Err>> + Send;
 }
 
 fn instant_now<Clk: Clock>(clock: &Clk) -> Instant {
@@ -203,11 +212,13 @@ where
 
         Box::pin(async move {
             let datagram_factory = datagram_factory.ok_or_else(|| {
-                ProximaError::Config("datagram protocol listener requires a datagram factory".into())
+                ProximaError::Config(
+                    "datagram protocol listener requires a datagram factory".into(),
+                )
             })?;
-            let mut socket = datagram_factory
-                .bind(bind)
-                .map_err(|err| ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {err}"))))?;
+            let mut socket = datagram_factory.bind(bind).map_err(|err| {
+                ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {err}")))
+            })?;
             if let Some(sender) = ready_signal {
                 let _ = sender.send(());
             }
@@ -281,7 +292,9 @@ where
                             socket.drain_recv_to_empty(&mut batch.recv);
                             let now = instant_now(&clock);
                             for view in batch.recv.filled_datagrams() {
-                                if let Err(error) = proto.on_datagram(now, view.peer, view.bytes).await {
+                                if let Err(error) =
+                                    proto.on_datagram(now, view.peer, view.bytes).await
+                                {
                                     warn!(
                                         ?error,
                                         label = %label,
@@ -326,12 +339,23 @@ where
 
                 let now = instant_now(&clock);
                 loop {
-                    let outcome = proto.transmit(now, &mut transmit_scratch).await.map_err(|error| {
-                        warn!(?error, label = %label, "datagram protocol transmit failed");
-                    });
+                    let outcome =
+                        proto
+                            .transmit(now, &mut transmit_scratch)
+                            .await
+                            .map_err(|error| {
+                                warn!(?error, label = %label, "datagram protocol transmit failed");
+                            });
                     match outcome {
                         Ok(Some((len, peer))) => {
-                            stage_reply(&mut socket, &mut batch, &transmit_scratch[..len], peer, &label).await?;
+                            stage_reply(
+                                &mut socket,
+                                &mut batch,
+                                &transmit_scratch[..len],
+                                peer,
+                                &label,
+                            )
+                            .await?;
                         }
                         Ok(None) | Err(()) => break,
                     }
@@ -379,7 +403,10 @@ mod tests {
 
     impl SharedSocket {
         fn new(local: SocketAddr) -> Self {
-            Self { state: Arc::new(Mutex::new(SocketState::default())), local }
+            Self {
+                state: Arc::new(Mutex::new(SocketState::default())),
+                local,
+            }
         }
 
         fn inject(&self, bytes: Vec<u8>, from: SocketAddr) {
@@ -396,7 +423,11 @@ mod tests {
     }
 
     impl DatagramSocket for SharedSocket {
-        fn poll_recv_from(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+        fn poll_recv_from(
+            &mut self,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
             let mut state = self.state.lock().unwrap();
             match state.inbound.pop_front() {
                 Some((bytes, from)) => {
@@ -411,7 +442,12 @@ mod tests {
             }
         }
 
-        fn poll_send_to(&mut self, _cx: &mut Context<'_>, buf: &[u8], peer: SocketAddr) -> std::task::Poll<io::Result<usize>> {
+        fn poll_send_to(
+            &mut self,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+            peer: SocketAddr,
+        ) -> std::task::Poll<io::Result<usize>> {
             self.state.lock().unwrap().sent.push((buf.to_vec(), peer));
             std::task::Poll::Ready(Ok(buf.len()))
         }
@@ -444,7 +480,12 @@ mod tests {
     impl DatagramProtocol for TimerDrivenProto {
         type Err = Infallible;
 
-        async fn on_datagram(&mut self, _now: Instant, _peer: SocketAddr, _datagram: &[u8]) -> Result<(), Infallible> {
+        async fn on_datagram(
+            &mut self,
+            _now: Instant,
+            _peer: SocketAddr,
+            _datagram: &[u8],
+        ) -> Result<(), Infallible> {
             Ok(())
         }
 
@@ -455,10 +496,18 @@ mod tests {
         }
 
         fn next_deadline(&self) -> Option<Instant> {
-            if self.emitted { None } else { Some(Instant::from_monotonic(Duration::ZERO)) }
+            if self.emitted {
+                None
+            } else {
+                Some(Instant::from_monotonic(Duration::ZERO))
+            }
         }
 
-        async fn transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
+        async fn transmit(
+            &mut self,
+            _now: Instant,
+            buf: &mut [u8],
+        ) -> Result<Option<(usize, SocketAddr)>, Infallible> {
             if !self.timer_fired || self.emitted {
                 return Ok(None);
             }
@@ -482,8 +531,16 @@ mod tests {
     impl DatagramProtocol for EchoAckProto {
         type Err = Infallible;
 
-        async fn on_datagram(&mut self, _now: Instant, peer: SocketAddr, datagram: &[u8]) -> Result<(), Infallible> {
-            self.received.lock().unwrap().push((datagram.to_vec(), peer));
+        async fn on_datagram(
+            &mut self,
+            _now: Instant,
+            peer: SocketAddr,
+            datagram: &[u8],
+        ) -> Result<(), Infallible> {
+            self.received
+                .lock()
+                .unwrap()
+                .push((datagram.to_vec(), peer));
             self.pending_reply = Some(peer);
             Ok(())
         }
@@ -496,7 +553,11 @@ mod tests {
             None
         }
 
-        async fn transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
+        async fn transmit(
+            &mut self,
+            _now: Instant,
+            buf: &mut [u8],
+        ) -> Result<Option<(usize, SocketAddr)>, Infallible> {
             match self.pending_reply.take() {
                 Some(peer) => {
                     let payload = b"ack";
@@ -517,7 +578,12 @@ mod tests {
     impl DatagramProtocol for NeverTimeoutProto {
         type Err = Infallible;
 
-        async fn on_datagram(&mut self, _now: Instant, _peer: SocketAddr, _datagram: &[u8]) -> Result<(), Infallible> {
+        async fn on_datagram(
+            &mut self,
+            _now: Instant,
+            _peer: SocketAddr,
+            _datagram: &[u8],
+        ) -> Result<(), Infallible> {
             Ok(())
         }
 
@@ -530,7 +596,11 @@ mod tests {
             None
         }
 
-        async fn transmit(&mut self, _now: Instant, _buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Infallible> {
+        async fn transmit(
+            &mut self,
+            _now: Instant,
+            _buf: &mut [u8],
+        ) -> Result<Option<(usize, SocketAddr)>, Infallible> {
             Ok(None)
         }
     }
@@ -545,7 +615,10 @@ mod tests {
         type Out = Response<bytes::Bytes>;
         type Err = ProximaError;
 
-        fn call(&self, _request: Request<bytes::Bytes>) -> impl Future<Output = Result<Response<bytes::Bytes>, ProximaError>> + Send {
+        fn call(
+            &self,
+            _request: Request<bytes::Bytes>,
+        ) -> impl Future<Output = Result<Response<bytes::Bytes>, ProximaError>> + Send {
             async move {
                 Ok(Response {
                     status: 200,
@@ -583,7 +656,9 @@ mod tests {
     async fn timer_fires_outbound_datagram_with_no_inbound_ever_fed() {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5301);
         let socket = SharedSocket::new(bind);
-        let factory = Arc::new(SharedFactory { socket: socket.clone() });
+        let factory = Arc::new(SharedFactory {
+            socket: socket.clone(),
+        });
         let reply_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), 44000);
         let on_timeout_calls = Arc::new(AtomicUsize::new(0));
         let build_calls = Arc::clone(&on_timeout_calls);
@@ -593,7 +668,11 @@ mod tests {
             on_timeout_calls: Arc::clone(&build_calls),
             reply_peer,
         };
-        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-timer", build, RecordingClock::new());
+        let protocol = DatagramProtocolListenProtocol::with_clock(
+            "dgram-proto-timer",
+            build,
+            RecordingClock::new(),
+        );
         let spec = serde_json::json!({});
         let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -602,29 +681,54 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let resolved_early = poll_n(&mut serve, &mut cx, 8);
-        assert!(!resolved_early, "serve must not resolve before shutdown fires");
+        assert!(
+            !resolved_early,
+            "serve must not resolve before shutdown fires"
+        );
 
-        assert!(!socket.sent().is_empty(), "timer-driven poll_transmit must ship an outbound datagram");
+        assert!(
+            !socket.sent().is_empty(),
+            "timer-driven poll_transmit must ship an outbound datagram"
+        );
         let sent = socket.sent();
         assert_eq!(sent.len(), 1, "exactly one retransmit datagram");
         assert_eq!(sent[0].0, b"retransmit");
         assert_eq!(sent[0].1, reply_peer);
-        assert_eq!(on_timeout_calls.load(Ordering::SeqCst), 1, "on_timeout ran exactly once before the emit");
-        assert!(socket.state.lock().unwrap().inbound.is_empty(), "no inbound datagram was ever fed");
+        assert_eq!(
+            on_timeout_calls.load(Ordering::SeqCst),
+            1,
+            "on_timeout ran exactly once before the emit"
+        );
+        assert!(
+            socket.state.lock().unwrap().inbound.is_empty(),
+            "no inbound datagram was ever fed"
+        );
 
         let _ = shutdown_tx.send(());
-        assert!(poll_n(&mut serve, &mut cx, 8), "serve resolves once shutdown fires");
+        assert!(
+            poll_n(&mut serve, &mut cx, 8),
+            "serve resolves once shutdown fires"
+        );
     }
 
     #[proxima::test]
     async fn recv_arm_feeds_on_datagram_and_drains_the_reply() {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5302);
         let socket = SharedSocket::new(bind);
-        let factory = Arc::new(SharedFactory { socket: socket.clone() });
+        let factory = Arc::new(SharedFactory {
+            socket: socket.clone(),
+        });
         let received = Arc::new(Mutex::new(Vec::new()));
         let build_received = Arc::clone(&received);
-        let build = move || EchoAckProto { received: Arc::clone(&build_received), pending_reply: None };
-        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-recv", build, RecordingClock::new());
+        let build = move || EchoAckProto {
+            received: Arc::clone(&build_received),
+            pending_reply: None,
+        };
+        let protocol = DatagramProtocolListenProtocol::with_clock(
+            "dgram-proto-recv",
+            build,
+            RecordingClock::new(),
+        );
         let spec = serde_json::json!({});
         let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
         let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -638,7 +742,10 @@ mod tests {
         socket.inject(b"hello".to_vec(), peer);
         poll_n(&mut serve, &mut cx, 8);
 
-        assert_eq!(received.lock().unwrap().as_slice(), &[(b"hello".to_vec(), peer)]);
+        assert_eq!(
+            received.lock().unwrap().as_slice(),
+            &[(b"hello".to_vec(), peer)]
+        );
         let sent = socket.sent();
         assert_eq!(sent.len(), 1, "exactly one ack reply");
         assert_eq!(sent[0], (b"ack".to_vec(), peer));
@@ -648,11 +755,19 @@ mod tests {
     async fn next_deadline_none_never_fires_on_timeout_only_shutdown_ends_it() {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5303);
         let socket = SharedSocket::new(bind);
-        let factory = Arc::new(SharedFactory { socket: socket.clone() });
+        let factory = Arc::new(SharedFactory {
+            socket: socket.clone(),
+        });
         let on_timeout_calls = Arc::new(AtomicUsize::new(0));
         let build_calls = Arc::clone(&on_timeout_calls);
-        let build = move || NeverTimeoutProto { on_timeout_calls: Arc::clone(&build_calls) };
-        let protocol = DatagramProtocolListenProtocol::with_clock("dgram-proto-quiet", build, RecordingClock::new());
+        let build = move || NeverTimeoutProto {
+            on_timeout_calls: Arc::clone(&build_calls),
+        };
+        let protocol = DatagramProtocolListenProtocol::with_clock(
+            "dgram-proto-quiet",
+            build,
+            RecordingClock::new(),
+        );
         let spec = serde_json::json!({});
         let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -661,13 +776,19 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let resolved_early = poll_n(&mut serve, &mut cx, 20);
-        assert!(!resolved_early, "parked with no deadline and no shutdown yet");
+        assert!(
+            !resolved_early,
+            "parked with no deadline and no shutdown yet"
+        );
 
-        assert_eq!(on_timeout_calls.load(Ordering::SeqCst), 0, "no spurious timer fire with next_deadline always None");
+        assert_eq!(
+            on_timeout_calls.load(Ordering::SeqCst),
+            0,
+            "no spurious timer fire with next_deadline always None"
+        );
         assert!(socket.sent().is_empty());
 
         let _ = shutdown_tx.send(());
         assert!(poll_n(&mut serve, &mut cx, 4), "shutdown ends serve()");
     }
-
 }

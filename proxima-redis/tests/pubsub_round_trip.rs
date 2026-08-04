@@ -116,7 +116,9 @@ async fn read_reply(stream: &mut TcpStream, buffered: &mut Vec<u8>) -> RespValue
 #[proxima::test(runtime = "tokio")]
 async fn publish_delivers_to_a_subscribed_connection_across_two_sockets() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"SUBSCRIBE", b"news"]).await;
@@ -129,7 +131,9 @@ async fn publish_delivers_to_a_subscribed_connection_across_two_sockets() {
         ])
     );
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"PUBLISH", b"news", b"hi"]).await;
     assert_eq!(
@@ -150,13 +154,17 @@ async fn publish_delivers_to_a_subscribed_connection_across_two_sockets() {
 #[proxima::test(runtime = "tokio")]
 async fn psubscribe_pattern_receives_a_pmessage_frame() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"PSUBSCRIBE", b"news.*"]).await;
     let _ack = read_reply(&mut subscriber, &mut subscriber_buf).await;
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"PUBLISH", b"news.tech", b"hi"]).await;
     assert_eq!(
@@ -204,13 +212,18 @@ async fn gated_command_is_rejected_while_subscribed_then_admitted_after_unsubscr
     );
 
     send_command(&mut client, &[b"GET", b"k"]).await;
-    assert_eq!(read_reply(&mut client, &mut buffered).await, RespValue::Null);
+    assert_eq!(
+        read_reply(&mut client, &mut buffered).await,
+        RespValue::Null
+    );
 }
 
 #[proxima::test(runtime = "tokio")]
 async fn unsubscribed_channel_no_longer_receives_publishes() {
     let bind_addr = spawn_server().await;
-    let mut subscriber = TcpStream::connect(bind_addr).await.expect("connect subscriber");
+    let mut subscriber = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect subscriber");
     let mut subscriber_buf = Vec::new();
 
     send_command(&mut subscriber, &[b"SUBSCRIBE", b"chan"]).await;
@@ -218,7 +231,9 @@ async fn unsubscribed_channel_no_longer_receives_publishes() {
     send_command(&mut subscriber, &[b"UNSUBSCRIBE", b"chan"]).await;
     let _unsub_ack = read_reply(&mut subscriber, &mut subscriber_buf).await;
 
-    let mut publisher = TcpStream::connect(bind_addr).await.expect("connect publisher");
+    let mut publisher = TcpStream::connect(bind_addr)
+        .await
+        .expect("connect publisher");
     let mut publisher_buf = Vec::new();
     send_command(&mut publisher, &[b"PUBLISH", b"chan", b"nobody-home"]).await;
     assert_eq!(

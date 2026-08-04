@@ -31,10 +31,10 @@ use std::alloc::System;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use proxima_protocols::http3_codec::qpack::encoder;
-use proxima_protocols::http3_codec::qpack::part_source::HeaderBlockPartSource;
 use proxima_primitives::pipe::part::PartSource;
 use proxima_primitives::pipe::request::Request;
+use proxima_protocols::http3_codec::qpack::encoder;
+use proxima_protocols::http3_codec::qpack::part_source::HeaderBlockPartSource;
 use stats_alloc::{Region, StatsAlloc};
 
 #[global_allocator]

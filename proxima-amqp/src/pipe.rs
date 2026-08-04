@@ -124,20 +124,23 @@ impl SendPipe for AmqpConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
-            let HijackedSocket { stream, leftover } = hijacked;
-            if !leftover.is_empty() {
-                // a raw AMQP socket has no prior protocol head, so the
-                // upgrade seam should never hand us pre-buffered bytes;
-                // dropping them silently would corrupt the protocol header.
-                return Err(ProximaError::Upstream(
-                    "amqp upgrade received pre-buffered bytes before the protocol header".into(),
-                ));
-            }
-            drive_session(stream, handler, broker, config, admission)
-                .await
-                .map_err(|error| ProximaError::Upstream(format!("amqp session: {error}")))
-        }))
+        Ok(UpgradeHandler::new(
+            move |hijacked: HijackedSocket| async move {
+                let HijackedSocket { stream, leftover } = hijacked;
+                if !leftover.is_empty() {
+                    // a raw AMQP socket has no prior protocol head, so the
+                    // upgrade seam should never hand us pre-buffered bytes;
+                    // dropping them silently would corrupt the protocol header.
+                    return Err(ProximaError::Upstream(
+                        "amqp upgrade received pre-buffered bytes before the protocol header"
+                            .into(),
+                    ));
+                }
+                drive_session(stream, handler, broker, config, admission)
+                    .await
+                    .map_err(|error| ProximaError::Upstream(format!("amqp session: {error}")))
+            },
+        ))
     }
 }
 
@@ -225,10 +228,7 @@ mod tests {
             into_amqp_handle(EchoPipe),
             std::sync::Arc::new(AmqpServerConfig::default()),
         );
-        let handler = pipe
-            .call(())
-            .await
-            .expect("accept hook must answer");
+        let handler = pipe.call(()).await.expect("accept hook must answer");
 
         // a client that sends only the protocol header then closes: the
         // server writes connection.start and keeps waiting — the socket

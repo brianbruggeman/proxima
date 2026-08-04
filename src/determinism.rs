@@ -204,7 +204,6 @@ mod tests {
         }
     }
 
-
     struct CapturingClockPipe {
         ticks: std::sync::atomic::AtomicU64,
     }
@@ -226,7 +225,6 @@ mod tests {
             }
         }
     }
-
 
     struct DriftingClockPipe {
         ticks: std::sync::atomic::AtomicU64,
@@ -251,7 +249,6 @@ mod tests {
             }
         }
     }
-
 
     #[proxima::test]
     async fn pure_pipe_passes_determinism_check() {

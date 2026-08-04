@@ -14,8 +14,8 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::lock::Mutex;
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::body::ResponseStream;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::body::ResponseStream;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
 
@@ -139,7 +139,6 @@ impl<U: StreamUpstream> SendPipe for RedisClientUpstream<U> {
         async move { self.exchange(request).await }
     }
 }
-
 
 /// `[verb] ++ args`, where args are the NUL-delimited segments in `body`.
 /// A body with no NUL bytes is a single arg; empty body adds no args.

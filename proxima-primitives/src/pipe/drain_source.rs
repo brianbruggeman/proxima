@@ -258,7 +258,9 @@ impl<const SLOTS: usize, const SLOT: usize> DrainSource for RingSource<SLOTS, SL
 // `futures::io` cannot compile at all — see `proxima_core::io`'s module
 // doc); the std-tier sibling immediately below forwards to it.
 #[cfg(feature = "io-async")]
-impl<const SLOTS: usize, const SLOT: usize> proxima_core::io::AsyncRead for RingSource<SLOTS, SLOT> {
+impl<const SLOTS: usize, const SLOT: usize> proxima_core::io::AsyncRead
+    for RingSource<SLOTS, SLOT>
+{
     // a read never truly fails here — the worst case is a short read (normal
     // `AsyncRead` behaviour), so there is no error to carry.
     type Error = core::convert::Infallible;

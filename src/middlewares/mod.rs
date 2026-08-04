@@ -34,21 +34,21 @@
 //! top-level modules; see the [`crate::pipe`] module rustdoc for the
 //! full menu (core primitives, recording-as-Pipe, serving).
 
-pub use proxima_primitives::pipe::diff;
-pub use proxima_primitives::pipe::isolate;
 pub use proxima_patterns::middleware::auth;
 pub use proxima_patterns::middleware::client_auth;
 pub use proxima_patterns::middleware::write_back;
+pub use proxima_primitives::pipe::diff;
+pub use proxima_primitives::pipe::isolate;
 pub use proxima_primitives::pipe::rate_limit;
 pub use proxima_primitives::pipe::retry;
 pub use proxima_primitives::pipe::transform;
 pub use proxima_primitives::pipe::validate;
 
-pub use proxima_primitives::pipe::diff::{Diff, diff_handle};
-pub use proxima_primitives::pipe::isolate::{Isolate, IsolateFactory};
 pub use proxima_patterns::middleware::auth::{Auth, AuthFactory};
 pub use proxima_patterns::middleware::client_auth::{ClientAuthFactory, ClientAuthPipe};
 pub use proxima_patterns::middleware::write_back::{WriteBack, WriteBackTarget};
+pub use proxima_primitives::pipe::diff::{Diff, diff_handle};
+pub use proxima_primitives::pipe::isolate::{Isolate, IsolateFactory};
 pub use proxima_primitives::pipe::rate_limit::{
     ExceededAction, KeyExtractor, KeyOf, RateLimit, RateLimitCaps, RateLimitFactory,
     TokenBucketConfig,

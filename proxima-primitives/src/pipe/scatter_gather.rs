@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::marker::PhantomData;
 
+use crate::pipe::SendPipe;
 use futures::future::join_all;
 use proxima_core::markers::DropSafe;
-use crate::pipe::SendPipe;
 
 use crate::pipe::fanout::{BestEffort, FanPolicy};
 

@@ -13,8 +13,8 @@ use crate::pipe::resilience::{Backoff, Jitter, RetryAction, RetryController};
 use crate::pipe::retry_rules::RetryRules;
 
 use crate::pipe::clock::TimeClock;
-use crate::pipe::labeled::Labeled;
 use crate::pipe::handler::PipeHandle;
+use crate::pipe::labeled::Labeled;
 use crate::pipe::request::{Request, Response};
 use crate::pipe::telemetry_surface::{Labels, TelemetryHandle};
 use proxima_core::ProximaError;
@@ -24,11 +24,11 @@ use proxima_core::ProximaError;
 #[cfg(feature = "std")]
 use crate::pipe::handler::ThreadLocalPipeHandle;
 #[cfg(feature = "std")]
+use crate::pipe::primitives::Pipe;
+#[cfg(feature = "std")]
 use bon::Builder;
 #[cfg(feature = "std")]
 use conflaguration::{Settings, Validate, ValidationMessage};
-#[cfg(feature = "std")]
-use crate::pipe::primitives::Pipe;
 #[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "std")]
@@ -364,8 +364,7 @@ where
 #[cfg(feature = "std")]
 impl<Clk> Pipe for Retry<ThreadLocalPipeHandle, Clk>
 where
-    ThreadLocalPipeHandle:
-        Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>,
+    ThreadLocalPipeHandle: Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>,
     Clk: Clock + Clone + Send + Sync + 'static,
 {
     type In = Request<Bytes>;
@@ -862,7 +861,6 @@ mod tests {
             }
         }
     }
-
 
     fn stub_inner() -> PipeHandle {
         into_handle(FailUntil {

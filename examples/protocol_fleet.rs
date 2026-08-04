@@ -49,7 +49,10 @@ impl SendPipe for NullHttp {
     type Out = Response<bytes::Bytes>;
     type Err = ProximaError;
 
-    async fn call(&self, _request: Request<bytes::Bytes>) -> Result<Response<bytes::Bytes>, ProximaError> {
+    async fn call(
+        &self,
+        _request: Request<bytes::Bytes>,
+    ) -> Result<Response<bytes::Bytes>, ProximaError> {
         Ok(Response::new(404))
     }
 }
@@ -89,11 +92,16 @@ async fn memcached_section() -> Result<(), ProximaError> {
             let store = self.data.clone();
             let reply = match request {
                 MemcachedRequest::Store { key, value, .. } => {
-                    store.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(key, value);
+                    store
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(key, value);
                     Reply::Stored
                 }
                 MemcachedRequest::Get { keys, .. } => {
-                    let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let guard = store
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     let values = proxima_memcached::iter_keys(&keys)
                         .filter_map(|key| {
                             guard.get(&key).map(|data| StoredValue {
@@ -122,12 +130,20 @@ async fn memcached_section() -> Result<(), ProximaError> {
         .await?;
     wait_until_listening(bind);
 
-    let client = Client::builder().memcached(format!("memcached://{bind}")).build()?;
-    client.call("SET", "").body("greeting\x000\x000\x00hello-memcached").send().await?;
+    let client = Client::builder()
+        .memcached(format!("memcached://{bind}"))
+        .build()?;
+    client
+        .call("SET", "")
+        .body("greeting\x000\x000\x00hello-memcached")
+        .send()
+        .await?;
     let get_response = client.call("GET", "").body("greeting").send().await?;
     let get_text = get_response.text().await?;
     assert!(get_text.contains("hello-memcached"), "got: {get_text:?}");
-    println!("§1 memcached: SET then GET round trip through .memcached(handler)/.memcached(dsn) -> {get_text:?}");
+    println!(
+        "§1 memcached: SET then GET round trip through .memcached(handler)/.memcached(dsn) -> {get_text:?}"
+    );
     server.stop();
     Ok(())
 }
@@ -136,7 +152,9 @@ async fn memcached_section() -> Result<(), ProximaError> {
 /// resolution — this facade answers authoritatively from whatever the
 /// handler returns, it does not walk the DNS tree itself.
 async fn dns_section() -> Result<(), ProximaError> {
-    use proxima_dns::{DnsAnswer, DnsAnswerRecord, DnsPipeHandle, DnsPipeReply, DnsPipeRequest, into_dns_handle};
+    use proxima_dns::{
+        DnsAnswer, DnsAnswerRecord, DnsPipeHandle, DnsPipeReply, DnsPipeRequest, into_dns_handle,
+    };
     use proxima_protocols::dns::encode::ipv4_rdata;
 
     struct StaticA;
@@ -175,11 +193,21 @@ async fn dns_section() -> Result<(), ProximaError> {
         .await?;
 
     let client = Client::builder().dns(format!("dns://{bind}")).build()?;
-    let response = client.call("QUERY", "/example.test").query("type", "A").send().await?;
+    let response = client
+        .call("QUERY", "/example.test")
+        .query("type", "A")
+        .send()
+        .await?;
     let json: serde_json::Value = response.json().await?;
     assert_eq!(json["rcode"], 0);
-    assert_eq!(json["records"][0]["rdata"], serde_json::json!([203, 0, 113, 42]));
-    println!("§2 DNS: .dns(handler) listener (both transports, one port) + .dns(dsn) client -> A record {}", json["records"][0]["rdata"]);
+    assert_eq!(
+        json["records"][0]["rdata"],
+        serde_json::json!([203, 0, 113, 42])
+    );
+    println!(
+        "§2 DNS: .dns(handler) listener (both transports, one port) + .dns(dsn) client -> A record {}",
+        json["records"][0]["rdata"]
+    );
     server.stop();
     Ok(())
 }
@@ -188,8 +216,11 @@ async fn dns_section() -> Result<(), ProximaError> {
 /// no consumer-group coordination) — ApiVersions/Produce/Fetch/Metadata,
 /// the routing-critical subset, never a drop-in broker replacement.
 async fn kafka_section() -> Result<(), ProximaError> {
-    use proxima_kafka::wire::{ApiKey, ProduceRequest, ProduceResponse, ProduceTopicData, ProducePartitionData, RequestBody, ResponseBody, decode_response};
     use proxima_kafka::into_kafka_handle;
+    use proxima_kafka::wire::{
+        ApiKey, ProducePartitionData, ProduceRequest, ProduceResponse, ProduceTopicData,
+        RequestBody, ResponseBody, decode_response,
+    };
 
     struct EchoProduce;
 
@@ -222,10 +253,17 @@ async fn kafka_section() -> Result<(), ProximaError> {
         timeout_ms: 100,
         topics: vec![ProduceTopicData {
             topic: "orders".to_string(),
-            partitions: vec![ProducePartitionData { partition: 0, record_set: bytes::Bytes::new() }],
+            partitions: vec![ProducePartitionData {
+                partition: 0,
+                record_set: bytes::Bytes::new(),
+            }],
         }],
     });
-    let response = client.call("PRODUCE", "").body(request.encode()).send().await?;
+    let response = client
+        .call("PRODUCE", "")
+        .body(request.encode())
+        .send()
+        .await?;
     let body = response.bytes().await?;
     let decoded = decode_response(ApiKey::Produce.to_i16(), &body)
         .map_err(|error| ProximaError::Decode(format!("kafka decode: {error}")))?;
@@ -254,7 +292,13 @@ async fn mqtt_section() -> Result<(), ProximaError> {
         type Err = ProximaError;
 
         async fn call(&self, _request: MqttPipeRequest) -> Result<MqttPipeReply, ProximaError> {
-            Ok(Response::typed(200, MqttReply::ConnAck { session_present: false, return_code: 0 }))
+            Ok(Response::typed(
+                200,
+                MqttReply::ConnAck {
+                    session_present: false,
+                    return_code: 0,
+                },
+            ))
         }
     }
 
@@ -271,7 +315,9 @@ async fn mqtt_section() -> Result<(), ProximaError> {
     let client = Client::builder().mqtt(format!("mqtt://{bind}")).build()?;
     let response = client.call("PING", "").send().await?;
     assert_eq!(response.status(), 200);
-    println!("§4 MQTT: .mqtt(handler).tcp() listener + .mqtt(dsn) client -> CONNECT+PINGREQ/PINGRESP OK");
+    println!(
+        "§4 MQTT: .mqtt(handler).tcp() listener + .mqtt(dsn) client -> CONNECT+PINGREQ/PINGRESP OK"
+    );
     server.stop();
     Ok(())
 }
@@ -293,7 +339,10 @@ async fn amqp_section() -> Result<(), ProximaError> {
         type Err = ProximaError;
 
         async fn call(&self, request: AmqpPipeRequest) -> Result<AmqpPipeReply, ProximaError> {
-            self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request.payload);
+            self.seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.payload);
             Ok(Response::typed(200, ()))
         }
     }
@@ -312,16 +361,31 @@ async fn amqp_section() -> Result<(), ProximaError> {
     wait_until_listening(bind);
 
     let client = Client::builder().amqp(format!("amqp://{bind}")).build()?;
-    client.call("PUBLISH", "").body("\x00orders\x00hello-amqp").send().await?;
+    client
+        .call("PUBLISH", "")
+        .body("\x00orders\x00hello-amqp")
+        .send()
+        .await?;
 
     for _ in 0..50 {
-        if !seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty() {
+        if !seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let recorded = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-    assert_eq!(recorded.len(), 1, "the handler must observe exactly one basic.publish");
+    let recorded = seen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the handler must observe exactly one basic.publish"
+    );
     assert_eq!(recorded[0].body, b"hello-amqp");
     println!(
         "§5 AMQP: .amqp(handler).tcp() listener + .amqp(dsn) client -> basic.publish observed, routing_key={:?}",
@@ -341,15 +405,25 @@ async fn amqp_section() -> Result<(), ProximaError> {
 fn kafka_conflaguration_section() -> Result<(), ProximaError> {
     use proxima_kafka::KafkaServerConfig;
 
-    let built = KafkaServerConfig::builder().max_message_bytes(4096).advertised_port(9093).build();
+    let built = KafkaServerConfig::builder()
+        .max_message_bytes(4096)
+        .advertised_port(9093)
+        .build();
     assert_eq!(built.max_message_bytes, 4096);
 
     let toml_dir = tempfile::tempdir().map_err(ProximaError::Io)?;
     let toml_path = toml_dir.path().join("kafka.toml");
-    std::fs::write(&toml_path, "max_message_bytes = 4096\nadvertised_port = 9093\n").map_err(ProximaError::Io)?;
+    std::fs::write(
+        &toml_path,
+        "max_message_bytes = 4096\nadvertised_port = 9093\n",
+    )
+    .map_err(ProximaError::Io)?;
     let from_file: KafkaServerConfig = conflaguration::from_file(&toml_path)
         .map_err(|error| ProximaError::Config(format!("kafka config toml: {error}")))?;
-    assert_eq!(from_file, built, "the builder route and the TOML route must agree bit for bit");
+    assert_eq!(
+        from_file, built,
+        "the builder route and the TOML route must agree bit for bit"
+    );
 
     println!(
         "§6 conflaguration: KafkaServerConfig::builder() and conflaguration::from_file(\"{}\") \

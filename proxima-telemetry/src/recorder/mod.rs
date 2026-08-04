@@ -1329,7 +1329,11 @@ impl<Clk: Clock> Recorder<Clk> {
         )
     }
 
-    pub fn span_from_scope(&self, name: &'static str, scope: &ScopeHandle) -> SpanBuilderWired<Clk> {
+    pub fn span_from_scope(
+        &self,
+        name: &'static str,
+        scope: &ScopeHandle,
+    ) -> SpanBuilderWired<Clk> {
         let trace_id = TraceId::generate();
         let span_id = SpanId::generate();
         let builder = SpanBuilder::new(name, trace_id, span_id);
@@ -1373,8 +1377,7 @@ impl<Clk: Clock> Recorder<Clk> {
         traceparent: &[u8],
         tracestate: Option<&[u8]>,
     ) -> SpanBuilderWired<Clk> {
-        let Some((trace_id, parent_span_id, flags)) =
-            crate::id::parse_traceparent(traceparent)
+        let Some((trace_id, parent_span_id, flags)) = crate::id::parse_traceparent(traceparent)
         else {
             return self.span(name);
         };
@@ -3525,8 +3528,7 @@ mod tests {
 
         let trace = TraceId::from_bytes([0x55; 16]);
         let parent = SpanId::from_bytes([0x66; 8]);
-        let traceparent =
-            crate::id::format_traceparent(&trace, &parent, TraceFlags::SAMPLED);
+        let traceparent = crate::id::format_traceparent(&trace, &parent, TraceFlags::SAMPLED);
 
         drop(
             recorder
@@ -3551,8 +3553,8 @@ mod tests {
     fn inject_then_extract_round_trips_w3c() {
         use crate::id::{SpanId, TraceFlags, TraceId};
         use crate::pipes::InMemoryPipe;
-        use proxima_primitives::pipe::header_list::HeaderList;
         use crate::propagation::{TRACEPARENT, TRACESTATE};
+        use proxima_primitives::pipe::header_list::HeaderList;
 
         let pipe = InMemoryPipe::new();
         let recorder = Recorder::builder()

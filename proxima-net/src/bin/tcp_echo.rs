@@ -17,12 +17,12 @@ fn main() {
 
 #[cfg(feature = "dpdk")]
 mod imp {
+    use proxima_net::dpdk::{Eal, Mempool, Port, RawMbuf, port};
+    use proxima_net::stack::{self, Action};
+    use proxima_net::tcp_listener::{EchoListener, Endpoint, Inbound, OutSegment};
     use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
     use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
     use proxima_protocols::inet::tcp::{self, TcpHeader};
-    use proxima_net::stack::{self, Action};
-    use proxima_net::tcp_listener::{EchoListener, Endpoint, Inbound, OutSegment};
-    use proxima_net::dpdk::{Eal, Mempool, Port, RawMbuf, port};
     use proxima_protocols::tcp::time::Instant as TcpInstant;
     use std::env;
     use std::process::ExitCode;

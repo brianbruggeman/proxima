@@ -16,6 +16,8 @@
 
 use super::port::{self, Port};
 use super::{DpdkError, Eal, Mempool, RawMbuf};
+use crate::packet::{Packet, PacketListener};
+use crate::stack::{self, Action};
 use bytes::Bytes;
 use core::future::Future;
 use core::pin::pin;
@@ -23,8 +25,6 @@ use proxima_primitives::sync::{AsyncMutex, AsyncMutexGuard};
 use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
 use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
 use proxima_protocols::inet::udp::{self, UdpHeader};
-use crate::packet::{Packet, PacketListener};
-use crate::stack::{self, Action};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};

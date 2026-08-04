@@ -68,7 +68,12 @@ impl DnsClientUpstream {
     /// [`DnsClientError::Timeout`] if every attempt's reply never arrives
     /// in time, or the last attempt's own [`DnsClientError`] (a transport
     /// or wire-decode failure) otherwise.
-    pub async fn query(&self, name: &str, qtype: u16, qclass: u16) -> Result<DnsAnswer, DnsClientError> {
+    pub async fn query(
+        &self,
+        name: &str,
+        qtype: u16,
+        qclass: u16,
+    ) -> Result<DnsAnswer, DnsClientError> {
         let mut last_error = DnsClientError::Timeout(self.config.query_timeout_ms);
         for _ in 0..self.config.max_attempts.max(1) {
             match self.try_query(name, qtype, qclass).await {
@@ -79,7 +84,12 @@ impl DnsClientUpstream {
         Err(last_error)
     }
 
-    async fn try_query(&self, name: &str, qtype: u16, qclass: u16) -> Result<DnsAnswer, DnsClientError> {
+    async fn try_query(
+        &self,
+        name: &str,
+        qtype: u16,
+        qclass: u16,
+    ) -> Result<DnsAnswer, DnsClientError> {
         let mut session = DnsClientSession::new();
         let (id, query_bytes) = session.encode_query(name, qtype, qclass, true)?;
 
@@ -120,7 +130,12 @@ impl SendPipe for DnsClientUpstream {
     type Err = ProximaError;
 
     async fn call(&self, request: Self::In) -> Result<Self::Out, ProximaError> {
-        let DnsQuery { name, qtype, qclass, .. } = request.payload;
+        let DnsQuery {
+            name,
+            qtype,
+            qclass,
+            ..
+        } = request.payload;
         let answer = self
             .query(&name, qtype, qclass)
             .await
@@ -227,7 +242,11 @@ mod tests {
     }
 
     impl DatagramSocket for FakeResolverSocket {
-        fn poll_recv_from(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<(usize, SocketAddr)>> {
+        fn poll_recv_from(
+            &mut self,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
             let mut state = self.state.lock().unwrap();
             match state.inbound.pop_front() {
                 Some((bytes, from)) => {
@@ -242,7 +261,12 @@ mod tests {
             }
         }
 
-        fn poll_send_to(&mut self, _cx: &mut Context<'_>, buf: &[u8], peer: SocketAddr) -> Poll<io::Result<usize>> {
+        fn poll_send_to(
+            &mut self,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+            peer: SocketAddr,
+        ) -> Poll<io::Result<usize>> {
             self.state.lock().unwrap().sent.push((buf.to_vec(), peer));
             Poll::Ready(Ok(buf.len()))
         }
@@ -272,7 +296,9 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
             resolver_addr(),
         );
-        let factory = Arc::new(FakeResolverFactory { socket: socket.clone() });
+        let factory = Arc::new(FakeResolverFactory {
+            socket: socket.clone(),
+        });
         let config = DnsResolverConfig::builder()
             .resolver_ip(resolver_addr().ip().to_string())
             .port(resolver_addr().port())
@@ -309,8 +335,13 @@ mod tests {
         // datagram would return its rcode/records instead of the correct
         // ones, so any pass here is a pass on the filter actually working.
         let wrong_sender = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 53);
-        let socket = FakeResolverSocket::new(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0), wrong_sender);
-        let factory = Arc::new(FakeResolverFactory { socket: socket.clone() });
+        let socket = FakeResolverSocket::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            wrong_sender,
+        );
+        let factory = Arc::new(FakeResolverFactory {
+            socket: socket.clone(),
+        });
         let config = DnsResolverConfig::builder()
             .resolver_ip(resolver_addr().ip().to_string())
             .port(resolver_addr().port())

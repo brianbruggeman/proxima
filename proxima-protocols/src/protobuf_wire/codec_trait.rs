@@ -34,8 +34,8 @@ impl WireCodec for ProtobufWireCodec {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::encode_varint;
+    use super::*;
     use proxima_codec::WireCodec;
 
     fn encode_tag(field: u32, wire: u8) -> Vec<u8> {

@@ -160,9 +160,9 @@ use proxima_listen::ListenProtocol;
 use proxima_listen::any::AnyProtocol;
 use proxima_primitives::pipe::handler::PipeHandle;
 
-use crate::any_listener::{AnyListenProtocol, H1AnyProtocol};
 #[cfg(feature = "http2-native")]
 use crate::any_listener::H2PriorKnowledgeAnyProtocol;
+use crate::any_listener::{AnyListenProtocol, H1AnyProtocol};
 
 // Re-exports so the umbrella's `pub use listeners::*` keeps working.
 pub use crate::http1::serve::{HttpListenerSpec, serve_h1_connection};
@@ -319,7 +319,9 @@ impl ListenProtocol for HttpListenProtocol {
                 Arc::new(std::collections::BTreeMap::new()),
             )
             .with_label("http");
-            protocol.serve(bind, dispatch, &spec, context, shutdown).await
+            protocol
+                .serve(bind, dispatch, &spec, context, shutdown)
+                .await
         })
     }
 }
@@ -368,7 +370,6 @@ mod tests {
         }
     }
 
-
     // test-only `Runtime` whose `spawn_on_current_core` forwards to
     // `tokio::task::spawn_local` — a real per-core runtime (`TokioPerCoreRuntime`,
     // `PrimeRuntime`) can't be used here since its `spawn_on_current_core`
@@ -402,9 +403,7 @@ mod tests {
 
         fn spawn_background_blocking(
             &self,
-            _work: Box<
-                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-            >,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
         ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
             unreachable!("test never spawns background-blocking work")
         }

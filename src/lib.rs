@@ -107,14 +107,14 @@ pub use proxima_patterns::middleware::context_inject;
 pub mod daemon_control_plane;
 pub mod determinism;
 pub use proxima_core as error;
-#[cfg(feature = "tcp")]
-pub use proxima_protocols::json_framing as framing;
 pub use proxima_http::http1::h1;
 pub use proxima_http::http1::h1_body;
 pub use proxima_http::http1::h1_connection;
 pub use proxima_http::http1::h1_response;
 #[cfg(feature = "http1")]
 pub use proxima_http::http1::hyper_body;
+#[cfg(feature = "tcp")]
+pub use proxima_protocols::json_framing as framing;
 
 // Composable, `Pipe`-shaped outbound HTTP/1.1 client — the production prime
 // client path, usable as a transport STAGE in a pipe chain (e.g. a telemetry
@@ -127,8 +127,8 @@ pub use proxima_http::http1::{
     H1ClientConfig, H1ClientUpstream, ResponseBodyMode, ResponseHandling, ResponseHandlingConfig,
     ResponseHeaderMode,
 };
-pub use proxima_patterns::kv;
 pub use proxima_listen as listen;
+pub use proxima_patterns::kv;
 // low-level serve-time plumbing (bind/spec/dispatch + per-core `run_with_runtime`;
 // `Listener` itself lives here, see `listen_handle::Listener`). Named
 // `listen_handle`, not `listener` — the bare `listener` name is this crate's
@@ -143,10 +143,9 @@ pub mod listener;
 pub use proxima_net::prime::PrimeTcpUpstream;
 pub use proxima_primitives::pipe::header_list;
 pub mod load;
-pub use proxima_primitives::pipe::routing as mount;
-pub use proxima_telemetry::log_buffer;
 pub use proxima_net::packet;
 pub use proxima_primitives::pipe::path_pattern;
+pub use proxima_primitives::pipe::routing as mount;
 #[cfg(feature = "amqp-listener")]
 pub use proxima_protocols::amqp;
 #[cfg(feature = "dns-substrate")]
@@ -164,36 +163,37 @@ pub use proxima_protocols::protobuf_wire as protobuf;
 pub use proxima_protocols::proxy_protocol;
 #[cfg(feature = "websocket-frame")]
 pub use proxima_protocols::websocket_frame;
+pub use proxima_telemetry::log_buffer;
 pub mod recording;
 pub use proxima_primitives::pipe::request;
 
 pub mod runtime;
 pub mod scenarios;
-pub use proxima_patterns::balancer::selection;
+pub use proxima_config::schema;
+pub use proxima_core::time;
 #[cfg(feature = "http2")]
 pub use proxima_http::http2 as h2;
 #[cfg(feature = "http3")]
 pub use proxima_http::http3 as h3;
+pub use proxima_patterns::balancer::selection;
 pub use proxima_primitives::pipe;
-#[cfg(feature = "http3")]
-pub use proxima_quic as quic;
-pub use proxima_config::schema;
-pub use proxima_primitives::sync::shutdown;
 #[cfg(feature = "sync-wrappers")]
 pub use proxima_primitives::sync;
+pub use proxima_primitives::sync::shutdown;
 pub use proxima_primitives::sync::task;
-pub use proxima_core::time;
+#[cfg(feature = "http3")]
+pub use proxima_quic as quic;
 pub mod server;
 pub mod settings;
-pub use proxima_primitives::pipe::swap_registry as swap;
+pub use proxima_config::store as state_store;
+pub use proxima_config::sugar;
 #[cfg(feature = "http1")]
 pub use proxima_http::http1::shared_http;
 pub use proxima_primitives::pipe::capture_surface;
 pub use proxima_primitives::pipe::endpoint;
+pub use proxima_primitives::pipe::swap_registry as swap;
 pub use proxima_primitives::pipe::telemetry_surface;
-pub use proxima_config::store as state_store;
 pub use proxima_primitives::stream;
-pub use proxima_config::sugar;
 pub use proxima_telemetry as telemetry;
 // OTLP exporter face: `OtlpClient::http().endpoint(..).build()` (and the config
 // path `exporter_pipe`/`recorder_from_config`) lower to a prime `OtlpHttpCodec
@@ -225,7 +225,9 @@ pub mod pipelines;
 pub mod upstreams;
 pub mod verify;
 
-pub use app::{App, AppPipeBuilder, IntoMountTarget, MountTarget, RunConfig, Shutdown, offline_runtime};
+pub use app::{
+    App, AppPipeBuilder, IntoMountTarget, MountTarget, RunConfig, Shutdown, offline_runtime,
+};
 pub use causality::{ByteRange, Causal, CausalEdge, CausalIndex};
 pub use determinism::check_determinism;
 #[cfg(feature = "rayon")]
@@ -353,7 +355,9 @@ pub use listen::{
     ProbeVerdict, ServeBuilder, ServeContext, ThreadLocalListenProtocol, ThreadLocalListenRegistry,
 };
 pub use listen_handle::{Listener, ListenerHandle, ListenerSpec, ShutdownPolicy};
-pub use listener::{ListenerBuilder, ListenerBuilderEntry, ListenerProtocolExt, ListenerTransportExt};
+pub use listener::{
+    ListenerBuilder, ListenerBuilderEntry, ListenerProtocolExt, ListenerTransportExt,
+};
 #[cfg(feature = "tokio")]
 pub use listeners::McpListenProtocol;
 #[cfg(any(feature = "http1", feature = "http1-native"))]
@@ -388,6 +392,7 @@ pub use pipe::{
     into_thread_local_handle,
 };
 pub use proxima_patterns::middleware::context_inject::ContextInjector;
+pub use proxima_primitives::pipe::RoutingPipe;
 pub use proxima_primitives::pipe::SendPipe;
 pub use recording::{
     AccumulatingSink, AppendFuture as RecordingAppendFuture, AppendLog, BinSource,
@@ -402,8 +407,9 @@ pub use recording::{
     deferred_runtime,
 };
 pub use request::{Request, RequestBuilder, RequestContext, Response};
-pub use proxima_primitives::pipe::RoutingPipe;
-pub use scenarios::{CompareOp, Expectation, OrchestrationMode, Scenario, ScenarioPipeSpec, WorkloadSpec};
+pub use scenarios::{
+    CompareOp, Expectation, OrchestrationMode, Scenario, ScenarioPipeSpec, WorkloadSpec,
+};
 #[cfg(feature = "tokio")]
 pub use scenarios::{ScenarioReport, run_scenario};
 pub use schema::{
@@ -437,11 +443,11 @@ pub use sugar::desugar;
 // ListenerProtocolExt}` / `{ClientTransportExt, ClientSecurityExt,
 // ClientProtocolExt}` light up `.tcp()`/`.http()`/… on `ListenerBuilder` /
 // `ClientBuilder` respectively.
-pub use sugar::SpecBuilder;
 pub use proxima_primitives::transport;
 pub use proxima_primitives::transport::{
     DEFAULT_REPLAY_CAP_BYTES, Replay, ReplayEvent, tap_complete, tap_complete_with_size,
 };
+pub use sugar::SpecBuilder;
 pub use telemetry::{
     HistogramSummary, Labels, Metrics, MetricsSnapshot, NoopTelemetry, Telemetry, TelemetryHandle,
 };
