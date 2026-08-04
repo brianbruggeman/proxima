@@ -62,8 +62,7 @@ mod http1_codec_sizing {
 
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
-        let manifest_dir =
-            env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
         let toml_path = PathBuf::from(&manifest_dir).join("http1_codec.toml");
         println!("cargo:rerun-if-changed=http1_codec.toml");
 
@@ -75,10 +74,7 @@ mod http1_codec_sizing {
 
         let header_inline_cap = require_usize(
             "header.inline_cap",
-            require_nonzero(
-                "header.inline_cap",
-                resolve(&root, "header", "inline_cap"),
-            ),
+            require_nonzero("header.inline_cap", resolve(&root, "header", "inline_cap")),
         );
 
         let body = format!(
@@ -152,8 +148,7 @@ mod http3_codec_sizing {
 
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
-        let manifest_dir =
-            env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
         let toml_path = PathBuf::from(&manifest_dir).join("http3_codec.toml");
         println!("cargo:rerun-if-changed=http3_codec.toml");
 
@@ -283,8 +278,7 @@ mod quic_sizing {
 
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
-        let manifest_dir =
-            env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
         let toml_path = PathBuf::from(&manifest_dir).join("quic.toml");
         println!("cargo:rerun-if-changed=quic.toml");
 

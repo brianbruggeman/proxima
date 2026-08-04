@@ -62,9 +62,9 @@
 #![warn(clippy::pedantic)]
 
 pub mod anchor;
+pub mod coarse;
 #[cfg(feature = "config")]
 pub mod config;
-pub mod coarse;
 mod seq_words;
 pub mod ticks;
 pub mod unix_nanos;

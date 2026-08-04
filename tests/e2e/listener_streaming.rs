@@ -25,9 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use proxima::{
-    App, MountTarget, ProximaError, Request, Response, RunConfig, Spec, into_handle,
-};
+use proxima::{App, MountTarget, ProximaError, Request, Response, RunConfig, Spec, into_handle};
 use proxima_primitives::pipe::SendPipe;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -89,7 +87,6 @@ impl SendPipe for BodyEcho {
         }
     }
 }
-
 
 async fn boot_echo_listener() -> (
     SocketAddr,

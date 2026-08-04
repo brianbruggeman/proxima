@@ -43,7 +43,10 @@ use crate::pipes::{MqttPipeHandle, MqttPipeRequest};
 use crate::topic_filter::is_valid_filter;
 use crate::wait_sources::MqttConnSource;
 
-async fn flush_out<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
+async fn flush_out<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    out: &mut Vec<u8>,
+) -> std::io::Result<()> {
     if !out.is_empty() {
         stream.write_all(out).await?;
         out.clear();
@@ -167,14 +170,15 @@ async fn dispatch_connect(
         return FrameOutcome::Close(out);
     }
     let clean_session = connect_flags & 0x02 != 0;
-    let ConnectCredentials { username, password } = match parse_connect_credentials(connect_flags, rest) {
-        Ok(credentials) => credentials,
-        Err(reason) => {
-            return FrameOutcome::InternalError(ProximaError::Upstream(format!(
-                "mqtt: {reason}"
-            )));
-        }
-    };
+    let ConnectCredentials { username, password } =
+        match parse_connect_credentials(connect_flags, rest) {
+            Ok(credentials) => credentials,
+            Err(reason) => {
+                return FrameOutcome::InternalError(ProximaError::Upstream(format!(
+                    "mqtt: {reason}"
+                )));
+            }
+        };
     let request = build_connect_request(
         client_id,
         clean_session,
@@ -435,16 +439,24 @@ async fn dispatch_packet(
             admission.request_release();
             outcome
         }
-        Packet::Publish { flags, topic, packet_id, payload } => {
-            dispatch_publish(topic, packet_id, payload, flags.qos, broker).await
-        }
-        Packet::Subscribe { packet_id, topic_filters } => {
-            dispatch_subscribe(packet_id, topic_filters, broker, push_sink, state)
-        }
-        Packet::Unsubscribe { packet_id, topic_filters } => {
-            dispatch_unsubscribe(packet_id, topic_filters, broker, state)
-        }
-        Packet::Ack { packet_type: PacketType::PubRel, packet_id } => {
+        Packet::Publish {
+            flags,
+            topic,
+            packet_id,
+            payload,
+        } => dispatch_publish(topic, packet_id, payload, flags.qos, broker).await,
+        Packet::Subscribe {
+            packet_id,
+            topic_filters,
+        } => dispatch_subscribe(packet_id, topic_filters, broker, push_sink, state),
+        Packet::Unsubscribe {
+            packet_id,
+            topic_filters,
+        } => dispatch_unsubscribe(packet_id, topic_filters, broker, state),
+        Packet::Ack {
+            packet_type: PacketType::PubRel,
+            packet_id,
+        } => {
             let mut out = Vec::new();
             encode_ack(PacketType::PubComp, packet_id, &mut out);
             FrameOutcome::Reply(out)
@@ -474,7 +486,9 @@ mod tests {
     use super::*;
     use proxima_primitives::pipe::request::Response;
     use proxima_protocols::mqtt::MqttReply;
-    use proxima_protocols::mqtt::encode::{encode_connect, encode_disconnect, encode_publish, encode_subscribe};
+    use proxima_protocols::mqtt::encode::{
+        encode_connect, encode_disconnect, encode_publish, encode_subscribe,
+    };
     use std::io::Read;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -491,7 +505,15 @@ mod tests {
             &self,
             _request: MqttPipeRequest,
         ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> + Send {
-            async move { Ok(Response::typed(200, MqttReply::ConnAck { session_present: false, return_code: 0 })) }
+            async move {
+                Ok(Response::typed(
+                    200,
+                    MqttReply::ConnAck {
+                        session_present: false,
+                        return_code: 0,
+                    },
+                ))
+            }
         }
     }
 
@@ -586,7 +608,13 @@ mod tests {
     async fn connect_then_disconnect_replies_connack_then_closes() {
         let mut wire = connect_wire("c1");
         encode_disconnect(&mut wire);
-        let response = drive(&wire, handler(), Arc::new(MqttBroker::new()), &MqttServerConfig::default()).await;
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::new(MqttBroker::new()),
+            &MqttServerConfig::default(),
+        )
+        .await;
         assert_eq!(response, vec![0x20, 0x02, 0x00, 0x00]);
     }
 
@@ -595,7 +623,13 @@ mod tests {
         let mut wire = connect_wire("c1");
         proxima_protocols::mqtt::encode::encode_pingreq(&mut wire);
         encode_disconnect(&mut wire);
-        let response = drive(&wire, handler(), Arc::new(MqttBroker::new()), &MqttServerConfig::default()).await;
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::new(MqttBroker::new()),
+            &MqttServerConfig::default(),
+        )
+        .await;
         assert_eq!(response, vec![0x20, 0x02, 0x00, 0x00, 0xD0, 0x00]);
     }
 
@@ -603,7 +637,13 @@ mod tests {
     async fn publish_before_connect_closes_without_a_reply() {
         let mut wire = Vec::new();
         encode_publish(b"a/b", None, b"hi", 0, false, false, &mut wire);
-        let response = drive(&wire, handler(), Arc::new(MqttBroker::new()), &MqttServerConfig::default()).await;
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::new(MqttBroker::new()),
+            &MqttServerConfig::default(),
+        )
+        .await;
         assert!(response.is_empty());
     }
 
@@ -625,10 +665,19 @@ mod tests {
         let broker = Arc::new(MqttBroker::new());
         let mut wire = connect_wire("subscriber");
         encode_subscribe(1, &[(b"news/#", 1)], &mut wire);
-        let response = drive(&wire, handler(), Arc::clone(&broker), &MqttServerConfig::default()).await;
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::clone(&broker),
+            &MqttServerConfig::default(),
+        )
+        .await;
         // CONNACK(accepted) + SUBACK(granted=[0], QoS 0 regardless of the
         // requested QoS — see the broker module docs)
-        assert_eq!(response, vec![0x20, 0x02, 0x00, 0x00, 0x90, 0x03, 0x00, 0x01, 0x00]);
+        assert_eq!(
+            response,
+            vec![0x20, 0x02, 0x00, 0x00, 0x90, 0x03, 0x00, 0x01, 0x00]
+        );
         assert_eq!(
             broker.subscription_count(b"news/#"),
             0,
@@ -641,8 +690,17 @@ mod tests {
         let mut wire = connect_wire("publisher");
         encode_publish(b"a/b", Some(9), b"hi", 1, false, false, &mut wire);
         encode_disconnect(&mut wire);
-        let response = drive(&wire, handler(), Arc::new(MqttBroker::new()), &MqttServerConfig::default()).await;
-        assert_eq!(response, vec![0x20, 0x02, 0x00, 0x00, 0x40, 0x02, 0x00, 0x09]);
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::new(MqttBroker::new()),
+            &MqttServerConfig::default(),
+        )
+        .await;
+        assert_eq!(
+            response,
+            vec![0x20, 0x02, 0x00, 0x00, 0x40, 0x02, 0x00, 0x09]
+        );
     }
 
     // The listener's admission policy (quiesce/drain/capacity), not the

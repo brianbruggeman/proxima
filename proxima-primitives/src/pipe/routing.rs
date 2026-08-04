@@ -320,8 +320,9 @@ where
     fn call(
         &self,
         request: Request<Bytes>,
-    ) -> impl Future<Output = Result<crate::pipe::request::Response<Bytes>, crate::pipe::ProximaError>> + Send
-    {
+    ) -> impl Future<
+        Output = Result<crate::pipe::request::Response<Bytes>, crate::pipe::ProximaError>,
+    > + Send {
         let routed = self.router.route(&request).map(|mount| mount.pipe.clone());
         let fallback = self.fallback.clone();
         async move {
@@ -344,7 +345,8 @@ impl crate::pipe::primitives::Pipe for RoutingPipe<crate::pipe::handler::ThreadL
     fn call(
         &self,
         request: Request<Bytes>,
-    ) -> impl Future<Output = Result<crate::pipe::request::Response<Bytes>, crate::pipe::ProximaError>> {
+    ) -> impl Future<Output = Result<crate::pipe::request::Response<Bytes>, crate::pipe::ProximaError>>
+    {
         let routed = self.router.route(&request).map(|mount| mount.pipe.clone());
         let fallback = self.fallback.clone();
         async move {
@@ -381,7 +383,8 @@ mod routing_pipe_tests {
         fn call(
             &self,
             _request: Request<Bytes>,
-        ) -> impl Future<Output = Result<Response<Bytes>, crate::pipe::ProximaError>> + Send {
+        ) -> impl Future<Output = Result<Response<Bytes>, crate::pipe::ProximaError>> + Send
+        {
             let body = self.0;
             async move { Ok(Response::ok(bytes::Bytes::from_static(body.as_bytes()))) }
         }

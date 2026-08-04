@@ -50,7 +50,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 /// Deterministic stand-in for a handler that blocks its calling thread
 /// synchronously (the `std::thread::sleep` anti-pattern), without timing:
 /// a request to `/hold` reports the OS thread it runs on and then parks
@@ -89,7 +88,6 @@ impl SendPipe for HoldOrFast {
     }
 }
 
-
 struct DrainOk;
 
 impl SendPipe for DrainOk {
@@ -109,7 +107,6 @@ impl SendPipe for DrainOk {
         }
     }
 }
-
 
 fn build_runtime(cores: usize) -> Arc<PrimeRuntime> {
     Arc::new(

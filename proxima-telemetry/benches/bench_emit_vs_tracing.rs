@@ -34,7 +34,8 @@ use tracing::{Event, Id, Metadata, span};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-const FILTER: &str = "proxima::h2=debug,proxima::h2::hpack=trace,proxima=info,downstream::store=warn";
+const FILTER: &str =
+    "proxima::h2=debug,proxima::h2::hpack=trace,proxima=info,downstream::store=warn";
 
 /// A subscriber that is enabled but does nothing — copied from tracing's own
 /// `benches/filter.rs` so the EnvFilter arm is measured on its home turf.

@@ -310,7 +310,9 @@ fn next_field<'a>(
 }
 
 fn next_u32<'a>(fields: &mut impl Iterator<Item = &'a [u8]>, name: &str) -> Result<u32, String> {
-    let field = fields.next().ok_or_else(|| format!("missing field '{name}'"))?;
+    let field = fields
+        .next()
+        .ok_or_else(|| format!("missing field '{name}'"))?;
     core::str::from_utf8(field)
         .ok()
         .and_then(|text| text.parse::<u32>().ok())
@@ -318,7 +320,9 @@ fn next_u32<'a>(fields: &mut impl Iterator<Item = &'a [u8]>, name: &str) -> Resu
 }
 
 fn next_u64<'a>(fields: &mut impl Iterator<Item = &'a [u8]>, name: &str) -> Result<u64, String> {
-    let field = fields.next().ok_or_else(|| format!("missing field '{name}'"))?;
+    let field = fields
+        .next()
+        .ok_or_else(|| format!("missing field '{name}'"))?;
     core::str::from_utf8(field)
         .ok()
         .and_then(|text| text.parse::<u64>().ok())

@@ -19,19 +19,19 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::reader_to_byte_stream;
-use proxima_core::ProximaError;
 use crate::{
     Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenProtocol, ListenerCore,
     ServeContext,
 };
+use proxima_core::ProximaError;
 use proxima_primitives::pipe::Method;
-use proxima_runtime::Runtime;
-use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
+use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::stream::StreamConnection;
+use proxima_runtime::Runtime;
 
 pub struct StreamListenProtocol {
     label: String,
@@ -109,7 +109,15 @@ impl ListenProtocol for StreamListenProtocol {
         // `TokioTcpListener::bind` fallback here, gone under the
         // additivity fix) — this is one explicit, feature-independent
         // configuration error instead.
-        let _ = (dispatch, method, path, chunk_bytes, ready_signal, shutdown, runtime);
+        let _ = (
+            dispatch,
+            method,
+            path,
+            chunk_bytes,
+            ready_signal,
+            shutdown,
+            runtime,
+        );
         Box::pin(async move {
             Err(ProximaError::Config(format!(
                 "{label} listener requires an acceptor factory (none injected on \
@@ -274,8 +282,8 @@ async fn handle_connection<C: StreamConnection>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::header_list::HeaderList;
     use proxima_primitives::pipe::handler::into_handle;
+    use proxima_primitives::pipe::header_list::HeaderList;
     use proxima_primitives::pipe::request::Response as ProximaResponse;
     use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -303,7 +311,6 @@ mod tests {
             }
         }
     }
-
 
     // test-only `Runtime` whose `spawn_on_current_core` forwards to
     // `tokio::task::spawn_local` — stands in for an installed runtime so
@@ -336,9 +343,7 @@ mod tests {
 
         fn spawn_background_blocking(
             &self,
-            _work: Box<
-                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-            >,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
         ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
             unreachable!("test never spawns background-blocking work")
         }

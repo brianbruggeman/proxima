@@ -26,11 +26,11 @@
 use loom::sync::Mutex;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 #[cfg(not(feature = "loom"))]
 use std::sync::Mutex;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use core::future::Future;

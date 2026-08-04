@@ -39,7 +39,8 @@ use bytes::Bytes;
 use proxima_codec::FrameCodec;
 use proxima_protocols::codec_pipe::{Incomplete, OwnFrame};
 use proxima_protocols::kafka::{
-    KafkaFrameCodec, ParseError as EnvelopeParseError, RequestHeader, parse_frame, parse_request_header,
+    KafkaFrameCodec, ParseError as EnvelopeParseError, RequestHeader, parse_frame,
+    parse_request_header,
 };
 
 use crate::wire::{self, ApiKey, RequestBody, ResponseBody, WireError};
@@ -66,7 +67,10 @@ pub enum Violation {
     /// client declared an `api_version` this facade does not support —
     /// a well-formed, data-free reply under the same `correlation_id`;
     /// the connection stays open.
-    UnsupportedVersion { correlation_id: i32, body: ResponseBody },
+    UnsupportedVersion {
+        correlation_id: i32,
+        body: ResponseBody,
+    },
 }
 
 /// [`FrameCodec::Frame`] for Kafka: the SUM of both wire directions (see
@@ -76,9 +80,15 @@ pub enum Violation {
 /// (`crate::framed_app::KafkaOutcome::as_frame`).
 #[derive(Debug, Clone)]
 pub enum KafkaFrame<'a> {
-    Request { header: RequestHeader<'a>, body: &'a [u8] },
+    Request {
+        header: RequestHeader<'a>,
+        body: &'a [u8],
+    },
     Violation(Violation),
-    Reply { correlation_id: i32, body: &'a ResponseBody },
+    Reply {
+        correlation_id: i32,
+        body: &'a ResponseBody,
+    },
 }
 
 /// The one error [`KafkaCodec::parse_frame`] ever raises ("the buffer
@@ -134,7 +144,9 @@ impl FrameCodec for KafkaCodec {
                     },
                     consumed,
                 )),
-                Err(_malformed_header) => Ok((KafkaFrame::Violation(Violation::Protocol), consumed)),
+                Err(_malformed_header) => {
+                    Ok((KafkaFrame::Violation(Violation::Protocol), consumed))
+                }
             },
             Err(EnvelopeParseError::PartialFrame(size)) => {
                 if 4 + size as usize > self.max_message_bytes {
@@ -153,8 +165,16 @@ impl FrameCodec for KafkaCodec {
         }
     }
 
-    fn encode_frame(&self, frame: &KafkaFrame<'_>, dest: &mut Vec<u8>) -> Result<(), KafkaCodecError> {
-        let KafkaFrame::Reply { correlation_id, body } = frame else {
+    fn encode_frame(
+        &self,
+        frame: &KafkaFrame<'_>,
+        dest: &mut Vec<u8>,
+    ) -> Result<(), KafkaCodecError> {
+        let KafkaFrame::Reply {
+            correlation_id,
+            body,
+        } = frame
+        else {
             // never constructed on the encode side — a handler's outcome
             // only ever borrows the `Reply` variant (see
             // `crate::framed_app::KafkaOutcome::as_frame`).
@@ -179,7 +199,11 @@ impl FrameCodec for KafkaCodec {
 /// `connection::dispatch`'s own single decode call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KafkaOwnedFrame {
-    Request { correlation_id: i32, api_key: i16, body: RequestBody },
+    Request {
+        correlation_id: i32,
+        api_key: i16,
+        body: RequestBody,
+    },
     Violation(Violation),
 }
 
@@ -292,7 +316,9 @@ mod tests {
         let codec = KafkaCodec::new(10);
         // declares a 1000-byte payload but supplies none of it yet.
         let buf = 1000_i32.to_be_bytes();
-        let (frame, consumed) = codec.parse_frame(&buf).expect("folds into a violation frame");
+        let (frame, consumed) = codec
+            .parse_frame(&buf)
+            .expect("folds into a violation frame");
         assert_eq!(consumed, buf.len());
         assert!(matches!(
             frame,
@@ -307,7 +333,9 @@ mod tests {
         KafkaFrameCodec
             .encode_frame(&[0_u8, 1].as_slice(), &mut wire)
             .expect("encode");
-        let (frame, consumed) = codec().parse_frame(&wire).expect("folds into a violation frame");
+        let (frame, consumed) = codec()
+            .parse_frame(&wire)
+            .expect("folds into a violation frame");
         assert_eq!(consumed, wire.len());
         assert!(matches!(frame, KafkaFrame::Violation(Violation::Protocol)));
     }
@@ -330,7 +358,9 @@ mod tests {
     #[test]
     fn own_frame_folds_an_unsupported_version_into_a_violation() {
         let wire = encode_request(ApiKey::Produce.to_i16(), 9, 5, b"");
-        let (frame, _) = codec().parse_frame(&wire).expect("parses the envelope+header");
+        let (frame, _) = codec()
+            .parse_frame(&wire)
+            .expect("parses the envelope+header");
         let owned = KafkaCodec::own_frame(&Bytes::new(), &frame);
         assert_eq!(
             owned,
@@ -345,7 +375,9 @@ mod tests {
     fn own_frame_folds_a_malformed_body_into_a_violation() {
         // Produce v0 with a truncated body (declares fields it doesn't supply).
         let wire = encode_request(ApiKey::Produce.to_i16(), 0, 1, &[0, 1]);
-        let (frame, _) = codec().parse_frame(&wire).expect("parses the envelope+header");
+        let (frame, _) = codec()
+            .parse_frame(&wire)
+            .expect("parses the envelope+header");
         let owned = KafkaCodec::own_frame(&Bytes::new(), &frame);
         assert_eq!(owned, KafkaOwnedFrame::Violation(Violation::MalformedBody));
     }
@@ -354,7 +386,10 @@ mod tests {
     fn own_frame_reowns_a_violation_verbatim() {
         let frame = KafkaFrame::Violation(Violation::MessageTooLarge { limit: 16 });
         let owned = KafkaCodec::own_frame(&Bytes::new(), &frame);
-        assert_eq!(owned, KafkaOwnedFrame::Violation(Violation::MessageTooLarge { limit: 16 }));
+        assert_eq!(
+            owned,
+            KafkaOwnedFrame::Violation(Violation::MessageTooLarge { limit: 16 })
+        );
     }
 
     #[test]

@@ -73,7 +73,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 fn start_proxima_server(
     runtime: &tokio::runtime::Runtime,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {

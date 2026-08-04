@@ -833,7 +833,10 @@ mod tests {
             "crate::time::drivers::external::DRIVER"
         );
         assert_eq!(Timer::EmbassyTime.driver_path(), "embassy_time::DRIVER");
-        assert_eq!(Timer::Mock.driver_path(), "crate::time::drivers::mock::DRIVER");
+        assert_eq!(
+            Timer::Mock.driver_path(),
+            "crate::time::drivers::mock::DRIVER"
+        );
         let custom = Timer::Custom("x::Y".into());
         assert_eq!(custom.driver_path(), "x::Y");
     }

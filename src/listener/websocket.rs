@@ -36,8 +36,7 @@ use crate::error::ProximaError;
 /// [`UpgradeHandler`] itself (a one-shot `FnOnce` per connection), a
 /// `WebSocketHandler` is called once PER accepted connection, so it must be
 /// callable more than once over the listener's lifetime.
-pub type WebSocketHandler =
-    Arc<dyn Fn(HijackedSocket) -> UpgradeFuture + Send + Sync>;
+pub type WebSocketHandler = Arc<dyn Fn(HijackedSocket) -> UpgradeFuture + Send + Sync>;
 
 /// RFC 6455 §1.3 handshake check: `Connection: Upgrade` + `Upgrade:
 /// websocket` (case-insensitive per RFC 7230 §6.7) + a present
@@ -160,7 +159,10 @@ mod tests {
             type Out = Response<Bytes>;
             type Err = ProximaError;
 
-            async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+            async fn call(
+                &self,
+                _request: Request<Bytes>,
+            ) -> Result<Response<Bytes>, ProximaError> {
                 Ok(Response::ok("plain"))
             }
         }
@@ -189,7 +191,10 @@ mod tests {
             type Out = Response<Bytes>;
             type Err = ProximaError;
 
-            async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+            async fn call(
+                &self,
+                _request: Request<Bytes>,
+            ) -> Result<Response<Bytes>, ProximaError> {
                 unreachable!("a genuine handshake must never reach the inner dispatch pipe")
             }
         }

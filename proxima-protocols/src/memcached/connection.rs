@@ -62,7 +62,10 @@ pub enum Advanced<'a> {
     NeedMore,
     /// One full command parsed. `consumed` is the byte length to pass to
     /// [`Connection::consume`] once the driver is done with `command`.
-    Command { command: Command<'a>, consumed: usize },
+    Command {
+        command: Command<'a>,
+        consumed: usize,
+    },
     /// The buffered bytes violate the text protocol's framing (unknown
     /// verb, malformed field, bad integer). The driver closes the
     /// connection rather than trying to resync — there is no trustworthy
@@ -209,14 +212,18 @@ mod tests {
 
     #[test]
     fn oversized_incomplete_value_trips_message_too_large() {
-        let mut connection = Connection::with_limits(Limits { max_message_bytes: 10 });
+        let mut connection = Connection::with_limits(Limits {
+            max_message_bytes: 10,
+        });
         connection.feed_bytes(b"set k 0 0 1000000000\r\nabc");
         assert!(matches!(connection.advance(), Advanced::MessageTooLarge));
     }
 
     #[test]
     fn small_incomplete_value_stays_need_more_under_the_cap() {
-        let mut connection = Connection::with_limits(Limits { max_message_bytes: 32 });
+        let mut connection = Connection::with_limits(Limits {
+            max_message_bytes: 32,
+        });
         connection.feed_bytes(b"set k 0 0 5\r\nhel");
         assert!(matches!(connection.advance(), Advanced::NeedMore));
     }

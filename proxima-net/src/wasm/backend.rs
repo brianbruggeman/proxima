@@ -11,8 +11,8 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 
-use crate::{Packet, PacketListener};
 use super::{PACKED_ADDR_LEN, decode_addr, encode_addr, take_wakers};
+use crate::{Packet, PacketListener};
 
 const WOULD_BLOCK: i64 = -1;
 

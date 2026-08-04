@@ -29,8 +29,8 @@ use tracing::{debug, error};
 use proxima_core::ProximaError;
 use proxima_listen::admission::{ConnAdmission, RequestAdmit};
 use proxima_primitives::pipe::Method;
-use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::quiesce::QuiesceResponse;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
@@ -848,8 +848,14 @@ where
             };
             release_if_admitted(admission, admission_outcome);
             cancel_guard.disarm();
-            finish_streaming_response(writer, out, connection, trace_id.as_deref(), response_result)
-                .await
+            finish_streaming_response(
+                writer,
+                out,
+                connection,
+                trace_id.as_deref(),
+                response_result,
+            )
+            .await
         }
         None => {
             // No executor to spawn onto — drive the dispatch future
@@ -866,8 +872,13 @@ where
             });
             let mut dispatch_done: Option<Result<Response<Bytes>, ProximaError>> = None;
             let pump_outcome = {
-                let mut pump_future =
-                    pin!(pump_body_stream(connection, reader, read_buf, &mut body_tx, &cancel));
+                let mut pump_future = pin!(pump_body_stream(
+                    connection,
+                    reader,
+                    read_buf,
+                    &mut body_tx,
+                    &cancel
+                ));
                 // `dispatch_pending` (a plain bool, checked OUTSIDE the
                 // poll_fn closure) gates whether the closure below even
                 // touches `dispatch_future` — reading `dispatch_done`
@@ -978,8 +989,14 @@ where
             };
             release_if_admitted(admission, admission_outcome);
             cancel_guard.disarm();
-            finish_streaming_response(writer, out, connection, trace_id.as_deref(), response_result)
-                .await
+            finish_streaming_response(
+                writer,
+                out,
+                connection,
+                trace_id.as_deref(),
+                response_result,
+            )
+            .await
         }
     }
 }
@@ -1124,7 +1141,8 @@ fn build_streaming_request(
     // Trailers slot the chunked decoder populates at body-end; the Pipe's
     // `body_bytes()` folds it into `headers` after draining (RFC 7230
     // §4.1.2 request trailers on the streaming path).
-    let trailers_slot: proxima_primitives::pipe::body::TrailersSlot = Arc::new(std::sync::Mutex::new(None));
+    let trailers_slot: proxima_primitives::pipe::body::TrailersSlot =
+        Arc::new(std::sync::Mutex::new(None));
     let request = Request {
         method,
         path,
@@ -1688,7 +1706,6 @@ mod tests {
         }
     }
 
-
     const CLOSE_GET: &[u8] = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
 
     fn serve_once(response: fn() -> Response<Bytes>) -> Vec<Vec<u8>> {
@@ -2138,8 +2155,13 @@ mod tests {
         const EXPECT_CONTINUE_POST: &[u8] =
             b"POST /submit HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\nhello";
         let (socket, writes) = TestSocket::new(EXPECT_CONTINUE_POST);
-        block_on(serve_h1_connection(socket, into_handle(EchoBodyPipe), None, None))
-            .expect("serve should complete cleanly on connection: close");
+        block_on(serve_h1_connection(
+            socket,
+            into_handle(EchoBodyPipe),
+            None,
+            None,
+        ))
+        .expect("serve should complete cleanly on connection: close");
         let writes = writes.lock().unwrap();
         let wire = joined(&writes);
         assert!(
@@ -2189,8 +2211,13 @@ mod tests {
     fn chunked_request_body_streams_through_pipe_without_tokio_runtime() {
         const CHUNKED_POST: &[u8] = b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let (socket, writes) = TestSocket::new(CHUNKED_POST);
-        block_on(serve_h1_connection(socket, into_handle(EchoBodyPipe), None, None))
-            .expect("serve should complete cleanly on connection: close");
+        block_on(serve_h1_connection(
+            socket,
+            into_handle(EchoBodyPipe),
+            None,
+            None,
+        ))
+        .expect("serve should complete cleanly on connection: close");
         let wire = joined(&writes.lock().unwrap());
         assert!(wire.starts_with("HTTP/1.1 200"), "response head: {wire}");
         assert!(

@@ -11,9 +11,9 @@ use crate::pipe::request::{Request, Response};
 use proxima_core::ProximaError;
 
 #[cfg(feature = "std")]
-use crate::pipe::mutate::MutateOp;
-#[cfg(feature = "std")]
 use crate::pipe::handler::into_handle;
+#[cfg(feature = "std")]
+use crate::pipe::mutate::MutateOp;
 #[cfg(feature = "std")]
 use crate::pipe::pipe_factory::PipeFactory;
 #[cfg(feature = "std")]
@@ -411,7 +411,6 @@ mod tests {
             }
         }
     }
-
 
     fn build_request() -> Request<Bytes> {
         Request::builder()

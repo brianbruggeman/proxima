@@ -716,9 +716,9 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::{AuthFlow, Disposition, Session, SessionError, StateName, WirePhase};
     use super::super::frontend::{FrontendMessage, InitialMessage, parse_frontend, parse_initial};
     use super::super::types::{ProtocolVersion, StatementTarget, TransactionStatus};
+    use super::{AuthFlow, Disposition, Session, SessionError, StateName, WirePhase};
 
     fn ssl_request_bytes() -> [u8; 8] {
         let mut buf = [0u8; 8];

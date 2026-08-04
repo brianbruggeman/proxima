@@ -436,7 +436,10 @@ mod tests {
     /// no sleeps: every wait is a real syscall bound to actual CQE arrivals.
     fn wait_until_reclaimed(reactor: &mut PrimeUringReactor, index: u32) {
         for _ in 0..16 {
-            let is_cancelling = matches!(reactor.slots[index as usize].state, SlotState::Cancelling { .. });
+            let is_cancelling = matches!(
+                reactor.slots[index as usize].state,
+                SlotState::Cancelling { .. }
+            );
             if !is_cancelling {
                 return;
             }
@@ -460,9 +463,13 @@ mod tests {
 
         let mut buffer = Box::new([0u8; BUF_SIZE]);
         let user_data = reactor.register_op();
-        let sqe = opcode::Recv::new(types::Fd(server.as_raw_fd()), buffer.as_mut_ptr(), BUF_SIZE as u32)
-            .build()
-            .user_data(user_data);
+        let sqe = opcode::Recv::new(
+            types::Fd(server.as_raw_fd()),
+            buffer.as_mut_ptr(),
+            BUF_SIZE as u32,
+        )
+        .build()
+        .user_data(user_data);
         unsafe {
             reactor
                 .ring_mut()

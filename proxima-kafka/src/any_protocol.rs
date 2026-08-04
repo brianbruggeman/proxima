@@ -52,8 +52,12 @@ const MIN_V0_HEADER_BYTES: i32 = 10;
 /// The concrete [`FramedAny`] instantiation Kafka drives — `Probe`/`Shed`
 /// are plain `fn` items (no captured state), so `KafkaAnyProtocol` needs
 /// no generic parameters of its own to name this type.
-type KafkaFramedAny =
-    FramedAny<KafkaCodec, KafkaFramedApp, fn(&[u8]) -> ProbeVerdict, fn(ShedReason, &KafkaOwnedFrame) -> KafkaOutcome>;
+type KafkaFramedAny = FramedAny<
+    KafkaCodec,
+    KafkaFramedApp,
+    fn(&[u8]) -> ProbeVerdict,
+    fn(ShedReason, &KafkaOwnedFrame) -> KafkaOutcome,
+>;
 
 fn probe_kafka(prefix: &[u8]) -> ProbeVerdict {
     if prefix.len() < PROBE_PREFIX_BYTES {
@@ -66,19 +70,24 @@ fn probe_kafka(prefix: &[u8]) -> ProbeVerdict {
         return ProbeVerdict::No;
     }
     let api_key = i16::from_be_bytes([prefix[4], prefix[5]]);
-    if wire::SUPPORTED_API_VERSIONS.iter().any(|&(key, _, _)| key == api_key) {
+    if wire::SUPPORTED_API_VERSIONS
+        .iter()
+        .any(|&(key, _, _)| key == api_key)
+    {
         ProbeVerdict::Match { consumed: 0 }
     } else {
         ProbeVerdict::No
     }
 }
 
-fn resolve_config(base: &KafkaServerConfig, spec: &Value) -> Result<KafkaServerConfig, ProximaError> {
+fn resolve_config(
+    base: &KafkaServerConfig,
+    spec: &Value,
+) -> Result<KafkaServerConfig, ProximaError> {
     match spec.get("kafka") {
         None => Ok(base.clone()),
-        Some(overrides) => {
-            serde_json::from_value(overrides.clone()).map_err(|error| ProximaError::Config(format!("kafka spec: {error}")))
-        }
+        Some(overrides) => serde_json::from_value(overrides.clone())
+            .map_err(|error| ProximaError::Config(format!("kafka spec: {error}"))),
     }
 }
 
@@ -183,7 +192,9 @@ mod tests {
         type Err = ProximaError;
 
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
-            Ok(crate::wire::ResponseBody::ApiVersions(crate::wire::ApiVersionsResponse::supported()))
+            Ok(crate::wire::ResponseBody::ApiVersions(
+                crate::wire::ApiVersionsResponse::supported(),
+            ))
         }
     }
 
@@ -206,13 +217,19 @@ mod tests {
     #[test]
     fn probe_matches_a_real_api_versions_request_prefix() {
         let protocol = KafkaAnyProtocol::new("kafka", handler());
-        assert_eq!(protocol.probe(&api_versions_prefix(1)), ProbeVerdict::Match { consumed: 0 });
+        assert_eq!(
+            protocol.probe(&api_versions_prefix(1)),
+            ProbeVerdict::Match { consumed: 0 }
+        );
     }
 
     #[test]
     fn probe_needs_more_bytes_below_the_eight_byte_prefix() {
         let protocol = KafkaAnyProtocol::new("kafka", handler());
-        assert_eq!(protocol.probe(b"\x00\x00\x00"), ProbeVerdict::NeedMore { at_least: 8 });
+        assert_eq!(
+            protocol.probe(b"\x00\x00\x00"),
+            ProbeVerdict::NeedMore { at_least: 8 }
+        );
     }
 
     #[test]

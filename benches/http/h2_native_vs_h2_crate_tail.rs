@@ -62,7 +62,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 async fn spawn_h2_crate(dispatch: PipeHandle) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");

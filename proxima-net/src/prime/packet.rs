@@ -156,10 +156,10 @@ mod tests {
 
                     let mut buf = vec![0_u8; 1500];
                     let received = server.recv(&mut buf).await.expect("recv");
-                    *result_handle.lock().unwrap() =
-                        Some((received.data.to_vec(), received.src));
+                    *result_handle.lock().unwrap() = Some((received.data.to_vec(), received.src));
                     done.store(true, Ordering::Release);
-                }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
@@ -188,7 +188,8 @@ mod tests {
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
         let done = Arc::new(AtomicBool::new(false));
         let done_clone = done.clone();
-        let result_chan: Arc<std::sync::Mutex<Option<usize>>> = Arc::new(std::sync::Mutex::new(None));
+        let result_chan: Arc<std::sync::Mutex<Option<usize>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let result_for_factory = result_chan.clone();
 
         handle
@@ -216,7 +217,8 @@ mod tests {
                     let received = server.recv(&mut small_buf).await.expect("recv");
                     *result_handle.lock().unwrap() = Some(received.data.len());
                     done.store(true, Ordering::Release);
-                }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
@@ -279,7 +281,8 @@ mod tests {
                     let received = server.recv(&mut buf).await.expect("recv");
                     *result_handle.lock().unwrap() = Some((received.data.to_vec(), received.src));
                     done.store(true, Ordering::Release);
-                }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 

@@ -124,7 +124,8 @@ impl DnsAnyProtocol {
             DnsTcpCodec::new(config.max_message_bytes),
             DnsFramedApp::new(self.label.clone(), self.handler.clone()),
             probe as fn(&[u8]) -> ProbeVerdict,
-            shed_reply as fn(ShedReason, &proxima_protocols::dns::DnsTcpOwnedFrame) -> DnsTcpOutcome,
+            shed_reply
+                as fn(ShedReason, &proxima_protocols::dns::DnsTcpOwnedFrame) -> DnsTcpOutcome,
             MIN_TCP_FRAME_PREFIX,
         )
     }
@@ -258,7 +259,10 @@ mod tests {
         let mut framed = framed_query(1234);
         // bump QDCOUNT (prefix-relative bytes 6..8) to 2.
         framed[7] = 2;
-        assert_eq!(protocol.probe(&framed[..MIN_TCP_FRAME_PREFIX]), ProbeVerdict::No);
+        assert_eq!(
+            protocol.probe(&framed[..MIN_TCP_FRAME_PREFIX]),
+            ProbeVerdict::No
+        );
     }
 
     #[test]

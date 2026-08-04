@@ -17,54 +17,56 @@
 /// `proxima_alloc` the unbounded `BTreeSet` form needs no cap.
 #[cfg(not(proxima_alloc))]
 mod sized {
-    include!(concat!(env!("OUT_DIR"), "/proxima_primitives_pipe_sized.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/proxima_primitives_pipe_sized.rs"
+    ));
 }
 
+#[cfg(feature = "alloc")]
+pub mod alloc_tier;
 #[cfg(feature = "std")]
 pub mod batch;
+pub mod batch_source;
 #[cfg(feature = "alloc")]
 pub mod body;
 #[cfg(feature = "alloc")]
 pub mod bounded;
 #[cfg(feature = "std")]
 pub mod bucket_table;
+pub mod capabilities;
 pub mod capture_surface;
 #[cfg(feature = "alloc")]
 pub mod chaos;
-pub mod primitives;
-#[cfg(feature = "alloc")]
-pub mod alloc_tier;
-pub mod batch_source;
-pub mod capabilities;
 #[cfg(feature = "alloc")]
 pub mod delay;
+pub mod primitives;
 // `Diff::call` used to require `tokio::join!` directly (predates the
 // pipe/sync primitives merge); it's now `futures::join!` (runtime-agnostic),
 // but the module stays `not(loom)` for parity with its sibling `lifecycle`
 // — untested under the loom model, not because it needs tokio anymore.
-#[cfg(all(feature = "std", not(loom)))]
-pub mod diff;
 #[cfg(feature = "alloc")]
 pub mod demand;
+#[cfg(all(feature = "std", not(loom)))]
+pub mod diff;
+pub mod drain_sink;
+pub mod drain_source;
 #[cfg(feature = "alloc")]
 pub mod endpoint;
+pub mod ext;
+pub mod fan_in;
 #[cfg(feature = "alloc")]
 pub mod fanout;
+#[cfg(feature = "std")]
+pub mod fanout_registry;
 #[cfg(feature = "alloc")]
 pub mod filter;
 #[cfg(feature = "std")]
 pub mod filter_registry;
-#[cfg(feature = "std")]
-pub mod fanout_registry;
-pub mod drain_sink;
-pub mod drain_source;
-pub mod ext;
-pub mod fan_in;
-pub mod stream_bridge;
-#[cfg(feature = "alloc")]
-pub mod header_list;
 #[cfg(feature = "alloc")]
 pub mod handler;
+#[cfg(feature = "alloc")]
+pub mod header_list;
 #[cfg(feature = "std")]
 pub mod interval_pipe;
 #[cfg(feature = "std")]
@@ -73,6 +75,7 @@ pub mod isolate;
 pub mod keyed_live_filter;
 #[cfg(feature = "alloc")]
 pub mod labeled;
+pub mod stream_bridge;
 // `not(loom)`: `ProducerLifecycle` wraps a real `tokio::task::JoinSet`
 // directly (predates the pipe/sync primitives merge); the loom build keeps
 // tokio out of the graph entirely (see `[target.'cfg(not(loom))'.dependencies]`
@@ -141,6 +144,11 @@ pub use proxima_core::{ProximaError, ProximaResult};
 #[cfg(feature = "alloc")]
 pub use body::{ChunkStream, RequestStream, ResponseStream};
 #[cfg(feature = "alloc")]
+pub use handler::{
+    Handler, PipeHandle, ThreadLocalHandler, ThreadLocalPipeHandle, into_handle,
+    into_thread_local_handle,
+};
+#[cfg(feature = "alloc")]
 pub use header_list::HeaderList;
 pub use header_name::HeaderName;
 #[cfg(feature = "std")]
@@ -154,16 +162,13 @@ pub use method::Method;
 #[cfg(feature = "part-source")]
 pub use part::{Part, PartSink, PartSource};
 #[cfg(feature = "alloc")]
-pub use handler::{
-    Handler, PipeHandle, ThreadLocalHandler, ThreadLocalPipeHandle, into_handle,
-    into_thread_local_handle,
-};
-#[cfg(feature = "alloc")]
 pub use pipe_factory::PipeFactory;
 #[cfg(feature = "alloc")]
 pub use request::{Request, RequestBuilder, RequestContext, Response};
 #[cfg(feature = "std")]
-pub use source::{SourceFactory, SourceFactoryRegistry, SourceHandle, SourcePipe, into_source_handle};
+pub use source::{
+    SourceFactory, SourceFactoryRegistry, SourceHandle, SourcePipe, into_source_handle,
+};
 #[cfg(feature = "alloc")]
 pub use swap_surface::{StreamFramer, SwapSurface, Turn};
 
@@ -177,12 +182,12 @@ pub use primitives::{AndThen, Pipe, SendPipe, UnpinPipe, UnpinSendPipe};
 // blanket impl over `Pipe` reaches every pipe (see `pipe::ext`'s module doc);
 // the resulting combinator values still carry whatever higher tiers their own
 // stages qualify for.
-pub use ext::PipeExt;
 #[cfg(feature = "alloc")]
 pub use alloc_tier::{
     BoxFuture, DynPipe, LocalPipeHandle, SendBoxFuture, SendDynPipe, into_local_handle,
 };
 pub use batch_source::BatchSource;
+pub use ext::PipeExt;
 // ApplyOps/BytePayload/CheckOutcome/Checkable/ExceededAction/KeyOf are the
 // same canonical items already re-exported at the crate root via
 // transform::/mutate::/validate::/rate_limit:: (each of those modules
@@ -190,34 +195,38 @@ pub use batch_source::BatchSource;
 // here would just be the identical item under a second name, so only the
 // capability traits with no other root-level path are added.
 pub use capabilities::{Idempotent, Replayable, Retryable};
+#[cfg(feature = "io-async")]
+pub use drain_sink::RingSinkWriteError;
 pub use drain_sink::{DrainFanOut, DrainSink, RingSink};
 pub use drain_source::{DrainFanIn, DrainSource, DrainState, RingSource};
 pub use fan_in::{Exhausted, FanIn, FanInStrategy, Select};
-pub use stream_bridge::{AsSink, AsSinkError, AsStream, DrainSinkExt, PollSourceExt};
-#[cfg(feature = "io-bridge")]
-pub use stream_bridge::{IntoReader, IntoWriter};
-#[cfg(feature = "io-async")]
-pub use drain_sink::RingSinkWriteError;
-#[cfg(feature = "std")]
-pub use filter_registry::{FilterRegistry, FilterRegistryConfig};
 #[cfg(feature = "std")]
 pub use fanout_registry::{KeyedFanOut, SubscriptionId};
 #[cfg(feature = "std")]
-pub use live_filter::{FilterControl, FilterUpdate, IdSet, LiveFilter, live_filter, live_filter_ids};
-pub use resilience::{Backoff, CircuitBreaker, CircuitState, Deadline, Jitter, RetryAction, RetryController};
+pub use filter_registry::{FilterRegistry, FilterRegistryConfig};
+#[cfg(feature = "std")]
+pub use live_filter::{
+    FilterControl, FilterUpdate, IdSet, LiveFilter, live_filter, live_filter_ids,
+};
 #[cfg(feature = "alloc")]
 pub use resilience::Fallback;
+pub use resilience::{
+    Backoff, CircuitBreaker, CircuitState, Deadline, Jitter, RetryAction, RetryController,
+};
 pub use retry_rules::RetryRules;
 #[cfg(feature = "std")]
 pub use signal_source::SignalSource;
+pub use stream_bridge::{AsSink, AsSinkError, AsStream, DrainSinkExt, PollSourceExt};
+#[cfg(feature = "io-bridge")]
+pub use stream_bridge::{IntoReader, IntoWriter};
 // sink_front::SinkFront is the generic ring-backed engine struct, distinct from
 // sink::SinkFront (the alloc-tier Arc-shared facade already at the crate root)
 // — only the two concrete instantiations are re-exported here to avoid the name
 // collision. Admission/DropReason/SinkCounters/SinkLifecycle are the same
 // canonical items sink:: already re-exports.
-pub use sink_front::StaticSinkFront;
 #[cfg(feature = "alloc")]
 pub use sink_front::HeapSinkFront;
+pub use sink_front::StaticSinkFront;
 pub use when::When;
 
 #[cfg(feature = "std")]
@@ -226,26 +235,22 @@ pub use batch::Batch;
 pub use bounded::{BoundedQueue, EnqueueOutcome, FailMode};
 #[cfg(feature = "alloc")]
 pub use chaos::{ChaosBuilder, ChaosConfig, LatencyFault, chaos};
-#[cfg(all(feature = "std", not(loom)))]
-pub use diff::{Diff, diff_handle};
-#[cfg(feature = "std")]
-pub use isolate::{Isolate, IsolateFactory};
-#[cfg(feature = "std")]
-pub use routing::{HostFilter, MethodFilter, Mount, Router, RoutingPipe};
-#[cfg(feature = "std")]
-pub use swap_registry::{SwapRegistry, SwappablePipe};
 #[cfg(feature = "std")]
 pub use delay::DelayFactory;
 #[cfg(feature = "alloc")]
 pub use delay::{Delay, DelayConfig, Dist};
 #[cfg(feature = "alloc")]
 pub use demand::{AlwaysArmed, AtomicGate, AtomicGateController, Demand, DemandGate};
+#[cfg(all(feature = "std", not(loom)))]
+pub use diff::{Diff, diff_handle};
 #[cfg(feature = "alloc")]
 pub use fanout::{AllOrNothing, BestEffort, FanOut, FanPolicy, IgnoreErrors};
 #[cfg(feature = "std")]
 pub use filter::FilterFactory;
 #[cfg(feature = "alloc")]
 pub use filter::{FilterConfig, Predicate, RejectMode};
+#[cfg(feature = "std")]
+pub use isolate::{Isolate, IsolateFactory};
 #[cfg(feature = "std")]
 pub use keyed_live_filter::{KeyedLiveFilter, keyed_live_filter_ids};
 #[cfg(feature = "alloc")]
@@ -263,10 +268,14 @@ pub use rate_limit::{
 pub use retry::RetryFactory;
 #[cfg(feature = "alloc")]
 pub use retry::{DeliveryOutcome, Retry, RetryBudget, RetryPredicate};
+#[cfg(feature = "std")]
+pub use routing::{HostFilter, MethodFilter, Mount, Router, RoutingPipe};
 #[cfg(feature = "fan-concurrent")]
 pub use scatter_gather::ScatterGather;
 #[cfg(feature = "alloc")]
 pub use sink::{Admission, DropReason, SinkCounters, SinkFront, SinkLifecycle};
+#[cfg(feature = "std")]
+pub use swap_registry::{SwapRegistry, SwappablePipe};
 #[cfg(feature = "alloc")]
 pub use transform::{ApplyOps, Transform};
 #[cfg(feature = "std")]

@@ -324,7 +324,9 @@ impl SendPipe for KafkaBroker {
                 // here too keeps `KafkaBroker` correct standing alone
                 // (e.g. driven directly in a unit test, bypassing the
                 // connection driver).
-                Ok(ResponseBody::ApiVersions(wire::ApiVersionsResponse::supported()))
+                Ok(ResponseBody::ApiVersions(
+                    wire::ApiVersionsResponse::supported(),
+                ))
             }
         }
     }

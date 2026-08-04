@@ -48,7 +48,10 @@ fn main() {
     // of records, then advance (Kafka's sticky partitioner). It plugs into the
     // same seam with zero library change — the whole point of "extend, not add".
     let by_sticky = route(&records, &Sticky::new(4));
-    print_partitions("Sticky (caller-defined, library never heard of it)", &by_sticky);
+    print_partitions(
+        "Sticky (caller-defined, library never heard of it)",
+        &by_sticky,
+    );
 
     println!("\naffinity proven: same key -> same partition; the strategy never saw a record.");
 }
@@ -162,7 +165,9 @@ struct Record {
 }
 
 fn order_stream() -> Vec<Record> {
-    let customers = ["ada", "linus", "grace", "dennis", "ada", "grace", "linus", "ada"];
+    let customers = [
+        "ada", "linus", "grace", "dennis", "ada", "grace", "linus", "ada",
+    ];
     customers
         .into_iter()
         .enumerate()
@@ -220,7 +225,11 @@ fn assert_customer_scatters(records: &[Record], partitions: &[Vec<Record>; PARTI
     let scattered = records.iter().any(|record| {
         let homes = partitions
             .iter()
-            .filter(|partition| partition.iter().any(|other| other.customer == record.customer))
+            .filter(|partition| {
+                partition
+                    .iter()
+                    .any(|other| other.customer == record.customer)
+            })
             .count();
         homes > 1
     });

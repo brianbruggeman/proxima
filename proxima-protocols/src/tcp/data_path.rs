@@ -262,10 +262,10 @@ where
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
     use super::super::congestion::Reno;
     use super::super::connection::State;
     use super::super::time::Instant;
+    use super::*;
     use proptest::prelude::*;
 
     const SMSS: u32 = 1000;

@@ -9,7 +9,9 @@ use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 use thread_local::ThreadLocal;
 
-pub use proxima_primitives::pipe::telemetry_surface::{Labels, NoopTelemetry, Telemetry, TelemetryHandle};
+pub use proxima_primitives::pipe::telemetry_surface::{
+    Labels, NoopTelemetry, Telemetry, TelemetryHandle,
+};
 
 /// Process-wide cache of `metric_name -> Arc<str>`. Hot-path callers
 /// pass the same `&'static str` literal billions of times; this

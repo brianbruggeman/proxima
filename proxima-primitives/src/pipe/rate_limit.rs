@@ -6,19 +6,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use bon::Builder;
-use conflaguration::{Settings, Validate, ValidationMessage};
 use crate::pipe::SendPipe;
 use crate::pipe::capabilities::Clock;
 pub use crate::pipe::capabilities::{ExceededAction, KeyOf};
 use crate::pipe::primitives::Pipe;
+use bon::Builder;
+use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::pipe::bucket_table::BucketTable;
 use crate::pipe::clock::TimeClock;
-use crate::pipe::labeled::Labeled;
 use crate::pipe::handler::{PipeHandle, ThreadLocalPipeHandle, into_handle};
+use crate::pipe::labeled::Labeled;
 use crate::pipe::pipe_factory::PipeFactory;
 use crate::pipe::request::{Request, Response};
 use crate::pipe::telemetry_surface::Labels;
@@ -671,7 +671,6 @@ mod tests {
             async { Ok(Response::ok("ok")) }
         }
     }
-
 
     fn build_request_with_metrics(method: &str, path: &str) -> (Request<Bytes>, Arc<Metrics>) {
         let metrics: Arc<Metrics> = Arc::new(Metrics::default());

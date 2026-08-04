@@ -29,7 +29,10 @@
 //! it owns the tokio/transport edge and stays `std` by design — the
 //! absence of `no_std` there is intentional, not an oversight.
 
-#[cfg(all(feature = "http2_codec-codec-trait", not(feature = "http2_codec-no-alloc")))]
+#[cfg(all(
+    feature = "http2_codec-codec-trait",
+    not(feature = "http2_codec-no-alloc")
+))]
 pub mod codec_trait;
 #[cfg(not(feature = "http2_codec-no-alloc"))]
 pub mod connection;
@@ -39,5 +42,8 @@ pub mod stream;
 #[cfg(not(feature = "http2_codec-no-alloc"))]
 pub mod stream_table;
 
-#[cfg(all(feature = "http2_codec-codec-trait", not(feature = "http2_codec-no-alloc")))]
+#[cfg(all(
+    feature = "http2_codec-codec-trait",
+    not(feature = "http2_codec-no-alloc")
+))]
 pub use codec_trait::{FrameError as H2FrameError, H2Frame, H2FrameCodec};

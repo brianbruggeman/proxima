@@ -118,7 +118,6 @@ impl SendPipe for ProcessRpcUpstream {
     }
 }
 
-
 async fn ensure_alive(
     state: &Arc<RpcState>,
     guard: &mut MutexGuard<'_, Option<RpcChild>>,

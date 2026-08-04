@@ -359,7 +359,6 @@ where
     }
 }
 
-
 impl<Clk> Pipe for RecordUpstream<ThreadLocalPipeHandle, Clk>
 where
     Clk: Clock + Clone + Send + Unpin + 'static,
@@ -403,7 +402,9 @@ fn wall_clock_now(wall_epoch: OffsetDateTime, epoch_nanos: u64, now_nanos: u64) 
 // `InteractionId::new()`'s `ulid::Ulid::from_datetime_with_source`, whose
 // same-shaped msb/lsb draw this seeded path replaces.
 fn draw_interaction_random(rng: &Mutex<StdRng>) -> u128 {
-    let mut guard = rng.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = rng
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let high = u128::from(guard.next_u64());
     let low = u128::from(guard.next_u64());
     (high << 64) | low
@@ -427,7 +428,6 @@ fn mint_interaction_id(
 fn elapsed_ms(now_nanos: u64, started_nanos: u64) -> u64 {
     now_nanos.saturating_sub(started_nanos) / 1_000_000
 }
-
 
 /// Shared body for both Handler and ThreadLocalHandler impls. Dispatches
 /// the inner call via `ThreadLocalHandler::call` — the blanket impl makes
@@ -1335,7 +1335,6 @@ mod tests {
             }
         }
 
-
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("trace.jsonl");
         // one spigot shared by the sink AND the upstream: `RecordUpstream`
@@ -1604,11 +1603,17 @@ mod tests {
                 Poll::Ready(Ok(buf.len()))
             }
 
-            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Poll::Ready(Ok(()))
             }
 
-            fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_close(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 let mut guard = self.write_buf.lock().unwrap();
                 guard.closed = true;
                 if let Some(waker) = guard.waker.take() {

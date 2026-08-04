@@ -44,8 +44,22 @@ use crate::pipes::MemcachedPipeHandle;
 /// longest-shares-a-prefix-first is not required — [`probe_verb`] checks
 /// every candidate on each call.
 const KNOWN_VERBS: &[&[u8]] = &[
-    b"get", b"gets", b"set", b"add", b"replace", b"append", b"prepend", b"cas", b"delete",
-    b"incr", b"decr", b"touch", b"flush_all", b"stats", b"version", b"quit",
+    b"get",
+    b"gets",
+    b"set",
+    b"add",
+    b"replace",
+    b"append",
+    b"prepend",
+    b"cas",
+    b"delete",
+    b"incr",
+    b"decr",
+    b"touch",
+    b"flush_all",
+    b"stats",
+    b"version",
+    b"quit",
 ];
 
 /// `len("flush_all")` (the longest known verb) plus one delimiter byte —
@@ -160,7 +174,11 @@ impl MemcachedAnyProtocol {
             MemcachedCodec::new(config.max_message_bytes),
             MemcachedFramedApp::new(self.handler.clone()),
             probe_verb as fn(&[u8]) -> ProbeVerdict,
-            shed_reply as fn(proxima_listen::admission::ShedReason, &MemcachedOwnedFrame) -> MemcachedOutcome,
+            shed_reply
+                as fn(
+                    proxima_listen::admission::ShedReason,
+                    &MemcachedOwnedFrame,
+                ) -> MemcachedOutcome,
             MAX_PREFIX_BYTES,
         )
     }

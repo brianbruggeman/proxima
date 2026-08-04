@@ -240,7 +240,9 @@ impl KeyUpdateManager {
 mod tests {
     use super::*;
     use crate::quic::crypto::initial_keys::{QUIC_HP_LEN, QUIC_IV_LEN, QUIC_KEY_LEN};
-    use crate::quic::tls::{DirectionalKeys, Epoch, EpochSecrets, HeaderKeyMaterial, PacketKeyMaterial};
+    use crate::quic::tls::{
+        DirectionalKeys, Epoch, EpochSecrets, HeaderKeyMaterial, PacketKeyMaterial,
+    };
 
     fn at(micros: u64) -> Instant {
         Instant::from_micros(micros)

@@ -153,10 +153,7 @@ impl<T: ShareBuf + 'static> FrameCodec for MemcachedCodec<T> {
     type Frame<'a> = MemcachedFrame<'a>;
     type Error = NeedMoreBytes;
 
-    fn parse_frame<'a>(
-        &self,
-        buf: &'a [u8],
-    ) -> Result<(MemcachedFrame<'a>, usize), NeedMoreBytes> {
+    fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(MemcachedFrame<'a>, usize), NeedMoreBytes> {
         match parse_command(buf) {
             Ok((command, consumed)) => Ok((MemcachedFrame::Request(command), consumed)),
             // `Short` (no CRLF yet — a `get`'s key list included) and
@@ -284,7 +281,9 @@ mod tests {
     fn parse_frame_partial_value_over_the_cap_is_a_message_too_large_violation() {
         let codec: MemcachedCodec = MemcachedCodec::new(8);
         let buf = b"set k 0 0 500\r\nabc";
-        let (frame, consumed) = codec.parse_frame(buf).expect("folds into a violation frame");
+        let (frame, consumed) = codec
+            .parse_frame(buf)
+            .expect("folds into a violation frame");
         assert_eq!(consumed, buf.len());
         assert!(matches!(
             frame,
@@ -295,9 +294,14 @@ mod tests {
     #[test]
     fn parse_frame_unknown_verb_is_a_protocol_violation_consuming_the_whole_buffer() {
         let buf = b"bogus\r\n";
-        let (frame, consumed) = codec().parse_frame(buf).expect("folds into a violation frame");
+        let (frame, consumed) = codec()
+            .parse_frame(buf)
+            .expect("folds into a violation frame");
         assert_eq!(consumed, buf.len());
-        assert!(matches!(frame, MemcachedFrame::Violation(Violation::Protocol)));
+        assert!(matches!(
+            frame,
+            MemcachedFrame::Violation(Violation::Protocol)
+        ));
     }
 
     #[test]
@@ -378,7 +382,9 @@ mod tests {
     fn parse_frame_unterminated_get_over_the_cap_is_a_message_too_large_violation() {
         let codec: MemcachedCodec = MemcachedCodec::new(8);
         let buf = b"get k1 k2 k3 k4 k5"; // no CRLF yet, already > 8 bytes
-        let (frame, consumed) = codec.parse_frame(buf).expect("folds into a violation frame");
+        let (frame, consumed) = codec
+            .parse_frame(buf)
+            .expect("folds into a violation frame");
         assert_eq!(consumed, buf.len());
         assert!(matches!(
             frame,

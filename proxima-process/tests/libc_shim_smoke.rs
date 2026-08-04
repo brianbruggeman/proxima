@@ -31,8 +31,8 @@ use std::ffi::CString;
 use bytes::Bytes;
 use futures::executor::block_on;
 use futures::stream::StreamExt;
-use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::Request;
+use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::handler::Handler;
 
 use proxima_process::command_pipe::CommandPipe;

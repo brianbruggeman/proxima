@@ -590,7 +590,13 @@ fn canonical_http(http_field: &Value, full: &Value) -> Result<Value, ProximaErro
     let mut spec = serde_json::Map::new();
     spec.insert("url".into(), Value::String(url.into()));
     for forwarded in [
-        "name", "timeout", "method", "headers", "proxy", "response", "transport",
+        "name",
+        "timeout",
+        "method",
+        "headers",
+        "proxy",
+        "response",
+        "transport",
     ] {
         if let Some(value) = full.get(forwarded) {
             spec.insert(forwarded.into(), value.clone());
@@ -915,7 +921,6 @@ impl SendPipe for DispatchPipe {
         }
     }
 }
-
 
 fn with_extra(base: &crate::telemetry::Labels, key: &str, value: &str) -> crate::telemetry::Labels {
     let mut pairs: Vec<(String, String)> = base.entries().to_vec();

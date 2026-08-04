@@ -264,7 +264,8 @@ mod portable_join_set {
             let sender = self.sender.clone();
             let notify = self.notify.clone();
             std::thread::spawn(move || {
-                let outcome = catch_unwind(AssertUnwindSafe(|| futures::executor::block_on(future)));
+                let outcome =
+                    catch_unwind(AssertUnwindSafe(|| futures::executor::block_on(future)));
                 let result = match outcome {
                     Ok(value) => Ok(value),
                     Err(_) => Err(JoinError {

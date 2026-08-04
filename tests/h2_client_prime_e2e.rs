@@ -37,7 +37,6 @@ impl SendPipe for PongPipe {
     }
 }
 
-
 #[proxima::test]
 async fn h2_client_unary_roundtrip_over_prime_wire() {
     let mut listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind");

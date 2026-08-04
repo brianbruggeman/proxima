@@ -47,12 +47,12 @@ use bytes::{Bytes, BytesMut};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 
 use proxima_core::ProximaError;
-use proxima_protocols::http2_codec::connection::{Connection, ConnectionEvent, SendOutcome};
-use proxima_protocols::http2_codec::frame::StandardSettings;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::stream::{StreamUpstream, StreamUpstreamExt};
+use proxima_protocols::http2_codec::connection::{Connection, ConnectionEvent, SendOutcome};
+use proxima_protocols::http2_codec::frame::StandardSettings;
 
 /// Socket read chunk. 16 KiB matches the default SETTINGS_MAX_FRAME_SIZE so a
 /// whole frame is typically read in one syscall.
@@ -164,7 +164,6 @@ impl<U: StreamUpstream> SendPipe for H2ClientUpstream<U> {
         async move { drive_unary(upstream, authority, secure, request).await }
     }
 }
-
 
 /// Build the request HEADERS (pseudo-headers first, then forwardable regular
 /// headers, lowercased per RFC §8.1.2).

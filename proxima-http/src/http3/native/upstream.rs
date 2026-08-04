@@ -252,7 +252,6 @@ impl SendPipe for H3NativeUpstream {
     }
 }
 
-
 fn client_err(err: ClientError) -> ProximaError {
     ProximaError::Upstream(format!("h3-native upstream: {err}"))
 }
@@ -655,8 +654,8 @@ pub async fn bench_multiplexed_part_source(
     streams: usize,
     deadline: StdInstant,
 ) -> (u64, u64) {
-    use proxima_protocols::http3_codec::client::H3ClientEvent;
     use proxima_primitives::pipe::part::{Part, PartSource as _};
+    use proxima_protocols::http3_codec::client::H3ClientEvent;
 
     let bind = match server_addr {
         SocketAddr::V4(_) => SocketAddr::from(([0u8, 0, 0, 0], 0)),
@@ -808,7 +807,8 @@ fn drain_events(
                 header_block,
             } if Some(stream_id) == request_id => {
                 *status = response_status;
-                let mut scratch = [0u8; PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
+                let mut scratch =
+                    [0u8; PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
                 let mut sink = |name: &[u8], value: &[u8]| -> Result<(), DecodeError> {
                     if name.first() != Some(&b':') {
                         let _ = headers
@@ -944,8 +944,11 @@ mod tests {
     #[cfg(feature = "http3-part-source")]
     fn response_headers_frame(pairs: &[(&[u8], &[u8])]) -> Vec<u8> {
         let mut block = Vec::new();
-        proxima_protocols::http3_codec::qpack::encoder::encode_refs(pairs.iter().copied(), &mut block)
-            .expect("encode response header set");
+        proxima_protocols::http3_codec::qpack::encoder::encode_refs(
+            pairs.iter().copied(),
+            &mut block,
+        )
+        .expect("encode response header set");
         let mut out = vec![0u8; block.len() + 8];
         let written = proxima_protocols::http3_codec::frame::encode(
             &proxima_protocols::http3_codec::frame::H3Frame::Headers {

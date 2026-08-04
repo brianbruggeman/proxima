@@ -72,7 +72,9 @@ impl SendPipe for Capture {
         let seen = Arc::clone(&self.seen);
         async move {
             if let TelemetryRecord::LogBatch(records) = &request.payload {
-                seen.lock().expect("capture lock").extend(records.iter().cloned());
+                seen.lock()
+                    .expect("capture lock")
+                    .extend(records.iter().cloned());
             }
             Ok(Response::ok(Bytes::new()))
         }
@@ -115,7 +117,9 @@ fn main() {
     let config = TelemetryConfig::builder()
         .elevation(elevation.clone())
         .build();
-    config.validate().expect("a sane elevation policy validates");
+    config
+        .validate()
+        .expect("a sane elevation policy validates");
     println!(
         "policy: floor={} elevated={} sample_ratio={} trigger={}",
         elevation.floor,

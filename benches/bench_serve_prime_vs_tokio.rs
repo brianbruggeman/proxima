@@ -80,7 +80,6 @@ impl SendPipe for FixedBody {
     }
 }
 
-
 fn dispatch_handle() -> PipeHandle {
     let body = Arc::new(vec![b'x'; BODY_LEN]);
     into_handle(FixedBody { body })

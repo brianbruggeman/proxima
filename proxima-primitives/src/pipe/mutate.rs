@@ -2,9 +2,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use portable_atomic::{AtomicU64, Ordering};
 
-use bytes::Bytes;
 pub use crate::pipe::capabilities::BytePayload;
 use crate::pipe::when::When;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::pipe::request::{Request, Response};

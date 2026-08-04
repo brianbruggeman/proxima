@@ -148,8 +148,8 @@ fn bench_c15(criterion: &mut Criterion) {
             feature = "runtime-prime-inbox-alloc",
         ))]
         {
-            use proxima::runtime::prime::os::core_shard;
             use proxima::runtime::CoreId;
+            use proxima::runtime::prime::os::core_shard;
 
             let handle =
                 core_shard::launch_with_lanes(CoreId(0), None, 8, 256).expect("launch core");

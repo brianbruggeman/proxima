@@ -16,7 +16,6 @@
 //! Sub-flag: `grpc-framing` (default off — only callers that build
 //! gRPC pipes/clients need this).
 
-
 use alloc::vec::Vec;
 
 /// gRPC compression flag (the 1-byte prefix at the start of every

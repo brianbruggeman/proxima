@@ -39,9 +39,9 @@ use bytes::Bytes;
 use proxima_codec::FrameCodec;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::capabilities::{Idempotent, Replayable};
-use proxima_primitives::pipe::{Pipe, SendPipe};
 use proxima_primitives::pipe::labeled::Labeled;
 use proxima_primitives::pipe::telemetry_surface::{Labels, NoopTelemetry, TelemetryHandle};
+use proxima_primitives::pipe::{Pipe, SendPipe};
 
 use crate::codec_pipe::{Incomplete, OwnFrame};
 use crate::http1_codec::codec_trait::{FrameError, H1RequestCodec};

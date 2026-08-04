@@ -299,7 +299,10 @@ where
                 admission: admission.clone(),
                 shed_reply: self.shed_reply.clone(),
             };
-            let pipe = AndThen::new(FrameCodecPipe::new(self.codec.clone()), OnFrame::new(admitted));
+            let pipe = AndThen::new(
+                FrameCodecPipe::new(self.codec.clone()),
+                OnFrame::new(admitted),
+            );
             let (mut read_half, mut write_half) = stream.split();
             let mut buf = BytesMut::new();
             let mut scratch = vec![0_u8; DEFAULT_READ_CHUNK];
@@ -397,7 +400,9 @@ mod tests {
     impl std::fmt::Display for GreetError {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                GreetError::Incomplete => formatter.write_str("incomplete: no terminating CRLF yet"),
+                GreetError::Incomplete => {
+                    formatter.write_str("incomplete: no terminating CRLF yet")
+                }
                 GreetError::Malformed => formatter.write_str("malformed: missing GREET prefix"),
             }
         }
@@ -419,7 +424,8 @@ mod tests {
             let Some(terminator) = buf.windows(2).position(|window| window == b"\r\n") else {
                 return Err(GreetError::Incomplete);
             };
-            let line = std::str::from_utf8(&buf[..terminator]).map_err(|_| GreetError::Malformed)?;
+            let line =
+                std::str::from_utf8(&buf[..terminator]).map_err(|_| GreetError::Malformed)?;
             let name = line.strip_prefix("GREET ").ok_or(GreetError::Malformed)?;
             Ok((name, terminator + 2))
         }
@@ -674,7 +680,8 @@ mod tests {
             }
         };
         let handler = crate::any::erase_handler(());
-        let prefixed: Box<dyn StreamConnection> = Box::new(PrefixedTestConn::new(accumulated, conn));
+        let prefixed: Box<dyn StreamConnection> =
+            Box::new(PrefixedTestConn::new(accumulated, conn));
         matched
             .drive(prefixed, handler, &Value::Null, None, admission)
             .await
@@ -697,7 +704,8 @@ mod tests {
     #[proxima::test]
     async fn framed_any_serves_a_greet_reply_over_a_real_socket() {
         let (listener, addr) = bind_loopback().await;
-        let candidates: Arc<[Arc<dyn AnyProtocol>]> = Arc::from(vec![greet_candidate(), Arc::new(EchoAny) as _]);
+        let candidates: Arc<[Arc<dyn AnyProtocol>]> =
+            Arc::from(vec![greet_candidate(), Arc::new(EchoAny) as _]);
         let admission = ConnAdmission::unbounded();
 
         let client = tokio::spawn(async move {
@@ -721,17 +729,15 @@ mod tests {
     #[proxima::test]
     async fn a_second_any_protocol_candidate_still_routes_on_the_same_classifier() {
         let (listener, addr) = bind_loopback().await;
-        let candidates: Arc<[Arc<dyn AnyProtocol>]> = Arc::from(vec![greet_candidate(), Arc::new(EchoAny) as _]);
+        let candidates: Arc<[Arc<dyn AnyProtocol>]> =
+            Arc::from(vec![greet_candidate(), Arc::new(EchoAny) as _]);
         let admission = ConnAdmission::unbounded();
 
         let client = tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(addr)
                 .await
                 .expect("client connect");
-            stream
-                .write_all(b"ECHO ping")
-                .await
-                .expect("write echo");
+            stream.write_all(b"ECHO ping").await.expect("write echo");
             let mut reply = vec![0_u8; 9];
             stream.read_exact(&mut reply).await.expect("read reply");
             assert_eq!(&reply, b"ECHO ping");

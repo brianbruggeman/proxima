@@ -60,7 +60,11 @@ pub struct DnsDatagramProtocol {
 
 impl DnsDatagramProtocol {
     #[must_use]
-    pub fn new(label: impl Into<String>, handler: DnsPipeHandle, config: Arc<DnsServerConfig>) -> Self {
+    pub fn new(
+        label: impl Into<String>,
+        handler: DnsPipeHandle,
+        config: Arc<DnsServerConfig>,
+    ) -> Self {
         Self {
             label: label.into(),
             handler,
@@ -90,7 +94,12 @@ impl DnsDatagramProtocol {
 impl DatagramProtocol for DnsDatagramProtocol {
     type Err = DnsServeError;
 
-    async fn on_datagram(&mut self, _now: Instant, peer: SocketAddr, datagram: &[u8]) -> Result<(), Self::Err> {
+    async fn on_datagram(
+        &mut self,
+        _now: Instant,
+        peer: SocketAddr,
+        datagram: &[u8],
+    ) -> Result<(), Self::Err> {
         if datagram.len() > self.config.max_message_bytes {
             warn!(
                 label = %self.label,
@@ -151,7 +160,11 @@ impl DatagramProtocol for DnsDatagramProtocol {
         None
     }
 
-    async fn transmit(&mut self, _now: Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Self::Err> {
+    async fn transmit(
+        &mut self,
+        _now: Instant,
+        buf: &mut [u8],
+    ) -> Result<Option<(usize, SocketAddr)>, Self::Err> {
         let Some((bytes, peer)) = self.pending.pop_front() else {
             return Ok(None);
         };
@@ -233,15 +246,21 @@ mod tests {
     #[test]
     fn on_datagram_stages_a_reply_transmit_then_drains() {
         let handler = into_dns_handle(StaticAnswerPipe);
-        let mut protocol = DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
-        let peer = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 7)), 40000);
+        let mut protocol =
+            DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
+        let peer = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 7)),
+            40000,
+        );
         let query_bytes = example_com_query_bytes(1234);
 
         let now = Instant::from_monotonic(core::time::Duration::ZERO);
         poll_once(protocol.on_datagram(now, peer, &query_bytes)).unwrap();
 
         let mut scratch = [0u8; 2048];
-        let (len, sent_to) = poll_once(protocol.transmit(now, &mut scratch)).unwrap().unwrap();
+        let (len, sent_to) = poll_once(protocol.transmit(now, &mut scratch))
+            .unwrap()
+            .unwrap();
         assert_eq!(sent_to, peer);
 
         let message = proxima_protocols::dns::codec_trait::parse_message(&scratch[..len]).unwrap();
@@ -249,21 +268,36 @@ mod tests {
         assert!(message.header.flags.is_response());
         assert_eq!(message.header.ancount, 1);
 
-        assert!(poll_once(protocol.transmit(now, &mut scratch)).unwrap().is_none());
+        assert!(
+            poll_once(protocol.transmit(now, &mut scratch))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn malformed_datagram_is_dropped_not_propagated() {
         let handler = into_dns_handle(StaticAnswerPipe);
-        let mut protocol = DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
-        let peer = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9)), 41000);
+        let mut protocol =
+            DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
+        let peer = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9)),
+            41000,
+        );
         let now = Instant::from_monotonic(core::time::Duration::ZERO);
 
         let outcome = poll_once(protocol.on_datagram(now, peer, &[0u8; 4]));
-        assert!(outcome.is_ok(), "a malformed datagram is dropped, not an Err");
+        assert!(
+            outcome.is_ok(),
+            "a malformed datagram is dropped, not an Err"
+        );
 
         let mut scratch = [0u8; 2048];
-        assert!(poll_once(protocol.transmit(now, &mut scratch)).unwrap().is_none());
+        assert!(
+            poll_once(protocol.transmit(now, &mut scratch))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -271,7 +305,10 @@ mod tests {
         let handler = into_dns_handle(StaticAnswerPipe);
         let config = DnsServerConfig::builder().max_message_bytes(20).build();
         let mut protocol = DnsDatagramProtocol::new("dns-test", handler, Arc::new(config));
-        let peer = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9)), 41000);
+        let peer = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9)),
+            41000,
+        );
         let now = Instant::from_monotonic(core::time::Duration::ZERO);
         let query_bytes = example_com_query_bytes(7);
         assert!(query_bytes.len() > 20);
@@ -279,13 +316,18 @@ mod tests {
         poll_once(protocol.on_datagram(now, peer, &query_bytes)).unwrap();
 
         let mut scratch = [0u8; 2048];
-        assert!(poll_once(protocol.transmit(now, &mut scratch)).unwrap().is_none());
+        assert!(
+            poll_once(protocol.transmit(now, &mut scratch))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn next_deadline_is_always_none_stateless_server() {
         let handler = into_dns_handle(StaticAnswerPipe);
-        let protocol = DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
+        let protocol =
+            DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
         assert_eq!(protocol.next_deadline(), None);
     }
 }

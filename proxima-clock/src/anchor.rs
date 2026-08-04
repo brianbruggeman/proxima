@@ -184,7 +184,10 @@ mod tests {
 
     #[test]
     fn at_the_anchor_point_wall_clock_equals_the_anchor() {
-        let anchor = AnchorCell::new(Ticks::from_raw(0), UnixNanos::from_nanos(1_753_500_000_000_000_000));
+        let anchor = AnchorCell::new(
+            Ticks::from_raw(0),
+            UnixNanos::from_nanos(1_753_500_000_000_000_000),
+        );
 
         let now = convert(&anchor, ARM_GENERIC_TIMER_HZ, Ticks::from_raw(0));
 
@@ -195,7 +198,11 @@ mod tests {
     fn arm_generic_timer_24mhz_one_second_of_ticks_advances_one_second() {
         let anchor = AnchorCell::new(Ticks::from_raw(0), UnixNanos::from_nanos(0));
 
-        let one_second_later = convert(&anchor, ARM_GENERIC_TIMER_HZ, Ticks::from_raw(ARM_GENERIC_TIMER_HZ));
+        let one_second_later = convert(
+            &anchor,
+            ARM_GENERIC_TIMER_HZ,
+            Ticks::from_raw(ARM_GENERIC_TIMER_HZ),
+        );
 
         assert_eq!(one_second_later, UnixNanos::from_nanos(1_000_000_000));
     }
@@ -217,7 +224,8 @@ mod tests {
     fn ptp_hardware_clock_100mhz_one_millisecond_of_ticks() {
         let anchor = AnchorCell::new(Ticks::from_raw(0), UnixNanos::from_nanos(0));
 
-        let one_millisecond_later = convert(&anchor, PTP_HARDWARE_CLOCK_HZ, Ticks::from_raw(100_000));
+        let one_millisecond_later =
+            convert(&anchor, PTP_HARDWARE_CLOCK_HZ, Ticks::from_raw(100_000));
 
         assert_eq!(one_millisecond_later, UnixNanos::from_nanos(1_000_000));
     }

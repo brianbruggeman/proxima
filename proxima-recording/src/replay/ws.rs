@@ -119,7 +119,6 @@ impl SendPipe for WsReplayUpstream {
     }
 }
 
-
 fn write_frames(
     mut socket: proxima_primitives::pipe::upgrade::HijackedSocket,
     frames: Vec<Bytes>,

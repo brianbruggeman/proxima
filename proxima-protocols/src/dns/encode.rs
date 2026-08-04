@@ -316,7 +316,13 @@ mod tests {
         let answers = alloc::vec![template; usize::from(u16::MAX) + 1];
         let mut out = Vec::new();
         assert_eq!(
-            encode_response(1, Flags::for_response(false, false, false, 0), question, &answers, &mut out),
+            encode_response(
+                1,
+                Flags::for_response(false, false, false, 0),
+                question,
+                &answers,
+                &mut out
+            ),
             Err(EncodeError::TooManyRecords)
         );
     }

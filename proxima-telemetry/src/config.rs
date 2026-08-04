@@ -1507,7 +1507,11 @@ mod tests {
             Some(Level::TRACE),
             "levels serialize by name"
         );
-        assert_eq!(elevation.trigger_level, Level::ERROR, "trigger default is error");
+        assert_eq!(
+            elevation.trigger_level,
+            Level::ERROR,
+            "trigger default is error"
+        );
         assert!((elevation.sample_ratio - 0.01).abs() < f64::EPSILON);
     }
 
@@ -1564,7 +1568,10 @@ sample_ratio = 0.02
         let cfg = TelemetryConfig::builder()
             .elevation(info_floor_trace_elevated(0.01))
             .build();
-        assert!(cfg.validate().is_ok(), "a sane elevation validates when compiled in");
+        assert!(
+            cfg.validate().is_ok(),
+            "a sane elevation validates when compiled in"
+        );
     }
 
     #[cfg(not(feature = "elevation"))]
@@ -1584,8 +1591,14 @@ sample_ratio = 0.02
     fn elevation_level_names_are_the_wire_form() {
         // floor/elevated read as level names in a config file, not integers.
         let json = serde_json::to_string(&info_floor_trace_elevated(0.05)).expect("serialize");
-        assert!(json.contains("\"info\""), "floor serialized by name: {json}");
-        assert!(json.contains("\"trace\""), "elevated serialized by name: {json}");
+        assert!(
+            json.contains("\"info\""),
+            "floor serialized by name: {json}"
+        );
+        assert!(
+            json.contains("\"trace\""),
+            "elevated serialized by name: {json}"
+        );
     }
 
     #[test]
@@ -1601,7 +1614,9 @@ sample_ratio = 0.02
                 retention: Retention::default(),
             })
             .build();
-        let err = cfg.validate().expect_err("coarser elevated must be rejected");
+        let err = cfg
+            .validate()
+            .expect_err("coarser elevated must be rejected");
         assert!(format!("{err:?}").contains("elevated"), "got: {err:?}");
     }
 

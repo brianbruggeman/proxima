@@ -158,7 +158,10 @@ mod tests {
     fn dollar_topics_are_excluded_from_leading_wildcards() {
         assert!(!topic_matches(b"#", b"$SYS/broker/uptime"));
         assert!(!topic_matches(b"+/broker/uptime", b"$SYS/broker/uptime"));
-        assert!(topic_matches(b"$SYS/#", b"$SYS/broker/uptime"), "an explicit $SYS filter still matches");
+        assert!(
+            topic_matches(b"$SYS/#", b"$SYS/broker/uptime"),
+            "an explicit $SYS filter still matches"
+        );
     }
 
     #[test]
@@ -197,7 +200,10 @@ mod tests {
     fn valid_filter_rejects_malformed_wildcards() {
         assert!(!is_valid_filter(b""));
         assert!(!is_valid_filter(b"sport#"), "# must be a whole level");
-        assert!(!is_valid_filter(b"sport/#/player1"), "# must be the final level");
+        assert!(
+            !is_valid_filter(b"sport/#/player1"),
+            "# must be the final level"
+        );
         assert!(!is_valid_filter(b"sport+"), "+ must be a whole level");
     }
 }

@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::pipe::ProximaError;
-use crate::pipe::primitives::Pipe;
 use crate::pipe::SendPipe;
 use crate::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle, into_handle};
 use crate::pipe::pipe_factory::PipeFactory;
+use crate::pipe::primitives::Pipe;
 use crate::pipe::request::{Request, Response};
 use crate::pipe::telemetry_surface::Labels;
 

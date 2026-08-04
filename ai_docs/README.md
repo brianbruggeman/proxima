@@ -1,13 +1,33 @@
 # Proxima AI Docs
 
-This tree is the agent-facing memory surface for Proxima. It records
-rules, decisions, failures, evidence, and projections in a shape that an
-agent can read before touching code.
-
-JSONL files are the source of truth. Markdown files under
-`projections/` are readable views of those records.
+This tree is the agent-facing **project memory** for Proxima. It records
+decisions, failures, open questions, and the evidence behind them, in a
+shape an agent can query before touching code.
 
 Start with `AGENT.md`.
+
+## What belongs here, and what does not
+
+The line is **standing rule versus recorded event** — not topic.
+
+| | Lives in | Shape | Changes |
+|---|---|---|---|
+| **Standing rules** | `AGENTS.md`, `.claude/skills/` | prose, hand-curated, read start-to-finish | when policy changes |
+| **Recorded events** | this tree | JSONL, evidence-bearing, read by task-route | every landing |
+
+"Box-free by default" is a standing rule — it lives in `AGENTS.md`.
+"The pgwire codec stays tier-3 on `thumbv7em-none-eabihf`, decode
+borrowed" is a decision with evidence — it lives here. "On the ARM64
+Hypervisor.framework HVC path, resume at the PC reported after the
+exit" is a recorded failure — it lives here, and **nothing else can
+hold it**. That is the justification for this tree.
+
+**Do not restate a rule here.** Rules were duplicated into
+`invariants.jsonl` as `proxima.rule.*` and `proxima.guiding.*` records
+and drifted from the prose; 21 such records were removed on 2026-07-27.
+Point at `proxima.AGENTS.hot_path` or
+`proxima.guiding_principles.skill` instead — those index entries
+resolve to the prose that owns the rule.
 
 ## Files
 
@@ -15,9 +35,12 @@ Start with `AGENT.md`.
 - `query.sh` - task query helper for agents.
 - `index.jsonl` - top-level routing index.
 - `task-routes.jsonl` - task-specific read plans and done criteria.
-- `invariants.jsonl` - rules that bind implementation and review.
-- `projections/performance-discipline.md` - readable projection of the
-  current performance and allocation discipline.
+- `invariants.jsonl` - decisions, failures, and open questions, with
+  their evidence. Not rules.
+- `examples-index.jsonl` - the combinator vocabulary and where each
+  example lives.
+- `projections/` - long-form readable documents for a named audience
+  (e.g. an operator wiring OTLP), not summaries of the JSONL.
 
 ## Record Shape
 

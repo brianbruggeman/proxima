@@ -344,8 +344,6 @@ impl<S: SpanSink, C: Clock> Drop for SpanGuard<S, C> {
 
 impl<S: SpanSink, C: Clock> crate::spanned::SpanContext for SpanGuard<S, C> {
     fn span_context(&self) -> Option<(TraceId, SpanId)> {
-        self.span
-            .as_ref()
-            .map(|span| (span.trace_id(), span.id()))
+        self.span.as_ref().map(|span| (span.trace_id(), span.id()))
     }
 }

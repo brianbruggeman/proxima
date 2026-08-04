@@ -101,7 +101,9 @@ use stats_alloc::{Region, StatsAlloc};
 use proxima_codec::FrameCodec;
 use proxima_primitives::pipe::{AndThen, Pipe};
 use proxima_protocols::codec_pipe::{FrameCodecPipe, OnFrame, OwnFrame};
-use proxima_protocols::memcached::frame_codec::{MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedMoreBytes, Violation};
+use proxima_protocols::memcached::frame_codec::{
+    MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedMoreBytes, Violation,
+};
 use proxima_protocols::memcached::pipe_contract::{MemcachedRequest, iter_keys};
 use proxima_protocols::memcached::{Command, StoreMode};
 
@@ -129,7 +131,11 @@ struct Workload {
 
 fn get_16_bytes() -> Vec<u8> {
     let wire = b"get k123456789\r\n".to_vec(); // 4 + 10 + 2 = 16 bytes exactly
-    assert_eq!(wire.len(), 16, "get_16b workload must be exactly 16 wire bytes");
+    assert_eq!(
+        wire.len(),
+        16,
+        "get_16b workload must be exactly 16 wire bytes"
+    );
     wire
 }
 
@@ -302,7 +308,10 @@ impl Pipe for TrivialMemcachedApp {
     type Out = usize;
     type Err = TrivialAppError;
 
-    fn call(&self, input: MemcachedOwnedFrame) -> impl Future<Output = Result<usize, TrivialAppError>> {
+    fn call(
+        &self,
+        input: MemcachedOwnedFrame,
+    ) -> impl Future<Output = Result<usize, TrivialAppError>> {
         async move {
             let touched = match &input {
                 MemcachedOwnedFrame::Request(MemcachedRequest::Get { keys, .. }) => {
@@ -319,8 +328,13 @@ impl Pipe for TrivialMemcachedApp {
     }
 }
 
-fn end_to_end_pipe(codec: MemcachedCodec) -> AndThen<FrameCodecPipe<MemcachedCodec>, OnFrame<TrivialMemcachedApp>> {
-    AndThen::new(FrameCodecPipe::new(codec), OnFrame::new(TrivialMemcachedApp))
+fn end_to_end_pipe(
+    codec: MemcachedCodec,
+) -> AndThen<FrameCodecPipe<MemcachedCodec>, OnFrame<TrivialMemcachedApp>> {
+    AndThen::new(
+        FrameCodecPipe::new(codec),
+        OnFrame::new(TrivialMemcachedApp),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -408,8 +422,9 @@ fn bench_end_to_end(criterion: &mut Criterion) {
         group.bench_function(workload.label, |bencher| {
             bencher.iter(|| {
                 let outcome = block_on(Pipe::call(&pipe, std::hint::black_box(raw.clone())));
-                let produced =
-                    outcome.expect("every workload's frame is complete (Request or Violation), never Incomplete");
+                let produced = outcome.expect(
+                    "every workload's frame is complete (Request or Violation), never Incomplete",
+                );
                 std::hint::black_box(produced);
             });
         });
@@ -422,7 +437,9 @@ fn bench_end_to_end(criterion: &mut Criterion) {
 /// discipline-log row can cite both from ONE bench run). Mirrors
 /// `hpack_decode_into.rs::print_alloc_report`'s pattern (P1 RISC reuse).
 fn print_alloc_report() {
-    println!("\n--- memcached frame-ownership alloc report (stats_alloc, 1 iteration per workload) ---");
+    println!(
+        "\n--- memcached frame-ownership alloc report (stats_alloc, 1 iteration per workload) ---"
+    );
     println!(
         "  {:<24} {:>6} {:>14} {:>10} {:>18} {:>10} {:>20} {:>10} {:>14} {:>10}",
         "workload",

@@ -27,8 +27,8 @@ use proxima::telemetry::id::parse_traceparent;
 use proxima::telemetry::pipes::{FormatterPipe, InMemoryPipe, LogFormat, TelemetryRequest};
 use proxima::telemetry::recorder::Recorder;
 use proxima::{
-    App, HeaderList, ListenerSpec, PipeHandle, ProximaError, Request, Response,
-    SendPipe, into_handle,
+    App, HeaderList, ListenerSpec, PipeHandle, ProximaError, Request, Response, SendPipe,
+    into_handle,
 };
 
 const FRONT_BIND: &str = "127.0.0.1:8091";
@@ -85,7 +85,6 @@ impl SendPipe for FrontPipe {
     }
 }
 
-
 /// Instance B. Its own H1 listener already calls `establish_trace_context` +
 /// `adopt_trace_context` on ingress (see `proxima-http/src/http1/serve.rs`), so
 /// `request.context.trace_id` reflects
@@ -112,7 +111,6 @@ async fn origin_pipe(request: Request<Bytes>) -> Result<Response<Bytes>, Proxima
         "origin_traceparent={origin_traceparent}\n"
     )))
 }
-
 
 // one #[instrument] span per instance, each handed its own instance's
 // `RequestContext::traceparent()` via the explicit `parent =` seam: `Some`

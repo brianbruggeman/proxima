@@ -26,7 +26,6 @@
 //! `proxima_protocols::dns` behind the `dns-substrate` feature for
 //! existing call sites.
 
-
 use alloc::string::String;
 use core::net::{Ipv4Addr, Ipv6Addr};
 
@@ -89,7 +88,12 @@ impl Flags {
     /// `RCODE` in the low 4 bits. See
     /// [`encode::encode_response`](super::encode::encode_response).
     #[must_use]
-    pub fn for_response(recursion_desired: bool, authoritative: bool, recursion_available: bool, rcode: u8) -> Self {
+    pub fn for_response(
+        recursion_desired: bool,
+        authoritative: bool,
+        recursion_available: bool,
+        rcode: u8,
+    ) -> Self {
         let mut bits = 0x8000u16;
         if recursion_desired {
             bits |= 0x0100;
@@ -568,7 +572,11 @@ pub use codec_trait::{DnsDatagramCodec, Message, QuestionIter, RecordIter, parse
 #[cfg(feature = "dns-codec-trait")]
 pub mod frame_codec;
 #[cfg(feature = "dns-codec-trait")]
-pub use frame_codec::{DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation};
+pub use frame_codec::{
+    DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation,
+};
 
 pub mod encode;
-pub use encode::{AnswerRecord, EncodeError, EncodeQuestion, encode_name, encode_query, encode_response};
+pub use encode::{
+    AnswerRecord, EncodeError, EncodeQuestion, encode_name, encode_query, encode_response,
+};

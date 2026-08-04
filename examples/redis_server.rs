@@ -56,7 +56,9 @@ impl SendPipe for KvStore {
             let reply = match verb.as_slice() {
                 b"GET" => {
                     let key = args.first().cloned().unwrap_or_default();
-                    let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let guard = store
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     match guard.get(&key) {
                         Some(value) => RespValue::BulkString(value.clone()),
                         None => RespValue::Null,
@@ -65,13 +67,17 @@ impl SendPipe for KvStore {
                 b"SET" => {
                     let key = args.first().cloned().unwrap_or_default();
                     let value = args.get(1).cloned().unwrap_or_default();
-                    let mut guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut guard = store
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.insert(key, value);
                     RespValue::SimpleString("OK".to_string())
                 }
                 b"DEL" => {
                     let key = args.first().cloned().unwrap_or_default();
-                    let mut guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut guard = store
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     let removed = guard.remove(&key).is_some();
                     RespValue::Integer(i64::from(removed))
                 }
@@ -197,11 +203,7 @@ async fn main() -> Result<(), ProximaError> {
     println!("PUBLISH from a second connection -> delivered to the subscriber");
     let mut publisher = TcpStream::connect(addr).await?;
     let mut publisher_buf = Vec::new();
-    send_command(
-        &mut publisher,
-        &[b"PUBLISH", b"news", b"hello subscribers"],
-    )
-    .await?;
+    send_command(&mut publisher, &[b"PUBLISH", b"news", b"hello subscribers"]).await?;
     expect_reply(
         read_reply(&mut publisher, &mut publisher_buf).await?,
         &RespValue::Integer(1),
@@ -273,8 +275,9 @@ impl SendPipe for NullHandle {
     fn call(
         &self,
         _request: proxima::request::Request<bytes::Bytes>,
-    ) -> impl core::future::Future<Output = Result<proxima::request::Response<bytes::Bytes>, ProximaError>>
-    + Send {
+    ) -> impl core::future::Future<
+        Output = Result<proxima::request::Response<bytes::Bytes>, ProximaError>,
+    > + Send {
         async move { Ok(proxima::request::Response::new(404)) }
     }
 }

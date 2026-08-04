@@ -72,7 +72,9 @@ fn main() {
 }
 
 // drives a fan-in to completion, printing each call's outcome as it goes.
-fn drain_merged<S, Strategy, const N: usize>(fan_in: FanIn<S, Strategy, N>) -> Vec<(&'static str, u32)>
+fn drain_merged<S, Strategy, const N: usize>(
+    fan_in: FanIn<S, Strategy, N>,
+) -> Vec<(&'static str, u32)>
 where
     S: UnpinPipe<In = (), Out = (&'static str, u32), Err = Exhausted> + DropSafe,
     Strategy: FanInStrategy,

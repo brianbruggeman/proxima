@@ -44,7 +44,6 @@ impl SendPipe for EchoBody {
     }
 }
 
-
 fn echo_body(criterion: &mut Criterion, label: &str, payload: Bytes) {
     let mut group = criterion.benchmark_group(format!("h3_echo_{label}"));
     group.measurement_time(Duration::from_secs(5));

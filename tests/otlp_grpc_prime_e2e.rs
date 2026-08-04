@@ -73,7 +73,6 @@ impl SendPipe for GrpcSpanCollector {
     }
 }
 
-
 fn seven_spans() -> Vec<proxima::telemetry::trace::SpanRecord> {
     let spans = capture(|recorder| {
         for _ in 0..7 {

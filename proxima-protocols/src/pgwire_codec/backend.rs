@@ -1004,10 +1004,10 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::*;
     use super::super::error::ParseError;
     use super::super::types::{CopyFormat, FormatCode, Oid, TransactionStatus};
     use super::super::views::FieldDescription;
+    use super::*;
 
     fn encode_backend(msg: &BackendMessage<'_>) -> Vec<u8> {
         let mut buf = vec![0u8; 1024];

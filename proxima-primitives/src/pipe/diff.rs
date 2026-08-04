@@ -6,10 +6,10 @@ use crate::transport::{DEFAULT_REPLAY_CAP_BYTES, Replay};
 
 use crate::pipe::Method;
 use crate::pipe::ProximaError;
-use crate::pipe::body::{ChunkStream, RequestStream};
-use crate::pipe::primitives::Pipe;
 use crate::pipe::SendPipe;
+use crate::pipe::body::{ChunkStream, RequestStream};
 use crate::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle, into_handle};
+use crate::pipe::primitives::Pipe;
 use crate::pipe::request::{Request, Response};
 use crate::pipe::telemetry_surface::Labels;
 

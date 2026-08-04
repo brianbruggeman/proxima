@@ -5,10 +5,10 @@ use bytes::Bytes;
 use tracing::Instrument;
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::{Pipe, SendPipe};
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle};
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::TelemetryHandle;
+use proxima_primitives::pipe::{Pipe, SendPipe};
 
 /// Telemetry / tracing context injection. Generic over the inner handle:
 /// `ContextInjector<PipeHandle>` impls `Handler`;
@@ -85,7 +85,6 @@ where
     }
 }
 
-
 impl Pipe for ContextInjector<ThreadLocalPipeHandle> {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -130,7 +129,6 @@ impl Pipe for ContextInjector<ThreadLocalPipeHandle> {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -161,7 +159,6 @@ mod tests {
             }
         }
     }
-
 
     #[proxima::test]
     async fn injector_sets_telemetry_so_inner_can_emit() {

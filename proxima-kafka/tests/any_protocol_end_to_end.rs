@@ -111,7 +111,13 @@ async fn accept_and_drive(
     let connection: Box<dyn StreamConnection> = Box::new(TokioTcpConnection::from_tokio(stream));
     let handler = erase_handler(());
     protocol
-        .drive(connection, handler, &serde_json::Value::Null, None, &admission)
+        .drive(
+            connection,
+            handler,
+            &serde_json::Value::Null,
+            None,
+            &admission,
+        )
         .await
 }
 
@@ -122,10 +128,17 @@ async fn accept_and_drive(
 async fn api_versions_is_answered_without_reaching_the_handler() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    stream.write_all(&api_versions_request(1)).await.expect("write");
+    stream
+        .write_all(&api_versions_request(1))
+        .await
+        .expect("write");
     // ApiVersions keeps the connection open (`Reply`, not `CloseWithReply`);
     // half-close the write side so the server's next read sees EOF and
     // returns cleanly.
@@ -143,7 +156,11 @@ async fn api_versions_is_answered_without_reaching_the_handler() {
 async fn a_produce_request_reaches_the_handler_and_replies() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", echo_produce_handler());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let request = encode_request(ApiKey::Produce.to_i16(), 0, 42, &empty_produce_body());
@@ -166,7 +183,11 @@ async fn a_produce_request_reaches_the_handler_and_replies() {
 async fn unsupported_version_replies_without_reaching_the_handler() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let request = encode_request(ApiKey::Produce.to_i16(), 9, 3, b"");
@@ -174,7 +195,10 @@ async fn unsupported_version_replies_without_reaching_the_handler() {
     stream.shutdown().await.expect("shutdown write half");
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply).await.expect("read to eof");
-    assert!(!reply.is_empty(), "connection must reply, not silently close");
+    assert!(
+        !reply.is_empty(),
+        "connection must reply, not silently close"
+    );
     assert_eq!(read_correlation_id(&reply), 3);
     server.await.expect("server task").expect("drive");
 }
@@ -187,7 +211,11 @@ async fn unsupported_version_replies_without_reaching_the_handler() {
 async fn a_malformed_header_closes_the_connection_with_no_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let mut malformed = Vec::new();
@@ -196,7 +224,10 @@ async fn a_malformed_header_closes_the_connection_with_no_reply() {
     stream.write_all(&malformed).await.expect("write");
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply).await.expect("read to eof");
-    assert_eq!(reply, b"", "a malformed header must close with no reply at all");
+    assert_eq!(
+        reply, b"",
+        "a malformed header must close with no reply at all"
+    );
     server.await.expect("server task").expect("drive");
 }
 
@@ -207,15 +238,26 @@ async fn a_malformed_header_closes_the_connection_with_no_reply() {
 async fn an_oversized_declared_frame_closes_with_no_reply() {
     let (listener, addr) = bind_loopback().await;
     let config = KafkaServerConfig::builder().max_message_bytes(10).build();
-    let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called()).with_config(config);
-    let server = tokio::spawn(accept_and_drive(listener, protocol, ConnAdmission::unbounded()));
+    let protocol =
+        KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called()).with_config(config);
+    let server = tokio::spawn(accept_and_drive(
+        listener,
+        protocol,
+        ConnAdmission::unbounded(),
+    ));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     // declares a 1000-byte payload but supplies none of it.
-    stream.write_all(&1000_i32.to_be_bytes()).await.expect("write");
+    stream
+        .write_all(&1000_i32.to_be_bytes())
+        .await
+        .expect("write");
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply).await.expect("read to eof");
-    assert_eq!(reply, b"", "an oversized declared frame must close with no reply");
+    assert_eq!(
+        reply, b"",
+        "an oversized declared frame must close with no reply"
+    );
     server.await.expect("server task").expect("drive");
 }
 
@@ -238,7 +280,10 @@ async fn a_business_request_is_shed_with_an_empty_reply_while_admission_is_quies
     stream.shutdown().await.expect("shutdown write half");
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply).await.expect("read to eof");
-    assert!(!reply.is_empty(), "a shed request must still reply, not drop the connection");
+    assert!(
+        !reply.is_empty(),
+        "a shed request must still reply, not drop the connection"
+    );
     assert_eq!(read_correlation_id(&reply), 7);
     server.await.expect("server task").expect("drive");
 }
@@ -256,7 +301,10 @@ async fn api_versions_bypasses_admission_shedding() {
     let server = tokio::spawn(accept_and_drive(listener, protocol, admission));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    stream.write_all(&api_versions_request(5)).await.expect("write");
+    stream
+        .write_all(&api_versions_request(5))
+        .await
+        .expect("write");
     stream.shutdown().await.expect("shutdown write half");
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply).await.expect("read to eof");

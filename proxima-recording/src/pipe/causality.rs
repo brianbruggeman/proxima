@@ -7,9 +7,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::{Pipe, SendPipe};
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle};
 use proxima_primitives::pipe::request::{Request, Response};
+use proxima_primitives::pipe::{Pipe, SendPipe};
 
 /// half-open byte interval `[start, end)` keyed to a specific node's
 /// emitted byte stream. zero-length ranges are valid (empty bodies).
@@ -316,7 +316,6 @@ where
     }
 }
 
-
 impl Pipe for Causal<ThreadLocalPipeHandle> {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -369,7 +368,6 @@ impl Pipe for Causal<ThreadLocalPipeHandle> {
         }
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

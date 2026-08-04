@@ -32,7 +32,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use proxima::error::ProximaError;
 use proxima::listeners::H3NativeListenProtocol;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::runtime::{PrimeRuntime, Runtime};
 use proxima::telemetry::NoopTelemetry;
@@ -54,7 +54,6 @@ impl SendPipe for ConstantOk {
         async move { Ok(Response::ok(Bytes::from_static(b"ok"))) }
     }
 }
-
 
 #[derive(Debug)]
 struct AcceptAnyCert;

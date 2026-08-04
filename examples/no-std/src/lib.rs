@@ -114,7 +114,9 @@ pub fn run_demo() {
 mod tests {
     use proxima_primitives::pipe::UnpinPipe;
 
-    use super::{FrameStore, Pipe, RING_SLOT_BYTES, RING_SLOTS, StoreError, block_on, ring_capacity};
+    use super::{
+        FrameStore, Pipe, RING_SLOT_BYTES, RING_SLOTS, StoreError, block_on, ring_capacity,
+    };
 
     #[test]
     fn stores_a_frame_that_fits() {

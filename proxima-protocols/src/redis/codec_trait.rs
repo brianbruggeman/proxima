@@ -73,10 +73,10 @@ mod tests {
         assert_eq!(consumed, wire.len());
         match frame {
             Frame::Array(items) => {
-                assert_eq!(items, alloc::vec![
-                    Frame::BlobString(b"GET"),
-                    Frame::BlobString(b"foo"),
-                ]);
+                assert_eq!(
+                    items,
+                    alloc::vec![Frame::BlobString(b"GET"), Frame::BlobString(b"foo"),]
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }

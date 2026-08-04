@@ -167,7 +167,10 @@ impl SlowGate {
             if gate.ready.load(Ordering::SeqCst) {
                 Poll::Ready(())
             } else {
-                gate.wakers.lock().expect("gate lock").push(cx.waker().clone());
+                gate.wakers
+                    .lock()
+                    .expect("gate lock")
+                    .push(cx.waker().clone());
                 Poll::Pending
             }
         })
@@ -455,8 +458,14 @@ fn run_test() {
         clock.advance(round_step);
         poll_serve(&mut serve, &mut cx);
     }
-    assert!(client_a.request_opened, "client A must reach a request open");
-    assert!(client_b.request_opened, "client B must reach a request open");
+    assert!(
+        client_a.request_opened,
+        "client A must reach a request open"
+    );
+    assert!(
+        client_b.request_opened,
+        "client B must reach a request open"
+    );
 
     // Drive a few more rounds so both dispatches are pushed into
     // `in_flight` and started (blocked on the gate) — WITHOUT releasing
@@ -483,8 +492,14 @@ fn run_test() {
          is released — proves client B's request was not starved behind client A's \
          still-pending in-flight future"
     );
-    assert!(!client_a.saw_response_finished, "A's response must still be gated");
-    assert!(!client_b.saw_response_finished, "B's response must still be gated");
+    assert!(
+        !client_a.saw_response_finished,
+        "A's response must still be gated"
+    );
+    assert!(
+        !client_b.saw_response_finished,
+        "B's response must still be gated"
+    );
 
     // Release both dispatches — event-driven: `gate.release()` wakes the
     // stored waker directly, no polling loop needed to notice.
@@ -506,8 +521,14 @@ fn run_test() {
         poll_serve(&mut serve, &mut cx);
     }
 
-    assert!(client_a.saw_response_finished, "client A never saw its H3 response");
-    assert!(client_b.saw_response_finished, "client B never saw its H3 response");
+    assert!(
+        client_a.saw_response_finished,
+        "client A never saw its H3 response"
+    );
+    assert!(
+        client_b.saw_response_finished,
+        "client B never saw its H3 response"
+    );
     assert_eq!(client_a.response_status, Some(200));
     assert_eq!(client_b.response_status, Some(200));
     assert_eq!(client_a.response_body, b"ok");
@@ -618,7 +639,10 @@ fn run_park_not_spin_test() {
         1,
         "the dispatch must have started (and be parked on the gate)"
     );
-    assert!(!client.saw_response_finished, "the response must still be gated");
+    assert!(
+        !client.saw_response_finished,
+        "the response must still be gated"
+    );
 
     // HEADLINE: with the gate not yet released, no new datagram pending,
     // and the clock not advanced, the loop is genuinely idle. A poll must
@@ -658,7 +682,10 @@ fn run_park_not_spin_test() {
         clock.advance(round_step);
         poll_serve(&mut serve, &mut noop_cx);
     }
-    assert!(client.saw_response_finished, "client never saw its H3 response");
+    assert!(
+        client.saw_response_finished,
+        "client never saw its H3 response"
+    );
     assert_eq!(client.response_status, Some(200));
     assert_eq!(client.response_body, b"ok");
 }

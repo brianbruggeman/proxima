@@ -13,12 +13,14 @@
 
 use std::task::{Context, Poll};
 
-use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, ServerState, StreamId};
+use proxima_protocols::http3_codec::server::{
+    H3ServerEvent, ServerConnection, ServerState, StreamId,
+};
 use proxima_protocols::http3_codec::settings::Settings;
-use proxima_quic::native::{Endpoint, EndpointError};
 use proxima_protocols::quic::connection::ConnectionState;
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::TlsProvider;
+use proxima_quic::native::{Endpoint, EndpointError};
 
 use super::config::ServerConfig;
 use super::driver::{DriverState, drive_server_step};

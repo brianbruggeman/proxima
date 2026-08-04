@@ -13,7 +13,6 @@
 //!
 //! Sub-flag: `memcached-listener` (default off).
 
-
 use core::fmt;
 
 /// One parsed memcached request line plus any associated body.
@@ -599,7 +598,9 @@ pub use codec_trait::{DatagramHeader, MemcachedDatagramCodec};
 #[cfg(feature = "memcached-codec-trait")]
 pub mod frame_codec;
 #[cfg(feature = "memcached-codec-trait")]
-pub use frame_codec::{MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedMoreBytes, Violation};
+pub use frame_codec::{
+    MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedMoreBytes, Violation,
+};
 
 /// Sans-IO connection state machine (bytes in, [`Command`] out) — the
 /// server-side idiom `proxima-memcached` drives. Mirrors

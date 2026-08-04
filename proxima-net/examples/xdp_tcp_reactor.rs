@@ -15,8 +15,8 @@ fn main() {
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use prime::os::core_shard;
     use proxima_net::xdp::{XdpStreamListener, XdpStreamUpstream};
-    use proxima_runtime::CoreId;
     use proxima_primitives::stream::{StreamListener, StreamUpstream};
+    use proxima_runtime::CoreId;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};

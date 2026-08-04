@@ -43,8 +43,11 @@ use proxima_telemetry::recorder::Recorder;
 const N_ITEMS: usize = 10_000;
 
 fn make_recorder_with<
-    P: SendPipe<In = TelemetryRequest, Out = Response<Bytes>, Err = proxima_primitives::pipe::ProximaError>
-        + Send
+    P: SendPipe<
+            In = TelemetryRequest,
+            Out = Response<Bytes>,
+            Err = proxima_primitives::pipe::ProximaError,
+        > + Send
         + Sync
         + 'static,
 >(

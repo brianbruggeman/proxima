@@ -25,13 +25,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::FutureExt;
+use proxima_core::factory::Named;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_core::factory::Named;
-use proxima_primitives::pipe::source::{SourceFactory, SourceHandle, into_source_handle};
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
+use proxima_primitives::pipe::source::{SourceFactory, SourceHandle, into_source_handle};
 
 use crate::alert::event::{
     AlertEvent, AlertId, KindString, LabelKey, LabelMap, LabelValue, Payload, Severity,
@@ -96,7 +96,10 @@ impl SendPipe for ScheduledTriggerPipe {
     type Out = ();
     type Err = ProximaError;
 
-    fn call(&self, cancel: Signal) -> impl std::future::Future<Output = Result<(), ProximaError>> + Send {
+    fn call(
+        &self,
+        cancel: Signal,
+    ) -> impl std::future::Future<Output = Result<(), ProximaError>> + Send {
         let inner = self.inner.clone();
         let schedule = self.schedule.clone();
         let event_kind = self.event_kind.clone();

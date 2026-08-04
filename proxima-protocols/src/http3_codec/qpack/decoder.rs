@@ -636,7 +636,8 @@ impl FieldSink for VecFieldSink<'_> {
 #[cfg(feature = "http3_codec-alloc")]
 pub fn decode_bounded(input: &[u8], cap: u64) -> Result<Vec<DecodedField>, DecodeError> {
     let mut fields = Vec::new();
-    let mut scratch = [0u8; crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
+    let mut scratch =
+        [0u8; crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN];
     let mut sink = VecFieldSink {
         fields: &mut fields,
     };

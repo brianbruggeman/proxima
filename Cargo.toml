@@ -66,7 +66,6 @@ proxima = { path = "." }
 proxima-amqp = { path = "proxima-amqp" }
 proxima-auth = { path = "proxima-auth", default-features = false }
 proxima-build = { path = "proxima-build" }
-proxima-centauri = { path = "proxima-centauri", default-features = false }
 proxima-clock = { path = "proxima-clock", default-features = false }
 proxima-codec = { path = "proxima-codec", default-features = false }
 proxima-config = { path = "proxima-config", default-features = false }

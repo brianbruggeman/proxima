@@ -50,22 +50,37 @@ impl DnsClientSession {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let mut out = Vec::new();
-        encode::encode_query(id, recursion_desired, EncodeQuestion { name, qtype, qclass }, &mut out)
-            .map_err(|error| DnsClientError::Wire(error.to_string()))?;
+        encode::encode_query(
+            id,
+            recursion_desired,
+            EncodeQuestion {
+                name,
+                qtype,
+                qclass,
+            },
+            &mut out,
+        )
+        .map_err(|error| DnsClientError::Wire(error.to_string()))?;
         Ok((id, out))
     }
 
     /// Decode a reply, verifying its id matches the query it's answering.
-    pub fn decode_response(&self, expected_id: u16, bytes: &[u8]) -> Result<DnsAnswer, DnsClientError> {
-        let message = parse_message(bytes).map_err(|error| DnsClientError::Wire(error.to_string()))?;
+    pub fn decode_response(
+        &self,
+        expected_id: u16,
+        bytes: &[u8],
+    ) -> Result<DnsAnswer, DnsClientError> {
+        let message =
+            parse_message(bytes).map_err(|error| DnsClientError::Wire(error.to_string()))?;
         if message.header.id != expected_id {
             return Err(DnsClientError::IdMismatch {
                 expected: expected_id,
                 reply: message.header.id,
             });
         }
-        message_to_answer(&message)
-            .ok_or_else(|| DnsClientError::Wire("response answer record failed to decode".to_string()))
+        message_to_answer(&message).ok_or_else(|| {
+            DnsClientError::Wire("response answer record failed to decode".to_string())
+        })
     }
 }
 

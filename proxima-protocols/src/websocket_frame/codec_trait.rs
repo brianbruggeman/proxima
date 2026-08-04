@@ -48,8 +48,8 @@ impl FrameCodec for WebSocketFrameCodec {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::Opcode;
+    use super::*;
     use proxima_codec::FrameCodec;
 
     #[test]

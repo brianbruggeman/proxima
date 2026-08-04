@@ -134,8 +134,9 @@ impl serde::Serialize for Level {
 impl<'de> serde::Deserialize<'de> for Level {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let name = alloc::string::String::deserialize(deserializer)?;
-        name.parse()
-            .map_err(|_| serde::de::Error::custom("expected a level name (trace..fatal) or severity"))
+        name.parse().map_err(|_| {
+            serde::de::Error::custom("expected a level name (trace..fatal) or severity")
+        })
     }
 }
 

@@ -954,8 +954,7 @@ mod tests {
         let protocol: Arc<dyn ListenProtocol> = Arc::new(ReadySignalProtocol {
             served: served.clone(),
         });
-        let listener = ListenerSpec::protocol(bind, protocol)
-            .attach(null_dispatch());
+        let listener = ListenerSpec::protocol(bind, protocol).attach(null_dispatch());
 
         // Empty registry — proves resolution never reaches `registry.get`.
         let registry = ListenRegistry::new();
@@ -965,7 +964,10 @@ mod tests {
         let handle = listener
             .run_with_runtime(&registry, telemetry, Some(runtime), None, None)
             .expect("carried protocol resolves without a registry entry");
-        assert!(served.load(Ordering::SeqCst), "carried protocol never served");
+        assert!(
+            served.load(Ordering::SeqCst),
+            "carried protocol never served"
+        );
         futures::executor::block_on(handle.stop());
     }
 

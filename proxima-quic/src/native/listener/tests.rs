@@ -23,8 +23,8 @@ use proxima_protocols::quic::tls::Epoch;
 use proxima_protocols::quic::tls::mock::{MockStep, MockTlsProvider};
 
 use super::{
-    AcceptFn, ConnectionHandle, DatagramIngest, ListenerError, build_version_negotiation, client_dcid_for_demux,
-    core_instant, quic_instant,
+    AcceptFn, ConnectionHandle, DatagramIngest, ListenerError, build_version_negotiation,
+    client_dcid_for_demux, core_instant, quic_instant,
 };
 use crate::native::listener::Listener;
 
@@ -69,14 +69,22 @@ impl CapturedPipe {
 }
 
 fn peer_addr(last_octet: u8) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)), 44000 + u16::from(last_octet))
+    SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
+        44000 + u16::from(last_octet),
+    )
 }
 
 /// Real client connection whose Initial datagram is produced by the
 /// canonical encoder (`Connection::poll_transmit`) rather than
 /// hand-crafted bytes — the header, CID fields, and packet protection
 /// are all genuine wire bytes a production client would send.
-fn build_client(dcid: &[u8], scid: &[u8], client_hello: &[u8], origin: QuicInstant) -> Connection<MockTlsProvider> {
+fn build_client(
+    dcid: &[u8],
+    scid: &[u8],
+    client_hello: &[u8],
+    origin: QuicInstant,
+) -> Connection<MockTlsProvider> {
     let config = MockTlsProvider::script_client(vec![MockStep::EmitHandshakeBytes {
         epoch: Epoch::Initial,
         bytes: client_hello.to_vec(),
@@ -88,24 +96,29 @@ fn build_client(dcid: &[u8], scid: &[u8], client_hello: &[u8], origin: QuicInsta
 /// reply with `server_hello` in the Initial epoch — the same shape a real
 /// server's TLS provider follows on the first ClientHello.
 fn accept_fn_for(client_hello: Vec<u8>, server_hello: Vec<u8>) -> AcceptFn<MockTlsProvider> {
-    Arc::new(move |dcid: &[u8], scid: &[u8], local_scid: &[u8], now: QuicInstant| {
-        let config = MockTlsProvider::script_server(vec![
-            MockStep::ReadHandshake {
-                epoch: Epoch::Initial,
-                expect: client_hello.clone(),
-            },
-            MockStep::EmitHandshakeBytes {
-                epoch: Epoch::Initial,
-                bytes: server_hello.clone(),
-            },
-        ]);
-        Connection::<MockTlsProvider>::new_server(config, b"", dcid, scid, local_scid, now)
-    })
+    Arc::new(
+        move |dcid: &[u8], scid: &[u8], local_scid: &[u8], now: QuicInstant| {
+            let config = MockTlsProvider::script_server(vec![
+                MockStep::ReadHandshake {
+                    epoch: Epoch::Initial,
+                    expect: client_hello.clone(),
+                },
+                MockStep::EmitHandshakeBytes {
+                    epoch: Epoch::Initial,
+                    bytes: server_hello.clone(),
+                },
+            ]);
+            Connection::<MockTlsProvider>::new_server(config, b"", dcid, scid, local_scid, now)
+        },
+    )
 }
 
 /// Drain every pending outbound datagram this tick, returning the
 /// `(bytes, peer)` pairs in emission order.
-fn drain_all(listener: &mut Listener<MockTlsProvider>, now: proxima_core::time::Instant) -> Vec<(Vec<u8>, SocketAddr)> {
+fn drain_all(
+    listener: &mut Listener<MockTlsProvider>,
+    now: proxima_core::time::Instant,
+) -> Vec<(Vec<u8>, SocketAddr)> {
     let mut sent = Vec::new();
     let mut buf = [0u8; 1500];
     while let Some((len, peer)) = block_on(listener.transmit(now, &mut buf)).expect("transmit") {
@@ -152,10 +165,8 @@ fn headline_pto_retransmits_handshake_flight_with_no_inbound_ever_fed_again() {
         .expect("client emits its Initial flight");
 
     let (accept_tx, mut accept_rx) = mpsc::unbounded();
-    let mut listener = Listener::<MockTlsProvider>::new(
-        accept_fn_for(client_hello, server_hello),
-        accept_tx,
-    );
+    let mut listener =
+        Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
 
     let core_now = core_instant(origin);
     block_on(listener.on_datagram(core_now, peer, &client_buf[..first.len]))
@@ -164,11 +175,18 @@ fn headline_pto_retransmits_handshake_flight_with_no_inbound_ever_fed_again() {
     accept_rx
         .try_recv()
         .expect("exactly one handle pushed for the NewInitial");
-    assert_eq!(listener.connection_handles().len(), 1, "exactly one connection accepted");
+    assert_eq!(
+        listener.connection_handles().len(),
+        1,
+        "exactly one connection accepted"
+    );
 
     // Drain the server's first flight (ServerHello) completely.
     let first_flight = drain_all(&mut listener, core_now);
-    assert!(!first_flight.is_empty(), "server must emit its first flight");
+    assert!(
+        !first_flight.is_empty(),
+        "server must emit its first flight"
+    );
     for (_, sent_peer) in &first_flight {
         assert_eq!(*sent_peer, peer);
     }
@@ -199,7 +217,10 @@ fn headline_pto_retransmits_handshake_flight_with_no_inbound_ever_fed_again() {
         "PTO retransmit re-emits the same number of packets as the lost flight"
     );
     for (_, sent_peer) in &retransmit_flight {
-        assert_eq!(*sent_peer, peer, "retransmit still addresses the original peer");
+        assert_eq!(
+            *sent_peer, peer,
+            "retransmit still addresses the original peer"
+        );
     }
 }
 
@@ -213,16 +234,25 @@ fn accept_channel_pushes_exactly_one_handle_per_new_initial() {
     let origin = QuicInstant::from_micros(500_000);
     let mut client = build_client(&client_dcid, &client_scid, &client_hello, origin);
     let mut buf = [0u8; 1500];
-    let first = client.poll_transmit(origin, &mut buf).expect("poll").expect("emit");
+    let first = client
+        .poll_transmit(origin, &mut buf)
+        .expect("poll")
+        .expect("emit");
 
     let (accept_tx, mut accept_rx) = mpsc::unbounded();
-    let mut listener = Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
+    let mut listener =
+        Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
 
     let core_now = core_instant(origin);
     block_on(listener.on_datagram(core_now, peer_addr(1), &buf[..first.len])).expect("accept");
 
-    let notified: Vec<ConnectionHandle> = std::iter::from_fn(|| accept_rx.try_recv().ok()).collect();
-    assert_eq!(notified.len(), 1, "exactly one accept notification for one NewInitial");
+    let notified: Vec<ConnectionHandle> =
+        std::iter::from_fn(|| accept_rx.try_recv().ok()).collect();
+    assert_eq!(
+        notified.len(),
+        1,
+        "exactly one accept notification for one NewInitial"
+    );
     assert_eq!(listener.connection_handles(), notified);
 }
 
@@ -237,8 +267,18 @@ fn next_deadline_is_the_minimum_across_connections_body() {
     let reply_a = b"REPLY-A".to_vec();
     let reply_b = b"REPLY-B".to_vec();
 
-    let mut client_a = build_client(&[0x01; 8], &[0x02; 8], &hello_a, QuicInstant::from_micros(0));
-    let mut client_b = build_client(&[0x03; 8], &[0x04; 8], &hello_b, QuicInstant::from_micros(0));
+    let mut client_a = build_client(
+        &[0x01; 8],
+        &[0x02; 8],
+        &hello_a,
+        QuicInstant::from_micros(0),
+    );
+    let mut client_b = build_client(
+        &[0x03; 8],
+        &[0x04; 8],
+        &hello_b,
+        QuicInstant::from_micros(0),
+    );
     let mut buf_a = [0u8; 1500];
     let mut buf_b = [0u8; 1500];
     let first_a = client_a
@@ -251,29 +291,47 @@ fn next_deadline_is_the_minimum_across_connections_body() {
         .expect("emit b");
 
     let (accept_tx, _accept_rx) = mpsc::unbounded();
-    let mut listener = Listener::<MockTlsProvider>::new(accept_fn_for(hello_a, reply_a), accept_tx.clone());
+    let mut listener =
+        Listener::<MockTlsProvider>::new(accept_fn_for(hello_a, reply_a), accept_tx.clone());
 
     // connection A accepted (and sent) at t=0.
-    block_on(listener.on_datagram(core_instant(QuicInstant::from_micros(0)), peer_addr(10), &buf_a[..first_a.len]))
-        .expect("accept a");
+    block_on(listener.on_datagram(
+        core_instant(QuicInstant::from_micros(0)),
+        peer_addr(10),
+        &buf_a[..first_a.len],
+    ))
+    .expect("accept a");
     drain_all(&mut listener, core_instant(QuicInstant::from_micros(0)));
 
     // connection B accepted (and sent) later, at t=5_000_000 — its PTO
     // deadline is therefore strictly later than A's.
     let (accept_tx_b, _accept_rx_b) = mpsc::unbounded();
-    let mut listener_b_only = Listener::<MockTlsProvider>::new(accept_fn_for(hello_b, reply_b), accept_tx_b);
-    block_on(listener_b_only.on_datagram(core_instant(QuicInstant::from_micros(5_000_000)), peer_addr(11), &buf_b[..first_b.len]))
-        .expect("accept b");
-    drain_all(&mut listener_b_only, core_instant(QuicInstant::from_micros(5_000_000)));
+    let mut listener_b_only =
+        Listener::<MockTlsProvider>::new(accept_fn_for(hello_b, reply_b), accept_tx_b);
+    block_on(listener_b_only.on_datagram(
+        core_instant(QuicInstant::from_micros(5_000_000)),
+        peer_addr(11),
+        &buf_b[..first_b.len],
+    ))
+    .expect("accept b");
+    drain_all(
+        &mut listener_b_only,
+        core_instant(QuicInstant::from_micros(5_000_000)),
+    );
 
     let deadline_a_only = listener.next_deadline().expect("A has a deadline");
     let deadline_b_only = listener_b_only.next_deadline().expect("B has a deadline");
-    assert!(deadline_a_only < deadline_b_only, "A's PTO fires strictly earlier than B's");
+    assert!(
+        deadline_a_only < deadline_b_only,
+        "A's PTO fires strictly earlier than B's"
+    );
 }
 
 #[test]
 fn poll_transmit_drains_pending_egress_across_multiple_connections_before_none() {
-    run_on_big_stack(poll_transmit_drains_pending_egress_across_multiple_connections_before_none_body);
+    run_on_big_stack(
+        poll_transmit_drains_pending_egress_across_multiple_connections_before_none_body,
+    );
 }
 
 fn poll_transmit_drains_pending_egress_across_multiple_connections_before_none_body() {
@@ -287,8 +345,14 @@ fn poll_transmit_drains_pending_egress_across_multiple_connections_before_none_b
     let mut client_b = build_client(&[0x30; 8], &[0x40; 8], &hello_b, origin);
     let mut buf_a = [0u8; 1500];
     let mut buf_b = [0u8; 1500];
-    let first_a = client_a.poll_transmit(origin, &mut buf_a).expect("poll a").expect("emit a");
-    let first_b = client_b.poll_transmit(origin, &mut buf_b).expect("poll b").expect("emit b");
+    let first_a = client_a
+        .poll_transmit(origin, &mut buf_a)
+        .expect("poll a")
+        .expect("emit a");
+    let first_b = client_b
+        .poll_transmit(origin, &mut buf_b)
+        .expect("poll b")
+        .expect("emit b");
 
     // A single accept_fn cannot script two different expected
     // ClientHellos, so exercise two independently-accepting listeners
@@ -304,14 +368,26 @@ fn poll_transmit_drains_pending_egress_across_multiple_connections_before_none_b
     let accept_fn: AcceptFn<MockTlsProvider> = Arc::new(move |dcid, scid, local_scid, now| {
         if dcid == dcid_a {
             let config = MockTlsProvider::script_server(vec![
-                MockStep::ReadHandshake { epoch: Epoch::Initial, expect: hello_a.clone() },
-                MockStep::EmitHandshakeBytes { epoch: Epoch::Initial, bytes: reply_a.clone() },
+                MockStep::ReadHandshake {
+                    epoch: Epoch::Initial,
+                    expect: hello_a.clone(),
+                },
+                MockStep::EmitHandshakeBytes {
+                    epoch: Epoch::Initial,
+                    bytes: reply_a.clone(),
+                },
             ]);
             Connection::<MockTlsProvider>::new_server(config, b"", dcid, scid, local_scid, now)
         } else {
             let config = MockTlsProvider::script_server(vec![
-                MockStep::ReadHandshake { epoch: Epoch::Initial, expect: hello_b.clone() },
-                MockStep::EmitHandshakeBytes { epoch: Epoch::Initial, bytes: reply_b.clone() },
+                MockStep::ReadHandshake {
+                    epoch: Epoch::Initial,
+                    expect: hello_b.clone(),
+                },
+                MockStep::EmitHandshakeBytes {
+                    epoch: Epoch::Initial,
+                    bytes: reply_b.clone(),
+                },
             ]);
             Connection::<MockTlsProvider>::new_server(config, b"", dcid, scid, local_scid, now)
         }
@@ -329,7 +405,8 @@ fn poll_transmit_drains_pending_egress_across_multiple_connections_before_none_b
     assert_eq!(handles.len(), 2, "both connections accepted");
 
     let sent = drain_all(&mut listener, core_now);
-    let peers: std::collections::BTreeSet<SocketAddr> = sent.iter().map(|(_, peer)| *peer).collect();
+    let peers: std::collections::BTreeSet<SocketAddr> =
+        sent.iter().map(|(_, peer)| *peer).collect();
     assert!(peers.contains(&peer_a), "connection A's flight was drained");
     assert!(peers.contains(&peer_b), "connection B's flight was drained");
 }
@@ -366,16 +443,18 @@ fn second_client_datagram_routes_to_the_existing_connection_not_a_new_one_body()
             expect: server_hello.clone(),
         },
     ]);
-    let mut client = Connection::<MockTlsProvider>::new_client(config, b"", &client_dcid, &client_scid, origin)
-        .expect("new_client");
+    let mut client =
+        Connection::<MockTlsProvider>::new_client(config, b"", &client_dcid, &client_scid, origin)
+            .expect("new_client");
     let mut buf = [0u8; 1500];
-    let first = client.poll_transmit(origin, &mut buf).expect("poll").expect("emit");
+    let first = client
+        .poll_transmit(origin, &mut buf)
+        .expect("poll")
+        .expect("emit");
 
     let (accept_tx, mut accept_rx) = mpsc::unbounded();
-    let mut listener = Listener::<MockTlsProvider>::new(
-        accept_fn_for(client_hello, server_hello),
-        accept_tx,
-    );
+    let mut listener =
+        Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
     let core_now = core_instant(origin);
     block_on(listener.on_datagram(core_now, peer, &buf[..first.len])).expect("accept");
     let handle = accept_rx.try_recv().expect("notified");
@@ -454,7 +533,10 @@ struct SharedSocket {
 
 impl SharedSocket {
     fn new(local: SocketAddr) -> Self {
-        Self { state: Arc::new(Mutex::new(SocketState::default())), local }
+        Self {
+            state: Arc::new(Mutex::new(SocketState::default())),
+            local,
+        }
     }
 
     fn inject(&self, bytes: Vec<u8>, from: SocketAddr) {
@@ -471,7 +553,11 @@ impl SharedSocket {
 }
 
 impl DatagramSocket for SharedSocket {
-    fn poll_recv_from(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+    fn poll_recv_from(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
         let mut state = self.state.lock().expect("lock");
         match state.inbound.pop_front() {
             Some((bytes, from)) => {
@@ -486,8 +572,17 @@ impl DatagramSocket for SharedSocket {
         }
     }
 
-    fn poll_send_to(&mut self, _cx: &mut Context<'_>, buf: &[u8], peer: SocketAddr) -> std::task::Poll<io::Result<usize>> {
-        self.state.lock().expect("lock").sent.push((buf.to_vec(), peer));
+    fn poll_send_to(
+        &mut self,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+        peer: SocketAddr,
+    ) -> std::task::Poll<io::Result<usize>> {
+        self.state
+            .lock()
+            .expect("lock")
+            .sent
+            .push((buf.to_vec(), peer));
         std::task::Poll::Ready(Ok(buf.len()))
     }
 
@@ -513,7 +608,10 @@ impl SendPipe for UnusedPipe {
     type Out = Response<bytes::Bytes>;
     type Err = ProximaError;
 
-    fn call(&self, _request: Request<bytes::Bytes>) -> impl Future<Output = Result<Response<bytes::Bytes>, ProximaError>> + Send {
+    fn call(
+        &self,
+        _request: Request<bytes::Bytes>,
+    ) -> impl Future<Output = Result<Response<bytes::Bytes>, ProximaError>> + Send {
         async move {
             Ok(Response {
                 status: 200,
@@ -541,13 +639,17 @@ fn poll_n(
 
 #[test]
 fn listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver() {
-    run_on_big_stack(listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver_body);
+    run_on_big_stack(
+        listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver_body,
+    );
 }
 
 fn listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver_body() {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5401);
     let socket = SharedSocket::new(bind);
-    let factory = Arc::new(SharedFactory { socket: socket.clone() });
+    let factory = Arc::new(SharedFactory {
+        socket: socket.clone(),
+    });
 
     let client_dcid = [0x55_u8; 8];
     let client_scid = [0x66_u8; 8];
@@ -558,7 +660,10 @@ fn listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver_b
     let origin = QuicInstant::from_micros(0);
     let mut client = build_client(&client_dcid, &client_scid, &client_hello, origin);
     let mut client_buf = [0u8; 1500];
-    let first = client.poll_transmit(origin, &mut client_buf).expect("poll").expect("emit");
+    let first = client
+        .poll_transmit(origin, &mut client_buf)
+        .expect("poll")
+        .expect("emit");
 
     // Production `TimeClock` (the same default `Listener::listen_protocol`
     // wires internally) — no need for a deterministic fake clock here: with
@@ -566,7 +671,8 @@ fn listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver_b
     // driver's timer race arm is `future::pending()` and the recv arm alone
     // decides the outcome once the datagram is injected below.
     let accept_fn: AcceptFn<MockTlsProvider> = accept_fn_for(client_hello, server_hello);
-    let (protocol, mut accept_rx) = Listener::<MockTlsProvider>::listen_protocol("quic-wiring", accept_fn);
+    let (protocol, mut accept_rx) =
+        Listener::<MockTlsProvider>::listen_protocol("quic-wiring", accept_fn);
     let spec = serde_json::json!({});
     let context = ServeContext::new(Arc::new(NoopTelemetry)).with_datagram_factory(factory);
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -581,7 +687,10 @@ fn listen_protocol_wiring_drives_a_real_client_initial_through_the_real_driver_b
     let resolved = poll_n(&mut serve, &mut cx, 16);
     assert!(!resolved, "serve must not resolve before shutdown fires");
 
-    assert!(!socket.sent().is_empty(), "the driver must ship the server's ServerHello flight");
+    assert!(
+        !socket.sent().is_empty(),
+        "the driver must ship the server's ServerHello flight"
+    );
     for (_, sent_peer) in socket.sent() {
         assert_eq!(sent_peer, peer);
     }
@@ -645,10 +754,14 @@ fn second_initial_still_addressed_to_the_clients_own_dcid_routes_to_the_existing
     let origin = QuicInstant::from_micros(0);
     let mut client = build_client(&client_dcid, &client_scid, &client_hello, origin);
     let mut buf = [0u8; 1500];
-    let first = client.poll_transmit(origin, &mut buf).expect("poll").expect("emit");
+    let first = client
+        .poll_transmit(origin, &mut buf)
+        .expect("poll")
+        .expect("emit");
 
     let (accept_tx, mut accept_rx) = mpsc::unbounded();
-    let mut listener = Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
+    let mut listener =
+        Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
     let core_now = core_instant(origin);
     block_on(listener.on_datagram(core_now, peer, &buf[..first.len])).expect("accept");
     let handle = accept_rx.try_recv().expect("notified");
@@ -658,16 +771,24 @@ fn second_initial_still_addressed_to_the_clients_own_dcid_routes_to_the_existing
     // re-emits the Initial with the SAME (still client-chosen) dcid,
     // exactly the shape a CRYPTO-fragment continuation or a genuine
     // client-side retransmit takes.
-    let client_deadline = client.next_timeout().expect("client PTO armed after its first flight");
-    client.handle_timeout(client_deadline).expect("client handle_timeout");
+    let client_deadline = client
+        .next_timeout()
+        .expect("client PTO armed after its first flight");
+    client
+        .handle_timeout(client_deadline)
+        .expect("client handle_timeout");
     let mut second_buf = [0u8; 1500];
     let second = client
         .poll_transmit(client_deadline, &mut second_buf)
         .expect("client poll_transmit after its own PTO")
         .expect("client re-emits its Initial, still addressed to its own dcid");
 
-    block_on(listener.on_datagram(core_instant(client_deadline), peer, &second_buf[..second.len]))
-        .expect("second datagram (client's own dcid) routes without error");
+    block_on(listener.on_datagram(
+        core_instant(client_deadline),
+        peer,
+        &second_buf[..second.len],
+    ))
+    .expect("second datagram (client's own dcid) routes without error");
 
     assert_eq!(
         listener.connection_handles().len(),
@@ -688,9 +809,10 @@ fn version_negotiation_echoes_swapped_cids_and_offers_v1() {
     let peer_dcid = [1u8, 2, 3, 4, 5, 6, 7, 8];
     let peer_scid = [10u8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
     let mut buf = [0u8; 64];
-    let written = build_version_negotiation(&peer_dcid, &peer_scid, &mut buf).expect("version negotiation encodes");
-    let parsed =
-        proxima_protocols::quic::packet::header::parse_long(&buf[..written]).expect("parses as a long header");
+    let written = build_version_negotiation(&peer_dcid, &peer_scid, &mut buf)
+        .expect("version negotiation encodes");
+    let parsed = proxima_protocols::quic::packet::header::parse_long(&buf[..written])
+        .expect("parses as a long header");
     match parsed {
         proxima_protocols::quic::packet::header::Header::VersionNegotiation {
             dcid,
@@ -726,13 +848,16 @@ fn unsupported_version_datagram_queues_a_vn_reply_drained_first_by_transmit() {
     datagram[6..6 + peer_dcid.len()].copy_from_slice(&peer_dcid);
     let scid_len_offset = 6 + peer_dcid.len();
     datagram[scid_len_offset] = u8::try_from(peer_scid.len()).expect("scid len fits u8");
-    datagram[scid_len_offset + 1..scid_len_offset + 1 + peer_scid.len()].copy_from_slice(&peer_scid);
+    datagram[scid_len_offset + 1..scid_len_offset + 1 + peer_scid.len()]
+        .copy_from_slice(&peer_scid);
 
     let (accept_tx, _accept_rx) = mpsc::unbounded();
-    let accept_fn: AcceptFn<MockTlsProvider> = accept_fn_for(b"unused".to_vec(), b"unused".to_vec());
+    let accept_fn: AcceptFn<MockTlsProvider> =
+        accept_fn_for(b"unused".to_vec(), b"unused".to_vec());
     let mut listener = Listener::<MockTlsProvider>::new(accept_fn, accept_tx);
     let core_now = core_instant(QuicInstant::from_micros(0));
-    block_on(listener.on_datagram(core_now, peer, &datagram)).expect("unsupported-version datagram accepted");
+    block_on(listener.on_datagram(core_now, peer, &datagram))
+        .expect("unsupported-version datagram accepted");
     assert!(
         listener.connection_handles().is_empty(),
         "an unsupported-version datagram must never spawn a connection"
@@ -743,11 +868,22 @@ fn unsupported_version_datagram_queues_a_vn_reply_drained_first_by_transmit() {
         .expect("transmit")
         .expect("a Version Negotiation reply is staged and drained");
     assert_eq!(sent_peer, peer);
-    let parsed = proxima_protocols::quic::packet::header::parse_long(&buf[..len]).expect("parses as a long header");
+    let parsed = proxima_protocols::quic::packet::header::parse_long(&buf[..len])
+        .expect("parses as a long header");
     match parsed {
-        proxima_protocols::quic::packet::header::Header::VersionNegotiation { dcid, scid, .. } => {
-            assert_eq!(dcid, &peer_scid[..], "VN DCID echoes the peer's SCID (swapped)");
-            assert_eq!(scid, &peer_dcid[..], "VN SCID echoes the peer's DCID (swapped)");
+        proxima_protocols::quic::packet::header::Header::VersionNegotiation {
+            dcid, scid, ..
+        } => {
+            assert_eq!(
+                dcid,
+                &peer_scid[..],
+                "VN DCID echoes the peer's SCID (swapped)"
+            );
+            assert_eq!(
+                scid,
+                &peer_dcid[..],
+                "VN SCID echoes the peer's DCID (swapped)"
+            );
         }
         other => panic!("expected a VersionNegotiation packet, got {other:?}"),
     }
@@ -785,13 +921,18 @@ fn ingest_datagram_return_names_the_accepted_then_the_existing_handle_body() {
             expect: server_hello.clone(),
         },
     ]);
-    let mut client = Connection::<MockTlsProvider>::new_client(config, b"", &client_dcid, &client_scid, origin)
-        .expect("new_client");
+    let mut client =
+        Connection::<MockTlsProvider>::new_client(config, b"", &client_dcid, &client_scid, origin)
+            .expect("new_client");
     let mut buf = [0u8; 1500];
-    let first = client.poll_transmit(origin, &mut buf).expect("poll").expect("emit");
+    let first = client
+        .poll_transmit(origin, &mut buf)
+        .expect("poll")
+        .expect("emit");
 
     let (accept_tx, mut accept_rx) = mpsc::unbounded();
-    let mut listener = Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
+    let mut listener =
+        Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
     let core_now = core_instant(origin);
 
     let ingest = listener
@@ -799,7 +940,10 @@ fn ingest_datagram_return_names_the_accepted_then_the_existing_handle_body() {
         .expect("ingest_datagram accepts the client Initial");
     let handle = match ingest {
         DatagramIngest::Accepted { handle, error } => {
-            assert!(error.is_none(), "a clean first Initial must not surface an error");
+            assert!(
+                error.is_none(),
+                "a clean first Initial must not surface an error"
+            );
             handle
         }
         other => panic!("expected Accepted, got {other:?}"),
@@ -812,7 +956,9 @@ fn ingest_datagram_return_names_the_accepted_then_the_existing_handle_body() {
 
     let server_flight = drain_all(&mut listener, core_now);
     for (bytes, _) in &server_flight {
-        client.handle_datagram(origin, bytes).expect("client reads server reply");
+        client
+            .handle_datagram(origin, bytes)
+            .expect("client reads server reply");
     }
     let mut next_buf = [0u8; 1500];
     let next = client
@@ -823,9 +969,18 @@ fn ingest_datagram_return_names_the_accepted_then_the_existing_handle_body() {
         .ingest_datagram(origin, peer, &next_buf[..next.len])
         .expect("ingest_datagram routes the second datagram");
     match ingest_again {
-        DatagramIngest::Existing { handle: routed, error } => {
-            assert_eq!(routed, handle, "the second datagram routes to the SAME handle the accept named");
-            assert!(error.is_none(), "a clean handshake continuation must not surface an error");
+        DatagramIngest::Existing {
+            handle: routed,
+            error,
+        } => {
+            assert_eq!(
+                routed, handle,
+                "the second datagram routes to the SAME handle the accept named"
+            );
+            assert!(
+                error.is_none(),
+                "a clean handshake continuation must not surface an error"
+            );
         }
         other => panic!("expected Existing, got {other:?}"),
     }
@@ -842,11 +997,13 @@ fn ingest_datagram_return_names_the_accepted_then_the_existing_handle_body() {
 // connection B, routed and driven independently, is completely
 // unaffected.
 #[test]
-fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and_leaves_others_alone() {
+fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and_leaves_others_alone()
+ {
     run_on_big_stack(connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and_leaves_others_alone_body);
 }
 
-fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and_leaves_others_alone_body() {
+fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and_leaves_others_alone_body()
+ {
     let hello_a = b"HELLO-ERR-A".to_vec();
     let hello_b = b"HELLO-ERR-B".to_vec();
     let reply_a = b"REPLY-ERR-A".to_vec();
@@ -870,20 +1027,41 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
             expect: reply_b.clone(),
         },
     ]);
-    let mut client_b =
-        Connection::<MockTlsProvider>::new_client(client_b_config, b"", &[0x50; 8], &[0x51; 8], origin)
-            .expect("new_client b");
+    let mut client_b = Connection::<MockTlsProvider>::new_client(
+        client_b_config,
+        b"",
+        &[0x50; 8],
+        &[0x51; 8],
+        origin,
+    )
+    .expect("new_client b");
     let mut buf_a = [0u8; 1500];
     let mut buf_b = [0u8; 1500];
-    let first_a = client_a.poll_transmit(origin, &mut buf_a).expect("poll a").expect("emit a");
-    let first_b = client_b.poll_transmit(origin, &mut buf_b).expect("poll b").expect("emit b");
+    let first_a = client_a
+        .poll_transmit(origin, &mut buf_a)
+        .expect("poll a")
+        .expect("emit a");
+    let first_b = client_b
+        .poll_transmit(origin, &mut buf_b)
+        .expect("poll b")
+        .expect("emit b");
 
     let dcid_a = [0x40_u8; 8];
     let accept_fn: AcceptFn<MockTlsProvider> = Arc::new(move |dcid, scid, local_scid, now| {
-        let (hello, reply) = if dcid == dcid_a { (&hello_a, &reply_a) } else { (&hello_b, &reply_b) };
+        let (hello, reply) = if dcid == dcid_a {
+            (&hello_a, &reply_a)
+        } else {
+            (&hello_b, &reply_b)
+        };
         let config = MockTlsProvider::script_server(vec![
-            MockStep::ReadHandshake { epoch: Epoch::Initial, expect: hello.clone() },
-            MockStep::EmitHandshakeBytes { epoch: Epoch::Initial, bytes: reply.clone() },
+            MockStep::ReadHandshake {
+                epoch: Epoch::Initial,
+                expect: hello.clone(),
+            },
+            MockStep::EmitHandshakeBytes {
+                epoch: Epoch::Initial,
+                bytes: reply.clone(),
+            },
         ]);
         Connection::<MockTlsProvider>::new_server(config, b"", dcid, scid, local_scid, now)
     });
@@ -891,23 +1069,39 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
     let (accept_tx, mut accept_rx) = mpsc::unbounded();
     let mut listener = Listener::<MockTlsProvider>::new(accept_fn, accept_tx);
 
-    let handle_a = match listener.ingest_datagram(origin, peer_a, &buf_a[..first_a.len]).expect("accept a") {
+    let handle_a = match listener
+        .ingest_datagram(origin, peer_a, &buf_a[..first_a.len])
+        .expect("accept a")
+    {
         DatagramIngest::Accepted { handle, error } => {
-            assert!(error.is_none(), "a clean first Initial must not surface an error");
+            assert!(
+                error.is_none(),
+                "a clean first Initial must not surface an error"
+            );
             handle
         }
         other => panic!("expected Accepted, got {other:?}"),
     };
-    let handle_b = match listener.ingest_datagram(origin, peer_b, &buf_b[..first_b.len]).expect("accept b") {
+    let handle_b = match listener
+        .ingest_datagram(origin, peer_b, &buf_b[..first_b.len])
+        .expect("accept b")
+    {
         DatagramIngest::Accepted { handle, error } => {
-            assert!(error.is_none(), "a clean first Initial must not surface an error");
+            assert!(
+                error.is_none(),
+                "a clean first Initial must not surface an error"
+            );
             handle
         }
         other => panic!("expected Accepted, got {other:?}"),
     };
     let _ = accept_rx.try_recv();
     let _ = accept_rx.try_recv();
-    assert_eq!(listener.connection_handles().len(), 2, "both connections accepted");
+    assert_eq!(
+        listener.connection_handles().len(),
+        2,
+        "both connections accepted"
+    );
 
     // Drain BOTH connections' first flights now, before triggering A's
     // error — so the LATER post-error drain contains ONLY A's fresh
@@ -920,16 +1114,27 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
         .filter(|(_, peer)| *peer == peer_b)
         .map(|(bytes, _)| bytes.clone())
         .collect();
-    assert!(!server_flight_b.is_empty(), "B's first flight must have shipped");
+    assert!(
+        !server_flight_b.is_empty(),
+        "B's first flight must have shipped"
+    );
     for bytes in &server_flight_b {
-        client_b.handle_datagram(origin, bytes).expect("client B reads server reply");
+        client_b
+            .handle_datagram(origin, bytes)
+            .expect("client B reads server reply");
     }
 
     // Learn connection A's server-chosen local SCID (generated internally
     // by `ingest_datagram`, so the test can't know it up front) — needed
     // to address a real packet AT that connection.
-    let local_scid_a = match listener.connection_mut(handle_a).expect("connection a").state() {
-        proxima_protocols::quic::connection::ConnectionState::Initial(state) => state.local_initial_scid.to_vec(),
+    let local_scid_a = match listener
+        .connection_mut(handle_a)
+        .expect("connection a")
+        .state()
+    {
+        proxima_protocols::quic::connection::ConnectionState::Initial(state) => {
+            state.local_initial_scid.to_vec()
+        }
         other => panic!("expected Initial, got {other:?}"),
     };
 
@@ -961,9 +1166,16 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
             .expect("ingest_datagram routes the malformed short-header packet")
         {
             DatagramIngest::Existing { handle, error } => {
-                assert_eq!(handle, handle_a, "the violation is attributed to connection A");
+                assert_eq!(
+                    handle, handle_a,
+                    "the violation is attributed to connection A"
+                );
                 match error {
-                    Some(proxima_protocols::quic::connection::ConnectionError::ProtocolViolation { reason }) => {
+                    Some(
+                        proxima_protocols::quic::connection::ConnectionError::ProtocolViolation {
+                            reason,
+                        },
+                    ) => {
                         assert_eq!(reason, "non-Initial packet received in Initial state");
                     }
                     other => panic!("expected Some(ProtocolViolation), got {other:?}"),
@@ -976,7 +1188,8 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
     // SURFACE: a telemetry error event fired — never silently discarded.
     let logs = captured.logs();
     assert!(
-        logs.iter().any(|log| log.level == proxima_telemetry::level::Level::ERROR),
+        logs.iter()
+            .any(|log| log.level == proxima_telemetry::level::Level::ERROR),
         "a connection-level protocol error must fire a telemetry error event; got {} log(s), none at ERROR",
         logs.len()
     );
@@ -993,14 +1206,20 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
     // nothing new for A here; what matters is that A is no longer live.
     assert!(
         matches!(
-            listener.connection_mut(handle_a).expect("connection a still present").state(),
+            listener
+                .connection_mut(handle_a)
+                .expect("connection a still present")
+                .state(),
             proxima_protocols::quic::connection::ConnectionState::Closing(_)
         ),
         "connection A must have transitioned to Closing"
     );
     let sent = drain_all(&mut listener, core_now);
     for (_, sent_peer) in &sent {
-        assert_eq!(*sent_peer, peer_a, "any drained bytes here would only be a retransmit of A's close");
+        assert_eq!(
+            *sent_peer, peer_a,
+            "any drained bytes here would only be a retransmit of A's close"
+        );
     }
 
     // Connection B is COMPLETELY unaffected: still routable, still makes
@@ -1015,8 +1234,14 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
         .expect("connection B keeps routing after A's error")
     {
         DatagramIngest::Existing { handle, error } => {
-            assert_eq!(handle, handle_b, "B's continuation still routes to B's own handle");
-            assert!(error.is_none(), "B's handshake continuation is unaffected by A's error");
+            assert_eq!(
+                handle, handle_b,
+                "B's continuation still routes to B's own handle"
+            );
+            assert!(
+                error.is_none(),
+                "B's handshake continuation is unaffected by A's error"
+            );
         }
         other => panic!("expected Existing, got {other:?}"),
     }

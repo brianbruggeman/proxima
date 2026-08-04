@@ -237,9 +237,7 @@ mod tests {
     #[test]
     fn malformed_reply_surfaces_as_a_client_error() {
         let mut session = ClientSession::new();
-        session
-            .submit(&MemcachedRequest::Version)
-            .expect("submit");
+        session.submit(&MemcachedRequest::Version).expect("submit");
         let _ = session.take_outbound();
         session.feed(b"BOGUS\r\n");
         assert!(matches!(session.advance(), Err(ClientError::Reply(_))));

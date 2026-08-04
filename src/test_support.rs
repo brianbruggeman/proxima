@@ -607,7 +607,6 @@ impl SendPipe for RecordingTee {
     }
 }
 
-
 // every test in this module drives cassette_pipe, which resolves a runtime
 // via app::offline_runtime — matches offline_runtime's own gate exactly.
 #[cfg(all(
@@ -644,7 +643,6 @@ mod tests {
             }
         }
     }
-
 
     async fn drive_cassette_round_trip(path: std::path::PathBuf) {
         let record_ctx = proxima_test::TestCtx::__new_for_test(Some(proxima_test::CassetteCtx {
@@ -711,7 +709,6 @@ mod tests {
         }
     }
 
-
     /// Echoes the request payload back with a marker prefix, so replay
     /// correctness per-body is observable.
     struct EchoPipe;
@@ -731,7 +728,6 @@ mod tests {
         }
     }
 
-
     /// Returns a different body on every call — the divergent-duplicate case.
     struct CountingPipe(std::sync::atomic::AtomicUsize);
 
@@ -748,7 +744,6 @@ mod tests {
             async move { Ok(Response::new(200).with_body(Bytes::from(format!("resp-{count}")))) }
         }
     }
-
 
     fn ctx(path: &std::path::Path, mode: proxima_test::Mode) -> proxima_test::TestCtx {
         proxima_test::TestCtx::__new_for_test(Some(proxima_test::CassetteCtx {

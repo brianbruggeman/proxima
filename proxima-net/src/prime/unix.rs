@@ -23,7 +23,8 @@ use proxima_primitives::stream::{
     BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream, UnixUpstreamFactory,
 };
 
-type ConnectFuture = Pin<Box<dyn std::future::Future<Output = io::Result<PrimeUnixConnection>> + Send>>;
+type ConnectFuture =
+    Pin<Box<dyn std::future::Future<Output = io::Result<PrimeUnixConnection>> + Send>>;
 
 /// prime-backed Unix-domain connection. wraps `prime::os::net::UnixStream`
 /// and carries the peer path (usually `None` — the common case is an
@@ -36,7 +37,10 @@ pub struct PrimeUnixConnection {
 
 impl PrimeUnixConnection {
     fn new(stream: UnixStream, peer: Option<PathBuf>) -> Self {
-        Self { inner: stream, peer }
+        Self {
+            inner: stream,
+            peer,
+        }
     }
 }
 
@@ -210,8 +214,8 @@ mod tests {
     use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use prime::os::core_shard;
-    use proxima_runtime::CoreId;
     use proxima_primitives::stream::{StreamListenerExt, StreamUpstreamExt};
+    use proxima_runtime::CoreId;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -330,7 +334,10 @@ mod tests {
         handle.shutdown_and_join().expect("shutdown");
 
         let got_error = result_chan.lock().unwrap().expect("result not set");
-        assert!(got_error, "expected an error connecting to a missing path, got Ok");
+        assert!(
+            got_error,
+            "expected an error connecting to a missing path, got Ok"
+        );
     }
 
     /// `PrimeUnixListener::local_addr()` reports the bind path — proves the

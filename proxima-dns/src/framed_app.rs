@@ -25,7 +25,9 @@ use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::method::Method;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 
-use proxima_protocols::dns::{DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation};
+use proxima_protocols::dns::{
+    DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation,
+};
 use proxima_telemetry::warn;
 
 use crate::pipes::{DnsAnswer, DnsPipeHandle, DnsQuery};
@@ -208,8 +210,10 @@ mod tests {
                 rtype: 1,
                 rclass: 1,
                 ttl: 60,
-                rdata: proxima_protocols::dns::encode::ipv4_rdata(core::net::Ipv4Addr::new(93, 184, 216, 34))
-                    .to_vec(),
+                rdata: proxima_protocols::dns::encode::ipv4_rdata(core::net::Ipv4Addr::new(
+                    93, 184, 216, 34,
+                ))
+                .to_vec(),
             };
             Ok(Response::typed(200, DnsAnswer::ok(vec![record])))
         }
@@ -260,7 +264,9 @@ mod tests {
     #[proxima::test]
     async fn a_not_single_question_violation_is_silent_and_keeps_serving() {
         let outcome = app()
-            .call(DnsTcpOwnedFrame::Violation(DnsTcpViolation::NotSingleQuestion))
+            .call(DnsTcpOwnedFrame::Violation(
+                DnsTcpViolation::NotSingleQuestion,
+            ))
             .await
             .expect("call");
         assert_eq!(outcome, DnsTcpOutcome::Silent);

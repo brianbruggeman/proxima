@@ -50,7 +50,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 struct EchoBody;
 
 impl SendPipe for EchoBody {
@@ -68,7 +67,6 @@ impl SendPipe for EchoBody {
         }
     }
 }
-
 
 fn handshake_only(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("h3_handshake_only");

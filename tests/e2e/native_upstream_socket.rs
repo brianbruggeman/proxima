@@ -55,7 +55,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 /// Dev-only verifier: the server presents an ephemeral rcgen self-signed
 /// cert (`dev_self_signed`), so the client trusts any cert for the test.
 #[derive(Debug)]

@@ -35,8 +35,8 @@ use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
 
 use proxima_protocols::mqtt::encode::{
-    encode_ack, encode_connack, encode_disconnect, encode_pingresp, encode_publish as encode_publish_frame,
-    encode_suback,
+    encode_ack, encode_connack, encode_disconnect, encode_pingresp,
+    encode_publish as encode_publish_frame, encode_suback,
 };
 use proxima_protocols::mqtt::{MqttReply, PacketType, is_streaming, verb};
 
@@ -98,7 +98,9 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
             cmd if cmd.eq_ignore_ascii_case(verb::UNSUBSCRIBE) => self.unsubscribe(&body).await,
             cmd if cmd.eq_ignore_ascii_case(verb::PING) => self.ping().await,
             cmd if cmd.eq_ignore_ascii_case(verb::DISCONNECT) => self.disconnect().await,
-            other => Err(ProximaError::Upstream(format!("mqtt: unsupported verb '{other}'"))),
+            other => Err(ProximaError::Upstream(format!(
+                "mqtt: unsupported verb '{other}'"
+            ))),
         }
     }
 
@@ -158,7 +160,10 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
             .as_mut()
             .ok_or_else(|| ProximaError::Upstream("mqtt cache empty".into()))?;
 
-        cached.session.submit_ping().map_err(client_error_to_proxima)?;
+        cached
+            .session
+            .submit_ping()
+            .map_err(client_error_to_proxima)?;
         match drive_to_complete(&mut cached.session, &mut cached.conn).await {
             Ok(reply) => Ok(Response::ok(Bytes::from(encode_reply(&reply)))),
             Err(error) => {
@@ -194,7 +199,10 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
         };
         drop(guard);
 
-        let refs: Vec<(&[u8], u8)> = filters.iter().map(|(filter, qos)| (filter.as_slice(), *qos)).collect();
+        let refs: Vec<(&[u8], u8)> = filters
+            .iter()
+            .map(|(filter, qos)| (filter.as_slice(), *qos))
+            .collect();
         cached
             .session
             .queue_subscribe(&refs)
@@ -283,14 +291,22 @@ fn encode_reply(reply: &MqttReply) -> Vec<u8> {
     let mut out = Vec::new();
     match reply {
         MqttReply::Published | MqttReply::Disconnected => {}
-        MqttReply::ConnAck { session_present, return_code } => {
+        MqttReply::ConnAck {
+            session_present,
+            return_code,
+        } => {
             encode_connack(*session_present, *return_code, &mut out);
         }
         MqttReply::PubAck { packet_id } => encode_ack(PacketType::PubAck, *packet_id, &mut out),
         MqttReply::SubAck { packet_id, granted } => encode_suback(*packet_id, granted, &mut out),
         MqttReply::UnsubAck { packet_id } => encode_ack(PacketType::UnsubAck, *packet_id, &mut out),
         MqttReply::Pong => encode_pingresp(&mut out),
-        MqttReply::Publish { topic, payload, qos, retain } => {
+        MqttReply::Publish {
+            topic,
+            payload,
+            qos,
+            retain,
+        } => {
             encode_publish_frame(topic, None, payload, *qos, false, *retain, &mut out);
         }
     }
@@ -325,14 +341,20 @@ async fn drive_until_ready<C: StreamConnection>(
     }
 }
 
-async fn flush<C: StreamConnection>(session: &mut ClientSession, conn: &mut C) -> Result<(), ClientError> {
+async fn flush<C: StreamConnection>(
+    session: &mut ClientSession,
+    conn: &mut C,
+) -> Result<(), ClientError> {
     let bytes = session.take_outbound();
     conn.write_all(&bytes).await?;
     conn.flush().await?;
     Ok(())
 }
 
-async fn recv<C: StreamConnection>(session: &mut ClientSession, conn: &mut C) -> Result<(), ClientError> {
+async fn recv<C: StreamConnection>(
+    session: &mut ClientSession,
+    conn: &mut C,
+) -> Result<(), ClientError> {
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
     let read = conn.read(&mut chunk).await?;
     if read == 0 {
@@ -361,7 +383,10 @@ async fn push_step<C: StreamConnection>(
     loop {
         match cached.session.poll_push() {
             Ok(PushStep::Frame(reply)) => {
-                return Some((Ok(Bytes::from(encode_reply(&reply))), StreamState::Active(cached)));
+                return Some((
+                    Ok(Bytes::from(encode_reply(&reply))),
+                    StreamState::Active(cached),
+                ));
             }
             Ok(PushStep::Recv) => {
                 let mut chunk = [0_u8; READ_CHUNK_BYTES];

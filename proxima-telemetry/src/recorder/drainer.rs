@@ -19,8 +19,8 @@ use crate::pipes::{
 };
 use crate::ring::HeapBoundedQueue;
 use crate::trace::{EventRecord, SpanLink, SpanRecord};
-use proxima_primitives::pipe::{BatchSource, SendDynPipe};
 use proxima_primitives::pipe::request::Response;
+use proxima_primitives::pipe::{BatchSource, SendDynPipe};
 
 use super::EmitShared;
 use super::ring_set::OverflowAttr;
@@ -643,7 +643,11 @@ mod tests {
                 >,
             > + Send {
                 self.methods.lock().push(request.method.to_bytes());
-                async move { Ok(proxima_primitives::pipe::request::Response::ok(bytes::Bytes::new())) }
+                async move {
+                    Ok(proxima_primitives::pipe::request::Response::ok(
+                        bytes::Bytes::new(),
+                    ))
+                }
             }
         }
 
@@ -716,7 +720,11 @@ mod tests {
                 >,
             > + Send {
                 self.methods.lock().push(request.method.to_bytes());
-                async move { Ok(proxima_primitives::pipe::request::Response::ok(bytes::Bytes::new())) }
+                async move {
+                    Ok(proxima_primitives::pipe::request::Response::ok(
+                        bytes::Bytes::new(),
+                    ))
+                }
             }
         }
 

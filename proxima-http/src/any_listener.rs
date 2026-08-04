@@ -67,7 +67,9 @@ use proxima_listen::any::{
 use proxima_listen::{ListenProtocol, ServeContext};
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
-use proxima_primitives::stream::{DatagramFactory, DatagramSocket, PeerInfo, StreamConnection, TcpAcceptor};
+use proxima_primitives::stream::{
+    DatagramFactory, DatagramSocket, PeerInfo, StreamConnection, TcpAcceptor,
+};
 use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
 
 use crate::http1::serve::HttpListenerSpec;
@@ -936,7 +938,9 @@ async fn serve_via_factory(
     // datagram socket on the SAME port number — an honest OS constraint
     // this hides but cannot eliminate: TCP:N and UDP:N are two distinct
     // sockets under the hood. See `AnyProtocol::wants_datagram`'s doc.
-    let needs_datagram = candidates.iter().any(|candidate| candidate.wants_datagram());
+    let needs_datagram = candidates
+        .iter()
+        .any(|candidate| candidate.wants_datagram());
     #[cfg(feature = "tls")]
     if needs_datagram && tls_acceptor.is_some() {
         return Err(ProximaError::Config(
@@ -1482,7 +1486,10 @@ async fn classify_and_drive_plaintext(
             // genuine priority collision, or two datagram candidates
             // matching the same message.
             ClassifyOutcome::AmbiguousMatch { priority, matches } => {
-                let names: Vec<&str> = matches.iter().map(|(protocol, _)| protocol.name()).collect();
+                let names: Vec<&str> = matches
+                    .iter()
+                    .map(|(protocol, _)| protocol.name())
+                    .collect();
                 warn!(
                     priority,
                     ?names,
@@ -1646,9 +1653,7 @@ mod tests {
 
         fn spawn_background_blocking(
             &self,
-            _work: Box<
-                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-            >,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
         ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
             unreachable!("test never spawns background-blocking work")
         }

@@ -27,7 +27,10 @@ impl fmt::Display for Error {
             Self::ThreadSpawn(message) => write!(formatter, "thread spawn failed: {message}"),
             #[cfg(feature = "tracing-init")]
             Self::GlobalSubscriberAlreadySet(message) => {
-                write!(formatter, "global tracing subscriber already set: {message}")
+                write!(
+                    formatter,
+                    "global tracing subscriber already set: {message}"
+                )
             }
         }
     }

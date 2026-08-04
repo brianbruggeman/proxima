@@ -329,9 +329,9 @@ mod tests {
     #[test]
     fn explicit_prime_with_cores_sizes_prime() {
         let expanded = expand_ok("runtime = \"prime\", cores = 3", "async fn main() {}");
-        assert!(expanded.contains(
-            "run_prime_with_cores (:: core :: option :: Option :: Some (3usize)"
-        ));
+        assert!(
+            expanded.contains("run_prime_with_cores (:: core :: option :: Option :: Some (3usize)")
+        );
     }
 
     // `affinity` threads through as a `&str` literal — parsed once, at
@@ -357,8 +357,7 @@ mod tests {
             "async fn main() {}",
         );
         assert!(
-            expanded
-                .contains("run_tokio (true , :: core :: option :: Option :: Some (4usize)")
+            expanded.contains("run_tokio (true , :: core :: option :: Option :: Some (4usize)")
         );
     }
 
@@ -453,9 +452,9 @@ mod tests {
             "",
             "async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { Ok(()) }",
         );
-        assert!(expanded.contains(
-            "-> Result < () , Box < dyn std :: error :: Error + Send + Sync > >"
-        ));
+        assert!(
+            expanded.contains("-> Result < () , Box < dyn std :: error :: Error + Send + Sync > >")
+        );
     }
 
     #[test]

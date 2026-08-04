@@ -22,7 +22,7 @@ use std::future::Future;
 
 use bytes::Bytes;
 use proxima::error::ProximaError;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::{App, MountTarget, RunConfig};
 use proxima_primitives::pipe::SendPipe;
@@ -45,7 +45,6 @@ impl SendPipe for ConstantOk {
         async move { Ok(Response::ok(Bytes::from_static(b"ok"))) }
     }
 }
-
 
 async fn spawn_uds_listener(socket: &std::path::Path) -> proxima::Shutdown {
     let mut app = App::new().expect("app");

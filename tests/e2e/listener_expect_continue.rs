@@ -32,9 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
-use proxima::{
-    App, MountTarget, ProximaError, Request, Response, RunConfig, Spec, into_handle,
-};
+use proxima::{App, MountTarget, ProximaError, Request, Response, RunConfig, Spec, into_handle};
 use proxima_primitives::pipe::SendPipe;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -72,7 +70,6 @@ impl SendPipe for BodyEcho {
         }
     }
 }
-
 
 async fn boot_listener(
     seen: Arc<AtomicBool>,

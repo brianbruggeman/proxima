@@ -453,7 +453,10 @@ mod tests {
     fn iter_keys_skips_runs_of_consecutive_spaces() {
         let keys = Bytes::from_static(b" a  b ");
         let collected: Vec<Bytes> = iter_keys(&keys).collect();
-        assert_eq!(collected, vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
+        assert_eq!(
+            collected,
+            vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]
+        );
     }
 
     #[test]

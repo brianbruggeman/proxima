@@ -301,7 +301,10 @@ impl InstrumentRegistry {
     pub fn drain_instruments(
         &self,
         ts_ns: u64,
-        pipe: &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<crate::pipes::TelemetryRequest, proxima_primitives::pipe::request::Response<bytes::Bytes>>,
+        pipe: &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<
+            crate::pipes::TelemetryRequest,
+            proxima_primitives::pipe::request::Response<bytes::Bytes>,
+        >,
     ) -> usize {
         let requests = self.snapshot_instruments(ts_ns);
         let total = requests.len();
@@ -321,7 +324,10 @@ impl InstrumentRegistry {
     pub async fn drain_instruments_async(
         &self,
         ts_ns: u64,
-        pipe: &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<crate::pipes::TelemetryRequest, proxima_primitives::pipe::request::Response<bytes::Bytes>>,
+        pipe: &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<
+            crate::pipes::TelemetryRequest,
+            proxima_primitives::pipe::request::Response<bytes::Bytes>,
+        >,
     ) -> usize {
         let requests = self.snapshot_instruments(ts_ns);
         let total = requests.len();
@@ -353,7 +359,10 @@ fn name_attrs(name: &'static str, unit: &'static str) -> smallvec::SmallVec<[Tag
 }
 
 fn call_pipe_sync(
-    pipe: &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<crate::pipes::TelemetryRequest, proxima_primitives::pipe::request::Response<bytes::Bytes>>,
+    pipe: &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<
+        crate::pipes::TelemetryRequest,
+        proxima_primitives::pipe::request::Response<bytes::Bytes>,
+    >,
     request: crate::pipes::TelemetryRequest,
 ) {
     let future = pipe.call_dyn(request);

@@ -119,7 +119,10 @@ mod tests {
         temp_env::with_vars(
             [
                 ("PROXIMA_CLOCK_ANCHOR_TICKS", Some("24000000")),
-                ("PROXIMA_CLOCK_ANCHOR_UNIX_NANOS", Some("1753500000000000000")),
+                (
+                    "PROXIMA_CLOCK_ANCHOR_UNIX_NANOS",
+                    Some("1753500000000000000"),
+                ),
             ],
             || {
                 let from_env = AnchorConfig::from_env().expect("from_env");

@@ -179,7 +179,9 @@ impl AnyProtocol for DnsUdpAnyProtocol {
             };
 
             let request = crate::pipes::DnsPipeRequest {
-                method: proxima_primitives::pipe::Method::from_wire(bytes::Bytes::from_static(b"DNS")),
+                method: proxima_primitives::pipe::Method::from_wire(bytes::Bytes::from_static(
+                    b"DNS",
+                )),
                 path: bytes::Bytes::from_static(b"/"),
                 query: proxima_primitives::pipe::header_list::HeaderList::new(),
                 metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
@@ -263,13 +265,19 @@ mod tests {
 
     #[test]
     fn peer_addr_recovers_the_tcp_shaped_peer_info() {
-        let addr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5)), 4000);
+        let addr = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5)),
+            4000,
+        );
         assert_eq!(peer_addr(Some(&PeerInfo::Tcp(addr))), addr);
     }
 
     #[test]
     fn peer_addr_degrades_to_unspecified_with_no_peer_info() {
         let addr = peer_addr(None);
-        assert_eq!(addr.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        );
     }
 }

@@ -150,7 +150,9 @@ pub fn timer_at(deadline: Tick) -> TimerAtFuture {
 /// contract as [`timer_at`]).
 pub fn timer_at_deadline(deadline: Instant) -> TimerAtFuture {
     let now_tick = current_tick();
-    let delay_millis = deadline.saturating_duration_since(Instant::now()).as_millis();
+    let delay_millis = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis();
     let delay_ticks = Tick::try_from(delay_millis).unwrap_or(Tick::MAX);
     timer_at(now_tick.saturating_add(delay_ticks))
 }
@@ -2139,12 +2141,10 @@ mod tests {
             .dispatch_send(Box::pin(async {}))
             .expect("nudge worker to recheck the timer wheel");
 
-        done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect(
-                "timer must fire from the virtual advance alone; a real 25s wait would \
+        done_rx.recv_timeout(Duration::from_secs(2)).expect(
+            "timer must fire from the virtual advance alone; a real 25s wait would \
                  exceed this 2s bound, proving no wall-clock sleep drove the fire",
-            );
+        );
         handle.shutdown_and_join().expect("shutdown");
     }
 
@@ -2171,7 +2171,11 @@ mod tests {
         let order: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
 
-        for deadline in [THIRTY_SECONDS_MILLIS, ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS] {
+        for deadline in [
+            THIRTY_SECONDS_MILLIS,
+            ONE_SECOND_MILLIS,
+            FIVE_SECONDS_MILLIS,
+        ] {
             // dispatch order deliberately scrambled relative to deadline
             // order — completion order must reflect DEADLINE order, not
             // dispatch order.
@@ -2197,12 +2201,10 @@ mod tests {
         // real time (2s); the property under test is that this NEVER
         // gets anywhere near it because no real sleep happens at all.
         for _ in 0..3 {
-            done_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect(
-                    "all three simulated sleeps (1s/5s/30s) must complete via auto-advance \
+            done_rx.recv_timeout(Duration::from_secs(2)).expect(
+                "all three simulated sleeps (1s/5s/30s) must complete via auto-advance \
                      alone; a real wait would take 36s and blow well past this 2s bound",
-                );
+            );
         }
         let elapsed = started.elapsed();
 
@@ -2210,7 +2212,11 @@ mod tests {
 
         assert_eq!(
             *order.lock().expect("order mutex poisoned"),
-            vec![ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS, THIRTY_SECONDS_MILLIS],
+            vec![
+                ONE_SECOND_MILLIS,
+                FIVE_SECONDS_MILLIS,
+                THIRTY_SECONDS_MILLIS
+            ],
             "completion order must match simulated deadline order (1s, then 5s, then 30s) — \
              proves auto-advance stepped through each deadline in turn rather than skipping \
              straight to the last one",

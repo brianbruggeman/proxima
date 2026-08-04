@@ -43,8 +43,8 @@
 //! [`FanIn`]: proxima_primitives::pipe::FanIn
 //! [`AndThen`]: proxima_primitives::pipe::AndThen
 
-use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
@@ -418,7 +418,9 @@ mod tests {
 
     fn expand_err(kind: FanKind, input: &str) -> String {
         let tokens: TokenStream = input.parse().expect("parse input");
-        expand(tokens, kind).expect_err("expected error").to_string()
+        expand(tokens, kind)
+            .expect_err("expected error")
+            .to_string()
     }
 
     #[test]

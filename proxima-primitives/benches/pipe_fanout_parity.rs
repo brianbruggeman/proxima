@@ -25,8 +25,8 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::executor::block_on;
-use proxima_primitives::pipe::{AllOrNothing, FanOut, IgnoreErrors};
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::{AllOrNothing, FanOut, IgnoreErrors};
 use smallvec::{SmallVec, smallvec};
 
 // ── counting allocator (deterministic alloc-count truth, not timing) ──────────

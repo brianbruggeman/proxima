@@ -28,8 +28,8 @@ impl FrameCodec for GrpcFrameCodec {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::Compression;
+    use super::*;
     use proxima_codec::FrameCodec;
 
     #[test]

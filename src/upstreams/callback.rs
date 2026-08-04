@@ -67,7 +67,6 @@ impl SendPipe for CallbackUpstream {
     }
 }
 
-
 /// Typed config surface for [`CallbackUpstream`]. The `callback` itself is a
 /// live Rust function resolved from [`CallbackRegistry::global`] by `name` at
 /// materialisation — it is runtime-only, not data, so it never appears here.

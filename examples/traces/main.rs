@@ -28,8 +28,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use proxima::HeaderList;
 use proxima::telemetry::pipes::InMemoryPipe;
-use proxima::telemetry::recorder::Recorder;
 use proxima::telemetry::propagation::TRACEPARENT;
+use proxima::telemetry::recorder::Recorder;
 
 const REQUEST_KEY: &str = "user:42";
 

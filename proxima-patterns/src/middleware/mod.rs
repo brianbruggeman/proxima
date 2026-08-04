@@ -30,14 +30,14 @@ pub use context_inject::ContextInjector;
 
 // ── re-exports: generic policy moved to proxima-pipe ─────────────────────────
 #[cfg(feature = "std")]
-pub use proxima_primitives::pipe::{
-    ChaosBuilder, ChaosConfig, Delay, DelayConfig, DelayFactory, Dist, FilterConfig,
-    FilterFactory, KeyExtractor, LatencyFault, MutateOp, Mutation, Predicate, RateLimit,
-    RateLimitCaps, RateLimitFactory, RejectMode, RequestOp, ResponseOp, Retry, RetryBudget,
-    RetryFactory, RetryPredicate, TokenBucketConfig, Transform, TransformFactory, Validate,
-    ValidateFactory, ValidateOp, chaos,
-};
-#[cfg(feature = "std")]
 pub use proxima_primitives::pipe::capabilities::BytePayload;
+#[cfg(feature = "std")]
+pub use proxima_primitives::pipe::{
+    ChaosBuilder, ChaosConfig, Delay, DelayConfig, DelayFactory, Dist, FilterConfig, FilterFactory,
+    KeyExtractor, LatencyFault, MutateOp, Mutation, Predicate, RateLimit, RateLimitCaps,
+    RateLimitFactory, RejectMode, RequestOp, ResponseOp, Retry, RetryBudget, RetryFactory,
+    RetryPredicate, TokenBucketConfig, Transform, TransformFactory, Validate, ValidateFactory,
+    ValidateOp, chaos,
+};
 #[cfg(feature = "std")]
 pub use proxima_primitives::pipe::{ExceededAction, KeyOf, When};

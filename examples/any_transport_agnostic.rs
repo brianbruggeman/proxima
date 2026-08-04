@@ -36,8 +36,8 @@ use bytes::Bytes;
 use serde_json::Value;
 
 use proxima::listen::admission::ConnAdmission;
-use proxima::prelude::*;
 use proxima::pipe::into_handle;
+use proxima::prelude::*;
 use proxima::request::{Request, Response};
 use proxima::stream::{PeerInfo, StreamConnection};
 use proxima::{ProximaError, SendPipe};
@@ -154,7 +154,11 @@ fn h1_round_trip(addr: SocketAddr) -> Result<String, ProximaError> {
 /// One send + one bounded-wait recv over a fresh ephemeral UDP socket —
 /// `None` if nothing arrives before the timeout (the ambiguous-match
 /// scenario relies on this to prove a datagram was dropped, not answered).
-fn udp_round_trip(bind: SocketAddr, payload: &[u8], timeout: Duration) -> Result<Option<Vec<u8>>, ProximaError> {
+fn udp_round_trip(
+    bind: SocketAddr,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<Option<Vec<u8>>, ProximaError> {
     let socket = UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(timeout))?;
     socket.send_to(payload, bind)?;

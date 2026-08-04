@@ -57,13 +57,15 @@ pub mod topic_filter;
 #[cfg(feature = "listen")]
 pub mod wait_sources;
 
-pub use proxima_protocols::mqtt::{
-    Connection, ParseError, Packet, PacketType, parse_packet, pipe_contract,
-};
 pub use proxima_protocols::mqtt::pipe_contract::{MqttReply, MqttRequest, verb};
+pub use proxima_protocols::mqtt::{
+    Connection, Packet, PacketType, ParseError, parse_packet, pipe_contract,
+};
 
 #[cfg(feature = "client")]
-pub use client::{ClientError, ClientSession, MqttClientConfig, MqttClientUpstream, MqttConfigError, Step};
+pub use client::{
+    ClientError, ClientSession, MqttClientConfig, MqttClientUpstream, MqttConfigError, Step,
+};
 
 // the server-side surface an MQTT connect-auth handler builds against —
 // re-exported so an engine author imports everything from proxima-mqtt

@@ -453,22 +453,24 @@ impl SendPipe for PgWireConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
-            let HijackedSocket { stream, leftover } = hijacked;
-            if !leftover.is_empty() {
-                // a raw pgwire socket has no prior protocol head, so the
-                // upgrade seam should never hand us pre-buffered bytes;
-                // dropping them silently would corrupt the startup phase
-                return Err(ProximaError::Upstream(
-                    "pgwire upgrade received pre-buffered bytes before startup".into(),
-                ));
-            }
-            drive_session(
-                stream, query, auth, config, registry, broker, tls, runtime, admission,
-            )
-            .await
-            .map_err(|error| ProximaError::Upstream(format!("pgwire session: {error}")))
-        }))
+        Ok(UpgradeHandler::new(
+            move |hijacked: HijackedSocket| async move {
+                let HijackedSocket { stream, leftover } = hijacked;
+                if !leftover.is_empty() {
+                    // a raw pgwire socket has no prior protocol head, so the
+                    // upgrade seam should never hand us pre-buffered bytes;
+                    // dropping them silently would corrupt the startup phase
+                    return Err(ProximaError::Upstream(
+                        "pgwire upgrade received pre-buffered bytes before startup".into(),
+                    ));
+                }
+                drive_session(
+                    stream, query, auth, config, registry, broker, tls, runtime, admission,
+                )
+                .await
+                .map_err(|error| ProximaError::Upstream(format!("pgwire session: {error}")))
+            },
+        ))
     }
 }
 

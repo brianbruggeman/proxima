@@ -729,7 +729,9 @@ fn build_vn_packet(dcid: &[u8], scid: &[u8], versions: &[u32]) -> alloc::vec::Ve
 /// accounting + recv-buffer reassembly are exercised end to end.
 #[test]
 fn client_stream_lifecycle_on_established_connection() {
-    use crate::quic::streams::{RecvState, SendState, StreamDirection, StreamFlowControl, StreamId};
+    use crate::quic::streams::{
+        RecvState, SendState, StreamDirection, StreamFlowControl, StreamId,
+    };
     use crate::quic::tls::mock::MockEvent;
     use arrayvec::ArrayVec;
 
@@ -839,10 +841,11 @@ fn client_stream_lifecycle_on_established_connection() {
             panic!("expected RecvState::Recv after open");
         }
         // Ensure: state mutation didn't leave invalid intermediate.
-        let _: &mut ArrayVec<u8, { crate::quic::streams::STREAM_RECV_INLINE }> = match &mut stream.recv {
-            RecvState::Recv { recv_buffer, .. } => recv_buffer,
-            _ => unreachable!(),
-        };
+        let _: &mut ArrayVec<u8, { crate::quic::streams::STREAM_RECV_INLINE }> =
+            match &mut stream.recv {
+                RecvState::Recv { recv_buffer, .. } => recv_buffer,
+                _ => unreachable!(),
+            };
     }
 
     // STEP 4: read_stream drains the recv buffer.
@@ -1885,11 +1888,21 @@ fn server_walks_past_leading_initial_ack_to_reach_coalesced_handshake_and_1rtt_r
 
     // The client's SECOND flight — coalesced, Initial leading — fed as
     // ONE datagram, ONE handle_datagram call.
-    let leading_initial_ack = build_client_initial_ack_only(&pair.client, &local_scid, &client_scid, 1);
+    let leading_initial_ack =
+        build_client_initial_ack_only(&pair.client, &local_scid, &client_scid, 1);
     let handshake_finished = build_server_handshake(&hs_secrets, &local_scid, &client_finished, 0);
     let (app_key, app_iv, app_hp) = app_secrets.remote.aes128_triple().expect("aes128 triple");
-    let one_rtt_request =
-        build_short_header_stream(app_key, app_iv, app_hp, &local_scid, 0, 0, request, false, 0);
+    let one_rtt_request = build_short_header_stream(
+        app_key,
+        app_iv,
+        app_hp,
+        &local_scid,
+        0,
+        0,
+        request,
+        false,
+        0,
+    );
 
     let mut coalesced = alloc::vec::Vec::new();
     coalesced.extend_from_slice(&leading_initial_ack);
@@ -2323,7 +2336,8 @@ fn build_short_header_path_challenge(
     cursor += pn_byte_len;
     packet[cursor] = 0x1a;
     cursor += 1;
-    packet[cursor..cursor + crate::quic::frame::PATH_CHALLENGE_LEN].copy_from_slice(&challenge_token);
+    packet[cursor..cursor + crate::quic::frame::PATH_CHALLENGE_LEN]
+        .copy_from_slice(&challenge_token);
     cursor += crate::quic::frame::PATH_CHALLENGE_LEN;
     for byte in &mut packet[cursor..cursor + padding_len] {
         *byte = 0;
@@ -2374,7 +2388,8 @@ fn build_short_header_path_response(
     cursor += pn_byte_len;
     packet[cursor] = 0x1b;
     cursor += 1;
-    packet[cursor..cursor + crate::quic::frame::PATH_CHALLENGE_LEN].copy_from_slice(&response_token);
+    packet[cursor..cursor + crate::quic::frame::PATH_CHALLENGE_LEN]
+        .copy_from_slice(&response_token);
     cursor += crate::quic::frame::PATH_CHALLENGE_LEN;
     for byte in &mut packet[cursor..cursor + padding_len] {
         *byte = 0;
@@ -3185,7 +3200,8 @@ fn established_entry_discards_initial_loss_epoch() {
     // state MUST be cleared so a stale Initial PTO can't arm the
     // unified deadline. See loss::detector::discard_epoch.
     let (mut connection, _) = drive_to_established(encode_test_peer_tp());
-    let initial_state = &connection.loss_mut_for_test().epochs[crate::quic::tls::Epoch::Initial.index()];
+    let initial_state =
+        &connection.loss_mut_for_test().epochs[crate::quic::tls::Epoch::Initial.index()];
     assert_eq!(
         initial_state.time_of_last_ack_eliciting_packet, None,
         "Initial PTO anchor must be cleared at Established entry"
@@ -4074,7 +4090,10 @@ fn c12_inbound_stream_fin_with_pending_gap_stays_in_size_known() {
             .get(crate::quic::streams::StreamId(3))
             .expect("stream");
         assert!(
-            matches!(stream.recv, crate::quic::streams::RecvState::SizeKnown { .. }),
+            matches!(
+                stream.recv,
+                crate::quic::streams::RecvState::SizeKnown { .. }
+            ),
             "FIN with pending gap must transition to SizeKnown (got {:?})",
             stream.recv
         );
@@ -4406,7 +4425,8 @@ fn post_retry_initial_resends_clienthello_with_token() {
         .poll_transmit(Instant::from_micros(1_600_000), &mut buf2)
         .expect("poll ok")
         .expect("post-Retry Initial is re-sent");
-    match crate::quic::packet::header::parse_long(&buf2[..second.len]).expect("parse post-Retry Initial")
+    match crate::quic::packet::header::parse_long(&buf2[..second.len])
+        .expect("parse post-Retry Initial")
     {
         crate::quic::packet::header::Header::Initial { token: echoed, .. } => {
             assert_eq!(echoed, &token, "post-Retry Initial echoes the Retry token");
@@ -5219,7 +5239,8 @@ fn early_data_hold_deadline_clears_buffer_on_timeout() {
     let dg = short_header_datagram(32);
     conn.handle_datagram(now, &dg).expect("buffer datagram");
 
-    let hold_deadline = now + Duration::from_micros(crate::quic::sized::HANDSHAKE_EARLY_DATA_HOLD_MICROS);
+    let hold_deadline =
+        now + Duration::from_micros(crate::quic::sized::HANDSHAKE_EARLY_DATA_HOLD_MICROS);
 
     // just past the hold deadline — buffer must be cleared
     let past_hold = hold_deadline + Duration::from_micros(1);

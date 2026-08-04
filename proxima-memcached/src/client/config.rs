@@ -63,7 +63,8 @@ impl MemcachedClientConfig {
         let (host, port) = match rest.rsplit_once(':') {
             Some((host, port)) => (
                 host,
-                port.parse::<u16>().map_err(|_| MemcachedConfigError::Port)?,
+                port.parse::<u16>()
+                    .map_err(|_| MemcachedConfigError::Port)?,
             ),
             None => (rest, default_port()),
         };

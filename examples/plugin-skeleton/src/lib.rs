@@ -20,7 +20,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::plugin::PluginRegistry;
-use proxima_primitives::pipe::{PipeFactory, PipeHandle, ProximaError, Request, Response, into_handle};
+use proxima_primitives::pipe::{
+    PipeFactory, PipeHandle, ProximaError, Request, Response, into_handle,
+};
 use serde_json::Value;
 
 /// Stamps a configurable header onto every response. Trivial example
@@ -49,7 +51,6 @@ impl SendPipe for StampHeader {
         }
     }
 }
-
 
 pub struct StampHeaderFactory;
 

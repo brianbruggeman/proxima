@@ -131,20 +131,22 @@ impl SendPipe for RedisConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
-            let HijackedSocket { stream, leftover } = hijacked;
-            if !leftover.is_empty() {
-                // a raw redis socket has no prior protocol head, so the
-                // upgrade seam should never hand us pre-buffered bytes;
-                // dropping them silently would corrupt the first command.
-                return Err(ProximaError::Upstream(
-                    "redis upgrade received pre-buffered bytes before the first command".into(),
-                ));
-            }
-            drive_session(stream, handler, broker, config, admission)
-                .await
-                .map_err(|error| ProximaError::Upstream(format!("redis session: {error}")))
-        }))
+        Ok(UpgradeHandler::new(
+            move |hijacked: HijackedSocket| async move {
+                let HijackedSocket { stream, leftover } = hijacked;
+                if !leftover.is_empty() {
+                    // a raw redis socket has no prior protocol head, so the
+                    // upgrade seam should never hand us pre-buffered bytes;
+                    // dropping them silently would corrupt the first command.
+                    return Err(ProximaError::Upstream(
+                        "redis upgrade received pre-buffered bytes before the first command".into(),
+                    ));
+                }
+                drive_session(stream, handler, broker, config, admission)
+                    .await
+                    .map_err(|error| ProximaError::Upstream(format!("redis session: {error}")))
+            },
+        ))
     }
 }
 

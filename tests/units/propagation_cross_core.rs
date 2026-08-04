@@ -148,7 +148,10 @@ struct RecordingSink {
 
 impl SpanSink for RecordingSink {
     fn emit(&mut self, record: SpanRecord) {
-        self.records.lock().expect("recording sink mutex poisoned").push(record);
+        self.records
+            .lock()
+            .expect("recording sink mutex poisoned")
+            .push(record);
     }
 }
 

@@ -185,10 +185,7 @@ impl Validate for DnsResolverConfig {
             ));
         }
         if self.max_attempts == 0 {
-            errors.push(ValidationMessage::new(
-                "max_attempts",
-                "must be at least 1",
-            ));
+            errors.push(ValidationMessage::new("max_attempts", "must be at least 1"));
         }
         if errors.is_empty() {
             Ok(())
@@ -205,7 +202,10 @@ mod tests {
 
     #[test]
     fn default_matches_builder() {
-        assert_eq!(DnsResolverConfig::default(), DnsResolverConfig::builder().build());
+        assert_eq!(
+            DnsResolverConfig::default(),
+            DnsResolverConfig::builder().build()
+        );
         let config = DnsResolverConfig::default();
         assert_eq!(config.port, 53);
         assert_eq!(config.resolver_addr().unwrap().to_string(), "1.1.1.1:53");
@@ -253,14 +253,18 @@ mod tests {
 
     #[test]
     fn resolver_addr_rejects_a_hostname() {
-        let config = DnsResolverConfig::builder().resolver_ip("resolver.example.com").build();
+        let config = DnsResolverConfig::builder()
+            .resolver_ip("resolver.example.com")
+            .build();
         let error = config.resolver_addr().unwrap_err();
         assert!(error.to_string().contains("resolver.example.com"));
     }
 
     #[test]
     fn validate_rejects_a_hostname() {
-        let config = DnsResolverConfig::builder().resolver_ip("resolver.example.com").build();
+        let config = DnsResolverConfig::builder()
+            .resolver_ip("resolver.example.com")
+            .build();
         assert!(config.validate().is_err());
     }
 

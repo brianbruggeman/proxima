@@ -45,11 +45,13 @@ impl<const N: usize> SeqWords<N> {
     fn store(&self, new_words: [u32; N]) {
         let sequence = self.sequence.load(Ordering::Relaxed);
         // odd sequence == "a write is in flight" — readers spin past it.
-        self.sequence.store(sequence.wrapping_add(1), Ordering::Release);
+        self.sequence
+            .store(sequence.wrapping_add(1), Ordering::Release);
         for (word, new_word) in self.words.iter().zip(new_words) {
             word.store(new_word, Ordering::Relaxed);
         }
-        self.sequence.store(sequence.wrapping_add(2), Ordering::Release);
+        self.sequence
+            .store(sequence.wrapping_add(2), Ordering::Release);
     }
 
     /// Read the payload as one atomic-seeming unit. Lock-free: never
@@ -129,8 +131,7 @@ impl SeqU64Pair {
     pub(crate) fn store(&self, first: u64, second: u64) {
         let [first_hi, first_lo] = split_u64(first);
         let [second_hi, second_lo] = split_u64(second);
-        self.inner
-            .store([first_hi, first_lo, second_hi, second_lo]);
+        self.inner.store([first_hi, first_lo, second_hi, second_lo]);
     }
 
     pub(crate) fn load(&self) -> (u64, u64) {

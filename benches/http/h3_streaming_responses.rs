@@ -74,7 +74,6 @@ impl SendPipe for StreamingPipe {
     }
 }
 
-
 fn proxima_streaming(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("h3_streaming_responses");
     group.measurement_time(SAMPLE_WINDOW);

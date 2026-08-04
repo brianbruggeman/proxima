@@ -109,7 +109,6 @@ impl proxima_primitives::pipe::SendPipe for SmokeUpstream {
     }
 }
 
-
 // --- #[proxima::fixture]: native rstest-style fixtures, no rstest dep ---
 
 #[proxima::fixture]

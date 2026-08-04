@@ -16,16 +16,16 @@ use futures::stream::{Stream, StreamExt};
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use proxima_core::ProximaError;
-use proxima_runtime::Runtime;
 use crate::{ListenProtocol, ServeContext};
+use proxima_core::ProximaError;
 use proxima_primitives::pipe::Method;
-use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
+use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::stream::{StreamConnection, StreamListener, StreamListenerExt};
+use proxima_runtime::Runtime;
 
 mod config;
 
@@ -324,7 +324,6 @@ mod tests {
             }
         }
     }
-
 
     #[proxima::test]
     async fn echo_protocol_round_trips_bytes_from_tcp_listener() {

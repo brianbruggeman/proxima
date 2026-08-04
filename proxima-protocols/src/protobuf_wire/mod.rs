@@ -16,7 +16,6 @@
 //!
 //! Sub-flag: `protobuf-wire` (default off).
 
-
 use alloc::vec::Vec;
 
 /// Wire types defined in the protobuf spec.

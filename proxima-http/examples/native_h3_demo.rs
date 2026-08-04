@@ -24,7 +24,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, StreamId as H3StreamId};
+use proxima_protocols::http3_codec::server::{
+    H3ServerEvent, ServerConnection, StreamId as H3StreamId,
+};
 use proxima_protocols::http3_codec::settings::Settings;
 use proxima_protocols::quic::connection::state::{MAX_BIDI_STREAMS, MAX_UNI_STREAMS};
 use proxima_protocols::quic::connection::{Connection, ConnectionState, DatagramWrite};
@@ -67,8 +69,10 @@ async fn main() {
     let local = socket.local_addr().expect("local_addr");
     info!(%local, "native h3 demo server listening");
 
-    let mut demux =
-        EndpointDemux::with_local_cid_len(proxima_protocols::quic::connection::SUPPORTED_VERSIONS, 8);
+    let mut demux = EndpointDemux::with_local_cid_len(
+        proxima_protocols::quic::connection::SUPPORTED_VERSIONS,
+        8,
+    );
     let mut connections: BTreeMap<u32, ConnEntry> = BTreeMap::new();
     let mut next_handle: u32 = 0;
     let mut recv_buf = [0u8; 2048];

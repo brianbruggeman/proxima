@@ -58,8 +58,7 @@ fn sync_closure_with_send_reaches_send_and_unpin_send() {
 
 #[test]
 fn async_closure_lifts_into_a_working_pipe() {
-    let incremented =
-        pipe!(async move |input: u64| -> Result<u64, Infallible> { Ok(input + 1) });
+    let incremented = pipe!(async move |input: u64| -> Result<u64, Infallible> { Ok(input + 1) });
     let out = block_on(Pipe::call(&incremented, 41));
     assert_eq!(out, Ok(42));
 }
@@ -125,7 +124,11 @@ async fn pipe_mounts_and_dispatches_through_the_real_router() {
 #[test]
 fn filter_gates_a_chain_admitting_and_rejecting() {
     let gate = filter!(|input: u64| -> Result<u64, &'static str> {
-        if input < 100 { Ok(input) } else { Err("too big") }
+        if input < 100 {
+            Ok(input)
+        } else {
+            Err("too big")
+        }
     });
     let increment = pipe!(|input: u64| -> Result<u64, &'static str> { Ok(input + 1) });
     let stack = gate.and_then(increment);
@@ -161,13 +164,10 @@ fn fanout_broadcasts_to_a_closure_arm_and_a_pass_through_arm() {
         calls: std::sync::Arc::clone(&calls),
     };
 
-    let fan = fanout!(
-        sink,
-        |input: u32| -> Result<(), Infallible> {
-            assert_eq!(input, 9);
-            Ok(())
-        }
-    );
+    let fan = fanout!(sink, |input: u32| -> Result<(), Infallible> {
+        assert_eq!(input, 9);
+        Ok(())
+    });
 
     let outcome = block_on(Pipe::call(&fan, 9));
     assert_eq!(outcome, Ok(()));

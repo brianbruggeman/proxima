@@ -51,7 +51,9 @@ mod connect_tunnel;
 pub use connect_tunnel::ConnectTunneledUpstream;
 
 mod unix;
-pub use unix::{PrimeUnixConnection, PrimeUnixListener, PrimeUnixUpstream, PrimeUnixUpstreamFactory};
+pub use unix::{
+    PrimeUnixConnection, PrimeUnixListener, PrimeUnixUpstream, PrimeUnixUpstreamFactory,
+};
 
 mod packet;
 pub use packet::{PrimePacketListenerFactory, PrimeUdpListener};
@@ -309,8 +311,8 @@ mod tests {
     use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use prime::os::core_shard;
-    use proxima_runtime::CoreId;
     use proxima_primitives::stream::StreamUpstreamExt;
+    use proxima_runtime::CoreId;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;

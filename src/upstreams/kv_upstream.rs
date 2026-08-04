@@ -105,7 +105,6 @@ impl<K: KvHandle> SendPipe for KvUpstream<K> {
     }
 }
 
-
 pub fn entry_to_response(entry: CacheEntry) -> Response<Bytes> {
     let chunks: Vec<Bytes> = entry.chunks.iter().cloned().collect();
     let mut response = Response::new(entry.status).with_stream(ResponseStream::new(

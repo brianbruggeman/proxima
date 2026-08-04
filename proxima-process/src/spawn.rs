@@ -61,6 +61,43 @@ pub struct Child {
     pub stderr: Option<OwnedFd>,
 }
 
+impl Child {
+    /// Block until the child exits, returning its exit code.
+    ///
+    /// A child killed by a signal reports `128 + signal`, matching shell
+    /// convention. Drop any piped `stdin` first — a child reading stdin will
+    /// not exit while the parent holds the write end open.
+    ///
+    /// Mirrors [`std::process::Child::wait`] in shape.
+    pub fn wait(&self) -> Result<i32, ProximaError> {
+        let mut status: libc::c_int = 0;
+
+        // SAFETY: waitpid is a kernel call taking our own child's pid and a
+        // pointer to a stack int; no Rust invariant is at risk.
+        let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+
+        if waited != self.pid {
+            return Err(ProximaError::Body(format!(
+                "waitpid returned {waited}, expected {}",
+                self.pid
+            )));
+        }
+
+        Ok(exit_code(status))
+    }
+}
+
+/// Decode a `waitpid` status word into a shell-convention exit code.
+fn exit_code(status: libc::c_int) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -1
+    }
+}
+
 /// Slot direction: where in the child the spawned fd ends up
 /// (kernel fd 0 / 1 / 2) and whether the child reads or writes it.
 #[derive(Debug, Clone, Copy)]

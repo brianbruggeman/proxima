@@ -39,13 +39,13 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use thiserror::Error;
 
+use crate::hpack::{DecodeError, DynamicTable, decode_block, encode_block};
 use crate::http2_codec::frame::{
     CONNECTION_PREFACE, FRAME_HEADER_LEN, FrameError, FrameHeader, FramePayload, FrameType,
     StandardSettings, encode_frame, flags, parse_payload,
 };
 use crate::http2_codec::stream::{StreamError, StreamEvent};
 use crate::http2_codec::stream_table::{StreamTable, TableError};
-use crate::hpack::{DecodeError, DynamicTable, decode_block, encode_block};
 
 const HPACK_DEFAULT_TABLE_SIZE: u32 = 4096;
 

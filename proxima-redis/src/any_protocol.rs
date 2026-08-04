@@ -153,7 +153,10 @@ mod tests {
     #[test]
     fn probe_matches_the_array_sigil_and_rejects_anything_else() {
         let protocol = RedisAnyProtocol::new("redis", handler());
-        assert_eq!(protocol.probe(b"*1\r\n"), ProbeVerdict::Match { consumed: 0 });
+        assert_eq!(
+            protocol.probe(b"*1\r\n"),
+            ProbeVerdict::Match { consumed: 0 }
+        );
         assert_eq!(protocol.probe(b""), ProbeVerdict::NeedMore { at_least: 1 });
         assert_eq!(protocol.probe(b"GET foo"), ProbeVerdict::No);
     }

@@ -66,12 +66,22 @@ pub enum MqttRequest {
 /// The typed payload a reply rides on `Response.payload`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MqttReply {
-    ConnAck { session_present: bool, return_code: u8 },
+    ConnAck {
+        session_present: bool,
+        return_code: u8,
+    },
     /// `qos == 0` `PUBLISH` completes with no wire acknowledgement.
     Published,
-    PubAck { packet_id: u16 },
-    SubAck { packet_id: u16, granted: Vec<u8> },
-    UnsubAck { packet_id: u16 },
+    PubAck {
+        packet_id: u16,
+    },
+    SubAck {
+        packet_id: u16,
+        granted: Vec<u8>,
+    },
+    UnsubAck {
+        packet_id: u16,
+    },
     Pong,
     Disconnected,
     /// One inbound `PUBLISH` the broker pushed to a subscribed client —

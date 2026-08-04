@@ -54,12 +54,16 @@ impl<T: ?Sized> RwLock<T> {
 
     /// Try to acquire a read guard without waiting.
     pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, TryLockError> {
-        self.0.try_read().ok_or_else(crate::sync::mutex::try_lock_error)
+        self.0
+            .try_read()
+            .ok_or_else(crate::sync::mutex::try_lock_error)
     }
 
     /// Try to acquire a write guard without waiting.
     pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryLockError> {
-        self.0.try_write().ok_or_else(crate::sync::mutex::try_lock_error)
+        self.0
+            .try_write()
+            .ok_or_else(crate::sync::mutex::try_lock_error)
     }
 
     /// Mutable access without locking — `&mut self` proves exclusivity

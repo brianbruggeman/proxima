@@ -284,9 +284,9 @@ async fn ssubscribe_with_a_duplicate_channel_name_still_returns_cleanly_to_activ
         .ssubscribe(&[b"news", b"news"])
         .expect("ssubscribe with a duplicate shard-channel name");
 
-    let mut active_again = subscribed
-        .unsubscribe_all()
-        .expect("unsubscribe_all must drain exactly the distinct-shard-channel ack count, not hang");
+    let mut active_again = subscribed.unsubscribe_all().expect(
+        "unsubscribe_all must drain exactly the distinct-shard-channel ack count, not hang",
+    );
 
     let get_reply = active_again
         .command(&[b"GET", b"k"])
@@ -310,7 +310,10 @@ impl Read for NeverStream {
 
 impl Write for NeverStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.written.lock().expect("written lock").extend_from_slice(buf);
+        self.written
+            .lock()
+            .expect("written lock")
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -333,8 +336,12 @@ fn subscribe_and_psubscribe_reject_an_empty_target_list_without_sending_anything
     .expect("handshake never touches the transport for resp2/no-auth");
     match channel_client.subscribe(&[]) {
         Err(ClientError::Protocol(_)) => {}
-        Err(other) => panic!("expected ClientError::Protocol for an empty subscribe, got {other:?}"),
-        Ok(_) => panic!("expected an empty subscribe to be rejected, not to transition to Subscribed"),
+        Err(other) => {
+            panic!("expected ClientError::Protocol for an empty subscribe, got {other:?}")
+        }
+        Ok(_) => {
+            panic!("expected an empty subscribe to be rejected, not to transition to Subscribed")
+        }
     }
     assert!(
         channel_writes.lock().expect("written lock").is_empty(),
@@ -351,8 +358,12 @@ fn subscribe_and_psubscribe_reject_an_empty_target_list_without_sending_anything
     .expect("handshake never touches the transport for resp2/no-auth");
     match pattern_client.psubscribe(&[]) {
         Err(ClientError::Protocol(_)) => {}
-        Err(other) => panic!("expected ClientError::Protocol for an empty psubscribe, got {other:?}"),
-        Ok(_) => panic!("expected an empty psubscribe to be rejected, not to transition to Subscribed"),
+        Err(other) => {
+            panic!("expected ClientError::Protocol for an empty psubscribe, got {other:?}")
+        }
+        Ok(_) => {
+            panic!("expected an empty psubscribe to be rejected, not to transition to Subscribed")
+        }
     }
     assert!(
         pattern_writes.lock().expect("written lock").is_empty(),
@@ -373,8 +384,12 @@ async fn empty_subscribe_leaves_the_broker_and_server_untouched() {
     let rejected = RedisClient::connect(rejected_stream, &config).expect("handshake");
     match rejected.subscribe(&[]) {
         Err(ClientError::Protocol(_)) => {}
-        Err(other) => panic!("expected ClientError::Protocol for an empty subscribe, got {other:?}"),
-        Ok(_) => panic!("expected an empty subscribe to be rejected, not to transition to Subscribed"),
+        Err(other) => {
+            panic!("expected ClientError::Protocol for an empty subscribe, got {other:?}")
+        }
+        Ok(_) => {
+            panic!("expected an empty subscribe to be rejected, not to transition to Subscribed")
+        }
     }
 
     let sibling_stream = TcpStream::connect(bind_addr).expect("connect sibling");
@@ -388,6 +403,8 @@ async fn empty_subscribe_leaves_the_broker_and_server_untouched() {
         "the rejected empty subscribe must never have reached the broker"
     );
 
-    let get_reply = sibling.command(&[b"GET", b"k"]).expect("command still works");
+    let get_reply = sibling
+        .command(&[b"GET", b"k"])
+        .expect("command still works");
     assert_eq!(get_reply, RespValue::Null);
 }

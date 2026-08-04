@@ -129,20 +129,22 @@ impl SendPipe for MqttConnectionPipe {
             .admission
             .clone()
             .unwrap_or_else(proxima_listen::admission::ConnAdmission::unbounded);
-        Ok(UpgradeHandler::new(move |hijacked: HijackedSocket| async move {
-            let HijackedSocket { stream, leftover } = hijacked;
-            if !leftover.is_empty() {
-                // a raw mqtt socket has no prior protocol head, so the
-                // upgrade seam should never hand us pre-buffered bytes;
-                // dropping them silently would corrupt the CONNECT packet.
-                return Err(ProximaError::Upstream(
-                    "mqtt upgrade received pre-buffered bytes before the first packet".into(),
-                ));
-            }
-            drive_session(stream, handler, broker, config, admission)
-                .await
-                .map_err(|error| ProximaError::Upstream(format!("mqtt session: {error}")))
-        }))
+        Ok(UpgradeHandler::new(
+            move |hijacked: HijackedSocket| async move {
+                let HijackedSocket { stream, leftover } = hijacked;
+                if !leftover.is_empty() {
+                    // a raw mqtt socket has no prior protocol head, so the
+                    // upgrade seam should never hand us pre-buffered bytes;
+                    // dropping them silently would corrupt the CONNECT packet.
+                    return Err(ProximaError::Upstream(
+                        "mqtt upgrade received pre-buffered bytes before the first packet".into(),
+                    ));
+                }
+                drive_session(stream, handler, broker, config, admission)
+                    .await
+                    .map_err(|error| ProximaError::Upstream(format!("mqtt session: {error}")))
+            },
+        ))
     }
 }
 
@@ -175,7 +177,10 @@ mod tests {
         async fn call(&self, _request: MqttPipeRequest) -> Result<MqttPipeReply, ProximaError> {
             Ok(Response::typed(
                 200,
-                MqttReply::ConnAck { session_present: false, return_code: 0 },
+                MqttReply::ConnAck {
+                    session_present: false,
+                    return_code: 0,
+                },
             ))
         }
     }

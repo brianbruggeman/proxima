@@ -60,7 +60,6 @@ impl SendPipe for OriginPipe {
     }
 }
 
-
 /// A slot in the load balancer's pool: the client bound to that backend,
 /// plus the health flag the selection policy checks before routing to it.
 struct Backend {
@@ -123,7 +122,6 @@ impl SendPipe for LoadBalancerPipe {
         }
     }
 }
-
 
 // `#[proxima::main(cores = 1)]` boots a throwaway 1-core prime runtime just
 // to give `main` an async context to `.await` on (no tokio anywhere in the

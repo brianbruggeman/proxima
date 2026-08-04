@@ -34,11 +34,11 @@ use futures::stream;
 use http_body_util::BodyExt as _;
 use proxima_http::http1::hyper_body::StreamingHyperBody;
 use proxima_http::http1::shared_http::SharedHttpClient;
+use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
 use proxima_protocols::http1_codec::h1_body::BodyDecoder;
 use proxima_protocols::http1_codec::h1_client::{
     ResponseStatus, encode_request_head, framing_from_response, parse_response_head,
 };
-use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 

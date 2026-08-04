@@ -24,8 +24,7 @@ use bytes::Bytes;
 use proxima::mount::MethodFilter;
 use proxima::shutdown::ShutdownBarrier;
 use proxima::{
-    App, ListenerSpec, PipeHandle, ProximaError, Request, Response, SendPipe,
-    into_handle,
+    App, ListenerSpec, PipeHandle, ProximaError, Request, Response, SendPipe, into_handle,
 };
 
 const BIND: &str = "127.0.0.1:8080";
@@ -89,7 +88,6 @@ impl SendPipe for CreateItem {
     }
 }
 
-
 /// READ: `GET /items/{id}`. `{id}` is a `PathPattern` param, extracted by
 /// the router before this pipe ever runs.
 struct ReadItem {
@@ -117,7 +115,6 @@ impl SendPipe for ReadItem {
         }
     }
 }
-
 
 /// UPDATE: `PUT /items/{id}`. Replaces an existing item's value; a missing
 /// id is a 404, not a silent create — `PUT` here updates, it doesn't upsert.
@@ -150,7 +147,6 @@ impl SendPipe for UpdateItem {
     }
 }
 
-
 /// DELETE: `DELETE /items/{id}`. Removes an existing item; a missing id is
 /// a 404, not a silent no-op.
 struct DeleteItem {
@@ -178,7 +174,6 @@ impl SendPipe for DeleteItem {
         }
     }
 }
-
 
 // the route table: one mount per (path pattern, method), each pointing at
 // its own handler. `App` dispatches by matching both; unmatched requests
@@ -234,7 +229,10 @@ async fn main() -> Result<(), ProximaError> {
     // blocks until every accept lane has acked ready — no polling, no
     // sleeping, no discovering ECONNREFUSED the hard way.
     let listener = app.build_listener(ListenerSpec::http(bind))?;
-    let cores = app.runtime().expect("builder installs a runtime").num_cores();
+    let cores = app
+        .runtime()
+        .expect("builder installs a runtime")
+        .num_cores();
     println!("listening on {bind} (prime runtime, {cores} core)");
 
     run_crud_flow(bind);

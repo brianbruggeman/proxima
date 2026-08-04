@@ -19,7 +19,7 @@
 
 use alloc::vec::Vec;
 
-use super::{ParseError, Packet, parse_packet};
+use super::{Packet, ParseError, parse_packet};
 
 /// A connection stays under this many buffered-but-unparsed bytes before a
 /// still-incomplete packet is treated as oversized. 16 MiB matches
@@ -59,7 +59,10 @@ pub enum Advanced<'a> {
     /// framing violation leaves no trustworthy packet boundary to skip
     /// past) — the driver closes the connection rather than trying to
     /// resync.
-    ProtocolError { reason: &'static str, consumed: usize },
+    ProtocolError {
+        reason: &'static str,
+        consumed: usize,
+    },
     /// A still-incomplete packet already exceeds
     /// [`Limits::max_message_bytes`] — the DoS guard tripped. The driver
     /// closes the connection.
@@ -126,7 +129,10 @@ impl Connection {
                 reason: "packet type is reserved or invalid",
                 consumed: 0,
             },
-            Err(ParseError::Malformed(reason)) => Advanced::ProtocolError { reason, consumed: 0 },
+            Err(ParseError::Malformed(reason)) => Advanced::ProtocolError {
+                reason,
+                consumed: 0,
+            },
             Err(ParseError::RemainingLengthOverflow) => Advanced::ProtocolError {
                 reason: "remaining-length varint exceeds 4 bytes",
                 consumed: 0,
@@ -210,7 +216,9 @@ mod tests {
 
     #[test]
     fn oversized_incomplete_packet_trips_message_too_large() {
-        let mut connection = Connection::with_limits(Limits { max_message_bytes: 10 });
+        let mut connection = Connection::with_limits(Limits {
+            max_message_bytes: 10,
+        });
         // declares a huge remaining length, but only a few payload bytes
         // actually sent — PartialPacket forever unless the guard trips.
         connection.feed_bytes(&[0x30, 0xFF, 0xFF, 0xFF, 0x7F]);
@@ -220,7 +228,9 @@ mod tests {
 
     #[test]
     fn small_incomplete_packet_stays_need_more_under_the_cap() {
-        let mut connection = Connection::with_limits(Limits { max_message_bytes: 16 });
+        let mut connection = Connection::with_limits(Limits {
+            max_message_bytes: 16,
+        });
         connection.feed_bytes(&[0x30, 0x05, 0x00, 0x02, b'a']);
         assert!(matches!(connection.advance(), Advanced::NeedMore));
     }

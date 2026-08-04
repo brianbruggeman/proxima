@@ -226,7 +226,10 @@ mod tests {
     #[test]
     fn defaults_track_the_sized_floor() {
         let config = LogBufferConfig::default();
-        assert_eq!(config.capacity, super::super::sized::LOG_BUFFER_CAPACITY_DEFAULT);
+        assert_eq!(
+            config.capacity,
+            super::super::sized::LOG_BUFFER_CAPACITY_DEFAULT
+        );
         assert_eq!(
             config.live_tail_channel_capacity,
             super::super::sized::LIVE_TAIL_CHANNEL_CAPACITY_DEFAULT
@@ -234,7 +237,10 @@ mod tests {
         // the env-overlay (from_env, no vars set) must agree with the const too.
         temp_env::with_vars::<&str, &str, _, _>([], || {
             let from_env = LogBufferConfig::from_env().expect("from_env");
-            assert_eq!(from_env.capacity, super::super::sized::LOG_BUFFER_CAPACITY_DEFAULT);
+            assert_eq!(
+                from_env.capacity,
+                super::super::sized::LOG_BUFFER_CAPACITY_DEFAULT
+            );
             assert_eq!(
                 from_env.live_tail_channel_capacity,
                 super::super::sized::LIVE_TAIL_CHANNEL_CAPACITY_DEFAULT

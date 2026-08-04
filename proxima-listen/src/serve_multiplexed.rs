@@ -301,7 +301,10 @@ mod tests {
 
         let outcome = block_on(wait_for_wire_event(&fan, &mut writer)).expect("wait");
         assert_eq!(outcome, Some(Bytes::from_static(b"hi")));
-        assert!(writer.written.is_empty(), "a Read event must not write anything");
+        assert!(
+            writer.written.is_empty(),
+            "a Read event must not write anything"
+        );
     }
 
     #[test]

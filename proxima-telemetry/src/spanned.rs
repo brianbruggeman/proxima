@@ -141,15 +141,15 @@ mod tests {
 
     use super::*;
     use crate::clock::MonotonicCounter;
-    use crate::id::{SpanId, TraceId};
-    use crate::trace::span::{SpanBuilder, SpanGuard, SpanSink};
-    use crate::trace::tracestate::TraceState;
     #[cfg(feature = "std")]
     use crate::current::current;
+    use crate::id::{SpanId, TraceId};
     #[cfg(feature = "std")]
     use crate::level::Level;
     #[cfg(feature = "std")]
     use crate::log::{LogBuilder, LogRecord};
+    use crate::trace::span::{SpanBuilder, SpanGuard, SpanSink};
+    use crate::trace::tracestate::TraceState;
 
     struct RecordingSink {
         records: Rc<RefCell<Vec<SpanId>>>,
@@ -250,12 +250,13 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    fn deferred_guard(
-        span_id: SpanId,
-    ) -> SpanGuard<impl SpanSink, MonotonicCounter> {
+    fn deferred_guard(span_id: SpanId) -> SpanGuard<impl SpanSink, MonotonicCounter> {
         SpanBuilder::new("task", TraceId::from_bytes([0; 16]), span_id)
             .with_tracestate(TraceState::empty())
-            .start(&MonotonicCounter::new(0), |_record: crate::trace::span::SpanRecord| {})
+            .start(
+                &MonotonicCounter::new(0),
+                |_record: crate::trace::span::SpanRecord| {},
+            )
             .enter_deferred(MonotonicCounter::new(0))
     }
 
@@ -292,9 +293,17 @@ mod tests {
         // A, B, A, B, A, B — each pending twice then ready on the third poll.
         for _ in 0..3 {
             let _ = task_a.as_mut().poll(&mut context);
-            assert_eq!(current(), None, "no current span leaks between A's and B's polls");
+            assert_eq!(
+                current(),
+                None,
+                "no current span leaks between A's and B's polls"
+            );
             let _ = task_b.as_mut().poll(&mut context);
-            assert_eq!(current(), None, "no current span leaks between B's and A's polls");
+            assert_eq!(
+                current(),
+                None,
+                "no current span leaks between B's and A's polls"
+            );
         }
 
         assert_eq!(a_seen.borrow().len(), 3, "A polled three times");

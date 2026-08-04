@@ -9,12 +9,13 @@ use crate::codec_factory::{
 };
 use crate::config_format::{ConfigFormatRegistry, default_config_format_registry};
 use crate::error::ProximaError;
-#[cfg(any(feature = "http1", feature = "http1-native"))]
-use crate::listeners::http::HttpListenProtocol;
 #[cfg(feature = "http3")]
 use crate::listeners::H3NativeListenProtocol;
+#[cfg(any(feature = "http1", feature = "http1-native"))]
+use crate::listeners::http::HttpListenProtocol;
 #[cfg(feature = "tokio")]
 use crate::listeners::mcp::McpListenProtocol;
+use crate::load::HttpClientHandle;
 use crate::load::LoadContext;
 use crate::log_buffer::LogBufferRegistry;
 use crate::middlewares::auth::AuthFactory;
@@ -27,7 +28,6 @@ use crate::mount::Router;
 use crate::pipe_factory::{DynPipeFactory, PipeFactoryRegistry};
 use crate::recording::factory::{DynRecordingSourceFactory, RecordingSourceRegistry};
 use crate::recording::{BinSourceFactory, JsonlSourceFactory};
-use crate::load::HttpClientHandle;
 use crate::schema::SchemaRegistry;
 #[cfg(feature = "http1")]
 use crate::shared_http::SharedHttpClient;
@@ -289,7 +289,11 @@ impl AppBuilder {
     /// Sugar for `.with_runtime_config(RuntimeConfig::builder().cores(cores).build())`.
     #[must_use]
     pub fn with_runtime_cores(self, cores: usize) -> Self {
-        self.with_runtime_config(crate::app_config::RuntimeConfig::builder().cores(cores).build())
+        self.with_runtime_config(
+            crate::app_config::RuntimeConfig::builder()
+                .cores(cores)
+                .build(),
+        )
     }
 
     /// Select the runtime by VALUE — the promoted, mismatch-proof surface
@@ -372,7 +376,10 @@ impl AppBuilder {
             http_client,
         };
         let listen_registry = Arc::new(self.listen_registry);
-        let cores_override = self.runtime_config.as_ref().map(|config| config.resolved_cores());
+        let cores_override = self
+            .runtime_config
+            .as_ref()
+            .map(|config| config.resolved_cores());
         // precedence: an explicit `.runtime(selection)` always wins; else a
         // `.with_runtime_config(...)` whose `backend` names a real backend
         // (not `auto`) resolves to one — the config round-trip P4 asks for,
@@ -465,7 +472,6 @@ mod tests {
             async move { Ok(Response::ok("counted")) }
         }
     }
-
 
     impl PipeFactory for CountingFactory {
         fn name(&self) -> &str {
@@ -634,7 +640,10 @@ mod tests {
 
         struct FakeDatagramFactory;
         impl DatagramFactory for FakeDatagramFactory {
-            fn bind(&self, _addr: std::net::SocketAddr) -> std::io::Result<Box<dyn DatagramSocket>> {
+            fn bind(
+                &self,
+                _addr: std::net::SocketAddr,
+            ) -> std::io::Result<Box<dyn DatagramSocket>> {
                 Err(std::io::Error::other("fake factory never actually binds"))
             }
 
@@ -663,14 +672,18 @@ mod tests {
             fn spawn_factory_on_core(
                 &self,
                 _core_id: CoreId,
-                _factory: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+                _factory: Box<
+                    dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+                >,
             ) -> Result<(), SpawnError> {
                 unreachable!()
             }
 
             fn spawn_background_blocking(
                 &self,
-                _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
+                _work: Box<
+                    dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
+                >,
             ) -> BackgroundHandle<Box<dyn std::any::Any + Send>> {
                 unreachable!()
             }

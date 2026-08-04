@@ -21,8 +21,8 @@ use proxima_telemetry::{debug, warn};
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::upgrade::{AcceptHandle, HijackStream, HijackedSocket};
-use proxima_runtime::Runtime;
 use proxima_primitives::stream::{AcceptorFactory, StreamConnection, TcpBindOptions};
+use proxima_runtime::Runtime;
 
 /// Drives one accepted socket through the connection pipe: call the
 /// `() -> UpgradeHandler` accept hook and invoke the handler against the
@@ -229,7 +229,10 @@ mod tests {
         type Out = UpgradeHandler;
         type Err = ProximaError;
 
-        fn call(&self, (): ()) -> impl Future<Output = Result<UpgradeHandler, ProximaError>> + Send {
+        fn call(
+            &self,
+            (): (),
+        ) -> impl Future<Output = Result<UpgradeHandler, ProximaError>> + Send {
             let done = self.done.clone();
             async move {
                 let handler = UpgradeHandler::new(move |mut socket: HijackedSocket| {
@@ -280,9 +283,7 @@ mod tests {
 
         fn spawn_background_blocking(
             &self,
-            _work: Box<
-                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-            >,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
         ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
             unreachable!("test never spawns background-blocking work")
         }
@@ -316,9 +317,10 @@ mod tests {
                     conn: std::sync::Mutex::new(Some(Box::new(conn))),
                 });
                 let (done_tx, done_rx) = async_channel::bounded(1);
-                let pipe: AcceptHandle = proxima_primitives::pipe::alloc_tier::into_handle(EchoBytePipe {
-                    done: Arc::new(done_tx),
-                });
+                let pipe: AcceptHandle =
+                    proxima_primitives::pipe::alloc_tier::into_handle(EchoBytePipe {
+                        done: Arc::new(done_tx),
+                    });
                 let (_shutdown_tx, shutdown_rx) = oneshot::channel();
                 let runtime: Option<Arc<dyn Runtime>> = Some(Arc::new(LocalSetRuntime));
 

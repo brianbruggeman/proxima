@@ -167,8 +167,7 @@ where
 
 impl<Clk> Pipe for Delay<ThreadLocalPipeHandle, Clk>
 where
-    ThreadLocalPipeHandle:
-        Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>,
+    ThreadLocalPipeHandle: Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>,
     Clk: Clock + Clone + 'static,
 {
     type In = Request<Bytes>;
@@ -276,7 +275,6 @@ mod tests {
             }
         }
     }
-
 
     fn build_request() -> Request<Bytes> {
         Request::builder()

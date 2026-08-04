@@ -68,7 +68,9 @@ pub use proxima_protocols::memcached::{
 // `listen` both now pull in (see this crate's Cargo.toml); the bare,
 // zero-feature build never references it.
 #[cfg(any(feature = "client", feature = "listen"))]
-pub use proxima_protocols::memcached::pipe_contract::{MemcachedRequest, encode_request, iter_keys, verb};
+pub use proxima_protocols::memcached::pipe_contract::{
+    MemcachedRequest, encode_request, iter_keys, verb,
+};
 
 #[cfg(feature = "client")]
 pub use client::{

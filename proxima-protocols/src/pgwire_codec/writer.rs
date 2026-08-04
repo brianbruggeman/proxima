@@ -132,8 +132,8 @@ impl<'a> MessageWriter<'a> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::*;
     use super::super::error::EncodeError;
+    use super::*;
 
     #[test]
     fn tagged_writer_encodes_tag_byte_and_length() {

@@ -11,7 +11,9 @@
 use proxima_protocols::http3_codec::client::{ClientConnection, H3ClientEvent};
 use proxima_protocols::http3_codec::frame::{self, H3Frame};
 use proxima_protocols::http3_codec::qpack;
-use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, StreamId as ServerStreamId};
+use proxima_protocols::http3_codec::server::{
+    H3ServerEvent, ServerConnection, StreamId as ServerStreamId,
+};
 use proxima_protocols::http3_codec::settings::Settings;
 
 const GREASE_FRAME_TYPE: u64 = 0x21;

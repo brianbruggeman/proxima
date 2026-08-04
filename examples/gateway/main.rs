@@ -145,8 +145,12 @@ async fn main() -> Result<(), ProximaError> {
         .runtime()
         .ok_or_else(|| ProximaError::Config("origin web app has no runtime installed".into()))?;
     let gateway_report = ShutdownBarrier::new(gateway_runtime).broadcast_drop().await;
-    let origin_api_report = ShutdownBarrier::new(origin_api_runtime).broadcast_drop().await;
-    let origin_web_report = ShutdownBarrier::new(origin_web_runtime).broadcast_drop().await;
+    let origin_api_report = ShutdownBarrier::new(origin_api_runtime)
+        .broadcast_drop()
+        .await;
+    let origin_web_report = ShutdownBarrier::new(origin_web_runtime)
+        .broadcast_drop()
+        .await;
     println!(
         "gateway    drained: cores_acked={} hooks_drained={}",
         gateway_report.cores_acked, gateway_report.hooks_drained
@@ -300,7 +304,6 @@ impl SendPipe for OriginPipe {
     }
 }
 
-
 fn spawn_origin(
     bind: SocketAddr,
     label: &'static str,
@@ -311,10 +314,7 @@ fn spawn_origin(
         .build()?
         .with_runtime(Arc::new(PrimeRuntime::new(1)?))
         .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
-    app.mount(
-        "/{*rest}",
-        into_handle(OriginPipe { label, calls }),
-    )?;
+    app.mount("/{*rest}", into_handle(OriginPipe { label, calls }))?;
     // blocks until the accept lane has acked ready — no polling, no sleeping.
     let listener = app.build_listener(ListenerSpec::http(bind))?;
     Ok((app, listener))
@@ -341,7 +341,6 @@ impl SendPipe for ForwardPipe {
         async move { SendPipe::call(&client, request).await }
     }
 }
-
 
 // deterministic clock: real time never advances on its own, so the
 // rate-limit boundary in scenario 5/6 is reached by call count alone

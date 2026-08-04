@@ -49,7 +49,9 @@ use std::sync::Arc;
 
 use futures::channel::mpsc;
 use proxima_listen::stream::{DatagramProtocol, DatagramProtocolListenProtocol};
-use proxima_protocols::quic::connection::{Connection, ConnectionError, ConnectionState, DatagramWrite, TimerOutcome};
+use proxima_protocols::quic::connection::{
+    Connection, ConnectionError, ConnectionState, DatagramWrite, TimerOutcome,
+};
 use proxima_protocols::quic::endpoint::{
     ConnectionHandle, ConnectionIdBytes, DatagramClassification, DropReason, EndpointDemux,
 };
@@ -122,7 +124,9 @@ struct ConnEntry<P: TlsProvider> {
 /// Per-connection accept policy — caller supplies this when binding
 /// so the Listener knows how to construct a fresh `Connection<P>`
 /// from a `NewInitial` classification.
-pub type AcceptFn<P> = Arc<dyn Fn(&[u8], &[u8], &[u8], Instant) -> Result<Connection<P>, ConnectionError> + Send + Sync>;
+pub type AcceptFn<P> = Arc<
+    dyn Fn(&[u8], &[u8], &[u8], Instant) -> Result<Connection<P>, ConnectionError> + Send + Sync,
+>;
 
 /// Multi-connection, I/O-free QUIC server listener — a
 /// [`DatagramProtocol`] state machine driven by
@@ -242,7 +246,10 @@ impl<P: TlsProvider> Listener<P> {
     pub fn listen_protocol(
         label: impl Into<String>,
         accept_fn: AcceptFn<P>,
-    ) -> (DatagramProtocolListenProtocol<impl Fn() -> Self + Send + Sync + 'static, Self>, mpsc::UnboundedReceiver<ConnectionHandle>)
+    ) -> (
+        DatagramProtocolListenProtocol<impl Fn() -> Self + Send + Sync + 'static, Self>,
+        mpsc::UnboundedReceiver<ConnectionHandle>,
+    )
     where
         P: Send + 'static,
     {
@@ -313,7 +320,12 @@ impl<P: TlsProvider> Listener<P> {
     /// demux's accept table being full. Per-connection protocol errors
     /// are never propagated here — see [`DatagramIngest::Existing`] /
     /// [`DatagramIngest::Accepted`]'s `error` field instead.
-    pub fn ingest_datagram(&mut self, now: Instant, peer: SocketAddr, datagram: &[u8]) -> Result<DatagramIngest, ListenerError> {
+    pub fn ingest_datagram(
+        &mut self,
+        now: Instant,
+        peer: SocketAddr,
+        datagram: &[u8],
+    ) -> Result<DatagramIngest, ListenerError> {
         let class = self.demux.classify_datagram(datagram);
         match class {
             DatagramClassification::Existing { handle, .. } => {
@@ -385,7 +397,11 @@ impl<P: TlsProvider> Listener<P> {
                 let _ = self.accept_tx.unbounded_send(handle);
                 Ok(DatagramIngest::Accepted { handle, error })
             }
-            DatagramClassification::UnsupportedVersion { dcid, scid, peer_version } => {
+            DatagramClassification::UnsupportedVersion {
+                dcid,
+                scid,
+                peer_version,
+            } => {
                 // RFC 9000 §6 / §17.2.1 — the peer offered a version we
                 // don't speak (commonly a GREASE probe, e.g.
                 // 0x?a?a?a?a). Reply with a Version Negotiation packet
@@ -435,13 +451,19 @@ impl<P: TlsProvider + Send + 'static> DatagramProtocol for Listener<P> {
     // RPITIT + `Send` signature (an immediately-`Ready` future is trivially
     // `Send` when every value it closes over is `Send`, which holds here:
     // `Connection<P>: Send` requires `P: Send`, added to the impl bound).
-    async fn on_datagram(&mut self, now: proxima_core::time::Instant, peer: SocketAddr, datagram: &[u8]) -> Result<(), Self::Err> {
+    async fn on_datagram(
+        &mut self,
+        now: proxima_core::time::Instant,
+        peer: SocketAddr,
+        datagram: &[u8],
+    ) -> Result<(), Self::Err> {
         // Discard the rich `DatagramIngest` return — the generic,
         // connectionless driver has no per-connection state to drive off
         // the routed handle or a surfaced error; a caller that wants
         // those (H3) calls `ingest_datagram` directly instead of going
         // through this trait method.
-        self.ingest_datagram(quic_instant(now), peer, datagram).map(|_ingest| ())
+        self.ingest_datagram(quic_instant(now), peer, datagram)
+            .map(|_ingest| ())
     }
 
     async fn on_timeout(&mut self, now: proxima_core::time::Instant) -> Result<(), Self::Err> {
@@ -459,7 +481,11 @@ impl<P: TlsProvider + Send + 'static> DatagramProtocol for Listener<P> {
             .map(core_instant)
     }
 
-    async fn transmit(&mut self, now: proxima_core::time::Instant, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, Self::Err> {
+    async fn transmit(
+        &mut self,
+        now: proxima_core::time::Instant,
+        buf: &mut [u8],
+    ) -> Result<Option<(usize, SocketAddr)>, Self::Err> {
         // Version Negotiation replies are connectionless and staged
         // eagerly by `on_datagram`; drain them FIRST so a version-probing
         // peer can never be starved behind a busy connection's egress.
@@ -517,7 +543,9 @@ fn quic_instant(now: proxima_core::time::Instant) -> Instant {
 /// Convert a QUIC proto layer [`Instant`] back into the driver's
 /// runtime-agnostic clock type.
 fn core_instant(instant: Instant) -> proxima_core::time::Instant {
-    proxima_core::time::Instant::from_monotonic(core::time::Duration::from_micros(instant.as_micros()))
+    proxima_core::time::Instant::from_monotonic(core::time::Duration::from_micros(
+        instant.as_micros(),
+    ))
 }
 
 /// Act on and surface a `Connection::handle_datagram` error — the single
@@ -593,7 +621,11 @@ fn act_and_surface<P: TlsProvider>(
         | ConnectionError::Aead(_)
         | ConnectionError::PacketNumber(_)
         | ConnectionError::TransientRecvBufferFull { .. } => {
-            tracing::debug!(?err, handle, "listener: packet-level error; dropping packet");
+            tracing::debug!(
+                ?err,
+                handle,
+                "listener: packet-level error; dropping packet"
+            );
             None
         }
         _ => {

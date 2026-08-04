@@ -571,9 +571,7 @@ pub fn install_from_path(
 }
 
 /// Build + install a recorder from a loaded [`ExportConfig`].
-pub fn install_from_config(
-    config: &ExportConfig,
-) -> Result<Arc<Recorder>, conflaguration::Error> {
+pub fn install_from_config(config: &ExportConfig) -> Result<Arc<Recorder>, conflaguration::Error> {
     let exporter = config
         .into_exporter()
         .map_err(|_| conflaguration::Error::Validation {

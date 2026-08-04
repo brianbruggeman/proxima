@@ -58,8 +58,8 @@ use std::thread;
 use alloc::ffi::CString;
 use bon::Builder;
 use futures::stream::{self, StreamExt};
-use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::pipe::{ProximaError, Request, Response, ResponseStream};
 
 use super::descriptor::{CommandDescriptor, Stdio};
@@ -115,6 +115,11 @@ pub struct Command {
     /// and call `Command::env_from(env)` after `build()`.
     #[builder(default)]
     envs: Vec<(OsString, OsString)>,
+
+    /// Keys withheld from the child, applied after any inherited
+    /// snapshot so removal cannot depend on builder call order.
+    #[builder(default)]
+    removed_envs: Vec<OsString>,
 
     /// Whether to snapshot the parent's env into the child.
     /// Default `false` — explicit (matches the alloc-tier
@@ -185,6 +190,7 @@ impl Command {
             args: Vec::new(),
             current_dir: None,
             envs: Vec::new(),
+            removed_envs: Vec::new(),
             inherit_parent_env: false,
             stdin: Stdio::Inherit,
             stdout: Stdio::Inherit,
@@ -222,6 +228,7 @@ impl Command {
     {
         let key = key.as_ref().to_os_string();
         let value = value.as_ref().to_os_string();
+        self.removed_envs.retain(|removed| *removed != key);
         if let Some(slot) = self.envs.iter_mut().find(|(existing, _)| *existing == key) {
             slot.1 = value;
         } else {
@@ -244,10 +251,18 @@ impl Command {
     }
 
     /// Mirrors [`std::process::Command::env_remove`].
+    ///
+    /// Removal outlives [`Command::inherit_current_env`] regardless of call
+    /// order: the key is recorded, and the parent's value is dropped when the
+    /// descriptor is built. Order-dependence here would be a footgun with
+    /// teeth — the usual reason to remove a var is that it carries a
+    /// credential the child must not see.
     pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Self {
-        let key = key.as_ref();
-        self.envs
-            .retain(|(existing, _)| existing.as_os_str() != key);
+        let key = key.as_ref().to_os_string();
+        self.envs.retain(|(existing, _)| *existing != key);
+        if !self.removed_envs.contains(&key) {
+            self.removed_envs.push(key);
+        }
         self
     }
 
@@ -257,6 +272,7 @@ impl Command {
     /// gives the child an empty env).
     pub fn env_clear(&mut self) -> &mut Self {
         self.envs.clear();
+        self.removed_envs.clear();
         self.inherit_parent_env = false;
         self
     }
@@ -457,6 +473,9 @@ impl Command {
                 osstr_to_cstring(value, "env value")?,
             );
         }
+        for key in &self.removed_envs {
+            descriptor.env_remove(&osstr_to_cstring(key, "env key")?);
+        }
         descriptor.stdin(self.stdin);
         descriptor.stdout(self.stdout);
         descriptor.stderr(self.stderr);
@@ -655,7 +674,6 @@ impl SendPipe for Command {
     }
 }
 
-
 async fn run_pipe_call(
     descriptor: CommandDescriptor,
     chain: Option<alloc_tier::PipeHandle<ChildRequest, ChildResponse>>,
@@ -793,6 +811,80 @@ mod tests {
             .stderr(Stdio::inherit());
         assert_eq!(cmd.get_program(), OsStr::new("/bin/ls"));
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp")));
+    }
+
+    fn descriptor_has_env(command: &Command, key: &str) -> bool {
+        command
+            .to_descriptor()
+            .expect("descriptor lowers")
+            .env
+            .iter()
+            .any(|var| var.key.to_str() == Ok(key))
+    }
+
+    #[test]
+    fn env_remove_beats_an_inherited_value_whichever_order_it_is_called() {
+        temp_env::with_var("PROXIMA_PROCESS_SECRET", Some("do-not-leak"), || {
+            let mut removed_first = Command::new("/bin/ls");
+            removed_first
+                .env_remove("PROXIMA_PROCESS_SECRET")
+                .inherit_current_env();
+
+            let mut inherited_first = Command::new("/bin/ls");
+            inherited_first
+                .inherit_current_env()
+                .env_remove("PROXIMA_PROCESS_SECRET");
+
+            assert!(
+                !descriptor_has_env(&removed_first, "PROXIMA_PROCESS_SECRET"),
+                "a removed key must not reach the child, even when inheritance is requested afterwards"
+            );
+            assert!(!descriptor_has_env(
+                &inherited_first,
+                "PROXIMA_PROCESS_SECRET"
+            ));
+        });
+    }
+
+    #[test]
+    fn inheriting_keeps_every_key_that_was_not_removed() {
+        temp_env::with_var("PROXIMA_PROCESS_KEEP", Some("visible"), || {
+            let mut command = Command::new("/bin/ls");
+            command
+                .inherit_current_env()
+                .env_remove("PROXIMA_PROCESS_ABSENT");
+
+            assert!(descriptor_has_env(&command, "PROXIMA_PROCESS_KEEP"));
+        });
+    }
+
+    #[test]
+    fn env_clear_forgets_pending_removals_along_with_the_values() {
+        temp_env::with_var("PROXIMA_PROCESS_SECRET", Some("do-not-leak"), || {
+            let mut command = Command::new("/bin/ls");
+            command
+                .env_remove("PROXIMA_PROCESS_SECRET")
+                .env_clear()
+                .inherit_current_env();
+
+            assert!(
+                descriptor_has_env(&command, "PROXIMA_PROCESS_SECRET"),
+                "env_clear resets the command, so an earlier removal must not linger"
+            );
+        });
+    }
+
+    #[test]
+    fn a_removed_key_set_explicitly_afterwards_is_honoured() {
+        let mut command = Command::new("/bin/ls");
+        command
+            .env_remove("PROXIMA_PROCESS_LATER")
+            .env("PROXIMA_PROCESS_LATER", "1");
+
+        assert!(
+            descriptor_has_env(&command, "PROXIMA_PROCESS_LATER"),
+            "an explicit set after a removal is the caller's newer intent"
+        );
     }
 
     #[test]

@@ -110,7 +110,11 @@ pub fn expand(input: TokenStream) -> Result<TokenStream, Error> {
 /// Shared by `pipe!` and `filter!`: lift a closure literal via [`build_leaf`],
 /// or pass any other expression through unchanged. `macro_name` only shapes
 /// error text (`filter!` reads better in its own errors than `pipe!` would).
-pub(crate) fn expand_expr(expr: Expr, args: PipeArgs, macro_name: &str) -> Result<TokenStream, Error> {
+pub(crate) fn expand_expr(
+    expr: Expr,
+    args: PipeArgs,
+    macro_name: &str,
+) -> Result<TokenStream, Error> {
     match expr {
         Expr::Closure(closure) => {
             let struct_ident = Ident::new("__ProximaPipeLeaf", Span::call_site());
@@ -354,8 +358,7 @@ mod tests {
 
     #[test]
     fn sync_closure_emits_pipe_and_unpin_pipe_tiers() {
-        let expanded =
-            expand_ok("|input: u64| -> Result<u64, Infallible> { Ok(input * 2) }");
+        let expanded = expand_ok("|input: u64| -> Result<u64, Infallible> { Ok(input * 2) }");
         assert!(expanded.contains("Pipe for __ProximaPipeLeaf"));
         assert!(expanded.contains("UnpinPipe for __ProximaPipeLeaf"));
         assert!(!expanded.contains("SendPipe"));
@@ -365,8 +368,7 @@ mod tests {
 
     #[test]
     fn sync_closure_with_send_emits_all_four_tiers() {
-        let expanded =
-            expand_ok("|input: u64| -> Result<u64, Infallible> { Ok(input * 2) }, send");
+        let expanded = expand_ok("|input: u64| -> Result<u64, Infallible> { Ok(input * 2) }, send");
         assert!(expanded.contains("Pipe for __ProximaPipeLeaf"));
         assert!(expanded.contains("SendPipe for __ProximaPipeLeaf"));
         assert!(expanded.contains("UnpinPipe for __ProximaPipeLeaf"));
@@ -394,18 +396,16 @@ mod tests {
 
     #[test]
     fn async_closure_with_send_is_refused() {
-        let err = expand_err(
-            "async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, send",
-        );
+        let err =
+            expand_err("async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, send");
         assert!(err.contains("`send` cannot be combined with an async closure"));
         assert!(err.contains("async_fn_traits"));
     }
 
     #[test]
     fn async_closure_with_unpin_is_refused_zero_box() {
-        let err = expand_err(
-            "async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, unpin",
-        );
+        let err =
+            expand_err("async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, unpin");
         assert!(err.contains("cannot be applied to an async closure as-is"));
         assert!(err.contains("does not offer the `boxed` escape hatch"));
     }
@@ -415,9 +415,8 @@ mod tests {
         let sync_err = expand_err("|input: u64| -> Result<u64, Infallible> { Ok(input) }, boxed");
         assert!(sync_err.contains("zero-box by construction"));
 
-        let async_err = expand_err(
-            "async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, boxed",
-        );
+        let async_err =
+            expand_err("async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, boxed");
         assert!(async_err.contains("zero-box by construction"));
     }
 
@@ -435,8 +434,7 @@ mod tests {
 
     #[test]
     fn closure_with_more_than_one_parameter_is_refused() {
-        let err =
-            expand_err("|a: u64, b: u64| -> Result<u64, Infallible> { Ok(a + b) }");
+        let err = expand_err("|a: u64, b: u64| -> Result<u64, Infallible> { Ok(a + b) }");
         assert!(err.contains("zero or one parameter"));
     }
 

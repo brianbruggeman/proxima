@@ -1,17 +1,17 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use proxima_core::ProximaError;
-use proxima_primitives::transport::{DEFAULT_REPLAY_CAP_BYTES, tap_complete_with_size};
 use crate::kv::cache_key_for_storage;
 use crate::kv::write_back::WriteBackConditions;
 use crate::kv::{CacheEntry, KvHandle};
+use bytes::Bytes;
+use proxima_core::ProximaError;
 use proxima_primitives::pipe::Method;
-use proxima_primitives::pipe::{Pipe, SendPipe};
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle};
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::Labels;
+use proxima_primitives::pipe::{Pipe, SendPipe};
+use proxima_primitives::transport::{DEFAULT_REPLAY_CAP_BYTES, tap_complete_with_size};
 
 pub struct WriteBackTarget {
     pub backend: Arc<dyn KvHandle>,
@@ -155,8 +155,9 @@ where
                     telemetry_for_cb.counter_inc("proxima.write_back.writes_total", &labels, 1);
                 }
             });
-            let mut rebuilt = Response::new(status)
-                .with_stream(proxima_primitives::pipe::ResponseStream::from_chunk_stream(tapped));
+            let mut rebuilt = Response::new(status).with_stream(
+                proxima_primitives::pipe::ResponseStream::from_chunk_stream(tapped),
+            );
             for (name, value) in header_pairs {
                 rebuilt = rebuilt.with_header(name, value);
             }
@@ -164,7 +165,6 @@ where
         }
     }
 }
-
 
 impl Pipe for WriteBack<ThreadLocalPipeHandle> {
     type In = Request<Bytes>;
@@ -251,8 +251,9 @@ impl Pipe for WriteBack<ThreadLocalPipeHandle> {
                     telemetry_for_cb.counter_inc("proxima.write_back.writes_total", &labels, 1);
                 }
             });
-            let mut rebuilt = Response::new(status)
-                .with_stream(proxima_primitives::pipe::ResponseStream::from_chunk_stream(tapped));
+            let mut rebuilt = Response::new(status).with_stream(
+                proxima_primitives::pipe::ResponseStream::from_chunk_stream(tapped),
+            );
             for (name, value) in header_pairs {
                 rebuilt = rebuilt.with_header(name, value);
             }
@@ -260,7 +261,6 @@ impl Pipe for WriteBack<ThreadLocalPipeHandle> {
         }
     }
 }
-
 
 fn context_labels_with(base: &Labels, target: &str) -> Labels {
     let mut pairs: Vec<(String, String)> = base.entries().to_vec();

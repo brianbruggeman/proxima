@@ -183,9 +183,14 @@ impl<S: Read + Write> RedisClient<S, Active> {
     /// [`ClientError::Protocol`] if `channels` is empty (nothing would be
     /// sent, so nothing would ack — nothing to gate the state transition on).
     /// [`ClientError`] on I/O or a malformed frame.
-    pub fn subscribe(mut self, channels: &[&[u8]]) -> Result<RedisClient<S, Subscribed>, ClientError> {
+    pub fn subscribe(
+        mut self,
+        channels: &[&[u8]],
+    ) -> Result<RedisClient<S, Subscribed>, ClientError> {
         if channels.is_empty() {
-            return Err(ClientError::Protocol("subscribe requires at least one channel"));
+            return Err(ClientError::Protocol(
+                "subscribe requires at least one channel",
+            ));
         }
         self.enter_subscriber_mode(b"SUBSCRIBE", channels)?;
         for channel in channels {
@@ -199,9 +204,14 @@ impl<S: Read + Write> RedisClient<S, Active> {
     /// # Errors
     /// [`ClientError::Protocol`] if `patterns` is empty. [`ClientError`] on
     /// I/O or a malformed frame.
-    pub fn psubscribe(mut self, patterns: &[&[u8]]) -> Result<RedisClient<S, Subscribed>, ClientError> {
+    pub fn psubscribe(
+        mut self,
+        patterns: &[&[u8]],
+    ) -> Result<RedisClient<S, Subscribed>, ClientError> {
         if patterns.is_empty() {
-            return Err(ClientError::Protocol("psubscribe requires at least one pattern"));
+            return Err(ClientError::Protocol(
+                "psubscribe requires at least one pattern",
+            ));
         }
         self.enter_subscriber_mode(b"PSUBSCRIBE", patterns)?;
         for pattern in patterns {
@@ -217,9 +227,14 @@ impl<S: Read + Write> RedisClient<S, Active> {
     /// # Errors
     /// [`ClientError::Protocol`] if `channels` is empty. [`ClientError`] on
     /// I/O or a malformed frame.
-    pub fn ssubscribe(mut self, channels: &[&[u8]]) -> Result<RedisClient<S, Subscribed>, ClientError> {
+    pub fn ssubscribe(
+        mut self,
+        channels: &[&[u8]],
+    ) -> Result<RedisClient<S, Subscribed>, ClientError> {
         if channels.is_empty() {
-            return Err(ClientError::Protocol("ssubscribe requires at least one channel"));
+            return Err(ClientError::Protocol(
+                "ssubscribe requires at least one channel",
+            ));
         }
         self.enter_subscriber_mode(b"SSUBSCRIBE", channels)?;
         for channel in channels {
@@ -240,7 +255,11 @@ impl<S: Read + Write> RedisClient<S, Active> {
         Ok(())
     }
 
-    fn enter_subscriber_mode(&mut self, verb: &'static [u8], targets: &[&[u8]]) -> Result<(), ClientError> {
+    fn enter_subscriber_mode(
+        &mut self,
+        verb: &'static [u8],
+        targets: &[&[u8]],
+    ) -> Result<(), ClientError> {
         let mut argv: Vec<&[u8]> = Vec::with_capacity(targets.len() + 1);
         argv.push(verb);
         argv.extend_from_slice(targets);

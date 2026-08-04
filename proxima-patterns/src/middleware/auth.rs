@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::{Pipe, SendPipe};
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::Labels;
+use proxima_primitives::pipe::{Pipe, SendPipe};
 
 const METRIC_REJECTED: &str = "proxima.auth.rejected_total";
 const METRIC_ADMITTED: &str = "proxima.auth.admitted_total";
@@ -194,7 +194,6 @@ where
     }
 }
 
-
 impl Pipe for Auth<ThreadLocalPipeHandle> {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -226,7 +225,6 @@ impl Pipe for Auth<ThreadLocalPipeHandle> {
         }
     }
 }
-
 
 pub struct AuthFactory;
 
@@ -312,7 +310,6 @@ mod tests {
             async { Ok(Response::ok("ok")) }
         }
     }
-
 
     fn build_request(token: Option<&str>) -> (Request<Bytes>, Arc<Metrics>) {
         let metrics: Arc<Metrics> = Arc::new(Metrics::default());

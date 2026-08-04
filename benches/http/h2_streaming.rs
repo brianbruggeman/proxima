@@ -63,7 +63,6 @@ impl SendPipe for EchoBody {
     }
 }
 
-
 fn start_echo_server(
     runtime: &tokio::runtime::Runtime,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {

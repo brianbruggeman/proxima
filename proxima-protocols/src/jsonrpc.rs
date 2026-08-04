@@ -5,7 +5,6 @@
 //! Tier: no_std + alloc. Pure sans-IO data types — caller owns the
 //! transport (HTTP / WebSocket / stdio / custom).
 
-
 use alloc::format;
 use alloc::string::{String, ToString};
 

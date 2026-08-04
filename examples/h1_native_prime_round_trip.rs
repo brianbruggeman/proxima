@@ -49,7 +49,12 @@ impl SendPipe for Greeter {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let runtime = Arc::new(PrimeRuntime::builder().cores(1).background_inline().build()?);
+    let runtime = Arc::new(
+        PrimeRuntime::builder()
+            .cores(1)
+            .background_inline()
+            .build()?,
+    );
     let pipe: PipeHandle = into_handle(Greeter);
 
     // Port 0 -> OS-assigned; `serve_http` blocks (via the listener's

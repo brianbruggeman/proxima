@@ -517,8 +517,7 @@ pub fn shared_prime_runtime() -> &'static PrimeRuntime {
         let runtime = PrimeRuntime::new_with_tokio_compat(1)
             .expect("proxima::test: build prime+tokio-compat runtime");
         #[cfg(not(feature = "test-prime-tokio-compat"))]
-        let runtime =
-            PrimeRuntime::new(1).expect("proxima::test: build prime runtime");
+        let runtime = PrimeRuntime::new(1).expect("proxima::test: build prime runtime");
         Box::leak(Box::new(runtime))
     })
 }

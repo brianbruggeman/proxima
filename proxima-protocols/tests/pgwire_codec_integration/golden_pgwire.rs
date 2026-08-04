@@ -453,7 +453,8 @@ fn auth_ok_golden_parity() {
         .expect("must be complete");
     assert_eq!(consumed, upstream_bytes.len());
 
-    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::Ok) = msg else {
+    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::Ok) = msg
+    else {
         panic!("expected AuthOk");
     };
 
@@ -471,7 +472,9 @@ fn auth_cleartext_password_golden_parity() {
         .expect("parse must succeed")
         .expect("must be complete");
 
-    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::CleartextPassword) = msg
+    let BackendMessage::Authentication(
+        proxima_protocols::pgwire_codec::AuthRequest::CleartextPassword,
+    ) = msg
     else {
         panic!("expected CleartextPassword");
     };
@@ -491,8 +494,9 @@ fn auth_md5_password_golden_parity() {
         .expect("must be complete");
     assert_eq!(consumed, upstream_bytes.len());
 
-    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::Md5Password { salt }) =
-        msg
+    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::Md5Password {
+        salt,
+    }) = msg
     else {
         panic!("expected Md5Password");
     };
@@ -516,8 +520,9 @@ fn auth_sasl_golden_parity() {
         .expect("must be complete");
     assert_eq!(consumed, upstream_bytes.len());
 
-    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::Sasl { mechanisms }) =
-        msg
+    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::Sasl {
+        mechanisms,
+    }) = msg
     else {
         panic!("expected Sasl");
     };
@@ -541,8 +546,9 @@ fn auth_sasl_continue_golden_parity() {
         .expect("must be complete");
     assert_eq!(consumed, upstream_bytes.len());
 
-    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::SaslContinue { data }) =
-        msg
+    let BackendMessage::Authentication(
+        proxima_protocols::pgwire_codec::AuthRequest::SaslContinue { data },
+    ) = msg
     else {
         panic!("expected SaslContinue");
     };
@@ -564,7 +570,9 @@ fn auth_sasl_final_golden_parity() {
         .expect("must be complete");
     assert_eq!(consumed, upstream_bytes.len());
 
-    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::SaslFinal { data }) = msg
+    let BackendMessage::Authentication(proxima_protocols::pgwire_codec::AuthRequest::SaslFinal {
+        data,
+    }) = msg
     else {
         panic!("expected SaslFinal");
     };
@@ -1236,7 +1244,8 @@ fn negotiate_protocol_version_spec_vector_round_trip() {
     };
     assert_eq!(got_minor, newest_minor);
     assert_eq!(unsupported_options.len(), 2);
-    let opts: Vec<proxima_protocols::pgwire_codec::PgStr<'_>> = unsupported_options.iter().collect();
+    let opts: Vec<proxima_protocols::pgwire_codec::PgStr<'_>> =
+        unsupported_options.iter().collect();
     assert_eq!(opts[0], "_pq_.trace");
     assert_eq!(opts[1], "_pq_.unknown");
 

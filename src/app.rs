@@ -360,8 +360,13 @@ impl App {
         // override the runtime with `.with_runtime(...)` (mismatchable —
         // see its doc) or `App::builder().runtime(selection)` (matched), or
         // size the fallback default with `App::builder().with_runtime_config(...)`.
-        let (runtime, acceptor_factory, datagram_factory, unix_upstream_factory, packet_listener_factory) =
-            split_runtime_selection(resolve_runtime_selection(None, None)?);
+        let (
+            runtime,
+            acceptor_factory,
+            datagram_factory,
+            unix_upstream_factory,
+            packet_listener_factory,
+        ) = split_runtime_selection(resolve_runtime_selection(None, None)?);
 
         let load_context = LoadContext::with_default_registry()?;
         // arm the recording spigot with the App's runtime so a directly-called
@@ -447,7 +452,9 @@ impl App {
     }
 
     #[must_use]
-    pub fn packet_listener_factory(&self) -> Option<Arc<dyn proxima_net::packet::PacketListenerFactory>> {
+    pub fn packet_listener_factory(
+        &self,
+    ) -> Option<Arc<dyn proxima_net::packet::PacketListenerFactory>> {
         self.packet_listener_factory.clone()
     }
 
@@ -816,8 +823,13 @@ impl App {
         if had_explicit_selection && let Some(selection) = &resolved {
             crate::runtime::install_runtime(selection.clone());
         }
-        let (runtime, acceptor_factory, datagram_factory, unix_upstream_factory, packet_listener_factory) =
-            split_runtime_selection(resolved);
+        let (
+            runtime,
+            acceptor_factory,
+            datagram_factory,
+            unix_upstream_factory,
+            packet_listener_factory,
+        ) = split_runtime_selection(resolved);
         // arm the recording spigot at build (see App::new) — a builder-made App
         // whose `record` upstream is called directly still pumps.
         if let Some(rt) = &runtime {

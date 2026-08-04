@@ -56,12 +56,10 @@ fn virtual_clock_fires_timer_from_outside_prime_with_zero_wall_clock_sleep() {
         .dispatch_send(Box::pin(async {}))
         .expect("nudge worker to recheck the timer wheel");
 
-    done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect(
-            "timer must fire from the virtual advance alone; a real 25s wait would \
+    done_rx.recv_timeout(Duration::from_secs(2)).expect(
+        "timer must fire from the virtual advance alone; a real 25s wait would \
              exceed this 2s bound, proving no wall-clock sleep drove the fire",
-        );
+    );
     handle.shutdown_and_join().expect("shutdown");
 }
 
@@ -89,7 +87,11 @@ fn auto_advance_orders_multiple_simulated_sleeps_from_outside_prime() {
 
     // dispatch order deliberately scrambled relative to deadline order —
     // completion order must reflect DEADLINE order, not dispatch order.
-    for deadline in [THIRTY_SECONDS_MILLIS, ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS] {
+    for deadline in [
+        THIRTY_SECONDS_MILLIS,
+        ONE_SECOND_MILLIS,
+        FIVE_SECONDS_MILLIS,
+    ] {
         let order_for_task = order.clone();
         let done_tx_for_task = done_tx.clone();
         handle
@@ -109,12 +111,10 @@ fn auto_advance_orders_multiple_simulated_sleeps_from_outside_prime() {
 
     let started = Instant::now();
     for _ in 0..3 {
-        done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect(
-                "all three simulated sleeps (1s/5s/30s) must complete via auto-advance \
+        done_rx.recv_timeout(Duration::from_secs(2)).expect(
+            "all three simulated sleeps (1s/5s/30s) must complete via auto-advance \
                  alone; a real wait would take 36s and blow well past this 2s bound",
-            );
+        );
     }
     let elapsed = started.elapsed();
 
@@ -122,7 +122,11 @@ fn auto_advance_orders_multiple_simulated_sleeps_from_outside_prime() {
 
     assert_eq!(
         *order.lock().expect("order mutex poisoned"),
-        vec![ONE_SECOND_MILLIS, FIVE_SECONDS_MILLIS, THIRTY_SECONDS_MILLIS],
+        vec![
+            ONE_SECOND_MILLIS,
+            FIVE_SECONDS_MILLIS,
+            THIRTY_SECONDS_MILLIS
+        ],
         "completion order must match simulated deadline order (1s, then 5s, then 30s)",
     );
     assert!(

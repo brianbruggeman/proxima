@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use proxima::h3::native::H3NativeListenProtocol;
-use proxima::pipe::{into_handle};
+use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
 use proxima::runtime::{PrimeRuntime, Runtime};
 use proxima::{ListenRegistry, ListenerSpec, NoopTelemetry, ProximaError, SendPipe};
@@ -32,7 +32,6 @@ impl SendPipe for OkHandler {
         async { Ok(Response::new(200).with_body(Bytes::from_static(b"ok"))) }
     }
 }
-
 
 fn main() -> Result<(), ProximaError> {
     // one-liner: level-routed console logging (info/debug→stdout, warn/error→stderr).

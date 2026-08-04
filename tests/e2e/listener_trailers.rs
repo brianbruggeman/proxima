@@ -26,8 +26,8 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use proxima::{
-    App, HeaderList, MountTarget, ProximaError, Request, Response, ResponseStream, RunConfig,
-    Spec, into_handle,
+    App, HeaderList, MountTarget, ProximaError, Request, Response, ResponseStream, RunConfig, Spec,
+    into_handle,
 };
 use proxima_primitives::pipe::SendPipe;
 use serde_json::json;
@@ -40,7 +40,6 @@ async fn pick_free_addr() -> SocketAddr {
     drop(listener);
     addr
 }
-
 
 /// Pipe that reads the request body trailers and echoes them
 /// back to the client as the response body so the test can
@@ -83,7 +82,6 @@ impl SendPipe for TrailerEcho {
     }
 }
 
-
 /// Pipe that returns chunked body + trailers — exercises the
 /// listener's trailer emission path.
 struct TrailerEmitter;
@@ -109,7 +107,6 @@ impl SendPipe for TrailerEmitter {
         }
     }
 }
-
 
 async fn boot_listener(handle: proxima::PipeHandle) -> (SocketAddr, proxima::Shutdown) {
     let mut app = App::new().expect("app");

@@ -21,7 +21,6 @@
 //!
 //! Sub-flag: `amqp-listener` (default off).
 
-
 /// AMQP frame end-marker byte (final byte of every frame).
 pub const FRAME_END: u8 = 0xCE;
 
