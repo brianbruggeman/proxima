@@ -36,21 +36,13 @@ use proxima_core::markers::DropSafe;
 use crate::pipe::fanout::{AllOrNothing, FanPolicy};
 
 /// Construction error for [`Race`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RaceBuildError {
     /// A race needs at least one sink to produce a winner.
+    #[error("race requires at least one sink")]
     EmptySinks,
 }
 
-impl core::fmt::Display for RaceBuildError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::EmptySinks => formatter.write_str("race requires at least one sink"),
-        }
-    }
-}
-
-impl core::error::Error for RaceBuildError {}
 
 /// Concurrent first-`Ok`-wins dispatcher over N drop-safe sink [`SendPipe`]s.
 ///
