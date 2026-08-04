@@ -46,7 +46,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 /// Handler that BLOCKS its worker thread for `block_ms` (a synchronous
 /// `thread::sleep`) before responding — simulating a synchronous cdb read /
 /// LSM compaction stall on the prime HTTP core. On the single-core
@@ -73,7 +72,6 @@ impl SendPipe for BlockingHandler {
         }
     }
 }
-
 
 /// Handler that opens an OUTBOUND connect per request before responding —
 /// the daemon's documented HTTP-handler shape (an upstream dial per
@@ -132,7 +130,6 @@ impl SendPipe for OutboundConnect {
         }
     }
 }
-
 
 /// Background std echo sink: accept, read 4, write 4, loop. Mirrors a fast
 /// upstream the handler dials. Returns the bound addr.

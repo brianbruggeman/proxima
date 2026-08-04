@@ -200,7 +200,10 @@ mod tests {
     use crate::id::{SpanId, TraceId};
 
     fn ids(byte: u8) -> (TraceId, SpanId) {
-        (TraceId::from_bytes([byte; 16]), SpanId::from_bytes([byte; 8]))
+        (
+            TraceId::from_bytes([byte; 16]),
+            SpanId::from_bytes([byte; 8]),
+        )
     }
 
     // enter displaces the current span and hands back the parent; restore puts it
@@ -217,11 +220,19 @@ mod tests {
         assert_eq!(current(), Some((outer_trace, outer_span)));
 
         let outer_parent = enter(inner_trace, inner_span);
-        assert_eq!(outer_parent, Some((outer_trace, outer_span)), "inner displaced outer");
+        assert_eq!(
+            outer_parent,
+            Some((outer_trace, outer_span)),
+            "inner displaced outer"
+        );
         assert_eq!(current(), Some((inner_trace, inner_span)));
 
         restore(outer_parent);
-        assert_eq!(current(), Some((outer_trace, outer_span)), "restore brings outer back");
+        assert_eq!(
+            current(),
+            Some((outer_trace, outer_span)),
+            "restore brings outer back"
+        );
 
         restore(root_parent);
         assert_eq!(current(), None, "restore empties back to no current span");

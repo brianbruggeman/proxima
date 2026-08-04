@@ -99,7 +99,10 @@ fn build_xdp_sized() {
 
     let frame_count = xdp_require_u32(
         "umem.frame_count",
-        xdp_require_nonzero("umem.frame_count", xdp_resolve(&table, "umem", "frame_count")),
+        xdp_require_nonzero(
+            "umem.frame_count",
+            xdp_resolve(&table, "umem", "frame_count"),
+        ),
     );
     let frame_size = xdp_require_u32(
         "umem.frame_size",

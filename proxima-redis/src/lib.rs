@@ -44,10 +44,10 @@ pub mod pipes;
 #[cfg(feature = "listen")]
 pub mod wait_sources;
 
+pub use proxima_protocols::redis::pipe_contract::{RedisRequest, verb};
 pub use proxima_protocols::redis::{
     Frame, ParseError, RespValue, encode, encode_command, parse, pipe_contract,
 };
-pub use proxima_protocols::redis::pipe_contract::{RedisRequest, verb};
 
 #[cfg(feature = "client")]
 pub use client::{

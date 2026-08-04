@@ -81,7 +81,6 @@ impl SendPipe for FsUpstream {
     }
 }
 
-
 // reject .. components and absolute paths from the request before
 // joining onto root. canonicalize the result and reject anything
 // that escaped root (symlink-out attack).

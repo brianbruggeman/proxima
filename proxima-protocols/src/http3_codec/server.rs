@@ -20,7 +20,8 @@ use alloc::vec::Vec;
 
 /// Map cap — pulled from `sized.rs` so the build-time TOML drives the
 /// type. heapless requires a power of two.
-const REQUESTS_CAP: usize = crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_SERVER_MAX_CONCURRENT_REQUESTS;
+const REQUESTS_CAP: usize =
+    crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_SERVER_MAX_CONCURRENT_REQUESTS;
 type RequestMap = heapless::index_map::FnvIndexMap<u64, RequestEntry, REQUESTS_CAP>;
 
 use crate::http3_codec::frame::{self, H3Frame};
@@ -206,8 +207,9 @@ impl ServerConnection {
     #[cfg(feature = "http3_codec-part-source")]
     pub fn enable_header_source_mode(&mut self) {
         self.request_header_mode = RequestHeaderMode::Source;
-        self.header_source_queue
-            .size_scratch(crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN);
+        self.header_source_queue.size_scratch(
+            crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN,
+        );
     }
 
     /// Drain one queued request-HEADERS field section as a borrowed

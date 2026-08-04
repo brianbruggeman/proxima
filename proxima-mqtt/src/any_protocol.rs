@@ -133,12 +133,18 @@ impl AnyProtocol for MqttAnyProtocol {
         let rem_len_bytes = match decode_remaining_length(&prefix[1..]) {
             Ok((_, used)) => used,
             Err(ParseError::RemainingLengthOverflow) => return ProbeVerdict::No,
-            Err(_) => return ProbeVerdict::NeedMore { at_least: prefix.len() + 1 },
+            Err(_) => {
+                return ProbeVerdict::NeedMore {
+                    at_least: prefix.len() + 1,
+                };
+            }
         };
         let header_len = 1 + rem_len_bytes;
         let name_field_end = header_len + 2;
         if prefix.len() < name_field_end {
-            return ProbeVerdict::NeedMore { at_least: name_field_end };
+            return ProbeVerdict::NeedMore {
+                at_least: name_field_end,
+            };
         }
         let name_len = u16::from_be_bytes([prefix[header_len], prefix[header_len + 1]]) as usize;
         let name_end = name_field_end + name_len;
@@ -161,13 +167,10 @@ impl AnyProtocol for MqttAnyProtocol {
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
         Box::pin(async move {
             let config = resolve_config(&self.config, spec)?;
-            let connection_pipe = MqttConnectionPipe::new(
-                self.label.clone(),
-                self.handler.clone(),
-                Arc::new(config),
-            )
-            .with_broker(Arc::clone(&self.broker))
-            .with_admission(admission.clone());
+            let connection_pipe =
+                MqttConnectionPipe::new(self.label.clone(), self.handler.clone(), Arc::new(config))
+                    .with_broker(Arc::clone(&self.broker))
+                    .with_admission(admission.clone());
             let pipe = alloc_tier::into_handle(connection_pipe);
             proxima_listen::serve_pipe::handle_connection(stream, pipe).await
         })
@@ -192,7 +195,10 @@ mod tests {
         async fn call(&self, _request: Self::In) -> Result<Self::Out, ProximaError> {
             Ok(Response::typed(
                 200,
-                MqttReply::ConnAck { session_present: false, return_code: 0 },
+                MqttReply::ConnAck {
+                    session_present: false,
+                    return_code: 0,
+                },
             ))
         }
     }

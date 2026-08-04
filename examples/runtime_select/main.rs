@@ -27,8 +27,8 @@ use bytes::Bytes;
 use proxima::prime::PrimeRuntime;
 use proxima::shutdown::ShutdownBarrier;
 use proxima::{
-    App, ListenerSpec, PipeHandle, ProximaError, Request, Response, Runtime,
-    TokioPerCoreRuntime, into_handle,
+    App, ListenerSpec, PipeHandle, ProximaError, Request, Response, Runtime, TokioPerCoreRuntime,
+    into_handle,
 };
 use proxima_primitives::stream::AcceptorFactory;
 
@@ -43,7 +43,6 @@ const TOKIO_BIND: &str = "127.0.0.1:8084";
 async fn select_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
     Ok(Response::ok("hello from whichever runtime is listening\n"))
 }
-
 
 // `#[proxima::main(cores = 1)]` supplies the one throwaway core
 // `App::builder()` needs before each pass's `.with_runtime(...)` overrides

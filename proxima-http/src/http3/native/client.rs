@@ -6,11 +6,11 @@ use std::task::{Context, Poll};
 use proxima_protocols::http3_codec::client::{ClientConnection, ClientState, H3ClientEvent};
 use proxima_protocols::http3_codec::server::StreamId;
 use proxima_protocols::http3_codec::settings::Settings;
-use proxima_quic::native::{Endpoint, EndpointError};
 use proxima_protocols::quic::connection::{ConnectionError, ConnectionState, TimerOutcome};
 use proxima_protocols::quic::streams::StreamDirection;
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::TlsProvider;
+use proxima_quic::native::{Endpoint, EndpointError};
 
 use super::config::ClientConfig;
 use super::driver::{DriverState, drive_client_step};

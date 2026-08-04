@@ -87,7 +87,6 @@ impl SendPipe for ProximaStreamingPipe {
     }
 }
 
-
 async fn hyper_handler(
     _request: hyper::Request<hyper::body::Incoming>,
 ) -> Result<

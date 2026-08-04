@@ -125,7 +125,6 @@ impl SendPipe for ConnectProxy {
     }
 }
 
-
 /// 101 Switching Protocols Pipe. Responds with a single 101 +
 /// Upgrade: line-protocol, then runs a tiny line-counting protocol
 /// over the hijacked socket: for every line of input, write back
@@ -189,7 +188,6 @@ impl SendPipe for LineProtocolUpgrade {
         }
     }
 }
-
 
 async fn boot_listener(handle: proxima::PipeHandle) -> (SocketAddr, proxima::Shutdown) {
     let mut app = App::new().expect("app");

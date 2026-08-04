@@ -80,7 +80,10 @@ async fn main() -> Result<(), ProximaError> {
         .build()?;
     let response = client.call("GET", "/").send().await?;
     assert_eq!(response.status(), 200);
-    println!("§1: .http().tcp() listener + .http(url).tcp() client -> {}", response.status());
+    println!(
+        "§1: .http().tcp() listener + .http(url).tcp() client -> {}",
+        response.status()
+    );
     server_1.stop();
 
     // ── §2: `.http().tcp().tls(cfg)` composes — TLS as a decorator ──────────
@@ -92,7 +95,10 @@ async fn main() -> Result<(), ProximaError> {
         .handle(into_handle(FixedOk))
         .serve()
         .await?;
-    assert!(tcp_connect_succeeds(bind_2), "§2 TLS-wrapped listener never came up");
+    assert!(
+        tcp_connect_succeeds(bind_2),
+        "§2 TLS-wrapped listener never came up"
+    );
     println!(
         "§2: .http().tcp().tls(cfg) serves on {bind_2} — TLS terminates as a decorator over \
          the SAME h1+h2 combiner, not a spec key (see tests/e2e/listener_client_interop.rs for \
@@ -178,7 +184,10 @@ async fn dns_axis() -> Result<(), ProximaError> {
         .dns(stub_handle())
         .serve()
         .await?;
-    assert!(tcp_connect_succeeds(bind), ".dns(handler) must accept a raw TCP connect");
+    assert!(
+        tcp_connect_succeeds(bind),
+        ".dns(handler) must accept a raw TCP connect"
+    );
 
     let mut query = Vec::new();
     proxima_dns::encode_query(
@@ -259,7 +268,10 @@ async fn kafka_axis() -> Result<(), ProximaError> {
         .kafka(stub_handle())
         .serve()
         .await?;
-    assert!(tcp_connect_succeeds(bind_ok), ".kafka(handler).tcp() must serve");
+    assert!(
+        tcp_connect_succeeds(bind_ok),
+        ".kafka(handler).tcp() must serve"
+    );
     println!("§5: .kafka(handler).tcp() serves on {bind_ok}");
     server_ok.stop();
 

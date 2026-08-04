@@ -39,13 +39,13 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use proxima::SendPipe;
 use proxima::error::ProximaError;
 use proxima::listen::admission::ConnAdmission;
 use proxima::pipe::into_handle;
 use proxima::prelude::*;
 use proxima::request::{Request, Response};
 use proxima::stream::{PeerInfo, StreamConnection};
-use proxima::SendPipe;
 
 /// The literal a real `MINI/1.0` client would open a connection with — a
 /// fixed positive-match prefix, the same shape `DenySignature`'s own probe

@@ -78,7 +78,6 @@ impl SendPipe for EightBytePipe {
     }
 }
 
-
 /// Minimal blocking h2 client. Returns the response body bytes for a
 /// single `GET /` request on stream 1, or `Err` on timeout / protocol
 /// error. The total 5s deadline is enforced via the socket's read
@@ -198,8 +197,7 @@ fn start_prime_server() -> SocketAddr {
                                 let admission =
                                     proxima_listen::admission::ConnAdmission::unbounded();
                                 let _ =
-                                    serve_h2_connection(socket, dispatch, admission, None)
-                                        .await;
+                                    serve_h2_connection(socket, dispatch, admission, None).await;
                             },
                         ));
                     }
@@ -233,13 +231,8 @@ fn start_tokio_server() -> SocketAddr {
                         let dispatch = dispatch.clone();
                         tokio::task::spawn_local(async move {
                             let admission = proxima_listen::admission::ConnAdmission::unbounded();
-                            let _ = serve_h2_connection(
-                                socket.compat(),
-                                dispatch,
-                                admission,
-                                None,
-                            )
-                            .await;
+                            let _ = serve_h2_connection(socket.compat(), dispatch, admission, None)
+                                .await;
                         });
                     }
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>

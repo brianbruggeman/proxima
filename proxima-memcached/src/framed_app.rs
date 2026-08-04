@@ -17,7 +17,9 @@ use proxima_core::ProximaError;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
 
-use proxima_protocols::memcached::frame_codec::{MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, Violation};
+use proxima_protocols::memcached::frame_codec::{
+    MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, Violation,
+};
 use proxima_protocols::memcached::{MemcachedRequest, Reply};
 
 use crate::pipes::MemcachedPipeHandle;
@@ -65,7 +67,9 @@ impl AsFrame<MemcachedCodec> for MemcachedOutcome {
 pub enum MemcachedAppError {
     #[error("handler pipe: {0}")]
     Handler(#[from] ProximaError),
-    #[error("codec reported it needed more bytes after FrameCodecPipe should have collapsed that to Ok(None)")]
+    #[error(
+        "codec reported it needed more bytes after FrameCodecPipe should have collapsed that to Ok(None)"
+    )]
     UnexpectedIncomplete,
 }
 
@@ -98,7 +102,10 @@ impl SendPipe for MemcachedFramedApp {
     type Out = MemcachedOutcome;
     type Err = MemcachedAppError;
 
-    async fn call(&self, input: MemcachedOwnedFrame) -> Result<MemcachedOutcome, MemcachedAppError> {
+    async fn call(
+        &self,
+        input: MemcachedOwnedFrame,
+    ) -> Result<MemcachedOutcome, MemcachedAppError> {
         match input {
             MemcachedOwnedFrame::Violation(Violation::Protocol) => {
                 tracing::error!("memcached protocol violation");
@@ -110,7 +117,9 @@ impl SendPipe for MemcachedFramedApp {
                     format!("message exceeds {limit} byte limit").into_bytes(),
                 )))
             }
-            MemcachedOwnedFrame::Request(MemcachedRequest::Quit) => Ok(MemcachedOutcome::CloseSilent),
+            MemcachedOwnedFrame::Request(MemcachedRequest::Quit) => {
+                Ok(MemcachedOutcome::CloseSilent)
+            }
             MemcachedOwnedFrame::Request(request) => Ok(dispatch(&self.handler, request).await),
         }
     }
@@ -208,12 +217,14 @@ mod tests {
             .expect("call");
         assert_eq!(
             outcome,
-            MemcachedOutcome::Reply(Reply::Values(vec![proxima_protocols::memcached::StoredValue {
-                key: b"k".to_vec(),
-                flags: 0,
-                data: b"stub-value".to_vec(),
-                cas_unique: None,
-            }]))
+            MemcachedOutcome::Reply(Reply::Values(vec![
+                proxima_protocols::memcached::StoredValue {
+                    key: b"k".to_vec(),
+                    flags: 0,
+                    data: b"stub-value".to_vec(),
+                    cas_unique: None,
+                }
+            ]))
         );
     }
 
@@ -280,7 +291,9 @@ mod tests {
         assert!(outcome.keep_serving());
         match outcome {
             MemcachedOutcome::Reply(Reply::ServerError(message)) => {
-                assert!(String::from_utf8_lossy(&message).starts_with("server is shedding requests"));
+                assert!(
+                    String::from_utf8_lossy(&message).starts_with("server is shedding requests")
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }

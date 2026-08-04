@@ -254,7 +254,6 @@ impl SendPipe for ForkedPipe {
     }
 }
 
-
 fn fork_via_server(
     server: &ForkServerInner,
     name: &str,

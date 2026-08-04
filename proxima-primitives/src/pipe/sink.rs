@@ -16,8 +16,8 @@
 use alloc::sync::Arc;
 use core::ops::Deref;
 
-use proxima_core::ring::FailMode;
 use crate::pipe::sink_front::HeapSinkFront as Engine;
+use proxima_core::ring::FailMode;
 
 pub use crate::pipe::sink_front::{Admission, DropReason, SinkCounters, SinkLifecycle};
 

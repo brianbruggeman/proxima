@@ -63,16 +63,18 @@ pub mod framed_app;
 #[cfg(feature = "listen")]
 pub mod udp_any_protocol;
 
-pub use proxima_protocols::dns::{
-    Flags, Header, Name, ParseError, Question, RData, Record, parse_header, parse_name,
-    parse_question, parse_record,
-};
 pub use proxima_protocols::dns::encode::{
     AnswerRecord, EncodeError, EncodeQuestion, encode_name, encode_query, encode_response,
     ipv4_rdata, ipv6_rdata,
 };
+pub use proxima_protocols::dns::{
+    Flags, Header, Name, ParseError, Question, RData, Record, parse_header, parse_name,
+    parse_question, parse_record,
+};
 
-pub use proxima_protocols::dns::codec_trait::{DnsDatagramCodec, Message, QuestionIter, RecordIter, parse_message};
+pub use proxima_protocols::dns::codec_trait::{
+    DnsDatagramCodec, Message, QuestionIter, RecordIter, parse_message,
+};
 
 #[cfg(feature = "client")]
 pub use client::{DnsClientUpstream, DnsConfigError, DnsResolverConfig};
@@ -80,7 +82,10 @@ pub use client::{DnsClientUpstream, DnsConfigError, DnsResolverConfig};
 #[cfg(any(feature = "client", feature = "listen"))]
 pub use error::DnsClientError;
 #[cfg(any(feature = "client", feature = "listen"))]
-pub use pipes::{DnsAnswer, DnsAnswerRecord, DnsPipeHandle, DnsPipeReply, DnsPipeRequest, DnsQuery, into_dns_handle};
+pub use pipes::{
+    DnsAnswer, DnsAnswerRecord, DnsPipeHandle, DnsPipeReply, DnsPipeRequest, DnsQuery,
+    into_dns_handle,
+};
 
 // the server-side surface a DNS query handler builds against — re-exported
 // so a caller imports everything from proxima-dns and never reaches past

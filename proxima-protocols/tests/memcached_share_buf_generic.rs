@@ -79,7 +79,12 @@ fn set_command_drives_zero_copy_through_a_caller_supplied_buffer() {
     let owned = MemcachedCodec::<ArcSlice>::own_frame(&wire, &frame);
     match owned {
         MemcachedOwnedFrame::Request(MemcachedRequest::Store {
-            key, flags, exptime, value, noreply, ..
+            key,
+            flags,
+            exptime,
+            value,
+            noreply,
+            ..
         }) => {
             assert_eq!(&*key, b"mykey");
             assert_eq!(flags, 5);

@@ -341,7 +341,12 @@ mod tests {
     fn derived_schema_dumps_openapi() {
         let mut schemas = BTreeMap::new();
         schemas.insert("Note".to_string(), Note::schema());
-        let doc = crate::schema::emit::emit_openapi("example-service", "1.0", &schemas, serde_json::json!({}));
+        let doc = crate::schema::emit::emit_openapi(
+            "example-service",
+            "1.0",
+            &schemas,
+            serde_json::json!({}),
+        );
 
         assert_eq!(doc["openapi"], "3.1.0");
         let note = &doc["components"]["schemas"]["Note"];

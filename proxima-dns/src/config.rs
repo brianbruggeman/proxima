@@ -73,7 +73,10 @@ mod tests {
 
     #[test]
     fn default_matches_builder() {
-        assert_eq!(DnsServerConfig::default(), DnsServerConfig::builder().build());
+        assert_eq!(
+            DnsServerConfig::default(),
+            DnsServerConfig::builder().build()
+        );
     }
 
     #[test]

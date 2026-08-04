@@ -4,7 +4,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use proxima_protocols::pgwire_codec::BackendMessage;
-use proxima_protocols::pgwire_codec::backend::{DataRowWriter, RowDescriptionWriter, parse_backend};
+use proxima_protocols::pgwire_codec::backend::{
+    DataRowWriter, RowDescriptionWriter, parse_backend,
+};
 use proxima_protocols::pgwire_codec::frontend::{parse_frontend, parse_initial};
 use proxima_protocols::pgwire_codec::types::{FormatCode, Oid, TransactionStatus};
 use proxima_protocols::pgwire_codec::views::FieldDescription;

@@ -136,7 +136,10 @@ fn emit_sizing_consts(out_dir: &Path) {
     // buffer's memory. Always emitted; consumed only under the feature.
     let elevation_max_traces = require_usize(
         "elevation.max_traces",
-        require_nonzero("elevation.max_traces", resolve(&root, "elevation", "max_traces")),
+        require_nonzero(
+            "elevation.max_traces",
+            resolve(&root, "elevation", "max_traces"),
+        ),
     );
     let elevation_per_trace_ring = require_usize(
         "elevation.per_trace_ring",

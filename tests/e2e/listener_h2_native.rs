@@ -70,7 +70,12 @@ async fn listener_builder_h2_serves_a_real_native_h2_client() {
     // actually accepting (see `ListenerBuilder::serve`'s readiness-race
     // doc) — bounded retry-connect via the client itself closes that gap,
     // same as `examples/h2_native_server.rs`.
-    let client = H2ClientUpstream::new(PrimeTcpUpstream::new(bind), format!("{bind}"), false, "h2-native-e2e");
+    let client = H2ClientUpstream::new(
+        PrimeTcpUpstream::new(bind),
+        format!("{bind}"),
+        false,
+        "h2-native-e2e",
+    );
     let mut attempts_left = 200;
     let response = loop {
         let request = Request::builder()

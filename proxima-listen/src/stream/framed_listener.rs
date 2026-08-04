@@ -24,18 +24,18 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use crate::{ListenProtocol, ServeContext};
 use proxima_codec::{FrameCodec, FrameError, FrameLimits, LengthDelimitedCodec};
 use proxima_core::ProximaError;
-use crate::{ListenProtocol, ServeContext};
 use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext};
+use proxima_primitives::stream::StreamConnection;
 #[cfg(feature = "tokio")]
 use proxima_primitives::stream::StreamListenerExt;
-use proxima_primitives::stream::StreamConnection;
 
 const DEFAULT_METHOD: &str = "FRAME";
 const DEFAULT_PATH: &str = "/";
@@ -55,7 +55,8 @@ const DEFAULT_READ_CHUNK: usize = 64 * 1024;
 /// here): the listener never names the accepted connection's concrete type,
 /// tokio's or any other backend's, and a caller can install the same
 /// transform whichever `AcceptorFactory` bound the listener.
-pub type ConnTransform = Arc<dyn Fn(Box<dyn StreamConnection>) -> Box<dyn StreamConnection> + Send + Sync>;
+pub type ConnTransform =
+    Arc<dyn Fn(Box<dyn StreamConnection>) -> Box<dyn StreamConnection> + Send + Sync>;
 
 pub struct FramedListenProtocol {
     label: String,
@@ -161,8 +162,8 @@ impl ListenProtocol for FramedListenProtocol {
 
         Box::pin(async move {
             let listener = if use_reuseport {
-                let tokio_listener = crate::handle::bind_reuseport_listener(bind)
-                    .map_err(|err| {
+                let tokio_listener =
+                    crate::handle::bind_reuseport_listener(bind).map_err(|err| {
                         ProximaError::Io(io::Error::other(format!(
                             "{label} reuseport bind {bind}: {err}"
                         )))
@@ -406,7 +407,6 @@ mod tests {
             }
         }
     }
-
 
     async fn send_frame(stream: &mut tokio::net::TcpStream, payload: &[u8]) {
         let len = u32::try_from(payload.len()).unwrap();

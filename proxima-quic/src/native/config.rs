@@ -206,7 +206,9 @@ impl ClientConfig {
             // advertise the size we actually buffer for (RFC 9000 §18.2). The
             // peer MUST NOT send a larger datagram; sized from the same const
             // as the recv buffers so the two can never drift and truncate.
-            max_udp_payload_size: Some(proxima_protocols::quic::endpoint::MAX_UDP_PAYLOAD_SIZE as u64),
+            max_udp_payload_size: Some(
+                proxima_protocols::quic::endpoint::MAX_UDP_PAYLOAD_SIZE as u64,
+            ),
             initial_max_path_id: if self.initial_max_path_id > 0 {
                 Some(self.initial_max_path_id)
             } else {
@@ -241,7 +243,9 @@ impl ServerConfig {
             // advertise the size we actually buffer for (RFC 9000 §18.2). The
             // peer MUST NOT send a larger datagram; sized from the same const
             // as the recv buffers so the two can never drift and truncate.
-            max_udp_payload_size: Some(proxima_protocols::quic::endpoint::MAX_UDP_PAYLOAD_SIZE as u64),
+            max_udp_payload_size: Some(
+                proxima_protocols::quic::endpoint::MAX_UDP_PAYLOAD_SIZE as u64,
+            ),
             initial_max_path_id: if self.initial_max_path_id > 0 {
                 Some(self.initial_max_path_id)
             } else {

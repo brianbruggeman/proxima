@@ -136,7 +136,6 @@ impl ManualClock {
 mod tests {
     use super::*;
 
-
     #[test]
     fn ack_delay_exponent_rejects_above_20() {
         assert!(matches!(

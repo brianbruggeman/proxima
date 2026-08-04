@@ -172,7 +172,9 @@ mod tests {
     use proxima_primitives::pipe::header_list::HeaderList;
     use proxima_primitives::pipe::request::{Request, RequestContext};
 
-    use crate::alert::event::{AlertId, KindString, LabelKey, LabelMap, LabelValue, Payload, Severity};
+    use crate::alert::event::{
+        AlertId, KindString, LabelKey, LabelMap, LabelValue, Payload, Severity,
+    };
 
     use super::*;
 

@@ -329,8 +329,7 @@ mod tests {
 
     #[test]
     fn parses_gets_hit_with_cas_unique() {
-        let (reply, _) =
-            parse_reply(b"VALUE k 0 3 77\r\nabc\r\nEND\r\n", ReplyHint::Get).unwrap();
+        let (reply, _) = parse_reply(b"VALUE k 0 3 77\r\nabc\r\nEND\r\n", ReplyHint::Get).unwrap();
         match reply {
             Reply::Values(values) => {
                 assert_eq!(values.len(), 1);
@@ -365,8 +364,11 @@ mod tests {
 
     #[test]
     fn parses_stats_rows() {
-        let (reply, _) =
-            parse_reply(b"STAT pid 123\r\nSTAT uptime 45\r\nEND\r\n", ReplyHint::Stats).unwrap();
+        let (reply, _) = parse_reply(
+            b"STAT pid 123\r\nSTAT uptime 45\r\nEND\r\n",
+            ReplyHint::Stats,
+        )
+        .unwrap();
         assert_eq!(
             reply,
             Reply::Stats(vec![

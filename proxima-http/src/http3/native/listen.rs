@@ -89,7 +89,9 @@ use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::stream::DatagramSocketBatchExt;
-use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, StreamId as H3StreamId};
+use proxima_protocols::http3_codec::server::{
+    H3ServerEvent, ServerConnection, StreamId as H3StreamId,
+};
 use proxima_protocols::http3_codec::settings::Settings;
 use proxima_protocols::quic::connection::{Connection, ConnectionState, HandshakeLimits};
 use proxima_protocols::quic::endpoint::ConnectionHandle;
@@ -116,7 +118,9 @@ const QPACK_DECOMPRESSION_FAILED: u64 = 0x0200;
 /// Short, structured close reason for the wire — keeps the close
 /// frame small (RFC 9000 §19.19 caps reason at ~1200 bytes; we
 /// stay well under).
-fn err_reason_for_close(err: &proxima_protocols::quic::connection::ConnectionError) -> &'static [u8] {
+fn err_reason_for_close(
+    err: &proxima_protocols::quic::connection::ConnectionError,
+) -> &'static [u8] {
     match err {
         proxima_protocols::quic::connection::ConnectionError::ProtocolViolation { reason } => {
             reason.as_bytes()
@@ -153,7 +157,11 @@ fn close_with_h3_code(
     } else {
         H3_GENERAL_PROTOCOL_ERROR
     };
-    warn!(?err, handle = handle_id, "h3-native connection-level error; closing with H3 code");
+    warn!(
+        ?err,
+        handle = handle_id,
+        "h3-native connection-level error; closing with H3 code"
+    );
     let _ = connection.close(h3_code, reason);
 }
 
@@ -256,25 +264,28 @@ where
             // here now — see the module doc for the composition shape.
             let accept_fn: AcceptFn<RustlsServerProvider> = {
                 let server_config = server_config.clone();
-                Arc::new(move |dcid: &[u8], scid: &[u8], local_scid: &[u8], now: ProtoInstant| {
-                    // RFC 9000 §18.2 — server transport parameters MUST include
-                    // the client's original DCID and our chosen SCID; clients
-                    // reject a server flight that omits them.
-                    let server_tp = encode_server_transport_parameters(dcid, local_scid);
-                    Connection::<RustlsServerProvider>::new_server_with_limits(
-                        RustlsConfig::Server {
-                            config: server_config.clone(),
-                        },
-                        &server_tp,
-                        dcid,
-                        scid,
-                        local_scid,
-                        now,
-                        handshake_limits,
-                    )
-                })
+                Arc::new(
+                    move |dcid: &[u8], scid: &[u8], local_scid: &[u8], now: ProtoInstant| {
+                        // RFC 9000 §18.2 — server transport parameters MUST include
+                        // the client's original DCID and our chosen SCID; clients
+                        // reject a server flight that omits them.
+                        let server_tp = encode_server_transport_parameters(dcid, local_scid);
+                        Connection::<RustlsServerProvider>::new_server_with_limits(
+                            RustlsConfig::Server {
+                                config: server_config.clone(),
+                            },
+                            &server_tp,
+                            dcid,
+                            scid,
+                            local_scid,
+                            now,
+                            handshake_limits,
+                        )
+                    },
+                )
             };
-            let (accept_tx, mut accept_rx) = futures::channel::mpsc::unbounded::<ConnectionHandle>();
+            let (accept_tx, mut accept_rx) =
+                futures::channel::mpsc::unbounded::<ConnectionHandle>();
             let mut listener = Listener::<RustlsServerProvider>::new(accept_fn, accept_tx);
             // H3-level bookkeeping, keyed by the SAME `ConnectionHandle.0`
             // the listener hands out — the shared-key join between the
@@ -415,8 +426,12 @@ where
                         // already happened there for the unambiguous RFC
                         // 9000 cases; an H3-level violation is still OPEN
                         // for THIS layer to close with its own code).
-                        match listener.ingest_datagram(to_proto_instant(now), view.peer, view.bytes) {
-                            Ok(DatagramIngest::Existing { handle, error } | DatagramIngest::Accepted { handle, error }) => {
+                        match listener.ingest_datagram(to_proto_instant(now), view.peer, view.bytes)
+                        {
+                            Ok(
+                                DatagramIngest::Existing { handle, error }
+                                | DatagramIngest::Accepted { handle, error },
+                            ) => {
                                 dirty.insert(handle.0);
                                 if let Some(err) = error
                                     && let Some(connection) = listener.connection_mut(handle)
@@ -450,7 +465,14 @@ where
                 // below with any handle whose dispatched response was just
                 // applied. Targeted, not a full-table scan of every live
                 // connection every tick.
-                drive_dirty_connections(&mut listener, &mut h3_state, &dirty, &dispatch, &response_tx, &mut in_flight);
+                drive_dirty_connections(
+                    &mut listener,
+                    &mut h3_state,
+                    &dirty,
+                    &dispatch,
+                    &response_tx,
+                    &mut in_flight,
+                );
 
                 // 2b) Drive ready response handlers to completion NOW so their
                 // responses emit in THIS iteration instead of trickling across
@@ -514,7 +536,8 @@ where
                 loop {
                     match listener.transmit(now, &mut transmit_scratch).await {
                         Ok(Some((len, peer))) => {
-                            if let Err(err) = batch.send.try_append(&transmit_scratch[..len], peer) {
+                            if let Err(err) = batch.send.try_append(&transmit_scratch[..len], peer)
+                            {
                                 // alloc tier grows; this fires only on u32 arena overflow.
                                 // The dropped datagram is recovered by QUIC loss recovery.
                                 warn!(?err, %peer, "h3-native send-batch append dropped datagram");
@@ -609,10 +632,20 @@ fn drive_dirty_connections(
             close_with_h3_code(connection, handle_id, &err);
             continue;
         }
-        if let Err(err) = process_h3_events(ConnectionHandle(handle_id), driver, dispatch, response_tx, in_flight) {
+        if let Err(err) = process_h3_events(
+            ConnectionHandle(handle_id),
+            driver,
+            dispatch,
+            response_tx,
+            in_flight,
+        ) {
             #[cfg(feature = "http3-part-source")]
             {
-                warn!(?err, handle = handle_id, "h3-native request header decode failed; closing connection");
+                warn!(
+                    ?err,
+                    handle = handle_id,
+                    "h3-native request header decode failed; closing connection"
+                );
                 let _ = connection.close(QPACK_DECOMPRESSION_FAILED, b"qpack decode failed");
             }
             #[cfg(not(feature = "http3-part-source"))]
@@ -979,7 +1012,9 @@ fn encode_server_transport_parameters(original_dcid: &[u8], local_scid: &[u8]) -
         initial_max_streams_bidi: Some(
             proxima_protocols::quic::sized::STREAMS_MAX_CONCURRENT_BIDI as u64,
         ),
-        initial_max_streams_uni: Some(proxima_protocols::quic::sized::STREAMS_MAX_CONCURRENT_UNI as u64),
+        initial_max_streams_uni: Some(
+            proxima_protocols::quic::sized::STREAMS_MAX_CONCURRENT_UNI as u64,
+        ),
         ..Default::default()
     }
     .encode(&mut buf)

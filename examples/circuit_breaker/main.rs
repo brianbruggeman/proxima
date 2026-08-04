@@ -41,9 +41,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use proxima_primitives::pipe::{CircuitBreaker, CircuitState, Pipe};
 
 fn main() {
-    println!(
-        "circuit breaker: closed -> open (short-circuit) -> half-open (probe) -> closed"
-    );
+    println!("circuit breaker: closed -> open (short-circuit) -> half-open (probe) -> closed");
     run_circuit_breaker();
 }
 

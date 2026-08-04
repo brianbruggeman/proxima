@@ -85,7 +85,11 @@ impl Pipe for SummarizeQuery {
 
 fn framed(message: &[u8]) -> Bytes {
     let mut framed = Vec::with_capacity(2 + message.len());
-    framed.extend_from_slice(&u16::try_from(message.len()).expect("fits u16").to_be_bytes());
+    framed.extend_from_slice(
+        &u16::try_from(message.len())
+            .expect("fits u16")
+            .to_be_bytes(),
+    );
     framed.extend_from_slice(message);
     Bytes::from(framed)
 }

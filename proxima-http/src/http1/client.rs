@@ -119,25 +119,25 @@ use bon::Builder;
 use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
-use serde::{Deserialize, Serialize};
 use proxima_primitives::sync::Mutex;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use proxima_core::ProximaError;
+use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::body::ResponseStream;
+use proxima_primitives::pipe::primitives::Pipe;
+use proxima_primitives::pipe::request::{Request, Response};
+use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
 use proxima_protocols::http1_codec::h1_body::{BodyDecoder, Status as BodyStatus};
 use proxima_protocols::http1_codec::h1_client::{
     ResponseStatus, encode_request_head, framing_from_response, parse_response_head,
 };
-use proxima_primitives::pipe::body::ResponseStream;
-use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::primitives::Pipe;
-use proxima_primitives::pipe::request::{Request, Response};
-use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};
 
+use crate::http1::http_config::HttpUpstreamConfig;
 pub use crate::http1::response_config::{
     ResponseBodyMode, ResponseHandling, ResponseHandlingConfig, ResponseHeaderMode,
 };
-use crate::http1::http_config::HttpUpstreamConfig;
 use crate::templates::{TemplateContext, expand};
 
 /// Read chunk size for draining the response off the connection. 16 KiB
@@ -691,7 +691,14 @@ async fn read_head<C: StreamConnection>(
 async fn read_head_status<C: StreamConnection>(
     conn: &mut C,
     read_buf: &mut Vec<u8>,
-) -> Result<(u16, proxima_protocols::http1_codec::h1_body::BodyFraming, usize), ProximaError> {
+) -> Result<
+    (
+        u16,
+        proxima_protocols::http1_codec::h1_body::BodyFraming,
+        usize,
+    ),
+    ProximaError,
+> {
     read_buf.clear();
     let mut scratch = [0_u8; READ_CHUNK_BYTES];
     loop {
@@ -952,7 +959,6 @@ impl<U: StreamUpstream> SendPipe for H1ClientUpstream<U> {
     }
 }
 
-
 impl<U: StreamUpstream> H1ClientUpstream<U> {
     /// Drive one request over the cached connection up to the response
     /// head, then return a `Response` whose body streams lazily off the
@@ -1186,7 +1192,14 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     async fn write_raw_read_status(
         guard: &mut ConnState<U::Conn>,
         request_bytes: &[u8],
-    ) -> Result<(u16, proxima_protocols::http1_codec::h1_body::BodyFraming, usize), ProximaError> {
+    ) -> Result<
+        (
+            u16,
+            proxima_protocols::http1_codec::h1_body::BodyFraming,
+            usize,
+        ),
+        ProximaError,
+    > {
         let ConnState { conn, read_buf, .. } = guard;
         let conn = conn
             .as_mut()

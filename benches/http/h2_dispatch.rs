@@ -65,7 +65,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 struct EchoBody;
 
 impl SendPipe for EchoBody {
@@ -83,7 +82,6 @@ impl SendPipe for EchoBody {
         }
     }
 }
-
 
 /// Boot a loopback h2 server. Returns the bound addr + a handle to
 /// keep the accept-loop alive while the bench runs.

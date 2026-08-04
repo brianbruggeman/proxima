@@ -493,7 +493,11 @@ mod tests {
                 Coord::parse("9.2.4").unwrap(),
                 Decision::Keep,
             ),
-            ("downstream::store", Coord::from(Level::INFO), Decision::Drop),
+            (
+                "downstream::store",
+                Coord::from(Level::INFO),
+                Decision::Drop,
+            ),
         ] {
             assert_eq!(compiled.decide(target, coord), want);
             assert_eq!(recompiled.decide(target, coord), want);
@@ -594,7 +598,10 @@ verbose = "9.2"
         let cfg = EmitConfig::layered().from_path(&path).unwrap().build();
         assert_eq!(cfg.targets.len(), 2);
         assert_eq!(cfg.targets["proxima::h2"].level, "debug");
-        assert_eq!(cfg.targets["downstream::store"].verbose.as_deref(), Some("9.2"));
+        assert_eq!(
+            cfg.targets["downstream::store"].verbose.as_deref(),
+            Some("9.2")
+        );
     }
 
     // the exact seam-#3 case: a file sets TWO scalar fields, env sets only

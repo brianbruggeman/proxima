@@ -35,7 +35,12 @@ fn push_string(bytes: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(bytes);
 }
 
-fn push_fixed_header(packet_type: PacketType, flags: u8, remaining_length: usize, out: &mut Vec<u8>) {
+fn push_fixed_header(
+    packet_type: PacketType,
+    flags: u8,
+    remaining_length: usize,
+    out: &mut Vec<u8>,
+) {
     out.push(((packet_type as u8) << 4) | flags);
     encode_remaining_length(remaining_length as u32, out);
 }
@@ -253,7 +258,10 @@ mod tests {
         let (packet, used) = parse_packet(&out).unwrap();
         assert_eq!(used, out.len());
         match packet {
-            Packet::ConnAck { session_present, return_code } => {
+            Packet::ConnAck {
+                session_present,
+                return_code,
+            } => {
                 assert!(session_present);
                 assert_eq!(return_code, 0);
             }
@@ -268,7 +276,12 @@ mod tests {
         let (packet, used) = parse_packet(&out).unwrap();
         assert_eq!(used, out.len());
         match packet {
-            Packet::Publish { flags, topic, packet_id, payload } => {
+            Packet::Publish {
+                flags,
+                topic,
+                packet_id,
+                payload,
+            } => {
                 assert_eq!(flags.qos, 1);
                 assert!(flags.retain);
                 assert!(!flags.dup);
@@ -286,7 +299,10 @@ mod tests {
         encode_ack(PacketType::PubAck, 42, &mut out);
         let (packet, _) = parse_packet(&out).unwrap();
         match packet {
-            Packet::Ack { packet_type, packet_id } => {
+            Packet::Ack {
+                packet_type,
+                packet_id,
+            } => {
                 assert_eq!(packet_type, PacketType::PubAck);
                 assert_eq!(packet_id, 42);
             }
@@ -300,7 +316,10 @@ mod tests {
         encode_suback(9, &[0, 1, 0x80], &mut out);
         let (packet, _) = parse_packet(&out).unwrap();
         match packet {
-            Packet::SubAck { packet_id, return_codes } => {
+            Packet::SubAck {
+                packet_id,
+                return_codes,
+            } => {
                 assert_eq!(packet_id, 9);
                 assert_eq!(return_codes, &[0, 1, 0x80]);
             }
@@ -320,11 +339,24 @@ mod tests {
     #[test]
     fn connect_round_trips_through_parse() {
         let mut out = Vec::new();
-        encode_connect(b"client-1", true, 30, Some(b"alice"), Some(b"hunter2"), &mut out);
+        encode_connect(
+            b"client-1",
+            true,
+            30,
+            Some(b"alice"),
+            Some(b"hunter2"),
+            &mut out,
+        );
         let (packet, used) = parse_packet(&out).unwrap();
         assert_eq!(used, out.len());
         match packet {
-            Packet::Connect { protocol_name, protocol_level, client_id, keep_alive, .. } => {
+            Packet::Connect {
+                protocol_name,
+                protocol_level,
+                client_id,
+                keep_alive,
+                ..
+            } => {
                 assert_eq!(protocol_name, b"MQTT");
                 assert_eq!(protocol_level, 4);
                 assert_eq!(client_id, b"client-1");
@@ -339,12 +371,19 @@ mod tests {
         let mut out = Vec::new();
         encode_subscribe(3, &[(b"a/+", 0), (b"b/#", 1)], &mut out);
         let (packet, _) = parse_packet(&out).unwrap();
-        let Packet::Subscribe { packet_id, topic_filters } = packet else {
+        let Packet::Subscribe {
+            packet_id,
+            topic_filters,
+        } = packet
+        else {
             panic!("expected Subscribe");
         };
         assert_eq!(packet_id, 3);
         let filters: Vec<(&[u8], u8)> = iter_subscribe_filters(topic_filters).collect();
-        assert_eq!(filters, vec![(b"a/+".as_slice(), 0), (b"b/#".as_slice(), 1)]);
+        assert_eq!(
+            filters,
+            vec![(b"a/+".as_slice(), 0), (b"b/#".as_slice(), 1)]
+        );
     }
 
     #[test]
@@ -352,7 +391,11 @@ mod tests {
         let mut out = Vec::new();
         encode_unsubscribe(4, &[b"a/+", b"b/#"], &mut out);
         let (packet, _) = parse_packet(&out).unwrap();
-        let Packet::Unsubscribe { packet_id, topic_filters } = packet else {
+        let Packet::Unsubscribe {
+            packet_id,
+            topic_filters,
+        } = packet
+        else {
             panic!("expected Unsubscribe");
         };
         assert_eq!(packet_id, 4);

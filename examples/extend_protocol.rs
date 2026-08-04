@@ -72,9 +72,13 @@ impl AnyProtocol for PingPongProtocol {
             return ProbeVerdict::No;
         }
         if prefix.len() < PING.len() {
-            return ProbeVerdict::NeedMore { at_least: PING.len() };
+            return ProbeVerdict::NeedMore {
+                at_least: PING.len(),
+            };
         }
-        ProbeVerdict::Match { consumed: PING.len() }
+        ProbeVerdict::Match {
+            consumed: PING.len(),
+        }
     }
 
     fn drive<'a>(
@@ -178,7 +182,11 @@ async fn main() -> Result<(), ProximaError> {
     println!(".any().ping_pong(PingPongProtocol) still routes legit h1 traffic on {bind}");
 
     let pong = pingpong_round_trip(bind)?;
-    assert_eq!(&pong[..], PONG, "the externally-registered candidate must drive its own reply");
+    assert_eq!(
+        &pong[..],
+        PONG,
+        "the externally-registered candidate must drive its own reply"
+    );
     println!(
         "a PINGPONG/1 connection on the SAME {bind} is classified and driven by PingPongProtocol's \
          own drive() -> {:?}",

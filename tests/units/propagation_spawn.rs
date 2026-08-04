@@ -201,5 +201,8 @@ fn spanned_future_that_yields_still_emits_exactly_one_record_at_resolution() {
         1,
         "span must finish exactly once, at resolution, not per poll"
     );
-    assert_eq!(records[0].span_id, span_id, "span id must survive the suspend");
+    assert_eq!(
+        records[0].span_id, span_id,
+        "span id must survive the suspend"
+    );
 }

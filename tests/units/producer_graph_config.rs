@@ -142,7 +142,8 @@ impl proxima_primitives::pipe::SourceFactory for TickSourceFactory {
     fn build(
         &self,
         _spec: &serde_json::Value,
-    ) -> Result<proxima_primitives::pipe::SourceHandle, proxima_primitives::pipe::ProximaError> {
+    ) -> Result<proxima_primitives::pipe::SourceHandle, proxima_primitives::pipe::ProximaError>
+    {
         struct TickSource(std::sync::Arc<std::sync::atomic::AtomicUsize>);
         impl proxima_primitives::pipe::SendPipe for TickSource {
             type In = proxima_core::signal::Signal;
@@ -152,8 +153,9 @@ impl proxima_primitives::pipe::SourceFactory for TickSourceFactory {
             fn call(
                 &self,
                 _cancel: proxima_core::signal::Signal,
-            ) -> impl std::future::Future<Output = Result<(), proxima_primitives::pipe::ProximaError>> + Send
-            {
+            ) -> impl std::future::Future<
+                Output = Result<(), proxima_primitives::pipe::ProximaError>,
+            > + Send {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async { Ok(()) }
             }

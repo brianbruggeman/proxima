@@ -190,8 +190,8 @@ fn lossy(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::parse;
+    use super::*;
     use alloc::vec;
 
     #[test]

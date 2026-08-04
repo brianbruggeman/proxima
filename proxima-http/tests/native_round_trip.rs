@@ -233,10 +233,15 @@ fn native_h3_get_round_trip_returns_200_ok() {
         )
         .expect("send_response_headers");
     server_h3
-        .send_response_data(proxima_protocols::http3_codec::server::StreamId(request_id.0), b"ok")
+        .send_response_data(
+            proxima_protocols::http3_codec::server::StreamId(request_id.0),
+            b"ok",
+        )
         .expect("send_response_data");
     server_h3
-        .finish_response(proxima_protocols::http3_codec::server::StreamId(request_id.0))
+        .finish_response(proxima_protocols::http3_codec::server::StreamId(
+            request_id.0,
+        ))
         .expect("finish_response");
 
     let mut response_status: Option<Vec<u8>> = None;
@@ -317,10 +322,15 @@ fn serve_one_get(
         )
         .expect("send_response_headers");
     server_h3
-        .send_response_data(proxima_protocols::http3_codec::server::StreamId(request_id.0), b"ok")
+        .send_response_data(
+            proxima_protocols::http3_codec::server::StreamId(request_id.0),
+            b"ok",
+        )
         .expect("send_response_data");
     server_h3
-        .finish_response(proxima_protocols::http3_codec::server::StreamId(request_id.0))
+        .finish_response(proxima_protocols::http3_codec::server::StreamId(
+            request_id.0,
+        ))
         .expect("finish_response");
 
     let mut saw_response = false;
@@ -537,10 +547,15 @@ fn native_h3_large_body_survives_per_stream_backpressure() {
         )
         .expect("send_response_headers");
     server_h3
-        .send_response_data(proxima_protocols::http3_codec::server::StreamId(request_id.0), &body)
+        .send_response_data(
+            proxima_protocols::http3_codec::server::StreamId(request_id.0),
+            &body,
+        )
         .expect("send_response_data");
     server_h3
-        .finish_response(proxima_protocols::http3_codec::server::StreamId(request_id.0))
+        .finish_response(proxima_protocols::http3_codec::server::StreamId(
+            request_id.0,
+        ))
         .expect("finish_response");
 
     let mut response_body: Vec<u8> = Vec::new();
@@ -674,10 +689,15 @@ fn native_h3_response_body_larger_than_initial_per_stream_credit() {
         )
         .expect("send_response_headers");
     server_h3
-        .send_response_data(proxima_protocols::http3_codec::server::StreamId(request_id.0), &body)
+        .send_response_data(
+            proxima_protocols::http3_codec::server::StreamId(request_id.0),
+            &body,
+        )
         .expect("send_response_data");
     server_h3
-        .finish_response(proxima_protocols::http3_codec::server::StreamId(request_id.0))
+        .finish_response(proxima_protocols::http3_codec::server::StreamId(
+            request_id.0,
+        ))
         .expect("finish_response");
 
     let mut response_body: Vec<u8> = Vec::new();

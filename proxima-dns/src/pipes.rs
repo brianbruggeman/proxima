@@ -91,7 +91,8 @@ pub type DnsPipeRequest = proxima_primitives::pipe::request::Request<DnsQuery>;
 pub type DnsPipeReply = proxima_primitives::pipe::request::Response<DnsAnswer>;
 
 /// Runtime-erased handle for DNS query-handler pipes.
-pub type DnsPipeHandle = proxima_primitives::pipe::alloc_tier::PipeHandle<DnsPipeRequest, DnsPipeReply>;
+pub type DnsPipeHandle =
+    proxima_primitives::pipe::alloc_tier::PipeHandle<DnsPipeRequest, DnsPipeReply>;
 
 /// Wrap any DNS-compatible pipe in a [`DnsPipeHandle`] — the bridge between
 /// a business handler you write (`impl SendPipe<In = DnsPipeRequest, Out =

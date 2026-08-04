@@ -63,7 +63,10 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().kafka("kafka://localhost:9092").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "kafka-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "kafka-client",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     #[must_use]
     fn kafka(self, dsn: impl Into<String>) -> Self;
 
@@ -126,7 +129,10 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().redis("redis://localhost:6379").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "redis-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "redis-client",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     #[must_use]
     fn redis(self, dsn: impl Into<String>) -> Self;
 
@@ -140,7 +146,10 @@ pub trait ClientProtocolExt: Sized {
     /// let client = Client::builder().valkey("redis://localhost:6379").build()?;
     /// # Ok::<(), proxima::ProximaError>(())
     /// ```
-    #[cfg(all(feature = "redis-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "redis-client",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     #[must_use]
     fn valkey(self, dsn: impl Into<String>) -> Self;
 
@@ -173,7 +182,10 @@ impl ClientProtocolExt for ClientBuilder {
         self.set("grpc", url.into())
     }
 
-    #[cfg(all(feature = "kafka-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "kafka-client",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn kafka(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::kafka::KafkaClientProtocol::dsn(dsn))
     }
@@ -198,15 +210,23 @@ impl ClientProtocolExt for ClientBuilder {
         any(target_os = "linux", target_os = "macos")
     ))]
     fn memcached(self, dsn: impl Into<String>) -> Self {
-        self.protocol(crate::upstreams::memcached::MemcachedClientProtocol::dsn(dsn))
+        self.protocol(crate::upstreams::memcached::MemcachedClientProtocol::dsn(
+            dsn,
+        ))
     }
 
-    #[cfg(all(feature = "redis-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "redis-client",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn redis(self, dsn: impl Into<String>) -> Self {
         self.protocol(crate::upstreams::redis::RedisClientProtocol::dsn(dsn))
     }
 
-    #[cfg(all(feature = "redis-client", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "redis-client",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn valkey(self, dsn: impl Into<String>) -> Self {
         self.redis(dsn)
     }

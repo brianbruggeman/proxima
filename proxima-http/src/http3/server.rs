@@ -12,11 +12,11 @@ use futures::stream::FuturesUnordered;
 use http::HeaderName;
 
 use proxima_core::ProximaError;
+use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::endpoint::PeerInfo;
-use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::handler::PipeHandle;
+use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
 use proxima_quic::Connection as QuicConnection;
 

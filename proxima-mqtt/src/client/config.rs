@@ -147,7 +147,11 @@ impl MqttClientConfig {
         };
 
         Ok(Self {
-            host: if host.is_empty() { default_host() } else { host.to_string() },
+            host: if host.is_empty() {
+                default_host()
+            } else {
+                host.to_string()
+            },
             port,
             client_id: String::new(),
             clean_session: true,
@@ -204,7 +208,10 @@ mod tests {
 
     #[test]
     fn default_matches_builder() {
-        assert_eq!(MqttClientConfig::default(), MqttClientConfig::builder().build());
+        assert_eq!(
+            MqttClientConfig::default(),
+            MqttClientConfig::builder().build()
+        );
         let config = MqttClientConfig::default();
         assert_eq!((config.host.as_str(), config.port), ("localhost", 1883));
         assert!(config.clean_session);
@@ -213,7 +220,8 @@ mod tests {
 
     #[test]
     fn dsn_full_round_trips_every_field() {
-        let config = MqttClientConfig::from_dsn("mqtt://alice:s3cr3t@broker.example.com:8883").unwrap();
+        let config =
+            MqttClientConfig::from_dsn("mqtt://alice:s3cr3t@broker.example.com:8883").unwrap();
         assert_eq!(config.username, "alice");
         assert_eq!(config.password, "s3cr3t");
         assert_eq!(config.host, "broker.example.com");
@@ -237,12 +245,18 @@ mod tests {
 
     #[test]
     fn dsn_rejects_foreign_scheme() {
-        assert_eq!(MqttClientConfig::from_dsn("http://host"), Err(MqttConfigError::Scheme));
+        assert_eq!(
+            MqttClientConfig::from_dsn("http://host"),
+            Err(MqttConfigError::Scheme)
+        );
     }
 
     #[test]
     fn dsn_rejects_tls_scheme_rather_than_downgrading() {
-        assert_eq!(MqttClientConfig::from_dsn("mqtts://host:8883"), Err(MqttConfigError::Tls));
+        assert_eq!(
+            MqttClientConfig::from_dsn("mqtts://host:8883"),
+            Err(MqttConfigError::Tls)
+        );
     }
 
     #[test]

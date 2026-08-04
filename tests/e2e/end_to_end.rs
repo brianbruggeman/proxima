@@ -269,7 +269,6 @@ async fn listener_drains_in_flight_request_before_shutdown() {
         }
     }
 
-
     let mut app = App::new().expect("app");
     app.pipe(
         "slow",
@@ -527,7 +526,6 @@ async fn app_update_pipe_swaps_in_new_handle_for_existing_mount() {
         }
     }
 
-
     let mut app = App::new().expect("app");
     app.pipe("svc", Spec::Handle(into_handle(StaticBody("first"))))
         .await
@@ -685,7 +683,6 @@ async fn http_listener_cancels_dispatch_when_client_disconnects_mid_request() {
             }
         }
     }
-
 
     let observed_cancel = Arc::new(AtomicBool::new(false));
     let mut app = App::new().expect("app");

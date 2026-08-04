@@ -52,10 +52,10 @@ pub type PipeFactoryRegistry = proxima_core::FactoryRegistry<dyn PipeFactory>;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::pipe::SendPipe;
     use crate::pipe::handler::into_handle;
     use crate::pipe::request::{Request, Response};
     use bytes::Bytes;
-    use crate::pipe::SendPipe;
 
     struct StubPipe;
 
@@ -103,8 +103,14 @@ mod tests {
             .expect("register");
         let factory = registry.get("test").expect("get");
         let pipe = factory.build(&Value::Null, None).await.expect("build");
-        let request = Request::builder().method("GET").path("/").build().expect("builder");
-        let response = crate::pipe::SendPipe::call(&pipe, request).await.expect("call");
+        let request = Request::builder()
+            .method("GET")
+            .path("/")
+            .build()
+            .expect("builder");
+        let response = crate::pipe::SendPipe::call(&pipe, request)
+            .await
+            .expect("call");
         assert_eq!(response.status, 200);
         assert_eq!(registry.names(), vec!["test".to_string()]);
     }

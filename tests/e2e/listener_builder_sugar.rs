@@ -31,11 +31,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde_json::Value;
 
+use proxima::SendPipe;
 use proxima::error::ProximaError;
 use proxima::pipe::into_handle;
 use proxima::prelude::*;
 use proxima::request::{Request, Response};
-use proxima::SendPipe;
 
 fn free_loopback_addr() -> SocketAddr {
     let probe = StdTcpListener::bind("127.0.0.1:0").expect("probe bind");
@@ -185,7 +185,10 @@ mod kafka_axis {
             Err(err) => err,
         };
         let text = format!("{err}");
-        assert!(text.contains(".kafka") || text.contains("TCP-only"), "got: {text}");
+        assert!(
+            text.contains(".kafka") || text.contains("TCP-only"),
+            "got: {text}"
+        );
     }
 }
 
@@ -273,10 +276,14 @@ mod dns_axis {
         framed.extend_from_slice(&query);
         tcp_conn.write_all(&framed).expect("dns tcp write");
         let mut length_prefix = [0_u8; 2];
-        tcp_conn.read_exact(&mut length_prefix).expect("dns tcp read length");
+        tcp_conn
+            .read_exact(&mut length_prefix)
+            .expect("dns tcp read length");
         let reply_len = u16::from_be_bytes(length_prefix) as usize;
         let mut tcp_reply = vec![0_u8; reply_len];
-        tcp_conn.read_exact(&mut tcp_reply).expect("dns tcp read body");
+        tcp_conn
+            .read_exact(&mut tcp_reply)
+            .expect("dns tcp read body");
         let tcp_message = proxima_dns::parse_message(&tcp_reply).expect("dns tcp reply parses");
         assert_eq!(tcp_message.header.id, 42);
         assert!(tcp_message.header.flags.is_response());
@@ -289,7 +296,8 @@ mod dns_axis {
         udp_socket.send_to(&query, bind).expect("dns udp send");
         let mut udp_buf = [0_u8; 512];
         let (udp_len, _) = udp_socket.recv_from(&mut udp_buf).expect("dns udp reply");
-        let udp_message = proxima_dns::parse_message(&udp_buf[..udp_len]).expect("dns udp reply parses");
+        let udp_message =
+            proxima_dns::parse_message(&udp_buf[..udp_len]).expect("dns udp reply parses");
         assert_eq!(udp_message.header.id, 42);
         assert!(udp_message.header.flags.is_response());
 
@@ -335,7 +343,10 @@ async fn grpc_quic_is_a_named_config_error() {
         Err(err) => err,
     };
     let text = format!("{err}");
-    assert!(text.contains(".grpc") || text.contains("QUIC"), "got: {text}");
+    assert!(
+        text.contains(".grpc") || text.contains("QUIC"),
+        "got: {text}"
+    );
 }
 
 #[cfg(all(
@@ -362,7 +373,10 @@ async fn websocket_quic_is_a_named_config_error() {
         Err(err) => err,
     };
     let text = format!("{err}");
-    assert!(text.contains(".websocket") || text.contains("extended-CONNECT"), "got: {text}");
+    assert!(
+        text.contains(".websocket") || text.contains("extended-CONNECT"),
+        "got: {text}"
+    );
 }
 
 /// THIRD-PARTY-style proof: a local `TestThriftExt` trait, defined right

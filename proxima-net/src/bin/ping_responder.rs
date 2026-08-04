@@ -15,8 +15,8 @@ fn main() {
 
 #[cfg(feature = "dpdk")]
 mod imp {
-    use proxima_net::stack::{self, Action};
     use proxima_net::dpdk::{Eal, Mempool, Port, RawMbuf, port};
+    use proxima_net::stack::{self, Action};
     use std::env;
     use std::process::ExitCode;
     use std::time::{Duration, Instant};

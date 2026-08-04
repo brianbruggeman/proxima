@@ -179,10 +179,9 @@ impl<R: AsyncRead + Unpin> UnpinPipe for RedisConnSource<R> {
 
     fn call(&self, (): ()) -> impl Future<Output = Result<WireEvent, Exhausted>> + Unpin {
         match self {
-            RedisConnSource::Read { read_half, scratch } => RedisConnCall::Read {
-                read_half,
-                scratch,
-            },
+            RedisConnSource::Read { read_half, scratch } => {
+                RedisConnCall::Read { read_half, scratch }
+            }
             RedisConnSource::Push { push_rx } => RedisConnCall::Push { push_rx },
             RedisConnSource::Shutdown { receiver } => RedisConnCall::Shutdown { receiver },
         }
@@ -244,7 +243,10 @@ mod tests {
             other => panic!("expected Read, got {other:?}"),
         }
         let second = block_on(UnpinPipe::call(&source, ())).expect("second poll");
-        assert!(matches!(second, WireEvent::Stop), "EOF must be Stop, not Exhausted (only ONE source dying must not stall the whole wait)");
+        assert!(
+            matches!(second, WireEvent::Stop),
+            "EOF must be Stop, not Exhausted (only ONE source dying must not stall the whole wait)"
+        );
     }
 
     struct FailingReader;
@@ -272,7 +274,8 @@ mod tests {
     #[test]
     fn push_source_yields_a_pushed_item() {
         let (tx, rx) = mpsc::unbounded::<Bytes>();
-        tx.unbounded_send(Bytes::from_static(b"+OK\r\n")).expect("send");
+        tx.unbounded_send(Bytes::from_static(b"+OK\r\n"))
+            .expect("send");
         let source = RedisConnSource::<OnceReader>::push(rx);
         let outcome = block_on(UnpinPipe::call(&source, ())).expect("poll");
         match outcome {

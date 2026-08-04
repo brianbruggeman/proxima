@@ -16,7 +16,9 @@ use std::task::{Context, Poll};
 use arrayvec::ArrayVec;
 use prime::os::net::UdpSocket;
 use proxima_core::datagram_batch::DatagramBatch;
-use proxima_protocols::quic::connection::{Connection, ConnectionError, DatagramWrite, TimerOutcome};
+use proxima_protocols::quic::connection::{
+    Connection, ConnectionError, DatagramWrite, TimerOutcome,
+};
 use proxima_protocols::quic::endpoint::MAX_UDP_PAYLOAD_SIZE;
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::TlsProvider;

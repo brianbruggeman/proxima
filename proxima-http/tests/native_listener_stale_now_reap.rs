@@ -363,7 +363,9 @@ fn accept_after_idle_await_survives_and_serves_not_reaped() {
                         (b":path", b"/"),
                     ])
                     .expect("open_request");
-                client_h3.finish_request(request_id).expect("finish_request");
+                client_h3
+                    .finish_request(request_id)
+                    .expect("finish_request");
                 request_opened = true;
             }
             let _ = drive_client_step(&mut client, &mut client_h3, &mut client_state);

@@ -19,7 +19,9 @@ use alloc::vec::Vec;
 use bytes::Bytes;
 use proxima_codec::FrameCodec;
 
-use crate::http2_codec::frame::{FRAME_HEADER_LEN, FrameHeader, FramePayload, encode_frame, parse_payload};
+use crate::http2_codec::frame::{
+    FRAME_HEADER_LEN, FrameHeader, FramePayload, encode_frame, parse_payload,
+};
 
 /// HTTP/2 frame [`FrameCodec`]. Zero-sized; clone freely.
 #[derive(Debug, Clone, Copy, Default)]

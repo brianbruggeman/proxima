@@ -229,7 +229,11 @@ mod tests {
 
     #[test]
     fn glob_set_matching_finds_every_satisfied_pattern() {
-        let set = GlobSet::from_patterns([b"news.*".to_vec(), b"chat.*".to_vec(), b"news.tech".to_vec()]);
+        let set = GlobSet::from_patterns([
+            b"news.*".to_vec(),
+            b"chat.*".to_vec(),
+            b"news.tech".to_vec(),
+        ]);
         let matched: Vec<&[u8]> = set.matching(b"news.tech").collect();
         assert_eq!(matched.len(), 2, "both news.* and news.tech match");
         assert!(matched.contains(&b"news.*".as_slice()));

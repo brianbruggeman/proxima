@@ -44,7 +44,11 @@ struct Odd;
 
 async fn filter_demo() {
     let reject_odd = filter!(|input: u64| -> Result<u64, Odd> {
-        if input.is_multiple_of(2) { Ok(input) } else { Err(Odd) }
+        if input.is_multiple_of(2) {
+            Ok(input)
+        } else {
+            Err(Odd)
+        }
     });
     let double = pipe!(|input: u64| -> Result<u64, Odd> { Ok(input * 2) });
     let gated = double.filter(reject_odd);
@@ -136,8 +140,10 @@ async fn echo_fn(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaErro
 
 fn mount_shapes_demo() {
     let app = App::new().expect("app");
-    app.mount("/via-pipe", echo).expect("mount a handler-shaped pipe");
-    app.mount("/via-fn", echo_fn).expect("mount a bare async fn");
+    app.mount("/via-pipe", echo)
+        .expect("mount a handler-shaped pipe");
+    app.mount("/via-fn", echo_fn)
+        .expect("mount a bare async fn");
     println!("mount: ViaPipe and ViaFn both accepted by the same App::mount");
 }
 

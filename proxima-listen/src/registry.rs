@@ -21,8 +21,8 @@ use crate::{DispatchPolicy, Route};
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::handler::{PipeHandle, ThreadLocalPipeHandle};
 use proxima_primitives::pipe::telemetry_surface::TelemetryHandle;
-use proxima_runtime::{CoreId, Runtime};
 use proxima_primitives::stream::PeerInfo;
+use proxima_runtime::{CoreId, Runtime};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum HandlerDispatch {
@@ -282,7 +282,9 @@ impl<'protocol, P: ListenProtocol + ?Sized> std::future::IntoFuture for ServeBui
         let dispatch = dispatch.unwrap_or_else(null_dispatch);
         let spec = spec.unwrap_or(Value::Null);
         let context = context.unwrap_or_else(|| {
-            ServeContext::new(Arc::new(proxima_primitives::pipe::telemetry_surface::NoopTelemetry))
+            ServeContext::new(Arc::new(
+                proxima_primitives::pipe::telemetry_surface::NoopTelemetry,
+            ))
         });
         let shutdown = shutdown.unwrap_or_else(|| oneshot::channel().1);
         Box::pin(async move {
@@ -621,9 +623,7 @@ mod tests {
 
         fn spawn_background_blocking(
             &self,
-            _work: Box<
-                dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send,
-            >,
+            _work: Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>, ProximaError> + Send>,
         ) -> proxima_runtime::BackgroundHandle<Box<dyn std::any::Any + Send>> {
             unreachable!("test never spawns background-blocking work")
         }
@@ -648,8 +648,12 @@ mod tests {
     fn dispatch_handler_follows_the_injected_runtime_value_not_feature_presence() {
         let flag_a = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag_b = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let runtime_a: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_a.clone() });
-        let runtime_b: Arc<dyn Runtime> = Arc::new(RecordingRuntime { ran: flag_b.clone() });
+        let runtime_a: Arc<dyn Runtime> = Arc::new(RecordingRuntime {
+            ran: flag_a.clone(),
+        });
+        let runtime_b: Arc<dyn Runtime> = Arc::new(RecordingRuntime {
+            ran: flag_b.clone(),
+        });
 
         // both runtimes are alive simultaneously (the additivity claim: two
         // backends linked into one binary is a supported state) — only the

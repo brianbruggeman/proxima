@@ -79,7 +79,6 @@ impl SendPipe for DrainOk {
     }
 }
 
-
 /// Records, from inside `Pipe::call` (which runs on the serving worker via
 /// `spawn_on_current_core`), whether a tokio runtime is entered on THIS
 /// thread. `Handle::try_current().is_ok()` is true iff a tokio reactor is
@@ -110,7 +109,6 @@ impl SendPipe for ReactorProbePipe {
         }
     }
 }
-
 
 // ---- raw client -------------------------------------------------------
 

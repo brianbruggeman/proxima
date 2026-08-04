@@ -28,7 +28,9 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::{FanIn, Pipe, PipeExt, Select, SendPipe, SubscriptionId};
 
-use proxima_protocols::redis::{Advanced, ConnMode, Connection as RespConnection, Frame, Limits, RedisRequest, RespValue};
+use proxima_protocols::redis::{
+    Advanced, ConnMode, Connection as RespConnection, Frame, Limits, RedisRequest, RespValue,
+};
 
 use crate::broker::{PushSink, RedisBroker};
 use crate::config::RedisServerConfig;
@@ -36,7 +38,10 @@ use crate::error::RedisServeError;
 use crate::pipes::RedisPipeHandle;
 use crate::wait_sources::RedisConnSource;
 
-async fn flush_out<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut Vec<u8>) -> std::io::Result<()> {
+async fn flush_out<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    out: &mut Vec<u8>,
+) -> std::io::Result<()> {
     if !out.is_empty() {
         stream.write_all(out).await?;
         out.clear();
@@ -337,17 +342,19 @@ async fn dispatch_args(
             b"PING" => FrameOutcome::Reply(ping_reply(&args)),
             b"QUIT" => FrameOutcome::Close,
             b"PUBLISH" if args.len() == 2 => match broker.publish(&args[0], &args[1]).await {
-                Ok(count) => {
-                    FrameOutcome::Reply(RespValue::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
-                }
+                Ok(count) => FrameOutcome::Reply(RespValue::Integer(
+                    i64::try_from(count).unwrap_or(i64::MAX),
+                )),
                 Err(error) => FrameOutcome::InternalError(error),
             },
-            b"SPUBLISH" if args.len() == 2 => match broker.publish_shard(&args[0], &args[1]).await {
-                Ok(count) => {
-                    FrameOutcome::Reply(RespValue::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+            b"SPUBLISH" if args.len() == 2 => {
+                match broker.publish_shard(&args[0], &args[1]).await {
+                    Ok(count) => FrameOutcome::Reply(RespValue::Integer(
+                        i64::try_from(count).unwrap_or(i64::MAX),
+                    )),
+                    Err(error) => FrameOutcome::InternalError(error),
                 }
-                Err(error) => FrameOutcome::InternalError(error),
-            },
+            }
             _ => {
                 // Request-level admission: a business command dispatched to the
                 // handler is redis's natural "one request" unit (mirrors h1 per
@@ -516,7 +523,10 @@ where
                 }
                 Advanced::ProtocolError { reason, .. } => {
                     tracing::error!(reason, "redis malformed frame");
-                    write_reply(out, &RespValue::Error(format!("ERR Protocol error: {reason}")));
+                    write_reply(
+                        out,
+                        &RespValue::Error(format!("ERR Protocol error: {reason}")),
+                    );
                     flush_out(write_half, out).await?;
                     return Ok(());
                 }

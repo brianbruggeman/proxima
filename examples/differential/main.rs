@@ -16,7 +16,9 @@
 //! Run:
 //!     cargo run --example differential
 
-use proxima_protocols::http1_codec::h1::{HttpVersion, ParserLimits, Status, parse_head_with_limits};
+use proxima_protocols::http1_codec::h1::{
+    HttpVersion, ParserLimits, Status, parse_head_with_limits,
+};
 
 // mirrors proxima_protocols::http1_codec::h1's private `MAX_HEADERS` array
 // cap so the oracle sees the same header-slot budget proxima's parser is

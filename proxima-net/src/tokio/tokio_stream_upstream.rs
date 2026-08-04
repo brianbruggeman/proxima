@@ -174,8 +174,8 @@ impl UnixUpstreamFactory for TokioUnixUpstreamFactory {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::tokio_stream_listener::TokioTcpListener;
+    use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use proxima_primitives::stream::{StreamListener, StreamListenerExt, StreamUpstreamExt};
     use std::net::Ipv4Addr;

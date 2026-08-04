@@ -490,11 +490,7 @@ mod io_bridge_tests {
                 .expect("close is a no-op success for a RingSink");
         });
 
-        let mut ring = writer
-            .into_inner()
-            .into_inner()
-            .into_inner()
-            .into_inner();
+        let mut ring = writer.into_inner().into_inner().into_inner().into_inner();
         assert_eq!(ring.pop(), Some(REQUEST_LINE), "first frame written");
         assert_eq!(ring.pop(), Some(HOST_HEADER), "second frame written");
     }

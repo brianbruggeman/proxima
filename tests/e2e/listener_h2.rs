@@ -41,7 +41,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 /// Pipe that returns 100 large response headers — forces the
 /// encoded HPACK block to exceed `peer_max_frame_size` (16,384) so
 /// HEADERS must split into HEADERS + N CONTINUATION frames.
@@ -71,7 +70,6 @@ impl SendPipe for HugeHeadersPipe {
     }
 }
 
-
 /// Pipe that returns a streaming response body — 8 separate
 /// chunks of "chunk-N\n". Exercises the chunk-pull pump in the
 /// native h2 server: handler returns before the body is consumed,
@@ -96,7 +94,6 @@ impl SendPipe for StreamingChunksPipe {
         }
     }
 }
-
 
 /// Pipe that streams 256 1-KiB chunks (256 KiB total), each
 /// filled with a unique byte so order corruption is visible. Total
@@ -132,7 +129,6 @@ impl SendPipe for ManyChunkStreamingPipe {
     }
 }
 
-
 struct EchoBodyPipe;
 
 impl SendPipe for EchoBodyPipe {
@@ -151,10 +147,12 @@ impl SendPipe for EchoBodyPipe {
     }
 }
 
-
 async fn spawn_native_server(dispatch: PipeHandle) -> std::net::SocketAddr {
-    spawn_native_server_with_admission(dispatch, proxima_listen::admission::ConnAdmission::unbounded())
-        .await
+    spawn_native_server_with_admission(
+        dispatch,
+        proxima_listen::admission::ConnAdmission::unbounded(),
+    )
+    .await
 }
 
 /// Sibling of [`spawn_native_server`] that takes a caller-supplied
@@ -572,7 +570,6 @@ impl SendPipe for FilterRoutedPipe {
     }
 }
 
-
 async fn collect_body(response: h2::client::ResponseFuture) -> (http::StatusCode, Vec<u8>) {
     let response = response.await.expect("response");
     let status = response.status();
@@ -829,12 +826,15 @@ async fn native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_
         .send_request(shed_request, false)
         .expect("send_request");
     shed_send_stream
-        .send_data(Bytes::from_static(b"a real request body, not bodyless"), true)
+        .send_data(
+            Bytes::from_static(b"a real request body, not bodyless"),
+            true,
+        )
         .expect("send body");
 
-    let shed_response = shed_response_future.await.expect(
-        "body-carrying shed request must receive an in-band response, not a stream reset",
-    );
+    let shed_response = shed_response_future
+        .await
+        .expect("body-carrying shed request must receive an in-band response, not a stream reset");
     assert_eq!(
         shed_response.status(),
         503,

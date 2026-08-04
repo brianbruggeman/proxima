@@ -86,11 +86,36 @@ fn own_frame_alloc_count(wire: &[u8], max_message_bytes: usize) -> usize {
 fn own_frame_allocation_counts_match_the_measured_baseline() {
     let cases: &[(&str, Vec<u8>, usize, usize)] = &[
         ("get_16b", get_16_bytes(), DEFAULT_MAX_MESSAGE_BYTES, 1),
-        ("set_1kb_value", set_with_value(1024), DEFAULT_MAX_MESSAGE_BYTES, 1),
-        ("set_8kb_value", set_with_value(8 * 1024), DEFAULT_MAX_MESSAGE_BYTES, 1),
-        ("set_64kb_value", set_with_value(64 * 1024), DEFAULT_MAX_MESSAGE_BYTES, 1),
-        ("multiget_20keys", multi_get(20), DEFAULT_MAX_MESSAGE_BYTES, 1),
-        ("malformed_unknown_verb", malformed_unknown_verb(), DEFAULT_MAX_MESSAGE_BYTES, 0),
+        (
+            "set_1kb_value",
+            set_with_value(1024),
+            DEFAULT_MAX_MESSAGE_BYTES,
+            1,
+        ),
+        (
+            "set_8kb_value",
+            set_with_value(8 * 1024),
+            DEFAULT_MAX_MESSAGE_BYTES,
+            1,
+        ),
+        (
+            "set_64kb_value",
+            set_with_value(64 * 1024),
+            DEFAULT_MAX_MESSAGE_BYTES,
+            1,
+        ),
+        (
+            "multiget_20keys",
+            multi_get(20),
+            DEFAULT_MAX_MESSAGE_BYTES,
+            1,
+        ),
+        (
+            "malformed_unknown_verb",
+            malformed_unknown_verb(),
+            DEFAULT_MAX_MESSAGE_BYTES,
+            0,
+        ),
         ("malformed_oversized", malformed_oversized_partial(), 8, 0),
     ];
 

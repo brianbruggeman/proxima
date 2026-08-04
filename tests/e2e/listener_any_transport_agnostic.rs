@@ -38,13 +38,13 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use proxima::SendPipe;
 use proxima::error::ProximaError;
 use proxima::listen::admission::ConnAdmission;
 use proxima::pipe::into_handle;
 use proxima::prelude::*;
 use proxima::request::{Request, Response};
 use proxima::stream::{PeerInfo, StreamConnection};
-use proxima::SendPipe;
 
 /// A datagram-wanting `AnyProtocol` candidate: matches a fixed literal
 /// prefix on ONE already-received UDP message and replies with a fixed

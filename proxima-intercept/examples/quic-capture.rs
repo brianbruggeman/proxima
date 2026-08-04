@@ -22,10 +22,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use proxima_http::http3::native::driver::{DriverState, drive_server_step};
-use proxima_protocols::http3_codec::server::{H3ServerEvent, ServerConnection, StreamId as H3StreamId};
-use proxima_protocols::http3_codec::settings::Settings;
 use proxima_intercept::ca::{ForgingResolver, ca_cert_pem, ca_key_pem, generate_ca, load_ca};
 use proxima_intercept::quic_relay::{H3Request, H3Response, reoriginate_h3, reoriginate_h3_to};
+use proxima_protocols::http3_codec::server::{
+    H3ServerEvent, ServerConnection, StreamId as H3StreamId,
+};
+use proxima_protocols::http3_codec::settings::Settings;
 use proxima_protocols::quic::connection::{Connection, ConnectionState, DatagramWrite};
 use proxima_protocols::quic::endpoint::{ConnectionHandle, DatagramClassification, EndpointDemux};
 use proxima_protocols::quic::time::Instant as ProtoInstant;
@@ -74,8 +76,10 @@ async fn main() {
     let socket = UdpSocket::bind(&bind).await.expect("bind udp");
     info!(%bind, "quic capture server listening (h3, forged certs)");
 
-    let mut demux =
-        EndpointDemux::with_local_cid_len(proxima_protocols::quic::connection::SUPPORTED_VERSIONS, 8);
+    let mut demux = EndpointDemux::with_local_cid_len(
+        proxima_protocols::quic::connection::SUPPORTED_VERSIONS,
+        8,
+    );
     let mut connections: BTreeMap<u32, ConnEntry> = BTreeMap::new();
     let mut next_handle: u32 = 0;
     let mut recv_buf = [0u8; 2048];

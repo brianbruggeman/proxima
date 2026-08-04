@@ -595,8 +595,8 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::*;
     use super::super::cursor::Reader;
+    use super::*;
 
     fn reader_from(bytes: &[u8]) -> Reader<'_> {
         Reader::new(bytes, 0)

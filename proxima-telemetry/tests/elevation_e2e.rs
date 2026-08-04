@@ -131,7 +131,10 @@ fn recorder_with_capturable_elevation(normal: &Capture, elevated: &Capture) -> R
         .core_count(1)
         .record_sharing(RecordSharing::Arc)
         .build();
-    assert!(cfg.elevation.is_none(), "install_elevation must not double-wrap the fan");
+    assert!(
+        cfg.elevation.is_none(),
+        "install_elevation must not double-wrap the fan"
+    );
 
     Recorder::from_config_with_pipe(&cfg, fan)
         .start()
@@ -174,11 +177,15 @@ fn error_inside_verbose_span_replays_full_tree_end_to_end() {
         "normal sink is floor+ only (info, error) — never the below-floor trace"
     );
     assert!(
-        normal_logs.iter().all(|record| record.level.severity() >= Level::INFO.severity()),
+        normal_logs
+            .iter()
+            .all(|record| record.level.severity() >= Level::INFO.severity()),
         "FloorFilter must retain only floor+ records"
     );
     assert!(
-        !normal_logs.iter().any(|record| record.level == Level::TRACE),
+        !normal_logs
+            .iter()
+            .any(|record| record.level == Level::TRACE),
         "the below-floor trace record must never reach the normal sink"
     );
 
@@ -189,18 +196,26 @@ fn error_inside_verbose_span_replays_full_tree_end_to_end() {
         "the error trigger must replay the WHOLE tree — below-floor trace included"
     );
     assert!(
-        elevated_logs.iter().all(|record| record.trace_flags.is_verbose_buffered()),
+        elevated_logs
+            .iter()
+            .all(|record| record.trace_flags.is_verbose_buffered()),
         "every replayed record must carry the VERBOSE_BUFFERED stamp from log/builder.rs"
     );
     assert!(
-        elevated_logs.iter().any(|record| record.level == Level::TRACE && message(record) == "handler entered"),
+        elevated_logs
+            .iter()
+            .any(|record| record.level == Level::TRACE && message(record) == "handler entered"),
         "the below-floor trace record must have been admitted, built, and replayed"
     );
     assert!(
-        elevated_logs.iter().any(|record| record.level == Level::INFO && message(record) == "cache miss")
+        elevated_logs
+            .iter()
+            .any(|record| record.level == Level::INFO && message(record) == "cache miss")
     );
     assert!(
-        elevated_logs.iter().any(|record| record.level == Level::ERROR && message(record) == "downstream timeout")
+        elevated_logs
+            .iter()
+            .any(|record| record.level == Level::ERROR && message(record) == "downstream timeout")
     );
     let timestamps: Vec<u64> = elevated_logs.iter().map(|record| record.ts_ns).collect();
     let mut sorted = timestamps.clone();
@@ -221,7 +236,10 @@ fn error_inside_verbose_span_replays_full_tree_end_to_end() {
             .find(|record| record.level == Level::ERROR)
             .expect("error record present")
             .ts_ns;
-        assert!(trace_ts < error_ts, "trace must have been recorded before the error that triggered it");
+        assert!(
+            trace_ts < error_ts,
+            "trace must have been recorded before the error that triggered it"
+        );
     }
 
     // case 2: a non-verbose trace (ratio 0.0). trace!/info! are never even

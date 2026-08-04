@@ -170,7 +170,12 @@ mod tests {
         let (packet, used) = parse_packet(&bytes).expect("valid MQTT packet");
         assert_eq!(used, bytes.len());
         match packet {
-            Packet::Publish { flags, topic, packet_id, payload } => {
+            Packet::Publish {
+                flags,
+                topic,
+                packet_id,
+                payload,
+            } => {
                 assert_eq!(flags.qos, 0);
                 assert!(!flags.retain);
                 assert_eq!(topic, b"news");
@@ -187,15 +192,18 @@ mod tests {
         let (push, mut rx) = sink();
         broker.subscribe(b"news/#", push);
 
-        let reached = broker
-            .publish(b"news/tech", b"hi")
-            .await
-            .expect("publish");
+        let reached = broker.publish(b"news/tech", b"hi").await.expect("publish");
 
         assert_eq!(reached, 1);
         let bytes = rx.next().await.expect("push delivered");
         let (packet, _) = parse_packet(&bytes).expect("valid MQTT packet");
-        assert!(matches!(packet, Packet::Publish { topic: b"news/tech", .. }));
+        assert!(matches!(
+            packet,
+            Packet::Publish {
+                topic: b"news/tech",
+                ..
+            }
+        ));
     }
 
     #[proxima::test(runtime = "tokio")]
@@ -236,12 +244,16 @@ mod tests {
         assert!(broker.unsubscribe(b"news/#", id));
         assert_eq!(broker.subscription_count(b"news/#"), 0);
 
-        broker.publish(b"news/tech", b"gone").await.expect("publish");
+        broker
+            .publish(b"news/tech", b"gone")
+            .await
+            .expect("publish");
         assert_eq!(rx.try_recv().ok(), None);
     }
 
     #[proxima::test(runtime = "tokio")]
-    async fn two_subscribers_to_the_same_filter_both_receive_and_one_unsub_leaves_the_filter_live() {
+    async fn two_subscribers_to_the_same_filter_both_receive_and_one_unsub_leaves_the_filter_live()
+    {
         let broker = MqttBroker::new();
         let (first_push, mut first_rx) = sink();
         let (second_push, mut second_rx) = sink();

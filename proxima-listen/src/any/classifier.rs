@@ -721,8 +721,10 @@ mod tests {
         match outcome {
             ClassifyOutcome::AmbiguousMatch { priority, matches } => {
                 assert_eq!(priority, 100);
-                let mut names: Vec<&str> =
-                    matches.iter().map(|(protocol, _)| protocol.name()).collect();
+                let mut names: Vec<&str> = matches
+                    .iter()
+                    .map(|(protocol, _)| protocol.name())
+                    .collect();
                 names.sort_unstable();
                 assert_eq!(names, vec!["custom-rpc", "pgwire"]);
                 assert!(matches.iter().all(|(_, consumed)| *consumed == 8));

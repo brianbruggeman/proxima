@@ -11,7 +11,6 @@
 //! handshake responsibility by design, while `proxima-websocket` is a
 //! server-side, async-tungstenite-backed connector — neither is a home.
 
-
 use alloc::string::String;
 use base64::Engine as _;
 use sha1::{Digest, Sha1};

@@ -102,7 +102,8 @@ fn cancel_bytes() -> Vec<u8> {
 
 fn auth_data_bytes(data: &[u8]) -> Vec<u8> {
     let mut buf = vec![0u8; 5 + data.len()];
-    let msg = FrontendMessage::AuthData(proxima_protocols::pgwire_codec::frontend::AuthData { data });
+    let msg =
+        FrontendMessage::AuthData(proxima_protocols::pgwire_codec::frontend::AuthData { data });
     let size = msg.encode(&mut buf).expect("auth data encodes");
     buf.truncate(size);
     buf
@@ -135,10 +136,11 @@ fn parse_msg_bytes() -> Vec<u8> {
 
 fn bind_bytes() -> Vec<u8> {
     let mut buf = vec![0u8; 128];
-    let size = proxima_protocols::pgwire_codec::frontend::BindWriter::begin(&mut buf, b"", b"", &[])
-        .expect("bind writer begins")
-        .finish(&[])
-        .expect("bind writer finishes");
+    let size =
+        proxima_protocols::pgwire_codec::frontend::BindWriter::begin(&mut buf, b"", b"", &[])
+            .expect("bind writer begins")
+            .finish(&[])
+            .expect("bind writer finishes");
     buf.truncate(size);
     buf
 }

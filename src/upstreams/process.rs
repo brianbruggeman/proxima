@@ -244,7 +244,6 @@ impl SendPipe for ProcessUpstream {
     }
 }
 
-
 async fn launch(
     spec: &ProcessSpec,
     label: &str,

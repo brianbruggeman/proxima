@@ -94,7 +94,6 @@ impl SendPipe for Registers {
     }
 }
 
-
 #[proxima::test]
 async fn shutdown_barrier_drops_per_core_resource_after_in_flight_completes() {
     let registered = Arc::new(AtomicBool::new(false));

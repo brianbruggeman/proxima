@@ -118,7 +118,6 @@ impl SendPipe for HashPipe {
     }
 }
 
-
 fn payload() -> Arc<[u8; HASH_INPUT_LEN]> {
     let mut buf = [0u8; HASH_INPUT_LEN];
     for (idx, slot) in buf.iter_mut().enumerate() {
@@ -419,7 +418,6 @@ impl SendPipe for SkewedCostPipe {
         }
     }
 }
-
 
 async fn drive_skewed(connections: Vec<h2::client::SendRequest<Bytes>>) {
     let requests_per_conn = SKEW_TOTAL_REQUESTS / connections.len();

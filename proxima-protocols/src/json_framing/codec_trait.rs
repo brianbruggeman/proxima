@@ -125,7 +125,9 @@ mod tests {
         let codec = JsonFrameCodec;
         let payload = br#"{"result":{"ok":true}}"#;
         let mut dest = Vec::new();
-        codec.encode_frame(&payload.as_slice(), &mut dest).expect("encode");
+        codec
+            .encode_frame(&payload.as_slice(), &mut dest)
+            .expect("encode");
         let (frame, consumed) = codec.parse_frame(&dest).expect("parse back");
         assert_eq!(frame, payload);
         assert_eq!(consumed, dest.len());

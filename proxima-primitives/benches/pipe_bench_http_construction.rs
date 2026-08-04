@@ -66,7 +66,10 @@ fn bench_http_construction(criterion: &mut Criterion) {
             let length = black_box(body.len());
             let response = Response::new(black_box(200))
                 .with_body(Bytes::clone(&body))
-                .with_header(proxima_primitives::pipe::HeaderName::ContentLength, length.to_string());
+                .with_header(
+                    proxima_primitives::pipe::HeaderName::ContentLength,
+                    length.to_string(),
+                );
             black_box(response)
         });
     });

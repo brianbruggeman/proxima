@@ -110,7 +110,6 @@ impl SendPipe for BlockingHashPipe {
     }
 }
 
-
 fn build_client_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

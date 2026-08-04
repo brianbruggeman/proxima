@@ -179,10 +179,9 @@ impl<R: AsyncRead + Unpin> UnpinPipe for MqttConnSource<R> {
 
     fn call(&self, (): ()) -> impl Future<Output = Result<WireEvent, Exhausted>> + Unpin {
         match self {
-            MqttConnSource::Read { read_half, scratch } => MqttConnCall::Read {
-                read_half,
-                scratch,
-            },
+            MqttConnSource::Read { read_half, scratch } => {
+                MqttConnCall::Read { read_half, scratch }
+            }
             MqttConnSource::Push { push_rx } => MqttConnCall::Push { push_rx },
             MqttConnSource::Shutdown { receiver } => MqttConnCall::Shutdown { receiver },
         }
@@ -244,7 +243,10 @@ mod tests {
             other => panic!("expected Read, got {other:?}"),
         }
         let second = block_on(UnpinPipe::call(&source, ())).expect("second poll");
-        assert!(matches!(second, WireEvent::Stop), "EOF must be Stop, not Exhausted (only ONE source dying must not stall the whole wait)");
+        assert!(
+            matches!(second, WireEvent::Stop),
+            "EOF must be Stop, not Exhausted (only ONE source dying must not stall the whole wait)"
+        );
     }
 
     struct FailingReader;
@@ -272,7 +274,8 @@ mod tests {
     #[test]
     fn push_source_yields_a_pushed_item() {
         let (tx, rx) = mpsc::unbounded::<Bytes>();
-        tx.unbounded_send(Bytes::from_static(b"\x30\x00")).expect("send");
+        tx.unbounded_send(Bytes::from_static(b"\x30\x00"))
+            .expect("send");
         let source = MqttConnSource::<OnceReader>::push(rx);
         let outcome = block_on(UnpinPipe::call(&source, ())).expect("poll");
         match outcome {

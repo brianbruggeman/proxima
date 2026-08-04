@@ -70,7 +70,10 @@ use crate::pipe::{SendPipe, alloc_tier};
 /// The served-HTTP face of [`SendPipe`]: `Request<Bytes> -> Response<Bytes>`,
 /// `Err` pinned to [`ProximaError`]. Blanket-implemented for every qualifying
 /// `SendPipe` — nothing to implement directly.
-pub trait Handler: SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError> {}
+pub trait Handler:
+    SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>
+{
+}
 
 impl<Implementor> Handler for Implementor where
     Implementor: SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>
@@ -93,7 +96,10 @@ where
 /// Per-thread sibling of [`Handler`] for runtimes that pin work to a single
 /// core (DPDK, per-core executors) and may hold `Rc` / `RefCell` state.
 /// Blanket-implemented over the no-Send root [`Pipe`].
-pub trait ThreadLocalHandler: Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError> {}
+pub trait ThreadLocalHandler:
+    Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>
+{
+}
 
 impl<Implementor> ThreadLocalHandler for Implementor where
     Implementor: Pipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>

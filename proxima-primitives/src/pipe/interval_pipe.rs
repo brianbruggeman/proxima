@@ -46,12 +46,12 @@ use futures::FutureExt;
 use proxima_core::factory::Named;
 use proxima_core::signal::Signal;
 
+use crate::pipe::SendPipe;
 use crate::pipe::handler::PipeHandle;
 use crate::pipe::header_list::HeaderList;
 use crate::pipe::request::{Request, RequestContext};
 use crate::pipe::source::{SourceFactory, SourceHandle, into_source_handle};
 use proxima_core::ProximaError;
-use crate::pipe::SendPipe;
 
 /// Type-erased request-factory: called per tick to produce the [`Request`]
 /// dispatched into the inner Pipe.
@@ -138,7 +138,10 @@ impl SendPipe for IntervalPipe {
     type Out = ();
     type Err = ProximaError;
 
-    fn call(&self, cancel: Signal) -> impl core::future::Future<Output = Result<(), ProximaError>> + Send {
+    fn call(
+        &self,
+        cancel: Signal,
+    ) -> impl core::future::Future<Output = Result<(), ProximaError>> + Send {
         let inner = self.inner.clone();
         let period = self.period;
         let factory = self.request_factory.clone();
@@ -363,9 +366,9 @@ mod tests {
     use alloc::sync::Arc;
     use std::sync::Mutex;
 
+    use crate::pipe::SendPipe;
     use crate::pipe::handler::PipeHandle;
     use crate::pipe::request::Response;
-    use crate::pipe::SendPipe;
 
     use super::*;
 
@@ -525,10 +528,7 @@ mod tests {
 
     #[test]
     fn interval_source_factory_rejects_a_spec_missing_period_ms() {
-        let factory = IntervalSourceFactory::new(
-            "heartbeat",
-            into_handle(CountingPipe::new()),
-        );
+        let factory = IntervalSourceFactory::new("heartbeat", into_handle(CountingPipe::new()));
         let outcome = factory.build(&serde_json::json!({}));
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }

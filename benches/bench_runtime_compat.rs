@@ -457,7 +457,6 @@ impl SendPipe for ConstantOk {
     }
 }
 
-
 struct StreamingOk;
 impl SendPipe for StreamingOk {
     type In = Request<Bytes>;
@@ -471,7 +470,6 @@ impl SendPipe for StreamingOk {
         async move { Ok(Response::ok(Bytes::from_static(STREAMING_BODY))) }
     }
 }
-
 
 async fn hyper_small_handler(
     _request: hyper::Request<hyper::body::Incoming>,

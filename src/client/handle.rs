@@ -406,7 +406,6 @@ impl SendPipe for Client {
     }
 }
 
-
 /// Fluent builder for [`Client`]: `Client::builder().http(url).tcp().build()`.
 #[derive(Default)]
 pub struct ClientBuilder {
@@ -711,7 +710,11 @@ fn shared_prime_runtime() -> Result<Arc<dyn Runtime>, ProximaError> {
 /// only reachable through `tokio_hop_runtime`, which itself requires the full
 /// `tokio` feature — this gate must include it too, or it goes dead whenever
 /// `runtime-prime` + `runtime-tokio` are on without `tokio`.
-#[cfg(all(feature = "tokio", feature = "runtime-prime", feature = "runtime-tokio"))]
+#[cfg(all(
+    feature = "tokio",
+    feature = "runtime-prime",
+    feature = "runtime-tokio"
+))]
 fn shared_tokio_runtime() -> Result<Arc<dyn Runtime>, ProximaError> {
     use std::sync::OnceLock;
 

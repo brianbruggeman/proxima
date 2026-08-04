@@ -121,7 +121,8 @@ impl RedisBroker {
     /// glob set `publish` scans.
     pub fn subscribe_pattern(&self, pattern: &[u8], sink: PushSink) -> SubscriptionId {
         let id = self.patterns.subscribe(pattern.to_vec(), sink);
-        self.pattern_control.update(|set| set.with(pattern.to_vec()));
+        self.pattern_control
+            .update(|set| set.with(pattern.to_vec()));
         id
     }
 
@@ -163,7 +164,11 @@ impl RedisBroker {
     /// subscriber, and never reached by a regular [`Self::publish`]. Returns
     /// the number of connections the message reached, the real Redis
     /// SPUBLISH reply.
-    pub async fn publish_shard(&self, channel: &[u8], payload: &[u8]) -> Result<usize, ProximaError> {
+    pub async fn publish_shard(
+        &self,
+        channel: &[u8],
+        payload: &[u8],
+    ) -> Result<usize, ProximaError> {
         let count = self.shard_channels.subscription_count(channel);
         if count > 0 {
             let frame = Frame::Array(vec![
@@ -263,10 +268,7 @@ mod tests {
         let (push, mut rx) = sink();
         broker.subscribe_pattern(b"news.*", push);
 
-        let reached = broker
-            .publish(b"news.tech", b"hi")
-            .await
-            .expect("publish");
+        let reached = broker.publish(b"news.tech", b"hi").await.expect("publish");
 
         assert_eq!(reached, 1);
         let bytes = rx.next().await.expect("push delivered");
@@ -375,7 +377,10 @@ mod tests {
             .publish_shard(b"orders", b"only-shard")
             .await
             .expect("publish_shard");
-        assert_eq!(shard_reached, 1, "SPUBLISH reaches only the SSUBSCRIBE side");
+        assert_eq!(
+            shard_reached, 1,
+            "SPUBLISH reaches only the SSUBSCRIBE side"
+        );
         assert!(shard_rx.next().await.is_some());
         assert_eq!(
             regular_rx.try_recv().ok(),
@@ -383,8 +388,14 @@ mod tests {
             "SPUBLISH must not reach a SUBSCRIBE subscriber on the same channel name"
         );
 
-        let regular_reached = broker.publish(b"orders", b"only-regular").await.expect("publish");
-        assert_eq!(regular_reached, 1, "PUBLISH reaches only the SUBSCRIBE side");
+        let regular_reached = broker
+            .publish(b"orders", b"only-regular")
+            .await
+            .expect("publish");
+        assert_eq!(
+            regular_reached, 1,
+            "PUBLISH reaches only the SUBSCRIBE side"
+        );
         assert!(regular_rx.next().await.is_some());
         assert_eq!(
             shard_rx.try_recv().ok(),
@@ -400,13 +411,17 @@ mod tests {
         let id = broker.subscribe_shard_channel(b"orders", push);
 
         assert!(broker.unsubscribe_shard_channel(b"orders", id));
-        broker.publish_shard(b"orders", b"gone").await.expect("publish_shard");
+        broker
+            .publish_shard(b"orders", b"gone")
+            .await
+            .expect("publish_shard");
 
         assert_eq!(rx.try_recv().ok(), None);
     }
 
     #[proxima::test(runtime = "tokio")]
-    async fn two_subscribers_to_the_same_pattern_both_receive_and_one_unsub_leaves_the_pattern_live() {
+    async fn two_subscribers_to_the_same_pattern_both_receive_and_one_unsub_leaves_the_pattern_live()
+     {
         let broker = RedisBroker::new();
         let (first_push, mut first_rx) = sink();
         let (second_push, mut second_rx) = sink();

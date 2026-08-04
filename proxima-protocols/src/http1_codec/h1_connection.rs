@@ -52,7 +52,9 @@ use crate::http1_codec::h1::{
     Header, HeaderVec, HttpVersion, ParseError, ParserLimits, RequestHead, StreamingStatus,
     parse_head_streaming,
 };
-use crate::http1_codec::h1_body::{BodyDecoder, BodyFraming, DecodeError, DecoderLimits, Status as BodyStatus};
+use crate::http1_codec::h1_body::{
+    BodyDecoder, BodyFraming, DecodeError, DecoderLimits, Status as BodyStatus,
+};
 use crate::http1_codec::h1_response::{BodyEncoder, write_response_head};
 
 const DEFAULT_BUFFER_BYTES: usize = 8 * 1024;
