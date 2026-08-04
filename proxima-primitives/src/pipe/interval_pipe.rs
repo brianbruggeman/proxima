@@ -336,25 +336,16 @@ impl IntervalPipeBuilder {
 }
 
 /// Errors from [`IntervalPipeBuilder::build`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum IntervalBuildError {
     /// `.period(...)` was not called.
+    #[error("IntervalPipe builder missing period")]
     MissingPeriod,
     /// `.inner(...)` was not called.
+    #[error("IntervalPipe builder missing inner")]
     MissingInner,
 }
-
-impl core::fmt::Display for IntervalBuildError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::MissingPeriod => formatter.write_str("IntervalPipe builder missing period"),
-            Self::MissingInner => formatter.write_str("IntervalPipe builder missing inner"),
-        }
-    }
-}
-
-impl core::error::Error for IntervalBuildError {}
 
 // `#[proxima::test]` pulls in the `proxima` dev-dependency, which the
 // loom build keeps out of the graph (see
