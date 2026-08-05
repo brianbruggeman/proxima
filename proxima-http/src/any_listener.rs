@@ -50,7 +50,7 @@ use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::stream::StreamExt;
 use serde_json::Value;
-use tracing::{debug, warn};
+use proxima_telemetry::{debug, warn};
 
 use proxima_core::ProximaError;
 use proxima_core::io::{FromFutures, IntoFutures, Prepend};
@@ -1536,7 +1536,7 @@ async fn drive_matched(
 ) {
     let Some(handler) = handlers.get(protocol.name()).cloned() else {
         warn!(
-            protocol = protocol.name(),
+            protocol = %protocol.name(),
             "any listener: matched protocol has no bound handler; dropping connection"
         );
         return;
@@ -1548,7 +1548,7 @@ async fn drive_matched(
     {
         warn!(
             ?error,
-            protocol = protocol.name(),
+            protocol = %protocol.name(),
             "any listener: connection error"
         );
     }

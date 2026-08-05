@@ -45,7 +45,6 @@ rustls = { workspace = true, optional = true, features = ["std", "aws_lc_rs", "t
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 smallvec = { workspace = true, optional = true, features = ["const_generics"] }
-tracing = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["sync", "rt", "io-util", "net", "macros", "time"] }
 tokio-util = { workspace = true, optional = true, features = ["compat", "io"] }
 tokio-rustls = { workspace = true, optional = true, features = ["aws_lc_rs", "tls12"] }

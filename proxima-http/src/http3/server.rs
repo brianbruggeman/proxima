@@ -99,7 +99,7 @@ pub async fn serve_h3_connection(
             // render on (e.g. `resolve_request`).
             Some(result) = handlers.next(), if !handlers.is_empty() => {
                 if let Err(error) = result {
-                    tracing::warn!(?error, "h3 native request task failed");
+                    proxima_telemetry::warn!(?error, "h3 native request task failed");
                 }
             }
         }
@@ -162,11 +162,11 @@ async fn finish_stream_with_error(
     error: ProximaError,
 ) -> Result<(), ProximaError> {
     if !matches!(error, ProximaError::Forbidden(_)) {
-        tracing::warn!(?error, "h3 native handler error");
+        proxima_telemetry::warn!(?error, "h3 native handler error");
         stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
         return Ok(());
     }
-    tracing::debug!("h3 native handler rejected request");
+    proxima_telemetry::debug!("h3 native handler rejected request");
     let status = crate::error_render::http_status_for(&error);
     let body = crate::error_render::error_response_body(&error);
     let response = Response::new(status)
