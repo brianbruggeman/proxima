@@ -169,6 +169,10 @@ http3-native = [
     "proxima-quic/native",
     "dep:rustls",
     "dep:rcgen",
+    # the only modules in this crate that define an error enum are
+    # `http3/native/{client,server}.rs`, so thiserror rides their feature
+    # rather than the whole crate.
+    "dep:thiserror",
 ]
 http3-quinn-compat = [
     "dep:h3",
@@ -219,7 +223,6 @@ tls = [
     "dep:futures-rustls",
     "proxima-listen/tls",
 ]
-thiserror = ["dep:thiserror"]
 
 [[bench]]
 name = "bench_h1_client_compare"

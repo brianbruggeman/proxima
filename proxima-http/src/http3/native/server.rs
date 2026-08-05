@@ -21,48 +21,34 @@ use proxima_protocols::quic::connection::ConnectionState;
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::TlsProvider;
 use proxima_quic::native::{Endpoint, EndpointError};
+use thiserror::Error;
 
 use super::config::ServerConfig;
 use super::driver::{DriverState, drive_server_step};
 
 /// Server-side facade error.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ServerError {
     /// QUIC-layer error from the endpoint.
-    Endpoint(EndpointError),
+    #[error("endpoint: {0}")]
+    Endpoint(#[from] EndpointError),
     /// H3-layer error from the sans-IO state machine.
+    #[error("h3: {0:?}")]
     H3(proxima_protocols::http3_codec::server::ServerError),
     /// Per-connection driver step failed (QUIC stream-routing layer).
+    #[error("driver: {0:?}")]
     Driver(proxima_protocols::quic::connection::ConnectionError),
     /// Method called outside the legal state.
+    #[error("illegal in state {state}: method {method}")]
     IllegalInState {
         state: &'static str,
         method: &'static str,
     },
 }
 
-impl core::fmt::Display for ServerError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Endpoint(err) => write!(f, "endpoint: {err}"),
-            Self::H3(err) => write!(f, "h3: {err:?}"),
-            Self::Driver(err) => write!(f, "driver: {err:?}"),
-            Self::IllegalInState { state, method } => {
-                write!(f, "illegal in state {state}: method {method}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ServerError {}
-
-impl From<EndpointError> for ServerError {
-    fn from(err: EndpointError) -> Self {
-        Self::Endpoint(err)
-    }
-}
-
+// hand-rolled rather than `#[from]`: the proto-crate `ServerError` does not
+// implement `std::error::Error`, which thiserror's `#[from]` requires.
 impl From<proxima_protocols::http3_codec::server::ServerError> for ServerError {
     fn from(err: proxima_protocols::http3_codec::server::ServerError) -> Self {
         Self::H3(err)
