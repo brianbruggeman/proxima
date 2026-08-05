@@ -220,10 +220,15 @@ pub fn build_server_config(config: &TlsConfig) -> Result<ServerConfig, ProximaEr
             build_single_cert_config(builder, cert_chain, key, config.ocsp_response.clone())?
         }
         TlsMode::MultiSni { hosts } => {
-            // MultiSni's per-host OCSP would attach to each CertifiedKey;
-            // current API only exposes one global OCSP slot, so we
-            // ignore it here. Per-host stapling lands as a follow-up
-            // when there's demand.
+            // an OCSP response names the serial of exactly one certificate, so
+            // one global response cannot be valid for N SNI certs. Dropping it
+            // silently would leave an operator believing stapling is on.
+            if config.ocsp_response.is_some() {
+                return Err(ProximaError::Config(
+                    "tls: ocsp_response is per-certificate and cannot apply to MultiSni"
+                        .into(),
+                ));
+            }
             let resolver = SniResolver::build(hosts)?;
             builder.with_cert_resolver(Arc::new(resolver))
         }
@@ -871,6 +876,32 @@ mod tests {
         // requires the crypto provider, install on demand.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let _ = build_server_config(&parsed).expect("server config builds with round-tripped multi-sni");
+    }
+
+    #[test]
+    fn multi_sni_with_a_global_ocsp_response_is_rejected_not_ignored() {
+        // an OCSP response is bound to one cert's serial, so it cannot cover a
+        // multi-host map. Accepting the config and dropping the response would
+        // tell an operator stapling is on when it is not.
+        let host = rcgen::generate_simple_self_signed(vec!["api.example.com".to_string()])
+            .expect("rcgen api");
+        let mut hosts = BTreeMap::new();
+        hosts.insert(
+            "api.example.com".into(),
+            SniCert {
+                cert: host.cert.pem().into_bytes(),
+                key: host.signing_key.serialize_pem().into_bytes(),
+            },
+        );
+        let config = TlsConfig {
+            mode: TlsMode::MultiSni { hosts },
+            alpn: default_alpn(),
+            client_auth: ClientAuth::Disabled,
+            session_resumption: false,
+            ocsp_response: Some(vec![0x30, 0x82, 0x01, 0xab]),
+        };
+        let outcome = build_server_config(&config);
+        assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
     #[test]
