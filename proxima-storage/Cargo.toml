@@ -11,11 +11,10 @@ readme.workspace = true
 
 [features]
 default = []
-pmem = []
 std = []
 nvme = ["dep:proxima-protocols", "proxima-protocols/nvme", "dep:proxima-primitives"]
 nvme-uio = ["nvme", "std", "dep:rustix"]
-dax = ["pmem", "std", "dep:rustix", "dep:bon", "dep:conflaguration", "dep:serde"]
+dax = ["std", "dep:rustix", "dep:bon", "dep:conflaguration", "dep:serde"]
 
 [dependencies]
 bon = { workspace = true, optional = true }
