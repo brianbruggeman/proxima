@@ -4567,6 +4567,7 @@ dependencies = [
  "serde",
  "serde_json",
  "temp-env",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "webpki-roots",
