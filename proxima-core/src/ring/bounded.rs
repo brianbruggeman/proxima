@@ -136,7 +136,7 @@ pub struct BoundedQueue<R: RingStorage> {
 
 impl<R: RingStorage> BoundedQueue<R> {
     /// Wrap an already-constructed storage with an overflow policy.
-    pub fn from_storage(queue: R, fail_mode: FailMode) -> Self {
+    pub const fn from_storage(queue: R, fail_mode: FailMode) -> Self {
         Self {
             queue,
             fail_mode,
@@ -257,8 +257,17 @@ pub type StaticBoundedQueue<T, const N: usize> = BoundedQueue<StaticRing<T, N>>;
 
 impl<T, const N: usize> BoundedQueue<StaticRing<T, N>> {
     /// A no-alloc bounded queue of capacity `N` (a power of two ≥ 2 — the
-    /// [`StaticRing`] requirement).
+    /// [`StaticRing`] requirement). `const`, so the whole sink stack can live in
+    /// a `static` on bare metal (see [`StaticRing::new`]); the loom build drops
+    /// the `const` because loom's atomics are not const-constructible.
     #[must_use]
+    #[cfg(not(feature = "loom"))]
+    pub const fn new(fail_mode: FailMode) -> Self {
+        Self::from_storage(StaticRing::new(), fail_mode)
+    }
+
+    #[must_use]
+    #[cfg(feature = "loom")]
     pub fn new(fail_mode: FailMode) -> Self {
         Self::from_storage(StaticRing::new(), fail_mode)
     }

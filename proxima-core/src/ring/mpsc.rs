@@ -173,7 +173,7 @@ unsafe impl<T: Send> Sync for Ring<T> {}
 impl<T> Ring<T> {
     /// Allocate a ring. `cap` is rounded up to a power of two, minimum 2 (the
     /// Vyukov protocol is degenerate at capacity 1: `pos` and `pos + 1` alias
-    /// the lone cell). Returns [`Error::InvalidInput`] only for `cap == 0`.
+    /// the lone cell). Returns [`CapacityError`] only for `cap == 0`.
     pub fn new(cap: usize) -> Result<Self, CapacityError> {
         if cap == 0 {
             return Err(CapacityError);
@@ -336,33 +336,11 @@ impl<'ring, T> Drainer<'ring, T> {
 /// `N` MUST be a power of two >= 2 (asserted in [`StaticRing::new`]); the
 /// protocol needs it for the `pos & (N - 1)` slot index.
 ///
-/// # Why [`new`](StaticRing::new) is not `const` — yet
-///
-/// The whole point of the no-alloc tier is to back a `static` on bare metal — no
-/// heap, and no lazy `OnceCell`/runtime init either. That wants a `const fn new`
-/// so a caller can write `static RING: StaticRing<T, N> = StaticRing::new();`.
-/// It is NOT const-constructible today, and the blocker is a real stable-Rust
-/// limitation, not a design choice — worth spelling out so nobody re-derives it:
-///
-/// The Vyukov protocol seeds **each cell's `sequence` to its own index** (cell
-/// `i` starts at `i`, so the empty-slot test `seq == pos` holds slot-by-slot).
-/// Stable `const fn` cannot build a `[Cell<T>; N]` with per-index values:
-/// - `core::array::from_fn(|i| …)` — the obvious tool — is **not `const`**.
-/// - `[const { EXPR }; N]` requires `EXPR` independent of the index (every cell
-///   identical), so it cannot set `sequence = i`.
-/// - a `const` `while` loop *can* fill a `[MaybeUninit<Cell<T>>; N]`, but turning
-///   that into `[Cell<T>; N]` needs `MaybeUninit::array_assume_init`
-///   (**unstable**), and `transmute::<[MaybeUninit<Cell<T>>; N], [Cell<T>; N]>`
-///   is rejected — **`E0512`**, transmute on a const-generic-`N` (dependently
-///   sized) array. `transmute_unchecked` would work but is also unstable.
-///
-/// TODO(const-new): make `new` a `const fn` as soon as ANY of these stabilises —
-/// a `const core::array::from_fn`, a `const MaybeUninit::array_assume_init`, or a
-/// `transmute`/`transmute_unchecked` that accepts equal-size `[_; N]` arrays.
-/// Nothing else blocks it (the pow2 assert is already `const`-friendly), and it
-/// is the last missing piece for a genuinely heap-free `static` sink stack
-/// ([`StaticBoundedQueue`](crate::ring::StaticBoundedQueue) and the pipe-forms
-/// `StaticSinkFront` inherit the same limitation transitively through here).
+/// [`new`](StaticRing::new) is `const`, so the whole no-alloc tier can back a
+/// `static` on bare metal with no heap and no lazy `OnceCell`/runtime init:
+/// `static RING: StaticRing<T, N> = StaticRing::new();`.
+/// [`StaticBoundedQueue`](crate::ring::StaticBoundedQueue) and the pipe-forms
+/// `StaticSinkFront` inherit that through here.
 pub struct StaticRing<T, const N: usize> {
     buf: [Cell<T>; N],
     enqueue_pos: AtomicUsize,
@@ -375,8 +353,41 @@ unsafe impl<T: Send, const N: usize> Send for StaticRing<T, N> {}
 unsafe impl<T: Send, const N: usize> Sync for StaticRing<T, N> {}
 
 impl<T, const N: usize> StaticRing<T, N> {
-    /// Construct an empty ring. Panics if `N` is not a power of two >= 2.
+    /// Construct an empty ring, seeding each cell's `sequence` to its own index
+    /// (the Vyukov empty-slot test is `seq == pos`, slot by slot). `const`, so a
+    /// bare-metal caller can put one straight in a `static`; a non-power-of-two
+    /// `N` then fails the BUILD rather than the first call.
+    ///
+    /// loom's atomics register with the model checker on construction and are
+    /// therefore not const-constructible, so the `--features loom` build gets
+    /// the same body without `const` (same cfg split as `write_cell` above).
     #[must_use]
+    #[cfg(not(feature = "loom"))]
+    pub const fn new() -> Self {
+        assert!(
+            N >= 2 && N.is_power_of_two(),
+            "StaticRing capacity N must be a power of two >= 2"
+        );
+        let mut buf = [const {
+            Cell {
+                sequence: AtomicUsize::new(0),
+                data: UnsafeCell::new(MaybeUninit::uninit()),
+            }
+        }; N];
+        let mut index = 0;
+        while index < N {
+            buf[index].sequence = AtomicUsize::new(index);
+            index += 1;
+        }
+        Self {
+            buf,
+            enqueue_pos: AtomicUsize::new(0),
+            dequeue_pos: AtomicUsize::new(0),
+        }
+    }
+
+    #[must_use]
+    #[cfg(feature = "loom")]
     pub fn new() -> Self {
         assert!(
             N >= 2 && N.is_power_of_two(),
@@ -440,19 +451,13 @@ impl<T, const N: usize> Drop for StaticRing<T, N> {
 // inside an actual loom::model(...) closure, which these plain #[test]
 // functions don't provide.
 #[cfg(all(test, not(feature = "loom")))]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     extern crate std;
 
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     use super::StaticRing;
 
@@ -867,6 +872,21 @@ mod tests {
         }
     }
 
+    // the no-alloc tier's reason to exist: a bare-metal caller puts a ring
+    // straight in a `static` — no heap, no lazy OnceCell, no runtime init. That
+    // this compiles at all is the proof; the round trip proves the const path
+    // seeds the same per-index cell sequences the protocol needs.
+    #[test]
+    fn static_ring_backs_a_static_with_no_lazy_init() {
+        static RING: StaticRing<u32, 4> = StaticRing::new();
+        assert_eq!(RING.capacity(), 4);
+        for value in [11, 22, 33, 44] {
+            RING.push(value).unwrap();
+        }
+        assert_eq!(RING.push(55), Err(55), "a const-built ring bounds like any other");
+        assert_eq!(RING.dequeue(), Some(11));
+    }
+
     #[test]
     fn static_ring_fifo_roundtrip() {
         let ring = StaticRing::<u32, 4>::new();
@@ -901,9 +921,6 @@ mod tests {
 
     #[test]
     fn static_ring_drop_drains_buffered_records() {
-        extern crate std;
-        use std::sync::Arc;
-
         struct Counted(Arc<AtomicUsize>);
         impl Drop for Counted {
             fn drop(&mut self) {
@@ -923,10 +940,6 @@ mod tests {
 
     #[test]
     fn static_ring_concurrent_mpmc_no_loss_no_dup() {
-        extern crate std;
-        use std::sync::Arc;
-        use std::thread;
-
         const PRODUCERS: usize = 4;
         const PER: u32 = 10_000;
         let total = PRODUCERS * PER as usize;
