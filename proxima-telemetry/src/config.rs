@@ -5,6 +5,7 @@
 //! - **Operator config wins**: put `.with_*` BEFORE `.from_path` / `.from_env`.
 //! - **Code overrides win**: put `.with_*` AFTER `.from_path` / `.from_env`.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use std::collections::BTreeSet;
@@ -18,6 +19,7 @@ use crate::config_merge::{MergeMode, apply_layer, insert_if_env_set};
 use crate::level::Level;
 use crate::pipes::{NullPipe, TelemetryPipeHandle, fan_exporters, into_telemetry_handle};
 use crate::recorder::{HasPipe, Recorder, RecorderBuilder, RingCapacities};
+use crate::sampler::Sampler;
 use crate::tag::{ScalarValue, Tag};
 
 /// Telemetry configuration surface.
@@ -428,12 +430,13 @@ impl Validate for TelemetryConfig {
 
 impl Recorder {
     /// Build a `HasPipe`-state recorder builder from a config, resolving the
-    /// terminal pipe from `cfg.exporter` via [`pipe_from_choice`].
+    /// terminal pipe from `cfg.exporters`.
     ///
     /// This crate is transport-free, so a transport-requiring exporter
     /// (`OtlpHttp`/`OtlpGrpc`) resolves to its codec only — it encodes but does
     /// not send. To actually send over the wire, compose the transport at a
-    /// layer that has an HTTP client and inject it via [`from_config_with_pipe`].
+    /// layer that has an HTTP client and inject it via
+    /// [`Self::from_config_with_pipe`].
     pub fn from_config(cfg: &TelemetryConfig) -> RecorderBuilder<HasPipe> {
         Self::from_config_with_pipe(cfg, pipe_from_config(cfg))
     }
@@ -479,8 +482,7 @@ impl Recorder {
                 builder.resource_tag(leak_str(&tag.key), ScalarValue::Str(leak_str(&tag.value)));
         }
         if let Some(spec) = &cfg.sampler {
-            let sampler_box = crate::sampler::spec_to_box(spec);
-            builder = builder.sampler_boxed(sampler_box);
+            builder = builder.sampler_boxed(Box::<dyn Sampler>::from(spec));
         }
         // the fan-out intent (>=2 exporters) DRIVES the sharing mechanism: a fan
         // needs Arc so the FanExporter clones each record with a refcount bump

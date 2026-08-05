@@ -400,11 +400,6 @@ pub struct ResilientOtlpConfigLayerBuilder {
 impl ResilientOtlpConfigLayerBuilder {
     /// Merge a TOML/JSON file's fields onto the accumulated config; the file
     /// wins for every field it specifies.
-    // matches the established `from_path`/`from_env` naming on every other
-    // layered-config builder in the workspace (`ListenTuningLayerBuilder`,
-    // `TelemetryLayerBuilder`) — clippy's `from_*` convention has no
-    // exception for a consuming-self builder chain.
-    #[allow(clippy::wrong_self_convention)]
     pub fn from_path<P: AsRef<Path>>(mut self, path: P) -> Result<Self, conflaguration::Error> {
         let partial: ResilientOtlpConfigPartial = conflaguration::from_file(path.as_ref())?;
         if let Some(buffer_capacity) = partial.buffer_capacity {
@@ -502,7 +497,6 @@ impl ResilientOtlpConfigLayerBuilder {
     /// `horizons` is considered "set" if ANY of its five constituent env
     /// keys is present (the nested table resolves as a whole via the
     /// `Settings` derive's own `nested` composition).
-    #[allow(clippy::wrong_self_convention)]
     pub fn from_env(mut self) -> Result<Self, conflaguration::Error> {
         let resolved = ResilientOtlpConfig::from_env()?;
         if env_is_set("PROXIMA_OTLP_RESILIENT_BUFFER_CAPACITY") {

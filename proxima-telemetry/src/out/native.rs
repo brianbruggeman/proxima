@@ -92,7 +92,7 @@ impl<S: FrameSink> NativeExporter<S> {
     }
 
     /// Zero-alloc encode: the payload borrows directly from the source record,
-    /// producing a byte-identical frame to [`encode_and_emit_payload`] without
+    /// producing a byte-identical frame to [`Self::encode_and_emit_payload`] without
     /// the per-record name/key/attr heap allocations. This is the drain hot path.
     pub fn encode_and_emit_payload_ref(&self, payload: NativePayloadRef<'_>) {
         let kind_low = match &payload {
@@ -112,7 +112,6 @@ const KIND_EVENT: u8 = 1;
 const KIND_LOG: u8 = 2;
 const KIND_METRIC: u8 = 3;
 const KIND_LINK: u8 = 4;
-#[allow(dead_code)]
 const KIND_OVERFLOW_ATTR: u8 = 5;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]

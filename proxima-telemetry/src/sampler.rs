@@ -16,7 +16,7 @@ use crate::tag::Tag;
 ///
 /// Implementations must be cheap (target ≤10 ns per call). Hot-path code.
 ///
-/// `Box<dyn Sampler>` is the one documented deviation from "no Box<dyn Trait>":
+/// `Box<dyn Sampler>` is the one documented deviation from "no `Box<dyn Trait>`":
 /// samplers need hot-swap (via `Recorder::swap_sampler`) and cross-core sharing,
 /// the same justification as `Arc<dyn Exporter>` in C9. User-facing builders
 /// and span types remain concrete/generic.
@@ -104,18 +104,14 @@ impl Sampler for AlwaysOff {
 /// Same trace_id always produces the same decision. Without a trace_id,
 /// falls back to `fastrand::u64(..)`.
 pub struct TraceIdRatioBased {
-    #[allow(dead_code)]
-    p: f64,
     threshold: u64,
 }
 
 impl TraceIdRatioBased {
-    pub fn new(p: f64) -> Self {
-        let clamped = p.clamp(0.0, 1.0);
-        let threshold = (clamped * u64::MAX as f64) as u64;
+    pub fn new(ratio: f64) -> Self {
+        let clamped = ratio.clamp(0.0, 1.0);
         Self {
-            p: clamped,
-            threshold,
+            threshold: (clamped * u64::MAX as f64) as u64,
         }
     }
 }
@@ -177,14 +173,6 @@ impl Sampler for ParentBased {
     }
 }
 
-/// Convert a `SamplerSpec` into a concrete `Box<dyn Sampler>`.
-///
-/// Called from `config.rs::Recorder::from_config`; avoids inline `use` inside function body.
-#[cfg(feature = "std")]
-pub fn spec_to_box(spec: &SamplerSpec) -> alloc::boxed::Box<dyn Sampler> {
-    alloc::boxed::Box::<dyn Sampler>::from(spec)
-}
-
 #[cfg(feature = "std")]
 impl From<&SamplerSpec> for alloc::boxed::Box<dyn Sampler> {
     fn from(spec: &SamplerSpec) -> Self {
@@ -204,12 +192,6 @@ impl From<&SamplerSpec> for alloc::boxed::Box<dyn Sampler> {
                 alloc::boxed::Box::<dyn Sampler>::from(not_sampled.as_ref()),
             )),
         }
-    }
-}
-
-impl Default for alloc::boxed::Box<dyn Sampler> {
-    fn default() -> Self {
-        alloc::boxed::Box::new(AlwaysOn)
     }
 }
 
