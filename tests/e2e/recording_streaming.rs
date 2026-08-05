@@ -10,8 +10,8 @@
 // representative slice converted from tokio::test to proxima::test: these
 // recording round-trips now drive on proxima's runtime (prime under test-prime).
 // gated on the harness feature so the default build is unaffected; the
-// proxima-test lane runs them with `--features test-prime`. See
-// docs/proxima-test/discipline.md.
+// proxima-test lane runs them with `--features test-prime`; the whole matrix
+// is scripts/proxima-test-gate.sh.
 //
 // also needs the full prime runtime bundle: `prime()` below constructs a
 // `PrimeRuntime` directly, which is gated behind executor + inbox-alloc +
