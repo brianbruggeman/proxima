@@ -11,6 +11,8 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
+use crate::error::DnsClientError;
+
 fn default_resolver_ip() -> String {
     // 1.1.1.1 — a well-known public resolver (Cloudflare), used the same
     // way most stub-resolver libraries pick a working default: real,
@@ -147,18 +149,18 @@ impl DnsResolverConfig {
     /// The socket address the client dials.
     ///
     /// # Errors
-    /// [`crate::error::DnsClientError::Config`] if [`Self::resolver_ip`]
-    /// isn't a parseable IP literal — checked here rather than at
-    /// construction so a config loaded from an untrusted source fails at
-    /// first use with a clear error instead of a builder-time panic. Reuses
-    /// the crate's one client error type rather than minting a
-    /// single-variant error type of its own (workspace principle 1).
-    pub fn resolver_addr(&self) -> Result<SocketAddr, crate::error::DnsClientError> {
+    /// [`DnsClientError::Config`] if [`Self::resolver_ip`] isn't a parseable
+    /// IP literal — checked here rather than at construction so a config
+    /// loaded from an untrusted source fails at first use with a clear error
+    /// instead of a builder-time panic. Reuses the crate's one client error
+    /// type rather than minting a single-variant error type of its own
+    /// (workspace principle 1).
+    pub fn resolver_addr(&self) -> Result<SocketAddr, DnsClientError> {
         self.resolver_ip
             .parse::<IpAddr>()
             .map(|ip| SocketAddr::new(ip, self.port))
             .map_err(|_| {
-                crate::error::DnsClientError::Config(format!(
+                DnsClientError::Config(format!(
                     "resolver_ip {:?} is not a valid IP address literal",
                     self.resolver_ip
                 ))

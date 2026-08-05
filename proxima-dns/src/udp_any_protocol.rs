@@ -21,23 +21,20 @@
 //! and DNS-over-UDP share one port number under `.any()`.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use serde_json::Value;
 
-use proxima_codec::Datagram;
 use proxima_core::ProximaError;
 use proxima_listen::admission::ConnAdmission;
 use proxima_listen::any::{AnyHandler, AnyProtocol, ProbeVerdict};
-use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
-use proxima_protocols::dns::codec_trait::DnsDatagramCodec;
 
-use crate::config::DnsServerConfig;
+use crate::config::{DnsServerConfig, resolve_config};
 use crate::pipes::DnsPipeHandle;
-use crate::wire::{answer_to_wire, message_to_query};
+use crate::wire::{answer_datagram, header_is_query};
 
 /// A raw DNS message is never shorter than its own fixed 12-byte header
 /// (RFC 1035 §4.1.1) — no 2-byte length prefix on this wire, unlike
@@ -72,27 +69,17 @@ impl DnsUdpAnyProtocol {
     }
 }
 
-fn resolve_config(base: &DnsServerConfig, spec: &Value) -> Result<DnsServerConfig, ProximaError> {
-    match spec.get("dns") {
-        None => Ok(base.clone()),
-        Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("dns spec: {error}"))),
-    }
-}
-
 /// Positive-match probe over the RAW message (no length prefix): the fixed
-/// header must be present and its `QDCOUNT` (header-relative bytes 4..6)
-/// must be exactly `1` — the same single-question contract
-/// [`crate::any_protocol::probe`] enforces for the TCP wire, just without
-/// skipping a 2-byte prefix first.
+/// header must be present and must open a query — the same predicate
+/// [`crate::any_protocol`] enforces for the TCP wire, just without skipping a
+/// 2-byte prefix first.
 fn probe(prefix: &[u8]) -> ProbeVerdict {
     if prefix.len() < MIN_UDP_HEADER_BYTES {
         return ProbeVerdict::NeedMore {
             at_least: MIN_UDP_HEADER_BYTES,
         };
     }
-    let qdcount = u16::from_be_bytes([prefix[4], prefix[5]]);
-    if qdcount == 1 {
+    if header_is_query(prefix) {
         ProbeVerdict::Match { consumed: 0 }
     } else {
         ProbeVerdict::No
@@ -110,7 +97,7 @@ fn probe(prefix: &[u8]) -> ProbeVerdict {
 fn peer_addr(peer: Option<&PeerInfo>) -> SocketAddr {
     match peer {
         Some(PeerInfo::Tcp(addr)) => *addr,
-        _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        _ => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
     }
 }
 
@@ -141,11 +128,6 @@ impl AnyProtocol for DnsUdpAnyProtocol {
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
         Box::pin(async move {
             let config = resolve_config(&self.config, spec)?;
-            // Carries its own engine from construction (`.dns(handler)`),
-            // mirroring `DnsAnyProtocol`'s identical asymmetry — see
-            // `AnyProtocol::drive`'s own doc for why this is a documented
-            // pattern, not a shortcut: pgwire/redis candidates do the same.
-            let dispatch = &self.handler;
             let peer = peer_addr(peer.as_ref());
 
             // The classifier already replayed however many bytes it read to
@@ -156,53 +138,21 @@ impl AnyProtocol for DnsUdpAnyProtocol {
             let mut datagram = Vec::new();
             stream.read_to_end(&mut datagram).await?;
 
-            if datagram.len() > config.max_message_bytes {
-                proxima_telemetry::warn!(
-                    label = %self.label,
-                    %peer,
-                    len = datagram.len(),
-                    limit = config.max_message_bytes,
-                    "dns query exceeds message limit; dropping"
-                );
-                return Ok(());
+            // The handler comes from construction (`.dns(handler)`), not from
+            // the `AnyHandler` the classifier passes — see `AnyProtocol::drive`'s
+            // own doc for why that asymmetry is the documented pattern here;
+            // pgwire's and redis's candidates do the same.
+            let reply = answer_datagram(
+                &self.label,
+                &self.handler,
+                config.max_message_bytes,
+                peer,
+                &datagram,
+            )
+            .await;
+            if let Some(bytes) = reply {
+                stream.write_all(&bytes).await?;
             }
-            let addressed = match DnsDatagramCodec.decode(peer, &datagram) {
-                Ok(addressed) => addressed,
-                Err(error) => {
-                    proxima_telemetry::warn!(label = %self.label, %peer, ?error, "dns query failed to parse; dropping");
-                    return Ok(());
-                }
-            };
-            let Some(query) = message_to_query(&addressed.message) else {
-                proxima_telemetry::warn!(label = %self.label, %peer, "dns query is not exactly one question; dropping");
-                return Ok(());
-            };
-
-            let request = crate::pipes::DnsPipeRequest {
-                method: proxima_primitives::pipe::Method::from_wire(bytes::Bytes::from_static(
-                    b"DNS",
-                )),
-                path: bytes::Bytes::from_static(b"/"),
-                query: proxima_primitives::pipe::header_list::HeaderList::new(),
-                metadata: proxima_primitives::pipe::header_list::HeaderList::new(),
-                payload: query.clone(),
-                stream: None,
-                context: proxima_primitives::pipe::request::RequestContext::default(),
-            };
-            let reply = match SendPipe::call(dispatch, request).await {
-                Ok(reply) => reply,
-                Err(error) => {
-                    proxima_telemetry::warn!(label = %self.label, %peer, ?error, "dns handler pipe failed; dropping");
-                    return Ok(());
-                }
-            };
-
-            let mut out = Vec::new();
-            if let Err(error) = answer_to_wire(&query, &reply.payload, &mut out) {
-                proxima_telemetry::warn!(label = %self.label, %peer, ?error, "dns answer failed to encode; dropping");
-                return Ok(());
-            }
-            stream.write_all(&out).await?;
             stream.close().await?;
             Ok(())
         })
@@ -213,6 +163,22 @@ impl AnyProtocol for DnsUdpAnyProtocol {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn example_com_query() -> Vec<u8> {
+        let mut message = Vec::new();
+        proxima_protocols::dns::encode::encode_query(
+            1234,
+            true,
+            proxima_protocols::dns::encode::EncodeQuestion {
+                name: "example.com.",
+                qtype: 1,
+                qclass: 1,
+            },
+            &mut message,
+        )
+        .unwrap();
+        message
+    }
 
     #[test]
     fn probe_needs_more_below_the_fixed_header() {
@@ -226,18 +192,7 @@ mod tests {
 
     #[test]
     fn probe_matches_a_well_formed_single_question_header_with_no_length_prefix() {
-        let mut message = Vec::new();
-        proxima_protocols::dns::encode::encode_query(
-            1234,
-            true,
-            proxima_protocols::dns::encode::EncodeQuestion {
-                name: "example.com.",
-                qtype: 1,
-                qclass: 1,
-            },
-            &mut message,
-        )
-        .unwrap();
+        let message = example_com_query();
         assert_eq!(
             probe(&message[..MIN_UDP_HEADER_BYTES]),
             ProbeVerdict::Match { consumed: 0 }
@@ -246,20 +201,27 @@ mod tests {
 
     #[test]
     fn probe_rejects_a_multi_question_header() {
-        let mut message = Vec::new();
-        proxima_protocols::dns::encode::encode_query(
-            1234,
-            true,
-            proxima_protocols::dns::encode::EncodeQuestion {
-                name: "example.com.",
-                qtype: 1,
-                qclass: 1,
-            },
-            &mut message,
-        )
-        .unwrap();
+        let mut message = example_com_query();
         // QDCOUNT sits at header-relative bytes 4..6 — bump it to 2.
         message[5] = 2;
+        assert_eq!(probe(&message[..MIN_UDP_HEADER_BYTES]), ProbeVerdict::No);
+    }
+
+    #[test]
+    fn probe_rejects_a_response_not_a_query() {
+        let mut message = example_com_query();
+        // set QR (header byte 2, high bit): a reply arriving at a server is
+        // not this candidate's traffic, however well-formed it looks.
+        message[2] |= 0b1000_0000;
+        assert_eq!(probe(&message[..MIN_UDP_HEADER_BYTES]), ProbeVerdict::No);
+    }
+
+    #[test]
+    fn probe_rejects_a_non_standard_opcode() {
+        let mut message = example_com_query();
+        // OPCODE 4 (NOTIFY, RFC 1996) — legal DNS, not a query this crate
+        // can answer.
+        message[2] |= 4 << 3;
         assert_eq!(probe(&message[..MIN_UDP_HEADER_BYTES]), ProbeVerdict::No);
     }
 
