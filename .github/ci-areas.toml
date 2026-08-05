@@ -76,6 +76,7 @@ paths = [
     "scripts/proxima-storage-gate.sh",
     "scripts/proxima-listen-gate.sh",
     "scripts/proxima-auth-gate.sh",
+    "scripts/proxima-recording-gate.sh",
     "scripts/_floor-crate-matrix.sh",
     ".github/workflows/no-std.yml",
 ]

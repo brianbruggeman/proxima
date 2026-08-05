@@ -269,6 +269,32 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-auth-gate.sh
 
+  # proxima-recording-gate.sh — same shape, different failure mode. Here the
+  # dev graph DOES unify two of the five non-default features back on (the
+  # crate dev-depends on the `proxima` umbrella, which depends back with
+  # `features = ["pipe", "replay"]`), which is exactly what made the hole hard
+  # to see: `-p proxima-recording` looks like it covers the crate. It does not
+  # cover `durable-wal`, `pipe-config` or `replay-config`, which grep confirms
+  # nothing in the tree turns on. Measured 2026-08-05 pre-audit:
+  # `--features replay-config` failed clippy -D warnings, `--features
+  # durable-wal` ran 6 tests with 2 failing, and `cargo doc` failed on six
+  # intra-doc links. Also the only place rustdoc and the doctest count run on
+  # this crate.
+  proxima-recording-gate:
+    name: proxima-recording-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-recording-gate.sh
+
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
   # directives. `continue-on-error: true` until DC5 finishes gating
