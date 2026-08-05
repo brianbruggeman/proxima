@@ -20,6 +20,10 @@ pub trait PipeFactory: Send + Sync + 'static {
     /// A wrapping factory called with `inner: None` should error; a
     /// terminal factory called with `inner: Some(_)` may either ignore
     /// or error — convention is ignore.
+    ///
+    /// Boxed, not RPITIT: the only consumer is `Arc<dyn PipeFactory>` in a
+    /// [`PipeFactoryRegistry`], and an `impl Future` return type is not
+    /// dyn-compatible.
     fn build(
         &self,
         spec: &Value,

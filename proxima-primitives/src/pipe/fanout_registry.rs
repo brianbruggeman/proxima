@@ -178,6 +178,7 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::block_on;
     use crate::pipe::fanout::BestEffort;
     use alloc::string::String;
     use alloc::string::ToString;
@@ -217,17 +218,6 @@ mod tests {
                     next
                 });
                 Ok(())
-            }
-        }
-    }
-
-    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let waker = core::task::Waker::noop();
-        let mut context = core::task::Context::from_waker(waker);
-        loop {
-            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
             }
         }
     }
