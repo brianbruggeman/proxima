@@ -5,7 +5,7 @@
 //! (`advance`/`remaining`/`chunk`), built to walk forward through a
 //! sequence of chunks, not to hand back a cheap, independently-owned
 //! sub-slice of the SAME backing allocation the codec parsed from — which
-//! is exactly what [`OwnFrame::own_frame`] needs (re-owning a borrowed
+//! is exactly what `OwnFrame::own_frame` needs (re-owning a borrowed
 //! frame past the `Pipe::call` boundary without copying bytes). `share`
 //! names that one operation directly instead of asking every future
 //! `Source` (an `Arc<[u8]>`-backed window, a DPDK `rte_mbuf`, ...) to also
@@ -22,7 +22,7 @@
 use core::ops::Deref;
 
 /// A buffer that can hand back a cheap, same-allocation sub-slice of
-/// itself — the operation [`proxima_protocols::codec_pipe::OwnFrame`]
+/// itself — the operation `proxima_protocols::codec_pipe::OwnFrame`
 /// needs to re-own a borrowed frame past a `Pipe::call` boundary without
 /// copying bytes (see the module doc for why this is `share`, not
 /// `bytes::Buf`).
