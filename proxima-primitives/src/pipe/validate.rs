@@ -177,7 +177,7 @@ impl Checkable<ValidateOp> for Request<Bytes> {
                     ProximaError::Body(format!("validate: request payload is not JSON: {err}"))
                 })?
             };
-            if let Err(err) = schema.validate(&value, &schemas) {
+            if let Err(err) = schema.validate(&value, schemas.as_ref()) {
                 telemetry.counter_inc(METRIC_REJECTED, &labels, 1);
                 return Ok(CheckOutcome::Reject(rejected_response(&err)));
             }
