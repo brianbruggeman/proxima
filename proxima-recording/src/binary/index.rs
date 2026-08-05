@@ -100,12 +100,20 @@ impl IndexWriter {
         .await
     }
 
-    /// Append a pre-packed run of 36-byte records in one write. The caller
-    /// (a [`crate::binary::FrameEncoder`] batch) guarantees the bytes are a
-    /// whole number of `INDEX_RECORD_BYTES` records; a partial tail would
-    /// desync the fixed-stride reader.
+    /// Append a pre-packed run of `INDEX_RECORD_BYTES`-wide records in one
+    /// write, for a caller that already batched them up. A partial tail
+    /// desyncs the fixed-stride reader for every later `read_at`, so it is
+    /// rejected rather than written — the corruption would only surface on a
+    /// much later read.
     pub async fn append_bytes(&self, records: &[u8]) -> Result<(), ProximaError> {
-        debug_assert_eq!(records.len() as u64 % INDEX_RECORD_BYTES, 0);
+        let remainder = records.len() as u64 % INDEX_RECORD_BYTES;
+        if remainder != 0 {
+            return Err(ProximaError::Record(format!(
+                "bin idx batch is not a whole number of {INDEX_RECORD_BYTES}-byte records: \
+                 {} bytes leaves {remainder} over",
+                records.len()
+            )));
+        }
         if records.is_empty() {
             return Ok(());
         }
@@ -311,6 +319,52 @@ mod tests {
         let reader = IndexReader::new(&path, runtime);
         let found = reader.seek_by_ts(target).await.expect("seek");
         assert_eq!(found, expected);
+    }
+
+    #[proxima::test]
+    async fn append_bytes_writes_a_whole_batch_the_reader_walks_back() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("batch.idx");
+        let runtime = prime();
+        let writer = IndexWriter::create(&path, Arc::clone(&runtime))
+            .await
+            .expect("create writer");
+        let original = [make_record(0, 10), make_record(80, 25)];
+        let mut packed = Vec::new();
+        for record in original {
+            packed.extend_from_slice(&record.to_bytes());
+        }
+        writer.append_bytes(&packed).await.expect("append batch");
+        writer.flush().await.expect("flush");
+
+        let reader = IndexReader::new(&path, runtime);
+        assert_eq!(reader.record_count().await.expect("count"), 2);
+        for (index, expected) in original.iter().enumerate() {
+            let got = reader.read_at(index as u64).await.expect("read");
+            assert_eq!(&got, expected);
+        }
+    }
+
+    #[proxima::test]
+    async fn append_bytes_refuses_a_partial_record_instead_of_desyncing_the_stride() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("partial.idx");
+        let runtime = prime();
+        let writer = IndexWriter::create(&path, Arc::clone(&runtime))
+            .await
+            .expect("create writer");
+        let record = make_record(0, 10).to_bytes();
+        let truncated = &record[..record.len() - 1];
+
+        let outcome = writer.append_bytes(truncated).await;
+
+        assert!(matches!(outcome, Err(ProximaError::Record(_))));
+        let reader = IndexReader::new(&path, runtime);
+        assert_eq!(
+            reader.record_count().await.expect("count"),
+            0,
+            "a rejected batch must not reach the file"
+        );
     }
 
     #[proxima::test]
