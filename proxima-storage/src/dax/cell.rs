@@ -20,6 +20,8 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::dax::error::DaxError;
+
 /// A durable single-value cell backed by a file, committed crash-consistently
 /// via fsync + atomic rename. Portable (any OS) and unbounded in value size.
 #[derive(Debug, Clone)]
@@ -30,38 +32,38 @@ pub struct FileCell {
 impl FileCell {
     /// Create (or overwrite) a cell at `path` with `initial` as the first
     /// committed value.
-    pub fn create(path: impl Into<PathBuf>, initial: &[u8]) -> io::Result<Self> {
+    pub fn create(path: impl Into<PathBuf>, initial: &[u8]) -> Result<Self, DaxError> {
         let path = path.into();
         write_atomic(&path, initial)?;
         Ok(Self { path })
     }
 
     /// Open an existing cell; the value is read on [`Self::read`] / [`Self::recover`].
-    pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, DaxError> {
         let path = path.into();
         if !path.exists() {
-            return Err(io::Error::new(
+            return Err(DaxError::Io(io::Error::new(
                 io::ErrorKind::NotFound,
                 "cell does not exist",
-            ));
+            )));
         }
         Ok(Self { path })
     }
 
     /// Commit a new value, crash-consistently. After a crash mid-commit a later
     /// [`Self::recover`] returns either this value or the prior one.
-    pub fn commit(&self, value: &[u8]) -> io::Result<()> {
+    pub fn commit(&self, value: &[u8]) -> Result<(), DaxError> {
         write_atomic(&self.path, value)
     }
 
     /// Read the live value (steady state).
-    pub fn read(&self) -> io::Result<Vec<u8>> {
-        fs::read(&self.path)
+    pub fn read(&self) -> Result<Vec<u8>, DaxError> {
+        Ok(fs::read(&self.path)?)
     }
 
     /// Recover the live value after a crash. The atomic rename guarantees a
     /// complete old-or-new value, so recovery is a plain read.
-    pub fn recover(&self) -> io::Result<Vec<u8>> {
+    pub fn recover(&self) -> Result<Vec<u8>, DaxError> {
         self.read()
     }
 
@@ -72,7 +74,7 @@ impl FileCell {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DaxError> {
     let temp = temp_path(path);
     {
         let mut file = File::create(&temp)?;
@@ -81,7 +83,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.sync_all()?;
     }
     fs::rename(&temp, path)?;
-    sync_parent_dir(path)
+    Ok(sync_parent_dir(path)?)
 }
 
 fn temp_path(path: &Path) -> PathBuf {
@@ -184,6 +186,9 @@ mod tests {
     fn open_missing_cell_is_not_found() {
         let dir = tempdir().expect("tempdir");
         let err = FileCell::open(dir.path().join("absent.bin")).expect_err("missing cell");
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let DaxError::Io(io_err) = err else {
+            panic!("a missing cell is an io error, got {err:?}");
+        };
+        assert_eq!(io_err.kind(), io::ErrorKind::NotFound);
     }
 }
