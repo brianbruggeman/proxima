@@ -24,13 +24,16 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 futures = { workspace = true, features = ["std", "async-await"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true }
-tracing = { workspace = true, optional = true }
 # the tokio-free native listener stack: `AmqpAnyProtocol` mounts into
 # `proxima-listen`'s `AnyListenProtocol` open universal listener over the
 # runtime-matched acceptor factory — see the `listen` feature below.
 proxima-listen = { workspace = true, optional = true }
 proxima-runtime = { workspace = true, features = ["std"], optional = true }
 serde_json = { workspace = true, optional = true }
+# the house telemetry surface, never `tracing` directly — the connection
+# driver's protocol-violation and publish-dispatch events are the only
+# emitters, so it rides `listen` alone.
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 
 [features]
 default = ["std"]
@@ -50,7 +53,6 @@ client = [
     "dep:conflaguration",
     "dep:futures",
     "dep:serde",
-    "dep:tracing",
 ]
 # the tokio-free native (sans-IO) AMQP 0-9-1 LISTENER: `AmqpConnectionPipe`
 # + `AmqpAnyProtocol` mounting into `proxima-listen`'s `AnyListenProtocol`
@@ -73,9 +75,9 @@ listen = [
     "dep:conflaguration",
     "dep:futures",
     "dep:serde",
-    "dep:tracing",
     "dep:proxima-listen",
     "dep:proxima-runtime",
+    "dep:proxima-telemetry",
     "dep:serde_json",
 ]
 

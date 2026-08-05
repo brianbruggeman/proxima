@@ -3703,11 +3703,11 @@ dependencies = [
  "proxima-primitives",
  "proxima-protocols",
  "proxima-runtime",
+ "proxima-telemetry",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
- "tracing",
 ]
 
 [[package]]
