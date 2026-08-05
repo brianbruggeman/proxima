@@ -32,8 +32,9 @@ use futures::stream::StreamExt;
 use alloc::sync::Arc;
 #[cfg(feature = "std")]
 use proxima_core::signal::Signal;
+
 #[cfg(feature = "std")]
-use std::sync::Mutex;
+use crate::sync::blocking::Mutex;
 
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
@@ -49,8 +50,9 @@ use proxima_core::ProximaError;
 pub type ChunkStream = Pin<Box<dyn Stream<Item = Result<Bytes, ProximaError>> + Send>>;
 
 /// Trailers slot — published by a chunked producer at stream end.
-/// std-only: needs `Mutex`. Lives on [`ResponseStream`], never on the
-/// buffered spine (trailers are meaningless for a complete `Bytes` body).
+/// std-only: needs [`crate::sync::blocking::Mutex`]. Lives on
+/// [`ResponseStream`], never on the buffered spine (trailers are meaningless
+/// for a complete `Bytes` body).
 #[cfg(feature = "std")]
 pub type TrailersSlot = Arc<Mutex<Option<HeaderList>>>;
 
@@ -163,7 +165,7 @@ impl ResponseStream {
     #[cfg(feature = "std")]
     #[must_use]
     pub fn trailers(&self) -> Option<HeaderList> {
-        self.trailers.as_ref()?.lock().ok()?.clone()
+        self.trailers.as_ref()?.lock().clone()
     }
 
     /// Borrow the trailers slot — handed to a producer (e.g. the H1
@@ -298,7 +300,7 @@ impl RequestStream {
     #[cfg(feature = "std")]
     #[must_use]
     pub fn trailers(&self) -> Option<HeaderList> {
-        self.trailers.as_ref()?.lock().ok()?.clone()
+        self.trailers.as_ref()?.lock().clone()
     }
 
     /// Borrow the trailers slot — handed to a producer (the chunked
@@ -500,7 +502,7 @@ mod tests {
         assert!(stream.trailers().is_none());
         let mut headers = HeaderList::new();
         headers.insert(Bytes::from_static(b"X-Done"), Bytes::from_static(b"true"));
-        *slot.lock().expect("lock") = Some(headers);
+        *slot.lock() = Some(headers);
         assert_eq!(
             stream
                 .trailers()

@@ -577,9 +577,7 @@ fn publish_pending_trailers(
     for (name, value) in captured_trailers {
         trailers.insert(name, value);
     }
-    if let Ok(mut guard) = trailers_slot.lock() {
-        *guard = Some(trailers);
-    }
+    *trailers_slot.lock() = Some(trailers);
 }
 
 /// Write the streaming path's final response (or rendered error) and
@@ -1142,7 +1140,7 @@ fn build_streaming_request(
     // `body_bytes()` folds it into `headers` after draining (RFC 7230
     // §4.1.2 request trailers on the streaming path).
     let trailers_slot: proxima_primitives::pipe::body::TrailersSlot =
-        Arc::new(std::sync::Mutex::new(None));
+        Arc::new(proxima_primitives::sync::blocking::Mutex::new(None));
     let request = Request {
         method,
         path,
@@ -1454,9 +1452,7 @@ where
     // drain above so any stream-end-emitted trailers are visible.
     // The terminator rides the final write — in the degenerate case
     // that is THE one write for the whole response.
-    let trailers_now = trailers_slot
-        .as_ref()
-        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+    let trailers_now = trailers_slot.as_ref().and_then(|slot| slot.lock().clone());
     if let Some(trailers) = trailers_now
         && matches!(framing, BodyFraming::Chunked)
         && !trailers.is_empty()

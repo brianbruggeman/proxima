@@ -1,6 +1,5 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
@@ -11,6 +10,7 @@ use futures::task::AtomicWaker;
 
 use proxima_core::ProximaError;
 
+use crate::sync::blocking::Mutex;
 use crate::transport::stream::GenericStream;
 
 pub const DEFAULT_REPLAY_CAP_BYTES: usize = 4 * 1024 * 1024;
@@ -116,7 +116,7 @@ impl<T: Send + Clone + 'static> Replay<T> {
     }
 
     pub fn replay(&self) -> Result<GenericStream<T>, ProximaError> {
-        let state = lock_state(&self.inner.state);
+        let state = self.inner.state.lock();
         if state.capped {
             return Err(ProximaError::Body(format!(
                 "tee replay unavailable: exceeded {} weight",
@@ -148,7 +148,7 @@ impl<T: Send + Clone + 'static> Replay<T> {
         let producer_waker = Arc::new(AtomicWaker::new());
         let closed = Arc::new(AtomicBool::new(false));
         {
-            let mut state = lock_state(&self.inner.state);
+            let mut state = self.inner.state.lock();
             state.sinks.push(SinkSlot {
                 queue: queue.clone(),
                 consumer_waker: consumer_waker.clone(),
@@ -171,12 +171,12 @@ impl<T: Send + Clone + 'static> Replay<T> {
 
     #[must_use]
     pub fn recorded_weight(&self) -> usize {
-        lock_state(&self.inner.state).recorded_weight
+        self.inner.state.lock().recorded_weight
     }
 
     #[must_use]
     pub fn capped(&self) -> bool {
-        lock_state(&self.inner.state).capped
+        self.inner.state.lock().capped
     }
 }
 
@@ -218,7 +218,7 @@ impl<T: Send + Clone + 'static> Stream for PrimaryStream<T> {
     type Item = Result<T, ProximaError>;
 
     fn poll_next(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut state = lock_state(&self.inner.state);
+        let mut state = self.inner.state.lock();
         let cap = self.inner.cap_weight;
         let weight_fn = self.inner.weight_fn.clone();
         loop {
@@ -277,7 +277,7 @@ impl<T: Send + Clone + 'static> Stream for ReplayStream<T> {
         let this = self.get_mut();
         let cap = this.inner.cap_weight;
         let weight_fn = this.inner.weight_fn.clone();
-        let mut state = lock_state(&this.inner.state);
+        let mut state = this.inner.state.lock();
         loop {
             if state.capped {
                 return Poll::Ready(Some(Err(ProximaError::Body(format!(
@@ -373,14 +373,6 @@ impl<T: Send + Clone + 'static> Drop for SinkStream<T> {
         self.closed.store(true, Ordering::Release);
         self.producer_waker.wake();
     }
-}
-
-fn lock_state<T: Send + Clone + 'static>(
-    state: &Mutex<ReplayState<T>>,
-) -> std::sync::MutexGuard<'_, ReplayState<T>> {
-    state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn record<T: Send + Clone + 'static>(

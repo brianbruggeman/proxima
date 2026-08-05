@@ -647,7 +647,8 @@ async fn dispatch_streaming_uring(
     const BODY_CHANNEL_DEPTH: usize = 8;
     let (body_tx, body_rx) =
         tokio::sync::mpsc::channel::<Result<Bytes, ProximaError>>(BODY_CHANNEL_DEPTH);
-    let trailers_slot: crate::body::TrailersSlot = Arc::new(std::sync::Mutex::new(None));
+    let trailers_slot: crate::body::TrailersSlot =
+        Arc::new(proxima_primitives::sync::blocking::Mutex::new(None));
 
     let upgrade_ticket = crate::upgrade::local_slots::next_ticket();
     let mut request = build_streaming_request_uring(connection, body_rx);
@@ -675,9 +676,7 @@ async fn dispatch_streaming_uring(
             for (name, value) in captured {
                 trailers.insert(name, value);
             }
-            if let Ok(mut guard) = trailers_slot.lock() {
-                *guard = Some(trailers);
-            }
+            *trailers_slot.lock() = Some(trailers);
         }
     }
     drop(body_tx);
@@ -930,9 +929,7 @@ async fn write_response_uring(
 
     // Trailers — only emit for chunked framing; encoder ignores for
     // content-length / none.
-    let trailers_now = trailers_slot
-        .as_ref()
-        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+    let trailers_now = trailers_slot.as_ref().and_then(|slot| slot.lock().clone());
     if let Some(trailers) = trailers_now
         && matches!(framing, BodyFraming::Chunked)
         && !trailers.is_empty()
