@@ -8,7 +8,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::task::{Context, Poll};
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Protocol, Socket, Type};
 use tokio::net::TcpListener as TokioTcpListenerInner;
 
 use proxima_primitives::stream::{AcceptorFactory, StreamConnection, TcpAcceptor, TcpBindOptions};
@@ -21,12 +21,7 @@ pub struct TokioAcceptorFactory;
 
 impl AcceptorFactory for TokioAcceptorFactory {
     fn bind(&self, addr: SocketAddr, options: TcpBindOptions) -> io::Result<Box<dyn TcpAcceptor>> {
-        let domain = if addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
-        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        let socket = Socket::new(super::domain_for(addr), Type::STREAM, Some(Protocol::TCP))?;
         socket.set_nonblocking(true)?;
         socket.set_reuse_address(true)?;
         #[cfg(unix)]
