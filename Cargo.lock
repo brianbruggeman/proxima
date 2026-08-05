@@ -4527,6 +4527,7 @@ dependencies = [
  "smallvec",
  "temp-env",
  "tempfile",
+ "thiserror 2.0.19",
  "thread_local",
  "tokio",
  "toml 0.8.23",

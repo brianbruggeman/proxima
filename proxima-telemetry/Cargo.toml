@@ -22,7 +22,7 @@ proxima-primitives = { workspace = true, optional = true }
 loom = { workspace = true, optional = true }
 arc-swap = { workspace = true, optional = true }
 bon = { workspace = true, optional = true }
-bytes = { workspace = true }
+bytes = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 dashmap = { workspace = true, optional = true }
 fastrand = { workspace = true, optional = true }
@@ -30,19 +30,20 @@ rustc-hash = { workspace = true, features = ["std"], optional = true }
 futures = { workspace = true, features = ["executor"], optional = true }
 hdrhistogram = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
-smallvec = { workspace = true }
+smallvec = { workspace = true, optional = true }
 thread_local = { workspace = true, optional = true }
-tracing = { workspace = true }
+tracing = { workspace = true, optional = true }
 postcard = { workspace = true, features = ["alloc"], optional = true }
 proxima-macros = { workspace = true, optional = true }
 prost = { workspace = true, features = ["std", "derive"], optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }
 atomic-waker = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true, optional = true }
-pin-project-lite.workspace = true
+pin-project-lite = { workspace = true, optional = true }
 proxima-clock = { workspace = true, optional = true }
+thiserror.workspace = true
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support"] }
@@ -89,7 +90,18 @@ default = ["std"]
 # the next domino for a bare-metal T1. `id` (TraceId/SpanId) needs neither
 # alloc nor proxima-primitives::pipe — it lives at the tier floor below, see
 # `pub mod id` in lib.rs.
-alloc = ["dep:fastrand", "dep:proxima-primitives", "proxima-primitives/alloc"]
+alloc = [
+    "dep:fastrand",
+    "dep:proxima-primitives",
+    "proxima-primitives/alloc",
+    # the record payloads: `Tag`'s `Bytes` variant, the `SmallVec` attr inline,
+    # `Level`'s serde codec, and `spanned`'s pin projection. None of them is
+    # reachable at the T0 floor, so none of them is compiled there.
+    "dep:bytes",
+    "dep:smallvec",
+    "dep:pin-project-lite",
+    "dep:serde",
+]
 # emit: the typed hierarchical emit-control / filtering surface. Default-off
 # (disciplined-component): opt in with `--features emit`. Implies alloc (the
 # Coord/resolution data); the config + pipe parts additionally need std.
@@ -102,6 +114,7 @@ std = [
     "proxima-core/std",
     "proxima-core/live",
     "proxima-primitives/std",
+    "thiserror/std",
     "dep:arc-swap",
     "dep:bon",
     "dep:conflaguration",
@@ -123,6 +136,11 @@ std = [
     # only exists under `std` (it wraps `std::time::Instant`), so the dep
     # is gated here rather than at `alloc`.
     "dep:proxima-clock",
+    # `tracing` is the OUT-OF-BAND fault channel for the telemetry runtime
+    # itself (drainer/registry export failures, drainer-thread spawn failure) —
+    # routing those through proxima's own recorder would feed the ring being
+    # drained. Nothing below `std` touches it, so bare metal never links it.
+    "dep:tracing",
 ]
 histogram    = ["std"]
 # instrument-metrics: the unified-instrument seam — a span's close also records its
