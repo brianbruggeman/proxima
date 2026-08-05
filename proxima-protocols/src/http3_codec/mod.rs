@@ -51,7 +51,7 @@ pub mod frame;
 pub mod qpack;
 
 #[cfg(feature = "http3_codec-codec-trait")]
-pub use codec_trait::{H3CodecError, H3FrameCodec};
+pub use codec_trait::H3FrameCodec;
 
 #[cfg(feature = "http3_codec-alloc")]
 pub mod client;

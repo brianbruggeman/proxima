@@ -13,14 +13,10 @@
 //! carries the chosen [`super::WireVersion`] as config, the same way
 //! `proxima_codec::LengthDelimitedCodec` carries its `FrameLimits`.
 //!
-//! [`super::ParseError`] has no `Display`/`Error` impl upstream (it
-//! only had a `From<ParseError> for ProximaError` bridge); `FrameError`
-//! wraps it and supplies both, mirroring the `H3CodecError` precedent
-//! (`docs/codec-trait/discipline.md`, C5) for an upstream type that
-//! doesn't derive them.
+//! `encode_frame` never fails ([`super::encode`] is infallible), so
+//! every [`super::ParseError`] surfaced here is a parse-side failure.
 
 use alloc::vec::Vec;
-use core::fmt;
 
 use proxima_codec::FrameCodec;
 
@@ -47,35 +43,15 @@ impl Default for ProxyProtocolCodec {
     }
 }
 
-/// Wraps [`ParseError`] with the `Display`/`Error` impls it lacks
-/// upstream. `encode_frame` never fails (`super::encode` is
-/// infallible), so every variant here is a parse-side failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameError(pub ParseError);
-
-impl fmt::Display for FrameError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            ParseError::NeedMore => formatter.write_str("proxy protocol: incomplete header"),
-            ParseError::NotProxyProtocol => formatter.write_str("proxy protocol: header missing"),
-            ParseError::Malformed(reason) => {
-                write!(formatter, "proxy protocol: malformed: {reason}")
-            }
-        }
-    }
-}
-
-impl core::error::Error for FrameError {}
-
 impl FrameCodec for ProxyProtocolCodec {
     type Frame<'a> = ProxyHeader;
-    type Error = FrameError;
+    type Error = ParseError;
 
-    fn parse_frame(&self, buf: &[u8]) -> Result<(ProxyHeader, usize), FrameError> {
-        parse(buf).map_err(FrameError)
+    fn parse_frame(&self, buf: &[u8]) -> Result<(ProxyHeader, usize), ParseError> {
+        parse(buf)
     }
 
-    fn encode_frame(&self, frame: &ProxyHeader, dest: &mut Vec<u8>) -> Result<(), FrameError> {
+    fn encode_frame(&self, frame: &ProxyHeader, dest: &mut Vec<u8>) -> Result<(), ParseError> {
         dest.extend_from_slice(&encode(frame, self.version));
         Ok(())
     }
@@ -127,19 +103,19 @@ mod tests {
     fn short_buffer_returns_need_more_not_error() {
         let codec = ProxyProtocolCodec::default();
         let outcome = codec.parse_frame(b"PROXY TCP4 192.168");
-        assert_eq!(outcome, Err(FrameError(ParseError::NeedMore)));
+        assert_eq!(outcome, Err(ParseError::NeedMore));
     }
 
     #[test]
     fn non_proxy_prefix_is_rejected() {
         let codec = ProxyProtocolCodec::default();
         let outcome = codec.parse_frame(b"GET / HTTP/1.1\r\n");
-        assert_eq!(outcome, Err(FrameError(ParseError::NotProxyProtocol)));
+        assert_eq!(outcome, Err(ParseError::NotProxyProtocol));
     }
 
     #[test]
     fn frame_error_display_carries_the_reason() {
-        let error = FrameError(ParseError::Malformed("v1 unknown family"));
+        let error = ParseError::Malformed("v1 unknown family");
         assert_eq!(
             alloc::format!("{error}"),
             "proxy protocol: malformed: v1 unknown family"

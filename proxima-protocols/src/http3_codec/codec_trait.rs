@@ -6,14 +6,11 @@
 //!
 //! Frame shape: a borrowed [`H3Frame<'a>`] (zero-copy view into the
 //! input buffer). This is the only sub-crate where the existing
-//! upstream surface already matched the FrameCodec contract almost
-//! exactly — `parse` already returns `(H3Frame<'_>, usize)`. The
-//! only adaptation is wrapping [`H3FrameError`] (which lives in
-//! `frame.rs`) in a [`H3CodecError`] that adds `core::error::Error` +
-//! `Display`, and bridging `encode` (writes to `&mut [u8]`) to
+//! upstream surface already matched the FrameCodec contract exactly —
+//! `parse` already returns `(H3Frame<'_>, usize)` and its
+//! [`H3FrameError`] already satisfies `FrameCodec::Error`. The only
+//! adaptation is bridging `encode` (writes to `&mut [u8]`) to
 //! `encode_frame` (extends a `Vec<u8>`).
-
-use core::fmt;
 
 use alloc::vec::Vec;
 use proxima_codec::FrameCodec;
@@ -24,43 +21,12 @@ use crate::http3_codec::frame::{FrameError as H3FrameError, H3Frame, encode, par
 #[derive(Debug, Clone, Copy, Default)]
 pub struct H3FrameCodec;
 
-/// Error surface for [`H3FrameCodec`]. Wraps the existing
-/// [`H3FrameError`] and adds `Display` + `core::error::Error` impls
-/// (the upstream type derives neither, since the wire layer is
-/// no_std-strict). The `Truncated` variant of `H3FrameError` already
-/// means "buffer ran out before the frame could be parsed", so this
-/// wrapper does NOT add a separate `Partial` variant the way the h1
-/// and h2 wrappers do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct H3CodecError(pub H3FrameError);
-
-impl fmt::Display for H3CodecError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            H3FrameError::Truncated => formatter.write_str("truncated: need more bytes"),
-            H3FrameError::InvalidVarint => formatter.write_str("invalid varint"),
-            H3FrameError::PayloadTooLong => formatter.write_str("payload too long"),
-            H3FrameError::BufferTooSmall { needed } => {
-                write!(formatter, "encode buffer too small: need {needed} bytes")
-            }
-        }
-    }
-}
-
-impl core::error::Error for H3CodecError {}
-
-impl From<H3FrameError> for H3CodecError {
-    fn from(error: H3FrameError) -> Self {
-        Self(error)
-    }
-}
-
 impl FrameCodec for H3FrameCodec {
     type Frame<'a> = H3Frame<'a>;
-    type Error = H3CodecError;
+    type Error = H3FrameError;
 
     fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(Self::Frame<'a>, usize), Self::Error> {
-        parse(buf).map_err(H3CodecError::from)
+        parse(buf)
     }
 
     fn encode_frame(&self, frame: &Self::Frame<'_>, dest: &mut Vec<u8>) -> Result<(), Self::Error> {
@@ -117,7 +83,7 @@ mod tests {
         let codec = H3FrameCodec;
         let buf = b"\x00"; // type only, length missing
         let outcome = codec.parse_frame(buf);
-        assert_eq!(outcome.err(), Some(H3CodecError(H3FrameError::Truncated)));
+        assert_eq!(outcome.err(), Some(H3FrameError::Truncated));
     }
 
     #[test]
@@ -138,7 +104,13 @@ mod tests {
 
     #[test]
     fn codec_error_displays_human_readable_message() {
-        let displayed = format!("{}", H3CodecError(H3FrameError::Truncated));
-        assert!(displayed.contains("truncated"));
+        assert_eq!(
+            format!("{}", H3FrameError::Truncated),
+            "truncated: need more bytes"
+        );
+        assert_eq!(
+            format!("{}", H3FrameError::BufferTooSmall { needed: 12 }),
+            "encode buffer too small: need 12 bytes"
+        );
     }
 }

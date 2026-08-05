@@ -23,10 +23,11 @@
 #[cfg(feature = "proxy_protocol-codec-trait")]
 pub mod codec_trait;
 #[cfg(feature = "proxy_protocol-codec-trait")]
-pub use codec_trait::{FrameError as ProxyProtocolFrameError, ProxyProtocolCodec};
+pub use codec_trait::ProxyProtocolCodec;
 
 use alloc::format;
 use alloc::vec::Vec;
+use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[cfg(feature = "proxy_protocol-std")]
@@ -282,17 +283,21 @@ pub enum ParseError {
     Malformed(&'static str),
 }
 
+impl fmt::Display for ParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NeedMore => formatter.write_str("proxy protocol: incomplete header"),
+            Self::NotProxyProtocol => formatter.write_str("proxy protocol: header missing"),
+            Self::Malformed(reason) => write!(formatter, "proxy protocol: malformed: {reason}"),
+        }
+    }
+}
+
+impl core::error::Error for ParseError {}
+
 impl From<ParseError> for ProximaError {
     fn from(value: ParseError) -> Self {
-        match value {
-            ParseError::NeedMore => ProximaError::Upstream("proxy protocol: short read".into()),
-            ParseError::NotProxyProtocol => {
-                ProximaError::Upstream("proxy protocol: header missing".into())
-            }
-            ParseError::Malformed(reason) => {
-                ProximaError::Upstream(format!("proxy protocol: malformed: {reason}"))
-            }
-        }
+        ProximaError::Upstream(format!("{value}"))
     }
 }
 
