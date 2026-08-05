@@ -88,7 +88,7 @@ async fn accept_and_drive(
         .await
 }
 
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn get_hit_reaches_the_handler() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -106,7 +106,7 @@ async fn get_hit_reaches_the_handler() {
     server.await.expect("server task").expect("drive");
 }
 
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn set_reaches_the_handler_and_replies_stored() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -127,7 +127,7 @@ async fn set_reaches_the_handler_and_replies_stored() {
     server.await.expect("server task").expect("drive");
 }
 
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn noreply_set_never_writes_a_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -151,7 +151,7 @@ async fn noreply_set_never_writes_a_reply() {
 /// Pipelining: two commands in ONE write, only the second is `noreply`.
 /// Proves `AsFrame::as_frame() -> None` skips exactly the silent
 /// command's own reply, not the whole batch.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn a_noreply_command_pipelined_behind_a_normal_one_only_suppresses_its_own_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -174,7 +174,7 @@ async fn a_noreply_command_pipelined_behind_a_normal_one_only_suppresses_its_own
 
 /// `quit` closes with no reply at all — the deleted `main_loop`'s
 /// `FrameOutcome::Close` behavior, now `MemcachedOutcome::CloseSilent`.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn quit_closes_the_connection_with_no_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -197,7 +197,7 @@ async fn quit_closes_the_connection_with_no_reply() {
 /// it must never be answered (the deleted `Advanced::ProtocolError`'s
 /// "no trustworthy boundary to skip past" close-outright behavior, now
 /// `MemcachedOutcome::CloseWithReply` + `keep_serving() == false`).
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn unknown_command_closes_the_connection_with_an_error() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -224,7 +224,7 @@ async fn unknown_command_closes_the_connection_with_an_error() {
 /// A still-incomplete `set` whose declared value already exceeds the
 /// configured cap closes with a descriptive `SERVER_ERROR`, matching the
 /// deleted `Advanced::MessageTooLarge` reply text exactly.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn an_oversized_value_closes_with_a_message_too_large_server_error() {
     let (listener, addr) = bind_loopback().await;
     // the command LINE alone ("set k 0 0 1000\r\n") is 16 bytes — a cap of
@@ -261,7 +261,7 @@ async fn an_oversized_value_closes_with_a_message_too_large_server_error() {
 /// connection instead of answering a `SERVER_ERROR` and staying open, so
 /// a trailing `quit` right behind the shed command now closes cleanly
 /// with no reply of its own.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn business_command_is_shed_with_a_server_error_reply_while_admission_is_quiescing() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
@@ -292,7 +292,7 @@ async fn business_command_is_shed_with_a_server_error_reply_while_admission_is_q
 /// the same silence its own successful dispatch would produce — instead
 /// of answering a `SERVER_ERROR` that a real memcached client, having
 /// declared `noreply`, would never read.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn a_noreply_command_stays_silent_when_admission_shed() {
     let (listener, addr) = bind_loopback().await;
     let protocol = MemcachedAnyProtocol::new("memcached", handler());
