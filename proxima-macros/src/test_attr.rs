@@ -333,16 +333,16 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
         start_paused,
     } = test_args;
 
-    let make_plan = |case: &str| -> TokenStream {
+    let make_cassette = |case: &str| -> TokenStream {
         match &cassette {
             Some(name) => quote! {
-                ::proxima::test_support::Plan::with_cassette(::proxima::test_support::CassetteSpec {
+                ::core::option::Option::Some(::proxima::test_support::CassetteSpec {
                     name: #name,
                     case: #case,
                     manifest_dir: ::core::env!("CARGO_MANIFEST_DIR"),
                 })
             },
-            None => quote!(::proxima::test_support::Plan::new()),
+            None => quote!(::core::option::Option::None),
         }
     };
 
@@ -394,23 +394,28 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
             } else {
                 quote!(::proxima::test_support::run_tokio_multi_thread)
             };
-            quote!(#fn_path(plan_arg, #workers_arg, body_arg))
+            quote!(#fn_path(cassette_arg, #workers_arg, body_arg))
         }
         (RuntimeKind::Default, true) | (RuntimeKind::Tokio, true) => {
             quote!(::proxima::test_support::run_tokio_current_thread_paused(
-                plan_arg, body_arg
+                cassette_arg,
+                body_arg
             ))
         }
-        (RuntimeKind::Default, false) => quote!(::proxima::test_support::run(plan_arg, body_arg)),
-        (RuntimeKind::Prime, _) => quote!(::proxima::test_support::run_prime(plan_arg, body_arg)),
+        (RuntimeKind::Default, false) => {
+            quote!(::proxima::test_support::run(cassette_arg, body_arg))
+        }
+        (RuntimeKind::Prime, _) => {
+            quote!(::proxima::test_support::run_prime(cassette_arg, body_arg))
+        }
         (RuntimeKind::Tokio, false) => {
-            quote!(::proxima::test_support::run_tokio(plan_arg, body_arg))
+            quote!(::proxima::test_support::run_tokio(cassette_arg, body_arg))
         }
     };
 
-    let driver = |plan: TokenStream, call_args: &[TokenStream]| {
+    let driver = |cassette_expr: TokenStream, call_args: &[TokenStream]| {
         quote! {
-            let plan_arg = #plan;
+            let cassette_arg = #cassette_expr;
             let body_arg = move |_proxima_cx: ::proxima::test_support::TestCtx| async move {
                 ::proxima::test_support::IntoTestOutcome::into_test_outcome(
                     __proxima_inner(#(#call_args),*).await,
@@ -448,7 +453,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
                 _ => unreachable!("case/values do not reach the non-parameterized path"),
             })
             .collect();
-        let body = driver(make_plan(""), &call_args);
+        let body = driver(make_cassette(""), &call_args);
         return Ok(quote! {
             #prime_cfg
             #(#other_attrs)*
@@ -544,7 +549,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
             }
             let case_name = name_parts.join("_");
             let case_ident = Ident::new(&case_name, Span::call_site());
-            let body = driver(make_plan(&case_name), &call_args);
+            let body = driver(make_cassette(&case_name), &call_args);
             generated.push(quote! {
                 #prime_cfg
                 #(#other_attrs)*
