@@ -4545,9 +4545,7 @@ dependencies = [
  "futures",
  "libc",
  "prime",
- "proxima-core",
  "proxima-runtime",
- "time",
  "tokio",
 ]
 

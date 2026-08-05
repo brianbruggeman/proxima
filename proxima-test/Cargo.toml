@@ -10,8 +10,6 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-proxima-core = { workspace = true }
-time = { workspace = true }
 # backs `AsyncOnce` (the `#[proxima::fixture(once)]` cell) — const-constructible,
 # no runtime coupling, unlike `tokio::sync::Mutex::const_new`.
 async-lock = { workspace = true }
