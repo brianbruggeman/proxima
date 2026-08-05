@@ -32,13 +32,14 @@ impl Clock for TimeClock {
 ///
 /// Two doubles, not one, because they prove two different things:
 ///
-/// - [`MockClock`] proves a combinator's async pend/wake state machine —
-///   `delay` genuinely pends until [`MockClock::advance`] crosses the
+/// - [`testing::MockClock`] proves a combinator's async pend/wake state
+///   machine — `delay` genuinely pends until [`testing::MockClock::advance`]
+///   crosses the
 ///   deadline, waking the task through the real driver's `schedule_wake`.
 ///   Collapsing this into `RecordingClock` would make every test that needs
 ///   real pend/wake behavior (does the combinator park at the right time,
 ///   does it wake exactly once) pass trivially without exercising it.
-/// - [`RecordingClock`] proves what a combinator *computed* (a backoff
+/// - [`testing::RecordingClock`] proves what a combinator *computed* (a backoff
 ///   schedule, a rate-limit refill) — `delay` never pends; it records the
 ///   requested [`Duration`] and resolves on first poll, so a sequential test
 ///   never has to drive a concurrent `advance()` to unblock it.

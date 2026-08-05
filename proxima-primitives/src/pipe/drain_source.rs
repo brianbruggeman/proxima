@@ -268,7 +268,8 @@ impl<const SLOTS: usize, const SLOT: usize> proxima_core::io::AsyncRead
     /// Poll-mode caveat (`docs/pipe-to-metal/edges.md`'s reshape ruling): this
     /// ring has no waker registration, so an empty-but-open ring returns
     /// `Pending` WITHOUT arming a wake — busy-poll, not wake-driven, matching
-    /// every other T0 source in this crate ([`FanIn`], [`DrainFanIn`]).
+    /// every other T0 source in this crate ([`crate::pipe::FanIn`],
+    /// [`DrainFanIn`]).
     fn poll_read(
         self: core::pin::Pin<&mut Self>,
         _cx: &mut core::task::Context<'_>,
