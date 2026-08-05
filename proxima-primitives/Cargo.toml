@@ -242,15 +242,11 @@ name = "sync_bench_runtime_shaped"
 harness = false
 required-features = ["runtime-shaped-mutex"]
 
-[lints.rust]
-warnings = "deny"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-# we use `impl Future + Send` explicitly in traits to keep DynService dyn-compatible
-manual_async_fn = "allow"
+# every other crate in the workspace inherits; `cfg(loom)` is declared by
+# build.rs (`cargo::rustc-check-cfg=cfg(loom)`), so the forked `[lints.rust]`
+# block this used to carry only duplicated the workspace values.
+[lints]
+workspace = true
 
 [build-dependencies]
 proxima-build.workspace = true
