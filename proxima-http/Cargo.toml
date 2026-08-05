@@ -48,7 +48,6 @@ smallvec = { workspace = true, optional = true, features = ["const_generics"] }
 tracing = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["sync", "rt", "io-util", "net", "macros", "time"] }
 tokio-util = { workspace = true, optional = true, features = ["compat", "io"] }
-tokio-uring = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true, features = ["aws_lc_rs", "tls12"] }
 # AnyListenProtocol's factory-driven (futures-io) accept loop terminates TLS
 # with the futures-io sibling of tokio-rustls — same rustls::ServerConfig,
@@ -144,6 +143,13 @@ http1-stream-client = [
 # quinn-compat/native-upstream paths reference it directly regardless
 # of the http1-io-uring feature, mirroring proxima-h3's original
 # always-on dependency.
+#
+# `tokio-uring` is declared under `cfg(target_os = "linux")` (see the target
+# table below), mirroring `proxima-runtime`'s own `io-uring` feature: macOS
+# and Windows accept the flag but resolve no `tokio-uring`, and
+# `uring_transport` is `cfg(target_os = "linux")` besides. Declaring it in the
+# plain `[dependencies]` table made `--all-features` unbuildable off Linux —
+# `io-uring` fails on `libc::MAP_POPULATE`/`cpu_set_t`/`SYS_io_uring_setup`.
 http1-io-uring = ["http1", "dep:tokio-uring", "dep:tokio-rustls"]
 
 # `http2-native` is the tokio-free base: the sans-IO codec + the futures-io
@@ -232,3 +238,6 @@ required-features = ["http3-native"]
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = { workspace = true, optional = true }
