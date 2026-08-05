@@ -1,11 +1,9 @@
 mod bounded;
-mod lane;
 mod mpsc;
 
 #[cfg(feature = "alloc")]
 pub use bounded::HeapBoundedQueue;
 pub use bounded::{BoundedQueue, EnqueueOutcome, FailMode, RingStorage, StaticBoundedQueue};
-pub use lane::LaneHandle;
 pub use mpsc::StaticRing;
 #[cfg(feature = "alloc")]
 pub use mpsc::{Drainer, Ring};
