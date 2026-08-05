@@ -1,4 +1,4 @@
-//! `Describe`: types that generate their own [`Schema`] IR from the type itself,
+//! `Describe`: types that generate their own [`enum@Schema`] IR from the type itself,
 //! so the contract cannot drift from the Rust shape. derive it with
 //! `#[derive(Schema)]` (the `schema-derive` feature) the way serde derives are
 //! used; the std impls below bottom out the recursion.

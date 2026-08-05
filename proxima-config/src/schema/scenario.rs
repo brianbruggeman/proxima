@@ -1,36 +1,30 @@
-//! `Schema` IR entries for [`crate::scenarios`] types. Built manually
-//! and registered in `SchemaRegistry` so:
+//! `Schema` IR entries for the umbrella crate's `proxima::scenarios`
+//! types. Built manually and registered in `SchemaRegistry` so:
 //!
 //! 1. `proxima describe --format json-schema` can emit them for
 //!    downstream binding generators (Python pydantic, TypeScript zod,
 //!    Go structs).
 //! 2. The smoke fixtures and any hand-written scenarios can be
 //!    validated against the schema at CI time, catching drift between
-//!    the serde structs in [`crate::scenarios::spec`] and the schema
+//!    the serde structs in `proxima::scenarios::spec` and the schema
 //!    description here.
 //!
-//! Schema names registered:
+//! Schema names registered, each against the `proxima::scenarios` type
+//! it describes:
 //!
-//! - `scenario`            — top-level [`Scenario`]
-//! - `workload_spec`       — [`WorkloadSpec`]
-//! - `expectation`         — [`Expectation`]
-//! - `duration_spec`       — [`DurationSpec`]
-//! - `profile_step`        — [`ProfileStep`]
-//! - `orchestration_mode`  — [`OrchestrationMode`]
-//! - `compare_op`          — [`CompareOp`]
-//! - `scenario_pipe_spec`  — [`ScenarioPipeSpec`]
+//! - `scenario`            — `Scenario`
+//! - `workload_spec`       — `WorkloadSpec`
+//! - `expectation`         — `Expectation`
+//! - `duration_spec`       — `DurationSpec`
+//! - `profile_step`        — `ProfileStep`
+//! - `orchestration_mode`  — `OrchestrationMode`
+//! - `compare_op`          — `CompareOp`
+//! - `scenario_pipe_spec`  — `ScenarioPipeSpec`
 //!
-//! Drift between this module and `scenarios::spec` is caught by the
-//! round-trip test in `proxima/rust/tests/scenario_schema.rs`.
-//!
-//! [`Scenario`]: crate::scenarios::Scenario
-//! [`WorkloadSpec`]: crate::scenarios::WorkloadSpec
-//! [`Expectation`]: crate::scenarios::Expectation
-//! [`DurationSpec`]: crate::scenarios::DurationSpec
-//! [`ProfileStep`]: crate::scenarios::ProfileStep
-//! [`OrchestrationMode`]: crate::scenarios::OrchestrationMode
-//! [`CompareOp`]: crate::scenarios::CompareOp
-//! [`ScenarioPipeSpec`]: crate::scenarios::ScenarioPipeSpec
+//! Those types live one crate UP: proxima-config is a dependency of the
+//! umbrella, so this module cannot link to or import them. Drift between
+//! the two is caught by the round-trip test in
+//! `tests/units/scenario_schema.rs` at the workspace root.
 
 use crate::schema::{EnumVariant, FieldFlags, Schema, SchemaRegistry, StructField};
 use proxima_core::ProximaError;
