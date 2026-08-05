@@ -14,7 +14,7 @@ proxima-core = { workspace = true, features = ["alloc"] }
 base64 = { workspace = true, optional = true }
 rcgen = { workspace = true, features = ["aws_lc_rs", "pem"], optional = true }
 rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"], optional = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"], optional = true }
 futures-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"], optional = true }
@@ -65,7 +65,9 @@ tokio = ["std", "dep:tokio-rustls"]
 # DPDK, glommio, io_uring direct). Default off; tokio-rustls is the default
 # adapter today.
 # the client `TlsStreamUpstream` lives here; it ships a P4 config +
-# bon builder, so the futures-io feature pulls bon + conflaguration too.
+# bon builder, so the futures-io feature pulls bon + conflaguration +
+# serde (the `TlsClientConfig` derives) too — nothing outside this
+# module touches serde, so the no_std tier never compiles it.
 # `proxima-primitives/std`: the workspace entry sets default-features =
 # false; proxima-primitives folds in the former proxima-stream, whose own
 # workspace entry had no such override (implicit std by default) — this
@@ -80,6 +82,7 @@ futures-io = [
     "futures/std",
     "dep:bon",
     "dep:conflaguration",
+    "dep:serde",
 ]
 
 [lints]
