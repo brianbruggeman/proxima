@@ -101,17 +101,17 @@ let json: serde_json::Value = response.json().await?;
 
 **Scope:** v0 API ONLY, opaque record-sets — `ApiVersions`/`Produce`/`Fetch`/`Metadata`, the routing-critical subset. No schema registry, no message compression, no consumer-group coordination. This is a wire-protocol facade you can route traffic through, never a drop-in Kafka broker replacement.
 
-**Listener:** `.kafka(handler)` takes a `KafkaPipeHandle` over `Request<RequestBody>` -> `Response<ResponseBody>` — `ApiVersions` is answered protocol-level and never even reaches this handler (proven directly in `proxima-kafka/tests/any_protocol_end_to_end.rs`):
+**Listener:** `.kafka(handler)` takes a `KafkaPipeHandle`, which is `RequestBody` -> `ResponseBody` directly — no `Request`/`Response` envelope cell around them, because both are already self-describing and the `correlation_id` rides outside the pipe entirely. `ApiVersions` is answered protocol-level and never even reaches this handler (proven directly in `proxima-kafka/tests/any_protocol_end_to_end.rs`):
 
 ```rust
 impl SendPipe for EchoProduce {
-    type In = KafkaPipeRequest;
-    type Out = KafkaPipeReply;
+    type In = RequestBody;
+    type Out = ResponseBody;
     type Err = ProximaError;
 
-    async fn call(&self, request: KafkaPipeRequest) -> Result<KafkaPipeReply, ProximaError> {
-        match request.payload {
-            RequestBody::Produce(_) => Ok(Response::typed(200, ResponseBody::Produce(ProduceResponse::default()))),
+    async fn call(&self, request: RequestBody) -> Result<ResponseBody, ProximaError> {
+        match request {
+            RequestBody::Produce(_) => Ok(ResponseBody::Produce(ProduceResponse::default())),
             _ => Err(ProximaError::Upstream("unexpected api".into())),
         }
     }

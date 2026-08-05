@@ -76,7 +76,7 @@ impl<U: StreamUpstream> KafkaClientUpstream<U> {
         }
     }
 
-    /// Produce one batch to `topic`/`partition`. Ergonomic typed entry
+    /// Produce every batch the request carries. Ergonomic typed entry
     /// point over [`SendPipe::call`]'s generic `Request<Bytes>` contract.
     ///
     /// # Errors
@@ -92,9 +92,9 @@ impl<U: StreamUpstream> KafkaClientUpstream<U> {
         }
     }
 
-    /// Fetch from `topic`/`partition` starting at an offset. Ergonomic
-    /// typed entry point over [`SendPipe::call`]'s generic `Request<Bytes>`
-    /// contract.
+    /// Fetch every topic/partition the request names, each from its own
+    /// offset. Ergonomic typed entry point over [`SendPipe::call`]'s
+    /// generic `Request<Bytes>` contract.
     ///
     /// # Errors
     /// [`ProximaError`] on transport failure, a malformed reply, or a

@@ -542,13 +542,12 @@ fn encode_api_versions_response(out: &mut Vec<u8>, response: &ApiVersionsRespons
 //
 // The broker facade above only ever needed request DECODE + response
 // ENCODE. A real client needs exactly the inverse pair — request ENCODE +
-// response DECODE — for the same four APIs. `KafkaClientUpstream`
-// (`crate::client`) is this facade's only caller today, and scopes itself
-// to Produce/Fetch (plus the ApiVersions handshake every real client
-// opens with); Metadata's client-side encode/decode is not wired up yet —
-// a caller that needs it can add `encode_metadata_request`/
-// `decode_metadata_response` following the exact same shape as the pair
-// below.
+// response DECODE — and all four APIs have it: `RequestBody::encode` and
+// `decode_response` are total over the same set `decode_request` and
+// `ResponseBody::encode` cover. `KafkaClientUpstream` (`crate::client`)
+// exposes typed entry points for Produce/Fetch only (plus the ApiVersions
+// handshake every real client opens with), but Metadata rides the same
+// generic `SendPipe::call` path with no codec work left to do.
 
 fn encode_produce_request(out: &mut Vec<u8>, request: &ProduceRequest) {
     write_i16(out, request.acks);
