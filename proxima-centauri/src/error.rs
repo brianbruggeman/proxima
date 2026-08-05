@@ -1,5 +1,3 @@
-use core::fmt;
-
 /// Failure modes of the sans-IO cryptographic core.
 ///
 /// Every variant carries a fixed-size payload. There is no `String`, no
@@ -8,90 +6,70 @@ use core::fmt;
 /// fail while reporting a failure. Context that is genuinely dynamic is
 /// carried as `&'static str` (a pointer and a length, no heap) or as the
 /// integers that describe the mismatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `thiserror` with `default-features = false` derives `core::error::Error`,
+/// which is the same trait std re-exports as `std::error::Error` — so the
+/// bare-metal tier and the std tier get one implementation, not two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CentauriError {
     /// The entropy source cannot produce bytes right now — a hardware TRNG
     /// failing its health test, a syscall-backed source refusing before the
     /// pool is initialised. A handshake cannot proceed and must not fall
     /// back to a weaker source.
+    #[error("entropy unavailable: {0}")]
     EntropyUnavailable(&'static str),
     /// A finite entropy source ran out of material. Reaching this in
     /// production means the source was mis-sized; reaching it in a test
     /// means the scripted sequence was shorter than the number of draws the
     /// state machine makes.
+    #[error("entropy exhausted: drew {drawn} of {available}")]
     EntropyExhausted { drawn: usize, available: usize },
     /// A caller-provided output buffer cannot hold what the state machine
     /// needs to write. The no-alloc analogue of a failed `Vec` growth: the
     /// caller sizes the buffer, so the caller is told what it should have
     /// been.
+    #[error("buffer too small: need {needed} bytes, have {available}")]
     BufferTooSmall { needed: usize, available: usize },
     /// A wire message could not be parsed. The `&'static str` names which
     /// field, not what the bytes were — error text must never carry
     /// attacker-supplied or secret material.
+    #[error("invalid message: {0}")]
     InvalidMessage(&'static str),
     /// A payload exceeded `[esp].max_payload_bytes`. The cap exists so a
     /// no-alloc deployment can size packet buffers statically; exceeding it is
     /// reported rather than truncated.
+    #[error("payload too large: {len} bytes, max {max}")]
     PayloadTooLarge { len: usize, max: usize },
     /// Key agreement produced the all-zero shared secret, which every
     /// low-order X25519 point yields. The peer's DH value is degenerate —
     /// substituted by an attacker, or a broken implementation — and continuing
     /// would give an ephemeral that contributes nothing.
+    #[error("degenerate key agreement")]
     DegenerateKeyAgreement,
     /// The SA's sequence space is exhausted. The sequence is the nonce, so
     /// continuing would repeat one; the SA must be rekeyed or torn down.
+    #[error("sequence space exhausted")]
     SequenceExhausted,
     /// AEAD sealing failed. Only reachable on a buffer-shape violation the
     /// caller-side length checks should already have caught.
+    #[error("encryption failed")]
     EncryptionFailed,
     /// An AEAD tag did not verify. Carries nothing on purpose: a decrypt
     /// failure must not tell an attacker which part was wrong.
+    #[error("authentication failed")]
     AuthenticationFailed,
     /// A packet's sequence number was already seen or is older than the replay
     /// window.
+    #[error("replay detected: seq {0}")]
     ReplayDetected(u64),
     /// A step was attempted that the current state does not permit.
+    #[error("invalid transition: expected {expected}, found {found}")]
     InvalidTransition {
         expected: &'static str,
         found: &'static str,
     },
 }
-
-impl fmt::Display for CentauriError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EntropyUnavailable(reason) => write!(formatter, "entropy unavailable: {reason}"),
-            Self::EntropyExhausted { drawn, available } => {
-                write!(formatter, "entropy exhausted: drew {drawn} of {available}")
-            }
-            Self::BufferTooSmall { needed, available } => {
-                write!(
-                    formatter,
-                    "buffer too small: need {needed} bytes, have {available}"
-                )
-            }
-            Self::PayloadTooLarge { len, max } => {
-                write!(formatter, "payload too large: {len} bytes, max {max}")
-            }
-            Self::DegenerateKeyAgreement => write!(formatter, "degenerate key agreement"),
-            Self::SequenceExhausted => write!(formatter, "sequence space exhausted"),
-            Self::EncryptionFailed => write!(formatter, "encryption failed"),
-            Self::AuthenticationFailed => write!(formatter, "authentication failed"),
-            Self::ReplayDetected(seq) => write!(formatter, "replay detected: seq {seq}"),
-            Self::InvalidMessage(field) => write!(formatter, "invalid message: {field}"),
-            Self::InvalidTransition { expected, found } => {
-                write!(
-                    formatter,
-                    "invalid transition: expected {expected}, found {found}"
-                )
-            }
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for CentauriError {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -119,6 +97,15 @@ mod tests {
             "error grew past two fat pointers: {}",
             size_of::<CentauriError>()
         );
+    }
+
+    #[test]
+    fn the_error_trait_is_implemented_at_the_bare_tier_too() {
+        // the hand-rolled impl this replaced was `#[cfg(feature = "std")]`, so
+        // a no-alloc caller could not treat a failure as an error at all.
+        fn requires_error_trait<Failure: core::error::Error>(_: &Failure) {}
+
+        requires_error_trait(&CentauriError::AuthenticationFailed);
     }
 
     #[test]
