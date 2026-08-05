@@ -1,6 +1,6 @@
 //! Prime-native TCP `StreamListener`/`StreamUpstream` over AF_XDP
 //! (`proxima_primitives::stream`). No tokio and no busy-poll: on a proxima worker the ONE
-//! xsk fd is registered on the per-core reactor (via [`super::readiness`], the
+//! xsk fd is registered on the per-core reactor (via [`prime::os::readiness`], the
 //! same mechanism the UDP `PacketListener` uses) and every poll point
 //! (`poll_accept`/`poll_read`/`poll_connect`) parks on it after fully draining
 //! the RX ring (EPOLLET). Off a worker (plain `block_on`) it falls back to
@@ -22,7 +22,7 @@
 
 use super::bpf::XdpProgram;
 use super::error::XdpError;
-use super::readiness::{Readiness, ReadyState};
+use prime::os::readiness::{Readiness, ReadyState};
 use super::sized;
 use super::sys;
 use super::uapi::{self, xdp_desc};
