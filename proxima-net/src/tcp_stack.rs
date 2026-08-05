@@ -17,21 +17,15 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
+use crate::tcp_listener::{
+    Endpoint, ISN_STRIDE, Inbound, OUR_WINDOW, OutSegment, Path, SMSS, is_bare_ack,
+    is_initial_syn, synack_segment, to_control,
+};
 use proxima_protocols::inet::tcp::TcpFlags;
 use proxima_protocols::tcp::DataPath;
 use proxima_protocols::tcp::congestion::Reno;
-use proxima_protocols::tcp::connection::Segment as ControlBits;
 use proxima_protocols::tcp::seq::SeqNum;
 use proxima_protocols::tcp::time::Instant;
-
-const OOO_GAPS: usize = 8;
-const RETX_CAP: usize = 16;
-const SMSS: u32 = 1460;
-const OUR_WINDOW: u16 = 64240;
-const ISN_STRIDE: u32 = 0x0004_0000;
-
-type Path = DataPath<OOO_GAPS, RETX_CAP, Reno>;
 
 /// The peer key a connection is addressed by: `(peer_ip, peer_port)`.
 pub type ConnId = ([u8; 4], u16);
@@ -246,7 +240,7 @@ impl TcpStack {
                     isn,
                 },
             );
-            return vec![(peer, synack(isn, inbound.seq))];
+            return vec![(peer, synack_segment(isn, inbound.seq))];
         }
         Vec::new()
     }
@@ -443,40 +437,9 @@ impl Conn {
     }
 }
 
-fn to_control(flags: TcpFlags) -> ControlBits {
-    ControlBits {
-        syn: flags.syn,
-        ack: flags.ack,
-        fin: flags.fin,
-        rst: flags.rst,
-    }
-}
-
-fn is_initial_syn(flags: TcpFlags) -> bool {
-    flags.syn && !flags.ack
-}
-
-fn is_bare_ack(flags: TcpFlags) -> bool {
-    flags.ack && !flags.syn
-}
-
 // wrapping sequence comparison: is `a` at or beyond `b` within the 2^31 window.
 fn seq_geq(a: u32, b: u32) -> bool {
     a.wrapping_sub(b) < 0x8000_0000
-}
-
-fn synack(isn: u32, peer_seq: u32) -> OutSegment {
-    OutSegment {
-        flags: TcpFlags {
-            syn: true,
-            ack: true,
-            ..TcpFlags::default()
-        },
-        seq: isn,
-        ack: peer_seq.wrapping_add(1),
-        window: OUR_WINDOW,
-        payload: Vec::new(),
-    }
 }
 
 #[cfg(test)]

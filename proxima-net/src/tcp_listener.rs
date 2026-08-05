@@ -26,12 +26,14 @@ use proxima_protocols::tcp::connection::Segment as ControlBits;
 use proxima_protocols::tcp::seq::SeqNum;
 use proxima_protocols::tcp::time::Instant;
 
-const OOO_GAPS: usize = 8;
-const RETX_CAP: usize = 16;
-const SMSS: u32 = 1460;
-const OUR_WINDOW: u16 = 64240;
+// the RFC 793 sizing + segment vocabulary this module and `tcp_stack` both
+// run on; one home so the two connection tables cannot drift apart.
+pub(crate) const OOO_GAPS: usize = 8;
+pub(crate) const RETX_CAP: usize = 16;
+pub(crate) const SMSS: u32 = 1460;
+pub(crate) const OUR_WINDOW: u16 = 64240;
 
-type Path = DataPath<OOO_GAPS, RETX_CAP, Reno>;
+pub(crate) type Path = DataPath<OOO_GAPS, RETX_CAP, Reno>;
 
 /// A peer's link/network/transport address, captured from its SYN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +88,7 @@ enum ConnState {
 type ConnKey = ([u8; 4], u16);
 
 // space successive connections' initial sequence numbers well apart.
-const ISN_STRIDE: u32 = 0x0004_0000;
+pub(crate) const ISN_STRIDE: u32 = 0x0004_0000;
 
 #[derive(Clone, Copy)]
 enum Disposition {
@@ -160,8 +162,8 @@ impl EchoListener {
         }
 
         // existing connection: advance it in place. the established data path
-        // mutates the boxed Conn directly (no per-packet realloc); only the table
-        // entry is dropped when the connection finishes.
+        // mutates the stored Conn directly (no per-packet realloc); only the
+        // table entry is dropped when the connection finishes.
         if let Some((stored_peer, state)) = self.conns.get_mut(&key) {
             let stored_peer = *stored_peer;
             let (response, drop_connection) = advance(stored_peer, state, inbound, now);
@@ -245,7 +247,7 @@ fn wrap(peer: Endpoint, segments: Vec<OutSegment>) -> Option<Response> {
     }
 }
 
-fn synack_segment(isn: u32, peer_seq: u32) -> OutSegment {
+pub(crate) fn synack_segment(isn: u32, peer_seq: u32) -> OutSegment {
     OutSegment {
         flags: TcpFlags {
             syn: true,
@@ -395,7 +397,7 @@ impl Conn {
     }
 }
 
-fn to_control(flags: TcpFlags) -> ControlBits {
+pub(crate) fn to_control(flags: TcpFlags) -> ControlBits {
     ControlBits {
         syn: flags.syn,
         ack: flags.ack,
@@ -405,12 +407,12 @@ fn to_control(flags: TcpFlags) -> ControlBits {
 }
 
 // a connection-opening SYN (no ACK).
-fn is_initial_syn(flags: TcpFlags) -> bool {
+pub(crate) fn is_initial_syn(flags: TcpFlags) -> bool {
     flags.syn && !flags.ack
 }
 
 // the handshake-completing ACK (no SYN).
-fn is_bare_ack(flags: TcpFlags) -> bool {
+pub(crate) fn is_bare_ack(flags: TcpFlags) -> bool {
     flags.ack && !flags.syn
 }
 
