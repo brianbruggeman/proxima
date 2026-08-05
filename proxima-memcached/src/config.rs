@@ -7,13 +7,11 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
-fn default_read_buffer() -> usize {
-    8 * 1024
-}
-
-fn default_high_water() -> usize {
-    64 * 1024
-}
+/// The shortest complete memcached command line: a three-character verb
+/// plus CRLF (`get\r\n`). A `max_message_bytes` under this cannot hold even
+/// that, so every command becomes a `MessageTooLarge` violation the moment
+/// it arrives in more than one read — a misconfiguration, not a tight cap.
+const MIN_COMMAND_BYTES: usize = 5;
 
 fn default_max_message() -> usize {
     16 * 1024 * 1024
@@ -31,16 +29,11 @@ fn default_max_message() -> usize {
 /// use proxima_memcached::MemcachedServerConfig;
 ///
 /// let via_builder = MemcachedServerConfig::builder()
-///     .read_buffer_bytes(4096)
 ///     .max_message_bytes(1_048_576)
 ///     .build();
 ///
 /// let mut file = tempfile::Builder::new().suffix(".toml").tempfile().expect("tempfile");
-/// write!(
-///     file,
-///     "read_buffer_bytes = 4096\nwrite_high_water_bytes = 65536\nmax_message_bytes = 1048576\n"
-/// )
-/// .expect("write toml");
+/// write!(file, "max_message_bytes = 1048576\n").expect("write toml");
 ///
 /// let via_toml: MemcachedServerConfig = conflaguration::builder()
 ///     .file(file.path())
@@ -54,22 +47,10 @@ fn default_max_message() -> usize {
 #[settings(prefix = "MEMCACHED")]
 #[builder(derive(Clone, Debug))]
 pub struct MemcachedServerConfig {
-    /// initial read-buffer size; the connection's buffer grows up to
-    /// `max_message_bytes`
-    #[setting(default = 8192)]
-    #[serde(default = "default_read_buffer")]
-    #[builder(default = default_read_buffer())]
-    pub read_buffer_bytes: usize,
-
-    /// write buffer flush threshold; replies accumulate in the
-    /// connection's out buffer up to this many bytes before a socket write
-    #[setting(default = 65536)]
-    #[serde(default = "default_high_water")]
-    #[builder(default = default_high_water())]
-    pub write_high_water_bytes: usize,
-
     /// hard cap on one still-incomplete inbound command — the DoS guard
-    /// `Connection::advance` enforces (`MessageTooLarge`)
+    /// [`proxima_protocols::memcached::frame_codec::MemcachedCodec`]'s
+    /// `parse_frame` enforces, folding a longer still-incomplete buffer
+    /// into a `MessageTooLarge` violation
     #[setting(default = 16777216)]
     #[serde(default = "default_max_message")]
     #[builder(default = default_max_message())]
@@ -85,22 +66,10 @@ impl Default for MemcachedServerConfig {
 impl Validate for MemcachedServerConfig {
     fn validate(&self) -> conflaguration::Result<()> {
         let mut errors = Vec::new();
-        if self.read_buffer_bytes < 64 {
-            errors.push(ValidationMessage::new(
-                "read_buffer_bytes",
-                "must be at least 64 bytes",
-            ));
-        }
-        if self.max_message_bytes < self.read_buffer_bytes {
+        if self.max_message_bytes < MIN_COMMAND_BYTES {
             errors.push(ValidationMessage::new(
                 "max_message_bytes",
-                "must be at least read_buffer_bytes",
-            ));
-        }
-        if self.write_high_water_bytes < 1024 {
-            errors.push(ValidationMessage::new(
-                "write_high_water_bytes",
-                "must be at least 1024",
+                "must be at least 5 bytes (the shortest complete command line)",
             ));
         }
         if errors.is_empty() {
@@ -120,7 +89,6 @@ mod tests {
     fn default_config_is_valid() {
         let config = MemcachedServerConfig::default();
         assert!(config.validate().is_ok());
-        assert_eq!(config.read_buffer_bytes, 8192);
         assert_eq!(config.max_message_bytes, 16 * 1024 * 1024);
     }
 
@@ -128,18 +96,23 @@ mod tests {
     fn builder_overrides_defaults() {
         let config = MemcachedServerConfig::builder()
             .max_message_bytes(1024)
-            .read_buffer_bytes(512)
             .build();
         assert_eq!(config.max_message_bytes, 1024);
-        assert_eq!(config.read_buffer_bytes, 512);
     }
 
     #[test]
-    fn validate_rejects_max_message_below_read_buffer() {
-        let config = MemcachedServerConfig::builder()
-            .read_buffer_bytes(4096)
-            .max_message_bytes(1024)
-            .build();
-        assert!(config.validate().is_err());
+    fn validate_rejects_a_cap_below_the_shortest_complete_command() {
+        let too_small = MemcachedServerConfig::builder().max_message_bytes(4).build();
+        assert!(too_small.validate().is_err());
+        let shortest = MemcachedServerConfig::builder().max_message_bytes(5).build();
+        assert!(shortest.validate().is_ok());
+    }
+
+    /// The cap the crate's own `any_protocol` e2e suite drives a real
+    /// socket with — it must not be a config the validator rejects.
+    #[test]
+    fn validate_accepts_the_tight_cap_the_end_to_end_suite_uses() {
+        let config = MemcachedServerConfig::builder().max_message_bytes(8).build();
+        assert!(config.validate().is_ok());
     }
 }
