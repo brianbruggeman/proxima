@@ -11,32 +11,37 @@
 //!
 //! # Tier
 //!
-//! `--no-default-features --features hpack` builds tier-1 (`core::*` +
-//! `alloc::*`, every module). `--no-default-features --features
-//! hpack-no-alloc` builds tier-3 (`core::*` only) — exposes just
-//! [`huffman`], [`integer`], and [`static_table`], none of which ever
-//! allocate.
+//! `--no-default-features --features hpack` builds tier-3 (`core::*`
+//! only) — exposes just [`huffman`], [`integer`], and [`static_table`],
+//! none of which ever allocate. `--features hpack-alloc` adds tier-1
+//! (`alloc::*`): `dynamic_table`, `encoder`, `decoder`.
+//!
+//! The floor is the BASE feature and `-alloc` widens it, matching
+//! [`crate::quic`] / `quic-alloc`. Enabling a feature never removes a
+//! module: Cargo unifies features across the whole graph, so a
+//! subtractive gate lets one consumer delete API out from under every
+//! other one.
 
-#[cfg(all(feature = "hpack-codec-trait", not(feature = "hpack-no-alloc")))]
+#[cfg(feature = "hpack-codec-trait")]
 pub mod codec_trait;
-#[cfg(not(feature = "hpack-no-alloc"))]
+#[cfg(feature = "hpack-alloc")]
 pub mod decoder;
-#[cfg(not(feature = "hpack-no-alloc"))]
+#[cfg(feature = "hpack-alloc")]
 pub mod dynamic_table;
-#[cfg(not(feature = "hpack-no-alloc"))]
+#[cfg(feature = "hpack-alloc")]
 pub mod encoder;
 pub mod huffman;
 pub mod integer;
 pub mod static_table;
 
-#[cfg(all(feature = "hpack-codec-trait", not(feature = "hpack-no-alloc")))]
+#[cfg(feature = "hpack-codec-trait")]
 pub use codec_trait::{DEFAULT_DYNAMIC_TABLE_SIZE, HpackCodec, HpackDecoder, HpackEncoder};
 
-#[cfg(not(feature = "hpack-no-alloc"))]
+#[cfg(feature = "hpack-alloc")]
 pub use decoder::{DecodeError, FieldSink, decode as decode_block, decode_into};
-#[cfg(not(feature = "hpack-no-alloc"))]
+#[cfg(feature = "hpack-alloc")]
 pub use dynamic_table::{DynamicEntry, DynamicTable, ENTRY_OVERHEAD, STATIC_TABLE_LAST_INDEX};
-#[cfg(not(feature = "hpack-no-alloc"))]
+#[cfg(feature = "hpack-alloc")]
 pub use encoder::encode as encode_block;
 pub use huffman::{
     HuffmanError, decode as huffman_decode, encode as huffman_encode,

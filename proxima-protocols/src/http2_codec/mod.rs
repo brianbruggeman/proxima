@@ -17,33 +17,33 @@
 //!
 //! # Tier
 //!
-//! Compiles under `#![no_std]` with `alloc`. `--no-default-features
-//! --features http2_codec-no-alloc` builds tier-3 (`core::*` only) —
-//! exposes just [`stream`], the per-stream RFC 7540 §5 state machine +
-//! flow-control windows (already heap-free). [`frame`] (owned `Bytes`
-//! payload views, `SmallVec` heap fallback), [`stream_table`]
-//! (`BTreeMap` registry), and [`connection`] (event queue, buffers,
-//! HPACK dynamic table) require `alloc`.
+//! `--no-default-features --features http2_codec` builds tier-3
+//! (`core::*` only) — exposes just [`stream`], the per-stream RFC 7540
+//! §5 state machine + flow-control windows (already heap-free).
+//! `--features http2_codec-alloc` adds `frame` (owned `Bytes` payload
+//! views, `SmallVec` heap fallback), `stream_table` (`BTreeMap`
+//! registry), and `connection` (event queue, buffers, HPACK dynamic
+//! table), which need a heap.
+//!
+//! The floor is the BASE feature and `-alloc` widens it, matching
+//! [`crate::quic`] / `quic-alloc`. Enabling a feature never removes a
+//! module: Cargo unifies features across the whole graph, so a
+//! subtractive gate lets one consumer delete API out from under every
+//! other one.
 //!
 //! The std IO adapter over this sans-IO core is `proxima-http::http2`;
 //! it owns the tokio/transport edge and stays `std` by design — the
 //! absence of `no_std` there is intentional, not an oversight.
 
-#[cfg(all(
-    feature = "http2_codec-codec-trait",
-    not(feature = "http2_codec-no-alloc")
-))]
+#[cfg(feature = "http2_codec-codec-trait")]
 pub mod codec_trait;
-#[cfg(not(feature = "http2_codec-no-alloc"))]
+#[cfg(feature = "http2_codec-alloc")]
 pub mod connection;
-#[cfg(not(feature = "http2_codec-no-alloc"))]
+#[cfg(feature = "http2_codec-alloc")]
 pub mod frame;
 pub mod stream;
-#[cfg(not(feature = "http2_codec-no-alloc"))]
+#[cfg(feature = "http2_codec-alloc")]
 pub mod stream_table;
 
-#[cfg(all(
-    feature = "http2_codec-codec-trait",
-    not(feature = "http2_codec-no-alloc")
-))]
+#[cfg(feature = "http2_codec-codec-trait")]
 pub use codec_trait::{FrameError as H2FrameError, H2Frame, H2FrameCodec};

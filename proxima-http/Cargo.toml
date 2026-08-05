@@ -107,7 +107,7 @@ default = ["http1"]
 # `serve_connection` and needs only `http1-native` + `http-listener` —
 # see `http-listener`'s doc below.
 http1-native = [
-    "proxima-protocols/http1_codec",
+    "proxima-protocols/http1_codec-alloc",
 ]
 http1 = [
     "http1-native",
@@ -132,7 +132,7 @@ http1-tls = ["http1", "dep:hyper-rustls"]
 # only the sans-IO h1 codec, not the hyper/tokio-backed `http1` feature —
 # see http1/mod.rs's module gates and http_config.rs's doc comment.
 http1-stream-client = [
-    "proxima-protocols/http1_codec",
+    "proxima-protocols/http1_codec-alloc",
     "dep:proxima-net",
     "proxima-net/prime",
     "proxima-net/runtime-prime-inbox-alloc",
@@ -151,7 +151,7 @@ http1-io-uring = ["http1", "dep:tokio-uring", "dep:tokio-rustls"]
 # loop (listener.rs's `serve_via_factory`). `http2` layers the legacy
 # tokio `TcpListener` fallback accept loop on top (used only when no
 # `AcceptorFactory` is injected) — no external `h2` crate either way.
-http2-native = ["proxima-protocols/http2_codec", "dep:rustc-hash", "dep:smallvec"]
+http2-native = ["proxima-protocols/http2_codec-alloc", "dep:rustc-hash", "dep:smallvec"]
 http2 = ["http2-native", "dep:tokio", "dep:tokio-util"]
 
 http3 = ["http3-native", "http3-quinn-compat"]

@@ -145,7 +145,7 @@ pub fn decode_integer(buf: &[u8], prefix_bits: u8) -> Result<(u32, usize), Hpack
     Err(HpackError::IntegerTruncated)
 }
 
-#[cfg(all(test, not(feature = "hpack-no-alloc")))]
+#[cfg(all(test, feature = "hpack-alloc"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;

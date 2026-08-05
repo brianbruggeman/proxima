@@ -14,14 +14,19 @@
 //!
 //! # Tier
 //!
-//! Compiles under `#![no_std]` with `alloc`. `--no-default-features
-//! --features http1_codec-no-alloc` builds tier-3 (`core::*` only) —
-//! exposing just the streaming request-head parser subset
-//! ([`h1::parse_head_streaming`], [`h1::Header`],
+//! `--no-default-features --features http1_codec` builds tier-3
+//! (`core::*` only) — exposing just the streaming request-head parser
+//! subset ([`h1::parse_head_streaming`], [`h1::Header`],
 //! [`h1::StreamingStatus`], [`h1::ParserLimits`]), which pushes
-//! borrowed offsets into caller storage and never touches a heap. The
-//! body decoder / connection FSM / response writer / owned-`RequestHead`
-//! surface require `alloc`.
+//! borrowed offsets into caller storage and never touches a heap.
+//! `--features http1_codec-alloc` adds the body decoder / connection FSM
+//! / response writer / owned-`RequestHead` surface, which need a heap.
+//!
+//! The floor is the BASE feature and `-alloc` widens it, matching
+//! [`crate::quic`] / `quic-alloc`. Enabling a feature never removes a
+//! module: Cargo unifies features across the whole graph, so a
+//! subtractive gate lets one consumer delete API out from under every
+//! other one.
 //!
 //! The std IO adapter over this sans-IO core is `proxima-http::http1`; it
 //! owns the tokio client pool + listener glue and stays `std` by design —
@@ -35,7 +40,7 @@
 /// NOT reused by [`frame_codec_pipe::OwnedFrame::headers`], which stays
 /// a plain `Vec` — see that field's doc for why inlining it measured
 /// as a net latency loss.
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub mod sized {
     include!(concat!(
         env!("OUT_DIR"),
@@ -43,38 +48,26 @@ pub mod sized {
     ));
 }
 
-#[cfg(all(
-    feature = "http1_codec-codec-trait",
-    not(feature = "http1_codec-no-alloc")
-))]
+#[cfg(feature = "http1_codec-codec-trait")]
 pub mod codec_trait;
-#[cfg(all(
-    feature = "http1_codec-frame-pipe",
-    not(feature = "http1_codec-no-alloc")
-))]
+#[cfg(feature = "http1_codec-frame-pipe")]
 pub mod frame_codec_pipe;
 pub mod h1;
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub mod h1_body;
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub mod h1_client;
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub mod h1_connection;
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub mod h1_response;
 
-#[cfg(all(
-    feature = "http1_codec-codec-trait",
-    not(feature = "http1_codec-no-alloc")
-))]
+#[cfg(feature = "http1_codec-codec-trait")]
 pub use codec_trait::{FrameError as H1FrameError, H1RequestCodec};
 // `FrameCodecPipe` itself now lives at `crate::codec_pipe::FrameCodecPipe` —
 // generic over ANY `FrameCodec`, not re-exported per-protocol. Consumers
 // spell it `proxima_protocols::codec_pipe::FrameCodecPipe<H1RequestCodec>`.
-#[cfg(all(
-    feature = "http1_codec-frame-pipe",
-    not(feature = "http1_codec-no-alloc")
-))]
+#[cfg(feature = "http1_codec-frame-pipe")]
 pub use frame_codec_pipe::{
     H1RequestFrame, H1RequestFrameCodec, H1RequestFrameError, OwnedFrame, OwnedHeader,
 };

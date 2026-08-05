@@ -23,10 +23,10 @@
 
 use core::fmt;
 
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 use smallvec::SmallVec;
 
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 use crate::http1_codec::sized;
 
 const MAX_HEADERS: usize = 100;
@@ -97,7 +97,7 @@ impl<'a> Header<'a> {
 /// past clippy's `large_enum_variant` threshold for the
 /// `Status::{Partial,Complete}` enum it lives in — see
 /// `http1_codec.toml`.
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub type HeaderVec<'a> = SmallVec<[Header<'a>; sized::HEADER_INLINE_CAP]>;
 
 /// Typed request head. Lives as long as the input buffer the parser
@@ -105,7 +105,7 @@ pub type HeaderVec<'a> = SmallVec<[Header<'a>; sized::HEADER_INLINE_CAP]>;
 /// [`sized::HEADER_INLINE_CAP`] headers — callers on the hot path
 /// should use `parse_head_streaming` to surface headers via callback
 /// into pre-allocated storage instead.
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestHead<'a> {
     pub method: &'a [u8],
@@ -114,7 +114,7 @@ pub struct RequestHead<'a> {
     pub headers: HeaderVec<'a>,
 }
 
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 impl<'a> RequestHead<'a> {
     /// Case-insensitive header lookup per RFC 7230 §3.2.
     #[must_use]
@@ -126,7 +126,7 @@ impl<'a> RequestHead<'a> {
     }
 }
 
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 fn eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -136,7 +136,7 @@ fn eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
         .all(|(left_byte, right_byte)| left_byte.eq_ignore_ascii_case(right_byte))
 }
 
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status<'a> {
     Partial,
@@ -225,12 +225,12 @@ impl Default for ParserLimits {
 /// Allocates only past `sized::HEADER_INLINE_CAP` headers (a `HeaderVec`
 /// spill). Hot-path callers should use `parse_head_streaming` instead —
 /// it routes headers through a callback into pre-allocated storage.
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub fn parse_head(buffer: &[u8]) -> Result<Status<'_>, ParseError> {
     parse_head_with_limits(buffer, ParserLimits::default())
 }
 
-#[cfg(not(feature = "http1_codec-no-alloc"))]
+#[cfg(feature = "http1_codec-alloc")]
 pub fn parse_head_with_limits(
     buffer: &[u8],
     limits: ParserLimits,
@@ -352,7 +352,7 @@ fn check_limits(
     Ok(())
 }
 
-#[cfg(all(test, not(feature = "http1_codec-no-alloc")))]
+#[cfg(all(test, feature = "http1_codec-alloc"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
