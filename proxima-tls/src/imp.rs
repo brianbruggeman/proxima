@@ -645,21 +645,34 @@ pub fn config_from_spec_value(
     }))
 }
 
-// gated on `tokio`: every case here exercises `build_acceptor`
-// (tokio_rustls-backed). The tokio-free default runs the equivalent
-// coverage in `connector.rs` against `build_acceptor_futures_io` instead.
-#[cfg(all(test, feature = "tokio"))]
+// every case drives `build_server_config` — the runtime-neutral core that
+// `build_acceptor` (tokio) and `build_acceptor_futures_io` (futures-io) both
+// wrap. Gating this module on `tokio` left all of it dark under the crate's
+// own default feature set, which is what `cargo nextest run -p proxima-tls`
+// actually runs.
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn self_signed_builds_a_usable_acceptor() {
+    fn self_signed_builds_a_usable_server_config() {
         let config = TlsConfig::self_signed();
-        let acceptor = build_acceptor(&config).expect("self-signed acceptor builds");
+        let built = build_server_config(&config).expect("self-signed server config builds");
         // No public state to inspect; the fact that build succeeded means
         // ECDSA-P256 keygen, cert assembly, and rustls config wiring all worked.
-        let _ = acceptor;
+        assert_eq!(built.alpn_protocols, config.alpn);
+    }
+
+    /// the tokio adapter is a pure wrapper over `build_server_config`: it
+    /// accepts exactly what the core accepts, and rejects what it rejects.
+    #[cfg(feature = "tokio")]
+    #[test]
+    fn tokio_acceptor_wraps_the_same_server_config() {
+        let good = TlsConfig::self_signed();
+        assert!(build_acceptor(&good).is_ok());
+        let bad = TlsConfig::pem(b"not a real pem".to_vec(), b"nope".to_vec());
+        assert!(matches!(build_acceptor(&bad), Err(ProximaError::Config(_))));
     }
 
     #[test]
@@ -674,12 +687,12 @@ mod tests {
     #[test]
     fn invalid_pem_bytes_return_typed_config_error() {
         let config = TlsConfig::pem(b"not a real pem".to_vec(), b"nope".to_vec());
-        let outcome = build_acceptor(&config);
+        let outcome = build_server_config(&config);
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
     #[test]
-    fn pem_bytes_from_real_cert_build_a_usable_acceptor() {
+    fn pem_bytes_from_real_cert_build_a_usable_server_config() {
         // real rcgen cert -> PEM bytes -> bytes-tier `pem()` -> rustls.
         // proves the bytes path parses what a sysadmin actually has in a
         // pemfile, not just that we round-trip arbitrary bytes through base64.
@@ -688,7 +701,7 @@ mod tests {
         let cert_pem = generated.cert.pem().into_bytes();
         let key_pem = generated.signing_key.serialize_pem().into_bytes();
         let config = TlsConfig::pem(cert_pem, key_pem);
-        let _ = build_acceptor(&config).expect("real-pem acceptor builds");
+        let _ = build_server_config(&config).expect("real-pem server config builds");
     }
 
     #[test]
@@ -698,22 +711,13 @@ mod tests {
         // convenience matches what pem() would have built directly.
         let generated =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
-        let tmp = std::env::temp_dir().join(format!(
-            "proxima-tls-pem-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        std::fs::create_dir_all(&tmp).expect("mkdtemp");
-        let cert_path = tmp.join("cert.pem");
-        let key_path = tmp.join("key.pem");
-        std::fs::write(&cert_path, generated.cert.pem()).expect("write cert");
-        std::fs::write(&key_path, generated.signing_key.serialize_pem()).expect("write key");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cert_path = tmp.path().join("cert.pem");
+        let key_path = tmp.path().join("key.pem");
+        fs::write(&cert_path, generated.cert.pem()).expect("write cert");
+        fs::write(&key_path, generated.signing_key.serialize_pem()).expect("write key");
         let config = TlsConfig::files(cert_path, key_path).expect("files ctor");
-        let _ = build_acceptor(&config).expect("acceptor builds from files-loaded pem");
-        std::fs::remove_dir_all(&tmp).ok();
+        let _ = build_server_config(&config).expect("server config builds from files-loaded pem");
     }
 
     #[test]
@@ -731,7 +735,7 @@ mod tests {
         let config = TlsConfig::pem(leaf_cert, leaf_key).with_client_auth(ClientAuth::Required {
             trust_anchors: ca_pem,
         });
-        let _ = build_acceptor(&config).expect("acceptor builds with real mTLS anchors");
+        let _ = build_server_config(&config).expect("server config builds with real mTLS anchors");
     }
 
     #[test]
@@ -764,7 +768,7 @@ mod tests {
         assert_eq!(key, &key_bytes);
         assert_eq!(parsed.alpn, vec![b"h3".to_vec(), b"h2".to_vec()]);
         // the bytes round-trip AND parse: rustls accepts what came out of the spec.
-        let _ = build_acceptor(&parsed).expect("acceptor builds from spec-round-tripped pem");
+        let _ = build_server_config(&parsed).expect("server config builds from spec-round-tripped pem");
     }
 
     #[test]
@@ -802,7 +806,7 @@ mod tests {
             other => panic!("expected Required, got {other:?}"),
         }
         // anchors survive the round-trip AND parse: WebPkiClientVerifier accepts them.
-        let _ = build_acceptor(&parsed).expect("acceptor builds with round-tripped anchors");
+        let _ = build_server_config(&parsed).expect("server config builds with round-tripped anchors");
     }
 
     #[test]
@@ -816,7 +820,7 @@ mod tests {
         let config = TlsConfig::self_signed().with_client_auth(ClientAuth::Required {
             trust_anchors: b"garbage not pem".to_vec(),
         });
-        let outcome = build_acceptor(&config);
+        let outcome = build_server_config(&config);
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
@@ -866,7 +870,7 @@ mod tests {
         // host's cert + key are real material rustls will load into a SniResolver.
         // requires the crypto provider, install on demand.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let _ = build_acceptor(&parsed).expect("acceptor builds with round-tripped multi-sni");
+        let _ = build_server_config(&parsed).expect("server config builds with round-tripped multi-sni");
     }
 
     #[test]

@@ -275,7 +275,11 @@ mod tests {
     /// store (NOT webpki roots). The bytes round-trip through a real TLS
     /// 1.3 session, proving the client connector works over the
     /// StreamUpstream interface.
-    #[proxima::test]
+    ///
+    /// tokio runtime, not the default prime one: the fixture binds a
+    /// `TokioTcpListener` and `tokio::spawn`s the echo half, both of which
+    /// need a live tokio reactor on the calling thread.
+    #[proxima::test(runtime = "tokio")]
     async fn loopback_tls_round_trips_bytes() {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
@@ -331,7 +335,7 @@ mod tests {
     /// a malformed server name surfaces as a connect-time io error, not
     /// a panic — the ctor cannot fail, so the bad name is carried until
     /// the first connect attempt.
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn invalid_server_name_errors_at_connect() {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()

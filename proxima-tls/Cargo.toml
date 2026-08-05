@@ -25,10 +25,16 @@ bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 
 [dev-dependencies]
-proxima = { workspace = true, features = ["test-support"] }
+# `tokio` alongside `test-support`: the connector tests bind a
+# `TokioTcpListener`, so they run under `#[proxima::test(runtime =
+# "tokio")]`, whose `run_tokio*` drivers live behind
+# `proxima-test/tokio-driver` — only reachable transitively through
+# `proxima`'s own `tokio` feature (mirrors proxima-kafka / proxima-mqtt).
+proxima = { workspace = true, features = ["test-support", "tokio"] }
 proxima-net = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"] }
 temp-env = { workspace = true }
+tempfile.workspace = true
 
 [features]
 default = ["std"]
