@@ -1,6 +1,6 @@
 [package]
 name = "proxima-protocols"
-description = "Sans-IO protocol parser primitives for proxima, one feature-gated module per protocol (DNS, MQTT, AMQP, Kafka, memcached, gRPC framing, protobuf wire, JSON-RPC envelopes, WebSocket frame/handshake, HAProxy PROXY protocol)"
+description = "Every wire proxima speaks, as a sans-IO codec that never touches a socket — one feature-gated module per protocol: HTTP/1, HTTP/2 with HPACK, HTTP/3, QUIC, TCP/IP, WebSocket (frame and handshake), redis, pgwire, DNS, MQTT, AMQP, Kafka, memcached, gRPC framing, protobuf wire, JSON-RPC envelopes, HAProxy PROXY protocol, and NVMe. Bytes in, frames out; the I/O facade that drives them lives elsewhere."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

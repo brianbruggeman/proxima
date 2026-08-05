@@ -225,7 +225,7 @@ debug = true
 # ===== umbrella `proxima` package (formerly rust/Cargo.toml) =====
 [package]
 name = "proxima"
-description = "Config-driven proxy and middleware runtime for faking, replaying, caching, or fronting dependencies from composable pipe specs"
+description = "A sans-IO core where everything is a Pipe — one async In -> Result<Out, Err> trait worn four ways (transform, source, sink, observe), composed into proxies, gateways, caches, codecs and telemetry pipelines. Config-driven, runtime-agnostic: the same pipe runs on the from-scratch Prime per-core runtime, on tokio, or on no_std bare metal."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
