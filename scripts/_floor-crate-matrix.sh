@@ -43,6 +43,13 @@ declare -a FLOOR_CRATE_CELLS=(
     # one of those ungated -- the same shape as the proxima-core cell below.
     "proxima-primitives-bare-no-alloc|proxima-primitives|"
     "proxima-net|proxima-net|alloc"
+    # proxima-net's FINEST tier is stricter than its `alloc` cell above: lib.rs
+    # gates packet on `std` and tcp_listener/tcp_stack on `alloc`, but `stack`
+    # (the sans-IO ARP/ICMP responder, lib.rs:29) carries NO cfg at all and the
+    # crate doc calls it "the crate's bare no_std no-alloc floor". Proving only
+    # `alloc` left that floor unproven -- same shape as the primitives/runtime/
+    # core cells around it.
+    "proxima-net-bare-no-alloc|proxima-net|"
     "proxima-runtime|proxima-runtime|alloc"
     # proxima-runtime's FINEST tier is stricter than its `alloc` cell above:
     # lib.rs gates ext, primitives, SpawnRequest, BackgroundPool and the
