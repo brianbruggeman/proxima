@@ -35,8 +35,8 @@ use std::task::Poll;
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::future::{Either, select};
+use proxima_telemetry::{debug, warn};
 use serde_json::Value;
-use tracing::{debug, warn};
 
 use crate::{ListenProtocol, ServeContext};
 use proxima_core::ProximaError;

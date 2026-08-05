@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
+use proxima_telemetry::{debug, warn};
 use serde_json::Value;
-use tracing::{debug, warn};
 
 use crate::{ListenProtocol, ServeContext};
 use proxima_codec::{FrameCodec, FrameError, FrameLimits, LengthDelimitedCodec};
