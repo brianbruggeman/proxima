@@ -35,7 +35,7 @@
 //! # Loom coverage
 //!
 //! `--cfg loom` loom-tests this exact `Sender`/`Receiver` pair (not a
-//! hand-written model): [`crate::sync::loom_atomic`] swaps `version` /
+//! hand-written model): the private `sync::loom_atomic` shim swaps `version` /
 //! `senders` / `receivers` and the `Arc`/`RwLock` for loom's
 //! instrumented equivalents, and `event_listener::Event` becomes
 //! loom-instrumented too (its `loom` Cargo feature is enabled under

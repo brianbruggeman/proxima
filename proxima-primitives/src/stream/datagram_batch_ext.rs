@@ -39,7 +39,7 @@ pub trait DatagramSocketBatchExt: DatagramSocket {
     /// parks. Returns the count of newly filled slots.
     ///
     /// Zero heap: the `&mut [u8]` iovec array and the `(len, peer)` scratch are
-    /// stack `ArrayVec`/array of width [`RECV_BATCH`].
+    /// stack `ArrayVec`/array of width `RECV_BATCH`.
     fn poll_fill_recv_batch<const SLOT_BYTES: usize, const INITIAL_CAP: usize>(
         &mut self,
         cx: &mut Context<'_>,
@@ -103,7 +103,7 @@ pub trait DatagramSocketBatchExt: DatagramSocket {
     /// loops until `span_offset == batch.len()`.
     ///
     /// Zero heap: each `sendmmsg` chunk is a stack `ArrayVec` of width
-    /// [`SEND_CHUNK`].
+    /// `SEND_CHUNK`.
     fn poll_drive_send_batch<const SEND_BYTES: usize, const SPAN_CAP: usize>(
         &mut self,
         cx: &mut Context<'_>,

@@ -8,7 +8,7 @@
 //!   unchanged — a genuine passthrough, no behavior change for std
 //!   consumers.
 //! - **`no_std` + `blocking`**: `lock_api::Mutex` over a futex raw mutex
-//!   ([`futex::RawFutexMutex`]) backed by `atomic-wait` (Linux `futex`,
+//!   (`futex::RawFutexMutex`) backed by `atomic-wait` (Linux `futex`,
 //!   macOS `__ulock`, Windows `WaitOnAddress`).
 //!
 //! There is deliberately no spin fallback: a blocking lock needs an OS wait

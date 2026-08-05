@@ -13,7 +13,7 @@
 //!   it drops straight into `.and_then(inner)`; the hot data path does one
 //!   lock-free load and delegates to the current predicate. For a pure
 //!   membership query that never forwards the item on (a control-plane
-//!   question, not a data-path decision — [`FilterRegistry::matches`]'s
+//!   question, not a data-path decision — [`FilterRegistry::matches`](crate::pipe::filter_registry::FilterRegistry::matches)'s
 //!   fan-out lookup is the example), [`LiveFilter::contains`] answers
 //!   synchronously without the pipe detour.
 //! - [`FilterControl`] — the control (write) half. The "pipe pumping in":
@@ -27,7 +27,7 @@
 //! visible to all filter clones — this is the "split" of a pub/sub subscription:
 //! data-out ([`LiveFilter`]) and control-in ([`FilterControl`]) are the two ends
 //! of one object. The swap is per-call monotonic (see
-//! [`proxima_core::live`](proxima_core::live) for the ordering contract): a call
+//! [`proxima_core::live`] for the ordering contract): a call
 //! sees either the pre-swap or post-swap predicate, which is the right semantics
 //! for id filtering ("start matching id X soon after I add it"). A filter that
 //! must change at a precise item needs the update carried *in* the item stream

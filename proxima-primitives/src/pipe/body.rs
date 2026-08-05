@@ -255,7 +255,7 @@ impl core::fmt::Debug for ResponseStream {
 /// A streamed request body (uploads, WebSocket-inbound relay). Symmetric
 /// to [`ResponseStream`]: carries an optional trailers slot a chunked
 /// decoder populates at body-end (HTTP/1.1 request trailers, RFC 7230
-/// §4.1.2). [`Request::body_bytes`] folds those into `Request.headers`
+/// §4.1.2). [`Request::body_bytes`](crate::pipe::request::Request::body_bytes) folds those into `Request.headers`
 /// after draining — "request trailers fold into headers at chunked-decode
 /// end".
 pub struct RequestStream {

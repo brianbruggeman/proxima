@@ -24,6 +24,7 @@
 //!   the one the caller fires from [`shutdown`].
 //!
 //! [`with_parent_signal`]: ProducerLifecycle::with_parent_signal
+//! [`shutdown`]: ProducerLifecycle::shutdown
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
