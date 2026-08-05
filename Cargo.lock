@@ -4459,6 +4459,7 @@ dependencies = [
  "rayon",
  "serde",
  "temp-env",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-uring",
  "toml 0.8.23",

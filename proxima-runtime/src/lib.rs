@@ -42,6 +42,8 @@ pub use primitives::{LocalRuntimeFactory, RuntimeFactory};
 #[cfg(feature = "tokio")]
 pub mod tokio;
 
+use thiserror::Error;
+
 #[cfg(feature = "alloc")]
 use core::convert::Infallible;
 #[cfg(feature = "alloc")]
@@ -155,27 +157,18 @@ pub trait BackgroundPool: Send + Sync + 'static {
 /// Implementations that cannot fail on back-pressure (e.g. tokio's
 /// `flume::unbounded()` mpsc never returns Full) will simply never
 /// produce `InboxFull` and callers see `Ok(())` in the steady state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SpawnError {
     /// The target core's inbox lane is at capacity. The future has been
     /// dropped; the caller should rebuild and retry (see
     /// [`spawn_on_core_blocking_with`]).
+    #[error("inbox lane full; transient back-pressure")]
     InboxFull,
     /// The target core has shut down or never existed (out-of-range
     /// `CoreId`). The future is dropped; retrying is futile.
+    #[error("target core disconnected")]
     Disconnected,
 }
-
-impl core::fmt::Display for SpawnError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::InboxFull => formatter.write_str("inbox lane full; transient back-pressure"),
-            Self::Disconnected => formatter.write_str("target core disconnected"),
-        }
-    }
-}
-
-impl core::error::Error for SpawnError {}
 
 /// Loop on `spawn_on_core` until the future is accepted (`Ok`) or the
 /// target core is shut down (`SpawnError::Disconnected`). The factory
