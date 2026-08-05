@@ -8,14 +8,7 @@ pub use mpsc::StaticRing;
 #[cfg(feature = "alloc")]
 pub use mpsc::{Drainer, Ring};
 
-/// The only failure constructing a [`Ring`](mpsc::Ring): a zero capacity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The only failure constructing a [`Ring`]: a zero capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("ring capacity must be non-zero")]
 pub struct CapacityError;
-
-impl core::fmt::Display for CapacityError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("ring capacity must be non-zero")
-    }
-}
-
-impl core::error::Error for CapacityError {}
