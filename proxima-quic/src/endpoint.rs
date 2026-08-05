@@ -1,45 +1,55 @@
-//! Core-side QUIC endpoint. Wraps the I/O-bound driver behind a
-//! façade that hides whether the backend is the high-level [`quinn`]
-//! crate (today) or a [`quinn_proto`]-driven loop on the runtime's
-//! `Runtime` (future).
+//! Core-side QUIC endpoint over the upstream `quinn` crate — the
+//! `quinn-compat` half of this crate's dual surface. Accepted
+//! connections are handed back as plain [`quinn::Connection`]s: this
+//! surface exists to ride quinn directly, so wrapping its connection
+//! handle would only rename it. The sans-IO alternative that owes
+//! nothing to quinn is this crate's `native` module.
 
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::Connection;
-
 /// Endpoint façade. One per UDP socket. Accepts inbound QUIC
-/// connections; each accepted handle becomes a [`Connection`] that
+/// connections; each accepted handle is a [`quinn::Connection`] that
 /// owns its stream multiplexer.
 pub struct Endpoint {
     inner: quinn::Endpoint,
-    local_addr: Option<SocketAddr>,
 }
 
 impl Endpoint {
     /// Bind a server endpoint to `addr` using the supplied TLS server
     /// config. ALPN protocols (e.g. `h3`) are configured on the
     /// `ServerConfig` by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Bubbles up the `bind(2)` failure.
     pub fn server(addr: SocketAddr, server_config: quinn::ServerConfig) -> io::Result<Self> {
         let inner = quinn::Endpoint::server(server_config, addr)?;
-        let local_addr = inner.local_addr().ok();
-        Ok(Self { inner, local_addr })
+        Ok(Self { inner })
     }
 
     /// Local bind address after the OS resolved any ephemeral port.
-    pub fn local_addr(&self) -> Option<SocketAddr> {
-        self.local_addr
+    /// Same signature as the native facade's `Endpoint::local_addr`.
+    ///
+    /// # Errors
+    ///
+    /// Bubbles up [`std::io::Error`] from `getsockname(2)`.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
     }
 
-    /// Accept the next inbound QUIC connection. Returns `None` once
-    /// the endpoint is closed.
-    pub async fn accept(&self) -> Option<io::Result<Connection>> {
+    /// Accept the next inbound QUIC connection, collapsing quinn's
+    /// two-step `accept().await?.await` into one call and its handshake
+    /// error into [`io::Error`]. Returns `None` once the endpoint is
+    /// closed.
+    pub async fn accept(&self) -> Option<io::Result<quinn::Connection>> {
         let incoming = self.inner.accept().await?;
-        Some(match incoming.await {
-            Ok(connection) => Ok(Connection::new(connection)),
-            Err(err) => Err(io::Error::other(format!("quic handshake: {err}"))),
-        })
+        Some(
+            incoming
+                .await
+                .map_err(|err| io::Error::other(format!("quic handshake: {err}"))),
+        )
     }
 
     /// Trigger a graceful close. In-flight connections drain before
@@ -51,7 +61,13 @@ impl Endpoint {
 
 /// Build a self-signed `ServerConfig` for tests / dev. Generates a
 /// fresh certificate for the supplied SAN list and advertises the
-/// supplied ALPN protocols (e.g. `b"h3"`).
+/// supplied ALPN protocols (e.g. `b"h3"`). Production plugs in real
+/// certs instead.
+///
+/// # Errors
+///
+/// Certificate generation, key encoding, or rustls rejecting the
+/// resulting cert/key pair.
 pub fn dev_server_config(sans: Vec<String>, alpn: &[&[u8]]) -> io::Result<quinn::ServerConfig> {
     let cert = rcgen::generate_simple_self_signed(sans)
         .map_err(|err| io::Error::other(format!("rcgen: {err}")))?;
