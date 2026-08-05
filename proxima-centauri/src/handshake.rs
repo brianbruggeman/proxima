@@ -64,12 +64,22 @@ const REKEY_SKEYSEED_CONTEXT: &str = "proxima-centauri-ike-rekey-skeyseed-v1";
 const AUTH_FLAG_INITIATOR: u8 = 0x08;
 const AUTH_FLAG_RESPONDER: u8 = 0x20;
 
-const HEADER_LEN: usize = 28;
+/// Bytes of the fixed IKEv2 header every message in this crate starts with.
+/// `pub(crate)` because [`crate::cookie`] writes the same header and had been
+/// spelling its offsets as bare numbers.
+pub(crate) const HEADER_LEN: usize = 28;
 const NONCE_LEN: usize = 32;
 const DH_LEN: usize = 32;
 
+// RFC 7296 §3.1 field order, obeyed by every message this crate writes:
+// next-payload at 16, version at 17, exchange type at 18, flags at 19. Load
+// bearing rather than tidy — `step` decides "is this a DELETE?" by reading
+// byte 18 before it knows what the message is, so a message that puts
+// something else there is dispatched on a coincidence.
 const NEXT_PAYLOAD: u8 = 0x21;
-const VERSION: u8 = 0x20;
+/// IKEv2 major 2, minor 0. Shared with [`crate::cookie`], which writes the
+/// same header on a challenge — one definition, so the two cannot drift.
+pub(crate) const VERSION: u8 = 0x20;
 const EXCHANGE_TYPE: u8 = 0x22;
 const FLAGS: u8 = 0x08;
 
@@ -507,7 +517,7 @@ impl Handshake {
         out[18] = DELETE_EXCHANGE_TYPE;
         out[19] = FLAGS;
         out[20..24].copy_from_slice(&message_id.to_be_bytes());
-        out[24..28].copy_from_slice(&(DELETE_LEN as u32).to_be_bytes());
+        out[24..HEADER_LEN].copy_from_slice(&(DELETE_LEN as u32).to_be_bytes());
         let mac = keyed_hash(&auth_key, &out[..HEADER_LEN]);
         out[HEADER_LEN..DELETE_LEN].copy_from_slice(&mac);
 
@@ -778,12 +788,12 @@ impl Handshake {
         let out = &mut self.outbound;
         out[0..8].copy_from_slice(&self.spi_initiator.as_raw().to_be_bytes());
         out[8..16].copy_from_slice(&self.spi_responder.as_raw().to_be_bytes());
-        out[16] = AUTH_EXCHANGE_TYPE;
+        out[16] = NEXT_PAYLOAD;
         out[17] = VERSION;
-        out[18] = flags;
-        out[19] = 0x00;
+        out[18] = AUTH_EXCHANGE_TYPE;
+        out[19] = flags;
         out[20..24].copy_from_slice(&message_id.to_be_bytes());
-        out[24..28].copy_from_slice(&(total as u32).to_be_bytes());
+        out[24..HEADER_LEN].copy_from_slice(&(total as u32).to_be_bytes());
         let identity_len_u16 = u16::try_from(identity_len)
             .map_err(|_| CentauriError::InvalidMessage("identity length"))?;
         out[HEADER_LEN..HEADER_LEN + IDENTITY_LEN_BYTES]
@@ -829,11 +839,11 @@ impl Handshake {
             return Ok(Progress::NeedInput);
         }
 
-        if input[16] != AUTH_EXCHANGE_TYPE {
-            return Err(CentauriError::InvalidMessage("auth exchange type"));
-        }
         if input[17] != VERSION {
             return Err(CentauriError::InvalidMessage("version"));
+        }
+        if input[18] != AUTH_EXCHANGE_TYPE {
+            return Err(CentauriError::InvalidMessage("auth exchange type"));
         }
 
         // self-describing: the length prefix locates the MAC without the
@@ -1155,7 +1165,7 @@ impl Handshake {
         out[18] = exchange_type;
         out[19] = FLAGS;
         out[20..24].copy_from_slice(&message_id.to_be_bytes());
-        out[24..28].copy_from_slice(&(MESSAGE_LEN as u32).to_be_bytes());
+        out[24..HEADER_LEN].copy_from_slice(&(MESSAGE_LEN as u32).to_be_bytes());
         out[HEADER_LEN..HEADER_LEN + NONCE_LEN].copy_from_slice(nonce);
         out[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(dh_public);
 

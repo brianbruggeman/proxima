@@ -36,7 +36,7 @@
 use subtle::ConstantTimeEq;
 
 use crate::error::CentauriError;
-use crate::handshake::{IkeSpi, MESSAGE_LEN};
+use crate::handshake::{HEADER_LEN, IkeSpi, MESSAGE_LEN, VERSION};
 use crate::hash::keyed_hash;
 
 /// Bytes of a cookie.
@@ -50,7 +50,7 @@ pub const COOKIE_LEN: usize = 32;
 pub const COOKIED_MESSAGE_LEN: usize = MESSAGE_LEN + COOKIE_LEN;
 
 /// Bytes of a challenge message.
-pub const CHALLENGE_LEN: usize = 28 + COOKIE_LEN;
+pub const CHALLENGE_LEN: usize = HEADER_LEN + COOKIE_LEN;
 
 /// No amplification: the reply must never exceed what provoked it, or this
 /// becomes the very thing it defends against. A const assertion rather than a
@@ -62,7 +62,16 @@ const _: () = assert!(
 );
 
 const CHALLENGE_EXCHANGE_TYPE: u8 = 0x25;
-const VERSION: u8 = 0x20;
+/// RFC 7296 §3.2: payload type 41, NOTIFY. A challenge carries a COOKIE
+/// notification, not the SA payload every other message in this crate leads
+/// with, so the next-payload byte differs on purpose.
+const NEXT_PAYLOAD_NOTIFY: u8 = 0x29;
+/// RFC 7296 §3.1 flags bit 5: this message is a response.
+const FLAG_RESPONSE: u8 = 0x20;
+/// Where the initiator's nonce sits in an SA_INIT — the cookie binds it, so a
+/// cookie issued for one exchange is useless in another.
+const NONCE_AT: usize = HEADER_LEN;
+const NONCE_LEN: usize = 32;
 
 /// The responder's rotating cookie key.
 ///
@@ -150,7 +159,7 @@ pub fn examine(
             .try_into()
             .map_err(|_| CentauriError::InvalidMessage("spi_initiator"))?,
     ));
-    let nonce = &message[28..60];
+    let nonce = &message[NONCE_AT..NONCE_AT + NONCE_LEN];
     let expected = derive(secret, peer_token, spi, nonce);
 
     if message.len() >= COOKIED_MESSAGE_LEN {
@@ -168,12 +177,12 @@ fn challenge(spi: IkeSpi, cookie: &[u8; COOKIE_LEN]) -> [u8; CHALLENGE_LEN] {
     let mut message = [0u8; CHALLENGE_LEN];
     message[0..8].copy_from_slice(&spi.as_raw().to_be_bytes());
     // responder SPI stays zero: none has been chosen, because no state exists
-    message[16] = 0x29;
+    message[16] = NEXT_PAYLOAD_NOTIFY;
     message[17] = VERSION;
     message[18] = CHALLENGE_EXCHANGE_TYPE;
-    message[19] = 0x20;
-    message[24..28].copy_from_slice(&(CHALLENGE_LEN as u32).to_be_bytes());
-    message[28..CHALLENGE_LEN].copy_from_slice(cookie);
+    message[19] = FLAG_RESPONSE;
+    message[24..HEADER_LEN].copy_from_slice(&(CHALLENGE_LEN as u32).to_be_bytes());
+    message[HEADER_LEN..CHALLENGE_LEN].copy_from_slice(cookie);
     message
 }
 
@@ -191,7 +200,7 @@ pub fn cookie_from_challenge(message: &[u8]) -> Result<[u8; COOKIE_LEN], Centaur
     }
 
     let mut cookie = [0u8; COOKIE_LEN];
-    cookie.copy_from_slice(&message[28..CHALLENGE_LEN]);
+    cookie.copy_from_slice(&message[HEADER_LEN..CHALLENGE_LEN]);
     Ok(cookie)
 }
 
