@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 
 pub mod profile;
 
-pub use profile::{Executor, Profile, Reactor, Timer, TimerParseError, TlsBackend};
+pub use profile::{
+    AxisParseError, Executor, H3Impl, Profile, QuicImpl, Reactor, Timer, TlsBackend,
+};
 
 /// Errors that can occur during profile resolution or codegen.
 #[derive(Debug, thiserror::Error)]
