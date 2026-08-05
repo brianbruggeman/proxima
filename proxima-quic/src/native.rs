@@ -6,21 +6,26 @@
 //!
 //! # Layering
 //!
-//! - The sans-IO state machine ([`proxima_protocols::quic::Connection`])
-//!   produces `Transmit` descriptors and consumes inbound datagrams.
+//! - The sans-IO state machine
+//!   ([`proxima_protocols::quic::connection::Connection`]) produces
+//!   `Transmit` descriptors and consumes inbound datagrams.
 //! - The facade wraps it with a UDP socket (today via
 //!   [`prime::os::net::UdpSocket`]) + a monotonic clock + an executor-
 //!   agnostic `poll_*` loop driver.
-//! - Public configs derive `Builder + Serialize + Deserialize` so
-//!   conflaguration loaders compose (principle 4).
+//! - Public configs derive `Serialize + Deserialize` so conflaguration
+//!   loaders compose (principle 4); the `Builder` + `Settings` derives
+//!   layer on at the consumer crate (see [`config`]).
 //!
-//! # Status
+//! # Surface
 //!
-//! C29 surface: `Endpoint::bind_client`, `Endpoint::poll_send`,
-//! `Endpoint::poll_recv`, and the client-side `Connection` shape with
-//! `poll_application_send` / `poll_application_recv` /
-//! `poll_handshake`. Server-side `accept` lands in B1.1 alongside the
-//! endpoint demux integration.
+//! - [`Endpoint`] — one socket, one connection, `poll_send` /
+//!   `poll_recv` plus their `sendmmsg`/`recvmmsg` batch twins. The
+//!   client-dial and single-inbound-connection shape.
+//! - [`Listener`] — the multi-connection server side: an I/O-free,
+//!   DCID-demuxed [`DatagramProtocol`](proxima_listen::stream::DatagramProtocol)
+//!   state machine that the `proxima-listen` datagram driver serves.
+//! - `TokioEndpoint` (feature `tokio-compat`) — the same
+//!   single-connection shape over `tokio::net::UdpSocket`.
 
 pub mod config;
 pub mod endpoint;

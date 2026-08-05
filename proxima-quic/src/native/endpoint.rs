@@ -67,7 +67,7 @@ impl core::fmt::Display for EndpointError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(err) => write!(f, "io: {err}"),
-            Self::Connection(err) => write!(f, "connection: {err:?}"),
+            Self::Connection(err) => write!(f, "connection: {err}"),
             Self::UnconfiguredSide => f.write_str("endpoint missing config for this operation"),
         }
     }
@@ -316,8 +316,9 @@ impl<P: TlsProvider> Endpoint<P> {
     /// or the minimum `recvfrom` calls (non-Linux fallback) and feed each
     /// through the proto state machine. Replaces the `now_or_never(poll_recv)`
     /// drain loop: instead of creating N `poll_fn` closures and calling
-    /// `poll_recv_from` N times, this reads up to [`CLIENT_RECV_BATCH_CAP`]
-    /// datagrams in a single call then feeds them all before returning.
+    /// `poll_recv_from` N times, this reads up to a fixed per-burst cap
+    /// (`CLIENT_RECV_BATCH_CAP`) of datagrams in a single call then feeds
+    /// them all before returning.
     ///
     /// Returns the number of datagrams processed. `Poll::Pending` when the
     /// socket is empty and the caller's waker has been registered.
@@ -410,6 +411,16 @@ mod tests {
         let err = EndpointError::UnconfiguredSide;
         let formatted = format!("{err}");
         assert!(formatted.contains("missing"));
+    }
+
+    #[test]
+    fn endpoint_error_displays_the_inner_connection_reason() {
+        let err = EndpointError::from(ConnectionError::BufferTooSmall { needed: 1200 });
+        let formatted = format!("{err}");
+        assert_eq!(
+            formatted, "connection: buffer too small (needed 1200)",
+            "the inner ConnectionError's own Display must survive the wrap"
+        );
     }
 
     /// C29 worked example: bind an Endpoint on a proxima worker; drive
