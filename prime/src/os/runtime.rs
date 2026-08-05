@@ -219,12 +219,13 @@ impl PrimeRuntime {
     /// `background_pool = rayon` (when the `rayon` feature is on,
     /// else `inline`).
     ///
-    /// ```ignore
-    /// use proxima::prime::PrimeRuntime;
+    /// ```no_run
+    /// use prime::os::runtime::PrimeRuntime;
     /// let runtime = PrimeRuntime::builder()
     ///     .cores(4)
     ///     .background_inline()  // tests / small workloads
     ///     .build()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// The builder accepts a [`PrimeConfig`](super::super::config::PrimeConfig)
@@ -232,12 +233,16 @@ impl PrimeRuntime {
     /// it when most of the deployment shape lives in config but a test
     /// harness or hot-fix script needs to pin one field locally:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// use conflaguration::Settings;
+    /// use prime::config::PrimeConfig;
+    /// use prime::os::runtime::PrimeRuntime;
     /// let config = PrimeConfig::from_env()?;
     /// let runtime = PrimeRuntime::builder()
     ///     .from_config(&config)
     ///     .cores(2)  // override the config's `cores`
     ///     .build()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[must_use]
     pub fn builder() -> super::super::config::Builder {
@@ -251,10 +256,14 @@ impl PrimeRuntime {
     /// `PrimeConfig` derives `conflaguration::Settings`, so it loads
     /// from the environment with no extra plumbing:
     ///
-    /// ```ignore
+    /// ```no_run
     /// // PRIME_CORES=8 PRIME_BACKGROUND_POOL=rayon
+    /// use conflaguration::Settings;
+    /// use prime::config::PrimeConfig;
+    /// use prime::os::runtime::PrimeRuntime;
     /// let config = PrimeConfig::from_env()?;
     /// let runtime = PrimeRuntime::from_config(&config)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// The same fields parse from a TOML file via
