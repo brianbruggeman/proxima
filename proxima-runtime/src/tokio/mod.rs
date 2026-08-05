@@ -56,17 +56,28 @@ impl TokioPerCoreRuntime {
     /// Spawn `num_cores` per-core worker threads. Pinning is best-effort:
     /// when `core_affinity` can't enumerate physical core ids (CI, restricted
     /// environments) workers run unpinned but still single-threaded.
+    ///
+    /// Returns only once every worker has reported its executor live. A worker
+    /// that cannot build one used to exit quietly, leaving a slot whose sender
+    /// still accepted work nothing would ever poll; the readiness handshake
+    /// turns that into a construction error.
+    ///
+    /// # Errors
+    /// `ProximaError::Config` if a worker thread cannot be spawned, cannot
+    /// build its executor, or dies before reporting.
     pub fn new(num_cores: usize) -> Result<Self, ProximaError> {
         let num_cores = num_cores.max(1);
         let physical = core_affinity::get_core_ids().unwrap_or_default();
+        let (ready_tx, ready_rx) = flume::unbounded::<Result<(), String>>();
         let mut cores: Vec<CoreSlot> = Vec::with_capacity(num_cores);
         for index in 0..num_cores {
             let core_id = CoreId(index);
             let affinity = physical.get(index).copied();
             let (spawn_tx, spawn_rx) = flume::unbounded();
+            let ready = ready_tx.clone();
             let handle = thread::Builder::new()
                 .name(format!("proxima-core-{index}"))
-                .spawn(move || worker(core_id, affinity, spawn_rx))
+                .spawn(move || worker(core_id, affinity, spawn_rx, &ready))
                 .map_err(|err| {
                     ProximaError::Config(format!("spawn per-core worker thread: {err}"))
                 })?;
@@ -74,6 +85,18 @@ impl TokioPerCoreRuntime {
                 spawn_tx,
                 handle: Some(handle),
             });
+        }
+        drop(ready_tx);
+        for _ in 0..num_cores {
+            match ready_rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => return Err(ProximaError::Config(reason)),
+                Err(_) => {
+                    return Err(ProximaError::Config(
+                        "per-core worker died before reporting readiness".into(),
+                    ));
+                }
+            }
         }
         Ok(Self {
             cores: Arc::new(cores),
@@ -135,6 +158,7 @@ fn worker(
     core_id: CoreId,
     affinity: Option<core_affinity::CoreId>,
     spawn_rx: flume::Receiver<SpawnRequest>,
+    ready: &flume::Sender<Result<(), String>>,
 ) {
     if let Some(target) = affinity {
         // best-effort: ignore failure (e.g., sandboxed CI runners)
@@ -142,7 +166,7 @@ fn worker(
     }
     CURRENT_CORE.with(|cell| cell.set(Some(core_id)));
 
-    run_event_loop(spawn_rx);
+    run_event_loop(spawn_rx, ready);
 }
 
 /// Drains spawn requests until the channel returns Shutdown or closes.
@@ -169,23 +193,34 @@ async fn drain_loop(spawn_rx: flume::Receiver<SpawnRequest>) {
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
-fn run_event_loop(spawn_rx: flume::Receiver<SpawnRequest>) {
+fn run_event_loop(
+    spawn_rx: flume::Receiver<SpawnRequest>,
+    ready: &flume::Sender<Result<(), String>>,
+) {
     // tokio-uring drives its own current-thread runtime + LocalSet
     // backed by io_uring. Owned-buffer I/O, no epoll. The runtime
     // contract (LocalSet for ?Send tasks, current-thread tokio) is
     // preserved — only the I/O reactor differs.
+    let _ = ready.send(Ok(()));
     tokio_uring::start(drain_loop(spawn_rx));
 }
 
 #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
-fn run_event_loop(spawn_rx: flume::Receiver<SpawnRequest>) {
+fn run_event_loop(
+    spawn_rx: flume::Receiver<SpawnRequest>,
+    ready: &flume::Sender<Result<(), String>>,
+) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        Ok(rt) => rt,
-        Err(_) => return,
+        Ok(runtime) => runtime,
+        Err(err) => {
+            let _ = ready.send(Err(format!("build per-core tokio runtime: {err}")));
+            return;
+        }
     };
+    let _ = ready.send(Ok(()));
     let local = tokio::task::LocalSet::new();
     runtime.block_on(local.run_until(drain_loop(spawn_rx)));
 }
@@ -324,8 +359,20 @@ impl Drop for TokioPerCoreRuntime {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::mpsc::{Receiver, channel};
+    use std::time::Duration;
+
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A worker signalling back is the only ordering these tests need, so they
+    /// wait on the value rather than polling for a flag. The deadline exists so
+    /// a regression fails with a message instead of hanging the suite; the happy
+    /// path never waits on it.
+    fn awaited<T>(receiver: &Receiver<T>, what: &str) -> T {
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|err| panic!("{what}: {err}"))
+    }
 
     #[test]
     fn new_runtime_spawns_requested_number_of_workers() {
@@ -333,14 +380,39 @@ mod tests {
         assert_eq!(runtime.num_cores(), 2);
     }
 
+    /// The readiness handshake: `new` does not return until every worker's
+    /// executor is live, so a slot whose executor failed to build surfaces as a
+    /// construction error rather than as a lane that silently swallows work.
+    #[test]
+    fn new_returns_only_once_every_worker_is_live() {
+        let runtime = TokioPerCoreRuntime::new(4).expect("build runtime");
+        let (sender, receiver) = channel();
+        for index in 0..runtime.num_cores() {
+            let sender = sender.clone();
+            runtime
+                .spawn_on_core(
+                    CoreId(index),
+                    Box::pin(async move {
+                        let _ = sender.send(CURRENT_CORE.with(|cell| cell.get()));
+                    }),
+                )
+                .expect("spawn on a live core");
+        }
+        let mut reported: Vec<CoreId> = (0..4)
+            .map(|_| awaited(&receiver, "worker report").expect("worker knows its core"))
+            .collect();
+        reported.sort_by_key(CoreId::as_usize);
+        assert_eq!(
+            reported,
+            vec![CoreId(0), CoreId(1), CoreId(2), CoreId(3)]
+        );
+    }
+
     // P-TU slice 1: a wrapped host runtime dispatches Send work onto the host's
     // own threads, with no proxima-owned worker threads — the tokio-hosts-proxima
     // seam the client's off-worker hop rides.
     #[test]
     fn from_handle_dispatches_send_work_onto_the_host_with_no_new_threads() {
-        use std::sync::atomic::AtomicBool;
-        use std::time::Duration;
-
         // the "host": a tokio multi-thread runtime the application already owns.
         let host = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -352,10 +424,7 @@ mod tests {
 
         // from a BARE thread (not a proxima worker), dispatch Send work — the
         // exact shape of the client's off-worker hop.
-        let ran = Arc::new(AtomicBool::new(false));
-        let on_host = Arc::new(AtomicBool::new(false));
-        let ran_worker = ran.clone();
-        let on_host_worker = on_host.clone();
+        let (sender, receiver) = channel();
         runtime
             .spawn_on_core(
                 CoreId(0),
@@ -364,25 +433,15 @@ mod tests {
                         .name()
                         .unwrap_or_default()
                         .to_string();
-                    on_host_worker.store(name.starts_with("host-tokio-worker"), Ordering::Release);
-                    ran_worker.store(true, Ordering::Release);
+                    let _ = sender.send(name);
                 }),
             )
             .expect("spawn onto host runtime");
 
-        for _ in 0..200 {
-            if ran.load(Ordering::Acquire) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let thread_name = awaited(&receiver, "host runtime ran the future");
         assert!(
-            ran.load(Ordering::Acquire),
-            "from_handle dispatched the future onto the host runtime"
-        );
-        assert!(
-            on_host.load(Ordering::Acquire),
-            "future ran on a host-tokio worker, not a new proxima thread"
+            thread_name.starts_with("host-tokio-worker"),
+            "future ran on a host-tokio worker, not a new proxima thread; got {thread_name}"
         );
         assert!(
             runtime.cores.is_empty(),
@@ -393,55 +452,38 @@ mod tests {
     #[test]
     fn spawn_on_core_dispatches_to_target_worker() {
         let runtime = TokioPerCoreRuntime::new(2).expect("build runtime");
-        let counter = Arc::new(AtomicUsize::new(0));
-        let counter_for_core_0 = counter.clone();
-        runtime
-            .spawn_on_core(
-                CoreId(0),
-                Box::pin(async move {
-                    counter_for_core_0.fetch_add(1, Ordering::SeqCst);
-                }),
-            )
-            .expect("spawn on fresh runtime");
-        let counter_for_core_1 = counter.clone();
-        runtime
-            .spawn_on_core(
-                CoreId(1),
-                Box::pin(async move {
-                    counter_for_core_1.fetch_add(1, Ordering::SeqCst);
-                }),
-            )
-            .expect("spawn on fresh runtime");
-        // give the workers a moment to drain the spawn channel.
-        for _ in 0..20 {
-            if counter.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        let (sender, receiver) = channel();
+        for index in 0..2 {
+            let sender = sender.clone();
+            runtime
+                .spawn_on_core(
+                    CoreId(index),
+                    Box::pin(async move {
+                        let _ = sender.send(index);
+                    }),
+                )
+                .expect("spawn on fresh runtime");
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        let mut dispatched = vec![
+            awaited(&receiver, "first worker"),
+            awaited(&receiver, "second worker"),
+        ];
+        dispatched.sort_unstable();
+        assert_eq!(dispatched, vec![0, 1]);
     }
 
     #[test]
     fn current_core_inside_worker_returns_dispatched_id() {
         let runtime = TokioPerCoreRuntime::new(2).expect("build runtime");
-        let observed: Arc<std::sync::Mutex<Option<CoreId>>> = Arc::new(std::sync::Mutex::new(None));
-        let observed_for_task = observed.clone();
+        let (sender, receiver) = channel();
         runtime
             .spawn_on_core(
                 CoreId(1),
                 Box::pin(async move {
-                    let id = CURRENT_CORE.with(|cell| cell.get());
-                    *observed_for_task.lock().unwrap() = id;
+                    let _ = sender.send(CURRENT_CORE.with(|cell| cell.get()));
                 }),
             )
             .expect("spawn on fresh runtime");
-        for _ in 0..20 {
-            if observed.lock().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(*observed.lock().unwrap(), Some(CoreId(1)));
+        assert_eq!(awaited(&receiver, "core 1 report"), Some(CoreId(1)));
     }
 }
