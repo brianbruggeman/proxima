@@ -10,6 +10,12 @@ use proxima_protocols::amqp::{FRAME_END, FrameType};
 
 use crate::method::Method;
 
+/// What one frame costs on the wire beyond its payload: the 7-byte header
+/// (`type` octet + `channel` short + `length` long) plus the
+/// [`FRAME_END`] marker. AMQP 0-9-1's negotiated `frame-max` counts both
+/// (§connection.tune), so a body chunk may only be `frame-max` minus this.
+pub const FRAME_ENVELOPE_BYTES: usize = 8;
+
 /// Appends one framed `(type, channel, payload)` triple to `out`.
 pub fn encode_frame(out: &mut Vec<u8>, frame_type: FrameType, channel: u16, payload: &[u8]) {
     out.push(frame_type as u8);
@@ -46,15 +52,20 @@ pub fn encode_header_frame(
     encode_frame(out, FrameType::Header, channel, &payload);
 }
 
-/// Splits `body` across one or more content-body frames, each capped at
-/// `max_chunk` bytes — the negotiated `frame-max` minus the 8-byte frame
-/// envelope overhead. Emits nothing for an empty body (a zero-length
-/// message has no body frame at all, per spec).
-pub fn encode_body_frames(out: &mut Vec<u8>, channel: u16, body: &[u8], max_chunk: usize) {
+/// Splits `body` across content-body frames no larger than the negotiated
+/// `frame_max` — envelope included, so the payload cap is `frame_max` minus
+/// [`FRAME_ENVELOPE_BYTES`]. Subtracting here rather than at each call site
+/// is deliberate: this function emits the envelope, so it is the only place
+/// that can get the arithmetic right, and a caller that passed the raw
+/// `frame-max` used to overshoot the cap it had just advertised. Emits
+/// nothing for an empty body (a zero-length message has no body frame at
+/// all, per spec).
+pub fn encode_body_frames(out: &mut Vec<u8>, channel: u16, body: &[u8], frame_max: usize) {
     if body.is_empty() {
         return;
     }
-    for chunk in body.chunks(max_chunk.max(1)) {
+    let payload_max = frame_max.saturating_sub(FRAME_ENVELOPE_BYTES).max(1);
+    for chunk in body.chunks(payload_max) {
         encode_frame(out, FrameType::Body, channel, chunk);
     }
 }
@@ -90,11 +101,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn body_frames_split_at_max_chunk() {
-        let mut out = Vec::new();
-        encode_body_frames(&mut out, 2, b"hello world", 4);
-        let mut cursor = out.as_slice();
+    fn body_frame_payloads(wire: &[u8]) -> Vec<Vec<u8>> {
+        let mut cursor = wire;
         let mut chunks = Vec::new();
         while !cursor.is_empty() {
             let (frame, consumed) = parse_frame(cursor).expect("parse");
@@ -104,10 +112,37 @@ mod tests {
             }
             cursor = &cursor[consumed..];
         }
+        chunks
+    }
+
+    #[test]
+    fn body_frames_split_at_the_frame_max_minus_its_envelope() {
+        let mut out = Vec::new();
+        encode_body_frames(&mut out, 2, b"hello world", 4 + FRAME_ENVELOPE_BYTES);
         assert_eq!(
-            chunks,
+            body_frame_payloads(&out),
             vec![b"hell".to_vec(), b"o wo".to_vec(), b"rld".to_vec()]
         );
+    }
+
+    // the interop bug this guards: a body chunk sized at the raw `frame-max`
+    // puts `frame-max + 8` bytes on the wire, which a conforming peer (and
+    // this crate's own `Connection`) rejects as a frame error.
+    #[test]
+    fn no_emitted_frame_exceeds_the_negotiated_frame_max() {
+        let frame_max = 64;
+        let mut out = Vec::new();
+        encode_body_frames(&mut out, 2, &vec![b'x'; 512], frame_max);
+
+        let mut cursor = out.as_slice();
+        while !cursor.is_empty() {
+            let (_frame, consumed) = parse_frame(cursor).expect("parse");
+            assert!(
+                consumed <= frame_max,
+                "emitted a {consumed}-byte frame past the {frame_max}-byte frame-max"
+            );
+            cursor = &cursor[consumed..];
+        }
     }
 
     #[test]

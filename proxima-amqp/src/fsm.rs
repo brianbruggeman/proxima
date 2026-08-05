@@ -524,7 +524,9 @@ fn method_error_to_advanced(error: MethodError) -> Advanced {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::frame::{encode_body_frames, encode_header_frame, encode_method_frame};
+    use crate::frame::{
+        FRAME_ENVELOPE_BYTES, encode_body_frames, encode_header_frame, encode_method_frame,
+    };
     use crate::wire::FieldTable;
 
     fn limits() -> Limits {
@@ -607,7 +609,7 @@ mod tests {
             },
         );
         encode_header_frame(&mut wire, 1, id::BASIC, 11, b"");
-        encode_body_frames(&mut wire, 1, b"hello world", 4);
+        encode_body_frames(&mut wire, 1, b"hello world", 4 + FRAME_ENVELOPE_BYTES);
         connection.feed_bytes(&wire);
 
         match connection.advance() {

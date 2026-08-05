@@ -102,7 +102,10 @@ pub struct ConsumerSink {
     consumer_tag: Vec<u8>,
     delivery_tag: Arc<AtomicU64>,
     sender: UnboundedSender<Bytes>,
-    max_frame_chunk: usize,
+    /// the `frame-max` this connection advertised in `connection.tune` —
+    /// the whole-frame ceiling, envelope included, that
+    /// [`encode_body_frames`] chunks the delivery body under.
+    frame_max: usize,
 }
 
 impl ConsumerSink {
@@ -111,14 +114,14 @@ impl ConsumerSink {
         channel: u16,
         consumer_tag: Vec<u8>,
         sender: UnboundedSender<Bytes>,
-        max_frame_chunk: usize,
+        frame_max: usize,
     ) -> Self {
         Self {
             channel,
             consumer_tag,
             delivery_tag: Arc::new(AtomicU64::new(1)),
             sender,
-            max_frame_chunk,
+            frame_max,
         }
     }
 }
@@ -149,7 +152,7 @@ impl SendPipe for ConsumerSink {
             delivery.body.len() as u64,
             &delivery.properties,
         );
-        encode_body_frames(&mut out, self.channel, &delivery.body, self.max_frame_chunk);
+        encode_body_frames(&mut out, self.channel, &delivery.body, self.frame_max);
 
         let result = self.sender.unbounded_send(Bytes::from(out));
         async move {
@@ -461,6 +464,38 @@ mod tests {
             .await
             .expect("publish");
         assert_eq!(rx.try_recv().ok(), None);
+    }
+
+    // the delivery a consumer receives must fit the `frame-max` the broker
+    // advertised in `connection.tune`; a body chunk sized at the raw
+    // `frame-max` overshoots it by the 8-byte envelope and a conforming
+    // client closes the connection with a frame error.
+    #[proxima::test(runtime = "tokio")]
+    async fn a_delivery_is_chunked_under_the_advertised_frame_max() {
+        let frame_max = 4096;
+        let (tx, mut rx) = mpsc::unbounded();
+        let broker = AmqpBroker::new();
+        broker.subscribe_queue(
+            b"orders",
+            ConsumerSink::new(1, b"ctag-1".to_vec(), tx, frame_max),
+        );
+
+        broker
+            .publish(b"", b"orders", Vec::new(), vec![b'x'; 40_000])
+            .await
+            .expect("publish");
+
+        let pushed = rx.next().await.expect("delivery");
+        let mut cursor = &pushed[..];
+        while !cursor.is_empty() {
+            let (_frame, consumed) =
+                proxima_protocols::amqp::parse_frame(cursor).expect("delivery frame");
+            assert!(
+                consumed <= frame_max,
+                "pushed a {consumed}-byte frame past the {frame_max}-byte frame-max"
+            );
+            cursor = &cursor[consumed..];
+        }
     }
 
     #[proxima::test(runtime = "tokio")]
