@@ -142,7 +142,7 @@ let decoded = decode_response(ApiKey::Produce.to_i16(), &response.bytes().await?
 
 ## 4. MQTT
 
-**Scope:** v3.1.1 only (no v5), the routing-critical packet subset (`CONNECT`/`PUBLISH`/`SUBSCRIBE`/`UNSUBSCRIBE`/`PING`/`DISCONNECT`). QoS2 downgrades to a lower QoS rather than implementing the full four-packet handshake; no retained messages; no persistent sessions across reconnects.
+**Scope:** v3.1.1 only (no v5), the routing-critical packet subset (`CONNECT`/`PUBLISH`/`SUBSCRIBE`/`UNSUBSCRIBE`/`PING`/`DISCONNECT`). A publisher's own QoS handshake with the broker is answered in full — `PUBACK` for QoS 1, `PUBREC`/`PUBREL`/`PUBCOMP` for QoS 2 — but the onward fan-out to subscribers is always QoS 0 with the retain flag cleared (`SUBACK`'s `granted` is always `[0, ...]`), and there is no redelivery or dedup bookkeeping behind those acks. No retained messages; no persistent sessions across reconnects. The client half is narrower still: `ClientSession::submit_publish` rejects a QoS 2 `PUBLISH` rather than downgrading it.
 
 **Listener:** `.mqtt(handler)` — the handler is dispatched ONLY for `CONNECT` (answer/reject the session); `PUBLISH`/`SUBSCRIBE`/`PING` are answered by the driver and broker directly, never reaching your pipe (proven in `proxima-mqtt/tests/pubsub_round_trip.rs`, which also proves a real two-connection pub/sub delivery):
 

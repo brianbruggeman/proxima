@@ -74,7 +74,8 @@ pub use proxima_protocols::mqtt::{
 
 #[cfg(feature = "client")]
 pub use client::{
-    ClientError, ClientSession, MqttClientConfig, MqttClientUpstream, MqttConfigError, Step,
+    ClientError, ClientSession, MqttClientConfig, MqttClientUpstream, MqttConfigError, PushStep,
+    Step,
 };
 
 // the server-side surface an MQTT connect-auth handler builds against —
