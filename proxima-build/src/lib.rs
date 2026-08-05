@@ -53,6 +53,21 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Env vars that participate in profile resolution, and so must appear in
+/// `cargo:rerun-if-env-changed`. Listed centrally so consumers don't drift.
+const TRACKED_ENV_VARS: [&str; 10] = [
+    "PROXIMA_PROFILE",
+    "PROXIMA_ALLOC",
+    "PROXIMA_STD",
+    "PROXIMA_EXECUTOR",
+    "PROXIMA_REACTOR",
+    "PROXIMA_TLS",
+    "PROXIMA_QUIC_ENABLED",
+    "PROXIMA_QUIC_IMPL",
+    "PROXIMA_H3_IMPL",
+    "PROXIMA_TIMER",
+];
+
 /// Boolean cfgs, each paired with the axis that switches it on. Emission and
 /// declaration both read this table, so an axis added here cannot be set
 /// without also being declared.
@@ -79,13 +94,12 @@ fn value_cfgs(profile: &Profile) -> [(&'static str, String); 7] {
     ]
 }
 
-/// Resolved profile + the source paths that were consulted (so
-/// callers can wire them into `cargo:rerun-if-changed` directives).
+/// Resolved profile + the source path that was consulted (so callers can
+/// wire it into a `cargo:rerun-if-changed` directive).
 #[derive(Debug)]
 pub struct Resolved {
     pub profile: Profile,
     pub profile_file: PathBuf,
-    pub env_vars: Vec<&'static str>,
 }
 
 /// Resolve the active profile from env + file + validation.
@@ -115,7 +129,6 @@ pub fn resolve_profile() -> Result<Resolved> {
     Ok(Resolved {
         profile,
         profile_file,
-        env_vars: tracked_env_vars(),
     })
 }
 
@@ -134,25 +147,7 @@ pub fn resolve_profile_from(path: &Path) -> Result<Resolved> {
     Ok(Resolved {
         profile,
         profile_file: path.to_owned(),
-        env_vars: tracked_env_vars(),
     })
-}
-
-/// Env vars that callers must declare in `cargo:rerun-if-env-changed`.
-/// Listed centrally so consumers don't drift.
-fn tracked_env_vars() -> Vec<&'static str> {
-    vec![
-        "PROXIMA_PROFILE",
-        "PROXIMA_ALLOC",
-        "PROXIMA_STD",
-        "PROXIMA_EXECUTOR",
-        "PROXIMA_REACTOR",
-        "PROXIMA_TLS",
-        "PROXIMA_QUIC_ENABLED",
-        "PROXIMA_QUIC_IMPL",
-        "PROXIMA_H3_IMPL",
-        "PROXIMA_TIMER",
-    ]
 }
 
 /// Emit `$OUT_DIR/proxima_profile.rs` with const + type alias derived
@@ -269,7 +264,7 @@ pub fn emit_timer_binding(resolved: &Resolved) -> Result<()> {
 /// when the profile file or any tracked env var changes.
 pub fn emit_rerun_directives(resolved: &Resolved) {
     println!("cargo:rerun-if-changed={}", resolved.profile_file.display());
-    for key in &resolved.env_vars {
+    for key in TRACKED_ENV_VARS {
         println!("cargo:rerun-if-env-changed={key}");
     }
 }
@@ -488,9 +483,8 @@ timer = "std-thread"
 
     #[test]
     fn tracked_env_vars_includes_proxima_profile() {
-        let vars = tracked_env_vars();
-        assert!(vars.contains(&"PROXIMA_PROFILE"));
-        assert!(vars.contains(&"PROXIMA_ALLOC"));
-        assert!(vars.contains(&"PROXIMA_STD"));
+        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_PROFILE"));
+        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_ALLOC"));
+        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_STD"));
     }
 }

@@ -25,7 +25,6 @@ fn main() {
         Resolved {
             profile: Profile::default(),
             profile_file: PathBuf::from("<PROXIMA_PROFILE unset — Profile::default()>"),
-            env_vars: Vec::new(),
         }
     };
 
