@@ -11,45 +11,33 @@
 //! - `WithoutNetwork`, `WithoutSpawn`, `WithoutTime`, `WithoutRandom`.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use proxima_core::markers::{WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime};
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::Response;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use proxima_primitives::sync::Mutex;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin, Stdout};
 use ulid::Ulid;
 
 use crate::alert::event::{AnswerString, GuidanceAnswer, GuidanceRequestId, ResponderString};
 use crate::alert::methods;
 use crate::alert::pipes::{GuidanceRequest, GuidanceResponse};
 
-/// Async reader trait for stdin injection.
-pub trait GuidanceReader: tokio::io::AsyncBufRead + Send + Sync + Unpin + 'static {}
-impl<T: tokio::io::AsyncBufRead + Send + Sync + Unpin + 'static> GuidanceReader for T {}
-
-/// Async writer trait for stdout injection.
-pub trait GuidanceWriter: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static {}
-impl<T: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static> GuidanceWriter for T {}
-
-/// Duplex sync stdin/stdout guidance pipe.
-pub struct StdioGuidancePipe {
-    reader: Arc<Mutex<Box<dyn GuidanceReader>>>,
-    writer: Arc<Mutex<Box<dyn GuidanceWriter>>>,
+/// Duplex sync stdin/stdout guidance pipe. Generic over the injected IO pair
+/// the same way [`crate::middleware::auth::Auth`] is generic over its inner
+/// handle: the defaults are the real stdin/stdout, a test substitutes its own.
+pub struct StdioGuidancePipe<Reader = BufReader<Stdin>, Writer = Stdout> {
+    reader: Arc<Mutex<Reader>>,
+    writer: Arc<Mutex<Writer>>,
     responder_label: String,
     prompt_prefix: String,
 }
 
 impl Default for StdioGuidancePipe {
     fn default() -> Self {
-        let stdin = BufReader::new(tokio::io::stdin());
-        let stdout = tokio::io::stdout();
-        Self {
-            reader: Arc::new(Mutex::new(Box::new(stdin))),
-            writer: Arc::new(Mutex::new(Box::new(stdout))),
-            responder_label: "stdin".to_string(),
-            prompt_prefix: "[ask] ".to_string(),
-        }
+        Self::with_io(BufReader::new(tokio::io::stdin()), tokio::io::stdout())
     }
 }
 
@@ -60,17 +48,6 @@ impl StdioGuidancePipe {
         Self::default()
     }
 
-    /// Inject specific reader/writer pair — used by tests.
-    #[must_use]
-    pub fn with_io<R: GuidanceReader, W: GuidanceWriter>(reader: R, writer: W) -> Self {
-        Self {
-            reader: Arc::new(Mutex::new(Box::new(reader))),
-            writer: Arc::new(Mutex::new(Box::new(writer))),
-            responder_label: "stdin".to_string(),
-            prompt_prefix: "[ask] ".to_string(),
-        }
-    }
-
     /// Fluent builder entry point (principle 4).
     #[must_use]
     pub fn builder() -> StdioGuidancePipeBuilder {
@@ -78,7 +55,24 @@ impl StdioGuidancePipe {
     }
 }
 
-impl SendPipe for StdioGuidancePipe {
+impl<Reader, Writer> StdioGuidancePipe<Reader, Writer> {
+    /// Inject a specific reader/writer pair — used by tests.
+    #[must_use]
+    pub fn with_io(reader: Reader, writer: Writer) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(reader)),
+            writer: Arc::new(Mutex::new(writer)),
+            responder_label: "stdin".to_string(),
+            prompt_prefix: "[ask] ".to_string(),
+        }
+    }
+}
+
+impl<Reader, Writer> SendPipe for StdioGuidancePipe<Reader, Writer>
+where
+    Reader: AsyncBufRead + Send + Sync + Unpin + 'static,
+    Writer: AsyncWrite + Send + Sync + Unpin + 'static,
+{
     type In = GuidanceRequest;
     type Out = GuidanceResponse;
     type Err = ProximaError;
@@ -141,10 +135,10 @@ impl SendPipe for StdioGuidancePipe {
     }
 }
 
-impl WithoutNetwork for StdioGuidancePipe {}
-impl WithoutSpawn for StdioGuidancePipe {}
-impl WithoutTime for StdioGuidancePipe {}
-impl WithoutRandom for StdioGuidancePipe {}
+impl<Reader, Writer> WithoutNetwork for StdioGuidancePipe<Reader, Writer> {}
+impl<Reader, Writer> WithoutSpawn for StdioGuidancePipe<Reader, Writer> {}
+impl<Reader, Writer> WithoutTime for StdioGuidancePipe<Reader, Writer> {}
+impl<Reader, Writer> WithoutRandom for StdioGuidancePipe<Reader, Writer> {}
 
 fn make_empty_answer() -> GuidanceAnswer {
     GuidanceAnswer {
@@ -166,7 +160,6 @@ fn truncate_to_answer(value: &str) -> AnswerString {
 }
 
 fn now_micros() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX))
