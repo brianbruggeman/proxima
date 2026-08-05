@@ -4546,6 +4546,7 @@ dependencies = [
  "libc",
  "prime",
  "proxima-runtime",
+ "temp-env",
  "tokio",
 ]
 

@@ -645,7 +645,7 @@ mod tests {
     }
 
     async fn drive_cassette_round_trip(path: std::path::PathBuf) {
-        let record_ctx = proxima_test::TestCtx::__new_for_test(Some(proxima_test::CassetteCtx {
+        let record_ctx = proxima_test::TestCtx::new(Some(proxima_test::CassetteCtx {
             path: path.clone(),
             mode: proxima_test::Mode::Record,
         }));
@@ -664,7 +664,7 @@ mod tests {
             b"{\"ok\":1}"
         );
 
-        let replay_ctx = proxima_test::TestCtx::__new_for_test(Some(proxima_test::CassetteCtx {
+        let replay_ctx = proxima_test::TestCtx::new(Some(proxima_test::CassetteCtx {
             path,
             mode: proxima_test::Mode::Replay,
         }));
@@ -746,7 +746,7 @@ mod tests {
     }
 
     fn ctx(path: &std::path::Path, mode: proxima_test::Mode) -> proxima_test::TestCtx {
-        proxima_test::TestCtx::__new_for_test(Some(proxima_test::CassetteCtx {
+        proxima_test::TestCtx::new(Some(proxima_test::CassetteCtx {
             path: path.to_path_buf(),
             mode,
         }))
