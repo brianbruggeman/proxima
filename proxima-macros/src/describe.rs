@@ -3,14 +3,17 @@
 //! IR to drift).
 //! supports `#[schema(rename = "...")]` and `#[schema(skip)]` per field; mirrors
 //! the field-name semantics of serde's rename so contracts match the wire.
+//!
+//! The emitted code holds at the ALLOC tier, not std: `proxima-config` gates
+//! this derive behind `schema-derive = ["schema", ..]` and `schema` in turn
+//! behind `alloc`, so a consumer can be `#![no_std]`. Every alloc-bearing
+//! path is therefore spelled through a local `extern crate alloc;` rather
+//! than `::std::…` or an unqualified `.to_string()` that would need the
+//! caller to have `ToString` already in scope.
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::Data;
-use syn::DeriveInput;
-use syn::Fields;
-use syn::Type;
-use syn::parse2;
+use syn::{Data, DeriveInput, Fields, Type, parse2};
 
 pub fn expand(input: TokenStream) -> Result<TokenStream, syn::Error> {
     let ast: DeriveInput = parse2(input)?;
@@ -20,13 +23,13 @@ pub fn expand(input: TokenStream) -> Result<TokenStream, syn::Error> {
     let Data::Struct(data) = &ast.data else {
         return Err(syn::Error::new_spanned(
             name,
-            "Describe derive supports structs only",
+            "#[derive(Schema)] only supports structs",
         ));
     };
     let Fields::Named(named) = &data.fields else {
         return Err(syn::Error::new_spanned(
             name,
-            "Describe derive supports named-field structs only",
+            "#[derive(Schema)] only supports structs with named fields",
         ));
     };
 
@@ -59,9 +62,10 @@ pub fn expand(input: TokenStream) -> Result<TokenStream, syn::Error> {
     Ok(quote! {
         impl #impl_generics ::proxima_config::schema::Describe for #name #ty_generics #where_clause {
             fn schema() -> ::proxima_config::schema::Schema {
+                extern crate alloc;
                 ::proxima_config::schema::Schema::Struct {
-                    name: #name_str.to_string(),
-                    fields: ::std::vec![ #(#fields),* ],
+                    name: alloc::string::ToString::to_string(#name_str),
+                    fields: alloc::vec![ #(#fields),* ],
                 }
             }
         }
@@ -139,4 +143,103 @@ fn is_option(ty: &Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "Option")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand_ok(input: &str) -> String {
+        let tokens: TokenStream = input.parse().expect("parse input");
+        expand(tokens).expect("expand").to_string()
+    }
+
+    fn expand_err(input: &str) -> String {
+        let tokens: TokenStream = input.parse().expect("parse input");
+        expand(tokens).expect_err("expected error").to_string()
+    }
+
+    // the derive is gated behind `schema-derive -> schema -> alloc`, never
+    // `schema-std`, so a `::std::…` path in the OUTPUT is a hard cliff for
+    // every no_std consumer — it fails with E0433 at the derive site.
+    #[test]
+    fn emitted_code_names_alloc_never_std() {
+        let expanded = expand_ok("struct Memory { id: String }");
+        assert!(expanded.contains("extern crate alloc"));
+        assert!(expanded.contains("alloc :: vec !"));
+        assert!(!expanded.contains("std :: vec"));
+    }
+
+    // an unqualified `.to_string()` resolves only where the CALLER already has
+    // `ToString` in scope; a no_std consumer generally does not.
+    #[test]
+    fn struct_name_is_owned_through_a_fully_qualified_call() {
+        let expanded = expand_ok("struct Memory { id: String }");
+        assert!(expanded.contains("alloc :: string :: ToString :: to_string (\"Memory\")"));
+    }
+
+    #[test]
+    fn option_fields_are_marked_optional() {
+        let expanded = expand_ok("struct Memory { id: String, score: Option<f64> }");
+        assert!(expanded.contains("field (\"id\" ,"));
+        assert!(expanded.contains("field (\"score\" ,"));
+        assert!(expanded.contains("false"));
+        assert!(expanded.contains("true"));
+    }
+
+    #[test]
+    fn schema_rename_overrides_the_field_ident() {
+        let expanded = expand_ok("struct Memory { #[schema(rename = \"type\")] kind: String }");
+        assert!(expanded.contains("field (\"type\" ,"));
+        assert!(!expanded.contains("field (\"kind\" ,"));
+    }
+
+    #[test]
+    fn schema_skip_omits_the_field() {
+        let expanded = expand_ok("struct Memory { id: String, #[schema(skip)] cursor: u64 }");
+        assert!(expanded.contains("field (\"id\" ,"));
+        assert!(!expanded.contains("cursor"));
+    }
+
+    // the schema tracks the WIRE name, so serde's rename is honoured with no
+    // second annotation — and `#[schema(rename)]` wins when the two disagree.
+    #[test]
+    fn serde_rename_is_honoured_and_schema_rename_wins() {
+        let from_serde = expand_ok("struct Memory { #[serde(rename = \"ty\")] kind: String }");
+        assert!(from_serde.contains("field (\"ty\" ,"));
+
+        let both = expand_ok(
+            "struct Memory { #[schema(rename = \"type\")] #[serde(rename = \"ty\")] kind: String }",
+        );
+        assert!(both.contains("field (\"type\" ,"));
+        assert!(!both.contains("field (\"ty\" ,"));
+    }
+
+    #[test]
+    fn serde_default_makes_a_field_absent_tolerant() {
+        let per_field = expand_ok("struct Memory { #[serde(default)] retries: u32 }");
+        assert!(per_field.contains("field (\"retries\" , < u32 as"));
+        assert!(per_field.contains("true"));
+
+        let struct_wide = expand_ok("#[serde(default)] struct Memory { retries: u32 }");
+        assert!(struct_wide.contains("true"));
+    }
+
+    #[test]
+    fn rejects_an_enum() {
+        let err = expand_err("enum Memory { A, B }");
+        assert!(err.contains("#[derive(Schema)] only supports structs"));
+    }
+
+    #[test]
+    fn rejects_a_tuple_struct() {
+        let err = expand_err("struct Memory(String);");
+        assert!(err.contains("named fields"));
+    }
+
+    #[test]
+    fn rejects_an_unknown_schema_key() {
+        let err = expand_err("struct Memory { #[schema(bogus)] id: String }");
+        assert!(err.contains("unknown #[schema(...)] key"));
+    }
 }
