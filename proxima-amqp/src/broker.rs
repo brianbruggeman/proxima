@@ -264,6 +264,7 @@ impl AmqpBroker {
     /// `basic.consume`: register `sink` under `queue` (a bare queue name —
     /// the SAME key the default exchange's implicit direct routing and a
     /// declared exchange's bound queues both publish to).
+    #[must_use = "dropping the id leaks the subscription — only it can unsubscribe"]
     pub fn subscribe_queue(&self, queue: &[u8], sink: ConsumerSink) -> SubscriptionId {
         self.queues.subscribe(queue.to_vec(), sink)
     }
@@ -355,7 +356,7 @@ mod tests {
     async fn default_exchange_routes_directly_to_the_queue_named_by_routing_key() {
         let broker = AmqpBroker::new();
         let (push, mut rx) = sink(1, b"ctag-1");
-        broker.subscribe_queue(b"orders", push);
+        let _ = broker.subscribe_queue(b"orders", push);
 
         let reached = broker
             .publish(b"", b"orders", Vec::new(), b"hello".to_vec())
@@ -375,7 +376,7 @@ mod tests {
         assert!(broker.bind_queue(b"orders-x", b"orders.eu".to_vec(), b"eu".to_vec()));
 
         let (push, mut rx) = sink(1, b"ctag-1");
-        broker.subscribe_queue(b"orders.eu", push);
+        let _ = broker.subscribe_queue(b"orders.eu", push);
 
         let reached = broker
             .publish(b"orders-x", b"eu", Vec::new(), b"body".to_vec())
@@ -402,8 +403,8 @@ mod tests {
 
         let (push1, mut rx1) = sink(1, b"c1");
         let (push2, mut rx2) = sink(2, b"c2");
-        broker.subscribe_queue(b"q1", push1);
-        broker.subscribe_queue(b"q2", push2);
+        let _ = broker.subscribe_queue(b"q1", push1);
+        let _ = broker.subscribe_queue(b"q2", push2);
 
         let reached = broker
             .publish(b"broadcast", b"ignored", Vec::new(), b"body".to_vec())
@@ -423,7 +424,7 @@ mod tests {
         broker.bind_queue(b"events", b"eu-orders".to_vec(), b"orders.eu.*".to_vec());
 
         let (push, mut rx) = sink(1, b"c1");
-        broker.subscribe_queue(b"eu-orders", push);
+        let _ = broker.subscribe_queue(b"eu-orders", push);
 
         let reached = broker
             .publish(
@@ -487,7 +488,7 @@ mod tests {
         broker.bind_queue(b"events", b"audit".to_vec(), b"orders.eu.*".to_vec());
 
         let (push, mut rx) = sink(1, b"ctag-1");
-        broker.subscribe_queue(b"audit", push);
+        let _ = broker.subscribe_queue(b"audit", push);
 
         let reached = broker
             .publish(
@@ -537,7 +538,7 @@ mod tests {
         let frame_max = 4096;
         let (tx, mut rx) = mpsc::unbounded();
         let broker = AmqpBroker::new();
-        broker.subscribe_queue(
+        let _ = broker.subscribe_queue(
             b"orders",
             ConsumerSink::new(1, b"ctag-1".to_vec(), tx, frame_max),
         );

@@ -4,9 +4,7 @@
 //! buffer-policy, and configuration failures. Mirrors
 //! `proxima_redis::error::RedisServeError`.
 
-use thiserror::Error;
-
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AmqpServeError {
     #[error("io: {0}")]
