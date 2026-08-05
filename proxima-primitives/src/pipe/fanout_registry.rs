@@ -16,7 +16,7 @@
 //! redis PUBLISH/SUBSCRIBE/PSUBSCRIBE is its first consumer, fanning a
 //! published message out to every subscribed connection's push sink.
 //! [`FanOut`] itself has no id-tracking (it is a bare broadcast over
-//! `Arc<Vec<S>>`), so the id needed for [`unsubscribe`](Self::unsubscribe)
+//! `Arc<Vec<S>>`), so the id needed for [`KeyedFanOut::unsubscribe`]
 //! lives in this registry's per-key sink list, not in `FanOut` — the exact
 //! same reason [`crate::pipe::filter_registry::FilterRegistry`] wraps its
 //! `LiveFilter`/`FilterControl` pair in a named `Subscription` entry rather

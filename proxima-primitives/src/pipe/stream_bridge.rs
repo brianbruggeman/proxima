@@ -106,7 +106,7 @@ impl<S: UnpinPipe<In = (), Err = Exhausted> + ?Sized> UnpinPipe for &mut S {
     }
 }
 
-/// The one real error [`AsSink::start_send`] can report: [`DrainSink::accept`]
+/// The one real error [`AsSink`]'s `futures::Sink::start_send` can report: [`DrainSink::accept`]
 /// only signals backpressure via `ControlFlow::Break` (no richer cause), and
 /// `poll_ready` is expected to prevent this in the well-behaved case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

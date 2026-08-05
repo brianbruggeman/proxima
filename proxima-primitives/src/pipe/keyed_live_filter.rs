@@ -5,7 +5,7 @@
 //! It composes two primitives that already exist, rather than inventing a
 //! third extraction mechanism:
 //!
-//! - [`KeyOf`] / [`KeyExtractor`](crate::pipe::rate_limit::KeyExtractor) — the same
+//! - [`KeyOf`] / [`crate::pipe::rate_limit::KeyExtractor`] — the same
 //!   seam `RateLimit` uses to pull a byte key out of a request (constant,
 //!   header, or path+method).
 //! - [`LiveFilter`] / [`IdSet`] / [`FilterControl`] — the live-swappable

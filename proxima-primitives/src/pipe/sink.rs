@@ -1,5 +1,6 @@
 //! `SinkFront<Item>` — the alloc-tier, cloneable, `Arc`-shared handle over the
-//! generic [`crate::pipe::SinkFront`] engine (heap [`Ring`] storage).
+//! generic [`crate::pipe::SinkFront`] engine (heap [`proxima_core::ring::Ring`]
+//! storage).
 //!
 //! The engine — `emit` / `emit_lossless` / `drain_one` / lifecycle FSM / demand
 //! flag — is tier-generic (the same code runs the no-alloc
@@ -21,7 +22,7 @@ use proxima_core::ring::FailMode;
 
 pub use crate::pipe::sink_front::{Admission, DropReason, SinkCounters, SinkLifecycle};
 
-/// A cloneable, `Arc`-shared sync producer facade over a heap [`Ring`]. Clone it
+/// A cloneable, `Arc`-shared sync producer facade over a heap [`proxima_core::ring::Ring`]. Clone it
 /// to hand the drainer a handle; both reach the same engine. All behaviour
 /// (`emit`, `emit_lossless`, `drain_one`, `arm`/`disarm`, `lifecycle`,
 /// `is_quiescent`) is the engine's, reached through [`Deref`].

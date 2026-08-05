@@ -26,7 +26,7 @@
 //!   reservation without send. No internal caller uses the
 //!   reserve-then-send-later pattern; we expose `try_send` instead.
 //! - `Sender::send_timeout(value, duration)` — timeout-bounded send.
-//!   Compose with [`crate::time::timeout`] at the call site.
+//!   Compose with `proxima_core::time::timeout` at the call site.
 //! - `Sender::closed().await` — wait-until-receiver-dropped sender
 //!   primitive. Compose via [`Sender::is_closed`] polling or
 //!   subscribe to a separate shutdown signal.

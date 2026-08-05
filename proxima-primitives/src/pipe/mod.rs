@@ -1,9 +1,9 @@
 //! Plugin surface for proxima.
 //!
 //! This module carries everything plugin authors need to implement a
-//! [`Handler`](handler::Handler): request/response envelopes, the root
-//! [`Pipe`](primitives::Pipe) / [`SendPipe`](primitives::SendPipe) forms,
-//! [`PipeFactory`](pipe_factory::PipeFactory), the
+//! [`handler::Handler`]: request/response envelopes, the root
+//! [`primitives::Pipe`] / [`primitives::SendPipe`] forms,
+//! [`pipe_factory::PipeFactory`], the
 //! [`TelemetryHandle`](telemetry_surface::TelemetryHandle) trait, the
 //! [`CaptureContext`](capture_surface::CaptureContext) trait, the
 //! upgrade primitives, and endpoint metadata value types.
