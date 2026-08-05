@@ -1,17 +1,10 @@
-//! Round-trip tests for proxima-notify-proto: encode → decode → equality.
+//! Round-trip tests for proxima_patterns::alert::event: encode → decode → equality.
 //!
 //! Per principle 9 (real-world data in tests), AlertEvent fixtures are
 //! built from realistic field values — `kind = "heartbeat"`, real label
 //! shapes, ms-precision timestamps — not `b"AAAA"` stubs.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+// the workspace denies unwrap/expect; tests assert through them.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_patterns::alert::event::{
     AgentId, AlertEvent, AlertId, AnswerString, ContextBytes, GuidanceAnswer, GuidanceQuestion,

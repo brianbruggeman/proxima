@@ -13,7 +13,7 @@ use proxima_core::ProximaError;
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::request::{Request, Response};
-use proxima_primitives::pipe::telemetry_surface::Labels;
+use crate::middleware::labels_with;
 use proxima_primitives::pipe::{Pipe, SendPipe};
 
 const METRIC_REJECTED: &str = "proxima.auth.rejected_total";
@@ -181,7 +181,7 @@ where
 
         async move {
             let realm_str = std::str::from_utf8(&realm).unwrap_or("");
-            let labels = with_extra(&context_labels, "realm", realm_str);
+            let labels = labels_with(&context_labels, "realm", realm_str);
             if admitted {
                 telemetry.counter_inc(METRIC_ADMITTED, &labels, 1);
                 SendPipe::call(&inner, request).await
@@ -213,7 +213,7 @@ impl Pipe for Auth<ThreadLocalPipeHandle> {
 
         async move {
             let realm_str = std::str::from_utf8(&realm).unwrap_or("");
-            let labels = with_extra(&context_labels, "realm", realm_str);
+            let labels = labels_with(&context_labels, "realm", realm_str);
             if admitted {
                 telemetry.counter_inc(METRIC_ADMITTED, &labels, 1);
                 Pipe::call(&inner, request).await
@@ -248,36 +248,22 @@ impl PipeFactory for AuthFactory {
     }
 }
 
-fn with_extra(base: &Labels, key: &str, value: &str) -> Labels {
-    let mut pairs: Vec<(String, String)> = base.entries().to_vec();
-    pairs.push((key.to_string(), value.to_string()));
-    let pair_refs: Vec<(&str, &str)> = pairs
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
-    Labels::from_pairs(&pair_refs)
-}
-
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+// the workspace denies unwrap/expect; tests assert through them.
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_primitives::pipe::telemetry_surface::{Telemetry, TelemetryHandle};
+    use proxima_primitives::pipe::telemetry_surface::{Labels, Telemetry, TelemetryHandle};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    /// (metric name, sorted label pairs) — what one recorded counter is keyed by.
+    type CounterKey = (String, Vec<(String, String)>);
+
     #[derive(Default)]
     struct Metrics {
-        counters: Mutex<HashMap<(String, Vec<(String, String)>), u64>>,
+        counters: Mutex<HashMap<CounterKey, u64>>,
     }
 
     impl Telemetry for Metrics {

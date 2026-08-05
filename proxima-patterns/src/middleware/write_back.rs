@@ -2,6 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::kv::cache_key_for_storage;
+use crate::middleware::labels_with;
 use crate::kv::write_back::WriteBackConditions;
 use crate::kv::{CacheEntry, KvHandle};
 use bytes::Bytes;
@@ -9,7 +10,6 @@ use proxima_core::ProximaError;
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle};
 use proxima_primitives::pipe::request::{Request, Response};
-use proxima_primitives::pipe::telemetry_surface::Labels;
 use proxima_primitives::pipe::{Pipe, SendPipe};
 use proxima_primitives::transport::{DEFAULT_REPLAY_CAP_BYTES, tap_complete_with_size};
 
@@ -111,7 +111,7 @@ where
                         continue;
                     }
                     backend.evict(key);
-                    let labels = context_labels_with(&context_labels, label);
+                    let labels = labels_with(&context_labels, "target", label);
                     telemetry.counter_inc("proxima.write_back.evictions_total", &labels, 1);
                     telemetry.gauge_set("proxima.cache.entries", &labels, backend.entries() as i64);
                 }
@@ -141,7 +141,7 @@ where
                     let entry =
                         CacheEntry::new(status, header_pairs_for_cb.clone(), chunks.clone(), None);
                     backend.put(key.clone(), entry);
-                    let labels = context_labels_with(&context_labels_for_cb, label);
+                    let labels = labels_with(&context_labels_for_cb, "target", label);
                     telemetry_for_cb.gauge_set(
                         "proxima.cache.entries",
                         &labels,
@@ -207,7 +207,7 @@ impl Pipe for WriteBack<ThreadLocalPipeHandle> {
                         continue;
                     }
                     backend.evict(key);
-                    let labels = context_labels_with(&context_labels, label);
+                    let labels = labels_with(&context_labels, "target", label);
                     telemetry.counter_inc("proxima.write_back.evictions_total", &labels, 1);
                     telemetry.gauge_set("proxima.cache.entries", &labels, backend.entries() as i64);
                 }
@@ -237,7 +237,7 @@ impl Pipe for WriteBack<ThreadLocalPipeHandle> {
                     let entry =
                         CacheEntry::new(status, header_pairs_for_cb.clone(), chunks.clone(), None);
                     backend.put(key.clone(), entry);
-                    let labels = context_labels_with(&context_labels_for_cb, label);
+                    let labels = labels_with(&context_labels_for_cb, "target", label);
                     telemetry_for_cb.gauge_set(
                         "proxima.cache.entries",
                         &labels,
@@ -262,14 +262,177 @@ impl Pipe for WriteBack<ThreadLocalPipeHandle> {
     }
 }
 
-fn context_labels_with(base: &Labels, target: &str) -> Labels {
-    let mut pairs: Vec<(String, String)> = base.entries().to_vec();
-    pairs.push(("target".into(), target.into()));
-    let pair_refs: Vec<(&str, &str)> = pairs
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
-    Labels::from_pairs(&pair_refs)
-}
 
-// integration tests using umbrella's KvCache stay in proxima/rust/tests/
+#[cfg(test)]
+// the workspace denies unwrap/expect; tests assert through them.
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use proxima_primitives::pipe::handler::into_handle;
+
+    use super::*;
+
+    /// In-memory `KvHandle` recording every put/evict, so a test can assert
+    /// what the write-back tap actually wrote rather than that it ran.
+    #[derive(Default)]
+    struct FakeKv {
+        entries: Mutex<BTreeMap<String, CacheEntry>>,
+        evicted: Mutex<Vec<String>>,
+    }
+
+    impl KvHandle for FakeKv {
+        fn get(&self, key: &str) -> Option<CacheEntry> {
+            self.entries.lock().expect("lock").get(key).cloned()
+        }
+
+        fn put(&self, key: String, entry: CacheEntry) {
+            self.entries.lock().expect("lock").insert(key, entry);
+        }
+
+        fn evict(&self, key: &str) {
+            self.entries.lock().expect("lock").remove(key);
+            self.evicted.lock().expect("lock").push(key.to_string());
+        }
+
+        fn entries(&self) -> usize {
+            self.entries.lock().expect("lock").len()
+        }
+
+        fn bytes(&self) -> usize {
+            self.entries
+                .lock()
+                .expect("lock")
+                .values()
+                .map(|entry| entry.size_bytes)
+                .sum()
+        }
+
+        fn name(&self) -> &str {
+            "fake-kv"
+        }
+    }
+
+    /// Answers with `status` and a fixed body.
+    struct Origin {
+        status: u16,
+    }
+
+    impl SendPipe for Origin {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            _request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+            let status = self.status;
+            async move {
+                Ok(Response::new(status)
+                    .with_header("content-type", "text/plain")
+                    .with_body(Bytes::from_static(b"hello world")))
+            }
+        }
+    }
+
+    fn request(method: &str) -> Request<Bytes> {
+        Request::builder()
+            .method(method)
+            .path("/things/42")
+            .build()
+            .expect("request")
+    }
+
+    #[proxima::test]
+    async fn success_response_body_is_written_back_after_the_body_drains() {
+        let backend = Arc::new(FakeKv::default());
+        let pipe = WriteBack::single(into_handle(Origin { status: 200 }), backend.clone());
+
+        let response = SendPipe::call(&pipe, request("GET")).await.expect("call");
+        assert_eq!(response.status, 200);
+        assert_eq!(backend.entries(), 0, "the tap fires only once the body ends");
+
+        let body = response.collect_body().await.expect("collect");
+        assert_eq!(&body[..], b"hello world");
+        assert_eq!(backend.entries(), 1, "draining the body populates the cache");
+
+        let key = cache_key_for_storage(&request("GET"), None);
+        let cached = backend.get(&key).expect("cached entry");
+        assert_eq!(cached.status, 200);
+        assert_eq!(cached.size_bytes, b"hello world".len());
+        assert!(
+            cached
+                .headers
+                .iter()
+                .any(|(name, _)| name.as_ref() == b"content-type"),
+            "response headers ride along into the entry"
+        );
+    }
+
+    #[proxima::test]
+    async fn non_success_response_is_passed_through_untouched() {
+        let backend = Arc::new(FakeKv::default());
+        let pipe = WriteBack::single(into_handle(Origin { status: 500 }), backend.clone());
+
+        let response = SendPipe::call(&pipe, request("GET")).await.expect("call");
+        assert_eq!(response.status, 500);
+        let body = response.collect_body().await.expect("collect");
+        assert_eq!(
+            &body[..],
+            b"hello world",
+            "the body still reaches the caller"
+        );
+        assert_eq!(backend.entries(), 0, "default conditions are 2xx-only");
+    }
+
+    #[proxima::test]
+    async fn delete_evicts_the_slot_instead_of_populating_it() {
+        let backend = Arc::new(FakeKv::default());
+        let key = cache_key_for_storage(&request("DELETE"), None);
+        backend.put(
+            key.clone(),
+            CacheEntry::new(200, vec![], vec![Bytes::from_static(b"stale")], None),
+        );
+
+        let pipe = WriteBack::single(into_handle(Origin { status: 200 }), backend.clone());
+        let response = SendPipe::call(&pipe, request("DELETE"))
+            .await
+            .expect("call");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(backend.entries(), 0, "the stale slot is gone");
+        assert_eq!(backend.evicted.lock().expect("lock").as_slice(), &[key]);
+    }
+
+    /// A DELETE the conditions reject must not evict — the guard runs per
+    /// target, not once for the whole request.
+    #[proxima::test]
+    async fn delete_with_a_failing_condition_leaves_the_slot_alone() {
+        let backend = Arc::new(FakeKv::default());
+        let key = cache_key_for_storage(&request("DELETE"), None);
+        backend.put(
+            key.clone(),
+            CacheEntry::new(200, vec![], vec![Bytes::from_static(b"stale")], None),
+        );
+
+        let target = WriteBackTarget {
+            backend: backend.clone(),
+            conditions: WriteBackConditions {
+                only_on_success: true,
+                min_status: 204,
+                max_status: 204,
+            },
+            label: "fake-kv".into(),
+        };
+        let pipe = WriteBack::new(into_handle(Origin { status: 200 }), vec![target]);
+        let response = SendPipe::call(&pipe, request("DELETE"))
+            .await
+            .expect("call");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(backend.entries(), 1, "200 is outside the 204..=204 window");
+        assert!(backend.evicted.lock().expect("lock").is_empty());
+    }
+}

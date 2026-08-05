@@ -146,7 +146,7 @@ impl std::fmt::Debug for UpstreamRef {
 }
 
 /// Per-thread sibling of [`UpstreamRef`] for selection paths driven by
-/// a [`crate::pipe::ThreadLocalPipe`].
+/// a [`proxima_primitives::pipe::ThreadLocalPipe`].
 #[derive(Clone)]
 pub struct ThreadLocalUpstreamRef {
     pub pipe: ThreadLocalPipeHandle,
@@ -234,6 +234,7 @@ impl Drop for CallTracker<'_> {
 }
 
 #[cfg(test)]
+// the workspace denies unwrap/expect; tests assert through them.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
