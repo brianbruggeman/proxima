@@ -110,6 +110,6 @@ pub use config::KafkaServerConfig;
 #[cfg(feature = "listen")]
 pub use frame_codec::{KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, Violation};
 #[cfg(feature = "listen")]
-pub use framed_app::{KafkaAppError, KafkaFramedApp, KafkaOutcome};
+pub use framed_app::{KafkaFramedApp, KafkaOutcome};
 #[cfg(feature = "listen")]
 pub use pipes::{KafkaPipeHandle, into_kafka_handle};

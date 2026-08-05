@@ -67,6 +67,7 @@ impl<U: StreamUpstream> KafkaClientUpstream<U> {
     /// let client = KafkaClientUpstream::new(transport, KafkaClientConfig::default());
     /// # let _ = client;
     /// ```
+    #[must_use]
     pub fn new(upstream: U, config: KafkaClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),
@@ -256,6 +257,12 @@ async fn recv<C: StreamConnection>(
     Ok(())
 }
 
+/// A transport failure keeps its `io::ErrorKind` (a caller retrying on
+/// `ConnectionRefused` needs it); everything else is protocol detail with
+/// no structured counterpart, so it renders into the message.
 fn client_error_to_proxima(error: ClientError) -> ProximaError {
-    ProximaError::Upstream(format!("kafka client: {error}"))
+    match error {
+        ClientError::Io(io) => ProximaError::Io(io),
+        other => ProximaError::Upstream(format!("kafka client: {other}")),
+    }
 }
