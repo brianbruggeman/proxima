@@ -17,9 +17,9 @@
 //!   protocol-header handshake, per-channel content (method + header +
 //!   body) reassembly, DoS-capped frame/message sizes. No socket
 //!   (workspace principle 11).
-//! - [`topic::TopicSet`] — AMQP topic-exchange (`#`/`*`) binding-key
+//! - [`topic::topic_match`] — AMQP topic-exchange (`#`/`*`) binding-key
 //!   matching, the routing-key sibling of
-//!   `proxima_redis::glob::GlobSet`'s PSUBSCRIBE matching.
+//!   `proxima_redis::glob::glob_match`'s PSUBSCRIBE matching.
 //!
 //! The `client` feature adds the std client: [`client::AmqpClientUpstream`]
 //! (an async `Pipe`, `basic.publish`/`basic.consume`) and

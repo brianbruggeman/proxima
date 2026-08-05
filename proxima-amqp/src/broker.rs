@@ -15,9 +15,10 @@
 //! reaches. That indirection is plain bookkeeping (a small live map, not
 //! sink/fan-out machinery), kept in [`AmqpBroker`]'s `exchanges` field:
 //! [`AmqpBroker::publish`] resolves (exchange, routing_key) -> a set of
-//! queue names first (direct exact-match / fanout-all-bound /
-//! [`TopicSet`]-matched, mirroring redis's channel vs. pattern split), then
-//! hands each matched queue name to the SAME `queues.publish` a bare
+//! queue names first ([`ExchangeKind::routes`] is the whole difference
+//! between direct exact-match, fanout-all-bound, and
+//! [`topic_match`]-matched, mirroring redis's channel vs. pattern split),
+//! then hands each matched queue name to the SAME `queues.publish` a bare
 //! `basic.consume` on the default exchange would use directly.
 
 use std::collections::BTreeMap;
@@ -34,7 +35,7 @@ use proxima_primitives::pipe::{BestEffort, KeyedFanOut, SendPipe, SubscriptionId
 
 use crate::frame::{encode_body_frames, encode_header_frame, encode_method_frame};
 use crate::method::{Method, id};
-use crate::topic::TopicSet;
+use crate::topic::topic_match;
 
 /// The exchange kind a `exchange.declare` registered. The default exchange
 /// (name `""`) is implicit `Direct` routing where the routing key IS the
@@ -59,6 +60,17 @@ impl ExchangeKind {
             b"fanout" => Some(Self::Fanout),
             b"topic" => Some(Self::Topic),
             _ => None,
+        }
+    }
+
+    /// Does a binding registered under `binding_key` carry a message
+    /// published with `routing_key`? This IS the difference between the
+    /// three kinds — everything else about routing is identical.
+    fn routes(self, binding_key: &[u8], routing_key: &[u8]) -> bool {
+        match self {
+            Self::Direct => binding_key == routing_key,
+            Self::Fanout => true,
+            Self::Topic => topic_match(binding_key, routing_key),
         }
     }
 }
@@ -299,32 +311,12 @@ impl AmqpBroker {
             let Some(entry) = exchanges.get(exchange) else {
                 return Vec::new();
             };
-            match entry.kind {
-                ExchangeKind::Direct => entry
-                    .bindings
-                    .iter()
-                    .filter(|binding| binding.routing_key == routing_key)
-                    .map(|binding| binding.queue.clone())
-                    .collect(),
-                ExchangeKind::Fanout => entry
-                    .bindings
-                    .iter()
-                    .map(|binding| binding.queue.clone())
-                    .collect(),
-                ExchangeKind::Topic => {
-                    let set = entry.bindings.iter().fold(TopicSet::new(), |set, binding| {
-                        set.with(binding.routing_key.clone())
-                    });
-                    let matched_patterns: Vec<Vec<u8>> =
-                        set.matching(routing_key).map(<[u8]>::to_vec).collect();
-                    entry
-                        .bindings
-                        .iter()
-                        .filter(|binding| matched_patterns.contains(&binding.routing_key))
-                        .map(|binding| binding.queue.clone())
-                        .collect()
-                }
-            }
+            entry
+                .bindings
+                .iter()
+                .filter(|binding| entry.kind.routes(&binding.routing_key, routing_key))
+                .map(|binding| binding.queue.clone())
+                .collect()
         })
     }
 }
