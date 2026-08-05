@@ -172,16 +172,11 @@ fn dpdk_pkg_config(arg: &str) -> Vec<String> {
         .collect()
 }
 
-trait DpdkStatusExt {
-    fn success_or_dump(&self, stderr: &[u8]) -> bool;
-}
-impl DpdkStatusExt for std::process::Output {
-    fn success_or_dump(&self, stderr: &[u8]) -> bool {
-        if !self.status.success() {
-            eprintln!("{}", String::from_utf8_lossy(stderr));
-        }
-        self.status.success()
+fn success_or_dump(output: &std::process::Output) -> bool {
+    if !output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
     }
+    output.status.success()
 }
 
 fn build_dpdk_abi() {
@@ -205,10 +200,7 @@ fn build_dpdk_abi() {
     let run = Command::new(&probe_bin)
         .output()
         .expect("run the abi probe");
-    assert!(
-        run.success_or_dump(&run.stderr),
-        "dpdk abi probe failed at runtime"
-    );
+    assert!(success_or_dump(&run), "dpdk abi probe failed at runtime");
 
     // 2. generate dpdk_abi.rs from the probe's `<type> <NAME> <value>` lines.
     let probe_out = String::from_utf8(run.stdout).expect("abi probe output is utf8");
