@@ -2,19 +2,26 @@
 
 *(builds on: runtime-select)*
 
-Userspace NIC rx/tx rings, poll-mode — kernel-bypass networking as a
-`Pipe`. Not yet landed as a dir-per-example rung (no `examples/dpdk/README.md`
-teaching this one lesson end to end), so there is nothing here to include
-yet without re-typing unverified prose.
+Userspace NIC rx/tx rings, poll-mode — kernel-bypass networking as a `Pipe`.
+The backend ships today as `proxima_net::dpdk`, one of the five platform
+backends `proxima-net` carries as feature-gated modules alongside `prime`,
+`tokio`, `wasm` and `xdp` (`proxima-net/src/lib.rs:35-48`). That is the shape
+worth taking away: DPDK is not a different API you port your pipe to, it is a
+feature you turn on underneath the pipe you already wrote.
 
-The underlying mechanics already exist as reference-tier, flat (no-README)
-examples, compiled and runnable today:
+Three flat, reference-tier examples drive it, each gated on `required-features
+= ["dpdk"]`:
 
 - `examples/dpdk_tcp_connect.rs`
 - `examples/dpdk_tcp_echo.rs`
 - `examples/dpdk_udp_echo.rs`
 
-Per `examples/README.md`'s own status line, `dpdk` is listed among the rungs
-**not yet built**. When the dir-per-example rung lands (`examples/dpdk/main.rs`
-+ `examples/dpdk/README.md`), this chapter becomes a normal two-include
-chapter like its siblings.
+They are not included inline here because they cannot be built — let alone run
+— without DPDK's own libraries and a bound NIC present on the host, so the
+build is host-dependent in a way no other chapter in this book is. Read them in
+the tree.
+
+They are also flat files rather than the dir-per-example shape the rest of the
+curriculum uses (`examples/<name>/main.rs` beside an `examples/<name>/README.md`
+teaching the one lesson). When that rung lands, this chapter becomes a normal
+two-include chapter like its siblings.
