@@ -32,9 +32,10 @@ mod config;
 pub use config::{ListenerStreamConfig, ListenerStreamLayerBuilder};
 
 /// Build-time sizing constants generated from `proxima-listeners-stream.toml`.
-/// At no_std+no_alloc (once this crate lifts off its std-only deps) these
-/// consts ARE the config; at std they seed [`ListenerStreamConfig`]'s
-/// runtime defaults — never duplicated.
+/// At no_std+no_alloc (once this MODULE lifts off its std-only deps — the
+/// crate itself already has that tier, see the crate root) these consts ARE
+/// the config; at std they seed [`ListenerStreamConfig`]'s runtime defaults
+/// — never duplicated.
 pub mod sized {
     include!(concat!(
         env!("OUT_DIR"),

@@ -7,7 +7,7 @@
 //!
 //! # Why the inner decode+dispatch loop stays in the caller
 //!
-//! Every source [`FanIn`] merges must be
+//! Every source [`proxima_primitives::pipe::FanIn`] merges must be
 //! [`proxima_core::markers::DropSafe`] — `fan_in.rs`'s own `UnpinPipe +
 //! DropSafe` bound on every merged source, enforced at `FanIn::call`'s
 //! trait bounds (see that module's doc: a source's in-flight `call` future
@@ -75,7 +75,8 @@ pub enum WireEvent {
 /// outside the ordinary request/reply cadence (redis pub/sub, pgwire
 /// LISTEN/NOTIFY). Those connections must race THREE things at once: more
 /// bytes arriving on the socket, an out-of-band push queued by some other
-/// connection, and shutdown. [`crate::any::FramedAny`] is the sibling for
+/// connection, and shutdown. `crate::any::FramedAny` (behind the
+/// `framed-any` feature) is the sibling for
 /// the opposite case — a STATELESS wire that is purely request-in/reply-out
 /// with nothing ever arriving unprompted; see that type's own doc for the
 /// split and why memcached/DNS-over-TCP fit there instead of here.
@@ -85,7 +86,7 @@ pub enum WireEvent {
 /// `sources` is raced through [`FanIn`], and `FanIn::call` polls each merged
 /// source once per scan and DROPS any in-flight call that isn't ready yet —
 /// so every source here must be
-/// [`proxima_core::markers::DropSafe`](proxima_core::markers::DropSafe):
+/// [`proxima_core::markers::DropSafe`]:
 /// safe to cancel mid-poll with no observable torn state (a `Read`/`Push`
 /// source that hasn't produced a value yet has consumed nothing real). An
 /// arbitrary business `handler.call()` dispatch does NOT qualify — dropping
