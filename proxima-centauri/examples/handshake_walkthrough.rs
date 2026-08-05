@@ -251,7 +251,7 @@ fn main() {
     let before = *initiator.keys().expect("authenticated").encrypt_key();
 
     let progress = initiator
-        .send_rekey(Some(Entropy32::new([0x31; 32])), now)
+        .send_rekey(Some(Entropy32::new([0x31; 32])))
         .expect("mutually authenticated, so rekey is legal");
     println!(
         "  send_rekey -> {progress:?}, {} bytes staged",
