@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde_json::Value;
-use tracing::debug;
+use proxima_telemetry::debug;
 use url::Url;
 
 use proxima_core::ProximaError;
@@ -184,7 +184,7 @@ fn build_prime_upstream(
             )
         }
     };
-    debug!(host = %host, port, secure, label, proxied = proxy.is_some(), "prime http upstream built");
+    debug!(host = %host, port, secure, label = %label, proxied = proxy.is_some(), "prime http upstream built");
     Ok(handle)
 }
 

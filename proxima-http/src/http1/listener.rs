@@ -16,7 +16,7 @@ use std::pin::Pin;
 use futures::channel::oneshot;
 use serde_json::Value;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, warn};
+use proxima_telemetry::{debug, warn};
 
 use crate::http1::serve::serve_h1_connection;
 use proxima_core::ProximaError;

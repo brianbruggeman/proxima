@@ -236,7 +236,7 @@ async fn send_http(
             .map_err(|error| ProximaError::Upstream(format!("handshake: {error}")))?;
     tokio::task::spawn_local(async move {
         if let Err(error) = conn.await {
-            tracing::debug!(?error, "uring upstream connection ended with error");
+            proxima_telemetry::debug!(?error, "uring upstream connection ended with error");
         }
     });
     send_request
@@ -286,7 +286,7 @@ async fn send_https(
             .map_err(|error| ProximaError::Upstream(format!("https handshake: {error}")))?;
     tokio::task::spawn_local(async move {
         if let Err(error) = conn.await {
-            tracing::debug!(?error, "uring upstream tls connection ended with error");
+            proxima_telemetry::debug!(?error, "uring upstream tls connection ended with error");
         }
     });
     send_request

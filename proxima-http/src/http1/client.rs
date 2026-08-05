@@ -121,7 +121,7 @@ use conflaguration::{Settings, Validate, ValidationMessage};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use proxima_primitives::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use proxima_telemetry::{debug, warn};
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;

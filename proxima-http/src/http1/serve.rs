@@ -24,7 +24,7 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, error};
+use proxima_telemetry::{debug, error};
 
 use proxima_core::ProximaError;
 use proxima_listen::admission::{ConnAdmission, RequestAdmit};
