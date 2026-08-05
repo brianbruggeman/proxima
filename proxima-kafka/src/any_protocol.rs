@@ -47,7 +47,7 @@ const PROBE_PREFIX_BYTES: usize = 8;
 /// The smallest possible v0 request body length past the frame-length
 /// prefix: `api_key`(2) + `api_version`(2) + `correlation_id`(4) +
 /// `client_id` nullable-string length(2).
-const MIN_V0_HEADER_BYTES: i32 = 10;
+pub(crate) const MIN_V0_HEADER_BYTES: i32 = 10;
 
 /// The concrete [`FramedAny`] instantiation Kafka drives — `Probe`/`Shed`
 /// are plain `fn` items (no captured state), so `KafkaAnyProtocol` needs

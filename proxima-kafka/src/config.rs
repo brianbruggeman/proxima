@@ -7,13 +7,12 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
-fn default_read_buffer() -> usize {
-    8 * 1024
-}
+use crate::any_protocol::MIN_V0_HEADER_BYTES;
 
-fn default_high_water() -> usize {
-    64 * 1024
-}
+/// The 4-byte length prefix plus the smallest v0 request header — a
+/// `max_message_bytes` under this rejects every request the facade can
+/// receive, so it is a misconfiguration, not a tight cap.
+const MIN_V0_REQUEST_BYTES: usize = 4 + MIN_V0_HEADER_BYTES as usize;
 
 fn default_max_message() -> usize {
     16 * 1024 * 1024
@@ -66,22 +65,9 @@ fn default_port() -> i32 {
 #[settings(prefix = "KAFKA")]
 #[builder(derive(Clone, Debug))]
 pub struct KafkaServerConfig {
-    /// initial read-buffer size; the connection's buffer grows up to
-    /// `max_message_bytes`
-    #[setting(default = 8192)]
-    #[serde(default = "default_read_buffer")]
-    #[builder(default = default_read_buffer())]
-    pub read_buffer_bytes: usize,
-
-    /// write buffer flush threshold; a reply accumulates in the
-    /// connection's out buffer up to this many bytes before a socket write
-    #[setting(default = 65536)]
-    #[serde(default = "default_high_water")]
-    #[builder(default = default_high_water())]
-    pub write_high_water_bytes: usize,
-
     /// hard cap on one still-incomplete inbound frame — the DoS guard
-    /// `Connection::advance` enforces (`MessageTooLarge`)
+    /// [`crate::frame_codec::KafkaCodec`]'s `parse_frame` enforces, folding
+    /// a larger declared frame into a `MessageTooLarge` violation
     #[setting(default = 16777216)]
     #[serde(default = "default_max_message")]
     #[builder(default = default_max_message())]
@@ -117,22 +103,10 @@ impl Default for KafkaServerConfig {
 impl Validate for KafkaServerConfig {
     fn validate(&self) -> conflaguration::Result<()> {
         let mut errors = Vec::new();
-        if self.read_buffer_bytes < 64 {
-            errors.push(ValidationMessage::new(
-                "read_buffer_bytes",
-                "must be at least 64 bytes",
-            ));
-        }
-        if self.max_message_bytes < self.read_buffer_bytes {
+        if self.max_message_bytes < MIN_V0_REQUEST_BYTES {
             errors.push(ValidationMessage::new(
                 "max_message_bytes",
-                "must be at least read_buffer_bytes",
-            ));
-        }
-        if self.write_high_water_bytes < 1024 {
-            errors.push(ValidationMessage::new(
-                "write_high_water_bytes",
-                "must be at least 1024",
+                "must be at least 14 bytes (a v0 frame prefix plus its smallest header)",
             ));
         }
         if self.advertised_host.is_empty() {
@@ -158,7 +132,6 @@ mod tests {
     fn default_config_is_valid() {
         let config = KafkaServerConfig::default();
         assert!(config.validate().is_ok());
-        assert_eq!(config.read_buffer_bytes, 8192);
         assert_eq!(config.max_message_bytes, 16 * 1024 * 1024);
         assert_eq!(config.advertised_port, 9092);
     }
@@ -167,21 +140,18 @@ mod tests {
     fn builder_overrides_defaults() {
         let config = KafkaServerConfig::builder()
             .max_message_bytes(1024)
-            .read_buffer_bytes(512)
             .broker_id(7)
             .build();
         assert_eq!(config.max_message_bytes, 1024);
-        assert_eq!(config.read_buffer_bytes, 512);
         assert_eq!(config.broker_id, 7);
     }
 
     #[test]
-    fn validate_rejects_max_message_below_read_buffer() {
-        let config = KafkaServerConfig::builder()
-            .read_buffer_bytes(4096)
-            .max_message_bytes(1024)
-            .build();
+    fn validate_rejects_a_cap_below_the_smallest_v0_request() {
+        let config = KafkaServerConfig::builder().max_message_bytes(13).build();
         assert!(config.validate().is_err());
+        let smallest = KafkaServerConfig::builder().max_message_bytes(14).build();
+        assert!(smallest.validate().is_ok());
     }
 
     #[test]
