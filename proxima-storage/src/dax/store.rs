@@ -10,8 +10,7 @@ use std::path::Path;
 
 use rustix::mm::{MsyncFlags, msync};
 
-use crate::dax::config::DaxConfig;
-use crate::dax::config::PersistMode;
+use crate::dax::config::{DaxConfig, PersistMode};
 use crate::dax::error::DaxError;
 use crate::dax::region::MappedRegion;
 use crate::pmem::{CowRoot, PmemError, persist as leaf_persist};
