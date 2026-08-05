@@ -18,7 +18,6 @@ use proxima_primitives::pipe::endpoint::PeerInfo;
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
-use proxima_quic::Connection as QuicConnection;
 
 type H3Connection = h3::server::Connection<h3_quinn::Connection, Bytes>;
 type H3RequestStream = h3::server::RequestStream<
@@ -39,13 +38,12 @@ type BuiltRequest = Result<
 /// Each accepted request runs concurrently inside a FuturesUnordered
 /// — no `tokio::spawn`, so the driver works on per-core runtimes.
 pub async fn serve_h3_connection(
-    quic: QuicConnection,
+    quic: quinn::Connection,
     dispatch: PipeHandle,
     in_flight: Arc<AtomicU64>,
 ) -> Result<(), ProximaError> {
     let peer = Some(PeerInfo::Tcp(quic.remote_address()));
-    let quinn_conn = quic.quinn();
-    let h3_quinn_conn = h3_quinn::Connection::new(quinn_conn);
+    let h3_quinn_conn = h3_quinn::Connection::new(quic);
 
     let mut h3_conn: H3Connection = h3::server::builder()
         .build(h3_quinn_conn)
