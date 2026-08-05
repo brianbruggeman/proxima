@@ -14,6 +14,26 @@
 use conflaguration::{Settings, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
+/// One profile axis failed to parse. Carries the axis name so the six
+/// `FromStr` impls share a single error rather than six identical newtypes.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {axis}: {value}")]
+pub struct AxisParseError {
+    /// The profile axis that rejected the value, e.g. `"executor"`.
+    pub axis: &'static str,
+    /// The value that did not parse, e.g. `"tokoi"`.
+    pub value: String,
+}
+
+impl AxisParseError {
+    fn new(axis: &'static str, value: &str) -> Self {
+        Self {
+            axis,
+            value: value.to_owned(),
+        }
+    }
+}
+
 fn default_quic_impl() -> String {
     "none".into()
 }
@@ -25,7 +45,7 @@ fn default_h3_impl() -> String {
 /// Top-level profile. Drives both the cargo invocation (via the xtask
 /// wrapper) and the generated module that downstream `build.rs` files
 /// include into their `OUT_DIR`.
-#[derive(Debug, Clone, Deserialize, Serialize, Settings)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Settings)]
 #[settings(prefix = "PROXIMA")]
 pub struct Profile {
     /// Schema version. Bump on breaking changes to this struct.
@@ -95,8 +115,7 @@ pub struct Profile {
 }
 
 /// Executor selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Executor {
     /// Standard tokio runtime (multi-thread or current-thread).
     Tokio,
@@ -109,25 +128,20 @@ pub enum Executor {
 }
 
 impl core::str::FromStr for Executor {
-    type Err = ExecutorParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    type Err = AxisParseError;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
             "tokio" => Ok(Self::Tokio),
             "prime" => Ok(Self::Prime),
             "embassy" => Ok(Self::Embassy),
             "static-prime" => Ok(Self::StaticPrime),
-            other => Err(ExecutorParseError(other.into())),
+            other => Err(AxisParseError::new("executor", other)),
         }
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("unknown executor: {0}")]
-pub struct ExecutorParseError(pub String);
-
 /// Reactor / I/O readiness layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reactor {
     TokioEpoll,
     IoUring,
@@ -137,26 +151,21 @@ pub enum Reactor {
 }
 
 impl core::str::FromStr for Reactor {
-    type Err = ReactorParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    type Err = AxisParseError;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
             "tokio-epoll" => Ok(Self::TokioEpoll),
             "io-uring" => Ok(Self::IoUring),
             "wasi" => Ok(Self::Wasi),
             "embassy-net" => Ok(Self::EmbassyNet),
             "none" => Ok(Self::None),
-            other => Err(ReactorParseError(other.into())),
+            other => Err(AxisParseError::new("reactor", other)),
         }
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("unknown reactor: {0}")]
-pub struct ReactorParseError(pub String);
-
 /// TLS backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsBackend {
     Rustls,
     EmbeddedTls,
@@ -164,24 +173,19 @@ pub enum TlsBackend {
 }
 
 impl core::str::FromStr for TlsBackend {
-    type Err = TlsParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    type Err = AxisParseError;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
             "rustls" => Ok(Self::Rustls),
             "embedded-tls" => Ok(Self::EmbeddedTls),
             "none" => Ok(Self::None),
-            other => Err(TlsParseError(other.into())),
+            other => Err(AxisParseError::new("tls backend", other)),
         }
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("unknown tls backend: {0}")]
-pub struct TlsParseError(pub String);
-
 /// QUIC implementation backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicImpl {
     /// Today's quinn / quinn-proto wrapper. std-only, tokio-coupled.
     /// The default until the C41 cutover commit (Phase D2) flips it to
@@ -196,24 +200,19 @@ pub enum QuicImpl {
 }
 
 impl core::str::FromStr for QuicImpl {
-    type Err = QuicImplParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    type Err = AxisParseError;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
             "quinn" => Ok(Self::Quinn),
             "native" => Ok(Self::Native),
             "none" => Ok(Self::None),
-            other => Err(QuicImplParseError(other.into())),
+            other => Err(AxisParseError::new("quic_impl", other)),
         }
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("unknown quic_impl: {0}")]
-pub struct QuicImplParseError(pub String);
-
 /// HTTP/3 implementation backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H3Impl {
     /// Today's h3 + h3-quinn wrapper. Depends on quinn; std-only.
     /// The default until the C41 cutover commit (Phase D2) flips it to
@@ -227,27 +226,22 @@ pub enum H3Impl {
 }
 
 impl core::str::FromStr for H3Impl {
-    type Err = H3ImplParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    type Err = AxisParseError;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
             "h3-quinn" => Ok(Self::H3Quinn),
             "native" => Ok(Self::Native),
             "none" => Ok(Self::None),
-            other => Err(H3ImplParseError(other.into())),
+            other => Err(AxisParseError::new("h3_impl", other)),
         }
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("unknown h3_impl: {0}")]
-pub struct H3ImplParseError(pub String);
 
 /// Timer driver selection. `Custom(path)` is the open extension point — any
 /// string containing `::` is treated as a fully-qualified path to a user
 /// `&'static dyn proxima_core::time::Driver` symbol baked into the build by
 /// `proxima_build::emit_timer_binding`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case", untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Timer {
     /// `proxima_core::time::drivers::std_thread::DRIVER` — host fallback (default).
     StdThread,
@@ -286,22 +280,18 @@ impl Timer {
 }
 
 impl core::str::FromStr for Timer {
-    type Err = TimerParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+    type Err = AxisParseError;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
             "std-thread" => Ok(Self::StdThread),
             "prime-wheel" => Ok(Self::PrimeWheel),
             "embassy-time" => Ok(Self::EmbassyTime),
             "mock" => Ok(Self::Mock),
             path if path.contains("::") => Ok(Self::Custom(path.into())),
-            other => Err(TimerParseError(other.into())),
+            other => Err(AxisParseError::new("timer", other)),
         }
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("unknown timer: {0}")]
-pub struct TimerParseError(pub String);
 
 impl Default for Profile {
     fn default() -> Self {
@@ -322,32 +312,32 @@ impl Default for Profile {
 
 impl Profile {
     /// Typed view of the [`Self::executor`] string.
-    pub fn executor_kind(&self) -> core::result::Result<Executor, ExecutorParseError> {
+    pub fn executor_kind(&self) -> core::result::Result<Executor, AxisParseError> {
         self.executor.parse()
     }
 
     /// Typed view of the [`Self::reactor`] string.
-    pub fn reactor_kind(&self) -> core::result::Result<Reactor, ReactorParseError> {
+    pub fn reactor_kind(&self) -> core::result::Result<Reactor, AxisParseError> {
         self.reactor.parse()
     }
 
     /// Typed view of the [`Self::tls`] string.
-    pub fn tls_backend(&self) -> core::result::Result<TlsBackend, TlsParseError> {
+    pub fn tls_backend(&self) -> core::result::Result<TlsBackend, AxisParseError> {
         self.tls.parse()
     }
 
     /// Typed view of the [`Self::timer`] string.
-    pub fn timer_kind(&self) -> core::result::Result<Timer, TimerParseError> {
+    pub fn timer_kind(&self) -> core::result::Result<Timer, AxisParseError> {
         self.timer.parse()
     }
 
     /// Typed view of the [`Self::quic_impl`] string.
-    pub fn quic_impl_kind(&self) -> core::result::Result<QuicImpl, QuicImplParseError> {
+    pub fn quic_impl_kind(&self) -> core::result::Result<QuicImpl, AxisParseError> {
         self.quic_impl.parse()
     }
 
     /// Typed view of the [`Self::h3_impl`] string.
-    pub fn h3_impl_kind(&self) -> core::result::Result<H3Impl, H3ImplParseError> {
+    pub fn h3_impl_kind(&self) -> core::result::Result<H3Impl, AxisParseError> {
         self.h3_impl.parse()
     }
 }
@@ -582,8 +572,11 @@ impl conflaguration::Validate for Profile {
 }
 
 #[cfg(test)]
+// workspace lints deny unwrap/expect; tests are the sanctioned exception.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use core::str::FromStr;
+
     use super::*;
     use conflaguration::Validate;
 
@@ -692,7 +685,6 @@ mod tests {
 
     #[test]
     fn quic_impl_from_str_roundtrip() {
-        use core::str::FromStr;
         assert_eq!(QuicImpl::from_str("quinn").unwrap(), QuicImpl::Quinn);
         assert_eq!(QuicImpl::from_str("native").unwrap(), QuicImpl::Native);
         assert_eq!(QuicImpl::from_str("none").unwrap(), QuicImpl::None);
@@ -701,7 +693,6 @@ mod tests {
 
     #[test]
     fn h3_impl_from_str_roundtrip() {
-        use core::str::FromStr;
         assert_eq!(H3Impl::from_str("h3-quinn").unwrap(), H3Impl::H3Quinn);
         assert_eq!(H3Impl::from_str("native").unwrap(), H3Impl::Native);
         assert_eq!(H3Impl::from_str("none").unwrap(), H3Impl::None);
@@ -797,7 +788,6 @@ mod tests {
 
     #[test]
     fn executor_from_str_roundtrip() {
-        use core::str::FromStr;
         assert_eq!(Executor::from_str("tokio").unwrap(), Executor::Tokio);
         assert_eq!(Executor::from_str("prime").unwrap(), Executor::Prime);
         assert_eq!(Executor::from_str("embassy").unwrap(), Executor::Embassy);
@@ -810,7 +800,6 @@ mod tests {
 
     #[test]
     fn timer_from_str_roundtrip() {
-        use core::str::FromStr;
         assert_eq!(Timer::from_str("std-thread").unwrap(), Timer::StdThread);
         assert_eq!(Timer::from_str("prime-wheel").unwrap(), Timer::PrimeWheel);
         assert_eq!(Timer::from_str("embassy-time").unwrap(), Timer::EmbassyTime);
@@ -894,5 +883,17 @@ mod tests {
             profile.timer_kind().unwrap(),
             Timer::Custom(ref path) if path == "user_crate::DRIVER"
         ));
+    }
+
+    #[test]
+    fn axis_parse_error_names_the_axis_and_the_bad_value() {
+        let err = Executor::from_str("tokoi").expect_err("typo should reject");
+        assert_eq!(err.axis, "executor");
+        assert_eq!(err.value, "tokoi");
+        assert_eq!(err.to_string(), "unknown executor: tokoi");
+
+        let err = Timer::from_str("systick").expect_err("bare name should reject");
+        assert_eq!(err.axis, "timer");
+        assert_eq!(err.to_string(), "unknown timer: systick");
     }
 }
