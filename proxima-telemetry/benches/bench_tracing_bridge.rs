@@ -41,7 +41,7 @@ fn proxima_tracing_bridge(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("proxima_tracing_bridge");
     group.throughput(Throughput::Elements(N_ITEMS as u64));
 
-    let (pipe, _spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+    let pipe = CountingPipe::new();
     let recorder = Arc::new(
         Recorder::builder()
             .pipe(pipe)
@@ -95,7 +95,7 @@ fn proxima_tracing_bridge_nodrain(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("proxima_tracing_bridge_nodrain");
     group.throughput(Throughput::Elements(N_ITEMS as u64));
 
-    let (pipe, _spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+    let pipe = CountingPipe::new();
     let recorder = Arc::new(
         Recorder::builder()
             .pipe(pipe)
@@ -126,7 +126,7 @@ fn proxima_tracing_bridge_span_emit(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("proxima_tracing_bridge_span_emit");
     group.throughput(Throughput::Elements(N_ITEMS as u64));
 
-    let (pipe, _spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+    let pipe = CountingPipe::new();
     let recorder = Arc::new(
         Recorder::builder()
             .pipe(pipe)

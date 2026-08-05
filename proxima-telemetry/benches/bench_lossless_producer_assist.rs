@@ -69,7 +69,8 @@ fn alloc_snap() -> usize {
 
 // build a recorder backed by a fast no-latency sink under the given policy.
 fn make_recorder(overflow: OverflowPolicy, ring_cap: usize) -> (Recorder, Arc<AtomicU64>) {
-    let (pipe, spans, _, _, _, _) = CountingPipe::new();
+    let pipe = CountingPipe::new();
+    let spans = Arc::clone(&pipe.spans);
     let recorder = Recorder::builder()
         .pipe(pipe)
         .core_count(1)

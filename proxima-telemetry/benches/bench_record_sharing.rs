@@ -82,7 +82,7 @@ fn clone_span(r: &SpanRecord) -> SpanRecord {
 }
 
 fn build_counting_pipes(k: usize) -> Vec<CountingPipe> {
-    (0..k).map(|_| CountingPipe::new().0).collect()
+    (0..k).map(|_| CountingPipe::new()).collect()
 }
 
 // inline fanout: each consumer receives a cloned Vec<SpanRecord> — simulates memcpy × K

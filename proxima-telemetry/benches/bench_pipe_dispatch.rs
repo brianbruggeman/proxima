@@ -26,6 +26,7 @@
 //  - `old_exporter_vtable_floor`    — design-favors: incumbent (pure vtable, pre-P4 shape)
 
 use std::hint::black_box;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -101,7 +102,8 @@ fn bench_proxima_null_pipe_dispatch(criterion: &mut Criterion) {
 
 fn bench_proxima_counting_pipe_dispatch(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("p4_pipe_dispatch");
-    let (pipe, spans, _, _, _, _) = CountingPipe::new();
+    let pipe = CountingPipe::new();
+    let spans = Arc::clone(&pipe.spans);
 
     group.bench_function("proxima_pipe_counting_dispatch", |bencher| {
         bencher.iter(|| {
@@ -190,7 +192,8 @@ fn bench_proxima_null_pipe_batch_1000(criterion: &mut Criterion) {
 
 fn bench_proxima_counting_pipe_batch_1000(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("p4_pipe_dispatch");
-    let (pipe, spans, _, _, _, _) = CountingPipe::new();
+    let pipe = CountingPipe::new();
+    let spans = Arc::clone(&pipe.spans);
 
     group.throughput(Throughput::Elements(1000));
     group.bench_function("proxima_pipe_counting_batch_1000", |bencher| {

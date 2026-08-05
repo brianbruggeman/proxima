@@ -90,7 +90,7 @@ fn proxima_counting_pipe(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("bench_terminal_sinks");
     group.throughput(Throughput::Elements(N_ITEMS as u64));
 
-    let (pipe, _spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+    let pipe = CountingPipe::new();
     let recorder = make_recorder_with(pipe);
 
     group.bench_function(
