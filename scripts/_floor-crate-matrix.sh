@@ -82,6 +82,21 @@ declare -a FLOOR_CRATE_CELLS=(
     # conflaguration/bon/serde) is excluded here by construction, matching
     # this array's own contract of the FLOOR tier, not every tier.
     "proxima-clock-bare-no-alloc|proxima-clock|"
+    # proxima-config's lib.rs opens by claiming `ConfigFormatFactory`,
+    # `DynConfigFormatFactory` and `JsonConfigFormat` hold at no_std + alloc,
+    # and its `sugar` / `schema` / `store` features each declare `alloc` as
+    # their floor too -- and NONE of it was in this matrix, so no gate had ever
+    # compiled the crate for an embedded target. Bare `--features ""` is
+    # excluded on purpose: with nothing on, every public item is cfg'd out and
+    # the cell would be an empty crate proving nothing.
+    "proxima-config|proxima-config|alloc"
+    # the three folded-in modules are default-OFF, so the `alloc` cell above
+    # does not reach any of them. Each names `alloc` as its own floor; this is
+    # where that is checked. `schema` drags regex/time/url on, all three pinned
+    # in the manifest with `default-features = false` precisely to survive here.
+    "proxima-config-sugar|proxima-config|alloc,sugar"
+    "proxima-config-schema|proxima-config|alloc,schema"
+    "proxima-config-store|proxima-config|alloc,store"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
