@@ -12,14 +12,12 @@
 //! - `#[from]` on a single tuple-variant field — generates `From<Inner>`,
 //!   AND treats the field as a `#[source]`
 //!
-//! Convention enforcement: see `lint_message_style` — emits a compile
-//! warning when `#[error("…")]` starts uppercase or ends in `.!?`.
+//! Convention enforcement: see [`validate_message_style`] — a `#[error("…")]`
+//! literal that starts uppercase or ends in `.`/`!`/`?` fails to expand.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
-use syn::{
-    Data, DataEnum, DeriveInput, Field, Fields, Ident, LitStr, Variant, parse2, spanned::Spanned,
-};
+use syn::{Data, DataEnum, DeriveInput, Fields, Ident, LitStr, Variant, parse2, spanned::Spanned};
 
 pub fn expand(input: TokenStream) -> Result<TokenStream, syn::Error> {
     let parsed: DeriveInput = parse2(input)?;
@@ -28,13 +26,13 @@ pub fn expand(input: TokenStream) -> Result<TokenStream, syn::Error> {
         Data::Struct(_) => {
             return Err(syn::Error::new(
                 parsed.ident.span(),
-                "proxima_macros::Error derive supports enums only (no structs)",
+                "#[derive(Error)] only supports enums (no structs)",
             ));
         }
         Data::Union(_) => {
             return Err(syn::Error::new(
                 parsed.ident.span(),
-                "proxima_macros::Error derive does not support unions",
+                "#[derive(Error)] only supports enums (no unions)",
             ));
         }
     };
@@ -61,7 +59,8 @@ struct AnalyzedVariant<'variant_input> {
     fields: &'variant_input Fields,
     display: DisplayKind,
     source_index: Option<usize>,
-    from_index: Option<usize>,
+    /// `Some` exactly when the variant carries `#[from]` — the type IS the
+    /// presence bit, so there is no separate index field saying the same thing.
     from_field_type: Option<&'variant_input syn::Type>,
 }
 
@@ -84,13 +83,12 @@ fn analyze_enum<'enum_input>(
 
 fn analyze_variant(variant: &Variant) -> Result<AnalyzedVariant<'_>, syn::Error> {
     let display = parse_variant_display(variant)?;
-    let (source_index, from_index, from_field_type) = parse_variant_field_attrs(variant)?;
+    let (source_index, from_field_type) = parse_variant_field_attrs(variant)?;
     Ok(AnalyzedVariant {
         name: &variant.ident,
         fields: &variant.fields,
         display,
         source_index,
-        from_index,
         from_field_type,
     })
 }
@@ -107,22 +105,21 @@ fn parse_variant_display(variant: &Variant) -> Result<DisplayKind, syn::Error> {
                 "duplicate #[error(...)] on the same variant",
             ));
         }
-        // Try `transparent` keyword first.
-        let parsed_transparent = attribute.parse_args::<Ident>();
-        if let Ok(ref keyword) = parsed_transparent
+        // `transparent` is a bare keyword, so it parses as an Ident where every
+        // other form is a string literal — try it first, then fall through.
+        if let Ok(keyword) = attribute.parse_args::<Ident>()
             && keyword == "transparent"
         {
             display = Some(DisplayKind::Transparent);
             continue;
         }
-        // Otherwise expect a string literal.
         let parsed_literal = attribute.parse_args::<LitStr>().map_err(|_| {
             syn::Error::new(
                 attribute.span(),
                 "expected #[error(\"literal\")] or #[error(transparent)]",
             )
         })?;
-        lint_message_style(&parsed_literal);
+        validate_message_style(&parsed_literal)?;
         display = Some(DisplayKind::Literal(parsed_literal));
     }
     display.ok_or_else(|| {
@@ -133,29 +130,26 @@ fn parse_variant_display(variant: &Variant) -> Result<DisplayKind, syn::Error> {
     })
 }
 
+/// The `#[source]` field's position and the `#[from]` field's type, if any.
 fn parse_variant_field_attrs(
     variant: &Variant,
-) -> Result<(Option<usize>, Option<usize>, Option<&syn::Type>), syn::Error> {
+) -> Result<(Option<usize>, Option<&syn::Type>), syn::Error> {
     let mut source_index: Option<usize> = None;
-    let mut from_index: Option<usize> = None;
     let mut from_field_type: Option<&syn::Type> = None;
 
-    let fields_iter: Box<dyn Iterator<Item = (usize, &Field)>> = match &variant.fields {
-        Fields::Named(named) => Box::new(named.named.iter().enumerate()),
-        Fields::Unnamed(unnamed) => Box::new(unnamed.unnamed.iter().enumerate()),
-        Fields::Unit => Box::new(core::iter::empty()),
-    };
-
-    for (index, field) in fields_iter {
-        let has_source = field.attrs.iter().any(|a| a.path().is_ident("source"));
-        let has_from = field.attrs.iter().any(|a| a.path().is_ident("from"));
+    for (index, field) in variant.fields.iter().enumerate() {
+        let has_source = field
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("source"));
+        let has_from = field.attrs.iter().any(|attr| attr.path().is_ident("from"));
         if has_source && source_index.is_some() {
             return Err(syn::Error::new(
                 field.span(),
                 "duplicate #[source] on the same variant",
             ));
         }
-        if has_from && from_index.is_some() {
+        if has_from && from_field_type.is_some() {
             return Err(syn::Error::new(
                 field.span(),
                 "duplicate #[from] on the same variant",
@@ -165,23 +159,48 @@ fn parse_variant_field_attrs(
             source_index = Some(index);
         }
         if has_from {
-            from_index = Some(index);
             from_field_type = Some(&field.ty);
-            // #[from] implies #[source]
+            // a `#[from]` field is the cause, so it is a `#[source]` too unless
+            // the variant already named a different one.
             if source_index.is_none() {
                 source_index = Some(index);
             }
         }
     }
-    Ok((source_index, from_index, from_field_type))
+    Ok((source_index, from_field_type))
 }
 
-fn lint_message_style(literal: &LitStr) {
-    // Convention: lowercase, no trailing punctuation.
-    // We cannot emit warnings from a derive macro without nightly
-    // proc_macro_diagnostic, so this is currently a no-op stub.
-    // Once the diag API stabilises, walk the value and warn here.
-    let _ = literal;
+/// The house style for an error message — lowercase, terse, causal, no
+/// trailing punctuation — checked where it is written rather than in review.
+/// A derive macro cannot warn on stable (`proc_macro_diagnostic` is nightly),
+/// and the two rules below have no legitimate exception, so a violation is a
+/// hard expansion failure: a message that needs a leading capital is asking to
+/// be restructured, which is what the convention wants anyway.
+fn validate_message_style(literal: &LitStr) -> Result<(), syn::Error> {
+    let message = literal.value();
+
+    if message.starts_with(|character: char| character.is_ascii_uppercase()) {
+        return Err(syn::Error::new(
+            literal.span(),
+            format!(
+                "error messages are lowercase: `{message}` starts with a capital. \
+                 Rephrase so the first word is lowercase (`tls handshake failed`, not \
+                 `TLS handshake failed`)"
+            ),
+        ));
+    }
+
+    if message.ends_with(['.', '!', '?']) {
+        return Err(syn::Error::new(
+            literal.span(),
+            format!(
+                "error messages carry no trailing punctuation: drop the final \
+                 character of `{message}`"
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 fn emit_display_impl(parsed: &DeriveInput, analyzed: &AnalyzedEnum<'_>) -> TokenStream {
@@ -222,8 +241,8 @@ fn emit_display_arm(variant: &AnalyzedVariant<'_>) -> TokenStream {
             }
         }
         (DisplayKind::Transparent, _) => {
-            // Non-single-field transparent: emit compile_error inline so
-            // the user sees the failure at the variant site.
+            // spanned at the variant so the failure points at the offending
+            // variant, not at the derive attribute.
             let span = variant_name.span();
             quote_spanned! { span =>
                 Self::#variant_name { .. } => {
@@ -242,7 +261,7 @@ fn emit_display_arm(variant: &AnalyzedVariant<'_>) -> TokenStream {
             let bindings: Vec<Ident> = (0..unnamed.unnamed.len())
                 .map(|index| format_ident!("__field{}", index))
                 .collect();
-            let format_args = render_format_args(literal, &unnamed.unnamed, &bindings);
+            let format_args = render_positional_format_args(literal, &bindings);
             quote! {
                 Self::#variant_name(#(#bindings),*) => formatter.write_fmt(#format_args),
             }
@@ -253,41 +272,26 @@ fn emit_display_arm(variant: &AnalyzedVariant<'_>) -> TokenStream {
                 .iter()
                 .map(|field| field.ident.as_ref().expect("named has ident"))
                 .collect();
-            let format_args = render_named_format_args(literal, &field_names);
+            // a named-field template says `{field}`, which `format_args!`
+            // resolves against the identifiers the arm just bound — so the
+            // literal needs no rewriting at all.
             quote! {
-                Self::#variant_name { #(#field_names),* } => formatter.write_fmt(#format_args),
+                Self::#variant_name { #(#field_names),* } => formatter.write_fmt(::core::format_args!(#literal)),
             }
         }
     }
 }
 
-fn render_format_args(
-    literal: &LitStr,
-    fields: &syn::punctuated::Punctuated<Field, syn::Token![,]>,
-    bindings: &[Ident],
-) -> TokenStream {
-    // For tuple variants, the user writes `{0}`, `{1}`, etc. — but we
-    // rebind to `__field0`, `__field1` to keep the names valid Rust
-    // identifiers. format_args! needs the rebinding spelled out.
-    let format_string = literal.value();
-    let rewritten = rewrite_positional_args(&format_string, bindings);
+fn render_positional_format_args(literal: &LitStr, bindings: &[Ident]) -> TokenStream {
+    let rewritten = rewrite_positional_args(&literal.value(), bindings);
     let format_str = LitStr::new(&rewritten, literal.span());
-    // No positional args needed after rewriting; all bindings are named.
-    let _ = fields;
     quote! { ::core::format_args!(#format_str) }
 }
 
-fn render_named_format_args(literal: &LitStr, field_names: &[&Ident]) -> TokenStream {
-    // For named-field variants the user writes `{field_name}` which
-    // format_args! resolves against in-scope identifiers — and the
-    // match arm above binds each field by its own name.
-    let _ = field_names;
-    quote! { ::core::format_args!(#literal) }
-}
-
+/// A tuple variant's template says `{0}`, but the match arm binds `__field0` —
+/// `format_args!` resolves names, not positions, so the indices are rewritten
+/// to the bindings. `{{`/`}}` are literal braces and pass through untouched.
 fn rewrite_positional_args(template: &str, bindings: &[Ident]) -> String {
-    // Replace `\{B\}` and `{N:fmt}` with `{__fieldN}` / `{__fieldN:fmt}`.
-    // Skip `{{` (literal `{`) and `}}` (literal `}`).
     let mut output = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(character) = chars.next() {
@@ -337,7 +341,8 @@ fn emit_error_impl(parsed: &DeriveInput, analyzed: &AnalyzedEnum<'_>) -> TokenSt
     });
 
     if !any_source {
-        // Empty Error impl is sufficient — the trait's `source()` default returns None.
+        // the trait's own `source()` default returns None, so an empty impl
+        // is not a stub — it is the whole contract for a sourceless enum.
         return quote! {
             impl #impl_generics ::core::error::Error for #enum_name #ty_generics #where_clause {}
         };
@@ -358,7 +363,8 @@ fn emit_error_impl(parsed: &DeriveInput, analyzed: &AnalyzedEnum<'_>) -> TokenSt
 
 fn emit_source_arm(variant: &AnalyzedVariant<'_>) -> TokenStream {
     let variant_name = variant.name;
-    // Transparent: forward source() to the single inner field (and treat it as the source itself).
+    // a transparent variant IS its inner error, so the inner value is both the
+    // Display target and the source.
     if matches!(variant.display, DisplayKind::Transparent) {
         return match &variant.fields {
             Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => quote! {
@@ -381,7 +387,6 @@ fn emit_source_arm(variant: &AnalyzedVariant<'_>) -> TokenStream {
             },
         };
     }
-    // Explicit #[source] / #[from] field on a variant.
     if let Some(index) = variant.source_index {
         return match &variant.fields {
             Fields::Unnamed(unnamed) => {
@@ -414,7 +419,6 @@ fn emit_source_arm(variant: &AnalyzedVariant<'_>) -> TokenStream {
             },
         };
     }
-    // No source on this variant.
     match &variant.fields {
         Fields::Unit => quote! { Self::#variant_name => ::core::option::Option::None, },
         Fields::Unnamed(_) => quote! { Self::#variant_name(..) => ::core::option::Option::None, },
@@ -427,9 +431,6 @@ fn emit_from_impls(parsed: &DeriveInput, analyzed: &AnalyzedEnum<'_>) -> Vec<Tok
     let (impl_generics, ty_generics, where_clause) = parsed.generics.split_for_impl();
     let mut impls = Vec::new();
     for variant in &analyzed.variants {
-        let Some(_) = variant.from_index else {
-            continue;
-        };
         let Some(from_type) = variant.from_field_type else {
             continue;
         };
@@ -448,11 +449,9 @@ fn emit_from_impls(parsed: &DeriveInput, analyzed: &AnalyzedEnum<'_>) -> Vec<Tok
                     .expect("named");
                 quote! { Self::#variant_name { #field_name: value } }
             }
-            _ => {
-                // #[from] on a multi-field variant: skip the From impl;
-                // the source machinery still works.
-                continue;
-            }
+            // a multi-field variant has no single value to build From, so only
+            // the source machinery applies.
+            _ => continue,
         };
         impls.push(quote! {
             impl #impl_generics ::core::convert::From<#from_type> for #enum_name #ty_generics #where_clause {
@@ -467,15 +466,6 @@ fn emit_from_impls(parsed: &DeriveInput, analyzed: &AnalyzedEnum<'_>) -> Vec<Tok
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::field_reassign_with_default,
-        clippy::type_complexity,
-        clippy::useless_vec,
-        clippy::needless_range_loop,
-        clippy::default_constructed_unit_structs
-    )]
     use super::*;
     use quote::quote;
 
@@ -488,10 +478,55 @@ mod tests {
         let result = expand(input);
         let error = result.expect_err("structs should be rejected");
         assert!(
-            error.to_string().contains("enums only"),
-            "error mentions enum-only: {}",
-            error
+            error.to_string().contains("only supports enums"),
+            "error mentions enum-only: {error}"
         );
+    }
+
+    // the house style is enforced where the message is written, not in review:
+    // lowercase, and no trailing punctuation.
+    #[test]
+    fn rejects_a_message_that_starts_with_a_capital() {
+        let input = quote! {
+            pub enum Shouty {
+                #[error("Invalid magic byte")]
+                Invalid,
+            }
+        };
+        let error = expand(input).expect_err("a capitalised message is rejected");
+        assert!(
+            error.to_string().contains("error messages are lowercase"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_message_with_trailing_punctuation() {
+        for message in ["truncated frame.", "truncated frame!", "truncated frame?"] {
+            let literal = LitStr::new(message, proc_macro2::Span::call_site());
+            let error =
+                validate_message_style(&literal).expect_err("trailing punctuation is rejected");
+            assert!(
+                error.to_string().contains("no trailing punctuation"),
+                "{error}"
+            );
+        }
+    }
+
+    // an interpolated placeholder is not punctuation, and a lowercase message
+    // that merely CONTAINS a capital (a hex spec, a proper noun mid-sentence)
+    // is fine — only the first character is the convention's subject.
+    #[test]
+    fn accepts_the_conventional_shapes() {
+        for message in [
+            "invalid magic byte: {0}",
+            "expected {0:#x} got {1:#x}",
+            "opcode 0x{0:X} is reserved or undefined",
+            "reserved bits RSV1/RSV2/RSV3 set — extensions not negotiated",
+        ] {
+            let literal = LitStr::new(message, proc_macro2::Span::call_site());
+            validate_message_style(&literal).expect("conventional message is accepted");
+        }
     }
 
     #[test]
