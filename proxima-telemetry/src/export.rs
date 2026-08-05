@@ -305,15 +305,15 @@ impl RecorderBuilder<HasPipe, GlobalClock> {
     }
 }
 
-/// The proxima-native half of [`install_console_logging`]: a recorder whose
+/// The proxima-native half of `install_console_logging`: a recorder whose
 /// sink is the level-routed [`Exporter::std`] (trace/debug/info → stdout,
 /// warn/error → stderr), registered as the process-default recorder, with a
 /// background drain thread already running. No `tracing-subscriber`
 /// dependency and no `tracing-init` feature required — proxima's own
 /// `info!`/`error!`/`#[instrument]` telemetry needs a recorder + sink +
-/// drain, nothing from the `tracing` crate. See [`install_console_logging`]
-/// for the version that additionally bridges `tracing::`-crate events (that
-/// bridge is the only part that needs `tracing-init`).
+/// drain, nothing from the `tracing` crate. `install_console_logging` (behind
+/// `tracing-init`, so it cannot be linked from here) is the version that
+/// additionally bridges `tracing::`-crate events.
 ///
 /// # Errors
 ///

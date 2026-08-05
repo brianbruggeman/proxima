@@ -40,7 +40,7 @@ pub mod sized {
 /// at every tier including no_std + no_alloc (where there is no runtime
 /// `CompiledEmit`). The compile-time half of the emit filter — proxima's analogue
 /// of tracing's `max_level_*` features, driven by proxima's build config. Pair it
-/// with the runtime [`emit::CallsiteGate`] (the disabled-fast-path cache) on the
+/// with the runtime `emit::CallsiteGate` (the disabled-fast-path cache) on the
 /// `std`/`alloc` tiers.
 ///
 /// ```
