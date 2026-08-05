@@ -7,7 +7,8 @@
 //! and is a pure transformation: feed it a sugary spec, read the
 //! desugared output to learn how the primitives compose.
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn doc() -> Result<(), proxima::ProximaError> {
 //! // plain http
 //! let client = proxima::Client::from_value(serde_json::json!({
 //!     "http": "https://api.example.com",
@@ -20,6 +21,8 @@
 //!     "http": "https://api.example.com",
 //!     "cache": true,
 //! }))?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod handle;
