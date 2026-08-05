@@ -5,19 +5,20 @@
 //!
 //! Typical consumer (in a downstream crate's `build.rs`):
 //!
-//! ```ignore
-//! fn main() {
-//!     let profile = proxima_build::resolve_profile().expect("resolve profile");
-//!     proxima_build::emit_generated_module(&profile);
-//!     proxima_build::emit_cfg_directives(&profile);
-//!     proxima_build::emit_rerun_directives(&profile);
+//! ```no_run
+//! fn main() -> proxima_build::Result<()> {
+//!     let resolved = proxima_build::resolve_profile()?;
+//!     proxima_build::emit_generated_module(&resolved)?;
+//!     proxima_build::emit_cfg_directives(&resolved);
+//!     proxima_build::emit_rerun_directives(&resolved);
+//!     Ok(())
 //! }
 //! ```
 //!
 //! The generated module ends up at `$OUT_DIR/proxima_profile.rs` and is
 //! included by the consumer via:
 //!
-//! ```ignore
+//! ```text
 //! mod profile {
 //!     include!(concat!(env!("OUT_DIR"), "/proxima_profile.rs"));
 //! }
@@ -109,7 +110,14 @@ pub struct Resolved {
 ///
 /// Workspace root is inferred from `CARGO_MANIFEST_DIR` by walking up
 /// until a `Cargo.toml` containing `[workspace]` is found.
-#[allow(clippy::missing_errors_doc)]
+///
+/// # Errors
+///
+/// [`Error::WorkspaceRootUnknown`] if `CARGO_MANIFEST_DIR` is unset or no
+/// ancestor declares `[workspace]`; [`Error::ProfileEnvUnset`] if
+/// `PROXIMA_PROFILE` is unset; [`Error::ProfileFileMissing`] if the named
+/// profile has no TOML file; [`Error::Conflag`] if the file fails to parse
+/// or fails cross-axis validation.
 pub fn resolve_profile() -> Result<Resolved> {
     let workspace_root = locate_workspace_root()?;
     let profile_name = env::var("PROXIMA_PROFILE").map_err(|_| Error::ProfileEnvUnset)?;
@@ -134,7 +142,11 @@ pub fn resolve_profile() -> Result<Resolved> {
 
 /// Resolve a profile from an explicit file path (skips env-var lookup
 /// for `PROXIMA_PROFILE`; useful for tests).
-#[allow(clippy::missing_errors_doc)]
+///
+/// # Errors
+///
+/// [`Error::ProfileFileMissing`] if `path` does not exist; [`Error::Conflag`]
+/// if the file fails to parse or fails cross-axis validation.
 pub fn resolve_profile_from(path: &Path) -> Result<Resolved> {
     if !path.exists() {
         return Err(Error::ProfileFileMissing(path.to_owned()));
@@ -153,7 +165,11 @@ pub fn resolve_profile_from(path: &Path) -> Result<Resolved> {
 /// Emit `$OUT_DIR/proxima_profile.rs` with const + type alias derived
 /// from the resolved profile. Consumer includes this module via
 /// `include!(concat!(env!("OUT_DIR"), "/proxima_profile.rs"))`.
-#[allow(clippy::missing_errors_doc)]
+///
+/// # Errors
+///
+/// [`Error::OutDirUnset`] outside a `build.rs` context; [`Error::Io`] if the
+/// generated file cannot be written.
 pub fn emit_generated_module(resolved: &Resolved) -> Result<()> {
     let out_dir = env::var("OUT_DIR").map_err(|_| Error::OutDirUnset)?;
     let out_path = Path::new(&out_dir).join("proxima_profile.rs");
@@ -222,20 +238,25 @@ pub fn emit_cfg_directives(resolved: &Resolved) {
 ///
 /// The generated file is one line:
 ///
-/// ```ignore
+/// ```text
 /// pub static BOUND_DRIVER: &dyn crate::time::Driver = &<resolved-driver-path>;
 /// ```
 ///
 /// where `<resolved-driver-path>` comes from `Profile::timer_kind()?.driver_path()`.
 /// `proxima-core`'s `time/mod.rs` includes this file with:
 ///
-/// ```ignore
+/// ```text
 /// include!(concat!(env!("OUT_DIR"), "/proxima_time_bound_driver.rs"));
 /// ```
 ///
 /// Wrong path / missing symbol / wrong type / non-`'static` all surface as
 /// compile errors in proxima-core, never at runtime.
-#[allow(clippy::missing_errors_doc)]
+///
+/// # Errors
+///
+/// [`Error::OutDirUnset`] outside a `build.rs` context; [`Error::Conflag`] if
+/// the `timer` axis does not parse; [`Error::Io`] if the generated file cannot
+/// be written.
 pub fn emit_timer_binding(resolved: &Resolved) -> Result<()> {
     let out_dir = env::var("OUT_DIR").map_err(|_| Error::OutDirUnset)?;
     let out_path = Path::new(&out_dir).join("proxima_time_bound_driver.rs");
@@ -287,9 +308,11 @@ fn locate_workspace_root() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+// workspace lints deny unwrap/expect; tests are the sanctioned exception.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use conflaguration::Settings;
 
     fn write_temp_profile(dir: &Path, contents: &str) -> PathBuf {
         let path = dir.join("profile.toml");
@@ -351,7 +374,7 @@ timer = "embassy-time"
         let missing = PathBuf::from("/nonexistent/profile.toml");
         let err = resolve_profile_from(&missing).expect_err("should error on missing");
         match err {
-            Error::ProfileFileMissing(p) => assert_eq!(p, missing),
+            Error::ProfileFileMissing(reported) => assert_eq!(reported, missing),
             other => panic!("expected ProfileFileMissing, got {other:?}"),
         }
     }
@@ -438,6 +461,13 @@ timer = "std-thread"
         }
     }
 
+    #[test]
+    fn tracked_env_vars_includes_proxima_profile() {
+        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_PROFILE"));
+        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_ALLOC"));
+        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_STD"));
+    }
+
     fn sentinel_profile() -> Profile {
         Profile {
             schema: 7,
@@ -482,9 +512,16 @@ timer = "std-thread"
     }
 
     #[test]
-    fn tracked_env_vars_includes_proxima_profile() {
-        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_PROFILE"));
-        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_ALLOC"));
-        assert!(TRACKED_ENV_VARS.contains(&"PROXIMA_STD"));
+    fn manual_default_matches_conflaguration_setting_defaults() {
+        let cleared: Vec<(&str, Option<&str>)> =
+            TRACKED_ENV_VARS.iter().map(|key| (*key, None)).collect();
+        temp_env::with_vars(cleared, || {
+            let from_settings = Profile::from_env().expect("defaults resolve with no env set");
+            assert_eq!(
+                from_settings,
+                Profile::default(),
+                "Profile::default() drifted from the #[setting(default = ..)] table"
+            );
+        });
     }
 }
