@@ -95,7 +95,9 @@ impl ClientSession {
         }
     }
 
-    /// Drains the bytes the driver must send.
+    /// Drains the bytes the driver must send. Dropping them loses a frame
+    /// the session already believes is on the wire.
+    #[must_use]
     pub fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
