@@ -87,6 +87,7 @@ impl fmt::Debug for AnchorCell {
 /// use proxima_clock::anchor::{AnchorCell, ToUnixNanos};
 /// use proxima_clock::ticks::Ticks;
 /// use proxima_clock::unix_nanos::UnixNanos;
+/// use proxima_primitives::block_on;
 /// use proxima_primitives::pipe::ext::PipeExt;
 /// use proxima_primitives::pipe::primitives::Pipe;
 /// use core::convert::Infallible;
@@ -106,8 +107,11 @@ impl fmt::Debug for AnchorCell {
 /// let anchor = AnchorCell::new(Ticks::from_raw(0), UnixNanos::from_nanos(1_753_500_000_000_000_000));
 /// let wall_clock = HardwareTicks(Ticks::from_raw(24_000_000))
 ///     .and_then(ToUnixNanos::new(&anchor, 24_000_000));
+///
 /// // `wall_clock` is itself `impl Pipe<In = (), Out = UnixNanos, Err = Infallible>` —
 /// // no `WallClock<C>` wrapper type; the transform stage IS the bridge.
+/// let now = block_on(wall_clock.call(())).expect("a tick read never fails");
+/// assert_eq!(now, UnixNanos::from_nanos(1_753_500_001_000_000_000));
 /// ```
 ///
 /// `frequency_hz` is supplied once at construction (a hardware clock's
