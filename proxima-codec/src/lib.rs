@@ -2,14 +2,26 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+pub mod factory;
+pub mod share_buf;
+
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
 use bytes::Bytes;
 use proxima_core::ProximaError;
+use thiserror::Error;
 
 #[cfg(feature = "std")]
 use std::cell::RefCell;
+
+#[cfg(feature = "std")]
+pub use factory::{
+    BytesPassthroughCodecFactory, BytesPassthroughDynCodec, CodecBuildFuture, CodecFactory,
+    CodecRegistry, DynCodec, DynCodecFactory, DynCodecHandle, JsonCodecFactory, JsonDynCodec,
+};
+pub use share_buf::ShareBuf;
 
 // per-thread scratch buffer reused across simd-json decodes. simd-json
 // mutates its input in place, so the codec must own a mutable copy. a
@@ -21,7 +33,7 @@ thread_local! {
 }
 
 #[cfg(feature = "std")]
-fn decode_through_scratch<T>(bytes: &[u8]) -> Result<T, ProximaError>
+pub(crate) fn decode_through_scratch<T>(bytes: &[u8]) -> Result<T, ProximaError>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -199,12 +211,12 @@ impl MessageCodec for BytesPassthrough {
 }
 
 #[cfg(feature = "std")]
-pub struct JsonCodec<Input, Output>(std::marker::PhantomData<(Input, Output)>);
+pub struct JsonCodec<Input, Output>(core::marker::PhantomData<(Input, Output)>);
 
 #[cfg(feature = "std")]
 impl<Input, Output> Default for JsonCodec<Input, Output> {
     fn default() -> Self {
-        Self(std::marker::PhantomData)
+        Self(core::marker::PhantomData)
     }
 }
 
@@ -212,7 +224,7 @@ impl<Input, Output> Default for JsonCodec<Input, Output> {
 impl<Input, Output> JsonCodec<Input, Output> {
     #[must_use]
     pub fn new() -> Self {
-        Self(std::marker::PhantomData)
+        Self::default()
     }
 }
 
@@ -283,6 +295,26 @@ impl Default for FrameLimits {
 /// buffer plus the total bytes consumed (header + payload). The IO loop
 /// that owns the read buffer (a listener or driver) reads more on
 /// [`FrameError::Incomplete`] and retries — keeping this codec sans-IO.
+///
+/// ```
+/// use proxima_codec::{FrameCodec, FrameError, FrameLimits, LengthDelimitedCodec};
+///
+/// let codec = LengthDelimitedCodec::new(FrameLimits::new(16 * 1024 * 1024, true));
+///
+/// let mut wire = Vec::new();
+/// codec.encode_frame(&&b"{\"op\":\"ping\"}"[..], &mut wire)?;
+///
+/// // one whole frame plus the first two bytes of the next one.
+/// wire.extend_from_slice(&[0, 0]);
+/// let (frame, consumed) = codec.parse_frame(&wire)?;
+/// assert_eq!(frame, b"{\"op\":\"ping\"}");
+/// assert_eq!(consumed, 4 + frame.len());
+///
+/// // the read loop advances by `consumed` and asks again; a short tail is
+/// // "read more bytes", not a failure.
+/// assert_eq!(codec.parse_frame(&wire[consumed..]), Err(FrameError::Incomplete));
+/// # Ok::<(), FrameError>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LengthDelimitedCodec {
     limits: FrameLimits,
@@ -345,33 +377,19 @@ impl LengthDelimitedCodec {
 }
 
 /// Errors and control signals from [`LengthDelimitedCodec`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum FrameError {
     /// The buffer does not yet hold a complete frame — read more bytes
     /// and retry. The normal partial-read signal, not a failure.
+    #[error("incomplete frame")]
     Incomplete,
     /// A zero-length frame was declared while `reject_zero_len` is set.
+    #[error("zero-length frame rejected")]
     ZeroLength,
     /// The declared payload length exceeds `max_frame_bytes`.
+    #[error("declared frame size {len} exceeds max_frame_bytes")]
     FrameTooLarge { len: usize },
 }
-
-impl core::fmt::Display for FrameError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Incomplete => write!(formatter, "incomplete frame"),
-            Self::ZeroLength => write!(formatter, "zero-length frame rejected"),
-            Self::FrameTooLarge { len } => {
-                write!(
-                    formatter,
-                    "declared frame size {len} exceeds max_frame_bytes"
-                )
-            }
-        }
-    }
-}
-
-impl core::error::Error for FrameError {}
 
 impl FrameCodec for LengthDelimitedCodec {
     type Frame<'a> = &'a [u8];
@@ -405,109 +423,98 @@ impl FrameCodec for LengthDelimitedCodec {
     }
 }
 
-/// Fixed-width 4-byte [`Datagram`] used only by this module's own unit
-/// tests — a trivial POD message, borrowed zero-copy from the packet
-/// buffer, to exercise the trait shape without pulling in a real
-/// protocol's parsing logic.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default)]
-struct FixedFourCodec;
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FixedFourError {
-    got_len: usize,
-}
-
-#[cfg(test)]
-impl core::fmt::Display for FixedFourError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "expected exactly 4 bytes, got {}", self.got_len)
-    }
-}
-
-#[cfg(test)]
-impl core::error::Error for FixedFourError {}
-
-#[cfg(test)]
-impl Datagram for FixedFourCodec {
-    type Message<'a> = &'a [u8];
-    type Error = FixedFourError;
-
-    fn decode<'a>(
-        &self,
-        peer: SocketAddr,
-        bytes: &'a [u8],
-    ) -> Result<Addressed<&'a [u8]>, FixedFourError> {
-        if bytes.len() != 4 {
-            return Err(FixedFourError {
-                got_len: bytes.len(),
-            });
-        }
-        Ok(Addressed {
-            peer,
-            message: bytes,
-        })
-    }
-
-    fn encode(
-        &self,
-        addressed: &Addressed<&[u8]>,
-        dest: &mut Vec<u8>,
-    ) -> Result<(), FixedFourError> {
-        if addressed.message.len() != 4 {
-            return Err(FixedFourError {
-                got_len: addressed.message.len(),
-            });
-        }
-        dest.extend_from_slice(addressed.message);
-        Ok(())
-    }
-}
-
-/// Owned-message [`Datagram`] used only by this module's own unit
-/// tests — demonstrates the `Message<'a> = Owned` escape hatch a
-/// future owned-`Message` protocol (a bencode-over-UDP or
-/// fixed-binary datagram format that decodes straight into an owned
-/// value, never borrows) would use: `Message<'a>` ignores `'a`
-/// entirely.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default)]
-struct OwnedIdCodec;
-
-#[cfg(test)]
-impl Datagram for OwnedIdCodec {
-    type Message<'a> = u32;
-    type Error = FixedFourError;
-
-    fn decode(&self, peer: SocketAddr, bytes: &[u8]) -> Result<Addressed<u32>, FixedFourError> {
-        let array: [u8; 4] = bytes.try_into().map_err(|_| FixedFourError {
-            got_len: bytes.len(),
-        })?;
-        Ok(Addressed {
-            peer,
-            message: u32::from_be_bytes(array),
-        })
-    }
-
-    fn encode(&self, addressed: &Addressed<u32>, dest: &mut Vec<u8>) -> Result<(), FixedFourError> {
-        dest.extend_from_slice(&addressed.message.to_be_bytes());
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+    /// Fixed-width 4-byte [`Datagram`] — a trivial POD message, borrowed
+    /// zero-copy from the packet buffer, to exercise the trait shape
+    /// without pulling in a real protocol's parsing logic.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct FixedFourCodec;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+    #[error("expected exactly 4 bytes, got {got_len}")]
+    struct FixedFourError {
+        got_len: usize,
+    }
+
+    impl Datagram for FixedFourCodec {
+        type Message<'a> = &'a [u8];
+        type Error = FixedFourError;
+
+        fn decode<'a>(
+            &self,
+            peer: SocketAddr,
+            bytes: &'a [u8],
+        ) -> Result<Addressed<&'a [u8]>, FixedFourError> {
+            if bytes.len() != 4 {
+                return Err(FixedFourError {
+                    got_len: bytes.len(),
+                });
+            }
+            Ok(Addressed {
+                peer,
+                message: bytes,
+            })
+        }
+
+        fn encode(
+            &self,
+            addressed: &Addressed<&[u8]>,
+            dest: &mut Vec<u8>,
+        ) -> Result<(), FixedFourError> {
+            if addressed.message.len() != 4 {
+                return Err(FixedFourError {
+                    got_len: addressed.message.len(),
+                });
+            }
+            dest.extend_from_slice(addressed.message);
+            Ok(())
+        }
+    }
+
+    /// Owned-message [`Datagram`] — demonstrates the `Message<'a> = Owned`
+    /// escape hatch a future owned-`Message` protocol (a bencode-over-UDP
+    /// or fixed-binary datagram format that decodes straight into an owned
+    /// value, never borrows) would use: `Message<'a>` ignores `'a`
+    /// entirely.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct OwnedIdCodec;
+
+    impl Datagram for OwnedIdCodec {
+        type Message<'a> = u32;
+        type Error = FixedFourError;
+
+        fn decode(&self, peer: SocketAddr, bytes: &[u8]) -> Result<Addressed<u32>, FixedFourError> {
+            let array: [u8; 4] = bytes.try_into().map_err(|_| FixedFourError {
+                got_len: bytes.len(),
+            })?;
+            Ok(Addressed {
+                peer,
+                message: u32::from_be_bytes(array),
+            })
+        }
+
+        fn encode(
+            &self,
+            addressed: &Addressed<u32>,
+            dest: &mut Vec<u8>,
+        ) -> Result<(), FixedFourError> {
+            dest.extend_from_slice(&addressed.message.to_be_bytes());
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
     struct Sample {
-        name: String,
+        name: alloc::string::String,
         count: u32,
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn json_codec_roundtrips_struct() {
         let codec: JsonCodec<Sample, Sample> = JsonCodec::new();
@@ -522,11 +529,19 @@ mod tests {
         assert_eq!(decoded, original);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn json_codec_decode_error_returns_decode_variant() {
         let codec: JsonCodec<Sample, Sample> = JsonCodec::new();
         let outcome = codec.decode_input(b"not json");
         assert!(matches!(outcome, Err(ProximaError::Decode(_))));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn json_content_type_is_application_json() {
+        let codec: JsonCodec<Sample, Sample> = JsonCodec::new();
+        assert_eq!(codec.content_type(), "application/json");
     }
 
     #[test]
@@ -538,12 +553,6 @@ mod tests {
             .expect("encode should succeed");
         let decoded = codec.decode_input(&encoded).expect("decode should succeed");
         assert_eq!(decoded, original);
-    }
-
-    #[test]
-    fn json_content_type_is_application_json() {
-        let codec: JsonCodec<Sample, Sample> = JsonCodec::new();
-        assert_eq!(codec.content_type(), "application/json");
     }
 
     #[test]
@@ -634,12 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn frame_error_zero_length_message_is_parity_stable() {
-        // the downstream consumer's incumbent wire error is exactly this string; the listener
-        // maps FrameError -> io::Error with this Display.
+    fn frame_error_display_is_parity_stable() {
+        // the downstream consumer's incumbent wire error is exactly these strings;
+        // the listener maps FrameError -> io::Error with this Display.
+        use alloc::string::ToString;
+        assert_eq!(FrameError::Incomplete.to_string(), "incomplete frame");
         assert_eq!(
             FrameError::ZeroLength.to_string(),
             "zero-length frame rejected"
+        );
+        assert_eq!(
+            FrameError::FrameTooLarge { len: 99 }.to_string(),
+            "declared frame size 99 exceeds max_frame_bytes"
         );
     }
 
@@ -697,14 +712,3 @@ mod tests {
         assert_eq!(dest, packet);
     }
 }
-
-#[cfg(feature = "std")]
-pub mod factory;
-#[cfg(feature = "std")]
-pub use factory::{
-    BytesPassthroughCodecFactory, BytesPassthroughDynCodec, CodecBuildFuture, CodecFactory,
-    CodecRegistry, DynCodec, DynCodecFactory, DynCodecHandle, JsonCodecFactory, JsonDynCodec,
-};
-
-pub mod share_buf;
-pub use share_buf::ShareBuf;
