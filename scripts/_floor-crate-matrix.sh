@@ -44,6 +44,13 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-primitives-bare-no-alloc|proxima-primitives|"
     "proxima-net|proxima-net|alloc"
     "proxima-runtime|proxima-runtime|alloc"
+    # proxima-runtime's FINEST tier is stricter than its `alloc` cell above:
+    # lib.rs gates ext, primitives, SpawnRequest, BackgroundPool and the
+    # Runtime trait itself on `alloc`, but `CoreId` and `SpawnError` (the
+    # cross-core dispatch vocabulary every caller matches on) carry no cfg at
+    # all. Proving only `alloc` left that pair -- and its thiserror-derived
+    # `core::error::Error` impl -- unproven on the cliff.
+    "proxima-runtime-bare-no-alloc|proxima-runtime|"
     "proxima-core|proxima-core|alloc"
     # proxima-core's FINEST tier is stricter than its `alloc` cell above: arch,
     # datagram_batch, factory::Named, markers, per_core, ring and time all
