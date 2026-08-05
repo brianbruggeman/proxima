@@ -38,6 +38,7 @@ use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::pipe::{FanIn, Select};
+use proxima_telemetry::{debug, error, warn};
 
 use crate::broker::{AmqpBroker, ConsumerSink, ExchangeKind};
 use crate::config::AmqpServerConfig;
@@ -318,7 +319,7 @@ where
                     // driver reuses the SAME event to receive pushed
                     // messages — see `crate::client::session`), but a
                     // well-behaved client must never send it to us.
-                    tracing::error!("amqp protocol violation: client sent basic.deliver");
+                    error!("amqp protocol violation: client sent basic.deliver");
                     write_connection_close(
                         out,
                         reply_code::SYNTAX_ERROR,
@@ -328,19 +329,19 @@ where
                     return Ok(());
                 }
                 Advanced::ProtocolError { reason } => {
-                    tracing::error!(reason, "amqp protocol violation");
+                    error!(reason = %reason, "amqp protocol violation");
                     write_connection_close(out, reply_code::SYNTAX_ERROR, &reason);
                     flush_out(write_half, out).await?;
                     return Ok(());
                 }
                 Advanced::FrameTooLarge { limit } => {
-                    tracing::error!(limit, "amqp frame exceeds frame-max");
+                    error!(limit, "amqp frame exceeds frame-max");
                     write_connection_close(out, reply_code::FRAME_ERROR, "frame exceeds frame-max");
                     flush_out(write_half, out).await?;
                     return Err(AmqpServeError::FrameTooLarge { limit });
                 }
                 Advanced::MessageTooLarge { limit } => {
-                    tracing::error!(limit, "amqp message body exceeds limit");
+                    error!(limit, "amqp message body exceeds limit");
                     write_connection_close(
                         out,
                         reply_code::RESOURCE_ERROR,
@@ -614,7 +615,7 @@ async fn dispatch_publish(
     admission: &proxima_listen::admission::ConnAdmission,
 ) {
     if let proxima_listen::admission::RequestAdmit::Shed { reason } = admission.request_admit() {
-        tracing::warn!(?reason, "amqp publish shed while admission is quiescing");
+        warn!(?reason, "amqp publish shed while admission is quiescing");
         return;
     }
     let request: AmqpPipeRequest = Request {
@@ -641,14 +642,14 @@ async fn dispatch_publish(
                 .publish(&exchange, &routing_key, properties, body)
                 .await
             {
-                tracing::error!(error = %error, "amqp broker publish failed");
+                error!(error = %error, "amqp broker publish failed");
             }
         }
         Err(ProximaError::Forbidden(reason)) => {
-            tracing::debug!(reason, "amqp publish rejected by handler");
+            debug!(reason = %reason, "amqp publish rejected by handler");
         }
         Err(error) => {
-            tracing::error!(error = %error, "amqp publish handler failed");
+            error!(error = %error, "amqp publish handler failed");
         }
     }
 }
