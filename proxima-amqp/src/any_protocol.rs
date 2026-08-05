@@ -120,6 +120,9 @@ impl AnyProtocol for AmqpAnyProtocol {
         _peer: Option<PeerInfo>,
         admission: &'a ConnAdmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
+        // the box is `AnyProtocol::drive`'s signature, not a choice here: the
+        // listener holds an open set of candidates as trait objects, and a
+        // dyn-compatible method cannot return `impl Future`.
         Box::pin(async move {
             let config = resolve_config(&self.config, spec)?;
             let connection_pipe =
