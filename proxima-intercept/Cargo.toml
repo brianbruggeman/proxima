@@ -12,7 +12,7 @@ readme.workspace = true
 [dependencies]
 bytes.workspace = true
 proxima-core = { workspace = true, features = ["alloc"] }
-proxima-protocols = { workspace = true, default-features = false, features = ["websocket_frame", "http1_codec"] }
+proxima-protocols = { workspace = true, default-features = false, features = ["websocket_frame", "http1_codec-alloc"] }
 proxima-primitives = { path = "../proxima-primitives" }
 proxima-tls = { path = "../proxima-tls", features = ["std"] }
 pem = "3"
@@ -47,7 +47,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 toml.workspace = true
-proxima-protocols = { workspace = true, default-features = false, features = ["http2_codec"] }
+proxima-protocols = { workspace = true, default-features = false, features = ["http2_codec-alloc"] }
 rand.workspace = true
 
 [lints]

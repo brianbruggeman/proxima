@@ -186,30 +186,53 @@ redis = ["dep:memchr"]
 redis-codec-trait = ["redis", "dep:proxima-codec"]
 
 # HPACK header compression (RFC 7541) — extracted from proxima-hpack.
+# The BASE feature is the tier-3 floor: bare no_std + no alloc, the leaf
+# module subset (huffman, integer, static_table). `hpack-alloc` widens it
+# to the full codec. This polarity matches `quic` / `quic-alloc` below,
+# and is the only one Cargo permits: features are additive, so gating a
+# module on `not(feature = ...)` let any one consumer in the graph delete
+# that module's API out from under every other consumer (measured: it
+# made `--all-features --all-targets` fail to compile at all).
 hpack = ["dep:bytes", "dep:thiserror"]
-# tier-3: bare no_std + no alloc — leaf module subset (huffman,
-# integer, static_table). Mirrors proxima-hpack's original split.
+# alias: `hpack-no-alloc` used to SUBTRACT the alloc modules; the floor
+# is now just the absence of `hpack-alloc`. Kept for existing consumers
+# that request it explicitly, mirroring `quic-no-alloc`.
 hpack-no-alloc = ["hpack"]
+# tier-1: the alloc-bearing half — dynamic_table (bounded LIFO with
+# size-based eviction) plus the encoder / decoder that orchestrate it.
+hpack-alloc = ["hpack"]
 # HpackCodec impls `StatefulCodec` with per-session HpackEncoder /
 # HpackDecoder vending. The module's own doc-comment says this stays
 # no_std + alloc clean (proxima-codec + proxima-core are the only
 # imports) — `proxima-core/std` was an unneeded leak, not a real
 # requirement; the `alloc` feature (baked into the dep declarations
 # above) is all this needs.
-hpack-codec-trait = ["hpack", "dep:proxima-codec", "dep:proxima-core"]
+hpack-codec-trait = ["hpack-alloc", "dep:proxima-codec", "dep:proxima-core"]
 
-# Sans-IO HTTP/1.x codec — extracted from proxima-h1-codec.
+# Sans-IO HTTP/1.x codec — extracted from proxima-h1-codec. The BASE
+# feature is the tier-3 floor (bare no_std + no alloc, streaming
+# request-head parser subset); `http1_codec-alloc` widens it. See the
+# `hpack` block above for why the polarity is this way round.
 http1_codec = ["dep:bumpalo", "dep:httparse", "dep:bytes", "dep:smallvec"]
-# tier-3: bare no_std + no alloc — streaming request-head parser subset.
+# alias: the floor is now just the absence of `http1_codec-alloc`. Kept
+# for existing consumers that request it explicitly.
 http1_codec-no-alloc = ["http1_codec"]
+# tier-1: body decoder, connection FSM, response writer, client inverse,
+# and the owned `RequestHead` surface — all heap-bearing.
+http1_codec-alloc = ["http1_codec"]
 # H1RequestCodec impls `FrameCodec` for HTTP/1.x request heads.
-http1_codec-codec-trait = ["http1_codec", "dep:proxima-codec"]
+http1_codec-codec-trait = ["http1_codec-alloc", "dep:proxima-codec"]
 # H1RequestCodec composes as the generic `codec_pipe::FrameCodecPipe` (was a
 # hardcoded H1-only adapter — generalized as part of the plug-and-play-floor
 # sweep, validate/pipe-transform-sweep) plus the `Replayable`/`Idempotent`/
 # `Labeled` capability impls on `OwnedFrame` so a parsed frame can be wrapped
 # by any `proxima-primitives` pipe combinator (e.g. `Retry`).
-http1_codec-frame-pipe = ["http1_codec-codec-trait", "codec-pipe", "dep:proxima-core"]
+http1_codec-frame-pipe = [
+    "http1_codec-codec-trait",
+    "http1_codec-alloc",
+    "codec-pipe",
+    "dep:proxima-core",
+]
 
 # Shared `codec_pipe::FrameCodecPipe<C>` / `OnFrame<App>` generic adapter —
 # one `Pipe` impl over ANY `proxima_codec::FrameCodec`, not a per-codec
@@ -218,18 +241,25 @@ http1_codec-frame-pipe = ["http1_codec-codec-trait", "codec-pipe", "dep:proxima-
 # `websocket_frame-frame-pipe`, ...).
 codec-pipe = ["dep:proxima-primitives", "proxima-primitives/alloc", "dep:proxima-codec", "dep:bytes"]
 
-# Sans-IO HTTP/2 codec — extracted from proxima-h2-codec.
+# Sans-IO HTTP/2 codec — extracted from proxima-h2-codec. The BASE
+# feature is the tier-3 floor (bare no_std + no alloc, the per-stream
+# RFC 7540 §5 state machine); `http2_codec-alloc` widens it. See the
+# `hpack` block above for why the polarity is this way round.
 http2_codec = ["hpack", "dep:smallvec", "dep:thiserror", "dep:bytes", "dep:tracing"]
-# tier-3: bare no_std + no alloc — per-stream state machine subset.
-http2_codec-no-alloc = ["http2_codec", "hpack-no-alloc"]
+# alias: the floor is now just the absence of `http2_codec-alloc`. Kept
+# for existing consumers that request it explicitly.
+http2_codec-no-alloc = ["http2_codec"]
+# tier-1: frame parse/encode (owned `Bytes` views), the `BTreeMap`
+# stream registry, and the connection FSM's event queue + HPACK tables.
+http2_codec-alloc = ["http2_codec", "hpack-alloc"]
 # H2FrameCodec impls `FrameCodec` for HTTP/2 wire frames.
-http2_codec-codec-trait = ["http2_codec", "dep:proxima-codec"]
+http2_codec-codec-trait = ["http2_codec-alloc", "dep:proxima-codec"]
 
 # Sans-IO HTTP/3 + QPACK protocol implementation — extracted from
 # proxima-h3-proto. Depends on this crate's own `quic` module (folded
 # from proxima-quic-proto) rather than an external crate, so what was
 # once a dependency edge is now intra-crate.
-http3_codec = ["hpack", "quic-alloc", "dep:arrayvec", "dep:heapless"]
+http3_codec = ["hpack-alloc", "quic-alloc", "dep:arrayvec", "dep:heapless"]
 # tier-1: alloc-tier state machines (server/client connections, QPACK
 # dynamic table). `http3_codec` already requires `quic-alloc`; this
 # alias is kept for existing consumers that request it explicitly.
@@ -447,12 +477,12 @@ required-features = ["hpack"]
 [[bench]]
 name = "hpack_block"
 harness = false
-required-features = ["hpack"]
+required-features = ["hpack-alloc"]
 
 [[bench]]
 name = "hpack_decode_into"
 harness = false
-required-features = ["hpack"]
+required-features = ["hpack-alloc"]
 
 [[bench]]
 name = "bench_hpack_codec_trait"
