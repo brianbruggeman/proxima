@@ -25,7 +25,9 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 futures = { workspace = true, features = ["std", "async-await"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
+# the house telemetry surface, never `tracing` directly — the framed App's
+# error events are the only emitters, so it rides `listen` alone.
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 # the tokio-free native listener stack: `MemcachedAnyProtocol` mounts into
 # `proxima-listen`'s `AnyListenProtocol` open universal listener over the
 # runtime-matched acceptor factory — see the `listen` feature below.
@@ -52,7 +54,6 @@ client = [
     "dep:futures",
     "dep:serde",
     "dep:thiserror",
-    "dep:tracing",
     # pipe_contract::MemcachedRequest (Bytes-backed fields, MultigetKeys)
     # lives behind proxima-protocols' memcached-codec-trait feature, not
     # its bare memcached feature — the client speaks MemcachedRequest over
@@ -81,9 +82,9 @@ listen = [
     "dep:conflaguration",
     "dep:serde",
     "dep:thiserror",
-    "dep:tracing",
     "dep:proxima-listen",
     "dep:proxima-runtime",
+    "dep:proxima-telemetry",
     "dep:serde_json",
     "proxima-listen/framed-any",
     "proxima-protocols/memcached-codec-trait",

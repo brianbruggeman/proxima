@@ -16,6 +16,7 @@
 use proxima_core::ProximaError;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
+use proxima_telemetry::error;
 
 use proxima_protocols::memcached::frame_codec::{
     MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, Violation,
@@ -108,11 +109,11 @@ impl SendPipe for MemcachedFramedApp {
     ) -> Result<MemcachedOutcome, MemcachedAppError> {
         match input {
             MemcachedOwnedFrame::Violation(Violation::Protocol) => {
-                tracing::error!("memcached protocol violation");
+                error!("memcached protocol violation");
                 Ok(MemcachedOutcome::CloseWithReply(Reply::Error))
             }
             MemcachedOwnedFrame::Violation(Violation::MessageTooLarge { limit }) => {
-                tracing::error!(limit, "memcached message too large");
+                error!(limit, "memcached message too large");
                 Ok(MemcachedOutcome::CloseWithReply(Reply::ServerError(
                     format!("message exceeds {limit} byte limit").into_bytes(),
                 )))
@@ -138,7 +139,7 @@ async fn dispatch(handler: &MemcachedPipeHandle, request: MemcachedRequest) -> M
         Ok(reply) => MemcachedOutcome::Reply(reply),
         Err(_error) if noreply => MemcachedOutcome::Silent,
         Err(error) => {
-            tracing::error!(error = %error, "memcached handler error");
+            error!(error = %error, "memcached handler error");
             MemcachedOutcome::Reply(Reply::ServerError(b"internal error".to_vec()))
         }
     }
