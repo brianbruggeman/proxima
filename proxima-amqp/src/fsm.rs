@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 
 use proxima_protocols::amqp::{Frame, ParseError, parse_frame};
 
-use crate::method::{Method, MethodError, decode, id};
+use crate::method::{Method, decode, id};
 
 /// The literal bytes a client sends before any framed AMQP traffic:
 /// `"AMQP"` + protocol-id `0` + major `0` + minor `9` + revision `1`.
@@ -297,7 +297,9 @@ impl Connection {
                 reason: format!("method frame on channel {channel} while content is in flight"),
             });
         }
-        let method = decode(class_id, method_id, args).map_err(method_error_to_advanced)?;
+        let method = decode(class_id, method_id, args).map_err(|error| Advanced::ProtocolError {
+            reason: error.to_string(),
+        })?;
         let pending = match &method {
             Method::BasicPublish {
                 exchange,
@@ -520,12 +522,6 @@ fn content_event(
             properties,
             body,
         },
-    }
-}
-
-fn method_error_to_advanced(error: MethodError) -> Advanced {
-    Advanced::ProtocolError {
-        reason: error.to_string(),
     }
 }
 
