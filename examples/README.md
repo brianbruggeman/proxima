@@ -70,7 +70,7 @@ config-free to keep one concept in focus.
 - **new-platform** — bring up a new target (os/arch/board): a `PROXIMA_PROFILE` + a `build.rs` that reads it via `conflaguration`/`proxima_build` and emits per-platform `pub const`s — config baked at build, no runtime. The porting workflow. *(config, no-std)*
 - **wasm** — proxima at the edge. *(transform)*
 - **dpdk** — kernel-bypass **networking**: userspace NIC rx/tx rings, poll-mode. *(runtime-select)*
-- **spdk** — kernel-bypass **storage**: userspace NVMe, a sans-IO SQE/CQE codec + ring FSM. *(dpdk)*
+- **nvme** — kernel-bypass **storage**: userspace NVMe, a sans-IO SQE/CQE codec + ring FSM, with the queue pair itself a `Pipe`. Pure Rust — there is no SPDK dependency, which is why this rung is not called "spdk". *(dpdk)*
 - **pmem** — **persistent memory**: byte-addressable, crash-consistent cells, no block layer. *(transform)*
 
 ## Extend it
@@ -94,14 +94,18 @@ config-free to keep one concept in focus.
   lesson (`proxima_main_demo.rs` / `proxima_main_tokio_demo.rs`).
 
 ---
-*Status: rungs land as they're built; a rung with no `<name>/main.rs` next to it hasn't
-landed yet. Live today: `hello`, the pipe algebra (`transform` through `signal`),
-`config`, the resilience layer (`clock` through `fallback`), the full Flow & delivery
-unit (`backpressure` · `cancellation` · `delivery` · `best-effort`),
-`record`/`replay`/`cache`, the o11y rungs (`logs` through `distributed-trace`), the
-prove-it-holds rungs (`chaos`/`fuzz`/`differential`), `runtime-select`, `multi-runtime`,
-the frontier `no-std`/`wasm`/`new-platform`/`dpdk` (`dpdk_tcp_connect`/`dpdk_tcp_echo`/
-`dpdk_udp_echo`, `required-features = ["dpdk"]`), `codec`, `plugin` (`examples/plugin-skeleton`),
-and the applied rungs
-(`proxy`/`gateway`/`load-balance`/`crud`/`integration`/`load`). Not yet built:
-`spdk`/`pmem`.*
+*Status: rungs land as they're built. Live today, as `<name>/main.rs` beside a
+`<name>/README.md`: `hello`, the pipe algebra (`transform` through `signal`), `config`,
+the resilience layer (`clock` through `fallback`), the full Flow & delivery unit
+(`backpressure` · `cancellation` · `delivery` · `best-effort`), `record`/`replay`/`cache`,
+the o11y rungs (`logs` through `distributed-trace`), the prove-it-holds rungs
+(`chaos`/`fuzz`/`differential`), `runtime-select`, `multi-runtime`, the frontier
+`no-std`/`wasm`/`new-platform`, `codec`, `plugin` (`examples/plugin-skeleton`), and the
+applied rungs (`proxy`/`gateway`/`load-balance`/`crud`/`integration`/`load`).*
+
+*Live as flat, reference-tier examples — the capability ships, the dir-per-example rung
+does not exist yet: `dpdk` (`dpdk_tcp_connect`/`dpdk_tcp_echo`/`dpdk_udp_echo`,
+`required-features = ["dpdk"]`, needs DPDK and a bound NIC), `nvme`
+(`proxima-storage/examples/uio_rw.rs`, `--features nvme-uio`, Linux + real controller),
+and `pmem` (`proxima-storage/examples/cow_walkthrough.rs` — no features, no hardware,
+runs on any host). Nothing on this page is unbuilt.*
