@@ -1,6 +1,6 @@
 //! `conflaguration`-derived [`ReplayConfig`] + factory entry point.
 //!
-//! Gated behind the `config` feature so consumers that only need the
+//! Gated behind the `replay-config` feature so consumers that only need the
 //! raw `ReplayUpstream::from_jsonl` / `from_source` constructors stay
 //! dependency-light. With the feature on, callers can drive a Replay
 //! pipe entirely from env vars or a TOML block:
@@ -30,13 +30,17 @@ use crate::replay::ReplayUpstream;
 
 #[derive(Debug, Clone, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "PROXIMA_REPLAY")]
-#[builder(derive(Clone, Debug), on(String, into), on(PathBuf, into))]
+#[builder(derive(Clone, Debug), on(String, into))]
 pub struct ReplayConfig {
     /// Path to the recording file the replay reads from. Must exist
     /// and be readable. The format is inferred from `format` (below)
     /// rather than the extension because operators sometimes name the
     /// same payload `.log` or `.recording` regardless of encoding.
     /// example: `/var/lib/proxima/recording.jsonl`
+    // per-field `into` rather than a second struct-level `on(PathBuf, into)`:
+    // clippy::duplicated_attributes reads the repeated `on(..)` as a literal
+    // duplicate and fails the -D warnings gate.
+    #[builder(into)]
     pub source_path: PathBuf,
 
     /// Friendly name for the replay Pipe, surfaced through
