@@ -1,5 +1,5 @@
 //! Portable store-backed crash-consistent cell — the floor under the pmem-native
-//! [`crate::dax::PmemCowStore`] fast tier.
+//! `PmemCowStore` fast tier.
 //!
 //! [`FileCell`] gives the *same* crash guarantee as `PmemCowStore` (a read after
 //! a crash sees the complete old or new value, never torn) using a conventional

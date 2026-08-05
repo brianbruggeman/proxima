@@ -13,7 +13,7 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
-/// How [`crate::dax::PmemCowStore`] makes a region durable on `persist`.
+/// How `PmemCowStore` makes a region durable on `persist`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistMode {
