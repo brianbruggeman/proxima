@@ -106,40 +106,68 @@ impl BackgroundPool for RayonBackgroundPool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::any::Any;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[proxima::test]
-    async fn rayon_pool_runs_work_and_returns_result() {
-        let pool = Arc::new(RayonBackgroundPool::new().expect("build pool"));
+    async fn typed_spawn_hands_back_the_concrete_type() {
+        let pool = RayonBackgroundPool::new().expect("build pool");
         let counter = Arc::new(AtomicUsize::new(0));
-        let counter_for_work = counter.clone();
-        let handle = pool.spawn(Box::new(move || {
-            counter_for_work.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(42_u32) as Box<dyn core::any::Any + Send>)
-        }));
-        let result = handle.await.expect("background result");
-        let value = result.downcast::<u32>().expect("downcast");
-        assert_eq!(*value, 42);
+        let counter_for_work = Arc::clone(&counter);
+        let value = pool
+            .spawn(move || {
+                counter_for_work.fetch_add(1, Ordering::SeqCst);
+                Ok(42_u32)
+            })
+            .await
+            .expect("background result");
+        assert_eq!(value, 42);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[proxima::test]
-    async fn rayon_pool_runs_many_tasks_in_parallel() {
-        let pool = Arc::new(RayonBackgroundPool::with_threads(4).expect("build pool"));
-        let mut handles = Vec::new();
-        for index in 0..8_u32 {
-            handles.push(pool.spawn(Box::new(move || {
-                Ok(Box::new(index * 2) as Box<dyn core::any::Any + Send>)
-            })));
-        }
+    async fn typed_spawn_runs_many_jobs_across_the_pool() {
+        let pool = RayonBackgroundPool::with_threads(4).expect("build pool");
+        let handles: Vec<_> = (0..8_u32)
+            .map(|index| pool.spawn(move || Ok(index * 2)))
+            .collect();
         let mut results: Vec<u32> = Vec::new();
         for handle in handles {
-            let value = handle.await.expect("result");
-            results.push(*value.downcast::<u32>().expect("downcast"));
+            results.push(handle.await.expect("result"));
         }
         results.sort_unstable();
         let expected: Vec<u32> = (0..8).map(|index| index * 2).collect();
         assert_eq!(results, expected);
+    }
+
+    /// The erased form `TokioPerCoreRuntime::with_background_pool` stores. Worth
+    /// its own case because the two tests above resolve to the INHERENT
+    /// `spawn<F, T>` — an inherent method shadows the trait one — so deleting
+    /// `impl BackgroundPool for RayonBackgroundPool` left them compiling.
+    #[proxima::test]
+    async fn erased_pool_round_trips_a_payload_through_the_trait() {
+        let pool: Arc<dyn BackgroundPool> =
+            Arc::new(RayonBackgroundPool::with_threads(2).expect("build pool"));
+        let handle = pool.spawn(Box::new(|| {
+            Ok(Box::new(alloc::string::String::from("hello")) as Box<dyn Any + Send>)
+        }));
+        let boxed = handle.await.expect("background result");
+        let value = boxed.downcast::<alloc::string::String>().expect("downcast");
+        assert_eq!(*value, "hello");
+    }
+
+    /// A job that fails must surface its own error, not the channel's — the arm
+    /// that distinguishes `Ok(Err(job))` from a dropped sender.
+    #[proxima::test]
+    async fn erased_pool_surfaces_the_jobs_own_error() {
+        let pool: Arc<dyn BackgroundPool> =
+            Arc::new(RayonBackgroundPool::new().expect("build pool"));
+        let handle = pool.spawn(Box::new(|| Err(ProximaError::Body("job said no".into()))));
+        let error = handle.await.expect_err("job failed");
+        assert!(
+            error.to_string().contains("job said no"),
+            "job error, not a transport error; got {error}"
+        );
     }
 }
