@@ -49,10 +49,13 @@
 //!
 //! # Tiers
 //!
-//! - **Bare `no_std` + no-alloc (default core)**: [`ticks`], [`unix_nanos`],
+//! - **Bare `no_std` + no-alloc floor**: [`ticks`], [`unix_nanos`],
 //!   [`coarse`], [`anchor`] — zero `alloc::`, zero `Box`/`Vec`/`Arc`/
-//!   `String`, builds for `thumbv7m-none-eabi` with
-//!   `--no-default-features`.
+//!   `String`. `--no-default-features` both builds for
+//!   `thumbv7m-none-eabi` and RUNS the crate's unit tests; only the tests
+//!   that genuinely need threads or an allocator are `std`-gated.
+//! - **`std` feature (on by default)**: no extra surface of its own — it
+//!   turns off `no_std` and admits the thread- and `format!`-using tests.
 //! - **`config` feature (std, opt-in)**: [`config`] — the principle-4
 //!   config + fluent-builder surface for [`anchor::AnchorCell`]'s initial
 //!   `(ticks, unix_nanos)` pair. `conflaguration` is std-only, so this
