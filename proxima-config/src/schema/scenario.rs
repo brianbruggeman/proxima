@@ -52,7 +52,7 @@ pub fn register_scenario_schemas(registry: &SchemaRegistry) -> Result<(), Proxim
 fn duration_spec_schema() -> Schema {
     Schema::Struct {
         name: "DurationSpec".into(),
-        fields: vec![field(
+        fields: vec![required_field(
             "secs",
             Schema::UInt {
                 min: None,
@@ -67,7 +67,7 @@ fn profile_step_schema() -> Schema {
     Schema::Struct {
         name: "ProfileStep".into(),
         fields: vec![
-            field(
+            required_field(
                 "rate",
                 Schema::UInt {
                     min: Some(1),
@@ -75,7 +75,7 @@ fn profile_step_schema() -> Schema {
                 },
                 "requests-per-second target during this step",
             ),
-            field(
+            required_field(
                 "duration",
                 Schema::Ref("duration_spec".into()),
                 "how long this step holds `rate`",
@@ -110,7 +110,7 @@ fn expectation_schema() -> Schema {
     Schema::Struct {
         name: "Expectation".into(),
         fields: vec![
-            field(
+            required_field(
                 "kind",
                 Schema::Enum {
                     name: "ExpectationKind".into(),
@@ -199,7 +199,7 @@ fn workload_spec_schema() -> Schema {
     Schema::Struct {
         name: "WorkloadSpec".into(),
         fields: vec![
-            field(
+            required_field(
                 "target_pipe",
                 Schema::String {
                     pattern: None,
@@ -295,7 +295,7 @@ fn scenario_pipe_spec_schema() -> Schema {
     Schema::Struct {
         name: "ScenarioPipeSpec".into(),
         fields: vec![
-            field(
+            required_field(
                 "name",
                 Schema::String {
                     pattern: None,
@@ -330,7 +330,7 @@ fn scenario_schema() -> Schema {
                 },
                 "pipe definitions referenced by the workload",
             ),
-            field(
+            required_field(
                 "workload",
                 Schema::Ref("workload_spec".into()),
                 "what to drive and how",
@@ -382,7 +382,7 @@ fn header_or_query_map_schema() -> Schema {
     }
 }
 
-fn field(name: &str, schema: Schema, description: &str) -> StructField {
+fn required_field(name: &str, schema: Schema, description: &str) -> StructField {
     StructField {
         name: name.into(),
         schema,
