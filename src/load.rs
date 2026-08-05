@@ -1202,7 +1202,12 @@ mod tests {
             "middleware": [{"type": "definitely-not-registered"}],
         });
         let outcome = load(spec, &context).await;
-        assert!(matches!(outcome, Err(ProximaError::Registry(_))));
+        assert!(matches!(
+            outcome,
+            Err(ProximaError::RegistryKind(
+                proxima_core::RegistryError::NotRegistered { .. }
+            ))
+        ));
     }
 
     #[cfg(any(
