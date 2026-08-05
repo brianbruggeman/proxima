@@ -22,7 +22,7 @@
 //! [`shed_reply`] (installed as `FramedAny`'s `Shed`) reproduces the
 //! SAME outcome [`KafkaFramedApp::call`] would have rendered for those
 //! two cases, ignoring the shed reason entirely (via the shared
-//! [`resolve_violation`]/`apiversions_reply` helpers): the deleted
+//! `resolve_violation`/`apiversions_reply` helpers): the deleted
 //! driver's own admission check ran only AFTER `ApiVersions` and every
 //! parse-time violation had already short-circuited to their answer, so
 //! neither was ever actually sheddable. Only a genuine dispatchable

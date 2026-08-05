@@ -1,6 +1,6 @@
 //! proxima's own Kafka client + broker-facade listener.
 //!
-//! The sans-IO wire envelope ([`proxima_protocols::kafka`]: the
+//! The sans-IO wire envelope (`proxima_protocols::kafka`: the
 //! `[i32 length][payload]` frame plus the `api_key`/`api_version`/
 //! `correlation_id`/`client_id` request header) is lifted, not
 //! reimplemented — see that module's docs. [`wire`] is this crate's own
@@ -10,18 +10,18 @@
 //! what a given `api_key` means).
 //!
 //! The `client` feature adds the std client built on top: the async
-//! [`client::KafkaClientUpstream`] Pipe and the blocking
-//! [`client::KafkaClient`] driver, both driving the sans-IO
-//! [`client::ClientSession`] over a pluggable transport (prime, tokio,
+//! `client::KafkaClientUpstream` Pipe and the blocking
+//! `client::KafkaClient` driver, both driving the sans-IO
+//! `client::ClientSession` over a pluggable transport (prime, tokio,
 //! TLS-wrapped) — the same split `proxima-redis` uses between
 //! `proxima-protocols::redis` and its own client.
 //!
 //! The `listen` feature adds the server side:
-//! [`frame_codec::KafkaCodec`] (the sans-IO `FrameCodec` +
+//! `frame_codec::KafkaCodec` (the sans-IO `FrameCodec` +
 //! `OwnFrame`/`Incomplete` impl over [`wire`]'s Produce/Fetch/Metadata/
-//! ApiVersions body codec), [`framed_app::KafkaFramedApp`] (the
+//! ApiVersions body codec), `framed_app::KafkaFramedApp` (the
 //! business-handler pipe wired as `proxima_listen::any::FramedAny`'s
-//! `App`), and [`any_protocol::KafkaAnyProtocol`] — the `AnyProtocol`
+//! `App`), and `any_protocol::KafkaAnyProtocol` — the `AnyProtocol`
 //! candidate that mounts kafka into the open universal listener
 //! (`Listener::builder().accept("kafka")`) by building a `FramedAny`
 //! internally. There is no bespoke per-connection I/O driver here
@@ -37,6 +37,10 @@
 //! batch-granularity offsets, a real if per-partition-sequential Fetch
 //! long-poll), not a production Kafka broker. There is no standalone
 //! `KafkaListenProtocol` bind+accept loop, mirroring redis's own shape.
+//!
+//! The feature-gated names above and below are deliberately unlinked — an
+//! intra-doc link to them would break `cargo doc` on the bare tier, where
+//! they do not exist.
 //!
 //! ## Scope
 //!
