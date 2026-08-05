@@ -89,6 +89,12 @@ hyper = { workspace = true, features = ["http1", "client"] }
 hyper-util = { workspace = true, features = ["tokio", "client", "client-legacy", "http1"] }
 temp-env.workspace = true
 tempfile = { workspace = true }
+# `examples/native_h3_demo.rs` drives its own UDP loop on tokio, and
+# `http1/client.rs`'s tests reach for `tokio::io`'s ext traits. A dev-dep, not
+# a library feature: no `[features]` entry grants bare tokio, and neither a
+# demo's nor a test's choice of runtime should force a library tier to carry
+# one. Without it those tests only built when `http1` happened to be on too.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
 
 [features]
 default = ["http1"]
@@ -227,7 +233,9 @@ tls = [
 [[bench]]
 name = "bench_h1_client_compare"
 harness = false
-required-features = ["http1-stream-client"]
+# it compares the prime client (`http1-stream-client`) against the hyper one,
+# so it needs BOTH arms: `hyper_body`/`shared_http` are gated on `http1`.
+required-features = ["http1", "http1-stream-client"]
 
 [[example]]
 name = "native_h3_demo"
