@@ -4402,6 +4402,7 @@ dependencies = [
  "proxima-primitives",
  "proxima-protocols",
  "proxima-runtime",
+ "proxima-telemetry",
  "rstest",
  "serde",
  "serde_json",
@@ -4411,7 +4412,6 @@ dependencies = [
  "time",
  "tokio",
  "toml 0.8.23",
- "tracing",
  "ulid",
  "zstd",
 ]

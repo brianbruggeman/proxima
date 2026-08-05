@@ -184,7 +184,7 @@ async fn run_worker(inner: Arc<BoundedInner>) {
         match inner.queue.dequeue() {
             Some(event) => {
                 if let Err(error) = inner.backend.append(event).await {
-                    tracing::error!(error = %error, "bounded recording backend failed");
+                    proxima_telemetry::error!(%error, "bounded recording backend rejected an event");
                 }
                 inner.counters.record_drain();
                 inner.progress_signal.notify_waiters();
@@ -197,15 +197,7 @@ async fn run_worker(inner: Arc<BoundedInner>) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::event::InteractionId;
@@ -214,9 +206,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
+    /// A counter is addressed by its metric name plus the exact label set it
+    /// was incremented under — the same pair a scrape would key on.
+    type CounterKey = (String, Vec<(String, String)>);
+
     #[derive(Default)]
     struct Metrics {
-        counters: StdMutex<HashMap<(String, Vec<(String, String)>), u64>>,
+        counters: StdMutex<HashMap<CounterKey, u64>>,
     }
 
     impl Telemetry for Metrics {

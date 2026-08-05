@@ -8,57 +8,36 @@
 //! Format-only consumers use the crate's default `std`/`alloc` surface;
 //! pipe-flavored consumers additionally enable the `pipe` feature.
 //!
-//! Tier: real content is std-only. Recording sinks use tokio::sync +
-//! crossbeam-queue + std::time. Enabling `pipe` without `std` compiles this
-//! module as a marker (no public items) — same tier behaviour the former
-//! `proxima-recording-pipe` crate had.
+//! Tier: std. Everything here holds a file handle or an OS thread, so the
+//! `pipe` feature declares `std` rather than gating each item on it. The
+//! concurrency is tokio-free: `proxima_primitives::sync::Notify` for the
+//! drain handshake, `crossbeam-queue` for the lock-free ring, and
+//! `futures::executor::block_on` on one dedicated thread per sink.
 
-#[cfg(feature = "std")]
 pub mod accumulate;
-#[cfg(feature = "std")]
 pub mod cap;
-#[cfg(feature = "std")]
 pub mod capture;
-#[cfg(feature = "std")]
 pub mod causality;
 #[cfg(feature = "pipe-config")]
 pub mod config;
-#[cfg(feature = "std")]
 pub mod dest;
-#[cfg(feature = "std")]
 pub mod event_sink;
-#[cfg(feature = "std")]
 pub mod fanout;
-#[cfg(feature = "std")]
 pub mod lazy;
-#[cfg(feature = "std")]
 pub mod log_pipe;
-#[cfg(feature = "std")]
 pub mod replay;
-#[cfg(feature = "std")]
 pub mod terminal_signal;
 
-#[cfg(feature = "std")]
 pub use accumulate::{AccumulatingSink, DEFAULT_BATCH_EVENTS};
-#[cfg(feature = "std")]
 pub use cap::{BoundedRecordingSink, DropReason, FailMode, RECORD_DROP_METRIC};
-#[cfg(feature = "std")]
 pub use capture::LiveCaptureContext;
-#[cfg(feature = "std")]
 pub use causality::{ByteRange, Causal, CausalEdge, CausalIndex};
 #[cfg(feature = "pipe-config")]
-pub use config::RecordingConfig;
-#[cfg(feature = "std")]
+pub use config::{RecorderConfig, RecordingConfig, SinkConfig};
 pub use dest::{FormatKind, SinkSpec};
-#[cfg(feature = "std")]
 pub use event_sink::{AppendFuture, DynRecordingSink, EventTap, RecordingSink};
-#[cfg(feature = "std")]
 pub use fanout::FanOut;
-#[cfg(feature = "std")]
 pub use lazy::{DeferredRuntime, LazyFanOut, deferred_runtime};
-#[cfg(feature = "std")]
 pub use log_pipe::{AppendAck, AppendLog, ReplayChunk, ReplayLog};
-#[cfg(feature = "std")]
-pub use replay::{ReplayConfig, ReplayMode, TimedReplay};
-#[cfg(feature = "std")]
+pub use replay::{ReplayMode, TimedReplay};
 pub use terminal_signal::TerminalSignal;

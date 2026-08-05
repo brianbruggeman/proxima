@@ -1,6 +1,6 @@
 [package]
 name = "proxima-recording"
-description = "Recording layer for proxima: event model, source/sink traits, binary and JSONL on-disk formats, index files (base/format tier); pipe-flavored capture/replay wrappers (`pipe` feature); cassette replay-by-match-key (`replay` feature)"
+description = "Recording layer for proxima: event model, source traits, binary and JSONL on-disk formats, index files (no_std+alloc format tier); durable Pipe terminals, capture and causal-order/timing-intact replay (`pipe` feature, std); cassette replay-by-match-key (`replay` feature)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -47,13 +47,16 @@ futures = { workspace = true, optional = true, features = ["executor"] }
 thiserror = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
-# `pipe` feature only (Pipe-flavored capture/replay wrappers): std, tokio-free
+# `pipe` feature only (Pipe-flavored capture/replay wrappers): tokio-free
 # background drain thread (`futures::executor::block_on`, see `cap.rs`),
 # per-core causal recording. Never pulled in by the base format tier.
 proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
 crossbeam-queue = { workspace = true, optional = true }
 num_cpus = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
+# proxima's own emit surface — the drain worker's backend-failure event. NOT
+# `tracing`: the house rule routes proxima code through proxima's recorder, and
+# `proxima-telemetry` does not depend on this crate, so the edge is acyclic.
+proxima-telemetry = { workspace = true, features = ["std", "emit"], optional = true }
 
 # `replay` feature only (cassette replay-by-match-key, `ReplayUpstream`):
 # RFC 6455 Sec-WebSocket-Accept for the ws replay handshake.
@@ -118,12 +121,10 @@ std = [
     "dep:futures",
     "dep:thiserror",
     "dep:zstd",
-    # `pipe`'s real content (gated on this crate's own `std`) reaches into
-    # `proxima_primitives::sync::Notify`, which is itself gated behind
-    # proxima-primitives' `std` feature (formerly satisfied implicitly by
-    # proxima-sync's own workspace-default std tier, pre-merge). Only takes
-    # effect when `pipe` is also active — otherwise proxima-primitives stays
-    # at the `alloc` tier the `pipe` feature itself requests.
+    # `pipe` reaches into `proxima_primitives::sync::Notify`, itself gated
+    # behind proxima-primitives' `std`. Only takes effect when `pipe` is also
+    # active — otherwise proxima-primitives stays at the `alloc` tier the
+    # `replay` feature requests.
     "proxima-primitives/std",
 ]
 
@@ -140,10 +141,10 @@ alloc = [
     "time/alloc",
 ]
 
-# S1 of the proxima-notify initiative: durable WAL semantics on BinSink/
-# BinSource. Adds BinSink::sync_now (fsync data + idx in the correct
-# order) and BinSource::events_from_offset (yields (offset, event) pairs
-# for at-least-once consumer drain via the offset cursor C7).
+# S1 of the proxima-notify initiative: durable WAL semantics on the binary
+# tier. Adds IndexWriter::sync_now (fsync data + idx in the correct order)
+# and BinSource::events_from_offset (yields (offset, event) pairs for
+# at-least-once consumer drain via the offset cursor C7).
 # Default off — opt-in until the notify layer is fully sealed.
 durable-wal = []
 
@@ -152,14 +153,15 @@ durable-wal = []
 # wrapper with causal index), the durable spigot terminal (`LazyFanOut`,
 # `FanOut`, `AppendLog`/`ReplayLog`), and `pipe::replay::TimedReplay` (the
 # causal-order / timing-intact recording pacer — distinct from the top-level
-# `replay` feature's `ReplayUpstream`). Real content is std-only; without
-# `std` this module compiles as a marker (matches the former crate's tier
-# behaviour).
+# `replay` feature's `ReplayUpstream`). Every item in `pipe::*` needs file
+# handles and an OS thread, so the feature declares `std` rather than
+# compiling to an empty module that still drags four dependencies in.
 pipe = [
+    "std",
     "dep:proxima-primitives",
     "dep:crossbeam-queue",
     "dep:num_cpus",
-    "dep:tracing",
+    "dep:proxima-telemetry",
 ]
 
 # Cassette replay-by-match-key (folded from proxima-replay): `ReplayUpstream`,
@@ -172,17 +174,16 @@ replay = [
     "dep:proxima-protocols",
 ]
 
-# Step 4 of the proxima workspace consolidation: RecordingConfig
-# (capacity / fail_mode / enabled) backed by conflaguration + bon.
-# default off so the raw `BoundedRecordingSink::new` /
-# `LiveCaptureContext` paths stay dependency-light.
-pipe-config = ["dep:conflaguration", "dep:bon", "pipe", "std"]
+# RecordingConfig / RecorderConfig (capacity / fail_mode / enabled, and the
+# sink topology) backed by conflaguration + bon. Default off so the raw
+# `BoundedRecordingSink::new` / `LiveCaptureContext` paths stay
+# dependency-light.
+pipe-config = ["dep:conflaguration", "dep:bon", "pipe"]
 
-# Step 4 of the proxima workspace consolidation: ReplayConfig +
-# `ReplayConfig::build()` async factory backed by conflaguration + bon.
-# default off so the raw `ReplayUpstream::from_jsonl` / `from_source`
-# constructors stay dependency-light. Requires `std`: conflaguration is
-# unconditionally std (guiding-principles P4).
+# `replay::config::ReplayConfig` + its async `build()` factory, backed by
+# conflaguration + bon. Default off so the raw `ReplayUpstream::from_jsonl` /
+# `from_source` constructors stay dependency-light. Requires `std`:
+# conflaguration is unconditionally std (guiding-principles P4).
 replay-config = ["dep:conflaguration", "dep:bon", "replay", "std"]
 
 [lints]
