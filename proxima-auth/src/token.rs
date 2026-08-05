@@ -89,6 +89,31 @@ enum Fetch {
 pub const DEFAULT_RETRY_BACKOFF_MS: u64 = 1_000;
 
 /// The token-lifecycle state machine.
+///
+/// The two methods are asked in different places and must not be collapsed:
+/// [`Self::needs_fetch`] is asked once per scheduling round and mutates (it
+/// claims the slot), [`Self::poll`] is asked once per request and does not.
+///
+/// ```
+/// use proxima_auth::{AuthTime, Credential, TokenLifecycle, TokenStep};
+///
+/// // refresh 200ms before hard expiry so the fetch happens off the request path
+/// let mut lifecycle = TokenLifecycle::new(200);
+/// assert_eq!(lifecycle.poll(AuthTime(0)), TokenStep::Await);
+///
+/// // exactly one caller is told to run the exchange edge
+/// assert!(lifecycle.needs_fetch(AuthTime(0)));
+/// assert!(!lifecycle.needs_fetch(AuthTime(0)));
+///
+/// let token = Credential::Bearer("ya29.a0Af…".to_string());
+/// lifecycle.set_token(token.clone(), AuthTime(1_000));
+/// assert_eq!(lifecycle.poll(AuthTime(500)), TokenStep::Use(token.clone()));
+///
+/// // inside the refresh-ahead window a refetch starts, and the OLD token still
+/// // serves — the refresh never stalls a request
+/// assert!(lifecycle.needs_fetch(AuthTime(850)));
+/// assert_eq!(lifecycle.poll(AuthTime(850)), TokenStep::Use(token));
+/// ```
 #[derive(Clone, Debug)]
 pub struct TokenLifecycle {
     token: Option<Credential>,
@@ -130,6 +155,11 @@ impl TokenLifecycle {
     /// window), none is in flight, AND any post-failure cool-down has elapsed.
     /// The winner performs the exchange edge and then calls [`Self::set_token`]
     /// (or [`Self::fetch_failed`]).
+    ///
+    /// `#[must_use]` because dropping the `true` on the floor claims the
+    /// single-flight slot and never releases it — every other caller then parks
+    /// forever waiting on a fetch nobody is performing.
+    #[must_use]
     pub fn needs_fetch(&mut self, now: AuthTime) -> bool {
         if self.fetch == Fetch::InFlight || now < self.next_retry_at {
             return false;
