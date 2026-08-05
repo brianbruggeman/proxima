@@ -246,6 +246,29 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-listen-gate.sh
 
+  # proxima-auth-gate.sh — same shape, sharpest ratio yet: `default = ["std"]`
+  # leaves `signing` / `digest` / `negotiate` off, and unlike proxima-listen
+  # nothing in the dev graph unifies them back on, so a crate-scoped command
+  # compiles one of four modules with no accident to soften it. Measured
+  # 2026-08-05: `cargo nextest run -p proxima-auth` ran 8 tests,
+  # `--all-features` ran 32 — every AWS SigV4 and RFC 7616 parity vector the
+  # crate owns sat in the 24 that no gate ran. Also the only place rustdoc and
+  # the doctest count run on this crate.
+  proxima-auth-gate:
+    name: proxima-auth-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-auth-gate.sh
+
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
   # directives. `continue-on-error: true` until DC5 finishes gating

@@ -58,6 +58,10 @@ packages = [
     "proxima-config",
     "proxima-test",
     "proxima-storage",
+    # only reaches the nostd area today through proxima-patterns' optional
+    # dependency on it; named directly because it now carries its own
+    # thumbv7m cliff cells, which must not depend on a sibling for coverage.
+    "proxima-auth",
 ]
 paths = [
     "scripts/nostd-gate.sh",
@@ -71,6 +75,7 @@ paths = [
     "scripts/proxima-test-gate.sh",
     "scripts/proxima-storage-gate.sh",
     "scripts/proxima-listen-gate.sh",
+    "scripts/proxima-auth-gate.sh",
     "scripts/_floor-crate-matrix.sh",
     ".github/workflows/no-std.yml",
 ]
