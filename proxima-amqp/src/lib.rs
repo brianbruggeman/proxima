@@ -21,22 +21,26 @@
 //!   matching, the routing-key sibling of
 //!   `proxima_redis::glob::glob_match`'s PSUBSCRIBE matching.
 //!
-//! The `client` feature adds the std client: [`client::AmqpClientUpstream`]
+//! The `client` feature adds the std client: `client::AmqpClientUpstream`
 //! (an async `Pipe`, `basic.publish`/`basic.consume`) and
-//! [`client::AmqpClient`] (a blocking driver), both driving the sans-IO
-//! [`client::ClientSession`] over a pluggable transport — the same split
+//! `client::AmqpClient` (a blocking driver), both driving the sans-IO
+//! `client::ClientSession` over a pluggable transport — the same split
 //! `proxima_redis::client` uses.
 //!
-//! The `listen` feature adds the server side: [`connection::serve_connection`]
+//! The `listen` feature adds the server side: `connection::serve_connection`
 //! (the per-connection I/O driver over the [`fsm::Connection`]),
-//! [`broker::AmqpBroker`] (exchange -> queue routing on
-//! [`proxima_primitives::pipe::KeyedFanOut`] — the same broadcast registry
+//! `broker::AmqpBroker` (exchange -> queue routing on
+//! `proxima_primitives::pipe::KeyedFanOut` — the same broadcast registry
 //! `proxima_redis::broker::RedisBroker`'s PUBLISH/SUBSCRIBE fabric uses),
-//! and [`any_protocol::AmqpAnyProtocol`] — the `AnyProtocol` candidate that
+//! and `any_protocol::AmqpAnyProtocol` — the `AnyProtocol` candidate that
 //! mounts AMQP into the open universal listener
 //! (`Listener::builder().accept("amqp")`), mirroring
 //! `proxima_redis::any_protocol::RedisAnyProtocol`'s shape exactly (no
 //! standalone `AmqpListenProtocol` bind+accept loop).
+//!
+//! The feature-gated names above and below are deliberately unlinked — an
+//! intra-doc link to them would break `cargo doc` on the bare tier, where
+//! they do not exist.
 //!
 //! ## Scope gaps (read before relying on this as a drop-in RabbitMQ)
 //!
@@ -46,7 +50,7 @@
 //! crate; there was no method-level codec to lift beyond the envelope.
 //! Deliberately out of implemented scope on top of that:
 //!
-//! - **No message persistence.** [`broker::AmqpBroker`] is a live fan-out
+//! - **No message persistence.** `broker::AmqpBroker` is a live fan-out
 //!   (like redis PUBLISH/SUBSCRIBE), not a store-and-forward queue — a
 //!   `basic.publish` to a queue with zero consumers is dropped, not
 //!   buffered. `queue.declare-ok`'s `message-count` is always `0`.
@@ -62,7 +66,7 @@
 //!   compose it behind `proxima-auth` for real credential checks, the same
 //!   posture redis's facade takes).
 //! - **`headers`-kind exchanges are not implemented** — only
-//!   `direct`/`fanout`/`topic` ([`broker::ExchangeKind`]); declaring a
+//!   `direct`/`fanout`/`topic` (`broker::ExchangeKind`); declaring a
 //!   `headers` exchange fails with `channel.close` (`COMMAND_INVALID`).
 //! - **`channel.flow`, `basic.get`, `queue.{purge,unbind,delete}`,
 //!   `exchange.delete`, `tx.*`, `confirm.*`** are not decoded —

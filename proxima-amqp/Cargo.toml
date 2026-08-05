@@ -1,6 +1,6 @@
 [package]
 name = "proxima-amqp"
-description = "AMQP 0-9-1 broker facade: the async client Pipe (publish/consume) and the listener-side broker (connection/channel FSM + exchange-to-queue routing over KeyedFanOut), built on the sans-IO frame envelope in proxima-protocols::amqp. Method-level (connection/channel/exchange/queue/basic) encode/decode lives in this crate — proxima-protocols::amqp only frames the outer envelope."
+description = "AMQP 0-9-1 broker facade: the async client Pipe (feature `client`, publish/consume) and the listener-side broker (feature `listen`, connection/channel FSM + exchange-to-queue routing over KeyedFanOut), built on the sans-IO frame envelope in proxima-protocols::amqp. Method-level (connection/channel/exchange/queue/basic) encode/decode lives in this crate — proxima-protocols::amqp only frames the outer envelope — and `--no-default-features` leaves that no_std + alloc codec alone."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

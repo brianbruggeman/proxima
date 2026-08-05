@@ -4,7 +4,8 @@
 //! header (`type` octet + `channel` short + `length` long) and trailing
 //! [`proxima_protocols::amqp::FRAME_END`] marker; this module is that
 //! wrapper plus the three outbound frame shapes
-//! [`crate::fsm::Connection`]/[`crate::broker::AmqpBroker`] build.
+//! [`crate::fsm::Connection`] and the `listen`-gated `broker::AmqpBroker`
+//! build.
 
 use alloc::vec::Vec;
 
