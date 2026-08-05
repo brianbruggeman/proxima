@@ -48,6 +48,8 @@ fn build_client_config(
     Ok(config)
 }
 
+// boxed because `poll_connect(&self, ..)` must stash this future in a struct
+// field between polls, and an RPITIT future has no nameable type to store.
 type ConnectFuture<C> = Pin<Box<dyn std::future::Future<Output = io::Result<TlsConn<C>>> + Send>>;
 
 /// Client-side TLS connection: a `futures_rustls::client::TlsStream`
