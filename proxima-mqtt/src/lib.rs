@@ -34,6 +34,12 @@
 //! late subscriber never receives a publish that happened before it
 //! subscribed. This is a routing fabric (like redis PUBLISH/SUBSCRIBE),
 //! not a durable broker.
+//!
+//! `--no-default-features` drops `std` and leaves only the MQTT codec
+//! re-exports, so the bare tier links on a bare-metal target
+//! (`thumbv7m-none-eabi`); both `client` and `listen` imply `std`.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "client")]
 pub mod client;
