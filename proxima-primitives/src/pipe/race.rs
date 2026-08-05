@@ -43,7 +43,6 @@ pub enum RaceBuildError {
     EmptySinks,
 }
 
-
 /// Concurrent first-`Ok`-wins dispatcher over N drop-safe sink [`SendPipe`]s.
 ///
 /// `Policy` governs pre-winner errors: [`AllOrNothing`] returns the first
