@@ -24,8 +24,6 @@
 //! (with proxima-config's schema module contracts), `Retry`, and `Isolate`. No
 //! per-integration Rust required.
 
-#![deny(missing_docs)]
-
 #[cfg(all(feature = "alert", feature = "proto"))]
 pub mod event;
 
