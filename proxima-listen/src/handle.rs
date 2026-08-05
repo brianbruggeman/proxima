@@ -9,8 +9,6 @@ use futures::FutureExt;
 use futures::channel::oneshot;
 use proxima_telemetry::warn;
 use serde_json::Value;
-#[cfg(feature = "tokio")]
-use tokio::task::JoinHandle;
 
 use crate::{ListenProtocol, ListenRegistry, ListenTuningConfig, ServeContext};
 use proxima_core::ProximaError;
@@ -313,8 +311,6 @@ impl Listener {
         Ok(ListenerHandle {
             bind_addr: Some(resolved_addr),
             shutdown: Some(shutdown_tx),
-            #[cfg(feature = "tokio")]
-            join: None,
             _runtime: Some(runtime_for_handle),
         })
     }
@@ -585,26 +581,17 @@ async fn serve(
 pub struct ListenerHandle {
     bind_addr: Option<SocketAddr>,
     shutdown: Option<oneshot::Sender<()>>,
-    // Never populated with `Some` by any constructor in this crate today —
-    // every path (`run_with_runtime`, `new_external`) sets `None`. Kept
-    // (not deleted) because `stop()` reads it; gated on `tokio` since the
-    // type itself is tokio's.
-    #[cfg(feature = "tokio")]
-    join: Option<JoinHandle<()>>,
     /// keep per-core runtime workers alive across `App` drop. None when
     /// the listener fell back to ambient `tokio::spawn`.
     _runtime: Option<Arc<dyn proxima_runtime::Runtime>>,
 }
 
 impl ListenerHandle {
-    pub async fn stop(mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        #[cfg(feature = "tokio")]
-        if let Some(join) = self.join.take() {
-            let _ = join.await;
-        }
+    /// Fire the shutdown signal. Async only so a caller already inside an
+    /// async block can `.await` it in place of [`Self::shutdown`]; both send
+    /// the same oneshot, and so does `Drop`.
+    pub async fn stop(self) {
+        self.shutdown();
     }
 
     pub fn shutdown_signal(&mut self) -> Option<oneshot::Sender<()>> {
@@ -637,8 +624,6 @@ impl ListenerHandle {
         Self {
             bind_addr: Some(bind_addr),
             shutdown: Some(shutdown),
-            #[cfg(feature = "tokio")]
-            join: None,
             _runtime: Some(runtime),
         }
     }
@@ -649,30 +634,6 @@ impl Drop for ListenerHandle {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ListenerConfig {
-    pub bind: SocketAddr,
-    pub protocol: String,
-    pub spec: Value,
-}
-
-impl ListenerConfig {
-    #[must_use]
-    pub fn http(bind: SocketAddr) -> Self {
-        Self {
-            bind,
-            protocol: "http".into(),
-            spec: Value::Null,
-        }
-    }
-
-    #[must_use]
-    pub fn with_spec(mut self, spec: Value) -> Self {
-        self.spec = spec;
-        self
     }
 }
 
@@ -690,14 +651,6 @@ mod tests {
     use proxima_runtime::{BackgroundHandle, CoreId, Runtime, SpawnError};
 
     use super::*;
-
-    #[test]
-    fn http_helper_sets_defaults() {
-        let bind: SocketAddr = "127.0.0.1:8080".parse().expect("address parses");
-        let listener = ListenerConfig::http(bind);
-        assert_eq!(listener.bind, bind);
-        assert_eq!(listener.protocol, "http");
-    }
 
     #[test]
     fn shutdown_policy_default_is_drain_30s() {
