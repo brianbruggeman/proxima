@@ -11,7 +11,8 @@
 //!
 //! AMQP multiplexes many logical channels and consumers over one socket,
 //! so it would be reasonable to expect the push source to need per-channel
-//! routing. It doesn't: [`crate::broker::ConsumerSink::call`] already
+//! routing. It doesn't: [`crate::broker::ConsumerSink`]'s `SendPipe::call`
+//! already
 //! encodes the full `basic.deliver` + content-header + content-body frame
 //! triple — channel number, consumer tag, and delivery tag all baked in —
 //! before it ever reaches this connection's `push_tx`. By the time
