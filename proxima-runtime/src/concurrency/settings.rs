@@ -6,28 +6,21 @@
 //! proxima-h1's `ResponseHandlingConfig` (`#[setting(skip)]` for serde-only
 //! fields).
 
-use core::fmt;
 use core::str::FromStr;
 use core::time::Duration;
 
 use conflaguration::{Settings, Validate};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::Bounds;
 use super::strategy::{Concurrency, Preset};
 
 /// Parse error for concurrency config fields (conflaguration's `resolve_with`
-/// demands a `std::error::Error` parser error type).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// demands a `core::error::Error` parser error type).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{0}")]
 pub struct ParseError(alloc::string::String);
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ParseError {}
 
 /// A control window as a human duration: `"150ms"`, `"2s"`, `"500us"`, `"1m"`.
 /// `FromStr` drives the conflaguration/env path; serde (de)serialises the same

@@ -11,7 +11,7 @@ readme.workspace = true
 
 [features]
 default = ["std"]
-std = ["alloc", "proxima-core/std"]
+std = ["alloc", "proxima-core/std", "thiserror/std"]
 alloc = ["proxima-core/alloc"]
 # no-op locally as of Wave D Phase 1 (SpanId de-embedded from SpawnRequest —
 # trace-span context now travels via `telemetry::Spanned<T>`, not a field on
@@ -49,6 +49,7 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"], optional = true }
 core_affinity = { workspace = true, optional = true }
 flume = { workspace = true, optional = true }
+thiserror.workspace = true
 
 [[bench]]
 name = "bench_runtime_dispatch"
