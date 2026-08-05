@@ -618,7 +618,7 @@ pub fn decode<B: BufMut>(input: &[u8], dst: &mut B) -> Result<usize, HuffmanErro
     Ok(bytes_written)
 }
 
-#[cfg(all(test, not(feature = "hpack-no-alloc")))]
+#[cfg(all(test, feature = "hpack-alloc"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
