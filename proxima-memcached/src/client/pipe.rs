@@ -43,7 +43,6 @@ use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstrea
 
 use proxima_protocols::memcached::{MemcachedRequest, StoreMode, encode_reply};
 
-use crate::client::config::MemcachedClientConfig;
 use crate::client::session::{ClientError, ClientSession, Step};
 
 const READ_CHUNK_BYTES: usize = 16 * 1024;
@@ -57,11 +56,12 @@ pub struct MemcachedClientUpstream<U: StreamUpstream> {
 }
 
 impl<U: StreamUpstream> MemcachedClientUpstream<U> {
-    /// Builds a client over `upstream`. `config` is accepted for
-    /// constructor parity with `RedisClientUpstream::new` (and to carry a
-    /// future SASL-auth extension); the base protocol has no handshake, so
-    /// it is not otherwise consulted here — only `upstream.connect()`'s
-    /// `host`/`port` (already baked into `upstream`) matter.
+    /// Builds a client over `upstream`. There is no
+    /// [`MemcachedClientConfig`](crate::client::config::MemcachedClientConfig)
+    /// parameter: its whole content is the dial target, already baked into
+    /// `upstream`, and the base protocol has no handshake for a config to
+    /// carry — the sibling clients that do take one (redis, kafka, amqp)
+    /// read theirs to build the startup exchange.
     ///
     /// `new` never touches the network — `upstream.connect()` only runs
     /// lazily on the first `.call()`, so building one is cheap and
@@ -69,15 +69,16 @@ impl<U: StreamUpstream> MemcachedClientUpstream<U> {
     /// running memcached server):
     ///
     /// ```
-    /// use proxima_memcached::{MemcachedClientConfig, MemcachedClientUpstream};
+    /// use proxima_memcached::MemcachedClientUpstream;
     /// use proxima_net::prime::PrimeTcpUpstream;
     ///
     /// let addr = "127.0.0.1:11211".parse().expect("valid socket address");
     /// let transport = PrimeTcpUpstream::new(addr);
-    /// let client = MemcachedClientUpstream::new(transport, MemcachedClientConfig::default());
+    /// let client = MemcachedClientUpstream::new(transport);
     /// # let _ = client;
     /// ```
-    pub fn new(upstream: U, _config: MemcachedClientConfig) -> Self {
+    #[must_use]
+    pub fn new(upstream: U) -> Self {
         Self {
             upstream: Arc::new(upstream),
             cached: Arc::new(Mutex::new(None)),
@@ -181,8 +182,14 @@ async fn recv<C: StreamConnection>(
     Ok(())
 }
 
+/// A transport failure keeps its `io::ErrorKind` (a caller retrying on
+/// `ConnectionRefused` needs it); everything else is protocol detail with
+/// no structured counterpart, so it renders into the message.
 fn client_error_to_proxima(error: ClientError) -> ProximaError {
-    ProximaError::Upstream(format!("memcached client: {error}"))
+    match error {
+        ClientError::Io(io) => ProximaError::Io(io),
+        other => ProximaError::Upstream(format!("memcached client: {other}")),
+    }
 }
 
 /// `[verb] ++ NUL-split(body)` -> [`MemcachedRequest`], per this module's

@@ -49,8 +49,8 @@ impl PipeFactory for MemcachedPipeFactory {
         let spec = spec.clone();
         Box::pin(async move {
             let config = config_from_spec(&spec)?;
-            let upstream = PrimeTcpUpstream::with_host(config.host.clone(), config.port);
-            Ok(into_handle(MemcachedClientUpstream::new(upstream, config)))
+            let upstream = PrimeTcpUpstream::with_host(config.host, config.port);
+            Ok(into_handle(MemcachedClientUpstream::new(upstream)))
         })
     }
 }
