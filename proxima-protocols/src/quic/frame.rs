@@ -37,6 +37,8 @@
 //! application semantically requires it (parsers stay tier-3, no UTF-8
 //! validation in the hot path).
 
+use core::fmt;
+
 use crate::quic::varint;
 
 /// PATH_CHALLENGE / PATH_RESPONSE carry an 8-byte opaque value (RFC 9000 §19.17).
@@ -191,6 +193,23 @@ pub enum DecodeError {
     LengthOverflowsBuffer,
 }
 
+impl fmt::Display for DecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("empty input, no frame type byte"),
+            Self::Truncated => formatter.write_str("input ran out mid-frame"),
+            Self::UnknownFrameType(frame_type) => {
+                write!(formatter, "unknown frame type {frame_type:#x}")
+            }
+            Self::LengthOverflowsBuffer => {
+                formatter.write_str("length prefix exceeds remaining input")
+            }
+        }
+    }
+}
+
+impl core::error::Error for DecodeError {}
+
 /// Encode failures for [`Frame::encode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -200,6 +219,17 @@ pub enum EncodeError {
     /// A field exceeded the varint encoding range (2^62 - 1).
     ValueTooLarge,
 }
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BufferTooSmall => formatter.write_str("output buffer too small for frame"),
+            Self::ValueTooLarge => formatter.write_str("field exceeds varint range 2^62-1"),
+        }
+    }
+}
+
+impl core::error::Error for EncodeError {}
 
 /// Parse the next frame from `input`. Returns the parsed frame and the
 /// number of bytes consumed.
