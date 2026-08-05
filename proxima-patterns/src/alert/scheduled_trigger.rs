@@ -19,12 +19,14 @@
 //! - Inherits `WithoutFilesystem`, `WithoutNetwork`, `WithoutSpawn`,
 //!   `WithoutRandom` from the inner Pipe via blanket AND-composition.
 
+use core::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::FutureExt;
+use proxima_primitives::pipe::alloc_tier::into_handle;
 use proxima_core::factory::Named;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::ProximaError;
@@ -37,7 +39,7 @@ use crate::alert::event::{
     AlertEvent, AlertId, KindString, LabelKey, LabelMap, LabelValue, Payload, Severity,
 };
 use crate::alert::methods;
-use crate::alert::pipes::{AlertPipeHandle, AlertRequest, into_alert_handle};
+use crate::alert::pipes::{AlertPipeHandle, AlertRequest};
 
 /// Schedule shape for a [`ScheduledTriggerPipe`].
 #[derive(Clone, Debug)]
@@ -194,10 +196,9 @@ async fn run_schedule_loop(
             interval.set_missed_tick_behavior(proxima_core::time::MissedTickBehavior::Skip);
             interval.tick().await;
             loop {
-                let cancel_fut = Box::pin(cancel.fired()).fuse();
-                let tick_fut = Box::pin(interval.tick()).fuse();
-                futures::pin_mut!(cancel_fut);
-                futures::pin_mut!(tick_fut);
+                let cancel_fut = cancel.fired().fuse();
+                let tick_fut = interval.tick().fuse();
+                futures::pin_mut!(cancel_fut, tick_fut);
                 let should_fire = futures::select_biased! {
                     _ = cancel_fut => {
                         proxima_telemetry::debug!(
@@ -245,7 +246,6 @@ fn build_alert_event(
         truncate_to_label_value(source_label),
     );
     let mut fire_seq_buf = LabelValue::new();
-    use core::fmt::Write;
     let _ = write!(&mut fire_seq_buf, "{fire_seq}");
     let _ = labels.insert(
         LabelKey::try_from("fire_seq").unwrap_or_default(),
@@ -336,7 +336,7 @@ impl ScheduledTriggerPipeBuilder {
             + Sync
             + 'static,
     {
-        self.inner = Some(into_alert_handle(pipe));
+        self.inner = Some(into_handle(pipe));
         self
     }
 
@@ -423,7 +423,7 @@ mod tests {
     use proxima_primitives::pipe::SendPipe;
     use proxima_primitives::pipe::request::Response;
 
-    use crate::alert::pipes::{AlertRequest, into_alert_handle};
+    use crate::alert::pipes::AlertRequest;
 
     use super::*;
 
@@ -460,7 +460,7 @@ mod tests {
     #[proxima::test]
     async fn scheduled_trigger_fires_three_ticks_on_the_house_clock() {
         let capture = CapturingPipe::new();
-        let inner = into_alert_handle(Arc::clone(&capture));
+        let inner = into_handle(Arc::clone(&capture));
         let pipe = ScheduledTriggerPipe::builder()
             .schedule(Schedule::Interval(Duration::from_millis(5)))
             .inner(inner)
@@ -514,7 +514,7 @@ mod tests {
     #[proxima::test]
     async fn builder_missing_schedule_returns_build_error() {
         let capture = CapturingPipe::new();
-        let inner = into_alert_handle(Arc::clone(&capture));
+        let inner = into_handle(Arc::clone(&capture));
         let result = ScheduledTriggerPipe::builder().inner(inner).build();
         assert!(matches!(result, Err(BuildError::MissingSchedule)));
     }
