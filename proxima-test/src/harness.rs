@@ -11,7 +11,7 @@ use std::future::Future;
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Once, PoisonError};
 use std::task::{Context, Poll};
 
 #[cfg(feature = "test-prime")]
@@ -26,13 +26,13 @@ use prime::os::runtime::PrimeRuntime;
 #[cfg(feature = "test-prime")]
 use proxima_runtime::{CoreId, Runtime, SpawnError};
 
-use crate::{CassetteCtx, Mode, Plan, TeardownRegistry, TestCtx};
+use crate::{CassetteCtx, CassetteSpec, Mode, TeardownRegistry, TestCtx};
 
 // ---------------------------------------------------------------------------
-// resolve_mode + build_test_ctx
+// ctx construction
 // ---------------------------------------------------------------------------
 
-pub fn resolve_mode(path: &Path) -> Mode {
+fn resolve_mode(path: &Path) -> Mode {
     match std::env::var("PROXIMA_CASSETTE").as_deref() {
         Ok("record") => Mode::Record,
         Ok("replay") => Mode::Replay,
@@ -41,8 +41,8 @@ pub fn resolve_mode(path: &Path) -> Mode {
     }
 }
 
-pub fn build_test_ctx(plan: &Plan) -> TestCtx {
-    let cassette = plan.cassette.as_ref().map(|spec| {
+fn build_test_ctx(cassette: Option<&CassetteSpec>) -> TestCtx {
+    TestCtx::new(cassette.map(|spec| {
         let mut path = PathBuf::from(spec.manifest_dir);
         path.push("tests");
         path.push("cassettes");
@@ -54,11 +54,7 @@ pub fn build_test_ctx(plan: &Plan) -> TestCtx {
         path.push(file);
         let mode = resolve_mode(&path);
         CassetteCtx { path, mode }
-    });
-    TestCtx {
-        cassette,
-        teardowns: Arc::new(Mutex::new(Vec::new())),
-    }
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +63,7 @@ pub fn build_test_ctx(plan: &Plan) -> TestCtx {
 
 async fn run_teardowns(teardowns: &TeardownRegistry) -> Option<CapturedPanic> {
     let mut pending = {
-        let mut guard = teardowns.lock().expect("teardown registry");
+        let mut guard = teardowns.lock().unwrap_or_else(PoisonError::into_inner);
         std::mem::take(&mut *guard)
     };
     pending.reverse();
@@ -84,11 +80,6 @@ async fn run_teardowns(teardowns: &TeardownRegistry) -> Option<CapturedPanic> {
 // ---------------------------------------------------------------------------
 // panic capture
 // ---------------------------------------------------------------------------
-
-enum TestReport {
-    Passed,
-    Failed(CapturedPanic),
-}
 
 struct CapturedPanic {
     message: String,
@@ -176,8 +167,8 @@ fn take_captured() -> CapturedPanic {
         })
 }
 
-fn finish(report: TestReport) {
-    if let TestReport::Failed(captured) = report {
+fn finish(outcome: Option<CapturedPanic>) {
+    if let Some(captured) = outcome {
         match captured.location {
             Some(location) => panic!("{} (at {location})", captured.message),
             None => panic!("{}", captured.message),
@@ -185,11 +176,8 @@ fn finish(report: TestReport) {
     }
 }
 
-fn report_from(result: std::thread::Result<()>) -> TestReport {
-    match result {
-        Ok(()) => TestReport::Passed,
-        Err(_) => TestReport::Failed(take_captured()),
-    }
+fn outcome_of(result: std::thread::Result<()>) -> Option<CapturedPanic> {
+    result.err().map(|_| take_captured())
 }
 
 // ---------------------------------------------------------------------------
@@ -220,95 +208,96 @@ impl<F: Future> Future for CatchUnwind<F> {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "test-prime")]
-pub fn run<Body, Fut>(plan: Plan, body: Body)
+pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    finish(drive_prime(&plan, body));
+    finish(drive_prime(cassette.as_ref(), body));
 }
 
 #[cfg(all(not(feature = "test-prime"), feature = "tokio-driver"))]
-pub fn run<Body, Fut>(plan: Plan, body: Body)
+pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
 {
-    finish(drive_tokio(&plan, body));
+    finish(drive_tokio(cassette.as_ref(), body));
 }
 
 #[cfg(feature = "test-prime")]
-pub fn run_prime<Body, Fut>(plan: Plan, body: Body)
+pub fn run_prime<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    finish(drive_prime(&plan, body));
+    finish(drive_prime(cassette.as_ref(), body));
 }
 
 #[cfg(feature = "tokio-driver")]
-pub fn run_tokio<Body, Fut>(plan: Plan, body: Body)
+pub fn run_tokio<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
 {
-    finish(drive_tokio(&plan, body));
+    finish(drive_tokio(cassette.as_ref(), body));
 }
 
 #[cfg(feature = "tokio-driver")]
-pub fn run_tokio_current_thread_paused<Body, Fut>(plan: Plan, body: Body)
+pub fn run_tokio_current_thread_paused<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
 {
-    finish(drive_tokio_paused(&plan, body));
+    finish(drive_tokio_inner(cassette.as_ref(), true, body));
 }
 
 #[cfg(feature = "tokio-driver")]
-pub fn run_tokio_multi_thread<Body, Fut>(plan: Plan, workers: Option<usize>, body: Body)
+pub fn run_tokio_multi_thread<Body, Fut>(
+    cassette: Option<CassetteSpec>,
+    workers: Option<usize>,
+    body: Body,
+) where
+    Body: FnOnce(TestCtx) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    finish(drive_tokio_multi(cassette.as_ref(), workers, false, body));
+}
+
+#[cfg(feature = "tokio-driver")]
+pub fn run_tokio_multi_thread_paused<Body, Fut>(
+    cassette: Option<CassetteSpec>,
+    workers: Option<usize>,
+    body: Body,
+) where
+    Body: FnOnce(TestCtx) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    finish(drive_tokio_multi(cassette.as_ref(), workers, true, body));
+}
+
+#[cfg(feature = "tokio-driver")]
+fn drive_tokio<Body, Fut>(cassette: Option<&CassetteSpec>, body: Body) -> Option<CapturedPanic>
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
 {
-    finish(drive_tokio_multi(&plan, workers, false, body));
+    drive_tokio_inner(cassette, false, body)
 }
 
 #[cfg(feature = "tokio-driver")]
-pub fn run_tokio_multi_thread_paused<Body, Fut>(plan: Plan, workers: Option<usize>, body: Body)
-where
-    Body: FnOnce(TestCtx) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    finish(drive_tokio_multi(&plan, workers, true, body));
-}
-
-#[cfg(feature = "tokio-driver")]
-fn drive_tokio<Body, Fut>(plan: &Plan, body: Body) -> TestReport
-where
-    Body: FnOnce(TestCtx) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    drive_tokio_inner(plan, false, body)
-}
-
-#[cfg(feature = "tokio-driver")]
-fn drive_tokio_paused<Body, Fut>(plan: &Plan, body: Body) -> TestReport
-where
-    Body: FnOnce(TestCtx) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    drive_tokio_inner(plan, true, body)
-}
-
-#[cfg(feature = "tokio-driver")]
-fn drive_tokio_inner<Body, Fut>(plan: &Plan, start_paused: bool, body: Body) -> TestReport
+fn drive_tokio_inner<Body, Fut>(
+    cassette: Option<&CassetteSpec>,
+    start_paused: bool,
+    body: Body,
+) -> Option<CapturedPanic>
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
 {
     install_panic_hook_once();
     raise_fd_limit_once();
-    let ctx = build_test_ctx(plan);
+    let ctx = build_test_ctx(cassette);
     let teardowns = ctx.teardowns.clone();
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
@@ -321,27 +310,27 @@ where
     runtime.block_on(async move {
         arm();
         let result = CatchUnwind { inner: body(ctx) }.await;
-        let body_report = report_from(result);
+        let body_outcome = outcome_of(result);
         let teardown_panic = run_teardowns(&teardowns).await;
         disarm();
-        combine_report(body_report, teardown_panic)
+        body_outcome.or(teardown_panic)
     })
 }
 
 #[cfg(feature = "tokio-driver")]
 fn drive_tokio_multi<Body, Fut>(
-    plan: &Plan,
+    cassette: Option<&CassetteSpec>,
     workers: Option<usize>,
     start_paused: bool,
     body: Body,
-) -> TestReport
+) -> Option<CapturedPanic>
 where
     Body: FnOnce(TestCtx) -> Fut,
     Fut: Future<Output = ()>,
 {
     install_panic_hook_once();
     raise_fd_limit_once();
-    let ctx = build_test_ctx(plan);
+    let ctx = build_test_ctx(cassette);
     let teardowns = ctx.teardowns.clone();
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
@@ -357,22 +346,15 @@ where
     runtime.block_on(async move {
         arm();
         let result = CatchUnwind { inner: body(ctx) }.await;
-        let body_report = report_from(result);
+        let body_outcome = outcome_of(result);
         let teardown_panic = run_teardowns(&teardowns).await;
         disarm();
-        combine_report(body_report, teardown_panic)
+        body_outcome.or(teardown_panic)
     })
 }
 
-fn combine_report(body: TestReport, teardown_panic: Option<CapturedPanic>) -> TestReport {
-    match (body, teardown_panic) {
-        (TestReport::Passed, Some(panic)) => TestReport::Failed(panic),
-        (other, _) => other,
-    }
-}
-
 #[cfg(feature = "test-prime")]
-pub fn shared_prime_runtime() -> &'static PrimeRuntime {
+fn shared_prime_runtime() -> &'static PrimeRuntime {
     static RUNTIME: OnceLock<&'static PrimeRuntime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         #[cfg(feature = "test-prime-tokio-compat")]
@@ -387,25 +369,25 @@ pub fn shared_prime_runtime() -> &'static PrimeRuntime {
 }
 
 #[cfg(feature = "test-prime")]
-fn drive_prime<Body, Fut>(plan: &Plan, body: Body) -> TestReport
+fn drive_prime<Body, Fut>(cassette: Option<&CassetteSpec>, body: Body) -> Option<CapturedPanic>
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     install_panic_hook_once();
     raise_fd_limit_once();
-    let ctx = build_test_ctx(plan);
+    let ctx = build_test_ctx(cassette);
     let teardowns = ctx.teardowns.clone();
     let runtime = shared_prime_runtime();
-    let (sender, receiver) = sync_channel::<TestReport>(1);
+    let (sender, receiver) = sync_channel::<Option<CapturedPanic>>(1);
 
     let task = async move {
         arm();
         let result = CatchUnwind { inner: body(ctx) }.await;
-        let body_report = report_from(result);
+        let body_outcome = outcome_of(result);
         let teardown_panic = run_teardowns(&teardowns).await;
         disarm();
-        let _ = sender.send(combine_report(body_report, teardown_panic));
+        let _ = sender.send(body_outcome.or(teardown_panic));
     };
 
     match runtime.spawn_on_core(CoreId(0), Box::pin(task)) {
@@ -415,7 +397,7 @@ where
     }
 
     match receiver.recv_timeout(body_timeout()) {
-        Ok(report) => report,
+        Ok(outcome) => outcome,
         Err(RecvTimeoutError::Timeout) => failed("body did not complete within the timeout"),
         Err(RecvTimeoutError::Disconnected) => {
             failed("worker dropped the completion channel without reporting")
@@ -434,8 +416,8 @@ fn body_timeout() -> Duration {
 }
 
 #[cfg(feature = "test-prime")]
-fn failed(message: &str) -> TestReport {
-    TestReport::Failed(CapturedPanic {
+fn failed(message: &str) -> Option<CapturedPanic> {
+    Some(CapturedPanic {
         message: format!("proxima::test: {message}"),
         location: None,
     })
@@ -449,37 +431,29 @@ mod tests {
     #[cfg(feature = "tokio-driver")]
     #[test]
     fn tokio_reports_passing_body() {
-        assert!(matches!(
-            drive_tokio(&Plan::new(), |_cx| async {}),
-            TestReport::Passed
-        ));
+        assert!(drive_tokio(None, |_cx| async {}).is_none());
     }
 
     #[cfg(feature = "tokio-driver")]
     #[test]
     fn tokio_reports_panicking_body_with_message() {
-        match drive_tokio(&Plan::new(), |_cx| async { panic!("boom-tokio") }) {
-            TestReport::Failed(captured) => assert!(captured.message.contains("boom-tokio")),
-            TestReport::Passed => panic!("expected the panicking body to be reported as failed"),
-        }
+        let captured = drive_tokio(None, |_cx| async { panic!("boom-tokio") })
+            .expect("a panicking body must be reported as failed");
+        assert!(captured.message.contains("boom-tokio"));
     }
 
     #[cfg(feature = "test-prime")]
     #[test]
     fn prime_reports_passing_body() {
-        assert!(matches!(
-            drive_prime(&Plan::new(), |_cx| async {}),
-            TestReport::Passed
-        ));
+        assert!(drive_prime(None, |_cx| async {}).is_none());
     }
 
     #[cfg(feature = "test-prime")]
     #[test]
     fn prime_reports_panicking_body_with_message() {
-        match drive_prime(&Plan::new(), |_cx| async { panic!("boom-prime") }) {
-            TestReport::Failed(captured) => assert!(captured.message.contains("boom-prime")),
-            TestReport::Passed => panic!("expected the panicking body to be reported as failed"),
-        }
+        let captured = drive_prime(None, |_cx| async { panic!("boom-prime") })
+            .expect("a panicking body must be reported as failed");
+        assert!(captured.message.contains("boom-prime"));
     }
 
     #[cfg(feature = "tokio-driver")]
@@ -488,25 +462,88 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static RAN: AtomicUsize = AtomicUsize::new(0);
 
-        let report = drive_tokio(&Plan::new(), |cx| async move {
+        let outcome = drive_tokio(None, |cx| async move {
             cx.defer(async {
                 RAN.fetch_add(1, Ordering::SeqCst);
             });
         });
-        assert!(matches!(report, TestReport::Passed));
+        assert!(outcome.is_none());
         assert_eq!(RAN.load(Ordering::SeqCst), 1, "teardown must run on pass");
 
-        let report = drive_tokio(&Plan::new(), |cx| async move {
+        let outcome = drive_tokio(None, |cx| async move {
             cx.defer(async {
                 RAN.fetch_add(1, Ordering::SeqCst);
             });
             panic!("boom");
         });
-        assert!(matches!(report, TestReport::Failed(_)));
+        assert!(outcome.is_some());
         assert_eq!(
             RAN.load(Ordering::SeqCst),
             2,
             "teardown must run even when the body panics"
         );
+    }
+
+    #[cfg(feature = "tokio-driver")]
+    #[test]
+    fn a_teardown_panic_fails_an_otherwise_passing_body() {
+        let captured = drive_tokio(None, |cx| async move {
+            cx.defer(async { panic!("boom-teardown") });
+        })
+        .expect("a panicking teardown must fail the test");
+        assert!(captured.message.contains("boom-teardown"));
+    }
+
+    #[test]
+    fn cassette_path_is_manifest_tests_cassettes_name_case() {
+        let ctx = build_test_ctx(Some(&CassetteSpec {
+            name: "health",
+            case: "warm",
+            manifest_dir: "/tmp/proxima-test-manifest",
+        }));
+        let cassette = ctx.cassette().expect("spec was supplied");
+        assert!(
+            cassette
+                .path
+                .ends_with("tests/cassettes/health__warm.jsonl"),
+            "got: {}",
+            cassette.path.display()
+        );
+    }
+
+    #[test]
+    fn an_absent_cassette_file_records() {
+        temp_env::with_var("PROXIMA_CASSETTE", None::<&str>, || {
+            let ctx = build_test_ctx(Some(&CassetteSpec {
+                name: "never-recorded",
+                case: "",
+                manifest_dir: "/tmp/proxima-test-manifest",
+            }));
+            let cassette = ctx.cassette().expect("spec was supplied");
+            assert!(
+                cassette
+                    .path
+                    .ends_with("tests/cassettes/never-recorded.jsonl")
+            );
+            assert_eq!(cassette.mode, Mode::Record);
+        });
+    }
+
+    #[test]
+    fn the_env_override_forces_replay_even_without_a_recorded_file() {
+        temp_env::with_var("PROXIMA_CASSETTE", Some("replay"), || {
+            let ctx = build_test_ctx(Some(&CassetteSpec {
+                name: "never-recorded",
+                case: "",
+                manifest_dir: "/tmp/proxima-test-manifest",
+            }));
+            let cassette = ctx.cassette().expect("spec was supplied");
+            assert_eq!(cassette.mode, Mode::Replay);
+        });
+    }
+
+    #[test]
+    fn no_spec_means_no_cassette() {
+        assert!(build_test_ctx(None).cassette().is_none());
     }
 }

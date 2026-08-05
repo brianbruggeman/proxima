@@ -21,77 +21,30 @@ mod harness;
 #[cfg(any(feature = "tokio-driver", feature = "test-prime"))]
 pub use harness::*;
 
-// ---------------------------------------------------------------------------
-// async-once
-// ---------------------------------------------------------------------------
-
 /// Backs `#[proxima::fixture(once)]`: a value computed once per process and
-/// shared as `&'static T`. Backed by `async_lock::OnceCell` (no runtime
-/// coupling — `async_lock::OnceCell::new()` is `const`, same as tokio's
-/// `Mutex::const_new`, so `static CELL: AsyncOnce<T> = AsyncOnce::new();`
-/// keeps working without a tokio dependency).
-pub struct AsyncOnce<T>(async_lock::OnceCell<T>);
-
-impl<T: Send + Sync> AsyncOnce<T> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(async_lock::OnceCell::new())
-    }
-
-    pub async fn get_or_init<Factory, Fut>(&'static self, init: Factory) -> &'static T
-    where
-        Factory: FnOnce() -> Fut,
-        Fut: Future<Output = T>,
-    {
-        self.0.get_or_init(init).await
-    }
-}
-
-impl<T: Send + Sync> Default for AsyncOnce<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// plan + cassette spec
-// ---------------------------------------------------------------------------
+/// shared as `&'static T`. `async_lock::OnceCell::new()` is `const`, so the
+/// cell can be a `static` with no runtime coupling — unlike
+/// `tokio::sync::Mutex::const_new`, which would drag tokio into every fixture.
+///
+/// ```
+/// use proxima_test::AsyncOnce;
+///
+/// static GREETING: AsyncOnce<String> = AsyncOnce::new();
+///
+/// let shared: &'static String = futures::executor::block_on(
+///     GREETING.get_or_init(|| async { "hello from the fixture".to_string() }),
+/// );
+/// assert_eq!(shared, "hello from the fixture");
+/// ```
+pub use async_lock::OnceCell as AsyncOnce;
 
 /// Cassette directive emitted by the macro from `cassette = "name"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CassetteSpec {
     pub name: &'static str,
     pub case: &'static str,
     pub manifest_dir: &'static str,
 }
-
-/// What the macro hands each runtime entry point.
-pub struct Plan {
-    pub cassette: Option<CassetteSpec>,
-}
-
-impl Plan {
-    #[must_use]
-    pub fn new() -> Self {
-        Self { cassette: None }
-    }
-
-    #[must_use]
-    pub fn with_cassette(spec: CassetteSpec) -> Self {
-        Self {
-            cassette: Some(spec),
-        }
-    }
-}
-
-impl Default for Plan {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// cassette ctx + mode
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -99,14 +52,11 @@ pub enum Mode {
     Replay,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CassetteCtx {
     pub path: PathBuf,
     pub mode: Mode,
 }
-
-// ---------------------------------------------------------------------------
-// TestCtx
-// ---------------------------------------------------------------------------
 
 // the deferred cleanups are an open set of caller futures with distinct types
 // queued in one registry — the case the box-free rule exempts.
@@ -119,18 +69,16 @@ pub struct TestCtx {
 }
 
 impl TestCtx {
-    pub fn cassette(&self) -> Option<&CassetteCtx> {
-        self.cassette.as_ref()
-    }
-
-    /// Test-only constructor for creating a `TestCtx` directly in tests that
-    /// need to exercise cassette logic without going through the macro harness.
-    #[doc(hidden)]
-    pub fn __new_for_test(cassette: Option<CassetteCtx>) -> Self {
+    #[must_use]
+    pub fn new(cassette: Option<CassetteCtx>) -> Self {
         Self {
             cassette,
             teardowns: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn cassette(&self) -> Option<&CassetteCtx> {
+        self.cassette.as_ref()
     }
 
     pub fn defer<Fut>(&self, cleanup: Fut)
@@ -143,10 +91,6 @@ impl TestCtx {
             .push(Box::pin(cleanup));
     }
 }
-
-// ---------------------------------------------------------------------------
-// outcome trait
-// ---------------------------------------------------------------------------
 
 /// Lets a `#[proxima::test]` body return `()` or `Result<(), E>`.
 pub trait IntoTestOutcome {
@@ -169,6 +113,7 @@ impl<Error: core::fmt::Debug> IntoTestOutcome for Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::panic;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
@@ -196,5 +141,37 @@ mod tests {
                 "initializer must run exactly once"
             );
         });
+    }
+
+    #[test]
+    fn ctx_without_a_cassette_reports_none() {
+        assert!(TestCtx::new(None).cassette().is_none());
+    }
+
+    #[test]
+    fn ctx_hands_back_the_cassette_it_was_built_with() {
+        let ctx = TestCtx::new(Some(CassetteCtx {
+            path: PathBuf::from("tests/cassettes/health.jsonl"),
+            mode: Mode::Replay,
+        }));
+        let cassette = ctx.cassette().expect("ctx was built with a cassette");
+        assert_eq!(cassette.mode, Mode::Replay);
+        assert_eq!(cassette.path, PathBuf::from("tests/cassettes/health.jsonl"));
+    }
+
+    #[test]
+    fn err_outcome_panics_with_the_error_rendered() {
+        let outcome: Result<(), &str> = Err("upstream refused");
+        let failure = panic::catch_unwind(|| outcome.into_test_outcome())
+            .expect_err("an Err body must fail the test");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("panic payload is the rendered error");
+        assert!(message.contains("upstream refused"), "got: {message}");
+    }
+
+    #[test]
+    fn unit_outcome_is_a_pass() {
+        ().into_test_outcome();
     }
 }
