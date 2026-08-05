@@ -129,7 +129,8 @@ impl PacketListener for WasmPacketListener {
     }
 
     fn poll_send(&self, cx: &mut Context<'_>, packet: &Packet) -> Poll<io::Result<()>> {
-        let addr = encode_addr(&packet.dst);
+        // the trait's mesh convention: `packet.src` is the destination to send to.
+        let addr = encode_addr(&packet.src);
         let sent = unsafe {
             proxima_net_send(
                 self.handle,
