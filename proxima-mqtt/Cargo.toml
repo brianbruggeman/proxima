@@ -25,9 +25,6 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 futures = { workspace = true, features = ["std", "async-await"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true, optional = true }
-# plaintext CONNECT username/password zeroized on drop — connection-level
-# credentials get the same hygiene proxima-redis gives AUTH/HELLO secrets.
-zeroize = { version = "1.9.0", default-features = false, features = ["alloc"], optional = true }
 # the house telemetry surface, never `tracing` directly — the connection
 # driver's error events are the only emitters, so it rides `listen` alone.
 proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
@@ -57,7 +54,6 @@ client = [
     "dep:futures",
     "dep:serde",
     "dep:thiserror",
-    "dep:zeroize",
 ]
 # the tokio-free native (sans-IO) MQTT broker LISTENER: `MqttConnectionPipe`
 # + `MqttAnyProtocol` mounting into `proxima-listen`'s `AnyListenProtocol`
