@@ -188,6 +188,17 @@ declare -a FLOOR_CRATE_CELLS=(
     # `#![no_std]`". `client` and `listen` both imply `std`, so bare is the
     # only floor and there is no `alloc` cell to add.
     "proxima-amqp-bare|proxima-amqp|"
+    # proxima-kafka is the fourth crate with the identical fold-era shape --
+    # `default = ["std"]`, `std = []` gating nothing, no `#![no_std]`, no cell
+    # here -- while its manifest advertised that `--no-default-features`
+    # "leaves the bare sans-IO wire codec ... for bare-metal embedding".
+    # Measured before the fix on 2026-08-05: `cargo build -p proxima-kafka
+    # --no-default-features --lib --target thumbv7m-none-eabi` exits 101 with
+    # 146 errors, opening on "`std` is required by `proxima_kafka` because it
+    # does not declare `#![no_std]`". The bare tier is the `wire` module (the
+    # Produce/Fetch/Metadata/ApiVersions v0 body codec); `client` and `listen`
+    # both imply `std`, so bare is the only floor and there is no `alloc` cell.
+    "proxima-kafka-bare|proxima-kafka|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

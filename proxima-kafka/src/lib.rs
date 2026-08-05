@@ -47,11 +47,22 @@
 //! v1+ schema evolution. `record_set` (the actual message batch bytes
 //! inside a Produce/Fetch body) is carried and stored as an opaque
 //! [`bytes::Bytes`] blob, never parsed into individual records
-//! ([`broker::KafkaBroker`]'s doc: "one opaque `record_set` blob, appended
+//! (`broker::KafkaBroker`'s doc: "one opaque `record_set` blob, appended
 //! whole"); this facade routes and replays record sets, it does not
 //! decode `RecordBatch` framing, per-record headers, or compression
 //! codecs. Not a substitute for a real broker's replication, transactions,
 //! or consumer-group coordination — those protocols are unimplemented.
+//!
+//! ## Tiers
+//!
+//! `--no-default-features` drops `std` and leaves [`wire`], which is
+//! `#![no_std]` + `alloc` and links on a bare-metal target
+//! (`thumbv7m-none-eabi`, proven by `scripts/thumbv7m-cliff-gate.sh`'s
+//! `proxima-kafka-bare` cell). `client` and `listen` both imply `std`.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 #[cfg(feature = "client")]
 pub mod client;

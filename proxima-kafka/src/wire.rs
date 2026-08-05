@@ -17,6 +17,13 @@
 //! null), `BYTES` is a 4-byte length prefix (`-1` = null), `ARRAY` is a
 //! 4-byte element count (`-1` = null, treated here as empty — a v0 client
 //! never round-trips the null/empty distinction through this facade).
+//!
+//! This module is the crate's bare `no_std` + `alloc` tier, so every name
+//! it borrows from `proxima_protocols` or from the `client`/`listen` half
+//! is a code span rather than an intra-doc link — neither exists here.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use bytes::Bytes;
 
