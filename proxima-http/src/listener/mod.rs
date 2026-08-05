@@ -312,6 +312,8 @@ impl ListenProtocol for HttpListenProtocol {
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
         let spec = spec.clone();
         Box::pin(async move {
+            // the h2 candidate below is the only push; without it the vec is
+            // built once and never mutated.
             #[cfg_attr(not(feature = "http2-native"), allow(unused_mut))]
             let mut candidates: Vec<Arc<dyn AnyProtocol>> = vec![Arc::new(H1AnyProtocol::new())];
             #[cfg(feature = "http2-native")]
