@@ -10,7 +10,7 @@
 //! `EndpointConfig::default()` produces a useful endpoint with no
 //! tuning required.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -54,9 +54,8 @@ impl EndpointConfig {
 
 impl Default for EndpointConfig {
     fn default() -> Self {
-        use std::net::{IpAddr, Ipv4Addr};
         Self {
-            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             client: Some(ClientConfig::default()),
             server: None,
         }
@@ -126,12 +125,19 @@ pub struct ServerConfig {
     pub max_idle_timeout_ms: u64,
     /// Initial connection-level flow-control credit (bytes).
     pub initial_max_data: u64,
-    /// Per-stream initial credits — see [`ClientConfig`].
+    /// Initial per-stream credit for locally-opened bidi streams
+    /// (peer's TP 0x05).
     pub initial_max_stream_data_bidi_local: u64,
+    /// Initial per-stream credit for peer-opened bidi streams
+    /// (peer's TP 0x06).
     pub initial_max_stream_data_bidi_remote: u64,
+    /// Initial per-stream credit for uni streams (peer's TP 0x07).
     pub initial_max_stream_data_uni: u64,
+    /// Cap on concurrent peer-initiated bidi streams.
     pub initial_max_streams_bidi: u64,
+    /// Cap on concurrent peer-initiated uni streams.
     pub initial_max_streams_uni: u64,
+    /// Local cap on multipath path IDs we accept. 0 disables multipath.
     pub initial_max_path_id: u64,
 }
 
@@ -224,7 +230,18 @@ impl ClientConfig {
 }
 
 impl ServerConfig {
-    /// Symmetric to [`ClientConfig::encode_transport_parameters`].
+    /// The server-side twin of
+    /// [`ClientConfig::encode_transport_parameters`], carrying the same
+    /// flow-control and stream-limit advertisements.
+    ///
+    /// NOTE: like the bare client form, this omits the per-connection
+    /// connection IDs a live handshake REQUIRES — a server MUST also send
+    /// `original_destination_connection_id` and
+    /// `initial_source_connection_id` (RFC 9000 §18.2 / §7.3), and neither
+    /// is knowable from a static policy config. There is no
+    /// `_with_source_cid` twin here yet, so this form is policy-only /
+    /// test use; the live server path encodes its own parameters inside
+    /// `Connection::new_server`.
     ///
     /// # Errors
     ///
@@ -306,9 +323,8 @@ mod tests {
     /// serde-round-trip half of the parity contract.)
     #[test]
     fn endpoint_config_toml_parity_with_literal_construction() {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         let from_literal = EndpointConfig {
-            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 4433),
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433),
             client: Some(ClientConfig {
                 tls_alpn: vec![b"h3".to_vec()],
                 max_idle_timeout_ms: 60_000,
