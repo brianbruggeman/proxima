@@ -34,6 +34,14 @@ declare -a FLOOR_CRATE_CELLS=(
     # needs no `alloc` feature at all -- the strictest floor cell we have.
     "prime-inbox-const|prime|alloc,runtime-prime-inbox-const,runtime-prime-executor,runtime-prime-timer,runtime-prime-thread-identity"
     "proxima-primitives|proxima-primitives|alloc"
+    # proxima-primitives' FINEST tier is stricter than its `alloc` cell above:
+    # pipe/mod.rs declares batch_source, capabilities, capture_surface,
+    # drain_sink, drain_source, ext, fan_in, header_name, method, primitives,
+    # resilience, retry_rules, sink_front, stream_bridge, upgrade and when with
+    # NO cfg at all (lines 30-137), so the whole root form family compiles with
+    # nothing turned on. Proving only `alloc` left the no-alloc half of every
+    # one of those ungated -- the same shape as the proxima-core cell below.
+    "proxima-primitives-bare-no-alloc|proxima-primitives|"
     "proxima-net|proxima-net|alloc"
     "proxima-runtime|proxima-runtime|alloc"
     "proxima-core|proxima-core|alloc"
