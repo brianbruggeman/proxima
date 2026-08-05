@@ -37,7 +37,11 @@ proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 
 [features]
 default = ["std"]
-std = []
+# `--no-default-features` leaves the sans-IO wire/method/frame/fsm/topic
+# codec, and the crate declares `#![no_std]` at that tier — proven on
+# `thumbv7m-none-eabi` by `scripts/thumbv7m-cliff-gate.sh`'s
+# `proxima-amqp-bare` cell.
+std = ["proxima-protocols/std", "thiserror/std"]
 # the async client `Pipe` driving the sans-IO `ClientSession` over a
 # `StreamUpstream`, so `proxima::Client` speaks AMQP 0-9-1 as a registered
 # protocol. `--no-default-features` leaves the bare sans-IO wire/method codec

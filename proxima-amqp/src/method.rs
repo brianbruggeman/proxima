@@ -12,6 +12,8 @@
 //! `id` groups the `(class_id, method_id)` constants this module matches
 //! against; [`decode`] and [`encode`] are the two directions.
 
+use alloc::vec::Vec;
+
 use crate::wire::{
     FieldTable, WireError, read_bit_flags, read_field_table, read_long, read_longlong,
     read_longstr, read_octet, read_short, read_shortstr, write_bit_flags, write_field_table,
