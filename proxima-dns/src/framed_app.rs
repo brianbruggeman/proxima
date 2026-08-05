@@ -1,39 +1,31 @@
 //! The DNS-over-TCP business-handler pipe, wired as the `App` half of
 //! `proxima_listen::any::FramedAny<DnsTcpCodec, DnsFramedApp, _, _>` — the
-//! generic stateless `AnyProtocol` driver replacing this crate's former
-//! bespoke `serve_tcp_connection`/`handle_one_message` (see git history:
-//! `any_protocol.rs`). `to_dns_query`/`build_request` are moved here
-//! verbatim from that driver — no wire-mapping logic is rewritten, only
-//! relocated next to their one remaining caller.
+//! generic stateless `AnyProtocol` driver. Everything here is per-message
+//! business logic; framing, admission, and the read/write loop all live one
+//! layer down in `FramedAny`.
 //!
 //! [`DnsTcpOutcome`] is the sentinel `FramedAny` asked for: `Reply` writes
 //! the pre-encoded response bytes, `Silent` writes nothing. Both keep
-//! serving — DNS-over-TCP has no `quit`-shaped command, and the deleted
-//! driver's own "malformed input: warn and skip, connection stays open"
-//! contract ([`crate::any_protocol`]'s old `handle_one_message`) had
-//! nothing that ever closed a connection from inside the per-message
-//! loop; the two cases that DID close (an over-declared length, a reply
-//! too large for the wire) are now [`proxima_protocols::dns::DnsTcpFrameError`]
-//! hard errors, resolved one layer down in
-//! [`proxima_listen::any::FramedAny`]'s own drive loop before this `App`
-//! is ever called.
+//! serving — DNS-over-TCP has no `quit`-shaped command, and malformed input
+//! is warn-and-skip with the connection open. The two cases that DO close it
+//! (an over-declared length, a reply too large for the wire) are
+//! [`DnsTcpFrameError`] hard errors [`proxima_listen::any::FramedAny`]'s own
+//! drive loop resolves before this `App` is ever called — which is why this
+//! `App` names the codec's error type directly rather than wrapping it:
+//! `FramedAny` asks only for `App::Err: From<C::Error>`, and a type is
+//! trivially `From` itself.
 
 use proxima_listen::admission::ShedReason;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::method::Method;
-use proxima_primitives::pipe::request::{Request, RequestContext};
 
 use proxima_protocols::dns::{
     DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation,
 };
 use proxima_telemetry::warn;
 
-use crate::pipes::{DnsAnswer, DnsPipeHandle, DnsQuery};
+use crate::pipes::{DnsAnswer, DnsPipeHandle, DnsQuery, TCP_TRANSPORT, build_request};
 use crate::wire::answer_to_wire;
-
-const METHOD_LABEL: &[u8] = b"DNS-TCP";
 
 fn to_dns_query(query: DnsTcpQuery) -> DnsQuery {
     DnsQuery {
@@ -42,18 +34,6 @@ fn to_dns_query(query: DnsTcpQuery) -> DnsQuery {
         name: query.name,
         qtype: query.qtype,
         qclass: query.qclass,
-    }
-}
-
-fn build_request(query: DnsQuery) -> crate::pipes::DnsPipeRequest {
-    Request {
-        method: Method::from_wire(bytes::Bytes::from_static(METHOD_LABEL)),
-        path: bytes::Bytes::from_static(b"/"),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: query,
-        stream: None,
-        context: RequestContext::default(),
     }
 }
 
@@ -76,21 +56,6 @@ impl AsFrame<DnsTcpCodec> for DnsTcpOutcome {
             DnsTcpOutcome::Silent => None,
         }
     }
-}
-
-/// Local wrapper around [`DnsTcpFrameError`] — `AndThen`'s
-/// `Second::Err: From<First::Err>` composition seam needs this `From` impl.
-/// Unlike memcached's equivalent (never exercised, since its codec's only
-/// error is unconditionally incomplete), this conversion IS reachable: a
-/// [`DnsTcpFrameError::MessageTooLarge`] is a real hard error the codec
-/// raises deliberately (see `proxima_protocols::dns::frame_codec`'s module
-/// doc) — surfacing it here is what makes [`proxima_listen::any::FramedAny`]
-/// close the connection for it, matching the deleted driver's own
-/// close-immediately behavior for an over-declared length.
-#[derive(Debug, thiserror::Error)]
-pub enum DnsFramedAppError {
-    #[error("dns-tcp framing: {0}")]
-    Framing(#[from] DnsTcpFrameError),
 }
 
 /// The DNS-over-TCP business-handler pipe as `FramedAny`'s `App`:
@@ -118,9 +83,9 @@ impl DnsFramedApp {
 impl SendPipe for DnsFramedApp {
     type In = DnsTcpOwnedFrame;
     type Out = DnsTcpOutcome;
-    type Err = DnsFramedAppError;
+    type Err = DnsTcpFrameError;
 
-    async fn call(&self, input: DnsTcpOwnedFrame) -> Result<DnsTcpOutcome, DnsFramedAppError> {
+    async fn call(&self, input: DnsTcpOwnedFrame) -> Result<DnsTcpOutcome, DnsTcpFrameError> {
         let query = match input {
             DnsTcpOwnedFrame::Violation(DnsTcpViolation::Malformed) => {
                 warn!(label = %self.label, "dns-tcp message failed to parse; skipping");
@@ -133,7 +98,8 @@ impl SendPipe for DnsFramedApp {
             DnsTcpOwnedFrame::Query(query) => to_dns_query(query),
         };
 
-        let outcome = SendPipe::call(&self.handler, build_request(query.clone())).await;
+        let request = build_request(TCP_TRANSPORT, query.clone());
+        let outcome = SendPipe::call(&self.handler, request).await;
         let answer = match outcome {
             Ok(reply) => reply.payload,
             Err(error) => {
@@ -147,9 +113,8 @@ impl SendPipe for DnsFramedApp {
 }
 
 /// Encode `answer` for `query`, folding an encode failure into
-/// [`DnsTcpOutcome::Silent`] — mirrors the deleted `handle_one_message`'s
-/// own "warn and skip" contract for [`crate::wire::answer_to_wire`]
-/// failures.
+/// [`DnsTcpOutcome::Silent`]: a reply this server cannot render is not worth
+/// closing an otherwise healthy connection over.
 fn render_reply(label: &str, query: &DnsQuery, answer: &DnsAnswer) -> DnsTcpOutcome {
     let mut out = Vec::new();
     match answer_to_wire(query, answer, &mut out) {
@@ -162,11 +127,11 @@ fn render_reply(label: &str, query: &DnsQuery, answer: &DnsAnswer) -> DnsTcpOutc
 }
 
 /// Renders the listener-wide admission-shed reply — installed as
-/// `FramedAny`'s `Shed` closure. Matches the deleted
-/// `handle_one_message`'s shed-reply behavior exactly: SERVFAIL (RFC 1035
-/// §4.1.1 RCODE 2), since DNS's own wire-specific rejection is a
-/// server-failure answer, not a dropped connection. A shed
-/// [`DnsTcpViolation`] stays silent — there is no valid question to
+/// `FramedAny`'s `Shed` closure. SERVFAIL (RFC 1035 §4.1.1 RCODE 2), because
+/// DNS's own wire-specific way to say "not right now" is a server-failure
+/// answer, not a dropped connection: a resolver that gets an answer retries
+/// or fails over, a resolver that gets silence waits out its whole timeout.
+/// A shed [`DnsTcpViolation`] stays silent — there is no valid question to
 /// answer either way.
 #[must_use]
 pub fn shed_reply(reason: ShedReason, input: &DnsTcpOwnedFrame) -> DnsTcpOutcome {

@@ -8,14 +8,12 @@
 //! (no retransmit state to arm a timer for), and every unit of work starts
 //! and ends inside one `on_datagram` call.
 //!
-//! `on_datagram` decodes with
-//! [`proxima_protocols::dns::codec_trait::DnsDatagramCodec`] (the
-//! `proxima_codec::Datagram` impl this crate is built to use), converts the
-//! zero-copy [`Message`] into an owned [`crate::pipes::DnsQuery`], dispatches
-//! it to the caller-supplied [`DnsPipeHandle`], and stages the encoded reply
-//! for [`DatagramProtocol::transmit`] to drain. A malformed or oversized
-//! datagram, or a handler failure, is logged and dropped — one bad query
-//! must never tear down a connectionless listener (the same contract
+//! `on_datagram` runs `crate::wire::answer_datagram` — the decode / dispatch
+//! / encode unit both UDP listeners share — and stages the reply for
+//! [`DatagramProtocol::transmit`] to drain. A malformed or oversized datagram,
+//! or a handler failure, is logged and dropped there, which is why this
+//! state machine's error type is [`Infallible`]: nothing about one bad query
+//! can tear down a connectionless listener (the same contract
 //! [`proxima_listen::stream::DatagramListenProtocol`] and the QUIC listener
 //! both hold).
 //!
@@ -24,26 +22,18 @@
 //! `DatagramProtocol` impl onto its driver.
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use proxima_codec::Datagram;
 use proxima_core::time::Instant;
 use proxima_listen::stream::{DatagramProtocol, DatagramProtocolListenProtocol};
-use proxima_primitives::pipe::Method;
-use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::request::{Request, RequestContext};
-use proxima_protocols::dns::codec_trait::DnsDatagramCodec;
 use proxima_telemetry::warn;
 
 use crate::config::DnsServerConfig;
-use crate::error::DnsServeError;
 use crate::pipes::DnsPipeHandle;
-use crate::wire::{answer_to_wire, message_to_query};
-
-const METHOD_LABEL: &[u8] = b"DNS";
+use crate::wire::answer_datagram;
 
 /// DNS-over-UDP query/response state machine. Construct fresh per `serve()`
 /// via [`Self::listen_protocol`]; holds no per-peer state between calls —
@@ -92,7 +82,7 @@ impl DnsDatagramProtocol {
 }
 
 impl DatagramProtocol for DnsDatagramProtocol {
-    type Err = DnsServeError;
+    type Err = Infallible;
 
     async fn on_datagram(
         &mut self,
@@ -100,51 +90,17 @@ impl DatagramProtocol for DnsDatagramProtocol {
         peer: SocketAddr,
         datagram: &[u8],
     ) -> Result<(), Self::Err> {
-        if datagram.len() > self.config.max_message_bytes {
-            warn!(
-                label = %self.label,
-                %peer,
-                len = datagram.len(),
-                limit = self.config.max_message_bytes,
-                "dns query exceeds message limit; dropping"
-            );
-            return Ok(());
+        let reply = answer_datagram(
+            &self.label,
+            &self.handler,
+            self.config.max_message_bytes,
+            peer,
+            datagram,
+        )
+        .await;
+        if let Some(bytes) = reply {
+            self.pending.push_back((Bytes::from(bytes), peer));
         }
-        let addressed = match DnsDatagramCodec.decode(peer, datagram) {
-            Ok(addressed) => addressed,
-            Err(error) => {
-                warn!(label = %self.label, %peer, ?error, "dns query failed to parse; dropping");
-                return Ok(());
-            }
-        };
-        let Some(query) = message_to_query(&addressed.message) else {
-            warn!(label = %self.label, %peer, "dns query is not exactly one question; dropping");
-            return Ok(());
-        };
-
-        let request = Request {
-            method: Method::from_wire(Bytes::from_static(METHOD_LABEL)),
-            path: Bytes::from_static(b"/"),
-            query: HeaderList::new(),
-            metadata: HeaderList::new(),
-            payload: query.clone(),
-            stream: None,
-            context: RequestContext::default(),
-        };
-        let reply = match SendPipe::call(&self.handler, request).await {
-            Ok(reply) => reply,
-            Err(error) => {
-                warn!(label = %self.label, %peer, ?error, "dns handler pipe failed; dropping");
-                return Ok(());
-            }
-        };
-
-        let mut out = Vec::new();
-        if let Err(error) = answer_to_wire(&query, &reply.payload, &mut out) {
-            warn!(label = %self.label, %peer, ?error, "dns answer failed to encode; dropping");
-            return Ok(());
-        }
-        self.pending.push_back((Bytes::from(out), peer));
         Ok(())
     }
 
@@ -197,6 +153,7 @@ mod tests {
 
     use futures::task::noop_waker;
     use proxima_core::ProximaError;
+    use proxima_primitives::pipe::SendPipe;
     use proxima_protocols::dns::encode;
 
     use super::*;

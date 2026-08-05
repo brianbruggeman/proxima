@@ -1,48 +1,46 @@
-//! proxima's own DNS resolver client + listener facade, mirroring
-//! `proxima_redis`'s crate structure.
+//! proxima's own DNS resolver client + listener facade.
 //!
-//! The sans-IO RFC 1035 parser ([`Header`], [`Flags`], [`Question`],
-//! [`Record`], [`RData`], [`Name`], [`ParseError`], [`parse_header`],
-//! [`parse_question`], [`parse_record`]) plus the write-side encoder
-//! ([`EncodeError`], [`EncodeQuestion`], [`AnswerRecord`], [`encode_query`],
-//! [`encode_response`]) and the `proxima_codec::Datagram` impl
-//! ([`DnsDatagramCodec`], [`Message`], [`parse_message`]) all live in
-//! [`proxima_protocols::dns`] — see its docs for the wire layer. This crate
-//! is the std client + listener built on top:
+//! The sans-IO RFC 1035 wire layer lives in [`proxima_protocols::dns`] — the
+//! parser ([`Header`], [`Flags`], [`Question`], [`Record`], [`RData`],
+//! [`Name`], [`parse_header`], [`parse_question`], [`parse_record`]), the
+//! encoder ([`EncodeQuestion`], [`AnswerRecord`], [`encode_query`],
+//! [`encode_response`]), the `proxima_codec::Datagram` impl
+//! ([`DnsDatagramCodec`], [`Message`], [`parse_message`]) and the
+//! DNS-over-TCP `proxima_codec::FrameCodec` ([`DnsTcpCodec`],
+//! [`DnsTcpOwnedFrame`]). All of it is re-exported here unconditionally, so a
+//! caller imports everything from `proxima-dns` and never reaches past it into
+//! `proxima-protocols` internals (teaching surface, workspace principle 2).
 //!
-//! - the async [`client::DnsClientUpstream`] resolver, driving the sans-IO
-//!   [`client::DnsClientSession`] over a pluggable
-//!   [`proxima_primitives::stream::DatagramFactory`] (prime, tokio, a fake
-//!   test socket) — the `client` feature.
-//! - [`DnsDatagramProtocol`] — the UDP server, a
-//!   [`proxima_listen::stream::DatagramProtocol`] state machine driven by
-//!   `DatagramProtocolListenProtocol`, dispatching each parsed query to a
-//!   caller-supplied [`DnsPipeHandle`] and staging the encoded reply — the
-//!   `listen` feature.
-//! - [`DnsAnyProtocol`] — the DNS-over-TCP (RFC 1035 §4.2.2) sibling, an
-//!   [`proxima_listen::any::AnyProtocol`] candidate for the open universal
-//!   listener — also the `listen` feature. See its module doc for the
-//!   2-byte length-prefix framing gap this module fills directly rather
-//!   than extending the shared codec crate.
-//! - [`DnsUdpAnyProtocol`] — the DNS-over-UDP (RFC 1035 §4.2.1) `AnyProtocol`
-//!   candidate `proxima::ListenerProtocolExt::dns` registers ALONGSIDE
-//!   [`DnsAnyProtocol`] under one `.any()`-fanned listener, so one bind
-//!   answers both transports on one port (`AnyProtocol::wants_datagram() ==
-//!   true` — see that method's own doc). A separate type from
-//!   [`DnsDatagramProtocol`] above: that one is a standalone, dedicated
-//!   UDP-only listener with no TCP sibling, for a caller who wants exactly
-//!   that instead.
+//! On top of that wire layer this crate adds the std-tier client and server:
+//!
+//! - `client::DnsClientUpstream` — the async resolver, driving the sans-IO
+//!   `client::session` encode/decode pair over a caller-injected
+//!   `proxima_primitives::stream::DatagramFactory` (prime, tokio, a fake test
+//!   socket), so `proxima::Client` speaks DNS as a registered protocol. The
+//!   `client` feature.
+//! - `DnsUdpAnyProtocol` / `DnsAnyProtocol` — the DNS-over-UDP (RFC 1035
+//!   §4.2.1) and DNS-over-TCP (§4.2.2) `proxima_listen::any::AnyProtocol`
+//!   candidates `proxima::ListenerProtocolExt::dns` registers together, so one
+//!   `.any()`-fanned bind answers both transports on one port. The `listen`
+//!   feature.
+//! - `DnsDatagramProtocol` — a standalone, dedicated UDP-only listener (a
+//!   `proxima_listen::stream::DatagramProtocol` state machine with its own
+//!   batched recv/transmit tick) for a caller who wants exactly that and no
+//!   TCP sibling. Also the `listen` feature.
+//!
+//! Every name behind `client` / `listen` above is deliberately unlinked: an
+//! intra-doc link to a feature-gated item fails `cargo doc` at the tiers where
+//! that item does not exist, including this crate's own default one.
 //!
 //! ## Scope
 //!
 //! **UDP and TCP, no DNS-over-QUIC (DoQ) or DNS-over-TLS/HTTPS (DoT/DoH).**
-//! Classic UDP queries ([`DnsDatagramProtocol`]) and DNS-over-TCP framing
-//! ([`DnsAnyProtocol`]) are both implemented; the encrypted-transport
-//! variants (DoQ/DoT/DoH) are not — `proxima::ListenerProtocolExt::dns`'s
-//! `.quic()` pairing is a named config error rather than a silent
-//! plaintext fallback (see that method's doc).
+//! Classic UDP queries and DNS-over-TCP framing are both implemented; the
+//! encrypted-transport variants are not — `proxima::ListenerProtocolExt::dns`'s
+//! `.quic()` pairing is a named config error rather than a silent plaintext
+//! fallback (see that method's doc).
 
-#[cfg(any(feature = "client", feature = "listen"))]
+#[cfg(feature = "client")]
 pub mod error;
 #[cfg(any(feature = "client", feature = "listen"))]
 pub mod pipes;
@@ -75,11 +73,14 @@ pub use proxima_protocols::dns::{
 pub use proxima_protocols::dns::codec_trait::{
     DnsDatagramCodec, Message, QuestionIter, RecordIter, parse_message,
 };
+pub use proxima_protocols::dns::frame_codec::{
+    DnsTcpCodec, DnsTcpFrameError, DnsTcpOwnedFrame, DnsTcpQuery, DnsTcpViolation,
+};
 
 #[cfg(feature = "client")]
 pub use client::{DnsClientUpstream, DnsConfigError, DnsResolverConfig};
 
-#[cfg(any(feature = "client", feature = "listen"))]
+#[cfg(feature = "client")]
 pub use error::DnsClientError;
 #[cfg(any(feature = "client", feature = "listen"))]
 pub use pipes::{
@@ -87,11 +88,6 @@ pub use pipes::{
     into_dns_handle,
 };
 
-// the server-side surface a DNS query handler builds against — re-exported
-// so a caller imports everything from proxima-dns and never reaches past
-// it into proxima-protocols/proxima-listen internals (teaching surface,
-// workspace principle 2), mirroring proxima-redis's own top-level
-// re-export shape.
 #[cfg(feature = "listen")]
 pub use any_protocol::DnsAnyProtocol;
 #[cfg(feature = "listen")]
@@ -99,8 +95,6 @@ pub use config::DnsServerConfig;
 #[cfg(feature = "listen")]
 pub use datagram_protocol::DnsDatagramProtocol;
 #[cfg(feature = "listen")]
-pub use error::DnsServeError;
-#[cfg(feature = "listen")]
-pub use framed_app::{DnsFramedApp, DnsFramedAppError, DnsTcpOutcome};
+pub use framed_app::{DnsFramedApp, DnsTcpOutcome};
 #[cfg(feature = "listen")]
 pub use udp_any_protocol::DnsUdpAnyProtocol;
