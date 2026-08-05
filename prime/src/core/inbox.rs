@@ -11,13 +11,20 @@
 //! counter; cloning more than `num_lanes` times panics. for proxima the
 //! caller knows `num_lanes` at startup (= num_cores).
 //!
-//! compile-time flag selects layer:
-//! - `runtime-prime-inbox-alloc`: heap-backed Box<[Lane<T>]>, runtime
-//!   `num_lanes` and `lane_capacity`
-//! - `runtime-prime-inbox-const`: stack-backed (TODO)
+//! compile-time flag selects layer. only the error types (`SendError`,
+//! `TryRecvError`, `RecvError`) and the closed-bit encoding are shared;
+//! everything else is gated, so selecting a layer really does exclude
+//! the others' storage:
+//! - `runtime-prime-inbox-alloc`: heap-backed `Box<[Lane<T>]>` at this
+//!   module's root, runtime `num_lanes` and `lane_capacity`
+//! - `runtime-prime-inbox-const`: stack-backed const-generic ring in
+//!   `inbox_const` — no_std, no alloc, no `extern crate alloc`
+//! - `runtime-prime-inbox-dynamic`: growable lane registry in
+//!   `inbox_dynamic`, std-only
 //!
-//! no_std + alloc only — uses `core::*` and `alloc::*` exclusively.
-//! AtomicWaker reuses `futures::task::AtomicWaker` (no_std-compat).
+//! the alloc and dynamic layers are no_std + alloc — `core::*` and
+//! `alloc::*` exclusively. AtomicWaker reuses `futures::task::AtomicWaker`
+//! (no_std-compat).
 
 #[cfg(all(
     feature = "runtime-prime-inbox-alloc",
@@ -28,25 +35,36 @@ compile_error!(
      exclusive — pick one"
 );
 
-extern crate alloc;
-
+#[cfg(feature = "runtime-prime-inbox-alloc")]
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use alloc::boxed::Box;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use alloc::sync::Arc;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 use core::cell::Cell;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::cell::UnsafeCell;
 use core::fmt;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::future::Future;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::marker::PhantomData;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::mem::MaybeUninit;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::pin::Pin;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::sync::atomic::{self, AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use core::task::{Context, Poll};
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use atomic_waker::AtomicWaker;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 use crossbeam_queue::SegQueue;
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 use crossbeam_utils::CachePadded;
 
 #[derive(Debug)]
@@ -102,6 +120,7 @@ const POSITION_MASK: usize = !CLOSED_BIT;
 /// internal lane-level error so the slow path in `try_send` can
 /// distinguish "lane full" from "closed" without leaking the
 /// inner-level `SendError` into `Lane`.
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 enum LaneSendErr<T> {
     Full(T),
     Closed(T),
@@ -141,6 +160,7 @@ impl fmt::Display for RecvError {
 /// `Acquire` load on `head` / `tail` when the cached value still proves there
 /// is room / data — stale caches only cause false-full / false-empty which
 /// then refreshes, never data races.
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 struct Lane<T> {
     head: CachePadded<AtomicUsize>,
     tail: CachePadded<AtomicUsize>,
@@ -156,9 +176,12 @@ struct Lane<T> {
 // observing tail > head via Acquire load. no two threads ever touch the
 // same slot concurrently. cached_head is single-producer only;
 // cached_tail is single-consumer only — by the SPSC contract.
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 unsafe impl<T: Send> Sync for Lane<T> {}
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 unsafe impl<T: Send> Send for Lane<T> {}
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Lane<T> {
     fn new(capacity: usize) -> Self {
         assert!(
@@ -296,12 +319,14 @@ impl<T> Lane<T> {
     }
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Drop for Lane<T> {
     fn drop(&mut self) {
         self.drop_remaining();
     }
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 struct Inner<T> {
     lanes: Box<[Lane<T>]>,
     used_lanes: AtomicUsize,
@@ -327,6 +352,7 @@ struct Inner<T> {
     drain_cursor: AtomicUsize,
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Inner<T> {
     fn new(num_lanes: usize, lane_capacity: usize) -> Arc<Self> {
         assert!(num_lanes > 0, "inbox num_lanes must be > 0");
@@ -440,7 +466,7 @@ impl<T> Inner<T> {
 /// monotonically exhaust `num_lanes`.
 ///
 /// Only compiled under `std` — the TLS backing requires it.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 struct LaneCacheEntry {
     inner_ptr: usize,
     lane: usize,
@@ -451,7 +477,7 @@ struct LaneCacheEntry {
     release: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 impl Drop for LaneCacheEntry {
     fn drop(&mut self) {
         if let Some(release) = self.release.take() {
@@ -467,15 +493,15 @@ impl Drop for LaneCacheEntry {
 /// dispatch patterns at zero overhead: the scan is 4 branchless
 /// ptr compares against a fixed-size array. an entry of (0, 0) is
 /// empty; replacement is round-robin via `HOT_LANES_NEXT`.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 const HOT_LANES_SIZE: usize = 4;
 
-// std-only TLS; deferred-debt for no_std cliff. C1 (thread-identity-trait)
-// in woolly-watching-cupcake routes this through ThreadIdentity with a
-// std-backed default and a no_std single-thread stub.
-// DC5 transitional gate: the TLS block + try_send_mpsc are unavailable
-// under alloc-only. C2 (lane-ticket) replaces this with a no_std-clean API.
-#[cfg(feature = "std")]
+// std-only TLS. the no_std cliff is closed by the cfg gate, not by an
+// abstraction: under alloc-only this block and `try_send_mpsc` vanish and
+// callers use the per-thread `Producer` clone instead. giving no_std an
+// mpsc-safe send needs a caller-held lane ticket — an API change, not a
+// thread-identity read.
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 std::thread_local! {
     static LANE_CACHE: core::cell::RefCell<Vec<LaneCacheEntry>> = const {
         core::cell::RefCell::new(Vec::new())
@@ -491,7 +517,7 @@ std::thread_local! {
     };
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "runtime-prime-inbox-alloc"))]
 impl<T> Inner<T> {
     /// allocate a lane for the calling thread. consults `free_lanes`
     /// first (a previously-allocated lane returned by an exited
@@ -523,17 +549,19 @@ impl<T> Inner<T> {
 /// producer handle. cheap to send across threads; `Clone` allocates the next
 /// available lane (panics if the inbox's `num_lanes` is exhausted — caller
 /// must size `num_lanes >= max_concurrent_producers` at construction).
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 pub struct Producer<T> {
     inner: Arc<Inner<T>>,
     lane_index: usize,
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Producer<T> {
     /// non-blocking SPSC send to this producer's dedicated lane. caller
     /// is responsible for ensuring only one thread sends on this Producer
     /// instance (the SPSC contract). For shared `Arc<Producer>` patterns
     /// where multiple threads must send through one handle, use
-    /// [`try_send_mpsc`] instead.
+    /// `try_send_mpsc` (std only) instead.
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
         self.inner.try_send_on(self.lane_index, value)
     }
@@ -565,7 +593,7 @@ impl<T> Producer<T> {
     /// its own SPSC lane, preserving the per-lane SPSC contract.
     ///
     /// For the single-thread case (or the per-thread-clone pattern used
-    /// in `bench_inbox`), prefer [`try_send`]: it's a single uncontended
+    /// in `bench_inbox`), prefer [`Self::try_send`]: it's a single uncontended
     /// store with no thread-local lookup.
     ///
     /// Returns `Err(SendError::NoLanes(value))` if the inbox's
@@ -651,6 +679,7 @@ impl<T> Producer<T> {
     }
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Clone for Producer<T> {
     fn clone(&self) -> Self {
         let index = self.inner.used_lanes.fetch_add(1, Ordering::AcqRel);
@@ -667,6 +696,7 @@ impl<T> Clone for Producer<T> {
     }
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
         if self.inner.producer_count.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -682,11 +712,13 @@ impl<T> Drop for Producer<T> {
 /// `Send` is fine: the consumer may be moved *to* a worker thread once at
 /// construction, then it stays there. `PhantomData<core::cell::Cell<()>>`
 /// gives us `Send + !Sync` (Cell is Send when T: Send, never Sync).
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 pub struct Consumer<T> {
     inner: Arc<Inner<T>>,
     _not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Consumer<T> {
     /// non-blocking drain across lanes. round-robins to keep producers fair.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -698,6 +730,7 @@ impl<T> Consumer<T> {
     }
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Drop for Consumer<T> {
     fn drop(&mut self) {
         self.inner.consumer_alive.store(false, Ordering::Release);
@@ -706,10 +739,12 @@ impl<T> Drop for Consumer<T> {
 
 /// state-machine future returned by `Consumer::recv`. polls on caller's stack;
 /// no `Box::pin`.
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 pub struct Recv<'consumer, T> {
     consumer: &'consumer Consumer<T>,
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 impl<T> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
@@ -757,6 +792,7 @@ impl<T> Future for Recv<'_, T> {
 /// additional producers come from `Producer::clone` (up to `num_lanes - 1`).
 /// both `num_lanes` and `lane_capacity` must be non-zero; capacity must be
 /// a power of two.
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 #[must_use]
 pub fn channel<T>(num_lanes: usize, lane_capacity: usize) -> (Producer<T>, Consumer<T>) {
     let inner = Inner::new(num_lanes, lane_capacity);
@@ -771,6 +807,7 @@ pub fn channel<T>(num_lanes: usize, lane_capacity: usize) -> (Producer<T>, Consu
     (producer, consumer)
 }
 
+#[cfg(feature = "runtime-prime-inbox-alloc")]
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1377,8 +1414,6 @@ mod tests {
 // Always (C2) adds crossbeam-epoch reclamation of above-floor idle lanes.
 #[cfg(feature = "runtime-prime-inbox-dynamic")]
 pub mod inbox_dynamic {
-    extern crate alloc;
-
     use alloc::boxed::Box;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
