@@ -1703,8 +1703,8 @@ impl<Clk: Clock> Recorder<Clk> {
         }
     }
 
-    /// Wake any [`pump_wait`](Self::pump_wait) future now — e.g. to stop the pump
-    /// promptly without waiting out its flush interval.
+    /// Wake any `pump_wait` future now — e.g. to stop the pump promptly
+    /// without waiting out its flush interval.
     /// No-op when `lossless-backpressure` is disabled.
     pub fn signal_pump(&self) {
         #[cfg(feature = "lossless-backpressure")]
@@ -1718,9 +1718,11 @@ impl<Clk: Clock> Recorder<Clk> {
     /// Test-only: fold this recorder's deferred span-duration observations into the
     /// registry WITHOUT the drain's snapshot-and-reset, so a test can read the live
     /// histogram `count()`. No-op under the inline-fold (non-deferred) build.
-    /// Only its span-metric-test callers exist, and those are instrument-metrics
-    /// gated — so gate here too, else it is dead under default features.
-    #[cfg(all(test, feature = "instrument-metrics"))]
+    /// Only its span-metric-test callers exist, and they live in a module gated
+    /// `instrument-metrics` AND `not(loom)` — so mirror BOTH here, else it is
+    /// dead code under default features (missing the first) or under
+    /// `--all-features` (missing the second).
+    #[cfg(all(test, not(feature = "loom"), feature = "instrument-metrics"))]
     pub(crate) fn fold_deferred(&self) {
         #[cfg(feature = "deferred-metric-fold")]
         {
@@ -2163,7 +2165,7 @@ fn system_clock_anchor() -> &'static (Instant, AnchorCell) {
 /// (steady — never steps backward) extrapolated against a wall-clock anchor
 /// pinned once on first use, via [`ToUnixNanos`] — the monotonic-to-wall-clock
 /// bridge from `proxima-clock`, not a fourth hand-rolled version of it (see
-/// that type's doc for the general shape; [`system_clock_anchor`] holds this
+/// that type's doc for the general shape; `system_clock_anchor` holds this
 /// clock's anchor). The `System` arm of [`crate::clock::GlobalClock`] —
 /// `Recorder<Clk = GlobalClock>`'s default type parameter — and directly
 /// usable on its own via [`RecorderBuilder::clock`] for a recorder that
@@ -2429,7 +2431,8 @@ mod tests {
     async fn sampled_out_span_still_records_duration_metric() {
         use crate::sampler::AlwaysOff;
 
-        let (pipe, spans, _, _, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2468,7 +2471,8 @@ mod tests {
         use crate::clock::MonotonicCounter;
         use crate::sampler::AlwaysOff;
 
-        let (pipe, spans, _, _, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2495,7 +2499,8 @@ mod tests {
         use crate::clock::MonotonicCounter;
         use crate::sampler::AlwaysOff;
 
-        let (pipe, spans, _, _, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2535,7 +2540,8 @@ mod tests {
         use crate::clock::MonotonicCounter;
         use crate::sampler::AlwaysOff;
 
-        let (pipe, spans, _, _, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2756,7 +2762,8 @@ mod tests {
     #[cfg(feature = "lossless-backpressure")]
     #[test]
     fn block_no_drainer_self_progresses_no_hang() {
-        let (pipe, spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2812,7 +2819,8 @@ mod tests {
     // call, so the only thing that can export them is EmitShared::drop.
     #[test]
     fn shutdown_flush_exports_records_left_in_ring() {
-        let (pipe, spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let count = 100u64;
         {
             let recorder = Recorder::builder()
@@ -2845,7 +2853,8 @@ mod tests {
     #[cfg(feature = "lossless-backpressure")]
     #[test]
     fn managed_drainer_pumps_without_manual_drain() {
-        let (pipe, spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2877,7 +2886,8 @@ mod tests {
     #[cfg(feature = "lossless-backpressure")]
     #[test]
     fn pump_time_trigger_flushes_light_load() {
-        let (pipe, spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -2916,7 +2926,8 @@ mod tests {
     #[cfg(feature = "lossless-backpressure")]
     #[test]
     fn pump_active_parks_producers_losslessly() {
-        let (pipe, spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = alloc::sync::Arc::new(
             Recorder::builder()
                 .pipe(pipe)
@@ -2970,7 +2981,8 @@ mod tests {
     // once — the single-consumer contract holds because each core has one drainer.
     #[test]
     fn drain_range_disjoint_covers_all_cores() {
-        let (pipe, spans, _events, _logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = alloc::sync::Arc::new(
             Recorder::builder()
                 .pipe(pipe)
@@ -3014,7 +3026,12 @@ mod tests {
         Arc<AtomicU64>,
         Arc<AtomicU64>,
     ) {
-        let (pipe, spans, events, logs, metrics, links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
+        let events = Arc::clone(&pipe.events);
+        let logs = Arc::clone(&pipe.logs);
+        let metrics = Arc::clone(&pipe.metrics);
+        let links = Arc::clone(&pipe.links);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(core_count)
@@ -3192,7 +3209,8 @@ mod tests {
         let first_drain = recorder.drain();
         assert!(first_drain >= 1);
 
-        let (new_pipe, _, _, logs, _, _) = CountingPipe::new();
+        let new_pipe = CountingPipe::new();
+        let logs = Arc::clone(&new_pipe.logs);
         recorder.swap_pipe(into_telemetry_handle(new_pipe));
 
         recorder.log().message("after swap").emit();
@@ -3367,7 +3385,8 @@ mod tests {
     async fn recorder_with_always_off_sampler_drops_spans() {
         use crate::sampler::AlwaysOff;
 
-        let (pipe, spans, _, _, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
@@ -3393,7 +3412,8 @@ mod tests {
     async fn recorder_with_always_on_sampler_keeps_spans() {
         use crate::sampler::AlwaysOn;
 
-        let (pipe, spans, _, _, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)

@@ -514,7 +514,7 @@ pub fn link_request(link: SpanLink) -> TelemetryRequest {
     make_request(METHOD_LINK, PATH_LINK, TelemetryRecord::Link(link))
 }
 
-/// Build a batch telemetry Request carrying a Vec<SpanRecord>.
+/// Build a batch telemetry Request carrying a `Vec<SpanRecord>`.
 #[must_use]
 pub fn span_batch_request(records: alloc::vec::Vec<SpanRecord>) -> TelemetryRequest {
     make_request(
@@ -524,7 +524,7 @@ pub fn span_batch_request(records: alloc::vec::Vec<SpanRecord>) -> TelemetryRequ
     )
 }
 
-/// Build a batch telemetry Request carrying a Vec<EventRecord>.
+/// Build a batch telemetry Request carrying a `Vec<EventRecord>`.
 #[must_use]
 pub fn event_batch_request(records: alloc::vec::Vec<EventRecord>) -> TelemetryRequest {
     make_request(
@@ -534,7 +534,7 @@ pub fn event_batch_request(records: alloc::vec::Vec<EventRecord>) -> TelemetryRe
     )
 }
 
-/// Build a batch telemetry Request carrying a Vec<LogRecord>.
+/// Build a batch telemetry Request carrying a `Vec<LogRecord>`.
 #[must_use]
 pub fn log_batch_request(records: alloc::vec::Vec<LogRecord>) -> TelemetryRequest {
     make_request(
@@ -544,7 +544,7 @@ pub fn log_batch_request(records: alloc::vec::Vec<LogRecord>) -> TelemetryReques
     )
 }
 
-/// Build a batch telemetry Request carrying a Vec<MetricSample>.
+/// Build a batch telemetry Request carrying a `Vec<MetricSample>`.
 #[must_use]
 pub fn metric_batch_request(samples: alloc::vec::Vec<MetricSample>) -> TelemetryRequest {
     make_request(
@@ -554,7 +554,7 @@ pub fn metric_batch_request(samples: alloc::vec::Vec<MetricSample>) -> Telemetry
     )
 }
 
-/// Build a batch telemetry Request carrying a Vec<SpanLink>.
+/// Build a batch telemetry Request carrying a `Vec<SpanLink>`.
 #[must_use]
 pub fn link_batch_request(links: alloc::vec::Vec<SpanLink>) -> TelemetryRequest {
     make_request(
@@ -564,7 +564,7 @@ pub fn link_batch_request(links: alloc::vec::Vec<SpanLink>) -> TelemetryRequest 
     )
 }
 
-/// Build an Arc-shared batch telemetry Request carrying a Vec<Arc<SpanRecord>>.
+/// Build an Arc-shared batch telemetry Request carrying a `Vec<Arc<SpanRecord>>`.
 ///
 /// Fan-out via Tee becomes N Arc bumps instead of N record memcpys. Produced by
 /// the drainer when `RecordSharing::Arc` is configured.
@@ -577,7 +577,7 @@ pub fn span_batch_arc_request(records: alloc::vec::Vec<Arc<SpanRecord>>) -> Tele
     )
 }
 
-/// Build an Arc-shared batch telemetry Request carrying a Vec<Arc<EventRecord>>.
+/// Build an Arc-shared batch telemetry Request carrying a `Vec<Arc<EventRecord>>`.
 #[must_use]
 pub fn event_batch_arc_request(records: alloc::vec::Vec<Arc<EventRecord>>) -> TelemetryRequest {
     make_request(
@@ -587,7 +587,7 @@ pub fn event_batch_arc_request(records: alloc::vec::Vec<Arc<EventRecord>>) -> Te
     )
 }
 
-/// Build an Arc-shared batch telemetry Request carrying a Vec<Arc<LogRecord>>.
+/// Build an Arc-shared batch telemetry Request carrying a `Vec<Arc<LogRecord>>`.
 #[must_use]
 pub fn log_batch_arc_request(records: alloc::vec::Vec<Arc<LogRecord>>) -> TelemetryRequest {
     make_request(
@@ -597,7 +597,7 @@ pub fn log_batch_arc_request(records: alloc::vec::Vec<Arc<LogRecord>>) -> Teleme
     )
 }
 
-/// Build an Arc-shared batch telemetry Request carrying a Vec<Arc<MetricSample>>.
+/// Build an Arc-shared batch telemetry Request carrying a `Vec<Arc<MetricSample>>`.
 #[must_use]
 pub fn metric_batch_arc_request(samples: alloc::vec::Vec<Arc<MetricSample>>) -> TelemetryRequest {
     make_request(
@@ -607,7 +607,7 @@ pub fn metric_batch_arc_request(samples: alloc::vec::Vec<Arc<MetricSample>>) -> 
     )
 }
 
-/// Build an Arc-shared batch telemetry Request carrying a Vec<Arc<SpanLink>>.
+/// Build an Arc-shared batch telemetry Request carrying a `Vec<Arc<SpanLink>>`.
 #[must_use]
 pub fn link_batch_arc_request(links: alloc::vec::Vec<Arc<SpanLink>>) -> TelemetryRequest {
     make_request(
@@ -1232,7 +1232,10 @@ fn dispatch_otlp_grpc(
 
 /// Test-only pipe that counts records by type.
 ///
-/// Shared counters are returned at construction time for assertions.
+/// `Clone` shares the same counters (every field is an `Arc`), matching
+/// [`InMemoryPipe`]: one handle goes into the recorder, the other reads the
+/// counts after drain.
+#[derive(Clone, Default)]
 pub struct CountingPipe {
     pub spans: Arc<core::sync::atomic::AtomicU64>,
     pub events: Arc<core::sync::atomic::AtomicU64>,
@@ -1241,47 +1244,10 @@ pub struct CountingPipe {
     pub links: Arc<core::sync::atomic::AtomicU64>,
 }
 
-/// A [`CountingPipe`] paired with its five shared counters
-/// (spans, events, logs, metrics, links) for assertion access.
-pub type CountingPipeWithCounters = (
-    CountingPipe,
-    Arc<core::sync::atomic::AtomicU64>,
-    Arc<core::sync::atomic::AtomicU64>,
-    Arc<core::sync::atomic::AtomicU64>,
-    Arc<core::sync::atomic::AtomicU64>,
-    Arc<core::sync::atomic::AtomicU64>,
-);
-
 impl CountingPipe {
-    // returns the pipe plus its five shared counters for test assertions
-    #[allow(clippy::type_complexity)]
     #[must_use]
-    pub fn new() -> CountingPipeWithCounters {
-        let spans = Arc::new(core::sync::atomic::AtomicU64::new(0));
-        let events = Arc::new(core::sync::atomic::AtomicU64::new(0));
-        let logs = Arc::new(core::sync::atomic::AtomicU64::new(0));
-        let metrics = Arc::new(core::sync::atomic::AtomicU64::new(0));
-        let links = Arc::new(core::sync::atomic::AtomicU64::new(0));
-        (
-            Self {
-                spans: Arc::clone(&spans),
-                events: Arc::clone(&events),
-                logs: Arc::clone(&logs),
-                metrics: Arc::clone(&metrics),
-                links: Arc::clone(&links),
-            },
-            spans,
-            events,
-            logs,
-            metrics,
-            links,
-        )
-    }
-}
-
-impl Default for CountingPipe {
-    fn default() -> Self {
-        Self::new().0
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -3608,7 +3574,8 @@ mod filter_view_tests {
 
     #[test]
     fn random_drop_keep_all_passes_every_record() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(inner, 1.0);
         let request = log_request(make_log(Level::INFO));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3617,7 +3584,8 @@ mod filter_view_tests {
 
     #[test]
     fn random_drop_keep_none_drops_every_record() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(inner, 0.0);
         let request = log_request(make_log(Level::INFO));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3626,7 +3594,8 @@ mod filter_view_tests {
 
     #[test]
     fn random_drop_keep_all_batch_passes_all() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(inner, 1.0);
         let records = vec![make_log(Level::INFO), make_log(Level::WARN)];
         let request = log_batch_request(records);
@@ -3636,7 +3605,8 @@ mod filter_view_tests {
 
     #[test]
     fn random_drop_keep_none_batch_short_circuits() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(inner, 0.0);
         let records = vec![make_log(Level::INFO), make_log(Level::WARN)];
         let request = log_batch_request(records);
@@ -3646,7 +3616,8 @@ mod filter_view_tests {
 
     #[test]
     fn random_drop_composition_both_apply() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(RandomDropPipe::new(inner, 1.0), 1.0);
         let request = log_request(make_log(Level::INFO));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3657,7 +3628,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_level_passes_record_at_or_above_threshold() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = FilterByLevelPipe::new(inner, Level::WARN);
         let request = log_request(make_log(Level::ERROR));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3666,7 +3638,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_level_drops_record_below_threshold() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = FilterByLevelPipe::new(inner, Level::WARN);
         let request = log_request(make_log(Level::DEBUG));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3675,7 +3648,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_level_passes_non_log_requests_unchanged() {
-        let (inner, spans, _, _, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let spans = Arc::clone(&inner.spans);
         let pipe = FilterByLevelPipe::new(inner, Level::ERROR);
         let request = span_request(make_span());
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3684,7 +3658,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_level_batch_keeps_only_at_or_above_threshold() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = FilterByLevelPipe::new(inner, Level::WARN);
         let records = vec![
             make_log(Level::DEBUG),
@@ -3698,7 +3673,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_level_composition_with_random_drop() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(FilterByLevelPipe::new(inner, Level::WARN), 1.0);
         let request = log_request(make_log(Level::ERROR));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3709,7 +3685,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_attr_drops_record_when_predicate_matches() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe =
             FilterByAttrPipe::new(inner, "env", |val| matches!(val, ScalarValue::Str("dev")));
         let record = make_log_with_attr(Level::INFO, "env", ScalarValue::Str("dev"));
@@ -3720,7 +3697,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_attr_passes_record_when_predicate_does_not_match() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe =
             FilterByAttrPipe::new(inner, "env", |val| matches!(val, ScalarValue::Str("dev")));
         let record = make_log_with_attr(Level::INFO, "env", ScalarValue::Str("prod"));
@@ -3731,7 +3709,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_attr_passes_record_when_key_absent() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe =
             FilterByAttrPipe::new(inner, "env", |val| matches!(val, ScalarValue::Str("dev")));
         let request = log_request(make_log(Level::INFO));
@@ -3741,7 +3720,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_attr_batch_removes_matching_records() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe =
             FilterByAttrPipe::new(inner, "env", |val| matches!(val, ScalarValue::Str("dev")));
         let records = vec![
@@ -3756,7 +3736,8 @@ mod filter_view_tests {
 
     #[test]
     fn filter_by_attr_composition_with_level_filter() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe =
             FilterByAttrPipe::new(FilterByLevelPipe::new(inner, Level::WARN), "env", |val| {
                 matches!(val, ScalarValue::Str("dev"))
@@ -3774,7 +3755,8 @@ mod filter_view_tests {
 
     #[test]
     fn drop_attr_removes_named_attr_from_log_record() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = DropAttrPipe::new(inner, &["user_id"]);
         let record = make_log_with_attr(Level::INFO, "user_id", ScalarValue::Str("abc"));
         let request = log_request(record);
@@ -3784,7 +3766,8 @@ mod filter_view_tests {
 
     #[test]
     fn drop_attr_passes_through_when_key_absent() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = DropAttrPipe::new(inner, &["user_id"]);
         let request = log_request(make_log(Level::INFO));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3793,7 +3776,8 @@ mod filter_view_tests {
 
     #[test]
     fn drop_attr_passes_non_log_non_typed_requests() {
-        let (inner, spans, _, _, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let spans = Arc::clone(&inner.spans);
         let mut span = make_span();
         span.attrs.push(Tag::Scalar {
             key: "user_id",
@@ -3807,7 +3791,8 @@ mod filter_view_tests {
 
     #[test]
     fn drop_attr_batch_strips_attr_from_all_records() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = DropAttrPipe::new(inner, &["user_id"]);
         let records = vec![
             make_log_with_attr(Level::INFO, "user_id", ScalarValue::Str("a")),
@@ -3820,7 +3805,8 @@ mod filter_view_tests {
 
     #[test]
     fn drop_attr_composition_with_level_filter() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = DropAttrPipe::new(FilterByLevelPipe::new(inner, Level::INFO), &["user_id"]);
         let record = make_log_with_attr(Level::INFO, "user_id", ScalarValue::Str("abc"));
         let request = log_request(record);
@@ -3832,7 +3818,8 @@ mod filter_view_tests {
 
     #[test]
     fn rename_metric_rewrites_metric_name_attr() {
-        let (inner, _, _, _, metrics, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let metrics = Arc::clone(&inner.metrics);
         let pipe = RenameMetricPipe::new(inner, "http.requests", "requests.count");
         let sample = make_metric_counter("metric.name", ScalarValue::Str("http.requests"));
         let request = metric_request(sample);
@@ -3842,7 +3829,8 @@ mod filter_view_tests {
 
     #[test]
     fn rename_metric_passes_through_non_matching() {
-        let (inner, _, _, _, metrics, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let metrics = Arc::clone(&inner.metrics);
         let pipe = RenameMetricPipe::new(inner, "http.requests", "requests.count");
         let sample = make_metric_counter("metric.name", ScalarValue::Str("other.metric"));
         let request = metric_request(sample);
@@ -3852,7 +3840,8 @@ mod filter_view_tests {
 
     #[test]
     fn rename_metric_passes_non_metric_requests() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RenameMetricPipe::new(inner, "http.requests", "requests.count");
         let request = log_request(make_log(Level::INFO));
         block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3861,7 +3850,8 @@ mod filter_view_tests {
 
     #[test]
     fn rename_metric_composition_with_drop_attr() {
-        let (inner, _, _, _, metrics, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let metrics = Arc::clone(&inner.metrics);
         let pipe = RenameMetricPipe::new(
             DropAttrPipe::new(inner, &["debug.tag"]),
             "old.name",
@@ -3902,7 +3892,8 @@ mod filter_view_tests {
 
         #[test]
         fn rebucket_histogram_remaps_buckets_and_forwards() {
-            let (inner, _, _, _, metrics, _) = CountingPipe::new();
+            let inner = CountingPipe::new();
+            let metrics = Arc::clone(&inner.metrics);
             let pipe = RebucketHistogramPipe::new(inner, NEW_BOUNDS);
             let request = make_histogram_request(OLD_BOUNDS, vec![1, 2, 3, 4, 5]);
             block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -3911,7 +3902,8 @@ mod filter_view_tests {
 
         #[test]
         fn rebucket_histogram_non_histogram_passes_through() {
-            let (inner, _, _, _, metrics, _) = CountingPipe::new();
+            let inner = CountingPipe::new();
+            let metrics = Arc::clone(&inner.metrics);
             let pipe = RebucketHistogramPipe::new(inner, NEW_BOUNDS);
             let sample = MetricSample::Counter(crate::metric::sample::NumberDataPoint {
                 value: ScalarValue::U64(5),
@@ -3926,7 +3918,8 @@ mod filter_view_tests {
 
         #[test]
         fn rebucket_histogram_composition_with_drop_attr() {
-            let (inner, _, _, _, metrics, _) = CountingPipe::new();
+            let inner = CountingPipe::new();
+            let metrics = Arc::clone(&inner.metrics);
             let pipe = RebucketHistogramPipe::new(DropAttrPipe::new(inner, &["debug"]), NEW_BOUNDS);
             let request = make_histogram_request(OLD_BOUNDS, vec![1, 2, 3, 4, 5]);
             block_on(SendPipe::call(&pipe, request)).expect("call ok");
@@ -4152,7 +4145,10 @@ mod filter_view_tests {
 
     #[test]
     fn telemetry_pipe_ext_chain_compiles_and_runs() {
-        let (inner, spans, _, logs, metrics, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let spans = Arc::clone(&inner.spans);
+        let logs = Arc::clone(&inner.logs);
+        let metrics = Arc::clone(&inner.metrics);
         let pipe = inner
             .filter_by_level(Level::WARN)
             .filter_random_drop(1.0)
@@ -4302,7 +4298,8 @@ mod filter_view_tests {
     #[test]
     fn non_counter_records_pass_through() {
         use std::time::Duration;
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = SumByPipe::new(inner, Duration::from_secs(60), ["route"]);
 
         let req = log_request(make_log(Level::INFO));
@@ -4410,7 +4407,8 @@ mod filter_view_tests {
 
     #[test]
     fn arc_batch_filter_via_random_drop() {
-        let (inner, _, _, logs, _, _) = CountingPipe::new();
+        let inner = CountingPipe::new();
+        let logs = Arc::clone(&inner.logs);
         let pipe = RandomDropPipe::new(inner, 0.5);
         let records: alloc::vec::Vec<Arc<LogRecord>> =
             (0..1000).map(|_| Arc::new(make_log(Level::INFO))).collect();
@@ -4443,7 +4441,9 @@ mod filter_view_tests {
 
     #[test]
     fn arc_batch_counting_pipe_counts_correctly() {
-        let (pipe, spans, _, logs, _, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
+        let logs = Arc::clone(&pipe.logs);
 
         let arc_spans: alloc::vec::Vec<Arc<SpanRecord>> =
             (0..7).map(|_| Arc::new(make_span())).collect();
@@ -4482,8 +4482,10 @@ mod filter_view_tests {
 
     #[test]
     fn fan_exporters_delivers_to_every_exporter() {
-        let (first, _, _, first_logs, _, _) = CountingPipe::new();
-        let (second, _, _, second_logs, _, _) = CountingPipe::new();
+        let first = CountingPipe::new();
+        let first_logs = Arc::clone(&first.logs);
+        let second = CountingPipe::new();
+        let second_logs = Arc::clone(&second.logs);
         let fan = fan_exporters(vec![
             into_telemetry_handle(first),
             into_telemetry_handle(second),
@@ -4497,7 +4499,8 @@ mod filter_view_tests {
 
     #[test]
     fn fan_exporters_single_is_passthrough_handle() {
-        let (only, _, _, logs, _, _) = CountingPipe::new();
+        let only = CountingPipe::new();
+        let logs = Arc::clone(&only.logs);
         let fan = fan_exporters(vec![into_telemetry_handle(only)]);
 
         block_on(fan.call_dyn(log_request(make_log(Level::INFO)))).expect("call ok");
@@ -4513,7 +4516,8 @@ mod filter_view_tests {
 
     #[test]
     fn fan_exporters_secondary_error_does_not_fail_the_fan() {
-        let (primary, _, _, primary_logs, _, _) = CountingPipe::new();
+        let primary = CountingPipe::new();
+        let primary_logs = Arc::clone(&primary.logs);
         let fan = fan_exporters(vec![
             into_telemetry_handle(primary),
             into_telemetry_handle(FailingPipe),
