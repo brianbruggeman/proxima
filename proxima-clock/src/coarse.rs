@@ -1,4 +1,5 @@
 use core::convert::Infallible;
+use core::fmt;
 use core::future::Future;
 
 use proxima_primitives::pipe::primitives::Pipe;
@@ -65,6 +66,17 @@ impl TickCell {
     }
 }
 
+// not derived: a derived impl reads each atomic half on its own, so a
+// `{:?}` racing the writer can print a value that was never stored.
+impl fmt::Debug for TickCell {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TickCell")
+            .field("ticks", &self.get())
+            .finish()
+    }
+}
+
 impl Pipe for &TickCell {
     type In = ();
     type Out = Ticks;
@@ -100,5 +112,22 @@ mod tests {
         let read = block_on(Pipe::call(&&cell, ())).expect("cell reads never fail");
 
         assert_eq!(read, Ticks::from_raw(24_000_000));
+    }
+
+    // `format!` needs an allocator, so the rendering assertions are std-tier;
+    // the `Debug` impl itself is `core`-only and compiles on the floor.
+    #[cfg(feature = "std")]
+    mod rendering {
+        use super::TickCell;
+        use crate::ticks::Ticks;
+
+        #[test]
+        fn debug_renders_the_live_value_not_the_constructed_one() {
+            let cell = TickCell::new(Ticks::from_raw(1_000));
+
+            cell.set(Ticks::from_raw(2_000));
+
+            assert_eq!(format!("{cell:?}"), "TickCell { ticks: Ticks(2000) }");
+        }
     }
 }
