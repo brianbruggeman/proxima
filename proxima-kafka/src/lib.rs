@@ -30,7 +30,7 @@
 //! `proxima_listen::any::FramedAny` is the ONE generic stateless
 //! `AnyProtocol` driver every stateless request/reply wire shares; see
 //! `framed_app`'s module doc for how Kafka's `ApiVersions`/violation
-//! semantics map onto its `AsFrame` seam. [`broker::KafkaBroker`] is the
+//! semantics map onto its `AsFrame` seam. `broker::KafkaBroker` is the
 //! default Produce/Fetch/Metadata handler a caller plugs in as
 //! `KafkaAnyProtocol::new(label, into_kafka_handle(broker))` — a
 //! protocol-correct broker FACADE (in-memory per-topic-partition log,
