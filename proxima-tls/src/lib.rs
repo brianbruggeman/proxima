@@ -11,12 +11,15 @@
 //! no_std discipline log — multi-day disciplined-component effort
 //! (reshapes the public config API), out of scope for this pass.
 //!
-//! Layers above TCP, layers below L7. The output of this module is a
-//! `tokio_rustls::TlsAcceptor` — a handshake wrapper that turns an
-//! accepted `TcpStream` into a `TlsStream<TcpStream>` implementing
-//! `AsyncRead + AsyncWrite`. Whatever L7 stack consumes plaintext
-//! after that (hyper today, proxima's own H1/H2 state machine
-//! tomorrow) sees an opaque byte stream.
+//! Layers above TCP, layers below L7. The output is a runtime-neutral
+//! `rustls::ServerConfig` (`build_server_config`) — a handshake wrapper
+//! that turns an accepted stream into a TLS session implementing
+//! `AsyncRead + AsyncWrite`. Two adapters wrap it: the default
+//! tokio-free `futures_rustls::TlsAcceptor` (`build_acceptor_futures_io`,
+//! `futures-io` feature) and `tokio_rustls::TlsAcceptor`
+//! (`build_acceptor`, `tokio` feature) for callers on a tokio-native
+//! socket. Whatever L7 stack consumes plaintext after that sees an
+//! opaque byte stream.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
