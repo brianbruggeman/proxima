@@ -662,6 +662,55 @@ mod tests {
         assert_eq!(response, vec![0x20, 0x02, 0x00, 0x05]);
     }
 
+    // v3.1's "MQIsdp"/level 3, which `MqttAnyProtocol::probe` deliberately
+    // matches (it is an MQTT connection) but this v3.1.1-only broker will not
+    // speak. Hand-built because `encode_connect` only writes "MQTT"/4.
+    fn legacy_v3_1_connect_wire() -> Vec<u8> {
+        let mut wire = vec![0x10, 0x10];
+        wire.extend_from_slice(&[0x00, 0x06, b'M', b'Q', b'I', b's', b'd', b'p']);
+        wire.push(0x03); // protocol level 3 = v3.1
+        wire.push(0x02); // clean session
+        wire.extend_from_slice(&[0x00, 0x1E]); // keep alive 30
+        wire.extend_from_slice(&[0x00, 0x02, b'c', b'1']);
+        wire
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn an_unspeakable_protocol_version_gets_connack_1_then_closes() {
+        let mut wire = legacy_v3_1_connect_wire();
+        // a PINGREQ the broker must never answer, because it closed first.
+        proxima_protocols::mqtt::encode::encode_pingreq(&mut wire);
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::new(MqttBroker::new()),
+            &MqttServerConfig::default(),
+        )
+        .await;
+        assert_eq!(response, vec![0x20, 0x02, 0x00, 0x01]);
+    }
+
+    // [MQTT-3.1.0-2]: a second CONNECT on an open session is a protocol
+    // violation, and v3.1.1 has no reply for one — the broker just closes.
+    #[proxima::test(runtime = "tokio")]
+    async fn a_second_connect_closes_the_session_without_a_further_connack() {
+        let mut wire = connect_wire("c1");
+        wire.extend_from_slice(&connect_wire("c1-again"));
+        proxima_protocols::mqtt::encode::encode_pingreq(&mut wire);
+        let response = drive(
+            &wire,
+            handler(),
+            Arc::new(MqttBroker::new()),
+            &MqttServerConfig::default(),
+        )
+        .await;
+        assert_eq!(
+            response,
+            vec![0x20, 0x02, 0x00, 0x00],
+            "only the first CONNECT is answered; nothing after it is served"
+        );
+    }
+
     #[proxima::test(runtime = "tokio")]
     async fn subscribe_grants_qos0_and_registers_on_the_broker() {
         let broker = Arc::new(MqttBroker::new());
