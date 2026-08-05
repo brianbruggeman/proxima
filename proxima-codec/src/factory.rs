@@ -1,13 +1,15 @@
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
+use base64::Engine as _;
 use bytes::Bytes;
 use serde_json::Value;
 
 use proxima_core::ProximaError;
+use proxima_core::factory::Named;
+
+use crate::decode_through_scratch;
 
 /// Type-erased codec for plugin-supplied wire formats (protobuf, cbor,
 /// msgpack, …). Both directions are bytes ⇄ `serde_json::Value`; the
@@ -32,72 +34,74 @@ pub type CodecBuildFuture<'lifetime> =
 pub trait CodecFactory: Send + Sync + 'static {
     fn name(&self) -> &str;
 
+    /// Build the codec a `codec = { type = "..." }` config row names.
+    ///
+    /// Boxed, not RPITIT: the only consumer is `Arc<dyn CodecFactory>` in a
+    /// [`CodecRegistry`], and an `impl Future` return type is not
+    /// dyn-compatible.
     fn build<'lifetime>(&'lifetime self, spec: &'lifetime Value) -> CodecBuildFuture<'lifetime>;
+}
+
+// bridge `CodecFactory` into the generic factory registry without touching any
+// existing `impl CodecFactory` — the registry only needs the factory's name.
+impl Named for dyn CodecFactory {
+    fn name(&self) -> &str {
+        CodecFactory::name(self)
+    }
 }
 
 pub type DynCodecFactory = Arc<dyn CodecFactory>;
 
-pub struct CodecRegistry {
-    factories: ArcSwap<BTreeMap<String, DynCodecFactory>>,
-}
+/// The codec registry is the generic [`proxima_core::FactoryRegistry`]
+/// specialized to `dyn CodecFactory` — the shape `proxima-core`'s own module
+/// doc names a codec table as a consumer of. The surface (`new` / `register` /
+/// `get` / `names` / `with`) is unchanged; only the implementation is now
+/// shared, and a duplicate or absent name reports the typed
+/// [`proxima_core::RegistryError`] rather than a hand-formatted string.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use proxima_codec::factory::{CodecFactory, CodecRegistry, JsonCodecFactory};
+///
+/// let registry = CodecRegistry::new().with(Arc::new(JsonCodecFactory))?;
+///
+/// assert_eq!(registry.names(), vec!["json".to_string()]);
+/// assert_eq!(registry.get("json")?.name(), "json");
+/// assert!(registry.get("cbor").is_err());
+/// # Ok::<(), proxima_core::ProximaError>(())
+/// ```
+pub type CodecRegistry = proxima_core::FactoryRegistry<dyn CodecFactory>;
 
-impl Default for CodecRegistry {
-    fn default() -> Self {
-        Self {
-            factories: ArcSwap::from_pointee(BTreeMap::new()),
-        }
-    }
-}
-
-impl CodecRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(&self, factory: DynCodecFactory) -> Result<(), ProximaError> {
-        let name = factory.name().to_string();
-        loop {
-            let current = self.factories.load_full();
-            if current.contains_key(&name) {
-                return Err(ProximaError::Registry(format!(
-                    "codec factory `{name}` already registered"
-                )));
-            }
-            let mut next: BTreeMap<String, DynCodecFactory> = (*current).clone();
-            next.insert(name.clone(), factory.clone());
-            let prev = self.factories.compare_and_swap(&current, Arc::new(next));
-            if Arc::ptr_eq(&prev, &current) {
-                return Ok(());
-            }
-        }
-    }
-
-    pub fn get(&self, name: &str) -> Result<DynCodecFactory, ProximaError> {
-        self.factories
-            .load_full()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ProximaError::Registry(format!("no codec factory `{name}`")))
-    }
-
-    #[must_use]
-    pub fn names(&self) -> Vec<String> {
-        self.factories.load_full().keys().cloned().collect()
-    }
-
-    pub async fn resolve(&self, spec: &Value) -> Result<DynCodecHandle, ProximaError> {
-        let kind = spec
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ProximaError::Config("codec spec requires `type`".into()))?;
-        let factory = self.get(kind)?;
-        factory.build(spec).await
-    }
+/// Build the codec named by a `codec = { type = "..." }` config row.
+///
+/// A free function, not an inherent method: [`CodecRegistry`] is an alias for a
+/// type this crate does not own, so an `impl` block here would not compile.
+pub async fn resolve(
+    registry: &CodecRegistry,
+    spec: &Value,
+) -> Result<DynCodecHandle, ProximaError> {
+    let kind = spec
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProximaError::Config("codec spec requires `type`".into()))?;
+    registry.get(kind)?.build(spec).await
 }
 
 /// JSON via simd-json on the hot path; recording/config paths keep
 /// vanilla serde_json.
+///
+/// ```
+/// use proxima_codec::factory::{DynCodec, JsonDynCodec};
+/// use serde_json::json;
+///
+/// let codec = JsonDynCodec;
+/// let wire = codec.encode_from_json(&json!({"op": "ping", "seq": 7}))?;
+///
+/// assert_eq!(codec.content_type(), "application/json");
+/// assert_eq!(codec.decode_to_json(&wire)?, json!({"op": "ping", "seq": 7}));
+/// # Ok::<(), proxima_core::ProximaError>(())
+/// ```
 pub struct JsonDynCodec;
 
 impl DynCodec for JsonDynCodec {
@@ -110,26 +114,13 @@ impl DynCodec for JsonDynCodec {
     }
 
     fn decode_to_json(&self, bytes: &[u8]) -> Result<Value, ProximaError> {
-        // simd-json mutates its input — own a per-thread scratch Vec
-        // so each decode reuses one allocation per worker.
-        thread_local! {
-            static SCRATCH: std::cell::RefCell<Vec<u8>> = const {
-                std::cell::RefCell::new(Vec::new())
-            };
-        }
-        SCRATCH.with(|cell| {
-            let mut buf = cell.borrow_mut();
-            buf.clear();
-            buf.extend_from_slice(bytes);
-            simd_json::serde::from_slice(&mut buf)
-                .map_err(|err| ProximaError::Decode(format!("json codec: {err}")))
-        })
+        decode_through_scratch(bytes)
     }
 
     fn encode_from_json(&self, value: &Value) -> Result<Bytes, ProximaError> {
         simd_json::serde::to_vec(value)
             .map(Bytes::from)
-            .map_err(|err| ProximaError::Encode(format!("json codec: {err}")))
+            .map_err(|err| ProximaError::Encode(format!("json: {err}")))
     }
 }
 
@@ -162,13 +153,11 @@ impl DynCodec for BytesPassthroughDynCodec {
     }
 
     fn decode_to_json(&self, bytes: &[u8]) -> Result<Value, ProximaError> {
-        use base64::Engine as _;
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         Ok(Value::String(encoded))
     }
 
     fn encode_from_json(&self, value: &Value) -> Result<Bytes, ProximaError> {
-        use base64::Engine as _;
         let raw = value.as_str().ok_or_else(|| {
             ProximaError::Encode("bytes codec encode requires a base64 string value".into())
         })?;
@@ -198,6 +187,7 @@ impl CodecFactory for BytesPassthroughCodecFactory {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use proxima_core::RegistryError;
     use serde_json::json;
 
     #[proxima::test]
@@ -224,8 +214,7 @@ mod tests {
         registry
             .register(Arc::new(JsonCodecFactory))
             .expect("register");
-        let codec = registry
-            .resolve(&json!({"type": "json"}))
+        let codec = resolve(&registry, &json!({"type": "json"}))
             .await
             .expect("resolve");
         assert_eq!(codec.name(), "json");
@@ -235,14 +224,17 @@ mod tests {
     #[proxima::test]
     async fn registry_unknown_type_returns_registry_error() {
         let registry = CodecRegistry::new();
-        let outcome = registry.resolve(&json!({"type": "nope"})).await;
-        assert!(matches!(outcome, Err(ProximaError::Registry(_))));
+        let outcome = resolve(&registry, &json!({"type": "nope"})).await;
+        assert!(matches!(
+            outcome,
+            Err(ProximaError::RegistryKind(RegistryError::NotRegistered { .. }))
+        ));
     }
 
     #[proxima::test]
     async fn registry_missing_type_returns_config_error() {
         let registry = CodecRegistry::new();
-        let outcome = registry.resolve(&json!({})).await;
+        let outcome = resolve(&registry, &json!({})).await;
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
@@ -253,6 +245,11 @@ mod tests {
             .register(Arc::new(JsonCodecFactory))
             .expect("first");
         let outcome = registry.register(Arc::new(JsonCodecFactory));
-        assert!(matches!(outcome, Err(ProximaError::Registry(_))));
+        assert!(matches!(
+            outcome,
+            Err(ProximaError::RegistryKind(
+                RegistryError::AlreadyRegistered { .. }
+            ))
+        ));
     }
 }

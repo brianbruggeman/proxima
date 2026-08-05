@@ -12,9 +12,9 @@ readme.workspace = true
 [dependencies]
 proxima-core = { workspace = true, default-features = false }
 bytes = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-arc-swap = { workspace = true, optional = true }
+thiserror.workspace = true
 base64 = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 simd-json = { workspace = true, optional = true }
 
@@ -22,26 +22,30 @@ simd-json = { workspace = true, optional = true }
 default = ["std"]
 # Tier-1: no_std + alloc. The FrameCodec/MessageCodec/Datagram traits,
 # Addressed, FrameLimits, LengthDelimitedCodec (alloc-free hot path), and
-# BytesPassthrough live here.
+# BytesPassthrough live here. Proven on thumbv7m-none-eabi by the
+# `proxima-codec` cell in scripts/_floor-crate-matrix.sh.
 alloc = ["proxima-core/alloc"]
-# Tier-2: std. Adds JsonCodec (simd-json) and the codec registry/factory
-# (arc-swap, serde_json, base64).
+# Tier-2: std. Adds JsonCodec (serde + simd-json) and the codec
+# registry/factory (proxima-core's FactoryRegistry, serde_json, base64).
+# `serde` is std-only on purpose: nothing below this tier deserializes, so a
+# bare-metal consumer must not pay for serde + the serde_derive proc-macro.
 std = [
     "alloc",
     "proxima-core/std",
+    "proxima-core/registry",
     "bytes/std",
-    "serde/std",
-    "serde_json/std",
-    "dep:arc-swap",
+    "thiserror/std",
     "dep:base64",
+    "dep:serde",
+    "serde/std",
     "dep:serde_json",
+    "serde_json/std",
     "dep:simd-json",
 ]
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support"] }
-rstest = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+serde = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true
