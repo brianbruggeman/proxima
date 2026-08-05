@@ -128,6 +128,44 @@ mod tests {
         assert_eq!(cell.load(), [24_000_000, 1_753_500_000_000_000_000]);
     }
 
+    // proptest needs an allocator and a test harness, so the properties are
+    // std-tier; the halving they cover is `core`-only.
+    #[cfg(feature = "std")]
+    mod properties {
+        use super::SeqU64s;
+        use proptest::prelude::{ProptestConfig, any, prop_assert_eq, proptest};
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(512))]
+
+            /// Every `u64` survives the trip through two 32-bit atomic halves
+            /// — the only reason this cell is not simply an `AtomicU64`.
+            #[test]
+            fn every_value_survives_the_32_bit_halving(
+                first in any::<u64>(),
+                second in any::<u64>(),
+            ) {
+                let cell = SeqU64s::new([0, 0]);
+
+                cell.store([first, second]);
+
+                prop_assert_eq!(cell.load(), [first, second]);
+            }
+
+            /// Construction and a later store must agree — a cell built at a
+            /// value reads back the same as one stored to it.
+            #[test]
+            fn construction_and_store_agree(value in any::<u64>()) {
+                let constructed = SeqU64s::new([value]);
+                let stored = SeqU64s::new([0]);
+
+                stored.store([value]);
+
+                prop_assert_eq!(constructed.load(), stored.load());
+            }
+        }
+    }
+
     // a real reader/writer race needs real threads, so this one test is
     // std-tier; everything above it runs at the crate's bare no_std floor.
     #[cfg(feature = "std")]
