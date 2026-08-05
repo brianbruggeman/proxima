@@ -65,7 +65,6 @@ use alloc::boxed::Box;
 /// `telemetry::Spanned<T>`, which wraps the future itself) — see Wave D
 /// Phase 1.
 #[cfg(feature = "alloc")]
-#[allow(clippy::large_enum_variant)]
 pub enum SpawnRequest<Inline = Infallible> {
     /// A `Send` future shipped across cores; runs locally on arrival.
     Send(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
