@@ -1,61 +1,13 @@
 //! AMQP topic-exchange binding-key matching — the `#`/`*` wildcard grammar
-//! (AMQP 0-9-1 §3.1.3.3) plugged into a live-swappable set the same shape
-//! `proxima_redis::glob::GlobSet` gives PSUBSCRIBE: [`TopicSet::matching`]
-//! answers "which of my bound patterns match this routing key" for
-//! [`crate::broker::AmqpBroker::publish`] on a `topic`-kind exchange.
+//! (AMQP 0-9-1 §3.1.3.3). [`topic_match`] answers "does this binding key
+//! cover this routing key" for [`crate::broker::AmqpBroker::publish`] on a
+//! `topic`-kind exchange.
 //!
 //! Unlike redis's byte-glob (`*`/`?`/`[...]`), a topic binding key is
 //! `.`-delimited *words*: `*` matches exactly one word, `#` matches zero or
 //! more words, anything else matches itself literally
 //! (e.g. `orders.*.created` matches `orders.eu.created` but not
 //! `orders.eu.region.created`; `orders.#` matches both).
-
-use std::collections::BTreeSet;
-
-/// A live-swappable set of topic binding-key patterns.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TopicSet {
-    patterns: BTreeSet<Vec<u8>>,
-}
-
-impl TopicSet {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn with(&self, pattern: Vec<u8>) -> Self {
-        let mut patterns = self.patterns.clone();
-        patterns.insert(pattern);
-        Self { patterns }
-    }
-
-    #[must_use]
-    pub fn without(&self, pattern: &[u8]) -> Self {
-        let mut patterns = self.patterns.clone();
-        patterns.remove(pattern);
-        Self { patterns }
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.patterns.len()
-    }
-
-    /// Every registered pattern that topic-matches `routing_key`.
-    pub fn matching<'a>(&'a self, routing_key: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
-        self.patterns
-            .iter()
-            .filter(move |pattern| topic_match(pattern, routing_key))
-            .map(Vec::as_slice)
-    }
-}
 
 /// AMQP topic-exchange match: `.`-delimited words, `*` = exactly one word,
 /// `#` = zero or more words, anything else = literal word equality.
@@ -117,26 +69,15 @@ mod tests {
     }
 
     #[test]
-    fn topic_set_matching_finds_every_satisfied_pattern() {
-        let set = TopicSet::default()
-            .with(b"orders.*.created".to_vec())
-            .with(b"orders.#".to_vec())
-            .with(b"shipments.#".to_vec());
-        let matched: Vec<&[u8]> = set.matching(b"orders.eu.created").collect();
-        assert_eq!(matched.len(), 2);
-        assert!(matched.contains(&b"orders.*.created".as_slice()));
-        assert!(matched.contains(&b"orders.#".as_slice()));
-    }
-
-    #[test]
-    fn with_and_without_are_copy_on_write() {
-        let empty = TopicSet::new();
-        let with_one = empty.with(b"orders.#".to_vec());
-        assert!(empty.is_empty());
-        assert_eq!(with_one.len(), 1);
-
-        let cleared = with_one.without(b"orders.#");
-        assert!(cleared.is_empty());
-        assert_eq!(with_one.len(), 1, "without does not mutate its receiver");
+    fn several_binding_keys_can_cover_one_routing_key_at_once() {
+        let bindings: [&[u8]; 3] = [b"orders.*.created", b"orders.#", b"shipments.#"];
+        let matched: Vec<&[u8]> = bindings
+            .into_iter()
+            .filter(|binding| topic_match(binding, b"orders.eu.created"))
+            .collect();
+        assert_eq!(
+            matched,
+            vec![b"orders.*.created".as_slice(), b"orders.#".as_slice()]
+        );
     }
 }
