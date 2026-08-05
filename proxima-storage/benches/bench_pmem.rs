@@ -4,7 +4,8 @@
 //! canonical std "make this write survive a crash" primitive — no `libc`, no
 //! `mmap`, no unsafe anywhere in this file.
 //!
-//! HONEST READ (see docs/pmem/discipline.md): on a host WITHOUT real pmem and
+//! HONEST READ (see ai_docs/invariants.jsonl,
+//! `proxima.decision.pmem_cow_root_swap`): on a host WITHOUT real pmem and
 //! without the x86 cache-flush path (e.g. aarch64 macOS, the dev box), `persist`
 //! is a documented no-op, so `cow_commit_real_persist` measures the FSM's
 //! compute, NOT a durability barrier — comparing it to fsync is no-syscall vs

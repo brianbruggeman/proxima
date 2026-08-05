@@ -15,7 +15,8 @@
 //! partial-persistence states all collapse to one outcome (old) because
 //! `recover` never reads the dead slot while the root still points at the live
 //! one. The oracle's search space is therefore O(1) in payload size. The full
-//! tournament is recorded in `docs/pmem/discipline.md`. The exhaustive oracle is
+//! tournament is recorded in `ai_docs/invariants.jsonl` under
+//! `proxima.decision.pmem_cow_root_swap`. The exhaustive oracle is
 //! in this module's tests.
 //!
 //! **Caller precondition for atomicity:** the region's base address must be

@@ -16,7 +16,7 @@
 //!   selects — no log, no replay. This is the shadow-paging design LMDB
 //!   (meta-page txnid) and ZFS (uberblock) use; it was chosen over undo- and
 //!   redo-logging because its crash-reordering oracle is the simplest to prove
-//!   (see `docs/pmem/discipline.md`).
+//!   (see `ai_docs/invariants.jsonl`, `proxima.decision.pmem_cow_root_swap`).
 //!
 //! The codec parses and persists; the I/O facade that maps a real pmem region
 //! (DAX `mmap`) lives elsewhere — this layer never touches a syscall.
