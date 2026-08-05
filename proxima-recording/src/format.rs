@@ -15,6 +15,32 @@ use std::io::BufRead;
 
 /// Codec for one on-disk recording format. `Send` so the terminal Pipe can
 /// move it into a background-pool offload closure.
+///
+/// Encode and decode are exact inverses over a batch — the property every
+/// durable terminal above this trait relies on:
+///
+/// ```
+/// use proxima_recording::{
+///     BinFormat, Format, HttpEvent, InteractionId, ProtocolEvent, RecordingEvent,
+/// };
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let event = RecordingEvent {
+///     id: InteractionId::from_bytes([7; 16]),
+///     ts_ms: 42,
+///     parent: None,
+///     event: ProtocolEvent::Http(HttpEvent::RequestEnded),
+/// };
+///
+/// let mut codec = BinFormat::new()?;
+/// let block = codec.encode_block(vec![event.clone()])?;
+///
+/// let mut reader = std::io::Cursor::new(block);
+/// let (decoded, _consumed) = codec.decode_block(&mut reader)?.expect("one block");
+/// assert_eq!(decoded, vec![event]);
+/// # Ok(())
+/// # }
+/// ```
 pub trait Format: Send {
     /// A short config discriminant (`"bin"`, `"json"`) — what `format = "…"`
     /// in config resolves to.
