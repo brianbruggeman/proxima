@@ -1,5 +1,5 @@
 //! Async HTTP/2 CLIENT driver over the sans-IO client
-//! [`Connection`](proxima_protocols::http2_codec::connection::Connection) — the client-role
+//! [`Connection`] — the client-role
 //! mirror of [`serve_h2_connection`](crate::http2::serve_h2_connection).
 //!
 //! # What form is this?

@@ -1,5 +1,5 @@
 //! HTTP/3 server driver. Maps each accepted bidi stream to one
-//! `Pipe::call`. Mirrors [`crate::h2::serve_h2_connection`]'s shape
+//! `Pipe::call`. Mirrors [`crate::http2::serve_h2_connection`]'s shape
 //! but rides on QUIC streams instead of an h2 multiplexer.
 
 use std::sync::Arc;

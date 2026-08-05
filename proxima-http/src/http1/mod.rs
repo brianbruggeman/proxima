@@ -12,9 +12,9 @@
 //!   sibling's tokio accept loop on top of `http1-native`.
 //! - `http1-tls` enables the https-capable `shared_http` connector.
 //!
-//! Listeners are in the umbrella's `listeners/http.rs` for now (they
-//! depend on the listener registry); a follow-on extraction pulls them
-//! into this crate.
+//! Listeners live here: [`listener::H1ListenProtocol`] is the standalone
+//! h1 bind, and the ALPN-multiplexed h1+h2 combiner is
+//! [`crate::listener::HttpListenProtocol`] behind `http-listener`.
 
 // Sans-IO codec lives in proxima-protocols::http1_codec; re-exported
 // here so existing `proxima_http::http1::{h1, h1_body, h1_connection,

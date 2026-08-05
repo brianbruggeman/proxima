@@ -1,6 +1,15 @@
 //! Error -> HTTP status/body rendering shared by the h1, h2, and h3
 //! server drivers.
 //!
+//! Gated on exactly the features whose server module calls it:
+//! `http1`/`http1-native` ([`crate::http1::serve`]), `http2-native`
+//! (`http2::server`, also reached via the `http2` feature, which forwards
+//! into `http2-native`), and `http3-quinn-compat` (`http3::server` — the
+//! quinn-based h3 bridge). `http3-native`'s own server path
+//! (`http3::native`) does not call this yet, so it is deliberately
+//! excluded: including it left these fns dead-code under an
+//! `http3-native`-only build.
+//!
 //! h1 (`http1::serve`) writes these straight onto the wire. h2 and h3
 //! wrap the same status + body into a `Response<Bytes>` and push it
 //! through their own head/body emission paths. One mapping, reused —

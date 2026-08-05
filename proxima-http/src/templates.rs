@@ -1,7 +1,7 @@
-//! Tiny string-template expansion: `{{var}}` substitution with
-//! path-param, query, and time placeholders. Folded in from the
-//! former `proxima-templates` crate — used by [`crate::http1::client`]
-//! and [`crate::http1::upstream`] for dynamic header injection.
+//! Tiny `{{var}}` string-template expansion with path-param, query, and
+//! time placeholders. Folded in from the former `proxima-templates`
+//! crate — used by `crate::http1::client` and `crate::http1::upstream`
+//! for dynamic header injection, so it rides `http1`/`http1-stream-client`.
 
 use std::env;
 use std::process;
