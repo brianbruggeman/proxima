@@ -41,6 +41,8 @@ use super::super::core::inline_task::InlineTask;
 use super::super::core::local_executor::LocalExecutor;
 use super::super::core::sized;
 use super::super::core::timer::{Clock, Tick, TimerKey, TimerWheel};
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+use super::io_uring::reactor::drain_cqes_if_initialized;
 use super::reactor::{Reactor, Wakeup};
 use inbox_impl::Producer;
 
@@ -410,11 +412,11 @@ impl CoreShardHandle {
     /// buffer for small `F`, single `Box<F>` for oversized), then ships
     /// the inlined task across the inbox — skipping the per-spawn
     /// `Pin<Box<dyn Future>>` fat-pointer allocation that
-    /// [`dispatch_send`] requires. on arrival the worker pushes the
+    /// [`Self::dispatch_send`] requires. on arrival the worker pushes the
     /// `InlineTask` straight into its slab; polls dispatch through the
     /// per-`F` vtable, no `dyn Future` indirection.
     ///
-    /// same back-pressure semantics as [`dispatch_send`]: inbox-full
+    /// same back-pressure semantics as [`Self::dispatch_send`]: inbox-full
     /// returns `Err(SpawnError::InboxFull)` with the future consumed.
     pub fn dispatch_send_inline<F>(&self, future: F) -> Result<(), SpawnError>
     where
@@ -799,7 +801,6 @@ fn worker_main(
         // tick without going to the park section.
         #[cfg(all(target_os = "linux", feature = "io-uring"))]
         {
-            use super::io_uring::reactor::drain_cqes_if_initialized;
             match drain_cqes_if_initialized() {
                 Ok(uring_fired) if uring_fired > 0 => continue,
                 Ok(_) => {}

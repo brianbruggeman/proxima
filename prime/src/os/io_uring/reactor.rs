@@ -28,11 +28,15 @@
     feature = "runtime-prime-reactor"
 ))]
 
+use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
 use std::task::Waker;
 
 use io_uring::{IoUring, opcode};
+
+use super::super::core_shard::CURRENT_REACTOR;
+use super::super::reactor::Interest;
 
 /// per-direction read/write buffer size for `TcpStream`; owned here (rather
 /// than in `tcp_stream`) because a cancelled op's buffer is parked in
@@ -376,12 +380,12 @@ where
 /// or reactor not initialised), the registration is skipped. the worker will
 /// still drain CQEs via `drain_cqes_if_initialized` after `turn()` returns
 /// on timeout.
-// TODO(floor-io): reuse prime::os::readiness::Readiness here, needs real-io_uring validation
+// not expressible via `os::readiness::Readiness`: that helper arms a waker
+// per poll, and this runs once from `with_current_uring`'s lazy init where
+// no `Context` exists — the ring fd is registered for interest only, never
+// parked on.
 fn register_ring_fd_with_epoll(ring_fd: std::os::fd::RawFd) -> io::Result<()> {
-    use super::super::core_shard::CURRENT_REACTOR;
-    use super::super::reactor::Interest;
-
-    let reactor_ptr = CURRENT_REACTOR.with(std::cell::Cell::get);
+    let reactor_ptr = CURRENT_REACTOR.with(Cell::get);
     if reactor_ptr.is_null() {
         return Ok(());
     }
