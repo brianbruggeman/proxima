@@ -24,12 +24,19 @@ mod test_attr;
 /// a `struct` with `async fn get/default/partial_N`, resolving dependency
 /// fixtures by parameter name (`#[default(expr)]` / `#[from(path)]` override).
 ///
-/// ```ignore
-/// #[proxima::fixture]
+/// ```
+/// #[proxima_macros::fixture]
 /// fn port() -> u16 { 8080 }
 ///
-/// #[proxima::fixture]
-/// async fn client(port: u16) -> Client { Client::connect(port).await }
+/// // a parameter is resolved as the fixture of the same name, so `endpoint`
+/// // gets `port`'s value with nothing wired by hand.
+/// #[proxima_macros::fixture]
+/// async fn endpoint(port: u16) -> String { format!("127.0.0.1:{port}") }
+///
+/// # async fn check() {
+/// assert_eq!(endpoint::default().await, "127.0.0.1:8080");
+/// assert_eq!(endpoint::partial_1(9000).await, "127.0.0.1:9000");
+/// # }
 /// ```
 #[proc_macro_attribute]
 pub fn fixture(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -42,12 +49,20 @@ pub fn fixture(args: TokenStream, item: TokenStream) -> TokenStream {
 /// (tokio fallback via `runtime = "tokio"`). Subsumes `#[tokio::test]`;
 /// `#[rstest]` parameterization + cassette record/replay land in later slices.
 ///
-/// ```ignore
-/// #[proxima::test]
+/// ```
+/// #[proxima_macros::test]
 /// async fn round_trips() { assert_eq!(2 + 2, 4); }
 ///
-/// #[proxima::test(runtime = "tokio")]
-/// async fn on_tokio() { /* !Send-friendly body */ }
+/// #[proxima_macros::test(runtime = "tokio")]
+/// async fn on_tokio() { tokio::task::yield_now().await; }
+///
+/// // parameterized: one `#[test]` per case, named for the case description.
+/// #[proxima_macros::test]
+/// #[case::small(1u32)]
+/// #[case::large(4_000_000_000u32)]
+/// async fn round_trips_each_case(#[case] value: u32) {
+///     assert_eq!(u32::from_le_bytes(value.to_le_bytes()), value);
+/// }
 /// ```
 #[proc_macro_attribute]
 pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -61,22 +76,32 @@ pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
 /// completion via `proxima::runtime::run*`. Same runtime surface as the
 /// test macro (adaptive default — prime when compiled, else tokio).
 ///
-/// ```ignore
-/// #[proxima::main]
-/// async fn main() { /* adaptive: prime when compiled, else tokio */ }
+/// Any `?`-propagated error type works, not just `ProximaError` — the macro
+/// never inspects `R`. A bare, non-`Send` `Box<dyn std::error::Error>` only
+/// compiles under `runtime = "tokio"`: the prime backend moves the body's
+/// output across a driver-core channel, which requires `Send`.
 ///
-/// #[proxima::main(runtime = "tokio", flavor = "multi_thread")]
-/// async fn main() -> std::process::ExitCode { /* hyper/axum/TokioPerCore bin */ }
-///
-/// #[proxima::main(runtime = "prime")]
+/// ```no_run
+/// // adaptive: prime when compiled, else tokio.
+/// #[proxima_macros::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-///     /* any `?`-propagated error type works, not just `ProximaError` — a
-///        bare, non-`Send` `Box<dyn std::error::Error>` only compiles under
-///        `runtime = "tokio"`: the prime backend moves the body's output
-///        across a driver-core channel, which requires `Send` */
 ///     Ok(())
 /// }
 /// ```
+///
+/// The return type is preserved verbatim, so `()`, `Result<T, E>`, and
+/// `ExitCode` all flow through:
+///
+/// ```no_run
+/// #[proxima_macros::main(cores = 4)]
+/// async fn main() -> std::process::ExitCode { std::process::ExitCode::SUCCESS }
+/// ```
+///
+/// `runtime = "tokio"` / `flavor = "multi_thread"` / `worker_threads = N` select
+/// an explicit tokio backend instead (they need the umbrella's `tokio` feature,
+/// which is why they are not shown as a compiled example here — this crate's own
+/// dev-dependencies deliberately do not pull that closure). `cores` / `affinity`
+/// are the prime/adaptive path's vocabulary and are mutually exclusive with it.
 #[proc_macro_attribute]
 pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
     main_attr::expand(args.into(), item.into())
@@ -118,29 +143,41 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```ignore
-/// #[proxima::piped]
-/// async fn double(input: u64) -> Result<u64, Infallible> { Ok(input * 2) }
+/// ```
+/// use std::convert::Infallible;
+/// use proxima::pipe::{Exhausted, Pipe, SendPipe, UnpinPipe};
+///
 /// // -> struct double; impl Pipe for double { .. }
+/// #[proxima_macros::piped]
+/// async fn double(input: u64) -> Result<u64, Infallible> { Ok(input * 2) }
 ///
-/// #[proxima::piped]
+/// // a plain fn is wrapped in `core::future::ready`, so it also reaches Unpin.
+/// // -> struct ring_pop; impl Pipe + UnpinPipe for ring_pop { .. }
+/// #[proxima_macros::piped]
 /// fn ring_pop(_: ()) -> Result<u8, Exhausted> { Ok(7) }
-/// // -> struct ring_pop; impl UnpinPipe for ring_pop { .. }
 ///
-/// #[proxima::piped(send)]
-/// async fn fetch(url: String) -> Result<Bytes, Error> { .. }
-/// // -> struct fetch; impl SendPipe for fetch { .. }
+/// // `send` is never inferred — it is opted into.
+/// // -> struct fetch; impl Pipe + SendPipe for fetch { .. }
+/// #[proxima_macros::piped(send)]
+/// async fn fetch(url: String) -> Result<usize, Infallible> { Ok(url.len()) }
 ///
-/// // stateful form: `Client` already exists, with its own field.
-/// struct Proxy { client: Client }
+/// // stateful form: the struct already carries its own fields, so no struct
+/// // is generated — `Counter` is relocated into `impl SendPipe for Counter`.
+/// #[derive(Clone)]
+/// struct Counter { start: u64 }
 ///
-/// #[proxima::piped(send)]
-/// impl Proxy {
-///     async fn call(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
-///         self.client.clone().call(request).await
+/// #[proxima_macros::piped(send)]
+/// impl Counter {
+///     async fn call(&self, step: u64) -> Result<u64, Infallible> {
+///         Ok(self.start + step)
 ///     }
 /// }
-/// // -> impl SendPipe for Proxy { .. }, no struct generated
+///
+/// # async fn check() {
+/// assert_eq!(Pipe::call(&double, 21).await, Ok(42));
+/// assert_eq!(UnpinPipe::call(&ring_pop, ()).await, Ok(7));
+/// assert_eq!(SendPipe::call(&Counter { start: 40 }, 2).await, Ok(42));
+/// # }
 /// ```
 ///
 /// [`Pipe`]: https://docs.rs/proxima-primitives/latest/proxima_primitives/pipe/trait.Pipe.html
@@ -171,9 +208,16 @@ pub fn piped(args: TokenStream, item: TokenStream) -> TokenStream {
 /// hand-written `async fn` as the escape hatch. Passing an expression that
 /// is not a closure literal passes it through unchanged.
 ///
-/// ```ignore
+/// ```
+/// use std::convert::Infallible;
+/// use proxima::pipe::{Pipe, PipeExt};
+/// use proxima_macros::pipe;
+///
+/// # async fn check() {
 /// let doubled = pipe!(|input: u64| -> Result<u64, Infallible> { Ok(input * 2) });
-/// let piped = pipe!(doubled).and_then(pipe!(|input: u64| -> Result<u64, Infallible> { Ok(input + 1) }));
+/// let composed = doubled.and_then(pipe!(|input: u64| -> Result<u64, Infallible> { Ok(input + 1) }));
+/// assert_eq!(Pipe::call(&composed, 20).await, Ok(41));
+/// # }
 /// ```
 #[proc_macro]
 pub fn pipe(input: TokenStream) -> TokenStream {
@@ -190,10 +234,17 @@ pub fn pipe(input: TokenStream) -> TokenStream {
 /// type. No collision with an existing attribute macro, so this one keeps
 /// its natural name.
 ///
-/// ```ignore
+/// ```
+/// use proxima::pipe::Pipe;
+/// use proxima_macros::filter;
+///
+/// # async fn check() {
 /// let gate = filter!(|input: u64| -> Result<u64, &'static str> {
 ///     if input < 100 { Ok(input) } else { Err("too big") }
 /// });
+/// assert_eq!(Pipe::call(&gate, 7).await, Ok(7));
+/// assert_eq!(Pipe::call(&gate, 900).await, Err("too big"));
+/// # }
 /// ```
 #[proc_macro]
 pub fn filter(input: TokenStream) -> TokenStream {
@@ -210,11 +261,22 @@ pub fn filter(input: TokenStream) -> TokenStream {
 /// sink type via a macro-generated enum (one variant per arm) — zero boxes,
 /// see `fan_bang`'s module doc for the full mechanism.
 ///
-/// ```ignore
+/// ```
+/// use std::convert::Infallible;
+/// use std::sync::atomic::{AtomicU64, Ordering};
+/// use proxima::pipe::Pipe;
+/// use proxima_macros::fanout;
+///
+/// static SEEN: AtomicU64 = AtomicU64::new(0);
+///
+/// # async fn check() {
 /// let fan = fanout!(
-///     |input: u64| -> Result<(), Infallible> { println!("a: {input}"); Ok(()) },
-///     |input: u64| -> Result<(), Infallible> { println!("b: {input}"); Ok(()) },
+///     |input: u64| -> Result<(), Infallible> { SEEN.fetch_add(input, Ordering::Relaxed); Ok(()) },
+///     |input: u64| -> Result<(), Infallible> { SEEN.fetch_add(input, Ordering::Relaxed); Ok(()) },
 /// );
+/// Pipe::call(&fan, 21).await.expect("both arms admit");
+/// assert_eq!(SEEN.load(Ordering::Relaxed), 42);
+/// # }
 /// ```
 #[proc_macro]
 pub fn fanout(input: TokenStream) -> TokenStream {
@@ -233,11 +295,19 @@ pub fn fanout(input: TokenStream) -> TokenStream {
 /// `#[proxima::piped(unpin, boxed)]` on a hand-written `async fn` and pass
 /// the result in as a pass-through arm.
 ///
-/// ```ignore
+/// ```
+/// use proxima::pipe::{Exhausted, UnpinPipe};
+/// use proxima_macros::fanin;
+///
+/// # async fn check() {
 /// let merged = fanin!(
 ///     |(): ()| -> Result<u8, Exhausted> { Ok(1) },
 ///     |(): ()| -> Result<u8, Exhausted> { Ok(2) },
 /// );
+/// // RoundRobin: the first pull takes arm 0, the second arm 1.
+/// assert_eq!(UnpinPipe::call(&merged, ()).await, Ok(1));
+/// assert_eq!(UnpinPipe::call(&merged, ()).await, Ok(2));
+/// # }
 /// ```
 #[proc_macro]
 pub fn fanin(input: TokenStream) -> TokenStream {
@@ -258,6 +328,8 @@ pub fn fanin(input: TokenStream) -> TokenStream {
 ///
 /// - `name = "..."` — span name; defaults to the function name
 /// - `level = "..."` — one of `trace`, `debug`, `info`, `warn`, `error`; defaults to `info`
+/// - `kind = "..."` — one of `internal`, `server`, `client`, `producer`, `consumer`;
+///   defaults to `internal`
 /// - `recorder = <expr>` — expression resolving to `&Recorder`; defaults to the ambient recorder
 /// - `parent = <expr>` — expression resolving to `Option<&[u8]>`, a W3C `traceparent`
 ///   (e.g. `RequestContext::traceparent()`, or bytes carried by hand from a caller's
@@ -265,18 +337,40 @@ pub fn fanin(input: TokenStream) -> TokenStream {
 ///   `None`/absent opens a fresh root. Proxima carries span context as explicit
 ///   data — never an ambient/thread-local "current span" — so a caller wanting a
 ///   child span MUST pass this.
+/// - `fields(key = <expr>, "dotted.key" = <expr>, bare_ident)` — typed scalar tags on
+///   the span. A bare identifier captures the argument of that name by value. Each
+///   value must be `Into<ScalarValue>`; proxima tags are typed scalars, never `Debug`
+///   strings, so a non-convertible expression is a compile error at the call site.
+/// - `err` — run the body, and set the span's status to `Error` when it returns
+///   `Err`. Requires a `Result` return; every return path (including an early
+///   `return`) flows through the check.
+/// - `budget = <ns>` — tail-sampling force-keep: if the span outruns this many
+///   nanoseconds, the trace is kept regardless of the head sampling decision.
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
+/// use proxima_macros::span;
+///
 /// #[span]
 /// fn do_work(input: &str) -> usize { input.len() }
 ///
 /// #[span(name = "explicit", level = "warn")]
-/// async fn fetch(url: &str) -> Result<String, Error> { ... }
+/// async fn fetch(url: &str) -> Result<usize, &'static str> { Ok(url.len()) }
 ///
-/// #[span(parent = request.context.traceparent())]
-/// fn handle(request: &Request) { ... }
+/// // a child span is opened by CARRYING the parent's traceparent, never by
+/// // reading an ambient "current span".
+/// #[span(parent = traceparent)]
+/// fn handle(traceparent: Option<&[u8]>) -> u8 { 1 }
+///
+/// #[span(kind = "server", fields(component = "auth", attempt), err, budget = 5_000_000)]
+/// fn authenticate(attempt: u64) -> Result<(), &'static str> { Ok(()) }
+///
+/// // with no recorder installed the body still runs, just span-free — the
+/// // same no-op contract the `info!` / `debug!` macros have.
+/// assert_eq!(do_work("proxima"), 7);
+/// assert_eq!(handle(None), 1);
+/// assert_eq!(authenticate(1), Ok(()));
 /// ```
 #[proc_macro_attribute]
 pub fn span(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -304,7 +398,13 @@ pub fn instrument(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
+/// use proxima::telemetry::id::SpanId;
+/// // the trait (type namespace) and the derive (macro namespace) share a name,
+/// // so both imports are needed — the same shape as serde's `Serialize`.
+/// use proxima::telemetry::trace::SpanCarrier;
+/// use proxima_macros::SpanCarrier;
+///
 /// #[derive(SpanCarrier)]
 /// struct Envelope {
 ///     span_id: Option<SpanId>,
@@ -312,11 +412,18 @@ pub fn instrument(args: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 ///
 /// #[derive(SpanCarrier)]
-/// struct Request {
+/// struct Message {
 ///     #[span_id]
 ///     trace_slot: Option<SpanId>,
-///     body: Bytes,
+///     body: String,
 /// }
+///
+/// let mut envelope = Envelope { span_id: None, payload: vec![1, 2, 3] };
+/// assert_eq!(envelope.span_id(), None);
+///
+/// let id = SpanId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+/// envelope.set_span_id(Some(id));
+/// assert_eq!(envelope.span_id(), Some(id));
 /// ```
 #[proc_macro_derive(SpanCarrier, attributes(span_id))]
 pub fn derive_span_carrier(item: TokenStream) -> TokenStream {
@@ -348,8 +455,21 @@ pub fn derive_span_carrier(item: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// Message style is enforced, not merely documented: a literal that starts with
+/// a capital or ends in `.`/`!`/`?` fails to expand.
+///
+/// ```
+/// use core::error::Error as _;
 /// use proxima_macros::Error;
+///
+/// #[derive(Debug)]
+/// pub struct WireError;
+/// impl core::fmt::Display for WireError {
+///     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+///         f.write_str("bad wire byte")
+///     }
+/// }
+/// impl core::error::Error for WireError {}
 ///
 /// #[derive(Error, Debug)]
 /// pub enum DecodeError {
@@ -360,10 +480,26 @@ pub fn derive_span_carrier(item: TokenStream) -> TokenStream {
 ///     TruncatedFrame,
 ///
 ///     #[error("upstream error")]
-///     Upstream(#[source] UpstreamError),
+///     Upstream(#[source] WireError),
 ///
 ///     #[error(transparent)]
 ///     Wire(WireError),
+/// }
+///
+/// assert_eq!(DecodeError::InvalidMagic(0x7e).to_string(), "invalid magic byte: 126");
+/// assert_eq!(DecodeError::TruncatedFrame.to_string(), "truncated frame");
+/// // `transparent` forwards both Display and source() to the inner error.
+/// assert_eq!(DecodeError::Wire(WireError).to_string(), "bad wire byte");
+/// assert!(DecodeError::Upstream(WireError).source().is_some());
+/// assert!(DecodeError::TruncatedFrame.source().is_none());
+/// ```
+///
+/// ```compile_fail
+/// # use proxima_macros::Error;
+/// #[derive(Error, Debug)]
+/// pub enum Shouty {
+///     #[error("Invalid magic byte.")]
+///     Invalid,
 /// }
 /// ```
 #[proc_macro_derive(Error, attributes(error, source, from))]
@@ -380,15 +516,29 @@ pub fn derive_error(item: TokenStream) -> TokenStream {
 /// # Supported attributes
 ///
 /// - `#[schema(rename = "wire_name")]` on a field — use a different name in the
-///   schema (match a serde rename so the contract tracks the wire).
+///   schema.
 /// - `#[schema(skip)]` on a field — omit it from the schema.
+///
+/// Serde's own attributes are read too, so the schema tracks the wire with no
+/// second annotation, and the contract's required-set matches what actually
+/// deserializes:
+///
+/// - `#[serde(rename = "...")]` supplies the field name when `#[schema(rename)]`
+///   is absent; `#[schema(rename)]` wins when both are present.
+/// - `#[serde(default)]` on a field, or on the struct, marks it (or every field)
+///   absent-tolerant.
 ///
 /// `Option<T>` fields are marked optional (absent-allowed) automatically.
 ///
+/// The emitted code holds at the alloc tier, so a `#![no_std]` consumer can
+/// derive this — it names `alloc` through a local `extern crate alloc;` rather
+/// than `std`, and never relies on `ToString` already being in scope.
+///
 /// # Examples
 ///
-/// ```ignore
-/// use proxima_config::schema::{Schema, Describe};
+/// ```
+/// use proxima_config::schema::{Describe, Schema as SchemaIr};
+/// use proxima_macros::Schema;
 ///
 /// #[derive(Schema)]
 /// struct Memory {
@@ -397,6 +547,16 @@ pub fn derive_error(item: TokenStream) -> TokenStream {
 ///     #[schema(rename = "type")]
 ///     kind: String,
 /// }
+///
+/// let SchemaIr::Struct { name, fields } = Memory::schema() else {
+///     panic!("a struct derives a struct schema");
+/// };
+/// assert_eq!(name, "Memory");
+/// let described: Vec<(&str, bool)> = fields
+///     .iter()
+///     .map(|field| (field.name.as_str(), field.flags.optional))
+///     .collect();
+/// assert_eq!(described, [("id", false), ("score", true), ("type", false)]);
 /// ```
 #[proc_macro_derive(Schema, attributes(schema))]
 pub fn derive_schema(item: TokenStream) -> TokenStream {

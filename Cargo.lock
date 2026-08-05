@@ -4067,6 +4067,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "proxima",
+ "proxima-config",
  "quote",
  "syn 2.0.119",
  "thiserror 2.0.19",

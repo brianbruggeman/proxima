@@ -24,6 +24,10 @@ criterion = { workspace = true, features = ["html_reports"] }
 # "tokio")]`'s driver — the span tests await inside the annotated fn, so they
 # need a real runtime under them.
 proxima = { workspace = true, features = ["test-support-tokio"] }
+# so `#[derive(Schema)]`'s emitted `::proxima_config::schema::…` has something
+# to resolve against in a doctest — token-shape unit tests alone are what let
+# a `::std::…` path ship into an alloc-tier derive.
+proxima-config = { workspace = true, features = ["schema"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 trybuild = { workspace = true }
