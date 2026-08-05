@@ -32,6 +32,7 @@
 use proxima_listen::admission::ShedReason;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
+use proxima_telemetry::{error, warn};
 
 use crate::frame_codec::{
     KafkaCodec, KafkaCodecError, KafkaFrame, KafkaOwnedFrame, Violation, empty_response_for,
@@ -55,22 +56,22 @@ fn apiversions_reply(correlation_id: i32) -> KafkaOutcome {
 fn resolve_violation(violation: &Violation) -> KafkaOutcome {
     match violation {
         Violation::Protocol => {
-            tracing::error!("kafka protocol violation");
+            error!("kafka protocol violation");
             KafkaOutcome::Close
         }
         Violation::MessageTooLarge { limit } => {
-            tracing::error!(limit, "kafka message too large");
+            error!(limit, "kafka message too large");
             KafkaOutcome::Close
         }
         Violation::MalformedBody => {
-            tracing::error!("kafka request body could not be decoded");
+            error!("kafka request body could not be decoded");
             KafkaOutcome::Close
         }
         Violation::UnsupportedVersion {
             correlation_id,
             body,
         } => {
-            tracing::warn!(correlation_id, "kafka unsupported api_version");
+            warn!(correlation_id, "kafka unsupported api_version");
             KafkaOutcome::Reply {
                 correlation_id: *correlation_id,
                 body: body.clone(),
@@ -195,8 +196,8 @@ async fn dispatch(
             correlation_id,
             body: response,
         },
-        Err(error) => {
-            tracing::error!(error = %error, api_key, "kafka handler error");
+        Err(handler_error) => {
+            error!(error = %handler_error, api_key, "kafka handler error");
             KafkaOutcome::CloseWithReply {
                 correlation_id,
                 body: empty_response_for(api_key),
@@ -224,7 +225,7 @@ pub fn shed_reply(reason: ShedReason, input: &KafkaOwnedFrame) -> KafkaOutcome {
             api_key,
             ..
         } => {
-            tracing::warn!(
+            warn!(
                 api_key,
                 ?reason,
                 "kafka request shed under admission policy"
