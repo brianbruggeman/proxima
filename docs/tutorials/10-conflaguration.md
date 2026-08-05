@@ -38,7 +38,7 @@ Four derives, one struct: `Builder` (from the `bon` crate) gives you `ServerConf
 
 ## 2. Builder and TOML file, side by side — a protocol's own config
 
-`KafkaServerConfig` (`proxima-kafka/src/config.rs`) is a real, shipped instance of this exact pattern — read/write buffer sizes, the DoS-guarding `max_message_bytes` cap, and the `advertised_host`/`advertised_port` a `Metadata` reply reports:
+`KafkaServerConfig` (`proxima-kafka/src/config.rs`) is a real, shipped instance of this exact pattern — the DoS-guarding `max_message_bytes` cap, the `broker_id`, and the `advertised_host`/`advertised_port` a `Metadata` reply reports:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
@@ -49,8 +49,7 @@ pub struct KafkaServerConfig {
     #[serde(default = "default_max_message")]
     #[builder(default = default_max_message())]
     pub max_message_bytes: usize,
-    // read_buffer_bytes, write_high_water_bytes, broker_id,
-    // advertised_host, advertised_port ...
+    // broker_id, advertised_host, advertised_port ...
 }
 ```
 
