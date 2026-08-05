@@ -22,7 +22,6 @@
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::sized;
@@ -65,31 +64,22 @@ impl SendSpan {
 /// Fallible batch-buffer errors — there is no `panic!`/`assert!` on any
 /// hot path (the reason [`SendBatch`] does NOT wrap
 /// [`ByteArena`](crate::arena::ByteArena), whose `append` asserts).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum BatchError {
     /// No-alloc recv slab at capacity; the burst exceeded `INITIAL_CAP` slots.
+    #[error("recv slab full ({capacity} slots)")]
     SlabFull { capacity: usize },
     /// Send arena would exceed the `u32` offset space (resets every tick).
+    #[error("send arena u32 offset space exhausted")]
     ArenaOverflow,
     /// No-alloc send arena out of bytes.
+    #[error("send arena full ({capacity} bytes)")]
     ArenaFull { capacity: usize },
     /// No-alloc span table full.
+    #[error("send spans full ({capacity})")]
     SpansFull { capacity: usize },
 }
-
-impl fmt::Display for BatchError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SlabFull { capacity } => write!(formatter, "recv slab full ({capacity} slots)"),
-            Self::ArenaOverflow => formatter.write_str("send arena u32 offset space exhausted"),
-            Self::ArenaFull { capacity } => write!(formatter, "send arena full ({capacity} bytes)"),
-            Self::SpansFull { capacity } => write!(formatter, "send spans full ({capacity})"),
-        }
-    }
-}
-
-impl core::error::Error for BatchError {}
 
 /// Fixed-slot receive slab — the iovec-addressable storage a batched
 /// `recvmmsg` fills. `alloc` tier grows to drain a burst to empty; no-alloc
