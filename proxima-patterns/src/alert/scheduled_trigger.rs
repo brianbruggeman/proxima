@@ -379,27 +379,16 @@ impl ScheduledTriggerPipeBuilder {
 }
 
 /// Errors from [`ScheduledTriggerPipeBuilder::build`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BuildError {
     /// `.schedule(...)` was not called.
+    #[error("ScheduledTriggerPipe builder missing schedule")]
     MissingSchedule,
     /// `.inner(...)` was not called.
+    #[error("ScheduledTriggerPipe builder missing inner")]
     MissingInner,
 }
-
-impl std::fmt::Display for BuildError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingSchedule => {
-                write!(formatter, "ScheduledTriggerPipe builder missing schedule")
-            }
-            Self::MissingInner => write!(formatter, "ScheduledTriggerPipe builder missing inner"),
-        }
-    }
-}
-
-impl std::error::Error for BuildError {}
 
 #[cfg(test)]
 mod tests {

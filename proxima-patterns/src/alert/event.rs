@@ -359,26 +359,16 @@ impl Deterministic for GuidanceAnswer {}
 impl Reproducible for GuidanceAnswer {}
 
 /// Errors from postcard encode / decode.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CodecError {
     /// postcard encode failure (typically: output buffer too small).
-    Encode(postcard::Error),
+    #[error("postcard encode: {0}")]
+    Encode(#[source] postcard::Error),
     /// postcard decode failure (corrupted bytes, version mismatch, etc.).
-    Decode(postcard::Error),
+    #[error("postcard decode: {0}")]
+    Decode(#[source] postcard::Error),
 }
-
-impl core::fmt::Display for CodecError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Encode(err) => write!(formatter, "postcard encode: {err}"),
-            Self::Decode(err) => write!(formatter, "postcard decode: {err}"),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for CodecError {}
 
 /// Encode an [`AlertEvent`] into `out`. Returns the number of bytes written
 /// or [`CodecError::Encode`] if the buffer is too small.

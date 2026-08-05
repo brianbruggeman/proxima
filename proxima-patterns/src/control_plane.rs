@@ -58,6 +58,11 @@ pub struct PipeStatus {
 /// Control surface for the daemon. Read-only ops have default impls
 /// returning `NotFound` so inspection-only planes (tests, static) can
 /// skip mutation entirely.
+///
+/// Every method returns `Pin<Box<dyn Future>>` rather than the house RPITIT
+/// shape because callers hold this as [`DynControlPlane`] (`Arc<dyn
+/// ControlPlane>`) — an open dyn set the listeners resolve at runtime — and
+/// RPITIT is not dyn-compatible. That is the whole reason for the box.
 #[cfg(feature = "alloc")]
 pub trait ControlPlane: Send + Sync + 'static {
     fn list_pipes<'lifetime>(
