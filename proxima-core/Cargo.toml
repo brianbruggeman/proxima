@@ -1,6 +1,6 @@
 [package]
 name = "proxima-core"
-description = "Foundation types for the proxima workspace (error)"
+description = "Foundation primitives for the proxima workspace: error, ring, arena, time, markers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

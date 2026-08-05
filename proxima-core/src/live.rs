@@ -3,7 +3,7 @@
 //!
 //! The "hot readers, rare control-plane writes" pattern: the data path reads the
 //! current value on every call through a lock-free
-//! [`ArcSwap`](arc_swap::ArcSwap) load, while a control plane swaps the value out
+//! [`ArcSwap`] load, while a control plane swaps the value out
 //! of band. [`live`] hands back the two ends:
 //!
 //! - [`Live`] — the read half. [`read`](Live::read) borrows the current value

@@ -592,8 +592,6 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn prepend_replays_leftover_then_delegates_to_inner() {
-        use alloc::vec::Vec;
-
         let mut prepended = Prepend::new(b"PRI ".to_vec(), SliceReader::new(b"proxima"));
         let mut context = Context::from_waker(Waker::noop());
         let mut assembled: Vec<u8> = Vec::new();
@@ -620,8 +618,6 @@ mod tests {
     #[cfg(feature = "io-async-compat")]
     #[test]
     fn from_futures_bridge_feeds_the_prepend_adapter() {
-        use alloc::vec::Vec;
-
         let socket = futures::io::Cursor::new(b"proxima".to_vec());
         let mut adapter = Prepend::new(b">>".to_vec(), FromFutures(socket));
         let mut context = Context::from_waker(Waker::noop());
@@ -643,8 +639,8 @@ mod tests {
         );
     }
 
-    // the tokio sibling of TokioSliceReader-shaped mocks below: manually
-    // implements tokio::io::AsyncRead over a byte slice, no executor needed.
+    // the tokio sibling of SliceReader: implements tokio::io::AsyncRead over a
+    // byte slice directly, so the bridge tests need no executor.
     #[cfg(feature = "io-async-compat-tokio")]
     struct TokioSliceReader<'a> {
         data: &'a [u8],
@@ -676,13 +672,12 @@ mod tests {
 
     // the tokio-analogue of from_futures_bridge_feeds_the_prepend_adapter: a
     // tokio::io reader, bridged INTO the seam via FromTokio, then wrapped by
-    // the io Prepend adapter — the shape the tokio proxy-protocol
-    // listener path uses to feed its leftover header bytes.
+    // the io Prepend adapter. No workspace crate binds tokio::io today (the
+    // preface-sniffing listeners all go through the futures-io sibling), so
+    // this pair of tests is the only thing holding the tokio bridge honest.
     #[cfg(feature = "io-async-compat-tokio")]
     #[test]
     fn from_tokio_bridge_feeds_the_prepend_adapter() {
-        use alloc::vec::Vec;
-
         let socket = TokioSliceReader::new(b"proxima");
         let mut adapter = Prepend::new(b">>".to_vec(), FromTokio(socket));
         let mut context = Context::from_waker(Waker::noop());

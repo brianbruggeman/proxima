@@ -35,18 +35,34 @@
 //! The caller drives the loop (this type does not own the resource re-check),
 //! in this exact order — announce, snapshot, RE-CHECK, wait:
 //!
-//! ```ignore
+//! ```
+//! use core::sync::atomic::{AtomicUsize, Ordering};
+//! use proxima_core::park::SlotPark;
+//!
+//! // stand-in for any bounded resource: a permit counter, one permit free.
+//! let permits = AtomicUsize::new(1);
+//! let take_permit = || {
+//!     permits
+//!         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |free| free.checked_sub(1))
+//!         .is_ok()
+//! };
+//! let park = SlotPark::new();
+//!
 //! loop {
-//!     if let Some(v) = try_take() { return v; }   // fast path: room now
-//!     before_park();                              // e.g. nudge a drain pump
-//!     let epoch = park.begin_wait();              // announce + snapshot
-//!     if let Some(v) = try_take() {               // RE-CHECK closes the window
-//!         park.end_wait();
-//!         return v;
+//!     if take_permit() {
+//!         break;                             // fast path: room now
 //!     }
-//!     park.wait(epoch);                           // futex-park until epoch moves
+//!     let epoch = park.begin_wait();         // announce + snapshot
+//!     if take_permit() {
+//!         park.end_wait();                   // RE-CHECK closes the window
+//!         break;
+//!     }
+//!     park.wait(epoch);                      // futex-park until the epoch moves
 //!     park.end_wait();
 //! }
+//!
+//! assert_eq!(permits.load(Ordering::Acquire), 0, "the permit was consumed");
+//! assert_eq!(park.waiters(), 0, "every begin_wait was paired with an end_wait");
 //! ```
 //!
 //! `waiters` is a pure optimisation: [`wake_all`](SlotPark::wake_all) skips the

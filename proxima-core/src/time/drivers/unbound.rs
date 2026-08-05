@@ -4,8 +4,8 @@
 //! consumer wants to prove its source compiles for a no_std target;
 //! it doesn't actually exercise the time primitives at runtime).
 //!
-//! Any call to [`now`](Driver::now) or
-//! [`schedule_wake`](Driver::schedule_wake) panics with a message
+//! Any call to [`now`](crate::time::Driver::now) or
+//! [`schedule_wake`](crate::time::Driver::schedule_wake) panics with a message
 //! pointing at the missing driver configuration. This is intentional:
 //! shipping a build that links the unbound driver and *does* use timer
 //! primitives is a configuration error, and silent zero-time / silent
