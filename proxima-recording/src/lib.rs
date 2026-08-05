@@ -5,9 +5,9 @@
 //! No Pipe deps at the base tier. Pipe-flavored pieces (`Causal`,
 //! `LiveCaptureContext`, `BoundedRecordingSink`, the record-wrapper Pipe;
 //! folded from the former `proxima-recording-pipe`) live behind the `pipe`
-//! feature, in [`pipe`]. Cassette replay-by-match-key (`ReplayUpstream`;
+//! feature, in `pipe`. Cassette replay-by-match-key (`ReplayUpstream`;
 //! folded from the former `proxima-replay`) lives behind the `replay`
-//! feature, in [`replay`].
+//! feature, in `replay`.
 //!
 //! Base-tier two tiers:
 //!
@@ -16,10 +16,18 @@
 //!   blocking-I/O offload seam (`rt_fs`). No file handles, no `BufRead`, no
 //!   registries — sans-IO by construction. This is the default surface a
 //!   bare-metal target builds against (`--no-default-features --features
-//!   alloc`).
+//!   alloc`). `replay`'s keying core (`replay::keying`, `replay::meta`)
+//!   also lands here.
 //! - `std` (default, forwards `alloc`): everything above plus the
 //!   source/index/factory registries and the bin/jsonl format readers,
-//!   which need `std::io::BufRead`, `PathBuf`, and `OnceLock`.
+//!   which need `std::io::BufRead`, `PathBuf`, and `OnceLock`. `pipe`
+//!   forwards `std` — every item it exposes owns a file handle or an OS
+//!   thread.
+//!
+//! The `format::Format` trait (std tier) is the codec seam: it frames a batch
+//! into the exact bytes appended to a log, and reads one unit back. Everything
+//! above it — `pipe::AppendLog`, `pipe::ReplayLog`, the sources — is file
+//! handling and scheduling around it.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -51,8 +59,8 @@ pub use binary::{BinFormat, BinSource, INDEX_RECORD_BYTES, IndexReader, IndexRec
 #[cfg(feature = "alloc")]
 pub use event::{
     CacheOutcome, EventSource, FrameMetadata, HttpEvent, InteractionId, PipelineEvent,
-    PipelineOutcome, ProcessEvent, ProtocolEvent, ProtocolRenderer, RECORDING_FORMAT_VERSION,
-    RecordMeta, RecordingEvent, RequestHeader,
+    PipelineOutcome, ProcessEvent, ProtocolEvent, RECORDING_FORMAT_VERSION, RecordMeta,
+    RecordingEvent, RequestHeader,
 };
 #[cfg(feature = "std")]
 pub use factory::{

@@ -402,7 +402,7 @@ pub use recording::{
     DynRecordingSink, DynRecordingSource, DynRecordingSourceFactory, EventSource, EventTap,
     FailMode, FanOut, FormatKind, HttpEvent, INDEX_RECORD_BYTES, IndexReader, IndexRecord,
     IndexWriter, InteractionId, JsonlSource, JsonlSourceFactory, LazyFanOut, PipelineEvent,
-    PipelineOutcome, ProcessEvent, ProtocolEvent, ProtocolRenderer, RECORD_DROP_METRIC,
+    PipelineOutcome, ProcessEvent, ProtocolEvent, RECORD_DROP_METRIC,
     RECORDING_FORMAT_VERSION, RecordMeta, RecordingEvent, RecordingEventStream, RecordingSink,
     RecordingSource, RecordingSourceFactory, RecordingSourceRegistry, ReplayLog,
     RequestHeader as RecordingRequestHeader, SinkSpec, SourceBuildFuture, TerminalSignal,

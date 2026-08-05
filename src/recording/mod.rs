@@ -13,7 +13,7 @@ pub use proxima_recording::{
     BinSource, BinSourceFactory, CacheOutcome, DynRecordingSource, DynRecordingSourceFactory,
     EventSource, FrameMetadata, HttpEvent, INDEX_RECORD_BYTES, IndexReader, IndexRecord,
     IndexWriter, InteractionId, JsonlSource, JsonlSourceFactory, PipelineEvent, PipelineOutcome,
-    ProcessEvent, ProtocolEvent, ProtocolRenderer, RECORDING_FORMAT_VERSION, RecordMeta,
+    ProcessEvent, ProtocolEvent, RECORDING_FORMAT_VERSION, RecordMeta,
     RecordingEvent, RecordingEventStream, RecordingSource, RecordingSourceFactory,
     RecordingSourceRegistry, RequestHeader, SourceBuildFuture, event, factory, source,
 };
