@@ -125,7 +125,7 @@ impl SigV4Signer {
             payload,
         );
 
-        let date_stamp = &amz_date[..8.min(amz_date.len())];
+        let date_stamp = date_stamp(amz_date);
         let scope = scope(date_stamp, &self.region, &self.service);
         let string_to_sign = string_to_sign(amz_date, &scope, &canonical_request);
 
@@ -165,9 +165,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// HMAC-SHA256, returning `Zeroizing` so secret-derived output wipes on drop
 /// (audit H1).
 fn hmac(key: &[u8], data: &[u8]) -> Zeroizing<Vec<u8>> {
-    // HMAC accepts a key of any length (it hashes over-long keys, pads short
-    // ones), so `new_from_slice` is infallible here; the `Err` arm is
-    // unreachable, so return an empty digest rather than panic on it.
+    // structurally unreachable, not merely unlikely: hmac-0.12 `optim.rs`'s
+    // `impl KeyInit for HmacCore` ends in a bare `Ok(Self { .. })` -- it derives
+    // a block-sized key from ANY slice length and has no error path at all. The
+    // arm exists only because the trait signature is fallible, so it returns an
+    // empty digest rather than panicking on a branch that cannot be taken.
     let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(key) else {
         return Zeroizing::new(Vec::new());
     };
@@ -270,6 +272,18 @@ fn uri_encode_path(path: &str) -> String {
         }
     }
     out
+}
+
+/// `YYYYMMDD` — the date half of an `x-amz-date` (`YYYYMMDDTHHMMSSZ`).
+///
+/// Byte 8 is not necessarily a `char` boundary, and `amz_date` is caller data:
+/// `proxima_patterns`' `SigV4AuthPipe` reads it straight off the inbound
+/// request's `x-amz-date` header, so a multi-byte character straddling byte 8
+/// would panic a `&amz_date[..8]` slice from a remote input. A malformed date
+/// is scoped verbatim instead — the signature then fails to verify server-side,
+/// which is the correct outcome for a malformed date, and nothing aborts.
+fn date_stamp(amz_date: &str) -> &str {
+    amz_date.get(..8).unwrap_or(amz_date)
 }
 
 /// `YYYYMMDD/region/service/aws4_request`.
@@ -465,6 +479,42 @@ mod tests {
         assert_eq!(uri_encode_path("/a/b"), "/a/b");
         assert_eq!(uri_encode_path("/example space/"), "/example%20space/");
         assert_eq!(uri_encode_path("/keep-._~"), "/keep-._~");
+    }
+
+    #[test]
+    fn a_multibyte_amz_date_is_scoped_without_panicking() {
+        // the date stamp is `amz_date[..8]`, and byte 8 lands mid-character
+        // here: `é` occupies bytes 7..9. `proxima_patterns`' SigV4 pipe passes
+        // the inbound `x-amz-date` header through verbatim, so a naive slice is
+        // a remotely reachable abort.
+        let malformed = "2015083é123600Z";
+        assert!(
+            !malformed.is_char_boundary(8),
+            "vector must straddle byte 8 to exercise the hazard"
+        );
+        assert_eq!(
+            date_stamp(malformed),
+            malformed,
+            "a date that cannot be split at 8 is scoped whole, not sliced"
+        );
+
+        let signer = get_vanilla_signer();
+        let headers = vec![SignedHeader {
+            name: "host".into(),
+            value: "example.amazonaws.com".into(),
+        }];
+        let authorization = signer.authorization("GET", "/", "", &headers, b"", malformed);
+        assert!(
+            authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+            "signing still produces a header; the server rejects the bad scope"
+        );
+    }
+
+    #[test]
+    fn date_stamp_takes_the_leading_eight_bytes_of_a_well_formed_date() {
+        assert_eq!(date_stamp("20150830T123600Z"), "20150830");
+        assert_eq!(date_stamp("2015"), "2015", "short dates pass through whole");
+        assert_eq!(date_stamp(""), "");
     }
 
     #[test]
