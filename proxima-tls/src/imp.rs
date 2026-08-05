@@ -2,14 +2,18 @@
 //! `std` feature in lib.rs.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustls::RootCertStore;
-use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
-use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use rustls::crypto::aws_lc_rs::Ticketer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::server::danger::ClientCertVerifier;
+use rustls::server::{ClientHello, ResolvesServerCert, WantsServerCert, WebPkiClientVerifier};
 use rustls::sign::CertifiedKey;
+use rustls::{ConfigBuilder, RootCertStore, ServerConfig};
 #[cfg(feature = "tokio")]
 use tokio_rustls::TlsAcceptor;
 
@@ -83,12 +87,11 @@ impl TlsConfig {
     /// construct a [`Self::pem`] config. Std-only — bytes-tier
     /// consumers call [`Self::pem`] directly.
     pub fn files(cert: PathBuf, key: PathBuf) -> Result<Self, ProximaError> {
-        let cert_bytes = std::fs::read(&cert).map_err(|err| {
+        let cert_bytes = fs::read(&cert).map_err(|err| {
             ProximaError::Config(format!("tls: read cert {}: {err}", cert.display()))
         })?;
-        let key_bytes = std::fs::read(&key).map_err(|err| {
-            ProximaError::Config(format!("tls: read key {}: {err}", key.display()))
-        })?;
+        let key_bytes = fs::read(&key)
+            .map_err(|err| ProximaError::Config(format!("tls: read key {}: {err}", key.display())))?;
         Ok(Self::pem(cert_bytes, key_bytes))
     }
 
@@ -153,16 +156,14 @@ pub struct SniCert {
     pub key: Vec<u8>,
 }
 
-#[allow(clippy::vec_init_then_push, unused_mut)]
 fn default_alpn() -> Vec<Vec<u8>> {
-    // each push is gated by a feature; the macro form doesn't compose
-    // with cfg attributes on individual entries.
-    let mut alpn: Vec<Vec<u8>> = Vec::new();
-    #[cfg(feature = "http2")]
-    alpn.push(b"h2".to_vec());
-    #[cfg(feature = "http1")]
-    alpn.push(b"http/1.1".to_vec());
-    alpn
+    let protocols: &[&[u8]] = match (cfg!(feature = "http2"), cfg!(feature = "http1")) {
+        (true, true) => &[b"h2", b"http/1.1"],
+        (true, false) => &[b"h2"],
+        (false, true) => &[b"http/1.1"],
+        (false, false) => &[],
+    };
+    protocols.iter().map(|protocol| protocol.to_vec()).collect()
 }
 
 /// Build a `tokio_rustls::TlsAcceptor` ready to wrap accepted TCP
@@ -232,15 +233,15 @@ pub fn build_server_config(config: &TlsConfig) -> Result<ServerConfig, ProximaEr
         // rustls's stateless ticketer encrypts session secrets with a
         // process-local key; the key rotates inside the ticketer. Tied
         // to the active crypto provider — fails if none is installed.
-        let ticketer = rustls::crypto::aws_lc_rs::Ticketer::new()
-            .map_err(|err| ProximaError::Config(format!("tls: ticketer: {err}")))?;
+        let ticketer =
+            Ticketer::new().map_err(|err| ProximaError::Config(format!("tls: ticketer: {err}")))?;
         server_config.ticketer = ticketer;
     }
     Ok(server_config)
 }
 
 fn build_single_cert_config(
-    builder: rustls::ConfigBuilder<ServerConfig, rustls::server::WantsServerCert>,
+    builder: ConfigBuilder<ServerConfig, WantsServerCert>,
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
     ocsp_response: Option<Vec<u8>>,
@@ -258,7 +259,7 @@ fn build_single_cert_config(
 fn client_cert_verifier(
     trust_anchors: &[u8],
     optional: bool,
-) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>, ProximaError> {
+) -> Result<Arc<dyn ClientCertVerifier>, ProximaError> {
     let mut roots = RootCertStore::empty();
     let anchors: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(trust_anchors)
         .collect::<Result<_, _>>()
@@ -346,13 +347,6 @@ impl ResolvesServerCert for SniResolver {
     }
 }
 
-// `ServerName` is required for the rustls trait surface; bring the
-// `_used` so the import isn't dead-code-pruned on builds that don't
-// touch SNI paths directly from this module.
-const _: fn() = || {
-    let _: Option<ServerName<'static>> = None;
-};
-
 fn generate_self_signed()
 -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ProximaError> {
     let subject_alt_names = vec![
@@ -403,8 +397,7 @@ pub const SPEC_KEY: &str = "__proxima_tls";
 /// material is in-memory bytes that round-trip via base64.
 #[must_use]
 pub fn config_to_spec_value(config: &TlsConfig) -> serde_json::Value {
-    use base64::Engine as _;
-    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let b64 = |bytes: &[u8]| BASE64.encode(bytes);
     let mode = match &config.mode {
         TlsMode::SelfSigned => serde_json::json!({"kind": "self_signed"}),
         TlsMode::Pem { cert, key } => serde_json::json!({
@@ -444,20 +437,21 @@ pub fn config_to_spec_value(config: &TlsConfig) -> serde_json::Value {
             "trust_anchors_pem_b64": b64(trust_anchors),
         }),
     };
-    // OCSP response is opaque DER bytes; base64 the wire shape so
-    // JSON / TOML round-trip cleanly. `None` omits the key.
-    let ocsp_b64 = config.ocsp_response.as_ref().map(|bytes| {
-        use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    });
     let mut root = serde_json::json!({
         "mode": mode,
         "alpn": alpn,
         "client_auth": client_auth,
         "session_resumption": config.session_resumption,
     });
-    if let (Some(b64), serde_json::Value::Object(table)) = (ocsp_b64, &mut root) {
-        table.insert("ocsp_response_b64".into(), serde_json::Value::String(b64));
+    // OCSP response is opaque DER bytes; base64 the wire shape so
+    // JSON / TOML round-trip cleanly. `None` omits the key.
+    if let (Some(ocsp), serde_json::Value::Object(table)) =
+        (config.ocsp_response.as_ref(), &mut root)
+    {
+        table.insert(
+            "ocsp_response_b64".into(),
+            serde_json::Value::String(b64(ocsp)),
+        );
     }
     root
 }
@@ -477,9 +471,8 @@ pub fn config_from_spec_value(
     let table = value.as_object().ok_or_else(|| {
         ProximaError::Config("tls spec must be an object with `mode` and `alpn`".into())
     })?;
-    use base64::Engine as _;
     let decode_b64 = |raw: &str, label: &str| -> Result<Vec<u8>, ProximaError> {
-        base64::engine::general_purpose::STANDARD
+        BASE64
             .decode(raw)
             .map_err(|err| ProximaError::Config(format!("tls.{label}: invalid base64: {err}")))
     };
@@ -633,14 +626,8 @@ pub fn config_from_spec_value(
         .and_then(|raw| raw.as_bool())
         .unwrap_or(false);
     let ocsp_response = match table.get("ocsp_response_b64") {
-        Some(serde_json::Value::String(b64)) => {
-            use base64::Engine as _;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(b64.as_bytes())
-                .map_err(|err| {
-                    ProximaError::Config(format!("tls.ocsp_response_b64 invalid base64: {err}"))
-                })?;
-            Some(bytes)
+        Some(serde_json::Value::String(encoded)) => {
+            Some(decode_b64(encoded, "ocsp_response_b64")?)
         }
         Some(serde_json::Value::Null) | None => None,
         Some(_) => {
