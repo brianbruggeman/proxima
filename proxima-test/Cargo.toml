@@ -16,10 +16,13 @@ time = { workspace = true }
 # no runtime coupling, unlike `tokio::sync::Mutex::const_new`.
 async-lock = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "fs", "macros", "test-util"], optional = true }
-libc = { workspace = true }
 
 prime = { workspace = true, optional = true }
 proxima-runtime = { workspace = true, optional = true }
+
+# only the drivers raise RLIMIT_NOFILE, and only on unix
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }
@@ -29,11 +32,11 @@ default = []
 # the explicit `#[proxima::test(runtime = "tokio")]` driver + `run_tokio*`
 # entry points. The adaptive default driver (no explicit `runtime = ...`)
 # does not need this — it prefers `test-prime` when linked.
-tokio-driver = ["dep:tokio"]
+tokio-driver = ["dep:tokio", "dep:libc"]
 # tokio-free: the adaptive default driver on a bare prime runtime (no
 # sister-tokio Handle on the worker). Sufficient for test bodies that only
 # call proxima/prime primitives.
-test-prime = ["dep:prime", "dep:proxima-runtime",
+test-prime = ["dep:prime", "dep:proxima-runtime", "dep:libc",
               "prime/runtime-prime-executor", "prime/runtime-prime-inbox-alloc",
               "prime/runtime-prime-reactor", "prime/runtime-prime-bgpool",
               "proxima-runtime/std"]
