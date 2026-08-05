@@ -13,9 +13,10 @@ use proxima_storage::pmem::cow::{CowRoot, UpdateState};
 use proxima_storage::pmem::error::PmemError;
 use proxima_storage::pmem::persist;
 
-fn show(label: &str, region: &[u8], layout: &CowRoot) {
-    let root = layout.live_index(region);
+fn show(label: &str, region: &[u8], layout: &CowRoot) -> Result<(), PmemError> {
+    let root = layout.live_index(region)?;
     println!("{label:<22} root={root}  bytes={region:02x?}");
+    Ok(())
 }
 
 fn main() -> Result<(), PmemError> {
@@ -25,14 +26,14 @@ fn main() -> Result<(), PmemError> {
 
     let mut region = vec![0u8; layout.region_len()];
     layout.init(&mut region, &old, &persist::persist)?;
-    show("after init", &region, &layout);
+    show("after init", &region, &layout)?;
 
     let plan = layout.prepare(&region, &new)?;
     let mut state = UpdateState::Idle;
     println!("\ndriving the update FSM, NEW = {new:02x?}:");
     while state != UpdateState::Committed {
         state = layout.step(&mut region, &plan, state, &persist::persist);
-        show(&format!("{state:?}"), &region, &layout);
+        show(&format!("{state:?}"), &region, &layout)?;
     }
 
     let live = layout.recover(&region)?;

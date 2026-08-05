@@ -103,19 +103,18 @@ impl CowRoot {
 
     /// The live slot index per the root word: `0` or `1`. An out-of-range root
     /// (only reachable from a corrupt region) is treated as `0`.
-    #[must_use]
-    pub fn live_index(&self, region: &[u8]) -> u64 {
+    pub fn live_index(&self, region: &[u8]) -> Result<u64, PmemError> {
+        self.ensure_region(region)?;
         let mut raw = [0u8; ROOT_LEN];
         raw.copy_from_slice(&region[..ROOT_LEN]);
         let root = u64::from_le_bytes(raw);
-        if root <= 1 { root } else { 0 }
+        Ok(if root <= 1 { root } else { 0 })
     }
 
     /// Read the live value. Steady-state read; the borrow lives as long as the
     /// region.
     pub fn read<'region>(&self, region: &'region [u8]) -> Result<&'region [u8], PmemError> {
-        self.ensure_region(region)?;
-        let offset = self.slot_offset(self.live_index(region));
+        let offset = self.slot_offset(self.live_index(region)?);
         Ok(&region[offset..offset + self.slot_len])
     }
 
@@ -156,14 +155,14 @@ impl CowRoot {
         region: &[u8],
         new_value: &'value [u8],
     ) -> Result<Commit<'value>, PmemError> {
-        self.ensure_region(region)?;
+        let live_index = self.live_index(region)?;
         if new_value.len() != self.slot_len {
             return Err(PmemError::SlotLenMismatch {
                 expected: self.slot_len,
                 got: new_value.len(),
             });
         }
-        let dead_index = 1 - self.live_index(region);
+        let dead_index = 1 - live_index;
         Ok(Commit {
             dead_index,
             new_value,
@@ -263,7 +262,7 @@ mod tests {
 
     // the correct CoW commit, as a persistence-event sequence
     fn commit_ops(layout: &CowRoot, region: &[u8], new_value: &[u8]) -> Vec<Op> {
-        let dead = 1 - layout.live_index(region);
+        let dead = 1 - layout.live_index(region).expect("oracle regions are layout-sized");
         let dead_off = layout.slot_offset(dead);
         vec![
             Op::Write {
@@ -290,7 +289,7 @@ mod tests {
     // a BROKEN commit that flips the root before persisting the dead slot — the
     // missing-B1 bug the oracle must catch.
     fn commit_ops_missing_b1(layout: &CowRoot, region: &[u8], new_value: &[u8]) -> Vec<Op> {
-        let dead = 1 - layout.live_index(region);
+        let dead = 1 - layout.live_index(region).expect("oracle regions are layout-sized");
         let dead_off = layout.slot_offset(dead);
         vec![
             Op::Write {
@@ -443,7 +442,7 @@ mod tests {
         assert_eq!(layout.read(&region).unwrap(), &OLD8);
         layout.commit(&mut region, &NEW8, &noop_persist).unwrap();
         assert_eq!(
-            layout.live_index(&region),
+            layout.live_index(&region).unwrap(),
             1,
             "root must select the new slot"
         );
@@ -495,7 +494,7 @@ mod tests {
         let slot1 = ROOT_LEN + 8;
         region[slot1..slot1 + 8].copy_from_slice(&torn_slot1);
         assert_eq!(
-            layout.live_index(&region),
+            layout.live_index(&region).unwrap(),
             0,
             "root still selects the live slot"
         );
@@ -532,19 +531,19 @@ mod tests {
         let value_b = [0xB1, 0xB2, 0xB3, 0xB4];
         let value_c = [0xC1, 0xC2, 0xC3, 0xC4];
         let mut region = fresh_region(&layout, &value_a);
-        assert_eq!(layout.live_index(&region), 0);
+        assert_eq!(layout.live_index(&region).unwrap(), 0);
 
         // each commit's crash window must recover to its own OLD or NEW
         let ops_ab = commit_ops(&layout, &region, &value_b);
         check_oracle(&layout, &region, &value_b, &ops_ab).expect("a->b consistent");
         layout.commit(&mut region, &value_b, &noop_persist).unwrap();
-        assert_eq!(layout.live_index(&region), 1, "second slot now live");
+        assert_eq!(layout.live_index(&region).unwrap(), 1, "second slot now live");
         assert_eq!(layout.recover(&region).unwrap(), &value_b);
 
         let ops_bc = commit_ops(&layout, &region, &value_c);
         check_oracle(&layout, &region, &value_c, &ops_bc).expect("b->c consistent");
         layout.commit(&mut region, &value_c, &noop_persist).unwrap();
-        assert_eq!(layout.live_index(&region), 0, "back to the first slot");
+        assert_eq!(layout.live_index(&region).unwrap(), 0, "back to the first slot");
         assert_eq!(layout.recover(&region).unwrap(), &value_c);
     }
 
@@ -591,6 +590,18 @@ mod tests {
         let mut region = vec![0u8; layout.region_len() - 1];
         let err = layout.init(&mut region, &OLD8, &noop_persist).unwrap_err();
         assert_eq!(err, PmemError::RegionTooSmall { need: 24, got: 23 });
+    }
+
+    // a region shorter than the root word itself: live_index validates like every
+    // other entry point instead of indexing past the end.
+    #[test]
+    fn live_index_rejects_a_region_shorter_than_the_root() {
+        let layout = CowRoot::new(8).unwrap();
+        let stub = [0u8; ROOT_LEN - 1];
+        assert_eq!(
+            layout.live_index(&stub).unwrap_err(),
+            PmemError::RegionTooSmall { need: 24, got: 7 }
+        );
     }
 
     #[test]
@@ -657,7 +668,7 @@ mod tests {
                 let value = vec![*fill; slot_len];
                 layout.commit(&mut region, &value, &noop_persist).unwrap();
                 prop_assert_eq!(layout.recover(&region).unwrap(), value.as_slice());
-                prop_assert_eq!(layout.live_index(&region), ((step + 1) % 2) as u64);
+                prop_assert_eq!(layout.live_index(&region).unwrap(), ((step + 1) % 2) as u64);
             }
         }
     }
