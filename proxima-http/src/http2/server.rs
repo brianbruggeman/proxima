@@ -319,9 +319,8 @@ where
                     connection.return_headers_buffer(headers_buffer);
                     // Request-level admission: h2 has its own natural
                     // per-stream boundary (RequestHead), so it calls
-                    // `request_admit`/`request_release` directly instead of
-                    // the legacy-atomics bridge h1 uses (see
-                    // `ConnAdmission::in_flight_counter`'s doc). On `Shed`
+                    // `request_admit`/`request_release` at that boundary,
+                    // the same way h1 does from `serve_connection`. On `Shed`
                     // this stream alone gets an in-band 503 — the
                     // connection and every other live stream keep running.
                     match admission.request_admit() {
