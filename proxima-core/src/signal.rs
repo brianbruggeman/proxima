@@ -261,7 +261,12 @@ impl Drop for SignalGuard {
     }
 }
 
-#[cfg(test)]
+// the fired flag + waiters mutex are cfg-swapped to loom under `--features
+// loom` (see the note at the top of this module) — those only work inside an
+// actual loom::model(...) closure, which these plain #[test] functions don't
+// provide. Same gate ring/mpsc.rs and ring/bounded.rs already carry; the loom
+// coverage for this module is tests/loom_signal.rs.
+#[cfg(all(test, not(feature = "loom")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
