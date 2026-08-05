@@ -41,14 +41,24 @@ pub enum DigestAlgorithm {
 }
 
 impl DigestAlgorithm {
-    /// Parse the `algorithm=` token (case-insensitive). Defaults to `MD5` per
-    /// RFC 7616 §3.4 when the challenge omits it.
+    /// Parse the `algorithm=` token (case-insensitive), or `None` for a token
+    /// this module does not compute — including the `-sess` variants, whose A1
+    /// derivation differs (RFC 7616 §3.4.2).
+    ///
+    /// `None` rather than a silent `MD5` default: mapping an unrecognized
+    /// algorithm to MD5 answers a `SHA-512-256` challenge with an MD5 digest
+    /// labelled `MD5`, which the server can only reject — a confusing 401 loop
+    /// standing in for "we do not implement that algorithm". The *absent*
+    /// `algorithm=` parameter still defaults to MD5 per RFC 7616 §3.3; that
+    /// default lives in [`DigestChallenge::parse`], where absence is visible.
     #[must_use]
-    pub fn parse(token: &str) -> Self {
-        if token.eq_ignore_ascii_case("SHA-256") {
-            Self::Sha256
+    pub fn parse(token: &str) -> Option<Self> {
+        if token.eq_ignore_ascii_case("MD5") {
+            Some(Self::Md5)
+        } else if token.eq_ignore_ascii_case("SHA-256") {
+            Some(Self::Sha256)
         } else {
-            Self::Md5
+            None
         }
     }
 
@@ -80,16 +90,17 @@ pub struct DigestChallenge {
 }
 
 impl DigestChallenge {
-    /// Parse a `Digest k1="v1", k2="v2"` challenge value (the part after the
-    /// `Digest ` scheme token; the caller strips the scheme).
+    /// Parse a `Digest k1="v1", k2="v2"` challenge value. A leading scheme
+    /// token is optional and matched case-insensitively per RFC 7235 §2.1.
     ///
     /// # Errors
-    /// [`DigestError::MissingField`] when `realm` or `nonce` is absent.
+    /// [`DigestError::MissingField`] when `realm` or `nonce` is absent,
+    /// [`DigestError::UnsafeField`] on an injection attempt,
+    /// [`DigestError::UnsupportedAlgorithm`] on an `algorithm=` this module does
+    /// not compute, and [`DigestError::UnsupportedQop`] when the challenge
+    /// offers a `qop` list without `auth`.
     pub fn parse(challenge: &str) -> Result<Self, DigestError> {
-        let body = challenge
-            .strip_prefix("Digest ")
-            .unwrap_or(challenge)
-            .trim();
+        let body = strip_digest_scheme(challenge.trim());
         let mut realm = None;
         let mut nonce = None;
         let mut algorithm = DigestAlgorithm::Md5;
@@ -99,8 +110,11 @@ impl DigestChallenge {
             match key {
                 "realm" => realm = Some(field_safe("realm", value)?.to_string()),
                 "nonce" => nonce = Some(field_safe("nonce", value)?.to_string()),
-                "algorithm" => algorithm = DigestAlgorithm::parse(value),
-                "qop" => qop = Some(first_qop(value).to_string()),
+                "algorithm" => {
+                    algorithm =
+                        DigestAlgorithm::parse(value).ok_or(DigestError::UnsupportedAlgorithm)?;
+                }
+                "qop" => qop = Some(auth_qop(value)?.to_string()),
                 "opaque" => opaque = Some(field_safe("opaque", value)?.to_string()),
                 _ => {}
             }
@@ -181,6 +195,12 @@ impl DigestClient {
     }
 
     /// Build the full `Authorization: Digest …` header value for a request.
+    ///
+    /// `username` and `uri` are echoed into quoted parameters unvalidated —
+    /// the challenge fields are guarded at parse, but these two are the
+    /// caller's. The edge that puts the result on the wire must reject control
+    /// characters in it; `proxima_patterns`' `DigestAuthPipe` does both, at
+    /// build time for the username and per request for the finished header.
     #[must_use]
     pub fn authorization(
         &self,
@@ -255,24 +275,36 @@ pub fn responses_equal(left: &str, right: &str) -> bool {
     (equal & same_length).into()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DigestError {
+    #[error("digest challenge missing `{0}`")]
     MissingField(&'static str),
     /// a challenge field carried a `"`, CR, or LF — a header-injection attempt
+    #[error("digest challenge `{0}` contains an unsafe character")]
     UnsafeField(&'static str),
+    /// the `algorithm=` token is one this module does not compute
+    #[error("digest challenge names an algorithm this client does not compute")]
+    UnsupportedAlgorithm,
+    /// the `qop=` list offered no `auth` option
+    #[error("digest challenge offers no `auth` qop")]
+    UnsupportedQop,
 }
 
-impl core::fmt::Display for DigestError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::MissingField(field) => write!(formatter, "digest challenge missing `{field}`"),
-            Self::UnsafeField(field) => {
-                write!(
-                    formatter,
-                    "digest challenge `{field}` contains an unsafe character"
-                )
-            }
-        }
+/// Drop a leading `Digest` scheme token, case-insensitively (RFC 7235 §2.1
+/// makes `auth-scheme` case-insensitive).
+///
+/// Matching the exact string `"Digest "` failed open in a way that read like a
+/// missing field: a conformant `digest realm="r", nonce="n"` kept its scheme
+/// token, so the first parameter parsed as the key `digest realm` and the error
+/// came back `MissingField("realm")` — pointing at a field that was right there.
+fn strip_digest_scheme(challenge: &str) -> &str {
+    let Some((scheme, rest)) = challenge.split_once(char::is_whitespace) else {
+        return challenge;
+    };
+    if scheme.eq_ignore_ascii_case("Digest") {
+        rest.trim_start()
+    } else {
+        challenge
     }
 }
 
@@ -329,14 +361,26 @@ fn push_param<'body>(pairs: &mut alloc::vec::Vec<(&'body str, &'body str)>, segm
     }
 }
 
-/// A challenge may offer `qop="auth,auth-int"`; we pick `auth` (the form we
-/// compute). Picks the first listed option as a fallback.
-fn first_qop(value: &str) -> &str {
+/// A challenge may offer `qop="auth,auth-int"`; we take `auth`, the only form
+/// [`DigestClient::response`] computes.
+///
+/// Anything else is [`DigestError::UnsupportedQop`], not a fallback to the first
+/// listed option. Echoing back the server's token unexamined was two defects in
+/// one: a `qop="auth-int"` challenge got an `auth`-formula response *labelled*
+/// `auth-int` (RFC 7616 §3.4.3 folds `H(entity-body)` into A2 for `auth-int`,
+/// which this module never computes) — claiming an integrity guarantee that was
+/// not calculated; and because `qop` is emitted unquoted, a `qop` carrying CRLF
+/// was a header-injection channel the `realm`/`nonce`/`opaque` guard did not
+/// cover. Accepting only the literal `auth` token closes both structurally.
+///
+/// # Errors
+/// [`DigestError::UnsupportedQop`] when no offered option is `auth`.
+fn auth_qop(value: &str) -> Result<&str, DigestError> {
     value
         .split(',')
         .map(str::trim)
         .find(|option| *option == "auth")
-        .unwrap_or_else(|| value.split(',').next().map_or("auth", str::trim))
+        .ok_or(DigestError::UnsupportedQop)
 }
 
 #[cfg(test)]
@@ -452,6 +496,35 @@ mod tests {
     }
 
     #[test]
+    fn the_scheme_token_is_optional_and_case_insensitive() {
+        // RFC 7235 §2.1: auth-scheme is case-insensitive. Matching the literal
+        // `"Digest "` left the token in the body, so `digest realm="r"` parsed
+        // as a key named `digest realm` and reported `MissingField("realm")`.
+        for challenge in [
+            "Digest realm=\"r\", nonce=\"n\"",
+            "digest realm=\"r\", nonce=\"n\"",
+            "DIGEST realm=\"r\", nonce=\"n\"",
+            "  Digest   realm=\"r\", nonce=\"n\"",
+            "realm=\"r\", nonce=\"n\"",
+        ] {
+            let parsed = DigestChallenge::parse(challenge)
+                .unwrap_or_else(|err| panic!("`{challenge}` must parse, got {err:?}"));
+            assert_eq!(parsed.realm, "r", "failed on `{challenge}`");
+            assert_eq!(parsed.nonce, "n", "failed on `{challenge}`");
+        }
+    }
+
+    #[test]
+    fn a_non_digest_scheme_token_is_not_stripped() {
+        // `Basic …` is not a Digest challenge; leaving the token in the body is
+        // what makes it fail as a missing field rather than silently parsing.
+        assert_eq!(
+            DigestChallenge::parse("Basic realm=\"r\", nonce=\"n\""),
+            Err(DigestError::MissingField("realm"))
+        );
+    }
+
+    #[test]
     fn responses_equal_is_constant_time_true_on_match() {
         assert!(responses_equal(
             "8ca523f5e9506fed4657c9700eebdbec",
@@ -474,15 +547,60 @@ mod tests {
         // refused at parse, never echoed into the quoted Authorization header.
         let quoted = DigestChallenge::parse("Digest realm=\"r\", nonce=\"a\"b\"");
         assert_eq!(quoted, Err(DigestError::UnsafeField("nonce")));
-        let crlf = DigestChallenge::parse("Digest realm=\"r\\r\\nevil\", nonce=\"n\"");
-        // the literal backslash-r-n above is text; build a real CRLF case:
         let real_crlf = DigestChallenge::parse("Digest realm=\"good\", nonce=\"a\r\nInjected: 1\"");
         assert_eq!(real_crlf, Err(DigestError::UnsafeField("nonce")));
-        let _ = crlf;
+    }
+
+    #[test]
+    fn a_qop_carrying_crlf_is_rejected_not_echoed_into_the_header() {
+        // `qop` is emitted UNQUOTED into the Authorization value, so echoing a
+        // server token verbatim splits headers. Only the literal `auth` token
+        // survives the parser, which closes the channel structurally.
+        assert_eq!(
+            DigestChallenge::parse("Digest realm=\"r\", nonce=\"n\", qop=\"a\r\nInjected: 1\""),
+            Err(DigestError::UnsupportedQop)
+        );
+    }
+
+    #[test]
+    fn an_auth_int_only_challenge_is_refused_rather_than_mislabelled() {
+        // RFC 7616 §3.4.3 folds H(entity-body) into A2 for `auth-int`; this
+        // module computes only the `auth` A2, so answering with `qop=auth-int`
+        // would claim an integrity guarantee that was never calculated.
+        assert_eq!(
+            DigestChallenge::parse("Digest realm=\"r\", nonce=\"n\", qop=\"auth-int\""),
+            Err(DigestError::UnsupportedQop)
+        );
+        let both =
+            DigestChallenge::parse("Digest realm=\"r\", nonce=\"n\", qop=\"auth-int, auth\"")
+                .expect("a list containing auth is accepted");
+        assert_eq!(both.qop.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn an_unrecognized_algorithm_is_refused_not_downgraded_to_md5() {
+        assert_eq!(
+            DigestChallenge::parse("Digest realm=\"r\", nonce=\"n\", algorithm=SHA-512-256"),
+            Err(DigestError::UnsupportedAlgorithm)
+        );
+        // the `-sess` variants derive A1 differently (RFC 7616 §3.4.2) and are
+        // not implemented here, so they are refused rather than silently
+        // computed as their non-session namesake.
+        assert_eq!(
+            DigestChallenge::parse("Digest realm=\"r\", nonce=\"n\", algorithm=MD5-sess"),
+            Err(DigestError::UnsupportedAlgorithm)
+        );
+        // an ABSENT algorithm still defaults to MD5 (RFC 7616 §3.3).
+        let defaulted = DigestChallenge::parse("Digest realm=\"r\", nonce=\"n\"").expect("parse");
+        assert_eq!(defaulted.algorithm, DigestAlgorithm::Md5);
     }
 
     #[test]
     fn legacy_no_qop_uses_the_two_field_kd_form() {
+        // RFC 2069 / RFC 7616 §3.4.6 legacy form over the §3.9.1 inputs:
+        // KD(H(A1), nonce ":" H(A2)) with no nc/cnonce/qop. Derived
+        // independently with a reference MD5 (principle 14), and the same
+        // pipeline reproduces the RFC-printed qop=auth value below as a control.
         let client = DigestClient::new(RFC_USERNAME, RFC_PASSWORD);
         let challenge = DigestChallenge {
             realm: RFC_REALM.into(),
@@ -492,7 +610,20 @@ mod tests {
             opaque: None,
         };
         let response = client.response(&challenge, RFC_METHOD, RFC_URI, RFC_NC, RFC_CNONCE);
-        // legacy KD(H(A1), nonce:H(A2)) — distinct from the qop form, and stable.
-        assert_eq!(response.len(), 32, "md5 hex is 32 chars");
+        assert_eq!(
+            response, "7b2cc3b30e75b4777ea31027084363fd",
+            "legacy KD(H(A1), nonce:H(A2)) over the §3.9.1 inputs"
+        );
+        assert_ne!(
+            response,
+            client.response(
+                &rfc_challenge(DigestAlgorithm::Md5),
+                RFC_METHOD,
+                RFC_URI,
+                RFC_NC,
+                RFC_CNONCE
+            ),
+            "the legacy form is a different digest from the qop=auth form"
+        );
     }
 }
