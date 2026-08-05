@@ -4,12 +4,13 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use hyper::body::Incoming;
-use serde_json::Value;
 use proxima_telemetry::warn;
+use serde_json::Value;
 
 use crate::http1::http_config::{HttpConfig, HttpUpstreamConfig};
 use crate::http1::hyper_body::StreamingHyperBody;
 use crate::http1::shared_http::SharedHttpClient;
+use crate::http1::status_class;
 use crate::templates::{TemplateContext, expand};
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
@@ -222,17 +223,6 @@ impl SendPipe for HttpUpstream {
             telemetry.histogram_record("proxima.upstream.latency_ms", &labels, elapsed_ms);
             Ok(translated)
         }
-    }
-}
-
-fn status_class(status: u16) -> &'static str {
-    match status {
-        100..=199 => "1xx",
-        200..=299 => "2xx",
-        300..=399 => "3xx",
-        400..=499 => "4xx",
-        500..=599 => "5xx",
-        _ => "other",
     }
 }
 

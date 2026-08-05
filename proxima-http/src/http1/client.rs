@@ -120,8 +120,8 @@ use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use proxima_primitives::sync::Mutex;
-use serde::{Deserialize, Serialize};
 use proxima_telemetry::{debug, warn};
+use serde::{Deserialize, Serialize};
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
@@ -138,6 +138,7 @@ use crate::http1::http_config::HttpUpstreamConfig;
 pub use crate::http1::response_config::{
     ResponseBodyMode, ResponseHandling, ResponseHandlingConfig, ResponseHeaderMode,
 };
+use crate::http1::status_class;
 use crate::templates::{TemplateContext, expand};
 
 /// Read chunk size for draining the response off the connection. 16 KiB
@@ -424,19 +425,6 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
 
 fn default_label() -> String {
     "h1-client".to_string()
-}
-
-/// HTTP status → coarse class label for upstream telemetry. Mirrors the
-/// hyper `HttpUpstream` so the prime backend emits identical metric labels.
-fn status_class(status: u16) -> &'static str {
-    match status {
-        100..=199 => "1xx",
-        200..=299 => "2xx",
-        300..=399 => "3xx",
-        400..=499 => "4xx",
-        500..=599 => "5xx",
-        _ => "other",
-    }
 }
 
 /// The declarative, serializable description of an [`H1ClientUpstream`] —
