@@ -3,9 +3,6 @@
 
 pub mod sized;
 
-#[cfg(feature = "runtime-prime-thread-identity")]
-pub mod thread_identity;
-
 #[cfg(any(
     feature = "runtime-prime-inbox-alloc",
     feature = "runtime-prime-inbox-const",

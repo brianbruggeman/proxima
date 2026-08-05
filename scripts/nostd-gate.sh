@@ -18,9 +18,10 @@
 # body's std:: calls are covered without needing per-line allow-list entries.
 #
 # Allow-list: `thread_local!` is intentionally exempt from cfg-awareness (see
-# above) — known deferred-debt TLS sites are tolerated by content match (not
-# line number, so they survive surrounding-code drift) until C1
-# (thread-identity-trait) lands and routes them through ThreadIdentity.
+# above) — the two known TLS sites are tolerated by content match (not line
+# number, so they survive surrounding-code drift). Both are `#[cfg(feature =
+# "std")]`-gated and vanish on the no_std cliff, so they do not block the
+# tier; the allow-list keeps NEW ungated TLS from creeping in beside them.
 #
 # Usage:
 #   bash scripts/nostd-gate.sh                # default scope: prime/src/core/
@@ -46,10 +47,10 @@ else
     paths=("$@")
 fi
 
-# Known deferred-debt TLS sites — drop once C1 (thread-identity-trait) lands
-# and the sites route through ThreadIdentity instead of raw thread_local!.
-# Matched by (file, content-substring) rather than line number, so drift in
-# surrounding code never requires renumbering these entries.
+# The two std-gated TLS sites. Matched by (file, content-substring) rather
+# than line number, so drift in surrounding code never requires renumbering
+# these entries. Each site's own comment states why it is std-only and what
+# the no_std build does instead.
 declare -a allowed_files
 declare -a allowed_content
 allowed_files+=("prime/src/core/inbox.rs")

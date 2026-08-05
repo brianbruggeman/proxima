@@ -42,7 +42,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p prime
-      - run: cargo test -p prime --lib --features runtime-prime-thread-identity
+      # the default feature set compiles almost nothing (every submodule
+      # except `sized` is behind a runtime-prime-* flag), so name the stack
+      # that actually carries the scheduler or this step proves nothing.
+      - run: cargo test -p prime --lib --features runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool
 
   # nostd-gate.sh hygiene check — production code under prime/src/core/*
   # must stay std-import-free except for the allow-listed TLS sites

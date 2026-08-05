@@ -69,7 +69,6 @@ std = [
 ]
 alloc = ["proxima-core/alloc", "proxima-runtime/alloc"]
 runtime-prime             = []
-runtime-prime-thread-identity = ["runtime-prime"]
 runtime-prime-inbox-alloc = ["runtime-prime"]
 runtime-prime-inbox-const = ["runtime-prime"]
 # dynamic inbox: lane registry grows on demand (no NoLanes/exhaustion = no task
@@ -133,11 +132,6 @@ prime-tokio-compat = ["std", "dep:tokio", "dep:core_affinity"]
 # module's deps; default-off.
 prime-tokio-compat-inverted = ["prime-tokio-compat"]
 runtime-prime-full = ["proxima-runtime/runtime-prime-full"]
-
-[[bench]]
-name = "bench_thread_identity"
-harness = false
-required-features = ["runtime-prime-thread-identity"]
 
 [[bench]]
 name = "bench_inbox_const"
