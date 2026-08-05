@@ -1,7 +1,7 @@
 //! AMQP topic-exchange binding-key matching — the `#`/`*` wildcard grammar
 //! (AMQP 0-9-1 §3.1.3.3). [`topic_match`] answers "does this binding key
-//! cover this routing key" for [`crate::broker::AmqpBroker::publish`] on a
-//! `topic`-kind exchange.
+//! cover this routing key" for the `listen`-gated `broker::AmqpBroker`'s
+//! publish path on a `topic`-kind exchange.
 //!
 //! Unlike redis's byte-glob (`*`/`?`/`[...]`), a topic binding key is
 //! `.`-delimited *words*: `*` matches exactly one word, `#` matches zero or

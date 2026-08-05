@@ -15,8 +15,8 @@
 //! reaches. That indirection is plain bookkeeping (a small live map, not
 //! sink/fan-out machinery), kept in [`AmqpBroker`]'s `exchanges` field:
 //! [`AmqpBroker::publish`] resolves (exchange, routing_key) -> a set of
-//! queue names first ([`ExchangeKind::routes`] is the whole difference
-//! between direct exact-match, fanout-all-bound, and
+//! queue names first (`ExchangeKind::routes`, private, is the whole
+//! difference between direct exact-match, fanout-all-bound, and
 //! [`topic_match`]-matched, mirroring redis's channel vs. pattern split),
 //! then hands each matched queue name to the SAME `queues.publish` a bare
 //! `basic.consume` on the default exchange would use directly.
@@ -94,7 +94,7 @@ type ExchangeMap = BTreeMap<Vec<u8>, Exchange>;
 /// (pre-encoded wire frame) except AMQP needs the RAW fields here: each
 /// sink encodes its OWN `basic.deliver` (consumer-tag + delivery-tag are
 /// per-consumer, unlike redis where the channel name IS the addressing —
-/// see [`ConsumerSink::call`]).
+/// see [`ConsumerSink`]'s `SendPipe` impl).
 #[derive(Debug, Clone)]
 pub struct Delivery {
     pub exchange: Vec<u8>,
@@ -287,7 +287,7 @@ impl AmqpBroker {
     /// 0-9-1 §3.1.3.4). A named exchange resolves its bound queues by
     /// kind: `Direct` exact-matches the binding key, `Fanout` reaches
     /// every bound queue regardless of routing key, `Topic` glob-matches
-    /// via [`TopicSet`]. Returns the number of consumers reached (a
+    /// via [`topic_match`]. Returns the number of consumers reached (a
     /// message with zero matched consumers, or matched queues with zero
     /// consumers, is a harmless no-op — mirrors redis `PUBLISH` to an
     /// unsubscribed channel).
