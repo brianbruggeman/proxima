@@ -21,14 +21,22 @@ use super::endpoint::EndpointError;
 
 /// `tokio::net::UdpSocket`-backed Endpoint.
 ///
-/// API parity with [`super::endpoint::Endpoint`] — same `poll_send` /
-/// `poll_recv` / `handle_timeout` / `next_timeout` shape. Drivable
+/// Parity with [`super::endpoint::Endpoint`] on the single-datagram
+/// surface — same `poll_send` / `poll_recv` / `handle_timeout` /
+/// `next_timeout` shape. There is deliberately no `poll_send_batch` /
+/// `poll_recv_batch` twin: those ride `prime`'s `sendmmsg`/`recvmmsg`
+/// path, which `tokio::net::UdpSocket` does not expose. Drivable
 /// from any tokio task; `tokio::main` not required (works inside
 /// `tokio::task::spawn_local` too).
 pub struct TokioEndpoint<P: TlsProvider> {
     config: EndpointConfig,
     socket: TokioUdpSocket,
-    connection: Connection<P>,
+    /// Boxed for the same reason as [`super::endpoint::Endpoint`]'s:
+    /// `Connection<P>` is large (≈160 KB with the rustls provider), so
+    /// keeping it inline would overflow a default task stack on every
+    /// move through construction and bloat every holder of a
+    /// `TokioEndpoint`. The box keeps moves pointer-sized.
+    connection: Box<Connection<P>>,
     peer: Option<SocketAddr>,
     scratch: Vec<u8>,
     /// Reusable inbound-datagram buffer, sized to the advertised
@@ -54,7 +62,7 @@ impl<P: TlsProvider> TokioEndpoint<P> {
         Ok(Self {
             config,
             socket,
-            connection,
+            connection: Box::new(connection),
             peer: None,
             scratch: vec![0u8; 1500],
             recv_buf: vec![0u8; proxima_protocols::quic::endpoint::MAX_UDP_PAYLOAD_SIZE],
@@ -187,8 +195,10 @@ mod tests {
     /// a ≥1200 byte Initial datagram.
     #[proxima::test(runtime = "tokio")]
     async fn tokio_endpoint_poll_send_emits_initial_to_loopback() {
-        // The connection enum is large (multipath + stream tables);
-        // spawn a thread with a generous stack to host the future.
+        // `Connection::new_client` returns the (multipath + stream table)
+        // state machine BY VALUE, so it lands on the stack before
+        // `TokioEndpoint::new` boxes it — a default test thread stack is
+        // not budgeted for that transient.
         let handle = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -224,11 +234,9 @@ mod tests {
                         client: Some(super::super::config::ClientConfig::default()),
                         server: None,
                     };
-                    let mut endpoint: Box<TokioEndpoint<MockTlsProvider>> = Box::new(
-                        TokioEndpoint::new(endpoint_config, connection)
-                            .await
-                            .expect("bind"),
-                    );
+                    let mut endpoint = TokioEndpoint::new(endpoint_config, connection)
+                        .await
+                        .expect("bind");
                     endpoint.set_peer(peer_addr);
                     let sent =
                         poll_fn(|cx| endpoint.poll_send(cx, Instant::from_micros(1_000_001)))
