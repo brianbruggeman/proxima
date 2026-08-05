@@ -38,18 +38,8 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::block_on;
     use core::future::Future;
-    use core::task::Poll;
-
-    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
-            }
-        }
-    }
 
     #[derive(Debug, Clone, PartialEq)]
     struct AlwaysFail;

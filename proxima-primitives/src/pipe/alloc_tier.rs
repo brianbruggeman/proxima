@@ -188,18 +188,9 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{SendDynPipe, into_handle, into_local_handle};
+    use crate::block_on;
     use crate::pipe::primitives::{Pipe, SendPipe};
     use core::future::Future;
-
-    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
-            }
-        }
-    }
 
     // Err pinned to ProximaError at the erasure boundary, so the probe uses it
     // directly (reflexive From<ProximaError>); typed-error pipes supply their
