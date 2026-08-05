@@ -21,11 +21,11 @@ use crate::quic::frame::{DecodeError, EncodeError, Frame, parse};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QuicFrameCodec;
 
-/// Error surface for [`QuicFrameCodec`]. Wraps the upstream
-/// [`DecodeError`] and [`EncodeError`] and adds `Display` +
-/// `core::error::Error` (the upstream types are no_std-strict). The
-/// `Truncated` variant of `DecodeError` already means "need more
-/// bytes", so this wrapper does NOT add a separate `Partial` variant.
+/// Error surface for [`QuicFrameCodec`]: the sum of the upstream
+/// [`DecodeError`] and [`EncodeError`], which `FrameCodec` collapses into
+/// one associated `Error` type. The `Truncated` variant of `DecodeError`
+/// already means "need more bytes", so this does NOT add a separate
+/// `Partial` variant.
 #[derive(Debug)]
 pub enum QuicCodecError {
     Decode(DecodeError),
@@ -35,13 +35,20 @@ pub enum QuicCodecError {
 impl fmt::Display for QuicCodecError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Decode(inner) => write!(formatter, "decode: {inner:?}"),
-            Self::Encode(inner) => write!(formatter, "encode: {inner:?}"),
+            Self::Decode(inner) => write!(formatter, "decode: {inner}"),
+            Self::Encode(inner) => write!(formatter, "encode: {inner}"),
         }
     }
 }
 
-impl core::error::Error for QuicCodecError {}
+impl core::error::Error for QuicCodecError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Decode(inner) => Some(inner),
+            Self::Encode(inner) => Some(inner),
+        }
+    }
+}
 
 impl From<DecodeError> for QuicCodecError {
     fn from(error: DecodeError) -> Self {
@@ -122,8 +129,14 @@ mod tests {
     }
 
     #[test]
-    fn codec_error_displays_human_readable_message() {
-        let displayed = format!("{}", QuicCodecError::Decode(DecodeError::Truncated));
-        assert!(displayed.contains("decode"));
+    fn codec_error_displays_the_inner_cause_not_its_debug_shape() {
+        assert_eq!(
+            format!("{}", QuicCodecError::Decode(DecodeError::Truncated)),
+            "decode: input ran out mid-frame"
+        );
+        assert_eq!(
+            format!("{}", QuicCodecError::Encode(EncodeError::ValueTooLarge)),
+            "encode: field exceeds varint range 2^62-1"
+        );
     }
 }

@@ -27,6 +27,8 @@
 //! Tier-3 (bare `no_std + no_alloc`). All parse paths borrow into
 //! `&'a [u8]`; encode paths write into caller-owned `&mut [u8]`.
 
+use core::fmt;
+
 use crate::quic::varint;
 
 /// `DATA` frame — RFC 9114 §7.2.1.
@@ -101,6 +103,21 @@ pub enum FrameError {
     /// frame's full type + length varints + payload.
     BufferTooSmall { needed: usize },
 }
+
+impl fmt::Display for FrameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Truncated => formatter.write_str("truncated: need more bytes"),
+            Self::InvalidVarint => formatter.write_str("invalid varint"),
+            Self::PayloadTooLong => formatter.write_str("payload too long"),
+            Self::BufferTooSmall { needed } => {
+                write!(formatter, "encode buffer too small: need {needed} bytes")
+            }
+        }
+    }
+}
+
+impl core::error::Error for FrameError {}
 
 impl From<varint::DecodeError> for FrameError {
     fn from(err: varint::DecodeError) -> Self {
@@ -307,11 +324,20 @@ fn write_varint_frame(frame_type: u64, value: u64, output: &mut [u8]) -> Result<
 ///
 /// # Example
 ///
-/// ```ignore
-/// for pair in SettingsIter::new(payload) {
-///     let (id, value) = pair?;
-///     // apply per RFC 9114 §7.2.4.1
+/// ```
+/// use proxima_protocols::http3_codec::frame::SettingsIter;
+///
+/// // real SETTINGS payload per RFC 9114 §7.2.4.1:
+/// // SETTINGS_MAX_FIELD_SECTION_SIZE (0x06) = 4096, encoded as the
+/// // 2-byte QUIC varint 0x50 0x00, then SETTINGS_QPACK_BLOCKED_STREAMS
+/// // (0x07) = 0, encoded as the 1-byte varint 0x00.
+/// let payload = [0x06, 0x50, 0x00, 0x07, 0x00];
+/// let mut settings = Vec::new();
+/// for pair in SettingsIter::new(&payload) {
+///     settings.push(pair?);
 /// }
+/// assert_eq!(settings, [(0x06, 4096), (0x07, 0)]);
+/// # Ok::<(), proxima_protocols::http3_codec::frame::FrameError>(())
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct SettingsIter<'a> {
