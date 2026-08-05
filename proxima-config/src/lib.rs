@@ -1,6 +1,17 @@
-//! Plugin-shaped config format registry. Parsers map source text →
-//! `serde_json::Value`; the registry dispatches by file extension or
-//! by trial-parse sniff when no hint is given.
+//! proxima's config concern, four modules deep, each behind its own feature:
+//!
+//! - this module — a plugin-shaped format registry. Parsers map source text →
+//!   `serde_json::Value`; the registry dispatches by file extension or by
+//!   trial-parse sniff when no hint is given.
+//! - `sugar` — the pure desugar pass over a pipe spec, plus the `SpecBuilder`
+//!   seam the fluent builders share with it.
+//! - `schema` — the typed value-shape IR, its `validate` walk, and the
+//!   JSON-Schema / OpenAPI / TOML emitters.
+//! - `store` — the k8s-style desired-state file store the daemon reconciles
+//!   against.
+//!
+//! The last three are default-OFF and named without links for that reason.
+//! Each carries its own tier split; none of the four depends on the others.
 //!
 //! Tier split: the [`ConfigFormatFactory`] trait, [`DynConfigFormatFactory`],
 //! and [`JsonConfigFormat`] compile under `no_std + alloc` — `serde_json`'s
