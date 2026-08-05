@@ -419,7 +419,6 @@ mod tests {
             rtt_p50: Duration::from_millis(min_ms),
             rtt_p99: Duration::from_millis(p99_ms),
             util,
-            ..Sample::seed(8)
         }
     }
 

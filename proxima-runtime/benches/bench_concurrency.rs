@@ -11,6 +11,10 @@
 //!    quality number (completions delivered), printed once; criterion times the
 //!    full drive.
 
+// a bench has no error channel: a knob that fails to build must abort the run,
+// and the message is the report. Same allow as every other bench in the tree.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
