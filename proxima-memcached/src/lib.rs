@@ -49,6 +49,8 @@
 //! (rare — most drivers default to text, or negotiate) will not interoperate
 //! with this facade.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
 #[cfg(feature = "client")]
 pub mod client;
 

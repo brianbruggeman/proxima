@@ -35,7 +35,7 @@ serde_json = { workspace = true, optional = true }
 
 [features]
 default = ["std"]
-std = []
+std = ["proxima-protocols/std"]
 # the async client `Pipe` + `PipeFactory` driving the sans-IO ClientSession over
 # a `StreamUpstream`, so `proxima::Client` speaks memcached as a registered
 # protocol. `--no-default-features` leaves the bare sans-IO codec with zero
