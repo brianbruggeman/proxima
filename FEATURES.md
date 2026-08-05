@@ -404,8 +404,19 @@ Multiple sources, autodetect:
 - Used by `Transform` middleware
 
 ### Codecs (`codec` + `codec_factory`)
-- `Codec` trait for body encoding/decoding (currently zstd; gzip planned)
-- `CodecFactory` registry (lock-free via `ArcSwap`)
+- Five sans-IO codec traits, one per wire shape: `MessageCodec` (owned
+  schema value pair), `FrameCodec` (borrowed length-delimited frame),
+  `Datagram` (borrowed whole packet + peer `SocketAddr`), `WireCodec`
+  (field-at-a-time walk), `StatefulCodec` (per-session encoder/decoder
+  factory, e.g. HPACK's dynamic table)
+- Built-in impls: `LengthDelimitedCodec` (`[u32 BE len][payload]`, zero-copy
+  parse, alloc-free header encode), `JsonCodec<In, Out>` (simd-json),
+  `BytesPassthrough`
+- `CodecFactory` registry for plugin-supplied formats, keyed by
+  `codec = { type = "..." }` — `proxima_core::FactoryRegistry` specialized to
+  `dyn CodecFactory`, lock-free reads via `ArcSwap`
+- Tier-1 (no_std + alloc) floor: everything but `JsonCodec` and the registry,
+  proven on `thumbv7m-none-eabi` by `scripts/thumbv7m-cliff-gate.sh`
 
 ---
 
