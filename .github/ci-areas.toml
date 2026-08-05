@@ -56,6 +56,7 @@ packages = [
     "proxima-net",
     "proxima-runtime",
     "proxima-core",
+    "proxima-config",
 ]
 paths = [
     "scripts/nostd-gate.sh",
@@ -65,6 +66,7 @@ paths = [
     "scripts/tokio-free-floor.sh",
     "scripts/thumbv7m-cliff-gate.sh",
     "scripts/proxima-runtime-gate.sh",
+    "scripts/proxima-config-gate.sh",
     "scripts/_floor-crate-matrix.sh",
     ".github/workflows/no-std.yml",
 ]

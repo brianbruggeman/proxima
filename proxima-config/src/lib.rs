@@ -10,17 +10,20 @@
 //! - `store` — the k8s-style desired-state file store the daemon reconciles
 //!   against.
 //!
-//! The last three are default-OFF and named without links for that reason.
 //! Each carries its own tier split; none of the four depends on the others.
 //!
-//! Tier split: the [`ConfigFormatFactory`] trait, [`DynConfigFormatFactory`],
-//! and [`JsonConfigFormat`] compile under `no_std + alloc` — `serde_json`'s
-//! `alloc` feature needs no OS. Every other format (`toml`, `json5`, YAML via
-//! `serde_norway`, `ron`, `quick-xml`) and the [`ConfigFormatRegistry`] itself
+//! Tier split: the `ConfigFormatFactory` trait, `DynConfigFormatFactory`, and
+//! `JsonConfigFormat` compile under `no_std + alloc` — `serde_json`'s `alloc`
+//! feature needs no OS. Every other format (`toml`, `json5`, YAML via
+//! `serde_norway`, `ron`, `quick-xml`) and `ConfigFormatRegistry` itself
 //! (built on `arc-swap`, which is std-only outside its experimental
 //! thread-local feature) have no alloc-only upstream equivalent, so they are
 //! gated behind `#[cfg(feature = "std")]`. A no_std caller composes formats
 //! directly (`JsonConfigFormat.parse(raw)`) rather than through the registry.
+//!
+//! Every name above is feature-gated, so none of them is linked: an intra-doc
+//! link from an UNGATED crate doc to a gated item is a rustdoc error in every
+//! cell that does not happen to turn that feature on.
 
 #![cfg_attr(
     not(any(feature = "std", feature = "schema-std", feature = "store-std")),
