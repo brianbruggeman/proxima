@@ -16,20 +16,16 @@ pub struct MemcachedClient<S> {
 }
 
 impl<S: Read + Write> MemcachedClient<S> {
-    /// Wraps `stream` in a ready client. There is no handshake to run
-    /// (see [`ClientSession`]'s docs), so this never fails on its own —
-    /// kept fallible (rather than an infallible constructor) for parity
-    /// with `RedisClient::connect` and to leave room for a future
-    /// SASL-auth extension without an API break.
-    ///
-    /// # Errors
-    /// Currently infallible; the `Result` is reserved for that future
-    /// extension.
-    pub fn connect(stream: S) -> Result<Self, ClientError> {
-        Ok(Self {
+    /// Wraps an already-connected `stream` in a ready client. Unlike its
+    /// redis/kafka/amqp siblings there is no handshake to run and so
+    /// nothing to fail on (see [`ClientSession`]'s docs) — this is pure
+    /// construction, and the first byte on the wire is the first command.
+    #[must_use]
+    pub fn new(stream: S) -> Self {
+        Self {
             stream,
             session: ClientSession::new(),
-        })
+        }
     }
 
     /// Runs one command and collects the reply. For a `noreply`-flagged
@@ -125,7 +121,7 @@ mod tests {
             scripted: Cursor::new(b"STORED\r\n".to_vec()),
             written: Vec::new(),
         };
-        let mut client = MemcachedClient::connect(stream).expect("connect");
+        let mut client = MemcachedClient::new(stream);
 
         let reply = client
             .command(&MemcachedRequest::Store {
@@ -148,7 +144,7 @@ mod tests {
             scripted: Cursor::new(Vec::new()),
             written: Vec::new(),
         };
-        let client = MemcachedClient::connect(stream).expect("connect");
+        let client = MemcachedClient::new(stream);
         client.close().expect("close");
     }
 }

@@ -68,9 +68,8 @@ fn reply_hint_for(request: &MemcachedRequest) -> ReplyHint {
 }
 
 impl ClientSession {
-    /// Builds an idle session — there is no handshake to queue (see the
-    /// module docs), so this never touches `config` beyond what a future
-    /// SASL-auth extension would need.
+    /// Builds an idle session. There is no handshake to queue (see the
+    /// module docs), so a new session is immediately ready for `submit`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -80,7 +79,9 @@ impl ClientSession {
         }
     }
 
-    /// Drains the bytes the driver must send.
+    /// Drains the bytes the driver must send. Dropping the returned buffer
+    /// silently loses a command the session believes is on the wire.
+    #[must_use]
     pub fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
