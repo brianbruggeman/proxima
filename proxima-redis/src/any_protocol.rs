@@ -10,14 +10,12 @@
 //! open classifier — mount via `.accept("redis")`, a single-candidate
 //! registration, exactly like pgwire's own positive-match reasoning).
 //!
-//! `drive` carries its own engine (`handler`, `config`) as a struct field —
-//! the same `AnyHandler`-unused asymmetry [`crate::pipe::RedisConnectionPipe`]
-//! docs. Redis's handler is NOT bespoke: [`crate::pipes::RedisPipeHandle`]
-//! is `SendPipe<RedisRequest, RespValue>` (no `Request`/`Response`
-//! envelope), the same de-enveloped typed-handle shape pgwire's
-//! [`crate::pipes::RedisPipeHandle`] sibling (`proxima_pgwire::PgPipeHandle`)
-//! uses. Each accepted connection builds a
-//! FRESH [`RedisConnectionPipe`] carrying THIS connection's [`ConnAdmission`]
+//! `drive` carries its own engine (`handler`, `config`) as struct fields, so
+//! the generic [`AnyHandler`] parameter goes unused — downcasting it would
+//! only reproduce the [`crate::pipes::RedisPipeHandle`] this candidate was
+//! already constructed with. `proxima_pgwire::PgWireAnyProtocol` has the same
+//! asymmetry for the same reason. Each accepted connection builds a FRESH
+//! [`RedisConnectionPipe`] carrying THIS connection's [`ConnAdmission`]
 //! clone, erases it, and hands it to
 //! [`proxima_listen::serve_pipe::handle_connection`] — the ONE
 //! accept-hook/upgrade-handler driver pgwire and redis now share.
@@ -104,6 +102,8 @@ impl AnyProtocol for RedisAnyProtocol {
         }
     }
 
+    // boxed by `AnyProtocol`'s own signature, not by choice: the classifier
+    // holds candidates as `dyn AnyProtocol`, so `drive` cannot be RPITIT.
     fn drive<'a>(
         &'a self,
         stream: Box<dyn StreamConnection>,

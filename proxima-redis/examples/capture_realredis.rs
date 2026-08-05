@@ -14,8 +14,10 @@
 //!   REDIS_REAL_HOST=127.0.0.1 REDIS_REAL_PORT=6379 \
 //!     cargo run -p proxima-redis --features client --example capture_realredis
 //!
-//! The corpus test (`proxima-redis/tests/realredis_corpus.rs`) then parses the
-//! vendored bytes on every build with no server required.
+//! The corpus test (`proxima-protocols/tests/redis_realredis_corpus.rs`) then
+//! parses the vendored bytes on every build with no server required — the
+//! fixtures live next to it, because the parser under test moved to
+//! `proxima-protocols::redis` and only the capture driver stayed here.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -25,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use proxima_redis::{RedisClient, RedisClientConfig};
 
-const FIXTURE_DIR: &str = "proxima-redis/tests/fixtures/realredis";
+const FIXTURE_DIR: &str = "proxima-protocols/tests/fixtures/realredis";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("REDIS_REAL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
