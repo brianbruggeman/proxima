@@ -21,6 +21,7 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use thiserror::Error;
 
 use crate::config_merge::{MergeMode, apply_layer, insert_if_env_set};
 use crate::emit::{CompiledEmit, Coord, EmitRule, EmitThreshold, LevelTree, MatchMode};
@@ -87,41 +88,20 @@ pub struct TargetSpec {
 
 /// Why an [`EmitConfig`] failed to compile — structured so the message can list
 /// the valid options (discoverability).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitConfigError {
     /// A level/coord string didn't parse.
+    #[error(
+        "{field}: unknown level '{got}'; expected trace|debug|info|warn|error|fatal|off, a dotted coord (e.g. 17.3), or a registered name"
+    )]
     BadLevel { field: String, got: String },
     /// An unknown match mode.
+    #[error("match_mode: unknown '{got}'; expected boundary|raw")]
     BadMatchMode { got: String },
     /// A target not present in `known_targets`.
+    #[error("unknown target '{got}'; known: {}", known.join(", "))]
     UnknownTarget { got: String, known: Vec<String> },
 }
-
-impl core::fmt::Display for EmitConfigError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::BadLevel { field, got } => write!(
-                formatter,
-                "{field}: unknown level '{got}'; expected trace|debug|info|warn|error|fatal|off, a dotted coord (e.g. 17.3), or a registered name"
-            ),
-            Self::BadMatchMode { got } => {
-                write!(
-                    formatter,
-                    "match_mode: unknown '{got}'; expected boundary|raw"
-                )
-            }
-            Self::UnknownTarget { got, known } => {
-                write!(
-                    formatter,
-                    "unknown target '{got}'; known: {}",
-                    known.join(", ")
-                )
-            }
-        }
-    }
-}
-
-impl core::error::Error for EmitConfigError {}
 
 impl EmitConfig {
     /// Lower the config to the typed [`CompiledEmit`]. All string parsing,
