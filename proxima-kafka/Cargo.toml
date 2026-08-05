@@ -1,6 +1,6 @@
 [package]
 name = "proxima-kafka"
-description = "Kafka client facade: the async client Pipe and blocking driver over the sans-IO Produce/Fetch/Metadata wire codec (ClientSession), so proxima::Client speaks Kafka, plus a broker-facade AnyProtocol listener candidate. The frame/header codec itself lives in proxima-protocols::kafka."
+description = "Kafka facade over a sans-IO v0 Produce/Fetch/Metadata/ApiVersions BODY codec: the async client Pipe and blocking driver (feature `client`, so proxima::Client speaks Kafka), and the server side — the FramedAny codec/app pair, the in-memory KafkaBroker handler, and an AnyProtocol listener candidate (feature `listen`). The frame/header envelope lives in proxima-protocols::kafka; `--no-default-features` leaves this crate's own body codec as a bare no_std + alloc tier."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
