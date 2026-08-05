@@ -4,13 +4,16 @@
 //! `proxima-pmem-dax` crates into one crate with feature-gated modules — each
 //! module keeps its own tier discipline (see the module docs).
 //!
-//! - [`nvme`] (feature `nvme`): tier-3 no_std + no-alloc queue-pair engine
-//!   driving the sans-IO [`proxima_protocols::nvme`] codec.
+//! - `nvme` (feature `nvme`): tier-3 no_std + no-alloc queue-pair engine
+//!   driving the sans-IO `proxima_protocols::nvme` codec.
 //! - [`pmem`]: tier-3 no_std + no-alloc persistence and crash-consistency
 //!   primitives, unconditionally available.
-//! - [`dax`] (feature `dax`): std DAX/file-backed mmap facade over [`pmem`],
-//!   Linux-only for the pmem-native fast tier (the portable [`dax::FileCell`]
+//! - `dax` (feature `dax`): std DAX/file-backed mmap facade over [`pmem`],
+//!   Linux-only for the pmem-native fast tier (the portable `dax::FileCell`
 //!   floor works on any OS).
+//!
+//! The two feature-gated modules are named as code, not linked: an intra-doc
+//! link to a module that a default build cfg's out is a rustdoc error.
 #![cfg_attr(not(feature = "std"), no_std)]
 
 // only proxima-pmem's cow FSM tests reach for alloc collections; everything

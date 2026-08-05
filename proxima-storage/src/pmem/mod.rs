@@ -2,7 +2,8 @@
 //!
 //! Tier-3: compiles under `#![no_std]` with no allocator. Two parts:
 //!
-//! - [`persist`] — the ordering primitives ([`flush`], [`drain`], [`persist`])
+//! - [`mod@persist`] — the ordering primitives ([`flush`], [`drain`],
+//!   [`persist()`])
 //!   that make stores to a borrowed region durable in the right order, over
 //!   `core::arch` cache-maintenance intrinsics. PMDK `libpmem` is the parity
 //!   reference; this is pure Rust with zero C linked, the storage analog of the
