@@ -9,7 +9,6 @@
 
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
 use std::time::Duration;
 
 use crate::{JoinError, JoinSetLike, MutexLike, NotifyLike, RuntimeFactory};
@@ -85,10 +84,10 @@ impl<T: Send + 'static> JoinSetLike<T> for TokioJoinSet<T> {
     }
 }
 
-/// Boxed sleep future — `tokio::time::Sleep` is `!Unpin`, so the
-/// associated type for `RuntimeFactory::Sleep` becomes a pinned
-/// boxed future to keep the trait surface uniform across runtimes.
-pub type TokioSleep = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// Tokio's own sleep future, named for the `RuntimeFactory::Sleep`
+/// fingerprint. `!Unpin`, which costs nothing: the associated type is
+/// bound `Future<Output = ()> + Send`, and `.await` pins in place.
+pub type TokioSleep = tokio::time::Sleep;
 
 impl RuntimeFactory for TokioPerCoreRuntime {
     type Mutex<T: Send + 'static> = TokioMutex<T>;
@@ -109,7 +108,7 @@ impl RuntimeFactory for TokioPerCoreRuntime {
     }
 
     fn sleep(duration: Duration) -> Self::Sleep {
-        Box::pin(tokio::time::sleep(duration))
+        tokio::time::sleep(duration)
     }
 }
 
@@ -159,8 +158,9 @@ mod tests {
     #[proxima::test(runtime = "tokio")]
     async fn tokio_join_set_abort_surfaces_cancelled() {
         let mut set: TokioJoinSet<u32> = TokioPerCoreRuntime::new_join_set();
+        // a task that can only ever end by being aborted -- no timer to wait on.
         set.spawn(async {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            std::future::pending::<()>().await;
             42u32
         });
         set.abort_all();
@@ -170,11 +170,12 @@ mod tests {
         }
     }
 
-    #[proxima::test(runtime = "tokio")]
-    async fn tokio_sleep_resolves_after_duration() {
-        let start = std::time::Instant::now();
+    /// `start_paused` puts the runtime on virtual time, so the 10ms is measured
+    /// against the timer wheel rather than slept through on the wall clock.
+    #[proxima::test(runtime = "tokio", start_paused = true)]
+    async fn tokio_sleep_resolves_after_the_requested_duration() {
+        let start = tokio::time::Instant::now();
         TokioPerCoreRuntime::sleep(Duration::from_millis(10)).await;
-        let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(8));
+        assert!(start.elapsed() >= Duration::from_millis(10));
     }
 }
