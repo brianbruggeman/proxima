@@ -36,6 +36,11 @@ pub enum ClientError {
     Closed,
     #[error("protocol: {0}")]
     Protocol(String),
+    /// The encoded request does not fit Kafka's signed 32-bit length
+    /// prefix — the client-side mirror of
+    /// [`crate::frame_codec::KafkaCodecError::ResponseTooLarge`].
+    #[error("request of {len} bytes exceeds the wire's i32 length prefix")]
+    RequestTooLarge { len: usize },
     #[error("wire: {0}")]
     Wire(#[from] WireError),
 }
@@ -118,8 +123,7 @@ impl ClientSession {
             ));
         }
         let api_key = api_key_of(&request);
-        self.queue(api_key, &request);
-        Ok(())
+        self.queue(api_key, &request)
     }
 
     /// Advances the state machine: sends queued bytes, then parses inbound
@@ -140,7 +144,7 @@ impl ClientSession {
 
     fn advance_handshake(&mut self) -> Result<Step, ClientError> {
         if self.pending.is_none() {
-            self.queue(ApiKey::ApiVersions, &RequestBody::ApiVersions);
+            self.queue(ApiKey::ApiVersions, &RequestBody::ApiVersions)?;
             return Ok(Step::Send);
         }
         match self.next_reply()? {
@@ -194,9 +198,12 @@ impl ClientSession {
         Ok((expected_id, api_key))
     }
 
-    fn queue(&mut self, api_key: ApiKey, request: &RequestBody) {
+    /// Frames one request into `outbound` and records it as the pending
+    /// reply. Nothing is recorded as pending unless the frame is really
+    /// queued: a request that cannot be framed used to leave the session
+    /// waiting on a reply to bytes it never sent.
+    fn queue(&mut self, api_key: ApiKey, request: &RequestBody) -> Result<(), ClientError> {
         let correlation_id = self.next_correlation_id;
-        self.next_correlation_id += 1;
 
         let mut payload = Vec::new();
         wire::write_i16(&mut payload, api_key.to_i16());
@@ -206,14 +213,16 @@ impl ClientSession {
         payload.extend_from_slice(&request.encode());
 
         let mut wire_bytes = Vec::new();
-        if let Err(error) = KafkaFrameCodec.encode_frame(&payload.as_slice(), &mut wire_bytes) {
-            // unreachable in practice (no request this client builds
-            // approaches the i32 length-prefix ceiling); still handled,
-            // not unwrapped, per house rule.
-            tracing::error!(error = %error, "kafka client request exceeds the wire's i32 length prefix");
-        }
+        KafkaFrameCodec
+            .encode_frame(&payload.as_slice(), &mut wire_bytes)
+            .map_err(|_frame_too_large| ClientError::RequestTooLarge {
+                len: payload.len(),
+            })?;
+
+        self.next_correlation_id += 1;
         self.outbound.extend_from_slice(&wire_bytes);
         self.pending = Some((correlation_id, api_key));
+        Ok(())
     }
 
     /// Parses one logical reply from the inbox, owning it and draining the
