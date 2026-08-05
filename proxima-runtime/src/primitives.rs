@@ -75,12 +75,6 @@ pub enum JoinError {
     Cancelled,
 }
 
-/// Shape of a sleep future. `Send` because the awaiter may move
-/// across thread boundaries on tokio's multi-thread runtime.
-pub trait SleepFuture: Future<Output = ()> + Send {}
-
-impl<F> SleepFuture for F where F: Future<Output = ()> + Send {}
-
 /// Sibling extension of [`Runtime`]: typed factory methods for the
 /// per-session sync / task / time primitives. Implemented by every
 /// concrete runtime that ships in the workspace (`TokioRuntime`,
@@ -92,7 +86,9 @@ pub trait RuntimeFactory: Runtime {
     type Mutex<T: Send + 'static>: MutexLike<T>;
     type Notify: NotifyLike;
     type JoinSet<T: Send + 'static>: JoinSetLike<T>;
-    type Sleep: SleepFuture;
+    /// `Send` because the awaiter may move across thread boundaries on
+    /// tokio's multi-thread runtime.
+    type Sleep: Future<Output = ()> + Send;
 
     fn new_mutex<T: Send + 'static>(value: T) -> Self::Mutex<T>;
     fn new_notify() -> Self::Notify;
@@ -158,14 +154,6 @@ pub trait LocalRuntimeFactory: Runtime {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sleep_future_blanket_impl_accepts_any_send_unit_future() {
-        // SleepFuture is auto-implemented; this test compiles if the
-        // blanket impl is in place.
-        fn accept<S: SleepFuture>(_: S) {}
-        accept(async {});
-    }
 
     #[test]
     fn join_error_is_debug_constructible() {

@@ -29,7 +29,7 @@ pub mod ext;
 pub mod primitives;
 #[cfg(feature = "alloc")]
 pub use primitives::{
-    JoinError, JoinSetLike, LocalMutexLike, LocalNotifyLike, MutexLike, NotifyLike, SleepFuture,
+    JoinError, JoinSetLike, LocalMutexLike, LocalNotifyLike, MutexLike, NotifyLike,
 };
 #[cfg(all(feature = "alloc", feature = "std"))]
 pub use primitives::{LocalRuntimeFactory, RuntimeFactory};
