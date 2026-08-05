@@ -30,9 +30,15 @@ declare -a FLOOR_CRATE_CELLS=(
     # the feature set that actually compiles the task table, hand-rolled waker,
     # timer wheel and alloc inbox on the floor, so the cell earns its keep.
     "prime|prime|alloc,runtime-prime-inbox-alloc,runtime-prime-executor,runtime-prime-timer"
-    # the alloc-FREE sibling: inbox_const is a stack-backed SPSC inbox that
-    # needs no `alloc` feature at all -- the strictest floor cell we have.
-    "prime-inbox-const|prime|alloc,runtime-prime-inbox-const,runtime-prime-executor,runtime-prime-timer,runtime-prime-thread-identity"
+    # inbox_const alongside the alloc-tier scheduler: proves the stack-backed
+    # SPSC ring composes with the executor + timer wheel.
+    "prime-inbox-const|prime|alloc,runtime-prime-inbox-const,runtime-prime-executor,runtime-prime-timer"
+    # the genuinely alloc-FREE cell, and the reason the previous one cannot
+    # claim that title: executor and timer both compile `alloc::` types, so
+    # any cell naming them is an alloc cell. `runtime-prime-inbox-const` is
+    # the only runtime feature whose resolved set excludes `alloc` -- if the
+    # inbox layers ever share ungated code again, this cell is what fails.
+    "prime-inbox-const-noalloc|prime|runtime-prime-inbox-const"
     "proxima-primitives|proxima-primitives|alloc"
     # proxima-primitives' FINEST tier is stricter than its `alloc` cell above:
     # pipe/mod.rs declares batch_source, capabilities, capture_surface,

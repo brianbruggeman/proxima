@@ -29,8 +29,6 @@
 //!
 //! no_std + alloc only — `core::*` and `alloc::*` exclusively.
 
-extern crate alloc;
-
 use alloc::vec::Vec;
 use core::task::Waker;
 
