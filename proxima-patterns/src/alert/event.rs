@@ -41,21 +41,63 @@ pub mod sized {
     include!(concat!(env!("OUT_DIR"), "/proxima_notify_sized.rs"));
 }
 
+use core::fmt;
+
 use heapless::index_map::FnvIndexMap;
 use heapless::{String as HeaplessString, Vec as HeaplessVec};
 use proxima_core::markers::{
     AllocFree, Deterministic, IsPure, NoStd, Reproducible, WithoutFilesystem, WithoutNetwork,
     WithoutRandom, WithoutSpawn, WithoutTime,
 };
-use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use serde::de::{Error as DeError, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use ulid::{ULID_LEN, Ulid};
+
+/// Wire form for the ULID-backed ids: the 26-char Crockford-base32 canonical
+/// string, byte-for-byte what `ulid`'s own `Serialize`/`Deserialize` emit.
+///
+/// Hand-rolled rather than enabling `ulid/serde`, because ulid's manifest
+/// leaves default-features on its serde edge — asking for it turns `serde/std`
+/// on for the whole build and takes the tier-3 cliff with it. This renders into
+/// a stack buffer and borrows on the way back, so it stays alloc-free.
+pub mod ulid_str {
+    use super::{DeError, Deserializer, Serializer, ULID_LEN, Ulid, Visitor, fmt};
+
+    struct UlidStringVisitor;
+
+    impl Visitor<'_> for UlidStringVisitor {
+        type Value = Ulid;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a 26-character Crockford-base32 ULID string")
+        }
+
+        fn visit_str<E: DeError>(self, value: &str) -> Result<Ulid, E> {
+            Ulid::from_string(value).map_err(E::custom)
+        }
+    }
+
+    /// Render `value` as its canonical 26-char string.
+    pub fn serialize<S: Serializer>(value: &Ulid, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut buffer = [0_u8; ULID_LEN];
+        serializer.serialize_str(value.array_to_str(&mut buffer))
+    }
+
+    /// Parse a canonical 26-char ULID string.
+    ///
+    /// # Errors
+    /// Fails when the input is not a well-formed Crockford-base32 ULID.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Ulid, D::Error> {
+        deserializer.deserialize_str(UlidStringVisitor)
+    }
+}
 
 /// Globally-unique identifier for an [`AlertEvent`]. Crockford-base32 ULID
 /// — lexicographically sortable, embeds a millisecond-precision timestamp
 /// plus 80 bits of entropy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[must_use]
-pub struct AlertId(pub Ulid);
+pub struct AlertId(#[serde(with = "ulid_str")] pub Ulid);
 
 impl AlertId {
     /// Build from raw bytes (16 bytes, big-endian per ULID spec).
@@ -85,7 +127,7 @@ impl Reproducible for AlertId {}
 /// [`GuidanceAnswer`]. Crockford-base32 ULID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[must_use]
-pub struct GuidanceRequestId(pub Ulid);
+pub struct GuidanceRequestId(#[serde(with = "ulid_str")] pub Ulid);
 
 impl GuidanceRequestId {
     /// Build from raw bytes.
@@ -115,7 +157,7 @@ impl Reproducible for GuidanceRequestId {}
 /// by [`GuidanceQuestion::agent_id`] and [`GuidanceQuestion::parent_id`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[must_use]
-pub struct AgentId(pub Ulid);
+pub struct AgentId(#[serde(with = "ulid_str")] pub Ulid);
 
 impl AgentId {
     /// Build from raw bytes.
@@ -389,8 +431,20 @@ pub fn decode_guidance_answer(bytes: &[u8]) -> Result<GuidanceAnswer, CodecError
 /// Requires `alloc` (via `serde_json`). NOT available in tier-3 builds.
 #[cfg(feature = "json-shape")]
 pub mod json_shape {
-    use super::{AlertEvent, GuidanceAnswer, GuidanceQuestion};
+    use alloc::string::String as AllocString;
+
     use serde_json::{Value, json};
+    use ulid::{ULID_LEN, Ulid};
+
+    use super::{AlertEvent, GuidanceAnswer, GuidanceQuestion};
+
+    /// Canonical 26-char ULID text. Renders through `array_to_str` rather than
+    /// `Ulid::to_string`, which ulid gates behind its `std` feature — this
+    /// module only reaches `alloc`.
+    fn ulid_text(value: Ulid) -> AllocString {
+        let mut buffer = [0_u8; ULID_LEN];
+        AllocString::from(&*value.array_to_str(&mut buffer))
+    }
 
     /// Render an [`AlertEvent`] into the documented JSON shape. Labels are
     /// sorted by key for deterministic output (matches the schema).
@@ -407,7 +461,7 @@ pub mod json_shape {
             .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
             .collect();
         json!({
-            "id": event.id.0.to_string(),
+            "id": ulid_text(event.id.0),
             "severity": event.severity.as_str(),
             "kind": event.kind.as_str(),
             "labels": labels_obj,
@@ -421,9 +475,9 @@ pub mod json_shape {
     #[must_use]
     pub fn guidance_question_to_json(question: &GuidanceQuestion) -> Value {
         json!({
-            "id": question.id.0.to_string(),
-            "agent_id": question.agent_id.0.to_string(),
-            "parent_id": question.parent_id.map(|id| id.0.to_string()),
+            "id": ulid_text(question.id.0),
+            "agent_id": ulid_text(question.agent_id.0),
+            "parent_id": question.parent_id.map(|id| ulid_text(id.0)),
             "question": question.question.as_str(),
             "asked_at_micros": question.asked_at_micros,
             "timeout_micros": question.timeout_micros,
@@ -434,7 +488,7 @@ pub mod json_shape {
     #[must_use]
     pub fn guidance_answer_to_json(answer: &GuidanceAnswer) -> Value {
         json!({
-            "request_id": answer.request_id.0.to_string(),
+            "request_id": ulid_text(answer.request_id.0),
             "content": answer.content.as_str(),
             "responder": answer.responder.as_str(),
             "responded_at_micros": answer.responded_at_micros,
@@ -443,17 +497,18 @@ pub mod json_shape {
 
     /// URL-safe base64 with no padding — RFC 4648 §5 alphabet, used by the
     /// `payload_bytes_base64` field in the documented schema. Hand-rolled
-    /// to avoid pulling in a separate base64 crate.
+    /// because this module reaches only `alloc`; the crate's `base64` dep
+    /// rides the std-bound `middleware` feature and is not linked here.
     fn base64_url_safe_no_pad(bytes: &[u8]) -> alloc::string::String {
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut out = alloc::string::String::with_capacity((bytes.len() + 2) / 3 * 4);
+        let mut out = alloc::string::String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
-            let buf = match chunk.len() {
-                3 => [chunk[0], chunk[1], chunk[2]],
-                2 => [chunk[0], chunk[1], 0],
-                1 => [chunk[0], 0, 0],
-                _ => unreachable!(),
+            let buf = match chunk {
+                [first, second, third] => [*first, *second, *third],
+                [first, second] => [*first, *second, 0],
+                [first] => [*first, 0, 0],
+                _ => break,
             };
             let combined = (u32::from(buf[0]) << 16) | (u32::from(buf[1]) << 8) | u32::from(buf[2]);
             let chars = [

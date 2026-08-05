@@ -136,6 +136,41 @@ fn decode_from_corrupted_bytes_returns_decode_error_not_panic() {
     );
 }
 
+/// Principle 14: `ulid`'s own `Serialize` writes the 26-char canonical string
+/// (`ulid-1.2.1/src/serde.rs:12` — `array_to_str` then `text.serialize`). The
+/// crate hand-rolls that form in `event::ulid_str` so it can drop the
+/// `ulid/serde` feature (which drags `serde/std` in and breaks the tier-3
+/// cliff). This pins the id bytes to the incumbent's encoding.
+#[test]
+fn alert_id_encodes_as_the_ulid_canonical_string_postcard_form() {
+    let id = AlertId::from_bytes([
+        0x01, 0x92, 0x3B, 0x5C, 0x7E, 0x8F, 0x4A, 0x6D, 0x9E, 0x0F, 0x01, 0x23, 0x45, 0x67, 0x89,
+        0xAB,
+    ]);
+    let mut actual = [0_u8; 64];
+    let written = postcard::to_slice(&id, &mut actual).expect("encode id");
+
+    let mut expected = [0_u8; 64];
+    let canonical = postcard::to_slice("01J8XNRZMF99PSW3R14D2PF2DB", &mut expected)
+        .expect("encode canonical string");
+
+    assert_eq!(
+        written, canonical,
+        "AlertId must encode byte-for-byte as ulid's canonical-string serde form"
+    );
+}
+
+#[test]
+fn guidance_ids_decode_back_from_the_canonical_string_form() {
+    let question = sample_guidance_question();
+    let mut buffer = [0_u8; 16_384];
+    let written = encode_guidance_question(&question, &mut buffer).expect("encode");
+    let decoded = decode_guidance_question(&buffer[..written]).expect("decode");
+    assert_eq!(decoded.id, question.id);
+    assert_eq!(decoded.agent_id, question.agent_id);
+    assert_eq!(decoded.parent_id, question.parent_id);
+}
+
 #[test]
 fn severity_numeric_values_match_proxima_telemetry_level_convention() {
     assert_eq!(Severity::Trace.as_u8(), 1);
