@@ -126,6 +126,23 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-patterns-alert-proto|proxima-patterns|alert,proto"
     "proxima-patterns-kv|proxima-patterns|kv"
     "proxima-patterns-control-plane|proxima-patterns|control_plane"
+    # proxima-storage's pmem module is declared with NO cfg at all
+    # (proxima-storage/src/lib.rs) and its module doc calls itself "Tier-3:
+    # compiles under #![no_std] with no allocator" -- and the crate had no cell
+    # here at all until the 2026-08-05 consistency pass, so nothing had ever
+    # compiled it for an embedded target. The bare cell is the whole no-alloc
+    # leaf: the core::arch cache-maintenance primitives plus the CoW
+    # atomic-root-swap FSM over a borrowed &mut [u8]. Measured 2026-08-05: it
+    # builds clean, so this locks in a claim that was true but unproven. No
+    # `alloc` cell exists because the crate has no `alloc` feature -- std is the
+    # only rung above bare.
+    "proxima-storage-bare-no-alloc|proxima-storage|"
+    # the sibling tier-3 claim (proxima-storage/src/nvme/mod.rs: "the engine is
+    # #![no_std] + no-alloc"): the queue-pair engine over the sans-IO
+    # proxima-protocols::nvme codec, ring cursors in atomics, Pipe + SendPipe.
+    # `nvme` does not imply `std`, so this cell is a real second floor, not a
+    # superset of the one above.
+    "proxima-storage-nvme|proxima-storage|nvme"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
