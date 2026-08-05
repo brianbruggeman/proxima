@@ -18,9 +18,10 @@ use bytes::Bytes;
 
 #[derive(Debug, Clone)]
 pub struct Packet {
-    /// remote peer (received-from on rx, send-to on tx).
+    /// remote peer (received-from on rx, send-to on tx). every backend's
+    /// `poll_send` reads THIS field for the destination, never `dst`.
     pub src: SocketAddr,
-    /// local-side address — usually the listener bind on rx.
+    /// local-side address — the listener bind on rx, ignored on tx.
     pub dst: SocketAddr,
     pub data: Bytes,
 }
@@ -34,15 +35,15 @@ pub trait PacketListener: Send + Sync + 'static {
 }
 
 pub trait PacketListenerExt: PacketListener {
-    fn recv<'lifetime>(&'lifetime self, buf: &'lifetime mut [u8]) -> Recv<'lifetime, Self> {
-        Recv {
+    fn recv<'lifetime>(&'lifetime self, buf: &'lifetime mut [u8]) -> RecvPacket<'lifetime, Self> {
+        RecvPacket {
             listener: self,
             buf,
         }
     }
 
-    fn send<'lifetime>(&'lifetime self, packet: &'lifetime Packet) -> Send_<'lifetime, Self> {
-        Send_ {
+    fn send<'lifetime>(&'lifetime self, packet: &'lifetime Packet) -> SendPacket<'lifetime, Self> {
+        SendPacket {
             listener: self,
             packet,
         }
@@ -64,12 +65,12 @@ pub trait PacketListenerFactory: Send + Sync + 'static {
     fn bind(&self, addr: SocketAddr) -> io::Result<Arc<dyn PacketListener>>;
 }
 
-pub struct Recv<'lifetime, L: PacketListener + ?Sized> {
+pub struct RecvPacket<'lifetime, L: PacketListener + ?Sized> {
     listener: &'lifetime L,
     buf: &'lifetime mut [u8],
 }
 
-impl<L: PacketListener + ?Sized> std::future::Future for Recv<'_, L> {
+impl<L: PacketListener + ?Sized> std::future::Future for RecvPacket<'_, L> {
     type Output = io::Result<Packet>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -78,12 +79,12 @@ impl<L: PacketListener + ?Sized> std::future::Future for Recv<'_, L> {
     }
 }
 
-pub struct Send_<'lifetime, L: PacketListener + ?Sized> {
+pub struct SendPacket<'lifetime, L: PacketListener + ?Sized> {
     listener: &'lifetime L,
     packet: &'lifetime Packet,
 }
 
-impl<L: PacketListener + ?Sized> std::future::Future for Send_<'_, L> {
+impl<L: PacketListener + ?Sized> std::future::Future for SendPacket<'_, L> {
     type Output = io::Result<()>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
