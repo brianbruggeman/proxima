@@ -196,6 +196,8 @@ enum FrameOutcome {
 /// the `Command` arm in Subscriber mode — the only change is dispatching on
 /// [`RedisRequest::from_args`]'s FSM-aware carry instead of a bare
 /// `verb.as_slice()` match.
+// bundling these into a context struct would buy a caller nothing (one call
+// site, all borrows already distinct) — a relocation, not a type.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_args(
     args: Vec<Vec<u8>>,
@@ -453,6 +455,8 @@ where
     outcome
 }
 
+// same reason as `dispatch_args`: one call site, and the split from
+// `serve_connection` exists only so `unsubscribe_all` runs on every exit path.
 #[allow(clippy::too_many_arguments)]
 async fn main_loop<S>(
     write_half: &mut futures::io::WriteHalf<S>,

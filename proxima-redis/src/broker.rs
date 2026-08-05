@@ -101,6 +101,7 @@ impl RedisBroker {
     }
 
     /// SUBSCRIBE: register `sink` under the exact channel name.
+    #[must_use = "dropping the id leaks the subscription — only it can unsubscribe"]
     pub fn subscribe_channel(&self, channel: &[u8], sink: PushSink) -> SubscriptionId {
         self.channels.subscribe(channel.to_vec(), sink)
     }
@@ -119,6 +120,7 @@ impl RedisBroker {
     /// PSUBSCRIBE: register `sink` under `pattern`, and — if this is the
     /// first subscriber for that exact pattern string — add it to the live
     /// glob set `publish` scans.
+    #[must_use = "dropping the id leaks the subscription — only it can unsubscribe"]
     pub fn subscribe_pattern(&self, pattern: &[u8], sink: PushSink) -> SubscriptionId {
         let id = self.patterns.subscribe(pattern.to_vec(), sink);
         self.pattern_control
@@ -144,6 +146,7 @@ impl RedisBroker {
 
     /// SSUBSCRIBE: register `sink` under the exact shard-channel name — a
     /// namespace distinct from [`Self::subscribe_channel`].
+    #[must_use = "dropping the id leaks the subscription — only it can unsubscribe"]
     pub fn subscribe_shard_channel(&self, channel: &[u8], sink: PushSink) -> SubscriptionId {
         self.shard_channels.subscribe(channel.to_vec(), sink)
     }
@@ -245,7 +248,7 @@ mod tests {
     async fn publish_reaches_an_exact_channel_subscriber_as_a_message_frame() {
         let broker = RedisBroker::new();
         let (push, mut rx) = sink();
-        broker.subscribe_channel(b"news", push);
+        let _ = broker.subscribe_channel(b"news", push);
 
         let reached = broker.publish(b"news", b"hello").await.expect("publish");
 
@@ -266,7 +269,7 @@ mod tests {
     async fn publish_reaches_a_matching_pattern_subscriber_as_a_pmessage_frame() {
         let broker = RedisBroker::new();
         let (push, mut rx) = sink();
-        broker.subscribe_pattern(b"news.*", push);
+        let _ = broker.subscribe_pattern(b"news.*", push);
 
         let reached = broker.publish(b"news.tech", b"hi").await.expect("publish");
 
@@ -289,8 +292,8 @@ mod tests {
         let broker = RedisBroker::new();
         let (exact_push, mut exact_rx) = sink();
         let (pattern_push, mut pattern_rx) = sink();
-        broker.subscribe_channel(b"news.tech", exact_push);
-        broker.subscribe_pattern(b"news.*", pattern_push);
+        let _ = broker.subscribe_channel(b"news.tech", exact_push);
+        let _ = broker.subscribe_pattern(b"news.*", pattern_push);
 
         let reached = broker
             .publish(b"news.tech", b"both")
@@ -345,7 +348,7 @@ mod tests {
     async fn publish_shard_reaches_an_ssubscribe_subscriber_as_an_smessage_frame() {
         let broker = RedisBroker::new();
         let (push, mut rx) = sink();
-        broker.subscribe_shard_channel(b"orders", push);
+        let _ = broker.subscribe_shard_channel(b"orders", push);
 
         let reached = broker
             .publish_shard(b"orders", b"shipped")
@@ -370,8 +373,8 @@ mod tests {
         let broker = RedisBroker::new();
         let (regular_push, mut regular_rx) = sink();
         let (shard_push, mut shard_rx) = sink();
-        broker.subscribe_channel(b"orders", regular_push);
-        broker.subscribe_shard_channel(b"orders", shard_push);
+        let _ = broker.subscribe_channel(b"orders", regular_push);
+        let _ = broker.subscribe_shard_channel(b"orders", shard_push);
 
         let shard_reached = broker
             .publish_shard(b"orders", b"only-shard")
@@ -426,7 +429,7 @@ mod tests {
         let (first_push, mut first_rx) = sink();
         let (second_push, mut second_rx) = sink();
         let first_id = broker.subscribe_pattern(b"news.*", first_push);
-        broker.subscribe_pattern(b"news.*", second_push);
+        let _ = broker.subscribe_pattern(b"news.*", second_push);
 
         assert!(broker.unsubscribe_pattern(b"news.*", first_id));
 

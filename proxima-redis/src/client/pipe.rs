@@ -48,6 +48,7 @@ impl<U: StreamUpstream> RedisClientUpstream<U> {
     /// Builds a client over `upstream` with `config`. The transport is injected
     /// (runtime object); the config is the declarative half — the same split as
     /// `PgwireClientUpstream::new`.
+    #[must_use]
     pub fn new(upstream: U, config: RedisClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),
@@ -245,6 +246,12 @@ async fn push_step<C: StreamConnection>(
     }
 }
 
+/// A transport failure keeps its `io::ErrorKind` (a caller retrying on
+/// `ConnectionRefused` needs it); everything else is protocol detail with no
+/// structured counterpart, so it renders into the message.
 fn client_error_to_proxima(error: ClientError) -> ProximaError {
-    ProximaError::Upstream(format!("redis client: {error}"))
+    match error {
+        ClientError::Io(io) => ProximaError::Io(io),
+        other => ProximaError::Upstream(format!("redis client: {other}")),
+    }
 }
