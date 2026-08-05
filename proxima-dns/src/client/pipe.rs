@@ -1,16 +1,16 @@
-//! `DnsClientUpstream` — the async driver over [`DnsClientSession`],
-//! mirroring `proxima_redis::client::pipe::RedisClientUpstream`'s split
-//! between the sans-IO session and the runtime-touching transport. Redis's
-//! upstream is generic over a `StreamUpstream` (TCP-shaped); DNS's primary
-//! transport is UDP, so this drives the runtime-agnostic
-//! [`DatagramSocket`]/[`DatagramFactory`] pair instead — the same seam
-//! [`crate::datagram_protocol::DnsDatagramProtocol`] binds server-side via
-//! `ServeContext::datagram_factory`, injected here the identical way so a
-//! caller can hand in prime's, tokio's, or a fake test factory without this
-//! crate naming any concrete runtime.
+//! `DnsClientUpstream` — the async driver over the sans-IO
+//! [`crate::client::session`] pair, splitting the protocol from the
+//! runtime-touching transport. DNS's primary transport is UDP, so this drives
+//! the runtime-agnostic [`DatagramFactory`]/`DatagramSocket` pair — the same
+//! seam the listener side binds via `ServeContext::datagram_factory`, injected
+//! here the identical way so a caller can hand in prime's, tokio's, or a fake
+//! test factory without this crate naming any concrete runtime.
 
+use std::future::poll_fn;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::Poll;
 
 use proxima_core::ProximaError;
@@ -19,7 +19,7 @@ use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::stream::DatagramFactory;
 
 use crate::client::config::DnsResolverConfig;
-use crate::client::session::DnsClientSession;
+use crate::client::session::{decode_response, encode_query};
 use crate::error::DnsClientError;
 use crate::pipes::{DnsAnswer, DnsPipeReply, DnsPipeRequest, DnsQuery};
 
@@ -27,8 +27,8 @@ use crate::pipes::{DnsAnswer, DnsPipeReply, DnsPipeRequest, DnsQuery};
 /// EDNS0-negotiated response a stub resolver client advertises in
 /// practice; a reply larger than this (rare, jumbo EDNS) is truncated by
 /// the OS socket read the same way it would be by any fixed-size receive
-/// buffer, and [`DnsClientSession::decode_response`] reports it as a wire
-/// error rather than silently misinterpreting a partial message.
+/// buffer, and [`decode_response`] reports it as a wire error rather than
+/// silently misinterpreting a partial message.
 const MAX_UDP_REPLY_BYTES: usize = 4096;
 
 /// Async resolver client: send a query, await the matching response.
@@ -38,6 +38,12 @@ const MAX_UDP_REPLY_BYTES: usize = 4096;
 pub struct DnsClientUpstream {
     factory: Arc<dyn DatagramFactory>,
     config: DnsResolverConfig,
+    /// Advances once per SEND — every query and every retransmission gets its
+    /// own id. It lives here rather than per-call because `SendPipe::call`
+    /// takes `&self`: a counter minted inside the call would restart at the
+    /// same value for every query, which is how this crate previously put id
+    /// 1 on every packet it ever sent.
+    next_id: AtomicU16,
 }
 
 impl DnsClientUpstream {
@@ -54,7 +60,18 @@ impl DnsClientUpstream {
     /// ```
     #[must_use]
     pub fn new(factory: Arc<dyn DatagramFactory>, config: DnsResolverConfig) -> Self {
-        Self { factory, config }
+        Self {
+            factory,
+            config,
+            // id 0 is legal (RFC 1035 places no restriction on it); starting
+            // at 1 only keeps a fresh client's first query from reading like
+            // an uninitialized field in a packet capture.
+            next_id: AtomicU16::new(1),
+        }
+    }
+
+    fn next_id(&self) -> u16 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Send one query and await its matching reply, retrying up to
@@ -90,14 +107,14 @@ impl DnsClientUpstream {
         qtype: u16,
         qclass: u16,
     ) -> Result<DnsAnswer, DnsClientError> {
-        let mut session = DnsClientSession::new();
-        let (id, query_bytes) = session.encode_query(name, qtype, qclass, true)?;
+        let id = self.next_id();
+        let query_bytes = encode_query(id, name, qtype, qclass, true)?;
 
         let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let mut socket = self.factory.bind(local_addr).map_err(DnsClientError::Io)?;
         let resolver_addr = self.config.resolver_addr()?;
 
-        std::future::poll_fn(|cx| socket.poll_send_to(cx, &query_bytes, resolver_addr))
+        poll_fn(|cx| socket.poll_send_to(cx, &query_bytes, resolver_addr))
             .await
             .map_err(DnsClientError::Io)?;
 
@@ -107,7 +124,7 @@ impl DnsClientUpstream {
         let deadline = now() + core::time::Duration::from_millis(self.config.query_timeout_ms);
         let mut buf = [0u8; MAX_UDP_REPLY_BYTES];
         loop {
-            let recv = std::future::poll_fn(|cx| -> Poll<std::io::Result<(usize, SocketAddr)>> {
+            let recv = poll_fn(|cx| -> Poll<io::Result<(usize, SocketAddr)>> {
                 socket.poll_recv_from(cx, &mut buf)
             });
             let (len, from) = timeout_at(deadline, recv)
@@ -119,7 +136,7 @@ impl DnsClientUpstream {
                 // waiting against the same deadline.
                 continue;
             }
-            return session.decode_response(id, &buf[..len]);
+            return decode_response(id, &buf[..len]);
         }
     }
 }
@@ -325,6 +342,54 @@ mod tests {
         assert_eq!(answer.rcode, 0);
         assert_eq!(answer.records.len(), 1);
         assert_eq!(answer.records[0].name, "example.com.");
+    }
+
+    #[proxima::test]
+    async fn successive_queries_carry_distinct_wire_ids() {
+        // the id an upstream puts on the wire is what a reply must echo and
+        // what an off-path spoofer has to guess; minting it per call instead
+        // of per upstream stamped id 1 on every packet this client ever sent.
+        let socket = FakeResolverSocket::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            resolver_addr(),
+        );
+        let factory = Arc::new(FakeResolverFactory {
+            socket: socket.clone(),
+        });
+        let config = DnsResolverConfig::builder()
+            .resolver_ip(resolver_addr().ip().to_string())
+            .port(resolver_addr().port())
+            .query_timeout_ms(200)
+            .build();
+        let client = DnsClientUpstream::new(factory, config);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..3 {
+            let query_future = client.query("example.com.", 1, 1);
+            futures::pin_mut!(query_future);
+            assert!(query_future.as_mut().poll(&mut cx).is_pending());
+            socket.queue_reply_to_last_query();
+            loop {
+                match query_future.as_mut().poll(&mut cx) {
+                    Poll::Ready(result) => {
+                        result.expect("the fake resolver answers every query");
+                        break;
+                    }
+                    Poll::Pending => continue,
+                }
+            }
+        }
+
+        let sent_ids: Vec<u16> = socket
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .map(|(bytes, _)| parse_message(bytes).unwrap().header.id)
+            .collect();
+        assert_eq!(sent_ids, vec![1, 2, 3], "each query gets its own id");
     }
 
     #[proxima::test]
