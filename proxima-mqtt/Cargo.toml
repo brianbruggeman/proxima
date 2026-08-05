@@ -1,6 +1,6 @@
 [package]
 name = "proxima-mqtt"
-description = "MQTT v3.1.1 broker facade: the async client Pipe and the tokio-free listener (CONNECT/PUBLISH/SUBSCRIBE broker over KeyedFanOut pub/sub) over the sans-IO MQTT codec. The codec itself lives in proxima-protocols::mqtt."
+description = "MQTT v3.1.1 facade over the sans-IO codec in proxima-protocols::mqtt: the async client Pipe driving a sans-IO ClientSession (feature `client`, so proxima::Client speaks MQTT), and the server side — the tokio-free per-connection driver, the KeyedFanOut PUBLISH/SUBSCRIBE broker, and an AnyProtocol listener candidate (feature `listen`). Fan-out is always QoS 0 with no retained messages: a routing fabric, not a durable broker. `--no-default-features` leaves a bare no_std codec re-export tier."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

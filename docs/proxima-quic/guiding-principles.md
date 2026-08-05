@@ -30,7 +30,7 @@ Plan file: [`i-need-a-full-adaptive-seal.md`](../../../../../.claude/plans/i-nee
   `arrayvec` + `heapless` for fixed-cap state. `http` crate (no_std +
   alloc) for HTTP semantics. an external crypto crate composes aws-lc-rs already.
   Mirror `proxima-h2-codec` patterns for the sans-IO codec shape; mirror
-  `proxima-mqtt::decode_remaining_length` for varint scaffolding.
+  `proxima_protocols::mqtt::decode_remaining_length` for varint scaffolding.
 - **Principle 3 — no_std + alloc + alloc-free tiers.** Tier-3 (bare
   no_std + no alloc) is the **aspiration** for every leaf module. Goal:
   ≥60% of `proxima-quic-proto` module count compiles at tier-3.
