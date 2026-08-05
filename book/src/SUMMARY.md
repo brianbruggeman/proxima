@@ -76,7 +76,7 @@
 - [new-platform](frontier/new-platform.md)
 - [wasm](frontier/wasm.md)
 - [dpdk](frontier/dpdk.md)
-- [spdk](frontier/spdk.md)
+- [nvme](frontier/nvme.md)
 - [pmem](frontier/pmem.md)
 
 # Extend it
