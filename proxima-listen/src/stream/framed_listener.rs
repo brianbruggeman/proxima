@@ -202,6 +202,9 @@ impl ListenProtocol for FramedListenProtocol {
     }
 }
 
+// every argument is an independent per-serve knob read off the listener
+// spec; a params struct would carry no invariant the tuple does not, so it
+// would be a relocation, not a type.
 #[allow(clippy::too_many_arguments)]
 fn spawn_framed_handler<C: StreamConnection>(
     conn: C,
@@ -227,6 +230,7 @@ fn spawn_framed_handler<C: StreamConnection>(
     });
 }
 
+// same reason as `spawn_framed_handler` above.
 #[allow(clippy::too_many_arguments)]
 async fn handle_framed_connection<C: StreamConnection>(
     conn: C,
