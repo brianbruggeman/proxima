@@ -302,6 +302,8 @@ pub mod server {
 // keep using the tokio backend as a convenient, always-available test
 // harness — same reasoning as before the `AsyncMutex` swap above; only
 // the client's PRODUCTION connection slot needed to stop requiring tokio.
+// That is why both bodies pin `runtime = "tokio"`: bare `#[proxima::test]`
+// drives on prime, where a tokio listener has no reactor to register with.
 #[cfg(all(test, feature = "json_framing-std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -312,7 +314,7 @@ mod tests {
     use serde_json::json;
     use std::net::{Ipv4Addr, SocketAddr};
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn round_trip_request_json_against_echo_server() {
         let listener = TokioTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -340,7 +342,7 @@ mod tests {
         assert_eq!(response["value"], 42);
     }
 
-    #[proxima::test]
+    #[proxima::test(runtime = "tokio")]
     async fn request_json_propagates_error_envelope() {
         let listener = TokioTcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
