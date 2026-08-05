@@ -55,15 +55,26 @@ async fn flush_out<S: AsyncWrite + Unpin>(
     stream.flush().await
 }
 
-/// This connection's own subscriptions, keyed by the exact filter bytes so
-/// a later `UNSUBSCRIBE` (or connection close) can remove precisely the
-/// right `SubscriptionId` from the shared [`MqttBroker`].
-#[derive(Default)]
-struct SubscriberState {
+/// Everything one connection owns about its own session: whether `CONNECT`
+/// has been accepted, the sink the broker pushes its deliveries into, and
+/// its subscriptions keyed by the exact filter bytes so a later
+/// `UNSUBSCRIBE` (or connection close) can remove precisely the right
+/// `SubscriptionId` from the shared [`MqttBroker`].
+struct SessionState {
+    connected: bool,
+    push_sink: PushSink,
     filters: BTreeMap<Vec<u8>, proxima_primitives::pipe::SubscriptionId>,
 }
 
-impl SubscriberState {
+impl SessionState {
+    fn new(push_sink: PushSink) -> Self {
+        Self {
+            connected: false,
+            push_sink,
+            filters: BTreeMap::new(),
+        }
+    }
+
     fn unsubscribe_all(&self, broker: &MqttBroker) {
         for (filter, id) in &self.filters {
             broker.unsubscribe(filter, *id);
@@ -149,47 +160,41 @@ fn parse_connect_credentials(
     Ok(ConnectCredentials { username, password })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_connect(
+/// Lifts a `CONNECT` packet's fields into the handler request. `Ok(None)`
+/// is a version the broker will not speak; `Err` is a malformed payload.
+fn connect_request(
     protocol_name: &[u8],
     protocol_level: u8,
     connect_flags: u8,
     keep_alive: u16,
     client_id: &[u8],
     rest: &[u8],
-    connected: &mut bool,
-    handler: &MqttPipeHandle,
-) -> FrameOutcome {
-    if *connected {
-        // [MQTT-3.1.0-2]: a second CONNECT on an already-open session is a
-        // protocol violation — no CONNACK, just close.
-        return FrameOutcome::Close(Vec::new());
-    }
+) -> Result<Option<MqttPipeRequest>, &'static str> {
     if protocol_name != b"MQTT" || protocol_level != 4 {
-        let mut out = Vec::new();
-        encode_connack(false, 1, &mut out); // 1 = unacceptable protocol version
-        return FrameOutcome::Close(out);
+        return Ok(None);
     }
     let clean_session = connect_flags & 0x02 != 0;
     let ConnectCredentials { username, password } =
-        match parse_connect_credentials(connect_flags, rest) {
-            Ok(credentials) => credentials,
-            Err(reason) => {
-                return FrameOutcome::InternalError(ProximaError::Upstream(format!(
-                    "mqtt: {reason}"
-                )));
-            }
-        };
-    let request = build_connect_request(
+        parse_connect_credentials(connect_flags, rest)?;
+    Ok(Some(build_connect_request(
         client_id,
         clean_session,
         keep_alive,
         username.as_deref(),
         password.as_deref(),
-    );
+    )))
+}
+
+/// Runs the business handler's connect-auth hook and turns its verdict into
+/// the `CONNACK` the client sees.
+async fn authorize_connect(
+    request: MqttPipeRequest,
+    handler: &MqttPipeHandle,
+    state: &mut SessionState,
+) -> FrameOutcome {
     match SendPipe::call(handler, request).await {
         Ok(_) => {
-            *connected = true;
+            state.connected = true;
             let mut out = Vec::new();
             encode_connack(false, 0, &mut out);
             FrameOutcome::Reply(out)
@@ -235,8 +240,7 @@ fn dispatch_subscribe(
     packet_id: u16,
     payload: &[u8],
     broker: &MqttBroker,
-    push_sink: &PushSink,
-    state: &mut SubscriberState,
+    state: &mut SessionState,
 ) -> FrameOutcome {
     let mut granted = Vec::new();
     for (filter, _requested_qos) in iter_subscribe_filters(payload) {
@@ -245,7 +249,7 @@ fn dispatch_subscribe(
             continue;
         }
         if !state.filters.contains_key(filter) {
-            let id = broker.subscribe(filter, push_sink.clone());
+            let id = broker.subscribe(filter, state.push_sink.clone());
             state.filters.insert(filter.to_vec(), id);
         }
         granted.push(0); // delivery is always QoS 0 — see broker module docs
@@ -259,7 +263,7 @@ fn dispatch_unsubscribe(
     packet_id: u16,
     payload: &[u8],
     broker: &MqttBroker,
-    state: &mut SubscriberState,
+    state: &mut SessionState,
 ) -> FrameOutcome {
     for filter in iter_unsubscribe_filters(payload) {
         if let Some(id) = state.filters.remove(filter) {
@@ -290,14 +294,8 @@ pub async fn serve_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let mut connection = MqttConnection::with_limits(Limits {
-        max_message_bytes: config.max_message_bytes,
-    });
-    let mut out = Vec::with_capacity(config.write_high_water_bytes + 4096);
     let (push_tx, push_rx) = mpsc::unbounded::<Bytes>();
-    let push_sink = PushSink::new(push_tx);
-    let mut state = SubscriberState::default();
-    let mut connected = false;
+    let mut state = SessionState::new(PushSink::new(push_tx));
 
     let (read_half, mut write_half) = stream.split();
     // declaration order == `Select::Fifo` scan order == the old
@@ -315,13 +313,9 @@ where
 
     let outcome = main_loop(
         &mut write_half,
-        &mut connection,
-        &mut out,
         &handler,
         &broker,
-        &push_sink,
         &mut state,
-        &mut connected,
         config,
         &sources,
         &admission,
@@ -331,16 +325,11 @@ where
     outcome
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn main_loop<S>(
     write_half: &mut futures::io::WriteHalf<S>,
-    connection: &mut MqttConnection,
-    out: &mut Vec<u8>,
     handler: &MqttPipeHandle,
     broker: &MqttBroker,
-    push_sink: &PushSink,
-    state: &mut SubscriberState,
-    connected: &mut bool,
+    state: &mut SessionState,
     config: &MqttServerConfig,
     sources: &FanIn<MqttConnSource<futures::io::ReadHalf<S>>, Select, 3>,
     admission: &proxima_listen::admission::ConnAdmission,
@@ -348,6 +337,10 @@ async fn main_loop<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let mut connection = MqttConnection::with_limits(Limits {
+        max_message_bytes: config.max_message_bytes,
+    });
+    let out = &mut Vec::with_capacity(config.write_high_water_bytes + 4096);
     loop {
         loop {
             match connection.advance() {
@@ -355,13 +348,11 @@ where
                 Advanced::Command { packet, consumed } => {
                     // [MQTT-3.1.0-1]: the first packet on a connection must
                     // be CONNECT.
-                    if !*connected && !matches!(packet, Packet::Connect { .. }) {
+                    if !state.connected && !matches!(packet, Packet::Connect { .. }) {
                         return Ok(());
                     }
-                    let outcome = dispatch_packet(
-                        packet, connected, handler, broker, push_sink, state, admission,
-                    )
-                    .await;
+                    let outcome =
+                        dispatch_packet(packet, handler, broker, state, admission).await;
                     connection.consume(consumed);
                     match outcome {
                         FrameOutcome::Reply(bytes) => out.extend_from_slice(&bytes),
@@ -403,14 +394,11 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_packet(
     packet: Packet<'_>,
-    connected: &mut bool,
     handler: &MqttPipeHandle,
     broker: &MqttBroker,
-    push_sink: &PushSink,
-    state: &mut SubscriberState,
+    state: &mut SessionState,
     admission: &proxima_listen::admission::ConnAdmission,
 ) -> FrameOutcome {
     match packet {
@@ -426,17 +414,30 @@ async fn dispatch_packet(
             {
                 return FrameOutcome::Close(Vec::new());
             }
-            let outcome = dispatch_connect(
-                protocol_name,
-                protocol_level,
-                connect_flags,
-                keep_alive,
-                client_id,
-                rest,
-                connected,
-                handler,
-            )
-            .await;
+            let outcome = if state.connected {
+                // [MQTT-3.1.0-2]: a second CONNECT on an already-open session
+                // is a protocol violation — no CONNACK, just close.
+                FrameOutcome::Close(Vec::new())
+            } else {
+                match connect_request(
+                    protocol_name,
+                    protocol_level,
+                    connect_flags,
+                    keep_alive,
+                    client_id,
+                    rest,
+                ) {
+                    Ok(Some(request)) => authorize_connect(request, handler, state).await,
+                    Ok(None) => {
+                        let mut out = Vec::new();
+                        encode_connack(false, 1, &mut out); // 1 = unacceptable protocol version
+                        FrameOutcome::Close(out)
+                    }
+                    Err(reason) => FrameOutcome::InternalError(ProximaError::Upstream(format!(
+                        "mqtt: {reason}"
+                    ))),
+                }
+            };
             admission.request_release();
             outcome
         }
@@ -449,7 +450,7 @@ async fn dispatch_packet(
         Packet::Subscribe {
             packet_id,
             topic_filters,
-        } => dispatch_subscribe(packet_id, topic_filters, broker, push_sink, state),
+        } => dispatch_subscribe(packet_id, topic_filters, broker, state),
         Packet::Unsubscribe {
             packet_id,
             topic_filters,
