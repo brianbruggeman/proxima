@@ -356,7 +356,11 @@ criterion = { workspace = true, features = ["html_reports"] }
 hickory-proto = { workspace = true }
 kafka-protocol = { workspace = true }
 mqttbytes = { workspace = true }
-proxima = { workspace = true, features = ["test-support"] }
+# `test-support-tokio` (not the full `tokio` closure): `json_framing`'s two
+# echo-server tests pin `#[proxima::test(runtime = "tokio")]`, whose
+# `run_tokio*` drivers live behind `proxima-test/tokio-driver`. This is the
+# narrow forwarder for exactly that driver.
+proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
 prost = { workspace = true, features = ["std", "derive"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tungstenite = { workspace = true }
