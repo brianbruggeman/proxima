@@ -439,6 +439,11 @@ fn pick_least_loaded(upstreams: &[UpstreamRef]) -> Option<(usize, &UpstreamRef)>
 
 pub type SelectionHandle = Arc<dyn DynSelection>;
 
+/// Object-safe face of [`Selection`], which cannot be `dyn` itself because it
+/// returns RPITIT. The box is the erasure itself, so it is the boundary's cost,
+/// not incidental allocation. The blanket impl below mirrors
+/// `proxima_primitives::pipe::alloc_tier`'s `DynPipe`/`SendDynPipe` erasure —
+/// see the note in the crate audit journal.
 pub trait DynSelection: Send + Sync + 'static {
     fn dispatch_dyn<'this, 'upstreams>(
         &'this self,
@@ -796,11 +801,15 @@ async fn run_fallthrough_local(
 // the workspace denies unwrap/expect; tests assert through them.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
-    use proxima_primitives::pipe::handler::into_handle;
-    use rstest::rstest;
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use proxima_primitives::pipe::handler::{into_handle, into_thread_local_handle};
+    use rstest::rstest;
+
+    use super::*;
 
     struct StaticPipe {
         label: String,
@@ -881,19 +890,6 @@ mod tests {
     }
 
     fn upstream(label: &str, pipe: Arc<StaticPipe>) -> UpstreamRef {
-        struct ArcWrapper(Arc<StaticPipe>);
-        impl SendPipe for ArcWrapper {
-            type In = Request<Bytes>;
-            type Out = Response<Bytes>;
-            type Err = ProximaError;
-
-            fn call(
-                &self,
-                request: Request<Bytes>,
-            ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
-                SendPipe::call(&*self.0, request)
-            }
-        }
         UpstreamRef::new(into_handle(ArcWrapper(pipe)), label.to_string(), 1)
     }
 
@@ -1083,12 +1079,9 @@ mod tests {
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
-    use proxima_primitives::pipe::handler::into_thread_local_handle;
-    use std::cell::Cell;
-
     struct CountingLocalPipe {
         label: String,
-        calls: std::rc::Rc<Cell<usize>>,
+        calls: Rc<Cell<usize>>,
     }
 
     impl Pipe for CountingLocalPipe {
@@ -1112,8 +1105,8 @@ mod tests {
     fn local_upstream(
         label: &str,
         weight: u32,
-    ) -> (ThreadLocalUpstreamRef, std::rc::Rc<Cell<usize>>) {
-        let calls = std::rc::Rc::new(Cell::new(0));
+    ) -> (ThreadLocalUpstreamRef, Rc<Cell<usize>>) {
+        let calls = Rc::new(Cell::new(0));
         let pipe = CountingLocalPipe {
             label: label.into(),
             calls: calls.clone(),

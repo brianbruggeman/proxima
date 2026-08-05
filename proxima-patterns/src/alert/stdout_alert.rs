@@ -15,8 +15,7 @@
 //! - NOT `IdempotentSideEffectFree` (printing twice ≠ printing once).
 //! - `WithoutNetwork`, `WithoutSpawn`, `WithoutRandom`, `WithoutTime`.
 
-use std::io::Write;
-use std::sync::Mutex;
+use std::io::{Stdout, Write};
 
 use bytes::Bytes;
 use proxima_core::markers::{WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime};
@@ -41,7 +40,7 @@ pub enum OutputFormat {
 /// Terminal sink pipe that prints `AlertEvent` payloads to stdout.
 pub struct StdoutAlertPipe {
     format: OutputFormat,
-    writer: Mutex<std::io::Stdout>,
+    writer: Stdout,
 }
 
 impl Default for StdoutAlertPipe {
@@ -56,7 +55,7 @@ impl StdoutAlertPipe {
     pub fn new(format: OutputFormat) -> Self {
         Self {
             format,
-            writer: Mutex::new(std::io::stdout()),
+            writer: std::io::stdout(),
         }
     }
 
@@ -85,11 +84,10 @@ impl StdoutAlertPipe {
     }
 
     fn write_line(&self, line: &str) -> Result<(), ProximaError> {
-        let mut guard = self
-            .writer
-            .lock()
-            .map_err(|err| ProximaError::Record(format!("stdout mutex poisoned: {err}")))?;
-        writeln!(*guard, "{line}").map_err(ProximaError::Io)?;
+        // Stdout is already an internally-locked global handle; wrapping it in
+        // a second Mutex only bought a poisoning failure mode.
+        let mut guard = self.writer.lock();
+        writeln!(guard, "{line}").map_err(ProximaError::Io)?;
         guard.flush().map_err(ProximaError::Io)
     }
 }

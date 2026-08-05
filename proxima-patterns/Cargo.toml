@@ -29,7 +29,7 @@ std = ["alloc", "proxima-core/std", "proxima-primitives/std", "bytes/std", "serd
 alert = ["proto"]
 
 # Proto layer (event types + postcard codec + markers + sized constants).
-proto = ["dep:heapless", "dep:postcard", "dep:ulid"]
+proto = ["dep:heapless", "dep:postcard", "dep:ulid", "dep:thiserror"]
 
 # Tier-1 / Tier-2 base. pipes.rs (std-gated) unconditionally uses the event
 # types (AlertEvent/GuidanceAnswer/GuidanceQuestion).
