@@ -90,6 +90,17 @@ impl EspSpi {
 /// a fixed bitmap of [`REPLAY_WINDOW_WORDS`] words, shifted by whole words
 /// plus a remainder, never resized and never allocated. The window size is
 /// build-time configurable, so this adapts rather than assuming 256.
+///
+/// # Why checking and recording are two calls
+///
+/// RFC 4303 §3.4.3 splits them, and the reason is the whole point of the
+/// window: a sequence number is attacker-controlled until the tag verifies.
+/// One combined `admit` — check and commit in a single pass, before
+/// decryption — hands anyone able to send a packet two free denials of
+/// service. Naming a far-future sequence slides the window past every packet
+/// in flight, so the real peer's traffic reads as too old; naming a sequence
+/// the peer has not sent yet sets that bit, so the genuine packet is later
+/// refused as a replay. Neither needs a single byte of key material.
 #[derive(Debug, Clone, Copy)]
 struct ReplayWindow {
     highest: u64,
@@ -104,26 +115,33 @@ impl ReplayWindow {
         }
     }
 
-    /// Accept `seq` and record it, or reject it as replayed or too old.
-    fn admit(&mut self, seq: u64) -> bool {
+    /// Whether `seq` could still be accepted — cheap enough to run before the
+    /// AEAD, which is what makes a replay flood cost a bitmap probe.
+    fn permits(&self, seq: u64) -> bool {
         if seq == 0 {
             return false;
         }
 
         if seq > self.highest {
-            self.shift(seq - self.highest);
-            self.highest = seq;
-            self.set(0);
             return true;
         }
 
         let offset = self.highest - seq;
-        if offset >= REPLAY_WINDOW || self.is_set(offset) {
-            return false;
+        offset < REPLAY_WINDOW && !self.is_set(offset)
+    }
+
+    /// Record `seq` as seen. Only legal after the tag verified: this is the
+    /// commit half, and committing an unauthenticated sequence is the defect
+    /// the split exists to prevent.
+    fn record(&mut self, seq: u64) {
+        if seq > self.highest {
+            self.shift(seq - self.highest);
+            self.highest = seq;
+            self.set(0);
+            return;
         }
 
-        self.set(offset);
-        true
+        self.set(self.highest - seq);
     }
 
     fn shift(&mut self, distance: u64) {
@@ -445,7 +463,9 @@ impl ChildSa {
     ///   header and a tag.
     /// - [`CentauriError::ReplayDetected`] if the sequence number is outside the
     ///   window or already seen. Checked *before* decryption, so a flood of
-    ///   replays costs a bitmap lookup rather than an AEAD pass.
+    ///   replays costs a bitmap lookup rather than an AEAD pass; the window is
+    ///   only advanced *after* the tag verifies, so a forged sequence number
+    ///   cannot slide it or claim a slot.
     /// - [`CentauriError::AuthenticationFailed`] if the tag does not verify —
     ///   which also covers a tampered SPI or sequence number, since the header
     ///   is bound as associated data.
@@ -462,7 +482,7 @@ impl ChildSa {
                 .map_err(|_| CentauriError::InvalidMessage("sequence"))?,
         );
 
-        if !self.replay.admit(seq) {
+        if !self.replay.permits(seq) {
             return Err(CentauriError::ReplayDetected(seq));
         }
 
@@ -480,6 +500,10 @@ impl ChildSa {
 
         let nonce = Self::nonce(&self.open_nonce_base, seq);
         self.open_cipher.open(&nonce, header, body, tag_ref)?;
+
+        // only now: until the tag verified, `seq` was attacker-controlled, and
+        // committing it would let a forgery slide the window or burn a slot.
+        self.replay.record(seq);
 
         Ok(payload_len)
     }
@@ -780,10 +804,12 @@ mod tests {
     fn every_single_bit_flip_in_a_packet_is_rejected() {
         // Exhaustive, and the property is total: unlike the handshake — which
         // validates only two header bytes — an AEAD packet has every byte
-        // under the tag, so there is no position where a flip may pass. A
-        // fresh receiver per flip, because opening advances the replay window.
+        // under the tag, so there is no position where a flip may pass. One
+        // receiver for all of them, which is itself the assertion: a rejected
+        // packet must leave the replay window untouched, so the genuine packet
+        // still opens at the end.
         let payload = [0x5Au8; 16];
-        let (mut sender, _) = agreed_pair();
+        let (mut sender, mut receiver) = agreed_pair();
         let mut sealed = [0u8; 16 + OVERHEAD];
         sealed[HEADER_LEN..HEADER_LEN + payload.len()].copy_from_slice(&payload);
         let packet_len = sender.seal(&mut sealed, payload.len()).unwrap();
@@ -793,15 +819,14 @@ mod tests {
 
         for byte_index in 0..packet_len {
             for bit in 0..8u32 {
-                let (_, mut receiver) = agreed_pair();
                 let mut corrupted = sealed;
                 corrupted[byte_index] ^= 1u8 << bit;
 
                 match receiver.open(&mut corrupted[..packet_len]) {
                     Err(CentauriError::AuthenticationFailed) => authentication_failures += 1,
-                    // flipping a sequence bit can move the packet outside the
-                    // replay window, which is refused before the AEAD runs —
-                    // still a rejection, just an earlier one
+                    // flipping the sequence to zero puts it outside the window,
+                    // which is refused before the AEAD runs — still a
+                    // rejection, just an earlier one
                     Err(CentauriError::ReplayDetected(_)) => replay_rejections += 1,
                     other => panic!("byte {byte_index} bit {bit} was NOT rejected: {other:?}"),
                 }
@@ -814,6 +839,78 @@ mod tests {
             "every bit of an AEAD packet must be under the tag"
         );
         assert!(authentication_failures > 0 && replay_rejections > 0);
+
+        let mut genuine = sealed;
+        assert_eq!(
+            receiver.open(&mut genuine[..packet_len]).unwrap(),
+            payload.len(),
+            "{} rejected forgeries must not cost the real packet its slot",
+            packet_len * 8
+        );
+    }
+
+    #[test]
+    fn a_forged_far_future_sequence_does_not_slide_the_window() {
+        // The denial of service the check/commit split exists for: anyone able
+        // to send a packet could otherwise name sequence 10^9, slide the
+        // window past everything in flight, and have the real peer's traffic
+        // read as too old — with no key material at all.
+        let (mut sender, mut receiver) = agreed_pair();
+
+        let mut first = [0u8; 64];
+        first[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"one!");
+        let first_len = sender.seal(&mut first, 4).unwrap();
+
+        let mut second = [0u8; 64];
+        second[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"two!");
+        let second_len = sender.seal(&mut second, 4).unwrap();
+
+        let mut forged = second;
+        forged[4..12].copy_from_slice(&1_000_000_000u64.to_be_bytes());
+        assert_eq!(
+            receiver.open(&mut forged[..second_len]).err(),
+            Some(CentauriError::AuthenticationFailed),
+            "the sequence is associated data, so editing it breaks the tag"
+        );
+
+        assert_eq!(
+            receiver.open(&mut first[..first_len]).unwrap(),
+            4,
+            "the forgery must not have aged the genuine packets out"
+        );
+        assert_eq!(receiver.open(&mut second[..second_len]).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_forged_sequence_does_not_burn_the_slot_the_real_packet_needs() {
+        // The other half: naming a sequence the peer has not sent yet would
+        // set that bit, so the genuine packet arrives to find itself already
+        // "seen".
+        let (mut sender, mut receiver) = agreed_pair();
+
+        let mut genuine = [0u8; 64];
+        genuine[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"real");
+        let len = sender.seal(&mut genuine, 4).unwrap();
+        assert_eq!(receiver.open(&mut genuine[..len]).unwrap(), 4);
+
+        let mut next = [0u8; 64];
+        next[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"next");
+        let next_len = sender.seal(&mut next, 4).unwrap();
+        assert_eq!(sender.send_seq(), 2);
+
+        // claim sequence 2 with a body the receiver's key cannot open
+        let mut forged = next;
+        forged[HEADER_LEN] ^= 0xFF;
+        assert_eq!(
+            receiver.open(&mut forged[..next_len]).err(),
+            Some(CentauriError::AuthenticationFailed)
+        );
+
+        assert_eq!(
+            receiver.open(&mut next[..next_len]).unwrap(),
+            4,
+            "sequence 2 was never legitimately seen, so it must still be open"
+        );
     }
 
     #[test]
@@ -854,33 +951,43 @@ mod tests {
         }
     }
 
+    /// The check-then-commit pair a verified packet performs, so the window's
+    /// own tests exercise the same order [`ChildSa::open`] does.
+    fn admit(window: &mut ReplayWindow, seq: u64) -> bool {
+        if !window.permits(seq) {
+            return false;
+        }
+        window.record(seq);
+        true
+    }
+
     #[test]
     fn out_of_order_within_the_window_is_accepted() {
         let mut window = ReplayWindow::new();
 
-        assert!(window.admit(10));
-        assert!(window.admit(8), "older but inside the window");
-        assert!(window.admit(9));
-        assert!(!window.admit(9), "and not twice");
+        assert!(admit(&mut window, 10));
+        assert!(admit(&mut window, 8), "older but inside the window");
+        assert!(admit(&mut window, 9));
+        assert!(!admit(&mut window, 9), "and not twice");
     }
 
     #[test]
     fn packets_older_than_the_window_are_rejected() {
         let mut window = ReplayWindow::new();
 
-        assert!(window.admit(REPLAY_WINDOW + 10));
-        assert!(!window.admit(1), "far outside the window");
-        assert!(window.admit(REPLAY_WINDOW + 9), "just inside it");
+        assert!(admit(&mut window, REPLAY_WINDOW + 10));
+        assert!(!admit(&mut window, 1), "far outside the window");
+        assert!(admit(&mut window, REPLAY_WINDOW + 9), "just inside it");
     }
 
     #[test]
     fn a_large_jump_clears_the_window() {
         let mut window = ReplayWindow::new();
 
-        assert!(window.admit(5));
-        assert!(window.admit(5 + REPLAY_WINDOW * 2));
+        assert!(admit(&mut window, 5));
+        assert!(admit(&mut window, 5 + REPLAY_WINDOW * 2));
         assert!(
-            !window.admit(5),
+            !admit(&mut window, 5),
             "the old entry is gone, so it reads as too old"
         );
     }
@@ -889,7 +996,22 @@ mod tests {
     fn sequence_zero_is_never_admitted() {
         let mut window = ReplayWindow::new();
 
-        assert!(!window.admit(0), "sealing starts at one");
+        assert!(!admit(&mut window, 0), "sealing starts at one");
+    }
+
+    #[test]
+    fn a_check_that_is_never_committed_leaves_the_window_where_it_was() {
+        // the property the split buys: `permits` is pure, so an unverified
+        // packet cannot move the window however many times it is examined.
+        let mut window = ReplayWindow::new();
+        assert!(admit(&mut window, 4));
+
+        for _ in 0..1_000 {
+            assert!(window.permits(u64::from(u32::MAX)), "checking is free");
+        }
+
+        assert!(admit(&mut window, 5), "the next genuine packet still fits");
+        assert!(!admit(&mut window, 4), "and the seen one is still seen");
     }
 
     #[test]
