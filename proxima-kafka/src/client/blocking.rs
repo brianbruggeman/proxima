@@ -9,7 +9,9 @@ use std::io::{Read, Write};
 
 use crate::client::config::KafkaClientConfig;
 use crate::client::session::{ClientError, ClientSession, Step};
-use crate::wire::{FetchRequest, FetchResponse, ProduceRequest, ProduceResponse, ResponseBody};
+use crate::wire::{
+    FetchRequest, FetchResponse, ProduceRequest, ProduceResponse, RequestBody, ResponseBody,
+};
 
 pub struct KafkaClient<S> {
     stream: S,
@@ -34,7 +36,7 @@ impl<S: Read + Write> KafkaClient<S> {
     /// [`ClientError`] on I/O, a malformed reply, or a non-Produce reply
     /// shape.
     pub fn produce(&mut self, request: ProduceRequest) -> Result<ProduceResponse, ClientError> {
-        match self.exchange(crate::wire::RequestBody::Produce(request))? {
+        match self.exchange(RequestBody::Produce(request))? {
             ResponseBody::Produce(response) => Ok(response),
             other => Err(ClientError::Protocol(format!(
                 "expected a Produce reply, got {other:?}"
@@ -48,7 +50,7 @@ impl<S: Read + Write> KafkaClient<S> {
     /// [`ClientError`] on I/O, a malformed reply, or a non-Fetch reply
     /// shape.
     pub fn fetch(&mut self, request: FetchRequest) -> Result<FetchResponse, ClientError> {
-        match self.exchange(crate::wire::RequestBody::Fetch(request))? {
+        match self.exchange(RequestBody::Fetch(request))? {
             ResponseBody::Fetch(response) => Ok(response),
             other => Err(ClientError::Protocol(format!(
                 "expected a Fetch reply, got {other:?}"
@@ -56,7 +58,7 @@ impl<S: Read + Write> KafkaClient<S> {
         }
     }
 
-    fn exchange(&mut self, request: crate::wire::RequestBody) -> Result<ResponseBody, ClientError> {
+    fn exchange(&mut self, request: RequestBody) -> Result<ResponseBody, ClientError> {
         self.session.submit(request)?;
         self.run_request()
     }

@@ -122,24 +122,6 @@ impl AsFrame<KafkaCodec> for KafkaOutcome {
     }
 }
 
-/// Local wrapper around [`KafkaCodecError`] — `AndThen`'s
-/// `Second::Err: From<First::Err>` composition seam needs a
-/// `From<KafkaCodecError>` impl, and orphan rules forbid implementing a
-/// foreign trait on a foreign type from this crate; a local newtype error
-/// satisfies it trivially. In practice this conversion is never
-/// exercised: `KafkaCodecError::Incomplete` is the only variant
-/// `KafkaCodec::parse_frame` ever returns, and `is_incomplete()` is
-/// unconditionally `true` for it, so
-/// `proxima_protocols::codec_pipe::FrameCodecPipe` always collapses it to
-/// `Ok(None)` before this App is ever called; `ResponseTooLarge` is an
-/// encode-side-only error `FramedAny::drive` handles directly, never
-/// routed through this conversion either.
-#[derive(Debug, thiserror::Error)]
-pub enum KafkaAppError {
-    #[error("codec: {0}")]
-    Codec(#[from] KafkaCodecError),
-}
-
 /// The Kafka business-handler pipe as `FramedAny`'s `App`: dispatches a
 /// parsed [`RequestBody`] to the wrapped [`KafkaPipeHandle`], and
 /// resolves `ApiVersions`/violations directly (no handler call).
@@ -158,12 +140,17 @@ impl KafkaFramedApp {
     }
 }
 
+/// `Err = KafkaCodecError` is `FramedAny`'s `App::Err: From<C::Error>`
+/// seam satisfied by the codec's own error, reflexively — this App never
+/// fails, so anything else would be a wrapper for a value nothing
+/// constructs. A handler-pipe failure is rendered as a courtesy reply plus
+/// close by this module's own `dispatch`, never propagated.
 impl SendPipe for KafkaFramedApp {
     type In = KafkaOwnedFrame;
     type Out = KafkaOutcome;
-    type Err = KafkaAppError;
+    type Err = KafkaCodecError;
 
-    async fn call(&self, input: KafkaOwnedFrame) -> Result<KafkaOutcome, KafkaAppError> {
+    async fn call(&self, input: KafkaOwnedFrame) -> Result<KafkaOutcome, KafkaCodecError> {
         match input {
             KafkaOwnedFrame::Violation(violation) => Ok(resolve_violation(&violation)),
             KafkaOwnedFrame::Request {
