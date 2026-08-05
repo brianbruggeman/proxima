@@ -64,6 +64,7 @@ impl<Backend: QueueBackend> QueuePair<Backend> {
     }
 
     /// The backend, for inspection or teardown.
+    #[must_use]
     pub fn backend(&self) -> &Backend {
         &self.backend
     }

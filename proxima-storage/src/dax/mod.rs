@@ -27,8 +27,7 @@ pub mod region;
 pub mod store;
 
 pub use cell::FileCell;
-pub use config::DaxConfig;
-pub use config::PersistMode;
+pub use config::{DaxConfig, PersistMode};
 pub use error::DaxError;
 
 #[cfg(target_os = "linux")]
