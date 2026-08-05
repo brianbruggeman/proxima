@@ -24,7 +24,7 @@
 
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant as StdInstant};
 
 use bytes::{Bytes, BytesMut};
@@ -903,8 +903,6 @@ fn request_header_bufs(server_name: &str, request: &Request<Bytes>) -> Vec<(Vec<
 /// Current proto [`Instant`] — origin + wall-clock micros since process
 /// start. Monotonic enough for QUIC timers across one short request.
 fn clock_now() -> Instant {
-    use std::sync::OnceLock;
-    use std::time::Instant as StdInstant;
     static START: OnceLock<StdInstant> = OnceLock::new();
     let start = START.get_or_init(StdInstant::now);
     let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -920,8 +918,17 @@ mod tests {
     fn new_upstream_does_not_dial_eagerly() {
         let addr: SocketAddr = "127.0.0.1:1".parse().expect("static addr");
         let upstream = H3NativeUpstream::new(addr, "never.invalid");
-        assert_eq!(upstream.name(), "h3-native://never.invalid/");
+        assert_eq!(upstream.server_addr, addr);
+        assert_eq!(&*upstream.server_name, "never.invalid");
         assert!(upstream.bind.ip().is_unspecified());
+        let conn = upstream
+            .conn
+            .try_lock()
+            .expect("nothing has taken the connection lock yet");
+        assert!(
+            conn.is_none(),
+            "constructing an upstream must not open a quic connection"
+        );
     }
 
     #[test]
