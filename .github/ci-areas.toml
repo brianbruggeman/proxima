@@ -64,6 +64,7 @@ paths = [
     "scripts/tier-lift-gate.sh",
     "scripts/tokio-free-floor.sh",
     "scripts/thumbv7m-cliff-gate.sh",
+    "scripts/proxima-runtime-gate.sh",
     "scripts/_floor-crate-matrix.sh",
     ".github/workflows/no-std.yml",
 ]

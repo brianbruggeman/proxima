@@ -136,6 +136,26 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/tier-lift-gate.sh
 
+  # proxima-runtime-gate.sh — the crate's own commands (`nextest run -p
+  # proxima-runtime`, `clippy -p proxima-runtime --all-targets`) see only
+  # `default = ["std"]`, so concurrency/, tokio/ and background_rayon.rs —
+  # three quarters of the crate — were never gated at all. Runs the matrix:
+  # default, --all-features, both no_std tiers, and each feature ALONE.
+  proxima-runtime-gate:
+    name: proxima-runtime-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-runtime-gate.sh
+
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
   # directives. `continue-on-error: true` until DC5 finishes gating
