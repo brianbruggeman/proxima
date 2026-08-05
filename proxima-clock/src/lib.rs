@@ -65,6 +65,6 @@ pub mod anchor;
 pub mod coarse;
 #[cfg(feature = "config")]
 pub mod config;
-mod seq_words;
+mod seq_u64s;
 pub mod ticks;
 pub mod unix_nanos;

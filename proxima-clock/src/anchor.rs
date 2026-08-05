@@ -3,7 +3,7 @@ use core::future::Future;
 
 use proxima_primitives::pipe::primitives::Pipe;
 
-use crate::seq_words::SeqU64Pair;
+use crate::seq_u64s::SeqU64s;
 use crate::ticks::Ticks;
 use crate::unix_nanos::UnixNanos;
 
@@ -20,7 +20,7 @@ use crate::unix_nanos::UnixNanos;
 /// epoch_nanos)` computed per read) — promoted here as the general,
 /// tick-domain, `no_std` shape both were converging on.
 ///
-/// Seqlock-protected (see [`crate::seq_words`]) rather than set-once: a
+/// Seqlock-protected rather than set-once: a
 /// caller that never re-anchors pays nothing extra (one seqlock read costs
 /// the same as a plain load on the happy path); a caller running an NTP/PTP
 /// discipline loop gets a real re-anchor primitive instead of needing to
@@ -34,7 +34,7 @@ use crate::unix_nanos::UnixNanos;
 /// `ticks`/`unix_nanos` in the pair without touching [`ToUnixNanos`]'s
 /// call site.
 pub struct AnchorCell {
-    pair: SeqU64Pair,
+    pair: SeqU64s<2>,
 }
 
 impl AnchorCell {
@@ -42,7 +42,7 @@ impl AnchorCell {
     #[must_use]
     pub fn new(ticks: Ticks, unix_nanos: UnixNanos) -> Self {
         Self {
-            pair: SeqU64Pair::new(ticks.as_raw(), unix_nanos.as_nanos()),
+            pair: SeqU64s::new([ticks.as_raw(), unix_nanos.as_nanos()]),
         }
     }
 
@@ -50,14 +50,14 @@ impl AnchorCell {
     /// discipline operation — call this from an NTP/PTP correction loop
     /// each time it resolves a fresh offset.
     pub fn set(&self, ticks: Ticks, unix_nanos: UnixNanos) {
-        self.pair.store(ticks.as_raw(), unix_nanos.as_nanos());
+        self.pair.store([ticks.as_raw(), unix_nanos.as_nanos()]);
     }
 
     /// The current `(ticks, unix_nanos)` anchor pair, read as one
     /// consistent unit.
     #[must_use]
     pub fn get(&self) -> (Ticks, UnixNanos) {
-        let (ticks, unix_nanos) = self.pair.load();
+        let [ticks, unix_nanos] = self.pair.load();
         (Ticks::from_raw(ticks), UnixNanos::from_nanos(unix_nanos))
     }
 }

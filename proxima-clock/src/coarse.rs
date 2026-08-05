@@ -3,7 +3,7 @@ use core::future::Future;
 
 use proxima_primitives::pipe::primitives::Pipe;
 
-use crate::seq_words::SeqU64;
+use crate::seq_u64s::SeqU64s;
 use crate::ticks::Ticks;
 
 /// A shared, coarsely-updated tick count — the common per-core/per-shard
@@ -34,12 +34,12 @@ use crate::ticks::Ticks;
 ///
 /// Single writer: [`TickCell::set`] is for the one owner that reads the
 /// real source and republishes it. Concurrent `set` calls from more than
-/// one caller are not synchronized against each other (see
-/// [`crate::seq_words`]'s seqlock contract). Any number of readers may
-/// call [`TickCell::get`] (or drive it as a `Pipe`) concurrently,
-/// lock-free.
+/// one caller are not synchronized against each other — the underlying
+/// seqlock's odd/even bump is not itself compare-and-swapped. Any number
+/// of readers may call [`TickCell::get`] (or drive it as a `Pipe`)
+/// concurrently, lock-free.
 pub struct TickCell {
-    ticks: SeqU64,
+    ticks: SeqU64s<1>,
 }
 
 impl TickCell {
@@ -47,20 +47,21 @@ impl TickCell {
     #[must_use]
     pub fn new(initial: Ticks) -> Self {
         Self {
-            ticks: SeqU64::new(initial.as_raw()),
+            ticks: SeqU64s::new([initial.as_raw()]),
         }
     }
 
     /// Republish the current tick count. See the struct doc's
     /// single-writer contract.
     pub fn set(&self, ticks: Ticks) {
-        self.ticks.store(ticks.as_raw());
+        self.ticks.store([ticks.as_raw()]);
     }
 
     /// Read the current tick count.
     #[must_use]
     pub fn get(&self) -> Ticks {
-        Ticks::from_raw(self.ticks.load())
+        let [raw] = self.ticks.load();
+        Ticks::from_raw(raw)
     }
 }
 
