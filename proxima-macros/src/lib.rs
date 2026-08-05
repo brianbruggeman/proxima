@@ -1,14 +1,7 @@
-// proc-macros legitimately use unwrap/expect for malformed input —
-// the panic is the error path (rustc surfaces it as a compile error
-// at the macro invocation site, which is exactly the right shape).
-// also allow type_complexity: proc-macro intermediate parse states
-// have a wide tuple shape that's clearer than naming each sub-type.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity
-)]
+// a proc-macro's error path IS a panic: rustc catches it and reports a compile
+// error at the invocation site, so `expect` on a malformed-input invariant is
+// the right shape rather than a swallowed Result.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proc_macro::TokenStream;
 
