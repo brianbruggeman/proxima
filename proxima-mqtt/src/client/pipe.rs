@@ -5,7 +5,7 @@
 //!
 //! `CONNECT` is never a caller-visible `Request` — like redis's
 //! `HELLO`/`AUTH`/`SELECT` handshake, it runs automatically the first time
-//! [`MqttClientUpstream::connect`] dials, driven internally by
+//! [`MqttClientUpstream`] dials, driven internally by
 //! [`ClientSession::new`]. The caller-visible verbs are `PUBLISH` /
 //! `SUBSCRIBE` / `UNSUBSCRIBE` / `PING` / `DISCONNECT`.
 //!

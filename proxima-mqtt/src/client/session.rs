@@ -7,7 +7,7 @@
 //! `PipeFactory` client wraps it — that is what makes the client agnostic
 //! to the transport shape.
 //!
-//! The FSM is a two-state enum ([`Phase`]): `Handshake` sends the queued
+//! The FSM is a private two-state enum: `Handshake` sends the queued
 //! `CONNECT` and awaits `CONNACK`; `Ready` accepts one request at a time
 //! (`PUBLISH`/`UNSUBSCRIBE`/`PINGREQ`) and yields its single reply.
 //! `SUBSCRIBE` leaves the request/reply rhythm — mirrors redis's own
