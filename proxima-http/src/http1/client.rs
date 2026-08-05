@@ -4,7 +4,7 @@
 //!
 //! Everything in proxima that does work is a **pipe**: one async function,
 //! `call`, that takes an `In` and returns a `Result<Out, Err>`. The trait is
-//! [`Pipe`](proxima_primitives::pipe::Pipe), and its docs name the four
+//! [`Pipe`], and its docs name the four
 //! forms a pipe can take, chosen entirely by what you pick for `In` and
 //! `Out`: a **transform** (`In -> Out`), a **source** (`() -> Out`), a
 //! **sink** (`In -> ()`), and an **observe** (`In -> In`). There is only one
@@ -25,12 +25,12 @@
 //!
 //! # Why `SendPipe` and not `Pipe`?
 //!
-//! The impl is of [`SendPipe`], not [`Pipe`](proxima_primitives::pipe::Pipe). These are the same shape;
+//! The impl is of [`SendPipe`], not [`Pipe`]. These are the same shape;
 //! `SendPipe` additionally promises the pipe and its future are `Send`, so
 //! they can move between threads.
 //!
 //! The surprise is which one is the root. Most Rust async libraries require
-//! `Send` everywhere. proxima does not: [`Pipe`](proxima_primitives::pipe::Pipe) has **no** `Send` bound and
+//! `Send` everywhere. proxima does not: [`Pipe`] has **no** `Send` bound and
 //! [`SendPipe`] is the *additive* form. `Send`-everywhere is a work-stealing
 //! assumption — it exists so a runtime can yank a task off one thread and
 //! finish it on another. proxima's own runtime, prime, is per-core
@@ -82,7 +82,7 @@
 //! This is the part worth understanding, because the obvious question is why
 //! the client is not written as
 //! `connect.and_then(encode).and_then(parse)`. [`AndThen`](proxima_primitives::pipe::AndThen) — the composition
-//! operator on [`Pipe`](proxima_primitives::pipe::Pipe) — passes a **value**
+//! operator on [`Pipe`] — passes a **value**
 //! from one stage to the next: `First::Out` becomes `Second::In`, by
 //! ownership.
 //!
@@ -187,7 +187,7 @@ impl<C: StreamConnection> ConnState<C> {
 // ── client struct ─────────────────────────────────────────────────────────────
 
 /// HTTP/1.1 client. The **transform** form of
-/// [`Pipe`](proxima_primitives::pipe::Pipe):
+/// [`Pipe`]:
 /// [`Request<Bytes>`](proxima_primitives::pipe::Request) in,
 /// [`Response<Bytes>`](proxima_primitives::pipe::Response) out, failing with
 /// [`ProximaError`]. See the [module docs](self) for what that means and why
@@ -1129,7 +1129,7 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     /// transport and the same framing decoder as [`SendPipe::call`], minus the
     /// request/response envelope the abstraction otherwise builds per call.
     /// Reuses the pooled connection and reconnects once on a stale keep-alive,
-    /// exactly like [`Self::exchange`].
+    /// exactly like `exchange`.
     pub async fn send_raw(&self, request_bytes: &[u8]) -> Result<u16, ProximaError> {
         let mut guard = self.state.lock().await;
         let reused = guard.conn.is_some();

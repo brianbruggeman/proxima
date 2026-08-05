@@ -11,7 +11,7 @@
 //! so you can see the full protocol flow.
 //!
 //! Run:
-//!   RUST_LOG=debug cargo run -p proxima-h3 --example native_h3_demo --features native
+//!   RUST_LOG=debug cargo run -p proxima-http --example native_h3_demo --features http3-native
 //!
 //! Test with a quinn-based client, or with curl (if built with HTTP/3):
 //!   curl -k --http3 https://localhost:4433/

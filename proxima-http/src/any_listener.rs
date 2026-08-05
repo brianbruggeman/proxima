@@ -1,5 +1,5 @@
 //! `Listener::any()` scaffolding: the concrete
-//! [`AnyProtocol`](proxima_listen::any::AnyProtocol) candidates this crate
+//! [`AnyProtocol`] candidates this crate
 //! ships (h1, h2 prior-knowledge) plus [`AnyListenProtocol`], the
 //! [`ListenProtocol`] that owns the ONE bind + accept loop and dispatches
 //! each accepted stream through [`proxima_listen::any::Classifier`].
@@ -30,9 +30,9 @@
 //! [`AnyProtocol::drive`] signature, which only ever sees one already
 //! -accepted stream. [`AnyListenProtocol`] here is the NEW, simpler,
 //! quiesce-free sibling: an open registry of candidates behind one bind,
-//! mirroring [`crate::http2::listener::H2ListenProtocol`]'s
+//! mirroring the retired `H2ListenProtocol`'s
 //! `serve_via_factory` shape (no admission/drain wiring, matching that
-//! shipped listener's own scope) rather than the combiner's fuller
+//! listener's own scope) rather than the combiner's fuller
 //! quiesce/drain machinery.
 
 use std::future::Future;
@@ -343,7 +343,7 @@ pub type RejectHook = Arc<dyn Fn(Option<PeerInfo>, RejectReason) + Send + Sync>;
 /// [`Classifier`] over an arbitrary, registry-driven set of
 /// [`AnyProtocol`] candidates — [`crate::listener::HttpListenProtocol`]'s
 /// combiner generalized from "exactly h1 and h2" to "whatever is
-/// registered." Mirrors [`crate::http2::listener::H2ListenProtocol`]'s
+/// registered." Mirrors the retired `H2ListenProtocol`'s
 /// `serve_via_factory` shape: `AcceptorFactory`-driven, no admission/drain
 /// wiring (that richer machinery belongs to a listener that owns exactly
 /// one wire's quiesce semantics, which this open listener deliberately does

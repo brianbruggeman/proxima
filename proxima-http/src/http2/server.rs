@@ -1,7 +1,7 @@
 //! Async I/O wrapper around the sans-IO [`super::connection::Connection`].
 //!
 //! `serve_h2_connection` matches the existing
-//! [`crate::listeners::h2_crate::serve_h2_connection`] signature but drives
+//! [`crate::http2::serve_h2_connection`] signature but drives
 //! the native HPACK + framing + state-machine stack instead of the
 //! `h2` crate.
 //!

@@ -1,12 +1,12 @@
 //! Native HTTP/3 request/response upstream — the client-side mirror of
 //! [`H3NativeListenProtocol`](super::listen::H3NativeListenProtocol),
 //! packaged as a [`proxima_primitives::pipe`] [`SendPipe`] so it drops into the same
-//! `proxima::Client` slot as [`H1ClientUpstream`] / [`H2ClientUpstream`].
+//! `proxima::Client` slot as [`crate::http1::H1ClientUpstream`] / [`crate::http2::H2ClientUpstream`].
 //!
 //! It composes the stack the way the docs point: a native QUIC
-//! [`Endpoint`](proxima_quic::native::Endpoint) (prime UDP socket +
-//! sans-IO [`Connection`](proxima_protocols::quic::connection::Connection))
-//! under the sans-IO H3 [`Client`](super::client::Client) state machine,
+//! [`Endpoint`] (prime UDP socket +
+//! sans-IO [`Connection`])
+//! under the sans-IO H3 [`Client`] state machine,
 //! driven by [`drive_client_step`](super::driver::drive_client_step).
 //! No quinn, no h3-quinn — the dual-surface native peer of the legacy
 //! `Http3Upstream` (P7), selectable side-by-side per the C41 ruling.
@@ -17,7 +17,7 @@
 //! # Scope (v1)
 //!
 //! One QUIC connection per `call` — the same v1 shape
-//! [`H2ClientUpstream`] documents ("connection-reuse + stream
+//! [`crate::http2::H2ClientUpstream`] documents ("connection-reuse + stream
 //! multiplexing are a later layer"). Connection reuse + request
 //! multiplexing land as a follow-on component so the bench against the
 //! incumbent stays apples-to-apples (both per-call-connect).

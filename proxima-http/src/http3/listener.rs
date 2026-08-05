@@ -2,11 +2,11 @@
 //! connections, and runs [`crate::http3::server::serve_h3_connection`] for each.
 //!
 //! TLS is mandatory on QUIC; the listener spec carries cert + key
-//! paths the same way [`crate::listeners::http`]'s `tls` section
+//! paths the same way [`crate::listener`]'s `tls` section
 //! does. ALPN advertises `h3`. A self-signed cert is generated when
 //! `dev_self_signed: true` is set — handy for tests and local dev.
 //!
-//! Same core discipline as [`crate::listeners::http`]: accept
+//! Same core discipline as [`crate::listener`]: accept
 //! loop on the calling task, per-connection driver spawned on the
 //! ambient runtime (today tokio; Stage H removes the assumption).
 
