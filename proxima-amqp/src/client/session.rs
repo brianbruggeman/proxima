@@ -167,7 +167,7 @@ impl ClientSession {
             &mut self.outbound,
             CLIENT_CHANNEL,
             body,
-            self.negotiated_frame_max.saturating_sub(8),
+            self.negotiated_frame_max,
         );
         Ok(())
     }
