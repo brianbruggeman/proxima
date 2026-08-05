@@ -24,7 +24,8 @@ pub struct RetryRules {
 
 /// The backing store for [`RetryRules::retry_on_status`], tier-selected at
 /// build time: a heap `BTreeSet` when an allocator is present, a sorted const-cap
-/// `heapless::Vec` when not. Both expose `insert` / `contains` over `u16`.
+/// `heapless::Vec` when not. Both expose `insert` / `contains` / `extend` over
+/// `u16`, so a caller never sees which tier it got.
 #[cfg(proxima_alloc)]
 pub type StatusSet = BTreeSet<u16>;
 
@@ -61,6 +62,27 @@ impl StatusSet {
     #[must_use]
     pub fn contains(&self, status: &u16) -> bool {
         self.inner.binary_search(status).is_ok()
+    }
+}
+
+// the alloc tier is a BTreeSet, which already has both of these; the no-alloc
+// tier needs them explicitly or a shared call site only compiles on one tier.
+#[cfg(not(proxima_alloc))]
+impl Extend<u16> for StatusSet {
+    fn extend<I: IntoIterator<Item = u16>>(&mut self, statuses: I) {
+        for status in statuses {
+            self.insert(status);
+        }
+    }
+}
+
+#[cfg(not(proxima_alloc))]
+impl IntoIterator for StatusSet {
+    type Item = u16;
+    type IntoIter = <heapless::Vec<u16, RETRY_STATUS_CAP> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
     }
 }
 
