@@ -1,6 +1,5 @@
-//! R2 of the runtime-shaped initiative: `RuntimeFactory` impl for
-//! `TokioPerCoreRuntime` plus the `*Like` adapters for tokio's
-//! per-session primitives.
+//! `RuntimeFactory` impl for `TokioPerCoreRuntime` plus the `*Like`
+//! adapters for tokio's per-session primitives.
 //!
 //! Each adapter is a NEWTYPE around the tokio primitive so future
 //! changes (e.g. instrumented variants) don't break the `R::Mutex<T>`

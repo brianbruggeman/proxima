@@ -8,19 +8,19 @@
 //! connections-per-core is wrong for every workload but the one it was tuned on.
 //!
 //! Every strategy here is the same shape: measure a [`Signal`], drive it toward
-//! an [`Objective`], by a [`law`](crate::concurrency::law), accept the step
+//! an [`Objective`], by a [`law`], accept the step
 //! through a CoV [`Gate`], inside [`Bounds`]. Named strategies
-//! ([`Preset`](crate::concurrency::Preset)) are just `(signal, objective)`
+//! ([`Preset`]) are just `(signal, objective)`
 //! bundles, mirroring proxima-h1 `ResponseHandling::Discard` = `Drain + Framing`.
 //!
 //! Three extension tiers — only `signal` + `law` are extensible (objective /
 //! gate / bounds are closed, YAGNI):
 //! - **tune**: operator sets preset + lever overrides in TOML/env via
 //!   [`ConcurrencySettings`] — zero Rust.
-//! - **swap a lever**: `.law(MyPid)` ([`ControlLaw`](crate::concurrency::law::ControlLaw))
+//! - **swap a lever**: `.law(MyPid)` ([`ControlLaw`])
 //!   or `.signal_fn(|s| ..)` — reuse the measure→decide→apply loop, write only
 //!   the decision.
-//! - **replace**: impl [`ConcurrencyStrategy`](crate::concurrency::ConcurrencyStrategy)
+//! - **replace**: impl [`ConcurrencyStrategy`]
 //!   for a whole controller that doesn't fit the lever model.
 
 pub mod builder;
@@ -322,7 +322,7 @@ impl Bounds {
     }
 }
 
-/// The context one [`ControlLaw::step`](crate::concurrency::law::ControlLaw::step)
+/// The context one [`ControlLaw::step`]
 /// receives — current concurrency, the signal now and last window, the objective,
 /// and the gate parameters. Carries the shared accept criterion via
 /// [`significant`](Self::significant) / [`margin`](Self::margin) so every law

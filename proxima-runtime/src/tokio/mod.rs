@@ -402,10 +402,7 @@ mod tests {
             .map(|_| awaited(&receiver, "worker report").expect("worker knows its core"))
             .collect();
         reported.sort_by_key(CoreId::as_usize);
-        assert_eq!(
-            reported,
-            vec![CoreId(0), CoreId(1), CoreId(2), CoreId(3)]
-        );
+        assert_eq!(reported, vec![CoreId(0), CoreId(1), CoreId(2), CoreId(3)]);
     }
 
     // P-TU slice 1: a wrapped host runtime dispatches Send work onto the host's
