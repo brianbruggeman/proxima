@@ -22,9 +22,10 @@
 //!
 //! The `alloc` feature (on by default here, matching the former crate's
 //! `default = ["std"]` -> `std = ["alloc"]`) routes through a growable
-//! [`hashbrown::HashMap`] that scales with the live connection count; with
+//! `hashbrown::HashMap` that scales with the live connection count; with
 //! `alloc` disabled the bare `no_std + no_alloc` tier uses a fixed-cap
-//! `heapless::FnvIndexMap` sized by [`sized::ADMISSION_TABLE_CAP`], so a
+//! `heapless::FnvIndexMap` sized by
+//! [`crate::admission::sized::ADMISSION_TABLE_CAP`], so a
 //! microcontroller's connection table is bounded at compile time. This
 //! module's own no_std/no_alloc gates are unchanged from the former crate —
 //! only the `alloc` feature now lives on `proxima-listen` (which itself

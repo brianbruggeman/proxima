@@ -4,30 +4,31 @@
 //! involved.
 //!
 //! Folded from the former `proxima-preface-codec` satellite crate
-//! (single consumer: this crate's `http` module) into `proxima-listen`
-//! as the `preface` module. Carved out of the `http` module's inline
-//! byte-sniff (the `dispatch_h1_or_h2` accept-loop helper) the same
-//! way `proxima-listen-core` carved connection admission out of the
-//! same accept loop: a pure `&[u8] -> decision` function, no sockets,
-//! no futures, no spawn. The listener owns reading bytes off the wire
-//! and feeding them here; this module only classifies what arrived.
+//! (single consumer: `proxima-http`, which depends on this crate
+//! already) into `proxima-listen` as the `preface` module. Carved out
+//! of the HTTP listener's inline byte-sniff (the `dispatch_h1_or_h2`
+//! accept-loop helper) the same way the former `proxima-listen-core`
+//! carved connection admission out of the same accept loop: a pure
+//! `&[u8] -> decision` function, no sockets, no futures, no spawn. The
+//! listener owns reading bytes off the wire and feeding them here;
+//! this module only classifies what arrived.
 //!
 //! Used on transports without ALPN (UDS, plain TCP without TLS). The
 //! TLS path doesn't need this classifier — ALPN negotiates h1 vs h2
 //! during the handshake instead.
 //!
-//! # Why a new crate, not a module in `proxima-h1-codec` / `proxima-h2-codec`
+//! # Why it lives here, not in the h1 or h2 codec
 //!
 //! The decision straddles both protocols without belonging to either:
 //! it runs *before* either codec's parser sees a byte, and its only
 //! job is choosing which one gets the connection. Housing it inside
-//! `proxima-h1-codec` would make h1 the arbiter of h2 dispatch (and
-//! vice versa) and force one codec crate to depend on the other's
-//! wire constant. `proxima-listen-core` already sits as a dependency-
-//! free peer of both, doing the analogous accept-layer admission
-//! decision — this module is that same shape, one layer up: a small,
-//! self-contained boundary primitive that the `http` module (the
-//! shared consumer of both codecs) composes at the accept loop.
+//! the h1 codec would make h1 the arbiter of h2 dispatch (and vice
+//! versa) and force one codec to depend on the other's wire constant.
+//! The [`crate::admission`] core already sits as a dependency-free
+//! peer of both, doing the analogous accept-layer admission decision —
+//! this module is that same shape, one layer up: a small,
+//! self-contained boundary primitive that `proxima-http` (the shared
+//! consumer of both codecs) composes at the accept loop.
 //!
 //! # Tier
 //!
@@ -57,7 +58,8 @@ const ROUTE_SNIFF_LEN: usize = 4;
 #[non_exhaustive]
 pub enum PrefaceClass {
     /// Not the h2 preface — dispatch as HTTP/1.1. Decided from the
-    /// first [`ROUTE_SNIFF_LEN`] bytes; the caller does not need to
+    /// first four bytes (`GET ` and every other real h1 method diverge
+    /// from `PRI ` inside them); the caller does not need to
     /// wait for more bytes before routing.
     Http1,
     /// The full 24-byte h2 client connection preface matched exactly.
@@ -67,7 +69,7 @@ pub enum PrefaceClass {
     /// larger buffer — bytes already seen are a prefix of the next
     /// call's buffer, nothing is discarded.
     NeedMoreBytes,
-    /// The first [`ROUTE_SNIFF_LEN`] bytes matched `PRI `, committing
+    /// The first four bytes matched `PRI `, committing
     /// the connection to the h2 path, but the remaining bytes did not
     /// match the rest of the canonical preface. `PRI ` is reserved and
     /// never a valid HTTP/1.1 method, so this is neither valid h1 nor

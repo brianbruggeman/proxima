@@ -177,8 +177,8 @@ pub struct ListenerCore {
 
 impl ListenerCore {
     /// Construct with the default capacity (unbounded on `alloc`,
-    /// [`crate::sized::ADMISSION_TABLE_CAP`] on bare `no_std + no_alloc`) and
-    /// the default per-peer cap ([`crate::sized::PER_PEER_CAP_DEFAULT`]).
+    /// [`crate::admission::sized::ADMISSION_TABLE_CAP`] on bare `no_std + no_alloc`) and
+    /// the default per-peer cap ([`crate::admission::sized::PER_PEER_CAP_DEFAULT`]).
     #[must_use]
     pub fn new(policy: DispatchPolicy) -> Self {
         #[cfg(feature = "alloc")]
@@ -190,7 +190,7 @@ impl ListenerCore {
 
     /// Construct with an explicit live-connection bound and the default
     /// per-peer cap. On the no-alloc tier the bound is clamped to
-    /// [`crate::sized::ADMISSION_TABLE_CAP`] (the backing map's fixed size).
+    /// [`crate::admission::sized::ADMISSION_TABLE_CAP`] (the backing map's fixed size).
     #[must_use]
     pub fn with_capacity(policy: DispatchPolicy, capacity: usize) -> Self {
         Self::with_caps(policy, capacity, sized::PER_PEER_CAP_DEFAULT)

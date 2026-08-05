@@ -41,13 +41,6 @@ const DEFAULT_METHOD: &str = "FRAME";
 const DEFAULT_PATH: &str = "/";
 const DEFAULT_READ_CHUNK: usize = 64 * 1024;
 
-/// Length-delimited request/reply listener. Construct with [`Self::new`],
-/// tweak the synthetic request envelope with [`Self::with_method`] /
-/// [`Self::with_path`], and register on an `App` via
-/// `with_listen_protocol`. Per-serve knobs (`max_frame_bytes`,
-/// `reject_zero_len`, `idle_timeout_ms`, `read_chunk_bytes`, `method`,
-/// `path`) are read from the listener `spec` so the control plane can
-/// tune a deployment without a recompile.
 /// Wraps an accepted connection before framing — e.g. a consumer plugging in
 /// a cipher so the length prefix itself rides inside an encrypted transport.
 /// Both the input and the output are the agnostic `Box<dyn StreamConnection>`
@@ -58,6 +51,13 @@ const DEFAULT_READ_CHUNK: usize = 64 * 1024;
 pub type ConnTransform =
     Arc<dyn Fn(Box<dyn StreamConnection>) -> Box<dyn StreamConnection> + Send + Sync>;
 
+/// Length-delimited request/reply listener. Construct with [`Self::new`],
+/// tweak the synthetic request envelope with [`Self::with_method`] /
+/// [`Self::with_path`], and register on an `App` via
+/// `with_listen_protocol`. Per-serve knobs (`max_frame_bytes`,
+/// `reject_zero_len`, `idle_timeout_ms`, `read_chunk_bytes`, `method`,
+/// `path`) are read from the listener `spec` so the control plane can
+/// tune a deployment without a recompile.
 pub struct FramedListenProtocol {
     label: String,
     method: String,

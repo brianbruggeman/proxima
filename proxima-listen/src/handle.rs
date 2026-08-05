@@ -67,7 +67,8 @@ pub struct ListenerSpec {
     /// This is also how TLS composes: there is deliberately no `tls` field
     /// on this struct (a typed `Option<TlsConfig>` slot would make TLS a
     /// property of every protocol variant — a protocol × tls matrix). TLS
-    /// termination is instead [`TlsListenProtocol`], a `ListenProtocol`
+    /// termination is instead `TlsListenProtocol` (behind the `tls`
+    /// feature), a `ListenProtocol`
     /// DECORATOR that wraps whatever concrete protocol is carried here —
     /// on/off is the presence of that wrapper, composed the same way any
     /// other concrete protocol reaches this field: through [`Self::protocol`].
@@ -485,8 +486,8 @@ fn attach_tls_to_spec(spec: &mut Value, tls: &proxima_tls::TlsConfig) {
 /// composes a background-pool hop onto any [`PipeHandle`] — no new
 /// mechanism, same shape.
 ///
-/// `serve` clones the spec it's handed, stamps the `__proxima_tls` marker
-/// [`attach_tls_to_spec`] always used, and hands THAT to the wrapped
+/// `serve` clones the spec it's handed, stamps the same `__proxima_tls`
+/// marker key it always has, and hands THAT to the wrapped
 /// protocol's own `serve` — the wrapped protocol (e.g. `HttpListenProtocol`)
 /// reads the identical marker key it always has; no change on that side.
 /// `name()` delegates to the inner protocol so identity checks that key off

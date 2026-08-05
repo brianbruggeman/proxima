@@ -4,7 +4,8 @@
 //! [`crate::ListenProtocol`]: `ListenProtocol` owns a bind + an accept loop
 //! ("run one socket"); an `AnyProtocol` owns neither — it is asked "is this
 //! prefix you?" and, once chosen, "drive this one already-accepted stream."
-//! [`crate::handle::Listener::any`]'s single accept loop is the ONE thing
+//! The `Listener::builder().any()` accept loop (umbrella `proxima`
+//! crate) is the ONE thing
 //! that owns the bind; every registered candidate is a peer under it.
 //!
 //! [`ProbeVerdict`] generalizes [`crate::preface::PrefaceClass`] from "h1 vs
@@ -121,7 +122,7 @@ pub enum ProbeVerdict {
 /// peer of [`crate::ListenProtocol`], not an extension of it:
 /// `ListenProtocol` drives one bind's accept loop; `AnyProtocol` is asked to
 /// classify a prefix and then drive ONE already-accepted stream — the
-/// listener ([`crate::handle::Listener::any`]) owns the socket, the accept
+/// listener (`Listener::builder().any()`) owns the socket, the accept
 /// loop, and the [`crate::any::Classifier`] that picks among registered
 /// candidates.
 ///
