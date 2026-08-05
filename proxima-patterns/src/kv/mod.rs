@@ -4,6 +4,16 @@
 //! Folded from the former `proxima-kv` crate.
 
 #[cfg(feature = "alloc")]
+pub mod cache_key;
+#[cfg(feature = "alloc")]
+pub mod write_back;
+
+#[cfg(feature = "alloc")]
+pub use cache_key::{cache_key_for_storage, cache_key_from_request, cache_key_with_version};
+#[cfg(feature = "alloc")]
+pub use write_back::{WriteBackConditions, WriteBackRule};
+
+#[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
@@ -235,13 +245,3 @@ mod tests {
         assert!(KvCaps::bytes(1024).require_at_least_one().is_ok());
     }
 }
-
-#[cfg(feature = "alloc")]
-pub mod write_back;
-#[cfg(feature = "alloc")]
-pub use write_back::{WriteBackConditions, WriteBackRule};
-
-#[cfg(feature = "alloc")]
-pub mod cache_key;
-#[cfg(feature = "alloc")]
-pub use cache_key::{cache_key_for_storage, cache_key_from_request, cache_key_with_version};
