@@ -203,7 +203,6 @@ mod tests {
             vec![Bytes::from_static(b"x")],
             Some(Duration::ZERO),
         );
-        std::thread::sleep(Duration::from_micros(10));
         assert!(!entry.is_fresh());
     }
 
@@ -216,10 +215,11 @@ mod tests {
     #[test]
     fn touch_updates_last_access() {
         let entry = CacheEntry::new(200, vec![], vec![Bytes::new()], None);
-        let before = entry.last_access();
-        std::thread::sleep(Duration::from_micros(50));
+        // seed a stamp the wall clock is guaranteed to be past, so the
+        // assertion does not race a same-microsecond `touch`.
+        entry.last_access_micros.store(1, Ordering::Relaxed);
         entry.touch();
-        assert!(entry.last_access() > before);
+        assert!(entry.last_access() > 1);
     }
 
     #[test]
