@@ -1,7 +1,10 @@
 //! Facade-level serve errors. Wire-level detail stays in
-//! `proxima_protocols::mqtt` (`ParseError`); this layer adds transport,
-//! buffer-policy, and configuration failures. Mirrors
-//! `proxima_redis::error::RedisServeError`.
+//! `proxima_protocols::mqtt` (`ParseError`); this layer adds the transport
+//! and buffer-policy failures the connection driver can end on.
+//!
+//! MQTT v3.1.1 has no error-report packet, so a framing violation or a
+//! half-arrived packet closes the connection rather than failing it — those
+//! are `Ok(())` out of [`crate::serve_connection`], not variants here.
 
 use thiserror::Error;
 
@@ -14,10 +17,4 @@ pub enum MqttServeError {
     Pipe(#[from] proxima_core::ProximaError),
     #[error("inbound message exceeds the {limit}-byte buffer limit")]
     MessageTooLarge { limit: usize },
-    #[error("protocol error: {reason}")]
-    Protocol { reason: String },
-    #[error("connection closed mid-message")]
-    UnexpectedEof,
-    #[error("config: {0}")]
-    Config(String),
 }
