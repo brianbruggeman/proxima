@@ -818,6 +818,7 @@ fn clone_request(request: &Request<Bytes>) -> Result<Request<Bytes>, ProximaErro
 }
 
 #[cfg(test)]
+// the workspace denies unwrap/expect; tests assert through them.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;

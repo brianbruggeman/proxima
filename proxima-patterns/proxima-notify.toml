@@ -1,11 +1,10 @@
-# build-time sizing for proxima-notify-proto.
-# Read by build.rs, emitted as consts into OUT_DIR/proxima_notify_proto_sized.rs.
+# build-time sizing for proxima_patterns::alert (the former proxima-notify-proto).
+# Read by build.rs, emitted as consts into OUT_DIR/proxima_notify_sized.rs.
 # Every const-generic cap in src/ traces back to here per principle 12.
 #
 # Per-system overrides via env vars at build time:
 #
-#   PROXIMA_NOTIFY_PROTO_ALERT_LABELS_MAX=32 \
-#       cargo build -p proxima-notify-proto
+#   PROXIMA_NOTIFY_ALERT_LABELS_MAX=32 cargo build -p proxima-patterns
 #
 # Tier-3 caps: changing these directly affects stack footprint of every
 # AlertEvent / GuidanceQuestion / GuidanceAnswer instance.

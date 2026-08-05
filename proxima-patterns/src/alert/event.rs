@@ -1,5 +1,5 @@
-//! C1 of the proxima-notify initiative: tier-3 sans-IO data types + postcard
-//! codec for alert events and guidance request/response.
+//! Tier-3 sans-IO data types + postcard codec for alert events and guidance
+//! request/response.
 //!
 //! # Tier
 //!
@@ -8,7 +8,7 @@
 //! - tier-3 (`--no-default-features`): `#![no_std]`, no per-call allocation.
 //!   `heapless::String<N>` / `heapless::FnvIndexMap<K, V, N>` /
 //!   `heapless::Vec<u8, N>` with const-generic caps from
-//!   `proxima-notify-proto.toml` per principle 12.
+//!   `proxima-notify.toml` per principle 12.
 //!
 //! Wire format is postcard (sans-IO binary) — the proxima native codec, also
 //! used for binary recording (`proxima-recording/src/binary/wire.rs`).
@@ -30,7 +30,7 @@
 //! (in `proxima-recording/src/event.rs`) already exists for ad-hoc
 //! event payloads. But it requires `alloc` (`String` + `serde_json::Value`)
 //! and supports arbitrary nesting — incompatible with the tier-3 invariant
-//! and the const-generic-caps discipline. proxima-notify-proto provides a
+//! and the const-generic-caps discipline. This module provides a
 //! typed, bounded shape for the alert + guidance domain that compiles at
 //! tier-3 AND round-trips through postcard.
 

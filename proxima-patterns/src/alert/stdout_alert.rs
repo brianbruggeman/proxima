@@ -159,15 +159,8 @@ impl StdoutAlertPipeBuilder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::field_reassign_with_default,
-        clippy::type_complexity,
-        clippy::useless_vec,
-        clippy::needless_range_loop,
-        clippy::default_constructed_unit_structs
-    )]
+    // the workspace denies unwrap/expect; tests assert through them.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use bytes::Bytes;
     use proxima_primitives::pipe::header_list::HeaderList;
     use proxima_primitives::pipe::request::{Request, RequestContext};
