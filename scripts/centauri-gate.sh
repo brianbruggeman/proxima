@@ -67,6 +67,12 @@ declare -a cells=(
     "aes-gcm suite alone: builds|cargo build -p proxima-centauri --no-default-features --features aead-aes-gcm"
     "aes-gcm suite alone: tests|cargo nextest run -p proxima-centauri --no-default-features --features std,aead-aes-gcm"
     "both suites together: tests incl. cross-suite rejection|cargo nextest run -p proxima-centauri --features aead-aes-gcm"
+    # every feature at once, which no other clippy cell reaches: with both
+    # suites compiled the cipher enum holds an AES key schedule beside a
+    # 32-byte ChaCha key, and `large_enum_variant` fired only in that
+    # combination. A lint gate that never lints a shipping feature set is not
+    # a lint gate.
+    "clippy with every feature on|cargo clippy -p proxima-centauri --all-targets --all-features"
     "aes-gcm suite on thumbv7m (bare metal)|cargo build -p proxima-centauri --no-default-features --features aead-aes-gcm --lib --target thumbv7m-none-eabi"
 
     # external vectors: the first check on this crate's crypto that does not
@@ -89,6 +95,14 @@ declare -a cells=(
     # doctests: nextest skips them, and a vacuous run exits 0, so assert a
     # nonzero pass count. tee keeps the raw output in the CI log.
     "doctests (nonzero)|cargo test --doc -p proxima-centauri 2>&1 | tee /dev/stderr | grep -qE 'test result: ok\\. [1-9][0-9]* passed'"
+
+    # rustdoc, at both ends of the tier ladder. `-D warnings` reaches
+    # rustdoc::broken_intra_doc_links, and nothing else in this gate builds
+    # docs — which is how a link to a type the module does not import survived
+    # in cookie.rs from the day it was written. Both tiers, because a link to
+    # a feature-gated item resolves at one and not the other.
+    "rustdoc resolves (std tier)|cargo doc -p proxima-centauri --no-deps"
+    "rustdoc resolves (no_std + no-alloc tier)|cargo doc -p proxima-centauri --no-deps --no-default-features"
 
     # benches must keep compiling; they are the discipline log's evidence and
     # rot silently otherwise. --no-run so CI does not pay for a full sweep.
