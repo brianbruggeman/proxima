@@ -328,7 +328,7 @@ where
                             spawn_handler(stream_id, request, &dispatch, &mut handlers);
                         }
                         RequestAdmit::Shed { reason } => {
-                            tracing::debug!(
+                            proxima_telemetry::debug!(
                                 stream_id,
                                 ?reason,
                                 "h2 native request shed by listener admission"
@@ -364,7 +364,7 @@ where
                             ) {
                                 Ok(pull) => chunk_pulls.push(pull),
                                 Err(render_error) => {
-                                    tracing::warn!(
+                                    proxima_telemetry::warn!(
                                         ?render_error,
                                         stream_id,
                                         "h2 native shed-response render failed"
@@ -505,7 +505,7 @@ fn process_handler_completion(
         // RST_STREAM, or the rejection never reaches the client.
         // Genuinely internal errors keep today's RST_STREAM behaviour.
         Err(error @ ProximaError::Forbidden(_)) => {
-            tracing::debug!(stream_id, "h2 native handler rejected request");
+            proxima_telemetry::debug!(stream_id, "h2 native handler rejected request");
             let status = crate::error_render::http_status_for(&error);
             let body = crate::error_render::error_response_body(&error);
             let response = Response::new(status)
@@ -514,7 +514,7 @@ fn process_handler_completion(
             match emit_response_head_and_first_pull(connection, stream_id, response) {
                 Ok(pull) => chunk_pulls.push(pull),
                 Err(render_error) => {
-                    tracing::warn!(
+                    proxima_telemetry::warn!(
                         ?render_error,
                         stream_id,
                         "h2 native rejection render failed"
@@ -524,7 +524,7 @@ fn process_handler_completion(
             }
         }
         Err(error) => {
-            tracing::warn!(?error, stream_id, "h2 native handler error");
+            proxima_telemetry::warn!(?error, stream_id, "h2 native handler error");
             let _ = connection.send_rst(stream_id, INTERNAL_ERROR);
         }
     }
@@ -544,7 +544,7 @@ fn process_chunk_pull_completion(
             chunk_pulls.push(next_chunk_future(stream_id, body_stream));
         }
         Some(Err(error)) => {
-            tracing::warn!(?error, stream_id, "h2 native response body error");
+            proxima_telemetry::warn!(?error, stream_id, "h2 native response body error");
             let _ = connection.send_rst(stream_id, INTERNAL_ERROR);
         }
         None => {

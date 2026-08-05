@@ -5,7 +5,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use hyper::body::Incoming;
 use serde_json::Value;
-use tracing::warn;
+use proxima_telemetry::warn;
 
 use crate::http1::http_config::{HttpConfig, HttpUpstreamConfig};
 use crate::http1::hyper_body::StreamingHyperBody;
