@@ -1,5 +1,6 @@
-//! proxima's own PostgreSQL client, built on `proxima-pgwire-codec` +
-//! [`crate::scram::ScramClient`] — no `tokio-postgres`.
+//! proxima's own PostgreSQL client, built on
+//! [`proxima_protocols::pgwire_codec`] + [`crate::scram::ScramClient`] — no
+//! `tokio-postgres`.
 //!
 //! Three layers, transport-agnostic by construction:
 //! - [`session::ClientSession`] — the sans-IO protocol state machine (startup,
@@ -8,9 +9,9 @@
 //!   `Session`.
 //! - [`blocking::PgClient`] — a `std::io::Read + Write` driver around the
 //!   session (the real-PG parity harness uses it).
-//! - the async Pipe + `PipeFactory` (see `crate::client::pipe`) drive the same
-//!   session over a futures-io transport, so `proxima::Client` speaks pgwire as
-//!   just another registered protocol.
+//! - `pipe::PgwireClientUpstream` (feature `client`) — the async `Pipe`
+//!   driving the same session over a futures-io transport, so
+//!   `proxima::Client` speaks pgwire as just another registered protocol.
 
 pub mod blocking;
 pub mod config;

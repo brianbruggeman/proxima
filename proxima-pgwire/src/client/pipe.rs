@@ -3,9 +3,9 @@
 //! wire (prime, tokio, TLS-wrapped). It drives the sans-IO [`ClientSession`]
 //! over a futures-io connection and maps the SQL-over-Pipe contract
 //! ([`QueryRequest`]'s `verb` field — `Query`/`Parse`/`Execute`) to/from
-//! [`PgReply`] — no `Request`/`Response` envelope (payload-no-cell). A
-//! registered `PipeFactory` (see `crate::client::factory`) builds this, so
-//! `proxima::Client` speaks pgwire as just another protocol.
+//! [`PgReply`] — no `Request`/`Response` envelope (payload-no-cell).
+//! `proxima::PgwirePipeFactory` builds one of these from a listener spec,
+//! so `proxima::Client` speaks pgwire as just another registered protocol.
 
 use std::future::Future;
 use std::sync::Arc;

@@ -42,11 +42,7 @@ use crate::connection::CancelRegistry;
 use crate::error::ServeError;
 use crate::pipe::PgWireConnectionPipe;
 use crate::pipes::PgPipeHandle;
-
-#[cfg(feature = "tls")]
-type TlsAcceptor = futures_rustls::TlsAcceptor;
-#[cfg(not(feature = "tls"))]
-type TlsAcceptor = ();
+use crate::spec::{resolve_config, resolve_tls};
 
 /// Length-prefixed protocol code a real PostgreSQL wire connection's first
 /// 8 bytes carry: v3.0 `StartupMessage` (`196608` = `3 << 16`).
@@ -105,27 +101,6 @@ impl PgWireAnyProtocol {
         self.auth_override = Some(auth);
         self
     }
-}
-
-fn resolve_config(base: &PgServerConfig, spec: &Value) -> Result<PgServerConfig, ProximaError> {
-    match spec.get("pgwire") {
-        None => Ok(base.clone()),
-        Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("pgwire spec: {error}"))),
-    }
-}
-
-#[cfg(feature = "tls")]
-fn resolve_tls(spec: &Value) -> Result<Option<TlsAcceptor>, ProximaError> {
-    let config = proxima_tls::config_from_spec_value(spec.get(proxima_tls::SPEC_KEY))?;
-    config
-        .map(|config| proxima_tls::build_acceptor_futures_io(&config))
-        .transpose()
-}
-
-#[cfg(not(feature = "tls"))]
-fn resolve_tls(_spec: &Value) -> Result<Option<TlsAcceptor>, ProximaError> {
-    Ok(None)
 }
 
 impl AnyProtocol for PgWireAnyProtocol {

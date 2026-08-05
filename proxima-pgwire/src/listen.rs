@@ -12,14 +12,15 @@
 //! The connection is a real `Pipe`: on each accepted socket the listener
 //! calls the connection pipe's `() -> UpgradeHandler` accept hook and
 //! invokes the returned handler against the socket wrapped as a
-//! `HijackedSocket`. The query engine is the `PipeHandle` supplied to
-//! [`PgWireListenProtocol::new`]; the registry's `dispatch` is used as the
-//! query pipe only when the constructor did not set one (so a bare
-//! `App`-mounted pgwire listener still routes to the app's dispatch).
+//! `HijackedSocket`. The query engine is the [`PgPipeHandle`] supplied to
+//! [`PgWireListenProtocol::new`] — the registry's untyped `dispatch` is
+//! never a substitute, because a SQL engine is `QueryRequest -> PgReply`
+//! and `dispatch` is the envelope-shaped `Request -> Response`.
 //!
 //! Without an acceptor factory the serve call fails with a config error
 //! unless the `tokio-compat` feature provides the legacy tokio listener
-//! path (off by default; prime/proxima-stream is the first-class path).
+//! path (off by default; prime over `proxima_primitives::stream` is the
+//! first-class path).
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -32,7 +33,7 @@ use serde_json::Value;
 #[cfg(feature = "tokio-compat")]
 use std::io;
 #[cfg(feature = "tokio-compat")]
-use tracing::{debug, warn};
+use proxima_telemetry::{debug, warn};
 
 use proxima_core::ProximaError;
 use proxima_listen::{ListenProtocol, ServeContext};
@@ -51,20 +52,16 @@ use crate::auth::PgAuth;
 use crate::config::PgServerConfig;
 use crate::connection::CancelRegistry;
 use crate::pipe::PgWireConnectionPipe;
-
-#[cfg(feature = "tls")]
-type TlsAcceptor = futures_rustls::TlsAcceptor;
-#[cfg(not(feature = "tls"))]
-type TlsAcceptor = ();
+use crate::spec::{TlsAcceptor, resolve_config, resolve_tls};
 
 /// PostgreSQL wire listener. Register on an `App` via
 /// `with_listen_protocol`, or drive directly with
-/// `ListenProtocolFluent::fluent()`. The `query` `PipeHandle` is the SQL
-/// engine: a `Pipe` that matches on [`verb`] verbs and returns
-/// [`crate::pipe_contract::PgReply`].
+/// `ListenProtocolFluent::fluent()`. The `query` [`PgPipeHandle`] is the SQL
+/// engine: a `Pipe` that matches on [`crate::pipe_contract::Verb`] and
+/// returns [`crate::pipe_contract::PgReply`].
 pub struct PgWireListenProtocol {
     label: String,
-    query: Option<PgPipeHandle>,
+    query: PgPipeHandle,
     config: PgServerConfig,
     auth_override: Option<PgAuth>,
     registry: Arc<CancelRegistry>,
@@ -75,20 +72,7 @@ impl PgWireListenProtocol {
     pub fn new(label: impl Into<String>, query: PgPipeHandle) -> Self {
         Self {
             label: label.into(),
-            query: Some(query),
-            config: PgServerConfig::default(),
-            auth_override: None,
-            registry: Arc::new(CancelRegistry::new()),
-        }
-    }
-
-    /// Mounts without a constructor-supplied engine: the registry's
-    /// `dispatch` becomes the query pipe at serve time.
-    #[must_use]
-    pub fn from_dispatch(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            query: None,
+            query,
             config: PgServerConfig::default(),
             auth_override: None,
             registry: Arc::new(CancelRegistry::new()),
@@ -113,36 +97,18 @@ impl PgWireListenProtocol {
     }
 }
 
-fn resolve_config(base: &PgServerConfig, spec: &Value) -> Result<PgServerConfig, ProximaError> {
-    match spec.get("pgwire") {
-        None => Ok(base.clone()),
-        Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("pgwire spec: {error}"))),
-    }
-}
-
-#[cfg(feature = "tls")]
-fn resolve_tls(spec: &Value) -> Result<Option<TlsAcceptor>, ProximaError> {
-    let config = proxima_tls::config_from_spec_value(spec.get(proxima_tls::SPEC_KEY))?;
-    config
-        .map(|config| proxima_tls::build_acceptor_futures_io(&config))
-        .transpose()
-}
-
-#[cfg(not(feature = "tls"))]
-fn resolve_tls(_spec: &Value) -> Result<Option<TlsAcceptor>, ProximaError> {
-    Ok(None)
-}
-
 impl ListenProtocol for PgWireListenProtocol {
     fn name(&self) -> &str {
         &self.label
     }
 
+    /// `_dispatch` is the registry's untyped `Request -> Response` handle;
+    /// pgwire's engine is the typed `QueryRequest -> PgReply` pipe held on
+    /// `self`, so there is nothing to fall back to.
     fn serve(
         &self,
         bind: SocketAddr,
-        dispatch: PipeHandle,
+        _dispatch: PipeHandle,
         spec: &Value,
         context: ServeContext,
         shutdown: oneshot::Receiver<()>,
@@ -169,20 +135,10 @@ impl ListenProtocol for PgWireListenProtocol {
             .get(proxima_listen::handle::REUSEPORT_SPEC_KEY)
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let Some(query) = self.query.clone() else {
-            return Box::pin(async move {
-                Err(ProximaError::Config(
-                    "pgwire listener requires a typed PgPipeHandle query engine; \
-                     use PgWireListenProtocol::new to supply one"
-                        .into(),
-                ))
-            });
-        };
-        let _ = dispatch;
         let runtime = context.runtime.clone();
         let connection_pipe = build_connection_pipe(
             &label,
-            query,
+            self.query.clone(),
             auth,
             config,
             &self.registry,
