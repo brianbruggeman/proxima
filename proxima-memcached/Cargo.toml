@@ -94,7 +94,6 @@ serde_json = { workspace = true }
 # TOML-file loading in the `MemcachedServerConfig` config doctest.
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
-rstest = { workspace = true }
 # the tokio<->futures::io compat wrapper (`TokioTcpConnection`) this
 # crate's own `tests/any_protocol_end_to_end.rs` needs to drive
 # `MemcachedAnyProtocol` over a real loopback socket (mirrors
