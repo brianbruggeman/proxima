@@ -117,6 +117,7 @@ impl<U: StreamUpstream> TlsStreamUpstream<U> {
     /// the hostname to present via SNI and verify the server cert
     /// against; an invalid name surfaces lazily on the first
     /// `connect()` as an `io::Error` (the ctor cannot fail).
+    #[must_use]
     pub fn new(inner: U, server_name: impl Into<String>, config: Arc<ClientConfig>) -> Self {
         let raw = server_name.into();
         let server_name = ServerName::try_from(raw.clone())
