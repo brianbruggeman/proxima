@@ -210,6 +210,18 @@ declare -a FLOOR_CRATE_CELLS=(
     # codec itself lives in proxima-protocols::mqtt); `client` and `listen`
     # both imply `std`, so bare is the only floor and there is no `alloc` cell.
     "proxima-mqtt-bare|proxima-mqtt|"
+    # proxima-memcached is the sixth and last protocol-fleet crate with the
+    # identical fold-era shape -- `default = ["std"]`, `std = []` gating
+    # nothing, no `#![no_std]`, no cell here -- while its `client` feature
+    # comment advertised that `--no-default-features` "leaves the bare sans-IO
+    # codec ... for bare-metal embedding". Measured before the fix on
+    # 2026-08-05: `cargo check -p proxima-memcached --no-default-features
+    # --target thumbv7m-none-eabi` exits 101 on "`std` is required by
+    # `proxima_memcached` because it does not declare `#![no_std]`". Like
+    # redis, dns and mqtt, the bare tier is re-exports only (the codec itself
+    # lives in proxima-protocols::memcached); `client` and `listen` both imply
+    # `std`, so bare is the only floor and there is no `alloc` cell.
+    "proxima-memcached-bare|proxima-memcached|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
