@@ -42,7 +42,7 @@ use serde_json::Value;
 #[cfg(feature = "schema-std")]
 use proxima_core::ProximaError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Schema {
     Bool,
@@ -115,7 +115,7 @@ pub enum StringFormat {
     Hostname,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructField {
     pub name: String,
     pub schema: Schema,
@@ -123,7 +123,7 @@ pub struct StructField {
     pub flags: FieldFlags,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldFlags {
     /// when true the field may be absent from an instance value
     #[serde(default)]
@@ -136,7 +136,7 @@ pub struct FieldFlags {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumVariant {
     pub name: String,
     /// when None, the variant is a unit (matched by string equality)
@@ -144,13 +144,13 @@ pub struct EnumVariant {
     pub payload: Option<Box<Schema>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     pub path: Vec<PathSegment>,
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
     Field(String),
     Index(usize),
@@ -967,7 +967,7 @@ mod round_trip_tests {
             Ok(value) => value,
             Err(err) => panic!("json deserialize failed: {err}"),
         };
-        assert_eq!(json, to_json(&back), "json round-trip is stable");
+        assert_eq!(original, back, "json round-trip preserves the schema");
     }
 
     #[cfg(feature = "schema-std")]
@@ -982,11 +982,7 @@ mod round_trip_tests {
             Ok(value) => value,
             Err(err) => panic!("toml deserialize failed: {err}\n--- toml was ---\n{toml_text}"),
         };
-        assert_eq!(
-            to_json(&original),
-            to_json(&back),
-            "toml round-trip preserves the schema"
-        );
+        assert_eq!(original, back, "toml round-trip preserves the schema");
     }
 
     // use serde-PRODUCED json (well-formed, includes the `value` content) and
@@ -999,20 +995,19 @@ mod round_trip_tests {
             max_items: None,
         };
         let canonical = to_json(&seq);
-        assert!(
-            matches!(
-                serde_json::from_str::<Schema>(&canonical),
-                Ok(Schema::Seq { .. })
-            ),
+        assert_eq!(
+            serde_json::from_str::<Schema>(&canonical).ok(),
+            Some(seq.clone()),
             "canonical seq loads: {canonical}"
         );
 
         // swap only the tag: does the json-schema `array` spelling alias to Seq?
         let array_form = canonical.replacen("\"seq\"", "\"array\"", 1);
         let parsed = serde_json::from_str::<Schema>(&array_form);
-        assert!(
-            matches!(parsed, Ok(Schema::Seq { .. })),
-            "the `array` alias loads as Seq, got {parsed:?} from {array_form}"
+        assert_eq!(
+            parsed.ok(),
+            Some(seq),
+            "the `array` alias loads as the same Seq, from {array_form}"
         );
     }
 }
