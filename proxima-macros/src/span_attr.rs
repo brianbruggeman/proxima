@@ -1,56 +1,26 @@
-use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
-use syn::{Error, Expr, ExprLit, Ident, ItemFn, Lit, LitStr, Meta, Token, parse_quote, parse2};
+use syn::{Error, Expr, Ident, ItemFn, LitStr, Meta, Token, parse_quote, parse2};
 
-// Resolve `…::recorder::Recorder` for whatever crate invoked `#[span]`: a direct
-// `proxima-telemetry` dep, the `proxima` umbrella re-export, or this crate
-// itself. Declarative macros get this for free via `$crate`; proc-macros do not.
+use crate::crate_path;
+use crate::runtime_args::extract_str_lit;
+
 fn recorder_path() -> TokenStream {
-    if let Ok(found) = crate_name("proxima-telemetry") {
-        return match found {
-            FoundCrate::Itself => quote!(crate::recorder::Recorder),
-            FoundCrate::Name(name) => {
-                let krate = Ident::new(&name, Span::call_site());
-                quote!(::#krate::recorder::Recorder)
-            }
-        };
-    }
-    match crate_name("proxima") {
-        Ok(FoundCrate::Itself) => quote!(crate::telemetry::recorder::Recorder),
-        Ok(FoundCrate::Name(name)) => {
-            let krate = Ident::new(&name, Span::call_site());
-            quote!(::#krate::telemetry::recorder::Recorder)
-        }
-        Err(_) => quote!(::proxima_telemetry::recorder::Recorder),
-    }
+    crate_path::resolve(
+        "proxima-telemetry",
+        &quote!(recorder::Recorder),
+        &quote!(telemetry::recorder::Recorder),
+    )
 }
 
-// Resolve `…::spanned::Spanned` the same way `recorder_path` resolves
-// `Recorder` — this crate has no Cargo dependency on proxima-telemetry
-// (proc-macro crates stay dependency-free); the path is only ever named in
-// the TOKEN OUTPUT handed back to the invoking crate, which does depend on
-// telemetry one way or another.
 fn spanned_path() -> TokenStream {
-    if let Ok(found) = crate_name("proxima-telemetry") {
-        return match found {
-            FoundCrate::Itself => quote!(crate::spanned::Spanned),
-            FoundCrate::Name(name) => {
-                let krate = Ident::new(&name, Span::call_site());
-                quote!(::#krate::spanned::Spanned)
-            }
-        };
-    }
-    match crate_name("proxima") {
-        Ok(FoundCrate::Itself) => quote!(crate::telemetry::spanned::Spanned),
-        Ok(FoundCrate::Name(name)) => {
-            let krate = Ident::new(&name, Span::call_site());
-            quote!(::#krate::telemetry::spanned::Spanned)
-        }
-        Err(_) => quote!(::proxima_telemetry::spanned::Spanned),
-    }
+    crate_path::resolve(
+        "proxima-telemetry",
+        &quote!(spanned::Spanned),
+        &quote!(telemetry::spanned::Spanned),
+    )
 }
 
 struct SpanArgs {
@@ -164,19 +134,6 @@ fn parse_args(args: TokenStream) -> Result<SpanArgs, Error> {
     }
 
     Ok(parsed)
-}
-
-fn extract_str_lit(expr: &Expr, field: &str) -> Result<String, Error> {
-    match expr {
-        Expr::Lit(ExprLit {
-            lit: Lit::Str(lit_str),
-            ..
-        }) => Ok(lit_str.value()),
-        _ => Err(Error::new_spanned(
-            expr,
-            format!("expected string literal for `{field}`"),
-        )),
-    }
 }
 
 fn validate_level(level: &str, span: Span) -> Result<(), Error> {

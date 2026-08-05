@@ -43,13 +43,13 @@
 //! [`FanIn`]: proxima_primitives::pipe::FanIn
 //! [`AndThen`]: proxima_primitives::pipe::AndThen
 
-use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::{Error, Expr, Ident, Token};
 
+use crate::crate_path;
 use crate::pipe_attr::{PipeArgs, pipe_path};
 use crate::pipe_bang::build_leaf;
 
@@ -77,28 +77,14 @@ pub fn expand_fanin(input: TokenStream) -> Result<TokenStream, Error> {
     expand(input, FanKind::In)
 }
 
-/// Resolve `::proxima_core::markers::DropSafe`, reachable either as a direct
-/// dependency (`proxima-core`, e.g. from inside `proxima-primitives`
-/// itself) or through the `proxima` umbrella's `pub use proxima_core as
-/// error;` re-export. Mirrors `pipe_attr::pipe_path`'s fallback chain.
+/// `DropSafe` sits one level deeper through the umbrella, which re-exports
+/// `proxima_core` as `error`.
 fn drop_safe_path() -> TokenStream {
-    if let Ok(found) = crate_name("proxima-core") {
-        return match found {
-            FoundCrate::Itself => quote!(crate::markers::DropSafe),
-            FoundCrate::Name(name) => {
-                let krate = Ident::new(&name, Span::call_site());
-                quote!(::#krate::markers::DropSafe)
-            }
-        };
-    }
-    match crate_name("proxima") {
-        Ok(FoundCrate::Itself) => quote!(crate::error::markers::DropSafe),
-        Ok(FoundCrate::Name(name)) => {
-            let krate = Ident::new(&name, Span::call_site());
-            quote!(::#krate::error::markers::DropSafe)
-        }
-        Err(_) => quote!(::proxima_core::markers::DropSafe),
-    }
+    crate_path::resolve(
+        "proxima-core",
+        &quote!(markers::DropSafe),
+        &quote!(error::markers::DropSafe),
+    )
 }
 
 fn expand(input: TokenStream, kind: FanKind) -> Result<TokenStream, Error> {
