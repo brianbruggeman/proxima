@@ -228,6 +228,27 @@ declare -a FLOOR_CRATE_CELLS=(
     # lives in proxima-protocols::memcached); `client` and `listen` both imply
     # `std`, so bare is the only floor and there is no `alloc` cell.
     "proxima-memcached-bare|proxima-memcached|"
+    # proxima-auth declares `#![cfg_attr(not(feature = "std"), no_std)]` and is
+    # consumed at that tier already -- proxima-pgwire/Cargo.toml:24 takes it
+    # `default-features = false, features = ["alloc"]` -- but the crate had no
+    # cell here, so the tier it advertises and ships had never been compiled for
+    # an embedded target. Measured 2026-08-05: it builds clean, so this locks in
+    # a claim that was true but unproven. `alloc` is the real floor: the token
+    # lifecycle FSM and the `Handshake` trait are `String`/`Vec` throughout.
+    "proxima-auth|proxima-auth|alloc"
+    # the three form features are default-OFF, so the cell above never reaches
+    # sigv4/digest/spnego -- which is exactly where the cliff risk lives, since
+    # each drags a crypto or codec dependency (hmac, sha2, md-5, subtle, base64,
+    # hex) whose DEFAULT features are std. They are pinned `default-features =
+    # false` in the manifest precisely to survive here; without this cell,
+    # nothing would notice a `cargo add` that dropped the pin.
+    "proxima-auth-forms|proxima-auth|alloc,signing,digest,negotiate"
+    # deliberately NO bare `--features ""` cell: `alloc` gates no code in this
+    # crate (lib.rs's `extern crate alloc` is unconditional, matching its
+    # proxima-codec sibling), so a bare cell would compile the identical objects
+    # as the `alloc` cell while implying a no-alloc tier that does not exist.
+    # Nothing in proxima-auth works without a heap -- every form carries owned
+    # credential material -- so `alloc` is the finest tier there is to expose.
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
