@@ -17,8 +17,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use serde_json::Value;
 use proxima_telemetry::debug;
+use serde_json::Value;
 use url::Url;
 
 use proxima_core::ProximaError;

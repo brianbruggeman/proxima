@@ -49,8 +49,8 @@ use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::stream::StreamExt;
-use serde_json::Value;
 use proxima_telemetry::{debug, warn};
+use serde_json::Value;
 
 use proxima_core::ProximaError;
 use proxima_core::io::{FromFutures, IntoFutures, Prepend};
@@ -904,6 +904,9 @@ impl AcceptDriver {
 /// drain stops accepting connections AND sheds all requests, bounded-
 /// waiting for both the connection table and the request counter to reach
 /// zero.
+// one accept loop threading every listener-scoped knob: bind, factories,
+// admission, TLS, drain, and the reject/blacklist seams. splitting it into a
+// params struct would only move the same fields behind one more name.
 #[allow(clippy::too_many_arguments)]
 async fn serve_via_factory(
     factory: Arc<dyn proxima_primitives::stream::AcceptorFactory>,
@@ -1193,6 +1196,8 @@ async fn drain_requests_only(admission: &ConnAdmission, timeout: std::time::Dura
 /// as the TCP path, since a control-plane UDS listener deserves the exact
 /// same graceful-shutdown guarantee as a network one.
 #[cfg(feature = "http1")]
+// the UDS sibling of `serve_via_factory`, so it carries the same
+// listener-scoped state; kept in one signature to stay diffable against it.
 #[allow(clippy::too_many_arguments)]
 async fn serve_uds(
     path: std::path::PathBuf,
@@ -1347,6 +1352,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> StreamConnection for Ud
 /// matched candidate with NO bound handler is a configuration mistake, not
 /// a silent drop: it is logged as a `ProximaError::Config` naming the
 /// protocol.
+// the whole classify-then-drive context travels together: one connection,
+// the candidate set, the handler map, the spec, admission, and both seams.
 #[allow(clippy::too_many_arguments)]
 async fn classify_and_drive(
     conn: Box<dyn proxima_primitives::stream::StreamConnection>,
@@ -1421,6 +1428,8 @@ async fn classify_and_drive(
 
 /// The classifier path shared by plaintext connections and (post-handshake,
 /// ALPN-inconclusive) TLS connections.
+// same argument list as `classify_and_drive`, by construction -- it is the
+// tail this delegates to.
 #[allow(clippy::too_many_arguments)]
 async fn classify_and_drive_plaintext(
     conn: Box<dyn proxima_primitives::stream::StreamConnection>,
