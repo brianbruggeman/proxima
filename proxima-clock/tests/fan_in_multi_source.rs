@@ -20,18 +20,9 @@ use core::future::Future;
 
 use proxima_clock::ticks::Ticks;
 use proxima_core::markers::DropSafe;
+use proxima_primitives::block_on;
 use proxima_primitives::pipe::fan_in::{Exhausted, FanIn, Select};
 use proxima_primitives::pipe::primitives::UnpinPipe;
-
-fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-    let mut pinned = core::pin::pin!(future);
-    let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-    loop {
-        if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-            return output;
-        }
-    }
-}
 
 /// A redundant tick source that answers a fixed number of times, then
 /// permanently exhausts — modeling a GPS PPS signal whose fix is lost, or

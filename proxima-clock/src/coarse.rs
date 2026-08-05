@@ -81,17 +81,8 @@ impl Pipe for &TickCell {
 mod tests {
     use super::TickCell;
     use crate::ticks::Ticks;
+    use proxima_primitives::block_on;
     use proxima_primitives::pipe::primitives::Pipe;
-
-    fn block_on<Fut: core::future::Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
-            }
-        }
-    }
 
     #[test]
     fn set_then_get_round_trips() {

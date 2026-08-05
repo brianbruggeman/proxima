@@ -156,17 +156,8 @@ mod tests {
     use super::{AnchorCell, ToUnixNanos};
     use crate::ticks::Ticks;
     use crate::unix_nanos::UnixNanos;
+    use proxima_primitives::block_on;
     use proxima_primitives::pipe::primitives::Pipe;
-
-    fn block_on<Fut: core::future::Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
-            }
-        }
-    }
 
     // 24 MHz: the ARM generic timer's real rate, and one that does not
     // divide evenly into 1e9 (1_000_000_000 / 24_000_000 = 41.66...) — the
