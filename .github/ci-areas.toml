@@ -51,7 +51,6 @@ packages = [
     "proxima-primitives",
     "proxima-patterns",
     "proxima-recording",
-    "proxima-listeners-stream",
     "proxima-listen",
     "proxima-net",
     "proxima-runtime",
@@ -71,6 +70,7 @@ paths = [
     "scripts/proxima-config-gate.sh",
     "scripts/proxima-test-gate.sh",
     "scripts/proxima-storage-gate.sh",
+    "scripts/proxima-listen-gate.sh",
     "scripts/_floor-crate-matrix.sh",
     ".github/workflows/no-std.yml",
 ]

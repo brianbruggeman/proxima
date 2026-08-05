@@ -143,6 +143,21 @@ declare -a FLOOR_CRATE_CELLS=(
     # `nvme` does not imply `std`, so this cell is a real second floor, not a
     # superset of the one above.
     "proxima-storage-nvme|proxima-storage|nvme"
+    # proxima-listen/src/lib.rs:5 opens by claiming a "Base (no_std +
+    # no_alloc)" tier -- the `admission` FSM (ungated) plus the `preface`
+    # classifier (ungated) -- and the crate had no cell here at all until the
+    # 2026-08-05 consistency pass, so nothing had ever compiled it for an
+    # embedded target. It is not enough to run the crate's own
+    # `--no-default-features` command on the host: proxima-listen dev-depends
+    # on the `proxima` umbrella, so host feature unification turns `std` back
+    # on and 122 tests still run with no std tier exercised at all. Only the
+    # cliff proves the claim. Measured 2026-08-05: both cells build clean.
+    "proxima-listen-bare-no-alloc|proxima-listen|"
+    # the alloc rung of the same two modules: `alloc` swaps the admission
+    # table's fixed-cap heapless::FnvIndexMap for a growable hashbrown::HashMap
+    # (proxima-listen/src/admission/state.rs), so it is a genuinely different
+    # compile, not a superset that the bare cell already covered.
+    "proxima-listen-alloc|proxima-listen|alloc"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

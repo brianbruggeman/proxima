@@ -220,6 +220,29 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-storage-gate.sh
 
+  # proxima-listen-gate.sh — same shape again: `default = ["std"]` leaves
+  # `stream`/`tokio`/`tls`/`framed-any` off, and the `proxima` dev-dependency
+  # silently unifies three of the four back on, so only `framed-any` shows the
+  # hole. Measured 2026-08-05: the default command ran 124 tests,
+  # `--all-features` ran 130, and the six `any::framed_any` tests plus that
+  # module's doctest had never run under any crate-scoped command. Also the
+  # only place rustdoc runs on this crate (eleven broken links at default
+  # features on the pre-audit tree).
+  proxima-listen-gate:
+    name: proxima-listen-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-listen-gate.sh
+
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
   # directives. `continue-on-error: true` until DC5 finishes gating
