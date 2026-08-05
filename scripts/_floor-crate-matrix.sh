@@ -57,6 +57,13 @@ declare -a FLOOR_CRATE_CELLS=(
     # compile with nothing turned on at all. Proving only `alloc` left the
     # no-alloc half of every one of those two-tier modules ungated.
     "proxima-core-bare-no-alloc|proxima-core|"
+    # proxima-telemetry claims a no_std + no-alloc floor in lib.rs:17-19
+    # (`sized` + `id` + `error` + `trace::{status,kind}`) and had NO cell here
+    # at all until the 2026-08-04 consistency pass. Only the BARE cell is
+    # honest: `--features alloc` does not reach the cliff, because `fastrand`'s
+    # default `std` feature fails first and proxima-primitives' parking_lot
+    # second. Adding an `alloc` cell would be a red gate, not a proof.
+    "proxima-telemetry-bare-no-alloc|proxima-telemetry|"
     "proxima-protocols|proxima-protocols|tcp,mqtt,amqp,kafka,memcached,nvme,inet,pgwire_codec,process,jsonrpc,websocket_frame,proxy_protocol,redis,hpack,http1_codec,http2_codec,http3_codec-alloc,json_framing,quic-alloc,dns,grpc_framing,protobuf_wire,websocket_handshake,codec-pipe"
     # proxima-codec's own Cargo.toml calls `alloc` its tier-1 floor and four
     # crates consume it there (proxima-kafka, proxima-protocols' -codec-trait

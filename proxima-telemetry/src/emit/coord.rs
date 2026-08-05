@@ -49,7 +49,7 @@ pub enum CoordError {
     /// An empty string, or a path with an empty segment (`1..2`).
     #[error("empty coordinate")]
     Empty,
-    /// More than [`MAX_DEPTH`](self) segments.
+    /// More than `MAX_DEPTH` segments.
     #[error("coordinate too deep: {got} segments (max {max})")]
     TooDeep { got: usize, max: u32 },
     /// A segment exceeds [`SEG_MAX`].
