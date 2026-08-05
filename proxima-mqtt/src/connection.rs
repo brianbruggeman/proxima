@@ -27,6 +27,7 @@ use proxima_core::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::pipe::{FanIn, HeaderList, Select};
+use proxima_telemetry::error;
 
 use proxima_protocols::mqtt::encode::{
     encode_ack, encode_connack, encode_pingresp, encode_suback, iter_subscribe_filters,
@@ -371,7 +372,7 @@ where
                             return Ok(());
                         }
                         FrameOutcome::InternalError(error) => {
-                            tracing::error!(error = %error, "mqtt handler error");
+                            error!(error = %error, "mqtt handler error");
                             return Err(MqttServeError::Pipe(error));
                         }
                     }
@@ -382,11 +383,11 @@ where
                 Advanced::ProtocolError { reason, .. } => {
                     // MQTT v3.1.1 has no error-report packet — a broker
                     // closes on a framing violation rather than replying.
-                    tracing::error!(reason, "mqtt protocol violation");
+                    error!(reason, "mqtt protocol violation");
                     return Ok(());
                 }
                 Advanced::MessageTooLarge => {
-                    tracing::error!(limit = config.max_message_bytes, "mqtt message too large");
+                    error!(limit = config.max_message_bytes, "mqtt message too large");
                     return Err(MqttServeError::MessageTooLarge {
                         limit: config.max_message_bytes,
                     });
