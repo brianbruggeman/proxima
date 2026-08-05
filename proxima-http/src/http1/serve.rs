@@ -642,6 +642,8 @@ where
 /// response, racing it against a single-byte reader.read for
 /// client-disconnect detection (mirrors the buffered path's
 /// cancel-token race).
+// the streaming dispatch needs the connection, both socket halves, the
+// request, and the listener-scoped admission/quiesce state in one frame.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_streaming_request<R, W>(
     connection: &mut Connection,
@@ -1620,6 +1622,8 @@ mod tests {
         type Out = Response<Bytes>;
         type Err = ProximaError;
 
+        // `SendPipe::call` returns `impl Future + Send`; an `async fn` here
+        // would not carry the Send bound the trait requires.
         #[allow(clippy::manual_async_fn)]
         fn call(
             &self,
@@ -1640,6 +1644,8 @@ mod tests {
         type Out = Response<Bytes>;
         type Err = ProximaError;
 
+        // `SendPipe::call` returns `impl Future + Send`; an `async fn` here
+        // would not carry the Send bound the trait requires.
         #[allow(clippy::manual_async_fn)]
         fn call(
             &self,
