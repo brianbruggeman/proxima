@@ -104,8 +104,15 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
         }
     }
 
-    async fn publish(&self, body: &[u8]) -> Result<Response<Bytes>, ProximaError> {
-        let (topic, qos, retain, payload) = split_publish_body(body);
+    /// The request/reply rhythm every non-streaming verb shares: reuse the
+    /// cached `CONNECT`ed connection (dialing one on first use), queue the
+    /// verb through `submit`, drive the session to its single reply. A
+    /// transport-level failure drops the cache so the next call redials; a
+    /// rejected `submit` leaves it intact, since nothing reached the wire.
+    async fn request_reply<Submit>(&self, submit: Submit) -> Result<Response<Bytes>, ProximaError>
+    where
+        Submit: FnOnce(&mut ClientSession) -> Result<(), ClientError>,
+    {
         let mut guard = self.cached.lock().await;
         if guard.is_none() {
             *guard = Some(self.connect().await?);
@@ -114,10 +121,7 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
             .as_mut()
             .ok_or_else(|| ProximaError::Upstream("mqtt cache empty".into()))?;
 
-        cached
-            .session
-            .submit_publish(&topic, &payload, qos, retain)
-            .map_err(client_error_to_proxima)?;
+        submit(&mut cached.session).map_err(client_error_to_proxima)?;
         match drive_to_complete(&mut cached.session, &mut cached.conn).await {
             Ok(reply) => Ok(Response::ok(Bytes::from(encode_reply(&reply)))),
             Err(error) => {
@@ -125,52 +129,23 @@ impl<U: StreamUpstream> MqttClientUpstream<U> {
                 Err(client_error_to_proxima(error))
             }
         }
+    }
+
+    async fn publish(&self, body: &[u8]) -> Result<Response<Bytes>, ProximaError> {
+        let (topic, qos, retain, payload) = split_publish_body(body);
+        self.request_reply(|session| session.submit_publish(&topic, &payload, qos, retain))
+            .await
     }
 
     async fn unsubscribe(&self, body: &[u8]) -> Result<Response<Bytes>, ProximaError> {
         let filters = split_filters(body);
-        let mut guard = self.cached.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect().await?);
-        }
-        let cached = guard
-            .as_mut()
-            .ok_or_else(|| ProximaError::Upstream("mqtt cache empty".into()))?;
-
         let refs: Vec<&[u8]> = filters.iter().map(Vec::as_slice).collect();
-        cached
-            .session
-            .submit_unsubscribe(&refs)
-            .map_err(client_error_to_proxima)?;
-        match drive_to_complete(&mut cached.session, &mut cached.conn).await {
-            Ok(reply) => Ok(Response::ok(Bytes::from(encode_reply(&reply)))),
-            Err(error) => {
-                *guard = None;
-                Err(client_error_to_proxima(error))
-            }
-        }
+        self.request_reply(|session| session.submit_unsubscribe(&refs))
+            .await
     }
 
     async fn ping(&self) -> Result<Response<Bytes>, ProximaError> {
-        let mut guard = self.cached.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect().await?);
-        }
-        let cached = guard
-            .as_mut()
-            .ok_or_else(|| ProximaError::Upstream("mqtt cache empty".into()))?;
-
-        cached
-            .session
-            .submit_ping()
-            .map_err(client_error_to_proxima)?;
-        match drive_to_complete(&mut cached.session, &mut cached.conn).await {
-            Ok(reply) => Ok(Response::ok(Bytes::from(encode_reply(&reply)))),
-            Err(error) => {
-                *guard = None;
-                Err(client_error_to_proxima(error))
-            }
-        }
+        self.request_reply(ClientSession::submit_ping).await
     }
 
     /// Sends `DISCONNECT` (best effort — MQTT defines no acknowledgement)
