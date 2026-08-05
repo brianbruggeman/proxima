@@ -125,6 +125,9 @@ impl ListenProtocol for StreamListenProtocol {
 /// injected `AcceptorFactory`. Binds through the factory (prime- or
 /// tokio-backed) and feeds each accepted boxed `StreamConnection` to the
 /// same `handle_connection` as the legacy path.
+// every argument is a distinct per-serve value read off the spec or the
+// ServeContext seam; a params struct would carry no invariant the tuple
+// does not, so it would be a relocation, not a type.
 #[allow(clippy::too_many_arguments)]
 async fn serve_via_factory(
     factory: Arc<dyn proxima_primitives::stream::AcceptorFactory>,
@@ -191,6 +194,8 @@ async fn drain_connections(
     }
 }
 
+// same reason as `serve_via_factory` above, plus the admission handle and
+// its release channel; no invariant binds them into a type.
 #[allow(clippy::too_many_arguments)]
 fn spawn_handler<C: StreamConnection>(
     conn: C,
