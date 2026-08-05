@@ -17,18 +17,9 @@ use core::future::Future;
 use proxima_clock::anchor::{AnchorCell, ToUnixNanos};
 use proxima_clock::ticks::Ticks;
 use proxima_clock::unix_nanos::UnixNanos;
+use proxima_primitives::block_on;
 use proxima_primitives::pipe::ext::PipeExt;
 use proxima_primitives::pipe::primitives::Pipe;
-
-fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-    let mut pinned = core::pin::pin!(future);
-    let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-    loop {
-        if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-            return output;
-        }
-    }
-}
 
 /// A fake memory-mapped counter register: word 0 of a page a real driver
 /// would have obtained via `mmap`/DMA. `HardwareTicks` holds a raw pointer
