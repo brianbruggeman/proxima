@@ -12,19 +12,37 @@
 //! [`proxima_listen::stream::DatagramProtocolListenProtocol`] drives: fed
 //! `now` and borrowed inbound bytes via [`DatagramProtocol::on_datagram`],
 //! it fills a caller-owned buffer with outbound bytes via
-//! [`DatagramProtocol::poll_transmit`], and [`DatagramProtocol::on_timeout`]
+//! [`DatagramProtocol::transmit`], and [`DatagramProtocol::on_timeout`]
 //! fires exactly at [`DatagramProtocol::next_deadline`] — the QUIC-handshake-
 //! retransmit shape (PTO firing with no inbound datagram) that seam exists
 //! for. [`Listener::listen_protocol`] is the single reference point that
 //! wires this state machine onto that driver for a real `serve()` call.
 //!
-//! ```ignore
-//! let (protocol, mut accept_rx) = Listener::listen_protocol("quic", accept_fn);
-//! // protocol implements proxima_listen::ListenProtocol; register it with
-//! // a serve() call the way any other ListenProtocol is registered.
-//! while let Some(handle) = accept_rx.next().await {
-//!     // per-connection setup (e.g. open H3 control stream).
-//! }
+//! ```
+//! use std::sync::Arc;
+//!
+//! use proxima_protocols::quic::connection::Connection;
+//! use proxima_protocols::quic::tls::mock::MockTlsProvider;
+//! use proxima_quic::native::{AcceptFn, Listener};
+//!
+//! let accept_fn: AcceptFn<MockTlsProvider> =
+//!     Arc::new(|dcid, scid, local_scid, now| {
+//!         Connection::new_server(
+//!             MockTlsProvider::script_server(Vec::new()),
+//!             b"",
+//!             dcid,
+//!             scid,
+//!             local_scid,
+//!             now,
+//!         )
+//!     });
+//!
+//! // `protocol` implements proxima_listen::ListenProtocol; register it with
+//! // a serve() call the way any other ListenProtocol is registered. Every
+//! // connection any listener it builds accepts arrives on `accept_rx`:
+//! //     while let Some(handle) = accept_rx.next().await { /* setup */ }
+//! let (protocol, accept_rx) = Listener::listen_protocol("quic", accept_fn);
+//! # let _ = (protocol, accept_rx);
 //! ```
 //!
 //! # The generic trait discards information; the concrete type doesn't
@@ -43,7 +61,6 @@
 //! through the trait.
 
 use std::collections::BTreeMap;
-use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -58,16 +75,22 @@ use proxima_protocols::quic::endpoint::{
 use proxima_protocols::quic::packet::header::Header;
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::TlsProvider;
+use rand::{RngExt, TryRng};
 
 /// QUIC version 1 (RFC 9000), big-endian, for the supported-versions list
 /// of an outbound Version Negotiation packet.
 const QUIC_V1_VERSION: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 
-/// Listener-level errors.
+/// Listener-level errors. No `Io` variant, deliberately: this listener
+/// never touches a socket (see the module header), so every failure it
+/// can report is either the caller's `accept_fn` refusing a new
+/// connection or the demux table being full. Socket errors belong to
+/// the driver that owns the socket.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ListenerError {
-    Io(io::Error),
+    /// The caller-supplied [`AcceptFn`] refused to build a connection
+    /// for a `NewInitial` datagram.
     Connection(ConnectionError),
     /// Per-path/per-connection table at capacity; new Initial dropped.
     AcceptTableFull,
@@ -76,20 +99,13 @@ pub enum ListenerError {
 impl core::fmt::Display for ListenerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "io: {err}"),
-            Self::Connection(err) => write!(f, "connection: {err:?}"),
+            Self::Connection(err) => write!(f, "connection: {err}"),
             Self::AcceptTableFull => f.write_str("accept table at capacity"),
         }
     }
 }
 
 impl std::error::Error for ListenerError {}
-
-impl From<io::Error> for ListenerError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
-}
 
 impl From<ConnectionError> for ListenerError {
     fn from(err: ConnectionError) -> Self {
@@ -124,6 +140,10 @@ struct ConnEntry<P: TlsProvider> {
 /// Per-connection accept policy — caller supplies this when binding
 /// so the Listener knows how to construct a fresh `Connection<P>`
 /// from a `NewInitial` classification.
+// dyn, not a generic param: the accept-policy set is open (every consumer
+// writes its own), and `listen_protocol`'s build closure has to clone one
+// policy into every `Listener` a rebind constructs — a generic would leak
+// that closure's unnameable type through the returned protocol.
 pub type AcceptFn<P> = Arc<
     dyn Fn(&[u8], &[u8], &[u8], Instant) -> Result<Connection<P>, ConnectionError> + Send + Sync,
 >;
@@ -137,11 +157,11 @@ pub struct Listener<P: TlsProvider> {
     connections: BTreeMap<u32, ConnEntry<P>>,
     next_handle: u32,
     /// Live handle order, mirrored against `connections`, used to
-    /// round-robin `poll_transmit` fairly across connections without
-    /// reallocating a scan buffer on every call.
+    /// round-robin [`DatagramProtocol::transmit`] fairly across
+    /// connections without reallocating a scan buffer on every call.
     handle_order: Vec<u32>,
     /// Index into `handle_order` (mod its length) the next
-    /// `poll_transmit` call resumes draining from.
+    /// [`DatagramProtocol::transmit`] call resumes draining from.
     transmit_cursor: usize,
     /// Function the listener calls when a NewInitial datagram arrives —
     /// it constructs a fresh `Connection<P>` keyed by the client's CIDs.
@@ -352,7 +372,7 @@ impl<P: TlsProvider> Listener<P> {
                 Ok(DatagramIngest::Existing { handle, error })
             }
             DatagramClassification::NewInitial { dcid, scid, .. } => {
-                let local_scid = generate_local_scid(dcid);
+                let local_scid = generate_local_scid();
                 let connection = (self.accept_fn)(dcid, scid, &local_scid, now)?;
                 let handle = ConnectionHandle(self.next_handle);
                 self.next_handle = self.next_handle.saturating_add(1);
@@ -412,14 +432,16 @@ impl<P: TlsProvider> Listener<P> {
                 // cannot itself emit wire bytes — only `transmit` does —
                 // so the encoded packet is staged in `pending_vn` and
                 // drained on the next `transmit` call.
-                tracing::debug!(
+                proxima_telemetry::debug!(
                     peer_version,
                     "listener: unsupported version; replying with Version Negotiation"
                 );
                 let mut buf = [0u8; 64];
                 match build_version_negotiation(dcid, scid, &mut buf) {
                     Some(written) => self.pending_vn.push((buf[..written].to_vec(), peer)),
-                    None => tracing::warn!("listener: version-negotiation encode failed"),
+                    None => {
+                        proxima_telemetry::warn!("listener: version-negotiation encode failed");
+                    }
                 }
                 Ok(DatagramIngest::VersionNegotiated)
             }
@@ -512,7 +534,7 @@ impl<P: TlsProvider + Send + 'static> DatagramProtocol for Listener<P> {
                         self.transmit_cursor = self.transmit_cursor.wrapping_add(1);
                     }
                     Err(err) => {
-                        tracing::warn!(
+                        proxima_telemetry::warn!(
                             ?err,
                             handle,
                             "listener: transmit failed; skipping connection this tick"
@@ -621,9 +643,10 @@ fn act_and_surface<P: TlsProvider>(
         | ConnectionError::Aead(_)
         | ConnectionError::PacketNumber(_)
         | ConnectionError::TransientRecvBufferFull { .. } => {
-            tracing::debug!(
+            proxima_telemetry::debug!(
                 ?err,
-                handle,
+                connection_id = handle,
+                peer = %peer,
                 "listener: packet-level error; dropping packet"
             );
             None
@@ -646,23 +669,19 @@ fn act_and_surface<P: TlsProvider>(
 /// lookup keyed by the exact `datagram[1..1+LOCAL_SCID_LEN]` slice.
 const LOCAL_SCID_LEN: usize = 8;
 
-/// Generate a per-connection server SCID. RFC 9000 §5.3 requires this
-/// be **unpredictable to anyone other than the generating endpoint** —
-/// a deterministic derivation from the peer's DCID (which travels in
-/// the clear) lets any on-path observer pre-compute it, enabling
-/// targeted spoofing and blocking future hardening (CID rotation,
-/// retry-token integrity). `SysRng` reads straight from the OS
-/// entropy source; on an OS-RNG failure (which would also break TLS
-/// entirely) we fall back to a thread RNG so the listener doesn't
-/// have a unique panic surface, but log loud.
-fn generate_local_scid(_dcid: &[u8]) -> [u8; LOCAL_SCID_LEN] {
-    use rand::{RngExt, TryRng};
+/// Generate a per-connection server SCID. Takes NO input by design:
+/// RFC 9000 §5.3 requires the SCID be **unpredictable to anyone other
+/// than the generating endpoint** — a deterministic derivation from the
+/// peer's DCID (which travels in the clear) lets any on-path observer
+/// pre-compute it, enabling targeted spoofing and blocking future
+/// hardening (CID rotation, retry-token integrity). `SysRng` reads
+/// straight from the OS entropy source; on an OS-RNG failure (which
+/// would also break TLS entirely) we fall back to a thread RNG so the
+/// listener doesn't have a unique panic surface, but log loud.
+fn generate_local_scid() -> [u8; LOCAL_SCID_LEN] {
     let mut out = [0u8; LOCAL_SCID_LEN];
     if let Err(err) = rand::rngs::SysRng.try_fill_bytes(&mut out) {
-        tracing::warn!(
-            ?err,
-            "proxima-quic listener SysRng failed; falling back to thread RNG"
-        );
+        proxima_telemetry::warn!(?err, "listener: SysRng failed; falling back to thread RNG");
         rand::rng().fill(&mut out[..]);
     }
     out
