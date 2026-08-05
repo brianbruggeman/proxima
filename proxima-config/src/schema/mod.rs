@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 #[cfg(feature = "schema-std")]
 use proxima_core::ProximaError;
@@ -144,7 +145,8 @@ pub struct EnumVariant {
     pub payload: Option<Box<Schema>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{}: {message}", self.path_string())]
 pub struct ValidationError {
     pub path: Vec<PathSegment>,
     pub message: String,
@@ -199,14 +201,6 @@ impl ValidationError {
         buffer
     }
 }
-
-impl core::fmt::Display for ValidationError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "{}: {}", self.path_string(), self.message)
-    }
-}
-
-impl core::error::Error for ValidationError {}
 
 /// Resolves `Ref` schemas during validation.
 pub trait SchemaResolver {
@@ -887,6 +881,17 @@ mod tests {
             .at_field("user")
             .at_index(3);
         assert_eq!(err.path_string(), "$[3].user.name");
+        assert_eq!(
+            alloc::format!("{err}"),
+            "$[3].user.name: bad",
+            "Display carries the located path, not just the message"
+        );
+    }
+
+    #[test]
+    fn validation_error_at_the_root_displays_the_dollar_path() {
+        let err = ValidationError::new("expected bool");
+        assert_eq!(alloc::format!("{err}"), "$: expected bool");
     }
 
     #[cfg(feature = "schema-std")]
