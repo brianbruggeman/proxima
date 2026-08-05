@@ -39,6 +39,11 @@ use proxima_core::ProximaError;
 const PIPES_SUBDIR: &str = "pipes";
 #[cfg(feature = "store-std")]
 const LISTENERS_SUBDIR: &str = "listeners";
+/// Names an in-progress atomic write. `atomic_write_toml` writes it and
+/// `load_records` skips it; both sides read this one constant so a torn file
+/// can never be mistaken for a record.
+#[cfg(feature = "store-std")]
+const TMP_PREFIX: &str = ".tmp-";
 
 /// Filesystem-backed desired-state store. Holds JSON-shaped pipe and
 /// listener specs keyed by name, serialized as TOML on disk.
@@ -172,7 +177,7 @@ fn atomic_write_toml<T: Serialize>(target: &Path, value: &T) -> Result<(), Proxi
             target.display()
         ))
     })?;
-    let tmp = parent.join(format!(".tmp-{}", random_suffix()));
+    let tmp = parent.join(format!("{TMP_PREFIX}{}", random_suffix()));
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -219,7 +224,7 @@ fn load_records<T: serde::de::DeserializeOwned>(
         if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
             continue;
         }
-        if stem.starts_with(".tmp-") {
+        if stem.starts_with(TMP_PREFIX) {
             continue;
         }
         if let Some(record) = load_record_optional::<T>(&path)? {
@@ -249,7 +254,7 @@ fn io_error(target: &Path, action: &str, err: std::io::Error) -> ProximaError {
     ProximaError::Config(format!("state store: {action} {}: {err}", target.display()))
 }
 
-// 12-hex-char suffix for tmp files. `random` doesn't need to be cryptographic;
+// 16-hex-char suffix for tmp files. `random` doesn't need to be cryptographic;
 // uniqueness across concurrent writers is the only requirement.
 #[cfg(feature = "store-std")]
 fn random_suffix() -> String {
@@ -361,19 +366,37 @@ mod tests {
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
+    // simulate a writer that died mid-write: a stray tmp file must not surface
+    // as a record. Both spellings, because `load_records` rejects them on
+    // different lines — the name `atomic_write_toml` actually produces has no
+    // extension at all and dies on the `.toml` test, so only a `.toml`-suffixed
+    // one ever reaches the TMP_PREFIX test.
     #[test]
     fn tmp_files_left_behind_are_ignored_on_list() {
-        // simulate a writer that died mid-write — a stray .tmp-* file
-        // must not surface as a pipe record on subsequent reads.
         let dir = tempdir().expect("tempdir");
         let store = StateStore::open(dir.path()).expect("open");
-        let stray = store
-            .root()
-            .join(PIPES_SUBDIR)
-            .join(".tmp-deadbeef-cafebabe");
-        fs::write(&stray, "garbage = junk").expect("write stray");
+        let pipes = store.root().join(PIPES_SUBDIR);
+        for stray in [
+            format!("{TMP_PREFIX}{}", random_suffix()),
+            format!("{TMP_PREFIX}{}.toml", random_suffix()),
+        ] {
+            fs::write(pipes.join(&stray), "garbage = junk").expect("write stray");
+        }
         let listed = store.list_pipes().expect("list");
-        assert!(listed.is_empty(), "stray .tmp-* ignored");
+        assert!(listed.is_empty(), "stray tmp files ignored");
+    }
+
+    #[test]
+    fn a_live_record_still_lists_alongside_a_stray_tmp_file() {
+        let dir = tempdir().expect("tempdir");
+        let store = StateStore::open(dir.path()).expect("open");
+        store.put_pipe(&pipe("echo", "synth")).expect("put");
+        let stray = format!("{TMP_PREFIX}{}.toml", random_suffix());
+        fs::write(store.root().join(PIPES_SUBDIR).join(stray), "garbage = junk")
+            .expect("write stray");
+        let listed = store.list_pipes().expect("list");
+        assert_eq!(listed.len(), 1, "the real record survives the tmp filter");
+        assert_eq!(listed.get("echo").expect("echo").name, "echo");
     }
 
     #[test]
@@ -392,5 +415,66 @@ mod tests {
         fs::write(&path, "this = is = not = toml =").expect("write garbage");
         let outcome = store.get_pipe("broken");
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+}
+
+// `store` without `store-std` is the record schema on its own — the tier a
+// no_std daemon holds desired state at before any filesystem exists under it.
+// It had no test at all: every case above needs `StateStore`.
+#[cfg(all(test, feature = "store"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod alloc_tier_tests {
+    use super::*;
+    use alloc::vec;
+    use serde_json::json;
+
+    #[test]
+    fn pipe_record_round_trips_with_its_flattened_spec() {
+        let record = PipeRecord {
+            name: "echo".into(),
+            spec: json!({ "synth": { "status": 200, "body": "hi" } }),
+            requires: vec!["upstream".into()],
+        };
+        let encoded = serde_json::to_value(&record).expect("encode");
+        assert_eq!(
+            encoded["synth"]["status"], 200,
+            "spec is flattened onto the record, not nested under `spec`"
+        );
+        let decoded: PipeRecord = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn empty_requires_is_omitted_and_defaults_back() {
+        let record = PipeRecord {
+            name: "echo".into(),
+            spec: json!({ "kind": "synth" }),
+            requires: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&record).expect("encode");
+        assert!(
+            encoded.get("requires").is_none(),
+            "an empty requires list stays off the wire: {encoded}"
+        );
+        let decoded: PipeRecord = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded, record, "and defaults back to empty on read");
+    }
+
+    #[test]
+    fn listener_record_round_trips_with_its_flattened_spec() {
+        let record = ListenerRecord {
+            name: "public".into(),
+            spec: json!({ "bind": "0.0.0.0:8080" }),
+        };
+        let encoded = serde_json::to_value(&record).expect("encode");
+        assert_eq!(encoded["bind"], "0.0.0.0:8080");
+        let decoded: ListenerRecord = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn a_record_missing_its_name_is_rejected() {
+        let outcome = serde_json::from_value::<ListenerRecord>(json!({ "bind": "0.0.0.0:8080" }));
+        assert!(outcome.is_err(), "name is required");
     }
 }
