@@ -1,6 +1,6 @@
 [package]
 name = "proxima-auth"
-description = "Sans-IO authentication FSM cores (token lifecycle, handshake, request-signing) for the proxima client/server auth axis — FSM in the middle, Pipe at the edges."
+description = "Sans-IO authentication cores for the proxima auth axis, no_std + alloc: token lifecycle (refresh-ahead, single-flight), the challenge/response handshake contract, AWS SigV4 request signing, RFC 7616 Digest, RFC 4559 SPNEGO framing — FSM in the middle, Pipe at the edges."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,19 +16,25 @@ hmac = { version = "0.12", default-features = false, optional = true }
 md-5 = { version = "0.10", default-features = false, optional = true }
 sha2 = { version = "0.10", default-features = false, optional = true }
 subtle = { version = "2.6.1", default-features = false, optional = true }
+thiserror.workspace = true
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 
 [features]
 default = ["std"]
-std = ["alloc"]
+std = ["alloc", "thiserror/std"]
+# the crate's floor tier: no_std + alloc. Every form below carries `String` /
+# `Vec` credential material, so each names `alloc` rather than relying on it
+# being pulled in by something else — selecting one form alone still resolves
+# to a buildable tier. There is no no-alloc rung to expose: nothing here works
+# without a heap.
 alloc = []
 # request-signing (auth form #5): AWS SigV4 / HMAC — HMAC-SHA256 + lowercase hex.
-signing = ["dep:hmac", "dep:sha2", "dep:hex"]
+signing = ["alloc", "dep:hmac", "dep:sha2", "dep:hex"]
 # challenge/response handshake (auth form #4): HTTP Digest (RFC 7616) — MD5/SHA-256
 # H + lowercase hex; constant-time response compare via subtle.
-digest = ["dep:md-5", "dep:sha2", "dep:hex", "dep:subtle"]
+digest = ["alloc", "dep:md-5", "dep:sha2", "dep:hex", "dep:subtle"]
 # SPNEGO / Negotiate (RFC 4559/4178): base64 HTTP transport + negotiate-loop FSM.
-negotiate = ["dep:base64"]
+negotiate = ["alloc", "dep:base64"]
 
 [lints]
 workspace = true
