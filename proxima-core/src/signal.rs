@@ -85,14 +85,19 @@ impl Level {
         })
     }
 
+    // a panic while some other thread held the registry poisons it, but the
+    // registry is just a list of waker slots — structurally intact either way.
+    // Recovering through into_inner is what keeps a poisoned lock from turning
+    // a shutdown signal into a silent hang. Same handling as time::drivers::mock.
+    fn waiters(&self) -> impl core::ops::DerefMut<Target = WaiterRegistry> + '_ {
+        self.waiters.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
     fn fire(&self) {
         if self.fired.swap(true, Ordering::AcqRel) {
             return;
         }
-        let drained = match self.waiters.lock() {
-            Ok(mut guard) => core::mem::take(&mut *guard),
-            Err(_) => return,
-        };
+        let drained = core::mem::take(&mut *self.waiters());
         for slot in drained {
             slot.wake();
         }
@@ -203,9 +208,7 @@ impl Future for Fired {
         if this.slot.is_none() {
             let slot = Arc::new(WakerSlot::new());
             for level in this.levels.iter() {
-                if let Ok(mut waiters) = level.waiters.lock() {
-                    waiters.push(slot.clone());
-                }
+                level.waiters().push(slot.clone());
             }
             this.slot = Some(slot);
         }
@@ -226,9 +229,9 @@ impl Drop for Fired {
             return;
         };
         for level in self.levels.iter() {
-            if let Ok(mut waiters) = level.waiters.lock() {
-                waiters.retain(|candidate| !Arc::ptr_eq(candidate, &slot));
-            }
+            level
+                .waiters()
+                .retain(|candidate| !Arc::ptr_eq(candidate, &slot));
         }
     }
 }
@@ -269,6 +272,7 @@ impl Drop for SignalGuard {
 #[cfg(all(test, not(feature = "loom")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
 
@@ -376,6 +380,35 @@ mod tests {
             assert_eq!(signal.levels[0].waiters.lock().unwrap().len(), 1);
         }
         assert_eq!(signal.levels[0].waiters.lock().unwrap().len(), 0);
+    }
+
+    // a shutdown signal that silently declines to fire is a hang, so a panic
+    // elsewhere must not be able to disarm it. The registry is only a list of
+    // waker slots, so recovering the poisoned guard is sound.
+    #[test]
+    fn a_poisoned_waiter_registry_still_wakes_its_waiters() {
+        let signal = Signal::new();
+        let mut fired = signal.fired();
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(Pin::new(&mut fired).poll(&mut cx), Poll::Pending);
+
+        let poisoner = signal.clone();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let _held = poisoner.levels[0].waiters.lock().expect("uncontended lock");
+            panic!("poison the waiter registry");
+        }));
+        assert!(outcome.is_err(), "the poisoning closure must have unwound");
+        assert!(signal.levels[0].waiters.is_poisoned());
+
+        signal.fire();
+
+        assert_eq!(
+            counter.0.load(Ordering::Relaxed),
+            1,
+            "a poisoned registry must still deliver the wakeup"
+        );
+        assert_eq!(Pin::new(&mut fired).poll(&mut cx), Poll::Ready(()));
     }
 
     #[test]
