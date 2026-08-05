@@ -11,17 +11,22 @@ use proxima_protocols::quic::streams::StreamDirection;
 use proxima_protocols::quic::time::Instant;
 use proxima_protocols::quic::tls::TlsProvider;
 use proxima_quic::native::{Endpoint, EndpointError};
+use thiserror::Error;
 
 use super::config::ClientConfig;
 use super::driver::{DriverState, drive_client_step};
 
 /// Client-side facade error.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ClientError {
-    Endpoint(EndpointError),
+    #[error("endpoint: {0}")]
+    Endpoint(#[from] EndpointError),
+    #[error("h3: {0:?}")]
     H3(proxima_protocols::http3_codec::client::ClientError),
+    #[error("driver: {0:?}")]
     Driver(proxima_protocols::quic::connection::ConnectionError),
+    #[error("illegal in state {state}: method {method}")]
     IllegalInState {
         state: &'static str,
         method: &'static str,
@@ -31,33 +36,12 @@ pub enum ClientError {
     /// another stream. The connection is healthy. Caller should wait for
     /// in-flight streams to complete and for the peer to issue a
     /// MAX_STREAMS frame, then retry [`Client::open_request`].
+    #[error("stream credit exhausted: all bidi slots in use or peer MAX_STREAMS limit reached")]
     StreamCreditExhausted,
 }
 
-impl core::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Endpoint(err) => write!(f, "endpoint: {err}"),
-            Self::H3(err) => write!(f, "h3: {err:?}"),
-            Self::Driver(err) => write!(f, "driver: {err:?}"),
-            Self::IllegalInState { state, method } => {
-                write!(f, "illegal in state {state}: method {method}")
-            }
-            Self::StreamCreditExhausted => f.write_str(
-                "stream credit exhausted: all bidi slots in use or peer MAX_STREAMS limit reached",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ClientError {}
-
-impl From<EndpointError> for ClientError {
-    fn from(err: EndpointError) -> Self {
-        Self::Endpoint(err)
-    }
-}
-
+// hand-rolled rather than `#[from]`: the proto-crate `ClientError` does not
+// implement `std::error::Error`, which thiserror's `#[from]` requires.
 impl From<proxima_protocols::http3_codec::client::ClientError> for ClientError {
     fn from(err: proxima_protocols::http3_codec::client::ClientError) -> Self {
         Self::H3(err)
