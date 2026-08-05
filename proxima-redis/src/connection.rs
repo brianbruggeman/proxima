@@ -27,6 +27,7 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::{FanIn, Pipe, PipeExt, Select, SendPipe, SubscriptionId};
+use proxima_telemetry::error;
 
 use proxima_protocols::redis::{
     Advanced, ConnMode, Connection as RespConnection, Frame, Limits, RedisRequest, RespValue,
@@ -489,7 +490,7 @@ where
                             .await
                         }
                         Err(reason) => {
-                            tracing::error!(reason, "redis protocol violation");
+                            error!(reason, "redis protocol violation");
                             write_reply(
                                 out,
                                 &RespValue::Error(format!("ERR Protocol error: {reason}")),
@@ -511,7 +512,7 @@ where
                             return Ok(());
                         }
                         FrameOutcome::InternalError(error) => {
-                            tracing::error!(error = %error, "redis handler error");
+                            error!(error = %error, "redis handler error");
                             write_reply(out, &RespValue::Error("ERR internal error".to_string()));
                             flush_out(write_half, out).await?;
                             return Err(RedisServeError::Pipe(error));
@@ -522,7 +523,7 @@ where
                     }
                 }
                 Advanced::ProtocolError { reason, .. } => {
-                    tracing::error!(reason, "redis malformed frame");
+                    error!(reason, "redis malformed frame");
                     write_reply(
                         out,
                         &RespValue::Error(format!("ERR Protocol error: {reason}")),
@@ -531,7 +532,7 @@ where
                     return Ok(());
                 }
                 Advanced::MessageTooLarge => {
-                    tracing::error!(limit = config.max_message_bytes, "redis message too large");
+                    error!(limit = config.max_message_bytes, "redis message too large");
                     write_reply(
                         out,
                         &RespValue::Error(format!(
