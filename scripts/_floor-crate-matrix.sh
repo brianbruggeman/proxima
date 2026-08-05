@@ -37,6 +37,11 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-net|proxima-net|alloc"
     "proxima-runtime|proxima-runtime|alloc"
     "proxima-core|proxima-core|alloc"
+    # proxima-core's FINEST tier is stricter than its `alloc` cell above: arch,
+    # datagram_batch, factory::Named, markers, per_core, ring and time all
+    # compile with nothing turned on at all. Proving only `alloc` left the
+    # no-alloc half of every one of those two-tier modules ungated.
+    "proxima-core-bare-no-alloc|proxima-core|"
     "proxima-protocols|proxima-protocols|tcp,mqtt,amqp,kafka,memcached,nvme,inet,pgwire_codec,process,jsonrpc,websocket_frame,proxy_protocol,redis,hpack,http1_codec,http2_codec,http3_codec-alloc,json_framing,quic-alloc,dns,grpc_framing,protobuf_wire,websocket_handshake,codec-pipe"
     # proxima-clock has no `alloc` feature at all -- every cell above proves
     # the no_std + alloc tier (`--features alloc`); this one proves the
