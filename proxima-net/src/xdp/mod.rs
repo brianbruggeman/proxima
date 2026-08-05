@@ -25,31 +25,29 @@ pub mod sized {
     include!(concat!(env!("OUT_DIR"), "/proxima_net_xdp_sized.rs"));
 }
 
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub mod bpf;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub mod packet_listener;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
-pub mod readiness;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub mod stream_listener;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub mod sys;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub mod umem;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub mod xsk;
 
 pub use error::XdpError;
 pub use ring::{ConsumerIndex, ProducerIndex};
 
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use bpf::XdpProgram;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use packet_listener::XdpPacketListener;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use stream_listener::{XdpStreamConnection, XdpStreamListener, XdpStreamUpstream};
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use umem::Umem;
-#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use xsk::{CompletionRing, FillRing, RingSizes, RxRing, TxRing, UmemConfig, XskSocket};
