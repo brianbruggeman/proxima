@@ -165,22 +165,27 @@ impl DatagramProtocol for DnsDatagramProtocol {
         _now: Instant,
         buf: &mut [u8],
     ) -> Result<Option<(usize, SocketAddr)>, Self::Err> {
-        let Some((bytes, peer)) = self.pending.pop_front() else {
-            return Ok(None);
-        };
-        if bytes.len() > buf.len() {
-            warn!(
-                label = %self.label,
-                %peer,
-                len = bytes.len(),
-                scratch = buf.len(),
-                "dns reply exceeds the listener's transmit scratch buffer; dropping"
-            );
-            return Ok(None);
+        // `Ok(None)` ends the driver's whole drain loop for this tick, and
+        // `next_deadline` never arms one — so skipping past an undeliverable
+        // reply has to continue the drain, not return None, or every reply
+        // staged behind it in the same batched tick waits for the next
+        // inbound datagram to ship.
+        while let Some((bytes, peer)) = self.pending.pop_front() {
+            if bytes.len() > buf.len() {
+                warn!(
+                    label = %self.label,
+                    %peer,
+                    len = bytes.len(),
+                    scratch = buf.len(),
+                    "dns reply exceeds the listener's transmit scratch buffer; dropping"
+                );
+                continue;
+            }
+            let len = bytes.len();
+            buf[..len].copy_from_slice(&bytes);
+            return Ok(Some((len, peer)));
         }
-        let len = bytes.len();
-        buf[..len].copy_from_slice(&bytes);
-        Ok(Some((len, peer)))
+        Ok(None)
     }
 }
 
@@ -208,13 +213,13 @@ mod tests {
         }
     }
 
-    fn example_com_query_bytes(id: u16) -> Vec<u8> {
+    fn query_bytes_for(id: u16, name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         encode::encode_query(
             id,
             true,
             encode::EncodeQuestion {
-                name: "example.com.",
+                name,
                 qtype: 1,
                 qclass: 1,
             },
@@ -222,6 +227,10 @@ mod tests {
         )
         .unwrap();
         out
+    }
+
+    fn example_com_query_bytes(id: u16) -> Vec<u8> {
+        query_bytes_for(id, "example.com.")
     }
 
     struct StaticAnswerPipe;
@@ -316,6 +325,40 @@ mod tests {
         poll_once(protocol.on_datagram(now, peer, &query_bytes)).unwrap();
 
         let mut scratch = [0u8; 2048];
+        assert!(
+            poll_once(protocol.transmit(now, &mut scratch))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_reply_too_large_for_the_scratch_does_not_strand_the_next_one() {
+        let handler = into_dns_handle(StaticAnswerPipe);
+        let mut protocol =
+            DnsDatagramProtocol::new("dns-test", handler, Arc::new(DnsServerConfig::default()));
+        let peer = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 11)),
+            42000,
+        );
+        let now = Instant::from_monotonic(core::time::Duration::ZERO);
+
+        // the handler echoes the query name into its answer, so a near-maximal
+        // name makes a reply no 128-byte transmit scratch can carry. The
+        // driver batches a whole recv burst before draining, so both replies
+        // stage in the same tick.
+        let long_label = "a".repeat(60);
+        let long_name = format!("{long_label}.{long_label}.{long_label}.");
+        poll_once(protocol.on_datagram(now, peer, &query_bytes_for(1, &long_name))).unwrap();
+        poll_once(protocol.on_datagram(now, peer, &query_bytes_for(2, "b.io."))).unwrap();
+
+        let mut scratch = [0u8; 128];
+        let (len, _) = poll_once(protocol.transmit(now, &mut scratch))
+            .unwrap()
+            .expect("the second reply still ships once the oversized one is skipped");
+        let message = proxima_protocols::dns::codec_trait::parse_message(&scratch[..len]).unwrap();
+        assert_eq!(message.header.id, 2);
+
         assert!(
             poll_once(protocol.transmit(now, &mut scratch))
                 .unwrap()
