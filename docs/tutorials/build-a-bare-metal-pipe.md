@@ -1,6 +1,6 @@
 # Build a bare-metal (no_std) pipe
 
-**Prerequisites:** [Foundations](./00-foundations.md) — the base sans-IO `Pipe` (the **transform** role, not the served one).
+**Prerequisites:** [Foundations](./00-foundations.md) — the base sans-IO `Pipe` in its **transform** form. Nothing here is served behind a listener, so you never reach `Handler`.
 **You will:** run the same `Pipe` trait on bare metal — no heap, no executor, no OS — and turn config into build-time constants baked before the program exists.
 **New concepts (in order):** the sans-IO `Pipe` under `#![no_std]` (a fixed-capacity `RingSink`, no `Box`/`Vec`/alloc) · `block_on` via `Waker::noop` (a polling loop is the whole runtime) · build-time config constants (`build.rs` bakes a TOML into `pub const`s).
 **Answer key:** [`examples/no-std/src/lib.rs`](../../examples/no-std/src/lib.rs) — `cargo build -p proxima-example-no-std` (no flags = the `no_std` proof).
