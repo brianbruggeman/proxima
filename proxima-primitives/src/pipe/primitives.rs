@@ -402,6 +402,7 @@ mod marker_propagation {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{AndThen, Pipe, SendPipe};
+    use crate::block_on;
     use crate::pipe::ext::PipeExt;
     use core::convert::Infallible;
     use core::future::Future;
@@ -410,19 +411,6 @@ mod tests {
         AllocFree, Commutative, Deterministic, DropSafe, IdempotentSideEffectFree, IsPure, NoStd,
         Reproducible, WithoutFilesystem, WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime,
     };
-
-    /// Dependency-free executor for the always-ready probe futures — keeps the
-    /// leaf crate no_std-pure even in tests (the `proxima` umbrella test macro
-    /// would be a dependency cycle). `Waker::noop` is stable since 1.85.
-    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
-            }
-        }
-    }
 
     /// Pure passthrough probe: carries every marker, impls both forms so it
     /// exercises `AndThen` on the no-Send root AND the cross-core form.

@@ -77,23 +77,13 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::block_on;
     use crate::pipe::clock::testing::RecordingClock;
     use crate::pipe::resilience::backoff::{Backoff, Jitter};
     use crate::pipe::resilience::deadline::Deadline;
     use crate::pipe::retry_rules::RetryRules;
-    use core::task::Poll;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-
-    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let Poll::Ready(output) = pinned.as_mut().poll(&mut cx) {
-                return output;
-            }
-        }
-    }
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct StatusOut(Option<u16>);

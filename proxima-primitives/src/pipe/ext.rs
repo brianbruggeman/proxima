@@ -90,19 +90,8 @@ impl<P: Pipe> PipeExt for P {}
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{FanInStrategy, Pipe, PipeExt};
+    use crate::block_on;
     use core::future::Future;
-
-    // dependency-free executor, matching `primitives.rs`'s own test helper —
-    // no `proxima::test` dependency needed to prove the sugar layer works.
-    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-        let mut pinned = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        loop {
-            if let core::task::Poll::Ready(output) = pinned.as_mut().poll(&mut context) {
-                return output;
-            }
-        }
-    }
 
     #[derive(Debug, PartialEq, Eq)]
     struct Overflow;
