@@ -40,7 +40,7 @@ zstd.workspace = true
 brotli = "8.0.3"
 
 [dev-dependencies]
-proxima = { path = "..", features = ["tcp", "test-support"] }
+proxima = { path = "..", features = ["http1", "tcp", "test-support", "tokio"] }
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
 rstest.workspace = true
 tempfile.workspace = true
@@ -60,7 +60,7 @@ intercept-replay = ["intercept-capture"]
 intercept-config = ["intercept-capture", "dep:conflaguration", "dep:bon", "dep:serde"]
 # transparent QUIC/h3 intercept (observe): forged-cert termination + h3 decode.
 # the QUIC stack stays out of the default TCP build.
-quic-intercept = ["dep:proxima-http", "proxima-protocols/http3_codec-alloc", "proxima-protocols/quic-tls-rustls"]
+quic-intercept = ["dep:proxima-http", "proxima-protocols/http3_codec-alloc", "proxima-protocols/quic-tls-rustls", "tokio/time"]
 # proxima-primitives (folds in the former proxima-sync) is always-on
 # post-merge; delta-tee is now purely a source-level cfg gate (see
 # src/pipe.rs, src/tee.rs), no dependency toggle needed.
