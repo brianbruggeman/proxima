@@ -111,8 +111,18 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn remaining(&self) -> usize {
+        self.buffer.len() - self.position
+    }
+
     fn take(&mut self, length: usize) -> Result<&'a [u8], WireError> {
-        let end = self.position + length;
+        // checked, not `+`: `length` comes from an attacker-controlled i32
+        // prefix, and on a 32-bit target that sum wraps rather than merely
+        // overshooting the buffer.
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(WireError::InvalidLength(i32::MAX))?;
         if end > self.buffer.len() {
             return Err(WireError::Short);
         }
@@ -183,7 +193,7 @@ impl<'a> Reader<'a> {
         if count < -1 {
             return Err(WireError::InvalidLength(count));
         }
-        let mut items = Vec::with_capacity(count as usize);
+        let mut items = Vec::with_capacity(reserve_for(count, self.remaining()));
         for _ in 0..count {
             items.push(item(self)?);
         }
@@ -205,12 +215,23 @@ impl<'a> Reader<'a> {
         if count < -1 {
             return Err(WireError::InvalidLength(count));
         }
-        let mut items = Vec::with_capacity(count as usize);
+        let mut items = Vec::with_capacity(reserve_for(count, self.remaining()));
         for _ in 0..count {
             items.push(item(self)?);
         }
         Ok(Some(items))
     }
+}
+
+/// How much to pre-allocate for a declared array of `count` elements with
+/// `remaining` bytes left to read. `count` is an untrusted 4-byte prefix:
+/// a 20-byte frame can legally declare `i32::MAX` elements, and reserving
+/// that many is an out-of-memory abort from one small request. Every
+/// element costs at least one byte on the wire, so `remaining` is a true
+/// upper bound on how many can actually arrive — the decode still fails
+/// with [`WireError::Short`], just without the allocation first.
+fn reserve_for(count: i32, remaining: usize) -> usize {
+    usize::try_from(count).unwrap_or(0).min(remaining)
 }
 
 // `pub(crate)`: `crate::client::session` needs `write_i16`/`write_i32`/
@@ -231,10 +252,19 @@ fn write_i64(out: &mut Vec<u8>, value: i64) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+/// Kafka's `STRING` is i16-length-prefixed, so a longer value has no wire
+/// representation at all and this infallible encode surface can only
+/// truncate. Cutting on a char boundary keeps the frame well-formed
+/// (a mid-codepoint cut is invalid utf-8 the peer rejects at a random
+/// offset); unlike an over-long `BYTES`, an over-long `STRING` still fits
+/// the envelope, so nothing downstream would catch it.
 pub(crate) fn write_string(out: &mut Vec<u8>, value: &str) {
-    let length = i16::try_from(value.len()).unwrap_or(i16::MAX);
-    write_i16(out, length);
-    out.extend_from_slice(&value.as_bytes()[..length as usize]);
+    let mut length = value.len().min(i16::MAX as usize);
+    while !value.is_char_boundary(length) {
+        length -= 1;
+    }
+    write_i16(out, i16::try_from(length).unwrap_or(i16::MAX));
+    out.extend_from_slice(&value.as_bytes()[..length]);
 }
 
 fn write_bytes(out: &mut Vec<u8>, value: &[u8]) {
@@ -890,6 +920,58 @@ mod tests {
                 version: 9,
             }
         );
+    }
+
+    #[test]
+    fn reserve_for_caps_a_declared_count_at_the_bytes_actually_present() {
+        assert_eq!(reserve_for(i32::MAX, 0), 0);
+        assert_eq!(reserve_for(i32::MAX, 12), 12);
+        assert_eq!(reserve_for(3, 4096), 3);
+        assert_eq!(reserve_for(-7, 4096), 0);
+    }
+
+    #[test]
+    fn a_declared_array_count_past_the_buffer_reports_short() {
+        // acks + timeout_ms + a topics array claiming i32::MAX entries, in a
+        // 10-byte body: reserving the declared count would ask the allocator
+        // for 2^31 elements.
+        let mut wire = Vec::new();
+        write_i16(&mut wire, 1);
+        write_i32(&mut wire, 1500);
+        write_i32(&mut wire, i32::MAX);
+        let error = decode_request(ApiKey::Produce.to_i16(), 0, &wire).unwrap_err();
+        assert_eq!(error, WireError::Short);
+    }
+
+    #[test]
+    fn a_declared_bytes_length_past_the_buffer_reports_short_not_a_wrapped_offset() {
+        let mut wire = Vec::new();
+        write_i16(&mut wire, 1);
+        write_i32(&mut wire, 1500);
+        write_array(&mut wire, &[0_u8], |out, _| {
+            write_string(out, "orders");
+            write_array(out, &[0_u8], |out, _| {
+                write_i32(out, 0);
+                write_i32(out, i32::MAX); // record_set claims 2GiB, supplies none
+            });
+        });
+        let error = decode_request(ApiKey::Produce.to_i16(), 0, &wire).unwrap_err();
+        assert_eq!(error, WireError::Short);
+    }
+
+    #[test]
+    fn an_oversized_string_truncates_on_a_char_boundary_not_mid_codepoint() {
+        // 'é' is two bytes, so a 2-byte-per-char string of i16::MAX+1 bytes
+        // has its cut land exactly where a naive `[..i16::MAX]` would split
+        // a codepoint.
+        let value = "é".repeat(i16::MAX as usize);
+        let mut encoded = Vec::new();
+        write_string(&mut encoded, &value);
+
+        let mut reader = Reader::new(&encoded);
+        let decoded = reader.read_string().expect("a truncated string is still valid utf-8");
+        assert_eq!(decoded.len(), i16::MAX as usize - 1);
+        assert!(value.starts_with(&decoded));
     }
 
     #[test]
