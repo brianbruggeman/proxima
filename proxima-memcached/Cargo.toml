@@ -1,6 +1,6 @@
 [package]
 name = "proxima-memcached"
-description = "Memcached client facade: the async client Pipe and blocking driver over the sans-IO memcached text-protocol codec (ClientSession), so proxima::Client speaks memcached. The codec itself lives in proxima-protocols::memcached."
+description = "Memcached (text protocol) facade over the sans-IO codec: the async client Pipe and blocking driver (feature `client`), and the server side — the framed business-handler App and AnyProtocol listener candidate (feature `listen`). The codec itself lives in proxima-protocols::memcached."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
