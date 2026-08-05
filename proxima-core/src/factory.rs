@@ -37,7 +37,7 @@ mod registry {
     use arc_swap::ArcSwap;
 
     use super::Named;
-    use crate::ProximaError;
+    use crate::{ProximaError, RegistryError};
 
     /// A lock-free registry of named factories of trait `F` (a factory trait
     /// object, e.g. `dyn PipeFactory`). Reads are wait-free (`ArcSwap`);
@@ -69,9 +69,11 @@ mod registry {
             loop {
                 let current = self.factories.load_full();
                 if current.contains_key(&name) {
-                    return Err(ProximaError::Registry(format!(
-                        "factory '{name}' already registered"
-                    )));
+                    return Err(RegistryError::AlreadyRegistered {
+                        kind: "factory",
+                        name,
+                    }
+                    .into());
                 }
                 let mut next: BTreeMap<String, Arc<F>> = (*current).clone();
                 next.insert(name.clone(), factory.clone());
@@ -92,11 +94,13 @@ mod registry {
 
         /// look up a factory by its registered name.
         pub fn get(&self, name: &str) -> Result<Arc<F>, ProximaError> {
-            self.factories
-                .load_full()
-                .get(name)
-                .cloned()
-                .ok_or_else(|| ProximaError::Registry(format!("no factory named '{name}'")))
+            self.factories.load_full().get(name).cloned().ok_or_else(|| {
+                RegistryError::NotRegistered {
+                    kind: "factory",
+                    name: name.to_string(),
+                }
+                .into()
+            })
         }
 
         /// the registered factory names, sorted.
@@ -148,12 +152,17 @@ mod registry {
                     registered_name: "dup".into(),
                 }))
                 .expect("first");
+            let outcome = registry.register(Arc::new(StubFactory {
+                registered_name: "dup".into(),
+            }));
             assert!(matches!(
-                registry.register(Arc::new(StubFactory {
-                    registered_name: "dup".into()
-                })),
-                Err(ProximaError::Registry(_))
+                outcome,
+                Err(ProximaError::RegistryKind(RegistryError::AlreadyRegistered { .. }))
             ));
+            assert_eq!(
+                outcome.expect_err("duplicate registration must fail").to_string(),
+                "registry: factory 'dup' already registered"
+            );
         }
 
         #[test]
@@ -173,10 +182,15 @@ mod registry {
         #[test]
         fn missing_name_is_a_registry_error() {
             let registry: FactoryRegistry<dyn Named> = FactoryRegistry::new();
+            let outcome = registry.get("absent");
             assert!(matches!(
-                registry.get("absent"),
-                Err(ProximaError::Registry(_))
+                outcome,
+                Err(ProximaError::RegistryKind(RegistryError::NotRegistered { .. }))
             ));
+            assert_eq!(
+                outcome.err().expect("lookup of an absent name must fail").to_string(),
+                "registry: no factory named 'absent'"
+            );
         }
     }
 }
@@ -194,7 +208,7 @@ mod config {
     use serde_json::Value;
 
     use super::{FactoryRegistry, Named};
-    use crate::ProximaError;
+    use crate::{ConfigError, ProximaError};
 
     /// A [`Named`] factory that builds its `Output` from a spec blob and the
     /// already-built `children` — the executable half of config-as-composition.
@@ -282,7 +296,12 @@ mod config {
                 .file(path)
                 .validate()
                 .build()
-                .map_err(|err| ProximaError::Registry(format!("composition load failed: {err}")))
+                .map_err(|err| {
+                    ProximaError::from(ConfigError::Parse {
+                        context: "composition",
+                        source: Box::new(err),
+                    })
+                })
         }
     }
 
@@ -330,6 +349,7 @@ mod config {
     #[allow(clippy::unwrap_used, clippy::expect_used)]
     mod tests {
         use super::*;
+        use crate::RegistryError;
 
         fn sample() -> Composition {
             Composition::builder()
@@ -461,7 +481,7 @@ mod config {
                 .build();
             assert!(matches!(
                 registry.build(&composition),
-                Err(ProximaError::Registry(_))
+                Err(ProximaError::RegistryKind(RegistryError::NotRegistered { .. }))
             ));
         }
     }
