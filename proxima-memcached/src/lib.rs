@@ -92,6 +92,6 @@ pub use any_protocol::MemcachedAnyProtocol;
 #[cfg(feature = "listen")]
 pub use config::MemcachedServerConfig;
 #[cfg(feature = "listen")]
-pub use framed_app::{MemcachedAppError, MemcachedFramedApp, MemcachedOutcome};
+pub use framed_app::{MemcachedFramedApp, MemcachedOutcome};
 #[cfg(feature = "listen")]
 pub use pipes::{MemcachedPipeHandle, into_memcached_handle};
