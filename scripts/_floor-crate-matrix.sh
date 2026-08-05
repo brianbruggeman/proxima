@@ -168,6 +168,15 @@ declare -a FLOOR_CRATE_CELLS=(
     # what keeps it fixed. No `alloc` cell: the crate has no `alloc` feature --
     # `client` and `listen` both imply `std`, so bare is the only floor.
     "proxima-redis-bare|proxima-redis|"
+    # proxima-dns carried the identical defect its redis sibling above did,
+    # and for the identical reason: same `default = ["std"]` / `std = []`
+    # shape, no `#![no_std]` in lib.rs, no cell here, so nothing ever tried
+    # the cliff. Measured before the fix on 2026-08-05: `cargo build -p
+    # proxima-dns --no-default-features --lib --target thumbv7m-none-eabi`
+    # exits 101 with "`std` is required by `proxima_dns` because it does not
+    # declare `#![no_std]`". Same shape, same single floor: `client` and
+    # `listen` both imply `std`, so there is no `alloc` cell to add.
+    "proxima-dns-bare|proxima-dns|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

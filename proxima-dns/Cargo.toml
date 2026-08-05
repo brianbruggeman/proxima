@@ -1,6 +1,6 @@
 [package]
 name = "proxima-dns"
-description = "DNS resolver client + listener facade: the async client Pipe (DnsClientUpstream) and the UDP/TCP servers (DnsDatagramProtocol / DnsAnyProtocol) over the sans-IO RFC 1035 codec, so proxima::Client / proxima::Listener speak DNS. The codec itself lives in proxima-protocols::dns."
+description = "DNS resolver client + listener facade: the async client Pipe (DnsClientUpstream) and the UDP/TCP servers (DnsUdpAnyProtocol / DnsAnyProtocol / DnsDatagramProtocol) over the sans-IO RFC 1035 codec, so proxima::Client / proxima::Listener speak DNS. The codec itself lives in proxima-protocols::dns and is re-exported here; --no-default-features leaves that bare no_std tier alone."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -43,10 +43,14 @@ proxima-runtime = { workspace = true, features = ["std"], optional = true }
 
 [features]
 default = ["std"]
-std = []
-# the async resolver client `DnsClientUpstream` + sans-IO `DnsClientSession`
-# driving a query over a pluggable `DatagramFactory` (prime, tokio, a fake
-# test socket), so `proxima::Client` speaks DNS as a registered protocol.
+# `--no-default-features` leaves only the wire-layer re-exports, and the crate
+# declares `#![no_std]` at that tier — proven on `thumbv7m-none-eabi` by
+# `scripts/thumbv7m-cliff-gate.sh`'s `proxima-dns-bare` cell.
+std = ["proxima-protocols/std"]
+# the async resolver client `DnsClientUpstream` + the sans-IO
+# `client::session` encode/decode pair, driving a query over a pluggable
+# `DatagramFactory` (prime, tokio, a fake test socket), so `proxima::Client`
+# speaks DNS as a registered protocol.
 client = [
     "std",
     "proxima-primitives/std",
