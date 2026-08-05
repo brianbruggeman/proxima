@@ -1,6 +1,6 @@
 //! [`FilterRegistry`] — a named store of live [`IdSet`] subscriptions.
 //!
-//! The pub/sub view of [`live_filter`](crate::pipe::live_filter): many named
+//! The pub/sub view of [`live_filter`](mod@crate::pipe::live_filter): many named
 //! subscriptions, each an id-set filter you *subscribe by name* and *reconfigure
 //! by name*. It dogfoods [`proxima_core::live::Live`] — the subscription map is
 //! itself a live cell, so lookups on the data path are wait-free and

@@ -4,7 +4,8 @@
 //! left-to-right instead of `AndThen::new(a, b)`.
 //!
 //! One trait, not four: every pipe in this crate implements the base [`Pipe`]
-//! (the higher tiers — [`SendPipe`], [`UnpinPipe`], [`UnpinSendPipe`] — are
+//! (the higher tiers — [`crate::pipe::primitives::SendPipe`], [`UnpinPipe`],
+//! [`crate::pipe::primitives::UnpinSendPipe`] — are
 //! ADDITIVE constraints on top, never a replacement for it), so a single
 //! `PipeExt: Pipe + Sized` blanket already reaches every pipe, and there is no
 //! second trait providing the same method names to be ambiguous against. The

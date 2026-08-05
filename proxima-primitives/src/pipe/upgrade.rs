@@ -179,8 +179,8 @@ impl core::fmt::Debug for LocalUpgradeHandler {
 ///
 /// The io_uring listener mints a ticket per request and places it in
 /// `request.context.local_upgrade_ticket` before dispatching. Pipe
-/// authors that want to upgrade call [`install`] with that ticket and
-/// a `LocalUpgradeHandler`. The listener calls [`take`] after dispatch
+/// authors that want to upgrade call [`local_slots::install`] with that ticket
+/// and a `LocalUpgradeHandler`. The listener calls [`local_slots::take`] after dispatch
 /// completes to retrieve the handler and hijack the socket.
 ///
 /// The registry is `thread_local!` because the io_uring listener
@@ -189,7 +189,7 @@ impl core::fmt::Debug for LocalUpgradeHandler {
 /// polled on the same thread for its lifetime, so install + take see
 /// the same map.
 ///
-/// Gotcha: don't call [`install`] from a `tokio::spawn`'d task nested
+/// Gotcha: don't call [`local_slots::install`] from a `tokio::spawn`'d task nested
 /// inside `Pipe::call` — that task may run on a different OS
 /// thread and miss the listener's `take`. Install directly from the
 /// `Pipe::call` future.

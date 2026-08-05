@@ -44,16 +44,40 @@
 //!
 //! # Serving a Handler
 //!
-//! A `Handler` doesn't serve traffic by itself — a
-//! [`ListenProtocol`](crate::pipe::ListenProtocol) does. The fluent builder
-//! [`ServeBuilder`](crate::pipe::ServeBuilder) wires a handler into a listener:
+//! A `Handler` doesn't serve traffic by itself. What this module owns is the
+//! step before that: a qualifying [`SendPipe`] already IS a `Handler` (the
+//! blanket below), and [`into_handle`] erases it into the [`PipeHandle`] a
+//! listener dispatches to. Wiring that handle to a socket is
+//! `proxima_listen::registry::ServeBuilder`'s job, one layer up — not
+//! linkable from here, and deliberately not shown here as an uncompiled
+//! sketch.
 //!
-//! ```ignore
-//! use proxima::{HttpListener, ListenProtocolFluent};
-//! HttpListener::http("0.0.0.0:8080".parse()?)
-//!     .fluent()
-//!     .dispatch(handle)
-//!     .await?;
+//! ```
+//! use bytes::Bytes;
+//! use core::future::Future;
+//! use proxima_core::ProximaError;
+//! use proxima_primitives::pipe::request::{Request, Response};
+//! use proxima_primitives::pipe::{Handler, PipeHandle, SendPipe, into_handle};
+//!
+//! struct Health;
+//!
+//! impl SendPipe for Health {
+//!     type In = Request<Bytes>;
+//!     type Out = Response<Bytes>;
+//!     type Err = ProximaError;
+//!
+//!     fn call(
+//!         &self,
+//!         _request: Request<Bytes>,
+//!     ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+//!         async { Ok(Response::typed(200, Bytes::from_static(b"ok"))) }
+//!     }
+//! }
+//!
+//! fn assert_handler<H: Handler>(_: &H) {}
+//! assert_handler(&Health);
+//!
+//! let handle: PipeHandle = into_handle(Health);
 //! ```
 
 // every item here touches Box/Rc/Arc unconditionally via alloc_tier;
