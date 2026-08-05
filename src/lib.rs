@@ -256,7 +256,8 @@ pub mod prime {
 
 /// `#[proxima::test]` attribute — one test attribute that drives the body on
 /// proxima's prime runtime (tokio fallback) and subsumes `#[rstest]` +
-/// cassette record/replay. See `docs/proxima-test/`.
+/// cassette record/replay. `tests/e2e/proxima_test_smoke.rs` is the
+/// worked example of every form it accepts.
 #[cfg(any(feature = "macros", test))]
 pub use proxima_macros::test;
 
@@ -268,7 +269,8 @@ pub use proxima_macros::test;
 pub use proxima_macros::main;
 
 /// `#[proxima::fixture]` — native rstest-style fixtures (no rstest dep),
-/// consumed by `#[proxima::test]` parameters. See `docs/proxima-test/`.
+/// consumed by `#[proxima::test]` parameters. `tests/e2e/proxima_test_smoke.rs`
+/// exercises the plain, `once`, `from` and override forms.
 #[cfg(any(feature = "macros", test))]
 pub use proxima_macros::fixture;
 

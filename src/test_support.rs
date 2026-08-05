@@ -5,8 +5,8 @@
 //! replay `Handler` from [`cassette_pipe`]. Record uses a deterministic
 //! synchronous tee ([`RecordingTee`]) over the recording-core event model +
 //! `JsonlSink` (NOT the serving-path `RecordUpstream`, whose detached drainer
-//! has no completion signal). Replay uses `ReplayUpstream::from_jsonl`. See
-//! `docs/proxima-test/edges.md`.
+//! has no completion signal). Replay uses `ReplayUpstream::from_jsonl`. The
+//! spec-to-path rule the ctx applies lives in `proxima-test/src/harness.rs`.
 
 // test-harness code: a panic IS the failure path here (mirrors proxima-macros),
 // so expect in the harness lines is intentional.
