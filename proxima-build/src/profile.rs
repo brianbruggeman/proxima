@@ -388,7 +388,6 @@ impl conflaguration::Validate for Profile {
                 None
             }
         };
-        let _ = reactor;
 
         if self.std && !self.alloc {
             errors.push(ValidationMessage::new(
@@ -511,6 +510,26 @@ impl conflaguration::Validate for Profile {
             errors.push(ValidationMessage::new(
                 "executor",
                 "executor=tokio requires std=true",
+            ));
+        }
+
+        if matches!(
+            reactor,
+            Some(Reactor::TokioEpoll | Reactor::IoUring | Reactor::Wasi)
+        ) && !self.std
+        {
+            errors.push(ValidationMessage::new(
+                "reactor",
+                "reactor=tokio-epoll, io-uring, and wasi require std=true",
+            ));
+        }
+
+        if matches!(reactor, Some(Reactor::EmbassyNet))
+            && !matches!(executor, Some(Executor::Embassy))
+        {
+            errors.push(ValidationMessage::new(
+                "reactor",
+                "reactor=embassy-net requires executor=embassy",
             ));
         }
 
@@ -883,6 +902,62 @@ mod tests {
             profile.timer_kind().unwrap(),
             Timer::Custom(ref path) if path == "user_crate::DRIVER"
         ));
+    }
+
+    #[test]
+    fn reactor_from_str_roundtrip() {
+        assert_eq!(
+            Reactor::from_str("tokio-epoll").unwrap(),
+            Reactor::TokioEpoll
+        );
+        assert_eq!(Reactor::from_str("io-uring").unwrap(), Reactor::IoUring);
+        assert_eq!(Reactor::from_str("wasi").unwrap(), Reactor::Wasi);
+        assert_eq!(
+            Reactor::from_str("embassy-net").unwrap(),
+            Reactor::EmbassyNet
+        );
+        assert_eq!(Reactor::from_str("none").unwrap(), Reactor::None);
+        assert!(Reactor::from_str("kqueue").is_err());
+    }
+
+    #[test]
+    fn reactor_host_layers_require_std() {
+        // every other axis is already satisfiable at std=false, so the reactor
+        // rule is the only thing this profile can fail on.
+        let mut profile = linux_daemon();
+        profile.std = false;
+        profile.alloc = true;
+        profile.executor = "embassy".into();
+        profile.tls = "none".into();
+        profile.timer = "embassy-time".into();
+        for host_reactor in ["tokio-epoll", "io-uring", "wasi"] {
+            profile.reactor = host_reactor.into();
+            let err = profile
+                .validate()
+                .expect_err("host reactor without std should reject");
+            assert!(
+                err.to_string().contains("reactor"),
+                "want the reactor axis named, got: {err}"
+            );
+        }
+
+        profile.reactor = "embassy-net".into();
+        profile
+            .validate()
+            .expect("embassy-net + embassy + no std should validate");
+    }
+
+    #[test]
+    fn reactor_embassy_net_requires_embassy_executor() {
+        let mut profile = linux_daemon();
+        profile.reactor = "embassy-net".into();
+        let err = profile
+            .validate()
+            .expect_err("embassy-net with executor=tokio should reject");
+        assert!(
+            err.to_string().contains("reactor"),
+            "want the reactor axis named, got: {err}"
+        );
     }
 
     #[test]
