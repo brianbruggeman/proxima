@@ -158,6 +158,16 @@ declare -a FLOOR_CRATE_CELLS=(
     # (proxima-listen/src/admission/state.rs), so it is a genuinely different
     # compile, not a superset that the bare cell already covered.
     "proxima-listen-alloc|proxima-listen|alloc"
+    # proxima-redis' Cargo.toml has advertised "`--no-default-features` leaves
+    # the bare sans-IO codec ... for bare-metal embedding" since the fold, and
+    # the crate had no cell here, so nothing ever compiled it for an embedded
+    # target. The claim was FALSE: lib.rs never declared `#![no_std]`, so the
+    # bare build still linked libstd and rustc rejected the cliff outright
+    # ("`std` is required by `proxima_redis` because it does not declare
+    # `#![no_std]`"). Fixed in the 2026-08-05 consistency pass; this cell is
+    # what keeps it fixed. No `alloc` cell: the crate has no `alloc` feature --
+    # `client` and `listen` both imply `std`, so bare is the only floor.
+    "proxima-redis-bare|proxima-redis|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

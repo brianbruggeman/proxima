@@ -19,7 +19,12 @@ crate="proxima-redis"
 
 printf '\n== proxima-redis gate ==\n'
 
-printf '\n[1/9] sans-IO codec builds no_std + alloc (no default features)\n'
+# the no_std tier itself is NOT proven here -- a host build links libstd
+# whether or not the crate declares `#![no_std]`, which is exactly how the
+# false "bare-metal embedding" claim survived. scripts/thumbv7m-cliff-gate.sh
+# owns that cell (`proxima-redis-bare`); this step only proves the bare
+# feature set still compiles.
+printf '\n[1/9] bare feature set compiles (no default features, host)\n'
 cargo build -p "${crate}" --no-default-features
 
 printf '\n[2/9] crate builds clean with the client (all features)\n'
