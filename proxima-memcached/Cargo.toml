@@ -81,7 +81,6 @@ listen = [
     "dep:bytes",
     "dep:conflaguration",
     "dep:serde",
-    "dep:thiserror",
     "dep:proxima-listen",
     "dep:proxima-runtime",
     "dep:proxima-telemetry",

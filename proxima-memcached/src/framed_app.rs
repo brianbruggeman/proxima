@@ -13,13 +13,12 @@
 //! (`Option`) + `AsFrame::keep_serving` (`bool`) instead of an early
 //! `return` inside a bespoke loop.
 
-use proxima_core::ProximaError;
 use proxima_listen::any::AsFrame;
 use proxima_primitives::pipe::SendPipe;
 use proxima_telemetry::error;
 
 use proxima_protocols::memcached::frame_codec::{
-    MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, Violation,
+    MemcachedCodec, MemcachedFrame, MemcachedOwnedFrame, NeedMoreBytes, Violation,
 };
 use proxima_protocols::memcached::{MemcachedRequest, Reply};
 
@@ -56,30 +55,6 @@ impl AsFrame<MemcachedCodec> for MemcachedOutcome {
     }
 }
 
-/// Local wrapper around [`ProximaError`] — `AndThen`'s
-/// `Second::Err: From<First::Err>` composition seam needs a `From<NeedMoreBytes>`
-/// impl, and orphan rules forbid implementing a foreign trait on a
-/// foreign type from this crate; a local newtype error satisfies it
-/// trivially. In practice this conversion is never exercised:
-/// `NeedMoreBytes::is_incomplete()` is unconditionally `true`, so
-/// `proxima_protocols::codec_pipe::FrameCodecPipe` always collapses it to
-/// `Ok(None)` before this App is ever called.
-#[derive(Debug, thiserror::Error)]
-pub enum MemcachedAppError {
-    #[error("handler pipe: {0}")]
-    Handler(#[from] ProximaError),
-    #[error(
-        "codec reported it needed more bytes after FrameCodecPipe should have collapsed that to Ok(None)"
-    )]
-    UnexpectedIncomplete,
-}
-
-impl From<proxima_protocols::memcached::frame_codec::NeedMoreBytes> for MemcachedAppError {
-    fn from(_: proxima_protocols::memcached::frame_codec::NeedMoreBytes) -> Self {
-        MemcachedAppError::UnexpectedIncomplete
-    }
-}
-
 /// The memcached business-handler pipe as `FramedAny`'s `App`: dispatches
 /// a parsed [`MemcachedRequest`] to the wrapped [`MemcachedPipeHandle`],
 /// and resolves `quit`/protocol violations directly (no handler call).
@@ -98,15 +73,17 @@ impl MemcachedFramedApp {
     }
 }
 
+/// `Err = NeedMoreBytes` is `FramedAny`'s `App::Err: From<C::Error>` seam
+/// satisfied by the codec's own error, reflexively — this App never fails,
+/// so anything else would be a wrapper for a value nothing constructs. A
+/// handler-pipe failure is rendered as a `SERVER_ERROR` reply by this
+/// module's own `dispatch`, never propagated.
 impl SendPipe for MemcachedFramedApp {
     type In = MemcachedOwnedFrame;
     type Out = MemcachedOutcome;
-    type Err = MemcachedAppError;
+    type Err = NeedMoreBytes;
 
-    async fn call(
-        &self,
-        input: MemcachedOwnedFrame,
-    ) -> Result<MemcachedOutcome, MemcachedAppError> {
+    async fn call(&self, input: MemcachedOwnedFrame) -> Result<MemcachedOutcome, NeedMoreBytes> {
         match input {
             MemcachedOwnedFrame::Violation(Violation::Protocol) => {
                 error!("memcached protocol violation");
@@ -175,6 +152,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use proxima_core::ProximaError;
     use proxima_protocols::memcached::StoreMode;
 
     struct EchoHandler;
