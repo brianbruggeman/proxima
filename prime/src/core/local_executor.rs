@@ -22,8 +22,6 @@
 //!
 //! no_std + alloc only — `core::*`, `alloc::*`, and `crossbeam_queue`.
 
-extern crate alloc;
-
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -33,7 +31,6 @@ use core::cell::{RefCell, UnsafeCell};
 use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::Pin;
-use core::ptr;
 #[cfg(feature = "std")]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -98,10 +95,6 @@ struct Slot {
 
 struct Task {
     body: TaskBody,
-    /// kept for future cancellation paths via `TaskHandle.generation`;
-    /// the executor's hot path doesn't consult it.
-    #[allow(dead_code)]
-    generation: u32,
 }
 
 /// Hand-rolled waker state. Heap-allocated once per slab slot, reused for
@@ -269,13 +262,12 @@ pub struct LocalExecutor {
 #[cfg(feature = "std")]
 static NEXT_EXEC_ID: AtomicU64 = AtomicU64::new(1);
 
-// std-only TLS; deferred-debt for no_std cliff. C1 (thread-identity-trait)
-// in woolly-watching-cupcake routes this through ThreadIdentity with a
-// std-backed default and a no_std single-thread stub.
-// DC5 transitional gate: the TLS block + arm/disarm/push_ready/do_wake
-// std path are unavailable under alloc-only. Under no_std, all wakes route
-// via remote_ready (always correct, marginally slower). C3 (reactor-direct-wake)
-// provides the no_std-clean replacement.
+// std-only TLS. the no_std cliff is closed by the cfg gate, not by an
+// abstraction: under alloc-only this block, arm/disarm, and the std paths of
+// push_ready/do_wake all vanish, and every wake routes via remote_ready —
+// always correct, marginally slower. a same-thread fast path for no_std would
+// need the reactor to wake the task directly, which is a reactor change, not
+// a thread-identity one.
 #[cfg(feature = "std")]
 thread_local! {
     /// id of the LocalExecutor currently being polled on this thread, or 0
@@ -372,7 +364,7 @@ impl LocalExecutor {
         self.spawn_with_body(TaskBody::Inline(task))
     }
 
-    /// eager-poll variant of [`spawn_local_inline`]. Polls the task
+    /// eager-poll variant of [`Self::spawn_local_inline`]. Polls the task
     /// ONCE on the spawn stack with `Waker::noop()`. If the future
     /// resolves on the first poll (the common case for `counter +=
     /// 1` style sync work that dominates spawn-burst workloads), the
@@ -436,7 +428,7 @@ impl LocalExecutor {
         // thread for the duration of any spawn/tick path; no concurrent
         // borrow can exist (wakers don't touch the slab).
         let slab = unsafe { &mut *self.slab.get() };
-        let task = Task { body, generation };
+        let task = Task { body };
         let index = if let Some(free) = slab.free_list.pop() {
             // writes into the slot's existing box in place — no new
             // allocation, and the task's storage address (already visited
@@ -667,12 +659,6 @@ impl Default for LocalExecutor {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// suppress unused-import warning when no inherent usage relies on `ptr`.
-#[allow(dead_code)]
-fn _ptr_unused_warning_guard() -> *const () {
-    ptr::null()
 }
 
 #[cfg(test)]
