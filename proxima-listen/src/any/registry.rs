@@ -231,7 +231,7 @@ mod tests {
             .expect("register mid-a");
 
         let snapshot = registry.snapshot();
-        let names: Vec<&str> = snapshot.iter().map(|p| p.name()).collect();
+        let names: Vec<&str> = snapshot.iter().map(|protocol| protocol.name()).collect();
         assert_eq!(names, vec!["high", "mid-a", "mid-b", "low"]);
     }
 

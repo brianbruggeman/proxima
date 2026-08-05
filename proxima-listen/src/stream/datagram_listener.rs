@@ -439,8 +439,8 @@ mod tests {
     #[proxima::test]
     async fn datagram_round_trips_reply_to_its_peer() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)), 40000);
-        let socket = drive_until(UppercasePipe, &[(b"hello datagram", peer)], |s| {
-            !s.sent().is_empty()
+        let socket = drive_until(UppercasePipe, &[(b"hello datagram", peer)], |socket| {
+            !socket.sent().is_empty()
         });
         let sent = socket.sent();
         assert_eq!(sent.len(), 1, "exactly one reply datagram");
@@ -453,15 +453,23 @@ mod tests {
 
     #[proxima::test]
     async fn two_datagrams_from_two_peers_each_get_their_own_reply() {
-        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 41000);
-        let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 42000);
-        let socket = drive_until(UppercasePipe, &[(b"one", a), (b"two", b)], |s| {
-            s.sent().len() >= 2
-        });
+        let first_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 41000);
+        let second_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 42000);
+        let socket = drive_until(
+            UppercasePipe,
+            &[(b"one", first_peer), (b"two", second_peer)],
+            |socket| socket.sent().len() >= 2,
+        );
         let sent = socket.sent();
         assert_eq!(sent.len(), 2);
-        assert!(sent.contains(&(b"ONE".to_vec(), a)), "peer a gets ONE");
-        assert!(sent.contains(&(b"TWO".to_vec(), b)), "peer b gets TWO");
+        assert!(
+            sent.contains(&(b"ONE".to_vec(), first_peer)),
+            "the first peer gets ONE"
+        );
+        assert!(
+            sent.contains(&(b"TWO".to_vec(), second_peer)),
+            "the second peer gets TWO"
+        );
     }
 
     #[proxima::test]

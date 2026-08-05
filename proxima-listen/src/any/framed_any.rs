@@ -134,8 +134,8 @@ where
 /// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// struct Incompl;
 /// impl std::fmt::Display for Incompl {
-///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-///         f.write_str("incomplete: no terminating CRLF yet")
+///     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         formatter.write_str("incomplete: no terminating CRLF yet")
 ///     }
 /// }
 /// impl std::error::Error for Incompl {}
@@ -149,7 +149,10 @@ where
 ///     type Frame<'a> = &'a str;
 ///     type Error = Incompl;
 ///     fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(&'a str, usize), Incompl> {
-///         let terminator = buf.windows(2).position(|w| w == b"\r\n").ok_or(Incompl)?;
+///         let terminator = buf
+///             .windows(2)
+///             .position(|window| window == b"\r\n")
+///             .ok_or(Incompl)?;
 ///         let line = std::str::from_utf8(&buf[..terminator]).map_err(|_| Incompl)?;
 ///         let name = line.strip_prefix("GREET ").ok_or(Incompl)?;
 ///         Ok((name, terminator + 2))
@@ -381,6 +384,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use crate::any::{Classifier, ClassifyOutcome};
+    use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
     use proxima_primitives::stream::{StreamListener, StreamListenerExt};
     use tokio::io::{AsyncReadExt as TokioRead, AsyncWriteExt as TokioWrite};
 
@@ -698,8 +702,6 @@ mod tests {
         };
         (listener, addr)
     }
-
-    use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 
     #[proxima::test]
     async fn framed_any_serves_a_greet_reply_over_a_real_socket() {

@@ -43,6 +43,9 @@ pub mod sized {
     ));
 }
 
+// box-free exception: `with_factory` accepts ANY `Fn() -> impl Future`, so the
+// stored factory is an open dyn set with no nameable future type. Paid once
+// per `serve()` (a control-plane rebind), never per connection.
 type ListenerFactoryFut<L> = Pin<Box<dyn Future<Output = std::io::Result<L>> + Send>>;
 type ListenerFactory<L> = Arc<dyn Fn() -> ListenerFactoryFut<L> + Send + Sync>;
 
@@ -157,6 +160,9 @@ impl<L: StreamListener + 'static> ListenProtocol for StreamListenerProtocol<L> {
 /// over an injected `AcceptorFactory`. Binds through the factory (prime-
 /// or tokio-backed) and feeds each accepted boxed `StreamConnection` to
 /// the same `spawn_handler` as the legacy path.
+// every argument is a distinct per-serve value read off the spec or the
+// ServeContext seam; a params struct would carry no invariant the tuple
+// does not, so it would be a relocation, not a type.
 #[allow(clippy::too_many_arguments)]
 async fn serve_via_acceptor_factory(
     factory: Arc<dyn proxima_primitives::stream::AcceptorFactory>,
@@ -195,6 +201,8 @@ async fn serve_via_acceptor_factory(
     }
 }
 
+// same reason as `serve_via_acceptor_factory` above: seven independent
+// per-serve values, no invariant to name.
 #[allow(clippy::too_many_arguments)]
 fn spawn_handler<C: StreamConnection>(
     conn: C,
