@@ -129,6 +129,9 @@ pub fn field(name: &str, schema: Schema, optional: bool) -> StructField {
 #[cfg(all(test, feature = "schema-derive"))]
 mod tests {
     use alloc::collections::BTreeMap;
+    use alloc::string::{String, ToString};
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     use crate::schema::{Describe, EmptyResolver, Schema};
 

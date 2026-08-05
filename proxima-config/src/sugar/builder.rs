@@ -62,6 +62,9 @@ pub trait SpecBuilder: Sized {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+
     use super::*;
     use serde_json::{Map, Value, json};
 
