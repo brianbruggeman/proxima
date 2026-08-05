@@ -412,6 +412,7 @@ static HISTOGRAM_DRAIN_BOUNDS: [f64; 32] = [
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
     use crate::pipes::{CountingPipe, into_telemetry_handle};
@@ -427,7 +428,8 @@ mod tests {
         registry.register_gauge("temp").set_f64(36.6, &[]);
         registry.register_updown_counter("conns").add(5, &[]);
 
-        let (pipe, _, _, _, metrics, _) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let metrics = Arc::clone(&pipe.metrics);
         let handle = into_telemetry_handle(pipe);
 
         // first drain: both changed -> two metric requests dispatched.

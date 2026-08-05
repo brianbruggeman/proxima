@@ -11,6 +11,7 @@
 // records flow through the same Pipe envelope as HTTP requests.
 // CountingPipe surfaces how many of each type landed.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use proxima_telemetry::pipes::CountingPipe;
@@ -18,7 +19,10 @@ use proxima_telemetry::recorder::Recorder;
 
 fn main() {
     // build a recorder with a counting terminal Pipe so records are observable.
-    let (pipe, spans, _events, logs, metrics, _links) = CountingPipe::new();
+    let pipe = CountingPipe::new();
+    let spans = Arc::clone(&pipe.spans);
+    let logs = Arc::clone(&pipe.logs);
+    let metrics = Arc::clone(&pipe.metrics);
 
     let recorder = Recorder::builder()
         .pipe(pipe)
@@ -53,13 +57,12 @@ fn main() {
     #[cfg(feature = "tracing-init")]
     {
         use proxima_telemetry::tracing_bridge::TracingLayer;
-        use std::sync::Arc;
         use tracing_subscriber::EnvFilter;
         use tracing_subscriber::layer::SubscriberExt;
 
         let recorder2 = Arc::new(
             Recorder::builder()
-                .pipe(CountingPipe::new().0)
+                .pipe(CountingPipe::new())
                 .core_count(1)
                 .start()
                 .expect("recorder2 build failed"),

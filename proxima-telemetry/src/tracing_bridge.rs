@@ -318,7 +318,9 @@ mod tests {
         Arc<std::sync::atomic::AtomicU64>,
         Arc<std::sync::atomic::AtomicU64>,
     ) {
-        let (pipe, spans, _events, logs, _metrics, _links) = CountingPipe::new();
+        let pipe = CountingPipe::new();
+        let spans = Arc::clone(&pipe.spans);
+        let logs = Arc::clone(&pipe.logs);
         let recorder = Recorder::builder()
             .pipe(pipe)
             .core_count(1)
