@@ -28,6 +28,7 @@ impl GlobSet {
     }
 
     /// A set seeded from `patterns`.
+    #[must_use]
     pub fn from_patterns(patterns: impl IntoIterator<Item = Vec<u8>>) -> Self {
         Self {
             patterns: patterns.into_iter().collect(),
@@ -74,11 +75,7 @@ impl GlobSet {
 /// operator-controlled (a subscribed pattern string), so the backtracking
 /// cost is bounded by what an operator subscribed, not by attacker input.
 #[must_use]
-pub fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    do_match(pattern, text)
-}
-
-fn do_match(mut pattern: &[u8], mut text: &[u8]) -> bool {
+pub fn glob_match(mut pattern: &[u8], mut text: &[u8]) -> bool {
     loop {
         match pattern.first() {
             None => return text.is_empty(),
@@ -89,7 +86,7 @@ fn do_match(mut pattern: &[u8], mut text: &[u8]) -> bool {
                 if pattern.is_empty() {
                     return true;
                 }
-                return (0..=text.len()).any(|start| do_match(pattern, &text[start..]));
+                return (0..=text.len()).any(|start| glob_match(pattern, &text[start..]));
             }
             Some(b'?') => {
                 let Some((_, rest)) = text.split_first() else {

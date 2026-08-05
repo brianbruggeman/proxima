@@ -3,9 +3,7 @@
 //! buffer-policy, and configuration failures. Mirrors
 //! `proxima_pgwire::error::ServeError`.
 
-use thiserror::Error;
-
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RedisServeError {
     #[error("io: {0}")]
