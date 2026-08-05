@@ -7,38 +7,51 @@
 //! the Connection and `clear()`'d each cycle — the steady-state
 //! request path makes zero allocations.
 //!
-//! Pattern from the listener:
+//! Pattern from the listener — the socket is the caller's problem, so
+//! this drives the same loop over a byte slice instead:
 //!
-//! ```ignore
+//! ```
+//! use proxima_protocols::http1_codec::h1_body::BodyFraming;
+//! use proxima_protocols::http1_codec::h1_connection::{Connection, Poll};
+//!
 //! let mut conn = Connection::new();
 //! let mut out = Vec::with_capacity(8 * 1024);
+//!
+//! // one kernel -> userspace copy; a real listener feeds each read here
+//! conn.feed_bytes(b"POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello");
+//!
 //! loop {
-//!     // single kernel→userspace copy:
-//!     conn.feed_bytes(&socket_chunk);
 //!     match conn.poll()? {
-//!         Poll::NeedInput => continue,
-//!         Poll::Close => break,
+//!         Poll::NeedInput => break,
 //!         Poll::RequestReady => {
-//!             let head = conn.head().expect("head present");
-//!             let body = conn.body();
-//!             // ... dispatch via Pipe::call ...
+//!             // `head` borrows the connection — read what the dispatch
+//!             // needs and let the borrow end before responding, since
+//!             // `begin_response` takes `&mut self`.
+//!             {
+//!                 let head = conn.head().expect("head present");
+//!                 assert_eq!(head.method, b"POST");
+//!             }
+//!             assert_eq!(conn.body(), b"hello");
+//!
+//!             let headers = [("content-length".to_string(), "2".to_string())];
 //!             out.clear();
-//!             let writer = conn.begin_response(200, "OK", &resp_headers, framing, &mut out);
-//!             socket.write_all(&out).await?;
-//!             out.clear();
-//!             writer.write_chunk(&response_body, &mut out);
-//!             socket.write_all(&out).await?;
-//!             out.clear();
+//!             let writer =
+//!                 conn.begin_response(200, "OK", &headers, BodyFraming::ContentLength(2), &mut out);
+//!             // a real listener writes `out` to the socket between each step
+//!             writer.write_chunk(b"ok", &mut out);
 //!             writer.end_response(&mut out);
-//!             socket.write_all(&out).await?;
+//!             assert!(out.starts_with(b"HTTP/1.1 200 OK\r\n"));
+//!             assert!(out.ends_with(b"ok"));
+//!
 //!             if conn.keep_alive() {
 //!                 conn.reset_for_next_request();
-//!             } else {
-//!                 break;
 //!             }
+//!             break;
 //!         }
+//!         other => panic!("unexpected poll outcome {other:?}"),
 //!     }
 //! }
+//! # Ok::<(), proxima_protocols::http1_codec::h1_connection::ReadError>(())
 //! ```
 
 use alloc::collections::VecDeque;
