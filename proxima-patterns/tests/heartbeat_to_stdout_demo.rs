@@ -1,12 +1,5 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+// the workspace denies unwrap/expect; tests assert through them.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Phase 8 demo (proxima-notify initiative): heartbeat-to-stdout end-to-end.
 //!
 //! Exercises the core + facade composition:

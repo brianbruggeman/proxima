@@ -69,6 +69,21 @@ mod std_facade {
 #[cfg(all(feature = "alert", feature = "std"))]
 pub use std_facade::methods;
 
+/// Wall-clock microseconds since the UNIX epoch. The proto layer is
+/// `WithoutTime` by construction, so the std facade Pipes stamp events here
+/// and pour the value in. `scheduled_trigger` and `stdio_guidance` each kept
+/// a byte-identical copy of this after the fold, under different names.
+#[cfg(all(
+    feature = "alert",
+    any(feature = "scheduled-trigger", feature = "stdio-guidance")
+))]
+pub(crate) fn micros_since_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 #[cfg(all(feature = "alert", feature = "std"))]
 pub mod pipes;
 

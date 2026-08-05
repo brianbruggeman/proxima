@@ -22,7 +22,7 @@
 use core::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -39,6 +39,7 @@ use crate::alert::event::{
     AlertEvent, AlertId, KindString, LabelKey, LabelMap, LabelValue, Payload, Severity,
 };
 use crate::alert::methods;
+use crate::alert::micros_since_epoch;
 use crate::alert::pipes::{AlertPipeHandle, AlertRequest};
 
 /// Schedule shape for a [`ScheduledTriggerPipe`].
@@ -275,13 +276,6 @@ fn build_scheduled_tick_request(event: AlertEvent) -> AlertRequest {
     }
 }
 
-fn micros_since_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
-
 fn truncate_to_kind_string(value: &str) -> KindString {
     let max = crate::alert::event::sized::ALERT_KIND_MAX;
     let truncated = if value.len() > max {
@@ -409,15 +403,8 @@ impl std::error::Error for BuildError {}
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::field_reassign_with_default,
-        clippy::type_complexity,
-        clippy::useless_vec,
-        clippy::needless_range_loop,
-        clippy::default_constructed_unit_structs
-    )]
+    // the workspace denies unwrap/expect; tests assert through them.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::sync::Mutex;
 
     use proxima_primitives::pipe::SendPipe;

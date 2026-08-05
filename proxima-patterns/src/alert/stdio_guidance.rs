@@ -11,7 +11,6 @@
 //! - `WithoutNetwork`, `WithoutSpawn`, `WithoutTime`, `WithoutRandom`.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use proxima_core::markers::{WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime};
 use proxima_primitives::pipe::ProximaError;
@@ -23,6 +22,7 @@ use ulid::Ulid;
 
 use crate::alert::event::{AnswerString, GuidanceAnswer, GuidanceRequestId, ResponderString};
 use crate::alert::methods;
+use crate::alert::micros_since_epoch;
 use crate::alert::pipes::{GuidanceRequest, GuidanceResponse};
 
 /// Duplex sync stdin/stdout guidance pipe. Generic over the injected IO pair
@@ -128,7 +128,7 @@ where
                 request_id: question.id,
                 content,
                 responder,
-                responded_at_micros: now_micros(),
+                responded_at_micros: micros_since_epoch(),
             };
             Ok(Response::typed(200, answer))
         }
@@ -157,13 +157,6 @@ fn truncate_to_answer(value: &str) -> AnswerString {
         value
     };
     AnswerString::try_from(truncated).unwrap_or_default()
-}
-
-fn now_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }
 
 /// Helper: construct a `GuidanceRequestId` from a Ulid for callers that
@@ -211,15 +204,8 @@ impl StdioGuidancePipeBuilder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::field_reassign_with_default,
-        clippy::type_complexity,
-        clippy::useless_vec,
-        clippy::needless_range_loop,
-        clippy::default_constructed_unit_structs
-    )]
+    // the workspace denies unwrap/expect; tests assert through them.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use bytes::Bytes;
     use proxima_primitives::pipe::SendPipe;
     use proxima_primitives::pipe::header_list::HeaderList;

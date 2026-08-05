@@ -1,8 +1,8 @@
-//! Build-time sizing for proxima-notify per principle 12.
+//! Build-time sizing for proxima-patterns::alert per principle 12.
 //!
 //! Reads `proxima-notify.toml` at the crate root + applies optional
 //! `PROXIMA_NOTIFY_<SECTION>_<KEY>` env-var overrides, emits a
-//! generated constant module into `OUT_DIR/proxima_notify_proto_sized.rs`.
+//! generated constant module into `OUT_DIR/proxima_notify_sized.rs`.
 //! The library `include!`s the generated file inside a `sized` module.
 
 use std::env;
@@ -52,7 +52,6 @@ fn resolve(table: &Value, section: &str, key: &str) -> u64 {
     }
 }
 
-#[allow(clippy::expect_used)]
 fn main() {
     println!("cargo:rerun-if-changed=proxima-notify.toml");
     println!("cargo:rerun-if-changed=build.rs");
