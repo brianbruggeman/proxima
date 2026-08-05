@@ -21,7 +21,7 @@
 //! then hands each matched queue name to the SAME `queues.publish` a bare
 //! `basic.consume` on the default exchange would use directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -226,12 +226,15 @@ impl AmqpBroker {
         Ok(())
     }
 
-    /// `queue.bind`: binds `queue` under `routing_key` on `exchange`. A
-    /// no-op success against an undeclared exchange mirrors real
-    /// broker leniency for the common "bind before declare races" case is
-    /// NOT taken here — an unknown exchange is reported so the connection
-    /// driver can render `channel.close` (`NOT_FOUND`), matching a real
-    /// broker's actual behavior.
+    /// `queue.bind`: binds `queue` under `routing_key` on `exchange`.
+    /// Rebinding an identical `(queue, routing_key)` pair is a no-op —
+    /// bindings are a set (AMQP 0-9-1 §1.4.2.3), and real clients redeclare
+    /// and rebind on every reconnect, so appending unconditionally would
+    /// both duplicate every delivery and grow the binding list forever.
+    ///
+    /// An unknown exchange is reported rather than leniently accepted, so
+    /// the connection driver can render `channel.close` (`NOT_FOUND`) the
+    /// way a real broker does.
     pub fn bind_queue(&self, exchange: &[u8], queue: Vec<u8>, routing_key: Vec<u8>) -> bool {
         let exists = self
             .exchanges
@@ -242,10 +245,16 @@ impl AmqpBroker {
         self.exchanges_control.update(|current| {
             let mut next = current.clone();
             if let Some(entry) = next.get_mut(exchange) {
-                entry.bindings.push(Binding {
-                    routing_key: routing_key.clone(),
-                    queue: queue.clone(),
-                });
+                let already_bound = entry
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.queue == queue && binding.routing_key == routing_key);
+                if !already_bound {
+                    entry.bindings.push(Binding {
+                        routing_key: routing_key.clone(),
+                        queue: queue.clone(),
+                    });
+                }
             }
             next
         });
@@ -303,6 +312,10 @@ impl AmqpBroker {
         Ok(reached)
     }
 
+    /// The DISTINCT queues `(exchange, routing_key)` reaches. Distinct is
+    /// the point: a queue bound twice (two patterns that both match, or a
+    /// fanout binding under two keys) is one destination, not two — AMQP
+    /// bindings are a set, and a publisher expects one copy per queue.
     fn matched_queues(&self, exchange: &[u8], routing_key: &[u8]) -> Vec<Vec<u8>> {
         if exchange.is_empty() {
             return vec![routing_key.to_vec()];
@@ -316,6 +329,8 @@ impl AmqpBroker {
                 .iter()
                 .filter(|binding| entry.kind.routes(&binding.routing_key, routing_key))
                 .map(|binding| binding.queue.clone())
+                .collect::<BTreeSet<Vec<u8>>>()
+                .into_iter()
                 .collect()
         })
     }
@@ -432,6 +447,61 @@ mod tests {
             .await
             .expect("publish");
         assert_eq!(missed, 0);
+    }
+
+    // real clients redeclare and rebind on every reconnect, so an
+    // unconditional append grows the binding list — cloned in full on every
+    // later declare/bind — without bound for the broker's whole lifetime.
+    // Asserted on the list itself: nothing else observes it, because
+    // routing already collapses duplicates.
+    #[test]
+    fn rebinding_an_identical_queue_and_key_registers_one_binding() {
+        let broker = AmqpBroker::new();
+        broker
+            .declare_exchange(b"orders-x".to_vec(), ExchangeKind::Direct)
+            .expect("declare");
+        for _reconnect in 0..16 {
+            assert!(broker.bind_queue(b"orders-x", b"orders.eu".to_vec(), b"eu".to_vec()));
+        }
+        assert!(broker.bind_queue(b"orders-x", b"orders.eu".to_vec(), b"us".to_vec()));
+
+        let bindings = broker.exchanges.read(|exchanges| {
+            exchanges
+                .get(b"orders-x".as_slice())
+                .map(|exchange| exchange.bindings.len())
+        });
+        assert_eq!(bindings, Some(2), "a distinct key still binds separately");
+    }
+
+    // two DISTINCT bindings may both name the same queue (two topic patterns
+    // that both match, or a fanout binding under two keys) — the queue is
+    // still one destination, so the publisher's one message stays one
+    // message.
+    #[proxima::test(runtime = "tokio")]
+    async fn a_queue_two_matching_patterns_reach_still_receives_one_copy() {
+        let broker = AmqpBroker::new();
+        broker
+            .declare_exchange(b"events".to_vec(), ExchangeKind::Topic)
+            .expect("declare");
+        broker.bind_queue(b"events", b"audit".to_vec(), b"orders.#".to_vec());
+        broker.bind_queue(b"events", b"audit".to_vec(), b"orders.eu.*".to_vec());
+
+        let (push, mut rx) = sink(1, b"ctag-1");
+        broker.subscribe_queue(b"audit", push);
+
+        let reached = broker
+            .publish(
+                b"events",
+                b"orders.eu.created",
+                Vec::new(),
+                b"body".to_vec(),
+            )
+            .await
+            .expect("publish");
+
+        assert_eq!(reached, 1);
+        assert!(rx.next().await.is_some());
+        assert_eq!(rx.try_recv().ok(), None, "the message was delivered twice");
     }
 
     #[proxima::test(runtime = "tokio")]
