@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering, fence};
 
 /// A seqlock over `N` 32-bit words, updated and read as one atomic-seeming
 /// unit. Internal building block for [`crate::coarse::TickCell`] (`N = 2`,
@@ -46,7 +46,11 @@ impl<const N: usize> SeqWords<N> {
         let sequence = self.sequence.load(Ordering::Relaxed);
         // odd sequence == "a write is in flight" — readers spin past it.
         self.sequence
-            .store(sequence.wrapping_add(1), Ordering::Release);
+            .store(sequence.wrapping_add(1), Ordering::Relaxed);
+        // a `Release` STORE would order the accesses BEFORE it, which is the
+        // wrong direction here: what must not move is the word stores BELOW
+        // it. only a release FENCE pins them under the odd bump.
+        fence(Ordering::Release);
         for (word, new_word) in self.words.iter().zip(new_words) {
             word.store(new_word, Ordering::Relaxed);
         }
@@ -67,7 +71,11 @@ impl<const N: usize> SeqWords<N> {
             for (slot, word) in words.iter_mut().zip(&self.words) {
                 *slot = word.load(Ordering::Relaxed);
             }
-            let after = self.sequence.load(Ordering::Acquire);
+            // mirror of the writer's fence: an `Acquire` LOAD below the word
+            // reads would not stop them sinking past it, so the validating
+            // read would compare a sequence taken BEFORE the data it guards.
+            fence(Ordering::Acquire);
+            let after = self.sequence.load(Ordering::Relaxed);
             if before == after {
                 return words;
             }
