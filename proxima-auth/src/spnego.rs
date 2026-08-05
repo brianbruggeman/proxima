@@ -114,7 +114,13 @@ impl NegotiateLoop {
 
     /// Consume the server's `WWW-Authenticate: Negotiate …` continuation.
     /// Returns the decoded GSS token bytes the mechanism must process next, or
-    /// `None` when the server sent `Negotiate` with no data (final round).
+    /// `None` once `gss_complete` reports the context established — at which
+    /// point `www_authenticate` is not read at all.
+    ///
+    /// A bare `Negotiate` with no `gssapi-data` decodes to an EMPTY token rather
+    /// than an error: RFC 4559 §4 lets the final server response carry the
+    /// scheme alone, and whether an empty token ends the exchange is the GSS
+    /// mechanism's call, not this framing layer's.
     ///
     /// `gss_complete` is the mechanism's verdict after processing the prior
     /// token: `true` ends the loop (`Established`).
@@ -152,40 +158,42 @@ pub fn encode_negotiate_header(gss_token: &[u8]) -> String {
 /// Extract the GSS token bytes from a `WWW-Authenticate: Negotiate <base64>`
 /// (or bare `Negotiate <base64>`) value.
 ///
+/// The scheme token is matched case-insensitively and the `gssapi-data` may be
+/// absent: RFC 7235 §2.1 makes `auth-scheme` case-insensitive, so a server
+/// answering `NEGOTIATE …` is conformant, and RFC 4559 §4 permits the scheme
+/// alone on the final round. Matching only the two exact casings `Negotiate `
+/// and `negotiate ` rejected both as [`NegotiateError::WrongScheme`], which is
+/// also the wrong diagnosis — the scheme was right.
+///
 /// # Errors
 /// [`NegotiateError`] when the scheme is wrong or the base64 is malformed.
 pub fn decode_negotiate_header(header: &str) -> Result<Vec<u8>, NegotiateError> {
     let trimmed = header.trim();
-    let data = trimmed
-        .strip_prefix("Negotiate ")
-        .or_else(|| trimmed.strip_prefix("negotiate "))
-        .ok_or(NegotiateError::WrongScheme)?
-        .trim();
-    BASE64.decode(data).map_err(|_| NegotiateError::BadBase64)
+    let (scheme, data) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    if !scheme.eq_ignore_ascii_case("Negotiate") {
+        return Err(NegotiateError::WrongScheme);
+    }
+    BASE64
+        .decode(data.trim())
+        .map_err(|_| NegotiateError::BadBase64)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NegotiateError {
     /// the header did not start with the `Negotiate` scheme token
+    #[error("negotiate header missing the `Negotiate` scheme")]
     WrongScheme,
     /// the token was not valid base64
+    #[error("negotiate token is not valid base64")]
     BadBase64,
     /// the server returned 401 with no `Negotiate` continuation token
+    #[error("server returned no `Negotiate` continuation token")]
     NoContinuation,
     /// `send` was called after the loop already reached a terminal state
+    #[error("negotiate loop already terminal; cannot send another token")]
     Terminal,
-}
-
-impl core::fmt::Display for NegotiateError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let message = match self {
-            Self::WrongScheme => "negotiate header missing the `Negotiate` scheme",
-            Self::BadBase64 => "negotiate token is not valid base64",
-            Self::NoContinuation => "server returned no `Negotiate` continuation token",
-            Self::Terminal => "negotiate loop already terminal; cannot send another token",
-        };
-        formatter.write_str(message)
-    }
 }
 
 #[cfg(test)]
@@ -215,8 +223,35 @@ mod tests {
 
     #[test]
     fn decode_accepts_the_www_authenticate_scheme_case_insensitively() {
-        let decoded = decode_negotiate_header("negotiate dG9rZW4=").expect("decode");
-        assert_eq!(decoded, b"token");
+        // RFC 7235 §2.1: auth-scheme is case-insensitive, so every casing a
+        // conformant server may emit has to be accepted, not just two.
+        for header in [
+            "negotiate dG9rZW4=",
+            "Negotiate dG9rZW4=",
+            "NEGOTIATE dG9rZW4=",
+            "NeGoTiAtE dG9rZW4=",
+        ] {
+            let decoded = decode_negotiate_header(header).expect("decode");
+            assert_eq!(decoded, b"token", "failed on `{header}`");
+        }
+    }
+
+    #[test]
+    fn a_bare_scheme_with_no_gssapi_data_decodes_to_an_empty_token() {
+        // RFC 4559 §4 permits the scheme alone on the final round. Reporting
+        // that as WrongScheme was both an error where none exists and the wrong
+        // diagnosis — the scheme was right, the data was absent.
+        assert_eq!(decode_negotiate_header("Negotiate"), Ok(Vec::new()));
+        assert_eq!(decode_negotiate_header("Negotiate  "), Ok(Vec::new()));
+
+        let mut negotiate = NegotiateLoop::new();
+        let _ = negotiate.send(b"client-init-token").expect("send");
+        let empty = negotiate.on_server(Some("Negotiate"), false).expect("bare");
+        assert_eq!(
+            empty,
+            Some(Vec::new()),
+            "the GSS mechanism, not the framing, judges an empty token"
+        );
     }
 
     #[test]
