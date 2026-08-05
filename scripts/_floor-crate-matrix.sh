@@ -97,6 +97,19 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-config-sugar|proxima-config|alloc,sugar"
     "proxima-config-schema|proxima-config|alloc,schema"
     "proxima-config-store|proxima-config|alloc,store"
+    # proxima-patterns' Cargo.toml has documented an `alert` tier-3 cell
+    # ("#![no_std], no per-call alloc, heapless containers") since the fold,
+    # and its `kv` / `control_plane` patterns each name `alloc` as their floor
+    # — none of it was in this matrix, so the claim had never been compiled for
+    # an embedded target. It did not hold: `ulid`'s manifest leaves
+    # default-features on its own serde edge, so `features = ["serde"]` turned
+    # `serde/std` on for the whole build. Fixed by pinning ulid locally with
+    # `default-features = false` and hand-rolling the identical canonical-string
+    # wire form (`alert::event::ulid_str`). No bare `--features ""` cell: lib.rs
+    # cfg's out every module, so it would compile an empty crate.
+    "proxima-patterns-alert-proto|proxima-patterns|alert,proto"
+    "proxima-patterns-kv|proxima-patterns|kv"
+    "proxima-patterns-control-plane|proxima-patterns|control_plane"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

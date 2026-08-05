@@ -200,7 +200,10 @@ async fn run_schedule_loop(
                 futures::pin_mut!(tick_fut);
                 let should_fire = futures::select_biased! {
                     _ = cancel_fut => {
-                        tracing::debug!(event_kind = %event_kind, "scheduled_trigger cancelled");
+                        proxima_telemetry::debug!(
+                            event_kind = %event_kind,
+                            "scheduled_trigger cancelled"
+                        );
                         return;
                     }
                     _ = tick_fut => true,
@@ -216,9 +219,9 @@ async fn run_schedule_loop(
                     );
                     let request = build_scheduled_tick_request(event);
                     if let Err(err) = SendPipe::call(inner.as_ref(), request).await {
-                        tracing::error!(
-                            ?err,
+                        proxima_telemetry::error!(
                             event_kind = %event_kind,
+                            ?err,
                             "scheduled_trigger inner call failed"
                         );
                     }

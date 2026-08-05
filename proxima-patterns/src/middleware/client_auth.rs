@@ -333,7 +333,7 @@ async fn build_oauth(
     if is_plaintext_token_url(token_url) {
         // F2: the client-credentials secret travels in the body of this POST;
         // over plaintext http it is exposed on the wire.
-        tracing::warn!(
+        proxima_telemetry::warn!(
             token_url = %token_url,
             "oauth token_url is plaintext http; client_secret is exposed in transit, use https"
         );
