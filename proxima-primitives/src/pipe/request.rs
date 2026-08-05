@@ -326,8 +326,7 @@ impl Request<Bytes> {
             // Request trailers fold into `metadata` at chunked-decode end.
             #[cfg(feature = "std")]
             if let Some(slot) = trailers_slot
-                && let Ok(guard) = slot.lock()
-                && let Some(trailers) = guard.clone()
+                && let Some(trailers) = slot.lock().clone()
             {
                 for (name, value) in &trailers {
                     this.metadata

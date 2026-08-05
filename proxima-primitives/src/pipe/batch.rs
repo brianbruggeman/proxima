@@ -9,11 +9,13 @@
 //! hands back the full batch for the caller to flush; `drain` takes the partial
 //! remainder on an explicit flush.
 //!
-//! Lock is poison-tolerant: a poisoned buffer only means a prior panic, and the
-//! `Vec` is still sound to take, so a batcher never wedges on one bad appender.
+//! The buffer is guarded by [`crate::sync::blocking::Mutex`] — the crate's
+//! canonical blocking lock. It never poisons, so a panic in one appender
+//! cannot wedge the batcher for every other one.
 
 use alloc::vec::Vec;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use crate::sync::blocking::Mutex;
 
 /// A count-thresholded accumulator. `Clone`-free, shareable behind an `Arc`.
 pub struct Batch<T> {
@@ -36,7 +38,7 @@ impl<T> Batch<T> {
     /// the threshold (leaving the buffer empty), otherwise `None`.
     #[must_use = "the returned batch must be flushed to its sink"]
     pub fn push(&self, item: T) -> Option<Vec<T>> {
-        let mut guard = self.lock();
+        let mut guard = self.buffer.lock();
         guard.push(item);
         if guard.len() >= self.batch_size {
             Some(core::mem::take(&mut *guard))
@@ -48,28 +50,24 @@ impl<T> Batch<T> {
     /// Take whatever is buffered (an explicit flush); empties the buffer.
     #[must_use = "the drained batch must be flushed to its sink"]
     pub fn drain(&self) -> Vec<T> {
-        core::mem::take(&mut *self.lock())
+        core::mem::take(&mut *self.buffer.lock())
     }
 
     /// Items currently buffered (not yet flushed).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.buffer.lock().len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
+        self.buffer.lock().is_empty()
     }
 
     /// The flush threshold.
     #[must_use]
     pub fn batch_size(&self) -> usize {
         self.batch_size
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Vec<T>> {
-        self.buffer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
