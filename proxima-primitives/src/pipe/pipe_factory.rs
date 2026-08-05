@@ -127,7 +127,12 @@ mod tests {
         let outcome = registry.register(Arc::new(StubFactory {
             registered_name: "dup".into(),
         }));
-        assert!(matches!(outcome, Err(ProximaError::Registry(_))));
+        assert!(matches!(
+            outcome,
+            Err(ProximaError::RegistryKind(
+                proxima_core::RegistryError::AlreadyRegistered { .. }
+            ))
+        ));
     }
 
     #[cfg(feature = "std")]
@@ -135,6 +140,11 @@ mod tests {
     async fn missing_name_returns_registry_error() {
         let registry = PipeFactoryRegistry::new();
         let outcome = registry.get("absent");
-        assert!(matches!(outcome, Err(ProximaError::Registry(_))));
+        assert!(matches!(
+            outcome,
+            Err(ProximaError::RegistryKind(
+                proxima_core::RegistryError::NotRegistered { .. }
+            ))
+        ));
     }
 }
