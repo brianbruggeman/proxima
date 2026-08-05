@@ -1,5 +1,6 @@
 //! Emit proxima's self-describing TOML schema form. Every registered
-//! schema becomes a `[[schema]]` block matching what `load_full` parses.
+//! schema becomes a `[[schema]]` block in the shape the umbrella crate's
+//! config loader reads back.
 
 use alloc::collections::BTreeMap;
 

@@ -20,7 +20,7 @@ pub use describe::{Describe, field};
 #[cfg(feature = "schema-std")]
 pub use scenario::register_scenario_schemas;
 
-/// `#[derive(Schema)]` — generate a [`Schema`] for a type (the derive lives in
+/// `#[derive(Schema)]` — generate a [`enum@Schema`] for a type (the derive lives in
 /// the macro namespace, the IR enum in the type namespace, so they share the
 /// name the way serde's `Serialize` trait and derive do). emits an
 /// `impl Describe`, so bring both into scope: `use proxima_config::schema::{Schema, Describe};`.
