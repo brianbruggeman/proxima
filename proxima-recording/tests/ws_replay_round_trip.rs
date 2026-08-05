@@ -6,15 +6,8 @@
 //!
 //! Spans the recording format base (BinFormat/BinSource) + the `replay`
 //! feature (WsReplayUpstream) + proxima-pipe (upgrade machinery), no network.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+// unwrap/expect are workspace-denied; tests are the sanctioned exception.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "replay")]
 
 use std::pin::Pin;
