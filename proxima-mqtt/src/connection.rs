@@ -340,7 +340,7 @@ where
     let mut connection = MqttConnection::with_limits(Limits {
         max_message_bytes: config.max_message_bytes,
     });
-    let out = &mut Vec::with_capacity(config.write_high_water_bytes + 4096);
+    let mut out = Vec::with_capacity(config.write_high_water_bytes + 4096);
     loop {
         loop {
             match connection.advance() {
@@ -359,7 +359,7 @@ where
                         FrameOutcome::NoReply => {}
                         FrameOutcome::Close(bytes) => {
                             out.extend_from_slice(&bytes);
-                            flush_out(write_half, out).await?;
+                            flush_out(write_half, &mut out).await?;
                             return Ok(());
                         }
                         FrameOutcome::InternalError(error) => {
@@ -368,7 +368,7 @@ where
                         }
                     }
                     if out.len() >= config.write_high_water_bytes {
-                        flush_out(write_half, out).await?;
+                        flush_out(write_half, &mut out).await?;
                     }
                 }
                 Advanced::ProtocolError { reason, .. } => {
@@ -385,7 +385,7 @@ where
                 }
             }
         }
-        flush_out(write_half, out).await?;
+        flush_out(write_half, &mut out).await?;
 
         match proxima_listen::wait_for_wire_event(sources, write_half).await? {
             Some(bytes) => connection.feed_bytes(&bytes),
