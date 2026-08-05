@@ -1,16 +1,23 @@
-//! proxima is a config-driven proxy and middleware runtime. The
-//! primitive is [`Pipe`](crate::pipe::Pipe) — an async `request → response`
-//! boundary that every upstream, middleware, and composition unit
-//! implements. Pipes compose recursively; the same spec drives the
-//! library, the CLI, and an MCP control plane.
+//! proxima is a sans-IO core where everything is a
+//! [`Pipe`](crate::pipe::Pipe) — one async trait, `In -> Result<Out, Err>`.
+//! Choose the types and the same trait becomes a **transform**
+//! (`In -> Out`), a **source** (`() -> Out`), a **sink** (`In -> ()`), or an
+//! **observe** (`In -> In`). There is no `Source` trait and no `Sink` trait;
+//! those are the one trait with `()` on a side. Join pipes with `and_then`,
+//! reach for the three primitives that wrap a pipe — filter, fan-out, fan-in
+//! — and a proxy, a gateway, a cache, or a rate limiter falls out as those
+//! composed rather than as another thing to learn.
+//!
+//! Because a pipe never touches I/O itself, the same pipe runs on the
+//! from-scratch per-core [`prime`] runtime, on tokio, or on `no_std` bare
+//! metal. Config and code are isomorphic: one spec drives the library, the
+//! CLI, and an MCP control plane.
 //!
 //! For the teaching surface, start at the [`mod@pipe`] module — its
-//! `//!` rustdoc is the canonical introduction to Pipe-as-the-primitive
-//! (composition, middleware, core primitives, recording, serving).
-//! For the per-core runtime, see [`prime`]. Hot-swap, recording,
-//! replay, and `causal explain` are core primitives — see
-//! [`Replay`], [`Diff`], [`Isolate`], [`Causal`], [`SwappablePipe`],
-//! [`WriteBack`], [`check_determinism`].
+//! `//!` rustdoc is the canonical introduction to the algebra. Hot-swap,
+//! recording, replay, and `causal explain` are not new machinery; each is
+//! pipes composed — see [`Replay`], [`Diff`], [`Isolate`], [`Causal`],
+//! [`SwappablePipe`], [`WriteBack`], [`check_determinism`].
 //!
 //! # Orientation
 //!

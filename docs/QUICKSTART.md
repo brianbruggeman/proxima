@@ -1,12 +1,15 @@
 # quickstart
 
-A `Pipe` is the primitive — an async `request → response` boundary
-that every upstream, middleware, and composition unit in proxima
-implements. This quickstart gets you to a running Pipe in five
-minutes. The canonical teaching surface for the primitive lives in
-the `proxima::pipe` module rustdoc — open `cargo doc` and start
-there, or read [proxima-primitives/src/pipe/mod.rs](../proxima-primitives/src/pipe/mod.rs)'s
-module-level doc-comment.
+A `Pipe` is the primitive — one async trait, `In -> Result<Out, Err>`.
+Pick the types and the same trait becomes a transform (`In -> Out`), a
+source (`() -> Out`), a sink (`In -> ()`), or an observe (`In -> In`).
+Every upstream, middleware, and composition unit in proxima is one.
+This quickstart gets you to a running Pipe in five minutes. The
+canonical teaching surface for the primitive lives in the
+`proxima::pipe` module rustdoc — open `cargo doc` and start there, or
+read [proxima-primitives/src/pipe/mod.rs](../proxima-primitives/src/pipe/mod.rs)'s
+module-level doc-comment. For the full curriculum, start at
+[examples/README.md](../examples/README.md).
 
 proxima is config-first: the same Pipe spec drives both the library
 face and `proxima.toml`. Sugar is a pure rewrite —
@@ -16,10 +19,12 @@ face and `proxima.toml`. Sugar is a pure rewrite —
 
 Every example below builds a Pipe and runs it. The shapes differ
 (config file, fluent Rust, CLI one-shot) but they all produce the
-same `PipeHandle` under the hood. The core primitives (Tee,
-Diff, Isolate, Causal, SwappablePipe, WriteBack, check_determinism)
-that compose around any Pipe are documented in the `proxima::pipe`
-module rustdoc.
+same `PipeHandle` under the hood. The algebra's own primitives are
+three — filter, fan-out, fan-in — and everything else is those plus
+`and_then`. The composition units that wrap a Pipe for hot-swap,
+diffing, isolation and causal explain (`Diff`, `Isolate`, `Causal`,
+`SwappablePipe`, `WriteBack`, `check_determinism`) are documented in
+the `proxima::pipe` module rustdoc.
 
 ## library
 
