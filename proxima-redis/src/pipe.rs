@@ -11,8 +11,9 @@
 //! RESP-over-TLS is whole-connection TLS from byte 0 — there is no in-band
 //! STARTTLS-style negotiation the way pgwire's SSLRequest is — so this pipe
 //! carries no TLS state of its own; TLS composes as the generic
-//! `Listener::builder().tls(config)` decorator over whatever
-//! `RedisListenProtocol` resolves, exactly like the h2/h3 listeners.
+//! `Listener::builder().tls(config)` decorator wrapping the accepted socket
+//! before [`crate::any_protocol::RedisAnyProtocol`] ever probes it, exactly
+//! like the h2/h3 listeners.
 
 use std::sync::Arc;
 
