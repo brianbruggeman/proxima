@@ -3,13 +3,11 @@
 //! see exactly what each variant carries and what triggers each
 //! transition.
 //!
-//! Mandated by workspace `pty-tester/docs/proxima-pty/guiding-principles.md`
-//! principle 11 ("every state machine ships with an
-//! `examples/<sm>_walkthrough.rs` driving it through every legal
-//! transition path").
+//! Every state machine ships with a walkthrough driving it through each legal
+//! transition path; this is QUIC's.
 //!
 //! Run with:
-//!     cargo run -p proxima-quic-proto --example connection_state_walkthrough --features mock-tls
+//!     cargo run -p proxima-protocols --example quic_connection_state_walkthrough --features quic-mock-tls
 
 #![allow(
     clippy::expect_used,
@@ -122,7 +120,12 @@ fn main() {
     assert_eq!(outcome, TimerOutcome::Drained);
     assert!(matches!(close_demo.state(), ConnectionState::Closed));
 
-    println!("\n-- Path 5: Idle timeout from fresh Initial → Closed --\n");
+    // two deadlines are armed from origin: handshake-completion (10 s) and
+    // idle (30 s). the nearer one is the only one a stalled Initial can ever
+    // reach, so IdleClosed is unreachable until Established clears the
+    // handshake deadline -- see connection/mod.rs's Initial arm, which checks
+    // handshake_completion_deadline before falling through to check_idle.
+    println!("\n-- Path 5: Handshake-completion timeout from fresh Initial → Closed --\n");
     let mut idle_demo = Connection::<MockTlsProvider>::new_client(
         MockTlsProvider::script_client(vec![]),
         b"",
@@ -132,14 +135,14 @@ fn main() {
     )
     .expect("new_client");
     print_state("t=10_000_000", &idle_demo);
-    let idle_deadline = idle_demo.next_timeout().expect("idle deadline");
-    println!("  → next_timeout = {idle_deadline:?} (RFC default 30s idle)");
+    let earliest = idle_demo.next_timeout().expect("deadline set");
+    println!("  → next_timeout = {earliest:?} (handshake-completion, nearer than the 30s idle)");
     let outcome = idle_demo
-        .handle_timeout(idle_deadline + Duration::from_micros(1))
+        .handle_timeout(earliest + Duration::from_micros(1))
         .expect("timeout");
-    println!("  → handle_timeout(idle_deadline + 1µs) returned {outcome:?}");
-    print_state("after idle deadline", &idle_demo);
-    assert_eq!(outcome, TimerOutcome::IdleClosed);
+    println!("  → handle_timeout(earliest + 1µs) returned {outcome:?}");
+    print_state("after handshake deadline", &idle_demo);
+    assert_eq!(outcome, TimerOutcome::HandshakeTimeout);
     assert!(matches!(idle_demo.state(), ConnectionState::Closed));
 
     println!("\n== All transition paths walked ✓ ==");
