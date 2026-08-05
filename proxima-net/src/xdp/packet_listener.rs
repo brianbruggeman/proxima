@@ -17,7 +17,7 @@
 
 use super::bpf::XdpProgram;
 use super::error::XdpError;
-use super::readiness::{Readiness, ReadyState};
+use prime::os::readiness::{Readiness, ReadyState};
 use super::sized;
 use super::sys;
 use super::uapi::{self, xdp_desc};
