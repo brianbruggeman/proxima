@@ -1,9 +1,10 @@
 //! `conflaguration`-derived [`RecordingConfig`] + factory entry point.
 //!
-//! Gated behind the `config` feature so the raw `BoundedRecordingSink::new` /
-//! `LiveCaptureContext` paths stay dependency-light. With the feature on
-//! callers can drive recording-pipe assembly entirely from env vars or a TOML
-//! block — matching the [`crate::pipe::cap::FailMode`] taxonomy.
+//! Gated behind the `pipe-config` feature so the raw
+//! `BoundedRecordingSink::new` / `LiveCaptureContext` paths stay
+//! dependency-light. With the feature on callers can drive recording-pipe
+//! assembly entirely from env vars or a TOML block — matching the
+//! [`crate::pipe::cap::FailMode`] taxonomy.
 //!
 //! ```text
 //! PROXIMA_RECORDING_ENABLED=true
@@ -37,13 +38,25 @@ pub struct SinkConfig {
     #[serde(default)]
     #[builder(default)]
     pub format: FormatKind,
+    /// zstd block-compressor level for `Bin` (CPU/ratio lever); absent uses
+    /// the codec default, and `Json` ignores it.
+    /// example: `9`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zstd_level: Option<i32>,
 }
 
 impl SinkConfig {
-    /// Lower to the builder-free descriptor the durable terminals open.
+    /// Lower to the builder-free descriptor the durable terminals open. Every
+    /// path from a config to a codec goes through here, so the eager
+    /// ([`RecorderConfig::build`]) and lazy ([`RecorderConfig::specs`]) routes
+    /// cannot drift apart.
     #[must_use]
     pub fn to_spec(&self) -> SinkSpec {
-        SinkSpec::new(self.path.clone(), self.format)
+        let spec = SinkSpec::new(self.path.clone(), self.format);
+        match self.zstd_level {
+            Some(level) => spec.with_zstd_level(level),
+            None => spec,
+        }
     }
 }
 
@@ -66,8 +79,8 @@ impl RecorderConfig {
     /// blocking I/O off-core.
     pub fn build(&self, runtime: Arc<dyn Runtime>) -> Result<FanOut, ProximaError> {
         let mut sinks = Vec::with_capacity(self.sinks.len());
-        for sink in &self.sinks {
-            let log = AppendLog::open(&sink.path, sink.format.codec()?, Arc::clone(&runtime))?;
+        for spec in self.specs() {
+            let log = AppendLog::open(&spec.path, spec.codec()?, Arc::clone(&runtime))?;
             sinks.push(log);
         }
         Ok(FanOut::new(sinks))
@@ -275,6 +288,22 @@ mod recorder_config_tests {
     fn default_is_empty_and_equals_builder() {
         assert_eq!(RecorderConfig::default(), RecorderConfig::builder().build());
         assert!(RecorderConfig::default().sinks.is_empty());
+    }
+
+    // the compressor level is a config knob, not a fluent-only one: a TOML
+    // `zstd_level` must reach the SinkSpec the durable terminal opens.
+    #[test]
+    fn configured_zstd_level_reaches_the_lowered_spec() {
+        let topology: RecorderConfig = serde_json::from_value(serde_json::json!({
+            "sinks": [
+                { "path": "/var/log/audit.bin", "format": "bin", "zstd_level": 9 },
+                { "path": "/var/log/plain.bin", "format": "bin" },
+            ]
+        }))
+        .unwrap();
+        let specs = topology.specs();
+        assert_eq!(specs[0].zstd_level, Some(9), "explicit level survives");
+        assert_eq!(specs[1].zstd_level, None, "omitted level stays default");
     }
 
     // the config actually BUILDS the fan-out: a 2-sink topology yields a FanOut
