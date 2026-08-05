@@ -65,6 +65,15 @@ declare -a FLOOR_CRATE_CELLS=(
     # second. Adding an `alloc` cell would be a red gate, not a proof.
     "proxima-telemetry-bare-no-alloc|proxima-telemetry|"
     "proxima-protocols|proxima-protocols|tcp,mqtt,amqp,kafka,memcached,nvme,inet,pgwire_codec,process,jsonrpc,websocket_frame,proxy_protocol,redis,hpack,http1_codec,http2_codec,http3_codec-alloc,json_framing,quic-alloc,dns,grpc_framing,protobuf_wire,websocket_handshake,codec-pipe"
+    # the cell above turns on each protocol's BASE feature and `codec-pipe`
+    # (the generic adapter), but none of the `-codec-trait` / `-frame-pipe` /
+    # `-session` / `-alloc` features -- which is where this crate's tier claims
+    # actually live: `dns-codec-trait`'s heapless no-alloc `DnsTcpQuery::name`
+    # rung, `websocket_frame-session`'s "Tier-1: no_std + alloc", and every
+    # per-codec `OwnFrame`/`Incomplete` impl the adapter composes against. None
+    # of it had ever been compiled for an embedded target. Measured 2026-08-04:
+    # it builds clean, so this cell locks in a claim that was true but unproven.
+    "proxima-protocols-codec-seams|proxima-protocols|dns-codec-trait,memcached-codec-trait,kafka-codec-trait,redis-codec-trait,json_framing-codec-trait,grpc_framing-codec-trait,grpc_framing-frame-pipe,protobuf_wire-codec-trait,websocket_frame-codec-trait,websocket_frame-frame-pipe,websocket_frame-session,http1_codec-alloc,http1_codec-codec-trait,http1_codec-frame-pipe,http2_codec-alloc,http2_codec-codec-trait,http3_codec-codec-trait,http3_codec-part-source,hpack-alloc,hpack-codec-trait,proxy_protocol-codec-trait,quic-codec-trait,quic-mock-tls"
     # proxima-codec's own Cargo.toml calls `alloc` its tier-1 floor and four
     # crates consume it there (proxima-kafka, proxima-protocols' -codec-trait
     # features, proxima-listen's framed-any, and the root crate's bench
