@@ -237,7 +237,6 @@ pub async fn par_each_with_threshold<Item, Work>(
     par_each_range(pool.clone(), slice, 0, len, work, chunk_threshold).await;
 }
 
-#[allow(clippy::too_many_arguments)]
 fn par_each_range<Item, Work>(
     pool: Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
@@ -347,7 +346,6 @@ where
 }
 
 #[cfg(feature = "runtime-prime-bgpool-async")]
-#[allow(clippy::too_many_arguments)]
 fn par_reduce_async_range<Item, Acc, Work, Fut, Reduce, Identity>(
     pool: Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
@@ -447,7 +445,6 @@ pub async fn par_each_async_with_threshold<Item, Work, Fut>(
 }
 
 #[cfg(feature = "runtime-prime-bgpool-async")]
-#[allow(clippy::too_many_arguments)]
 fn par_each_async_range<Item, Work, Fut>(
     pool: Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
@@ -528,7 +525,6 @@ where
     par_map_collect_range(pool.clone(), slice, 0, len, map_fn, chunk_threshold).await
 }
 
-#[allow(clippy::too_many_arguments)]
 fn par_map_collect_range<Item, Output, F>(
     pool: Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
@@ -612,7 +608,6 @@ where
 }
 
 #[cfg(feature = "runtime-prime-bgpool-async")]
-#[allow(clippy::too_many_arguments)]
 fn par_map_collect_async_range<Item, Output, F, Fut>(
     pool: Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
@@ -1640,19 +1635,12 @@ pub async fn par_chunks_mut<Item, Work>(
 // rayon-style structured concurrency: spawn closures into a `Scope`,
 // all spawned tasks complete before `scope(f)` returns.
 //
-// multi-spawn via lifetime-bound `'scope` closures requires that the
-// closures borrow from the caller stack. this is feasible but requires
-// unsafe to erase the lifetime for the pool's spawn signature (which
-// demands `'static`). the single-closure variant below is fully safe
-// and covers the majority of real use cases. the multi-spawn variant
-// with borrows is TODO — see module-level doc.
-//
-// TODO: multi-spawn scope that allows closures to borrow from the caller
-// stack. requires either a lifetime-erased trampoling with synchronization
-// (barrier/CountdownLatch) to guarantee the borrows are live until all
-// tasks complete, or switching spawn to take Scoped tasks like crossbeam's
-// scope. currently blocked by `ProximaBackgroundPool::spawn`'s `'static`
-// bound on the closure.
+// closures are `'static` by construction: `ProximaBackgroundPool::spawn`
+// erases the job into a `Box<dyn FnOnce() + Send + 'static>` for the shared
+// queue, so a `'scope` lifetime cannot survive the erasure without unsafe
+// lifetime laundering plus a completion barrier. `Arc` the shared state
+// instead — the constraint is documented on `scope` below and is the whole
+// reason no `'scope` parameter appears in its signature.
 
 /// rayon-style structured scope. runs `scope_fn(scope)` immediately; any
 /// work the caller passes to `scope.spawn(...)` is collected and awaited
