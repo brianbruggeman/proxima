@@ -96,9 +96,10 @@ pub struct MqttClientConfig {
     #[builder(default, into)]
     pub username: String,
 
-    /// `CONNECT` password; unused when empty. Held only as long as the
-    /// config; the live session keeps its working copy in a `Zeroizing`
-    /// buffer wiped on drop.
+    /// `CONNECT` password; unused when empty. This `String` is the only
+    /// copy the client holds — [`ClientSession::new`](crate::ClientSession::new)
+    /// borrows it to encode the `CONNECT` frame and never clones it, so its
+    /// lifetime is the config's.
     #[setting(default = "", sensitive)]
     #[serde(default)]
     #[builder(default, into)]
