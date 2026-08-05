@@ -25,7 +25,9 @@
 //! [`Handshake::needs_entropy`] exists so a driver backed by
 //! [`EntropyCell`](crate::EntropyCell) — which is take-once and fails when
 //! empty — only draws on the steps that consume entropy, instead of being
-//! forced to have a value staged for every step.
+//! forced to have a value staged for every step. It takes the pending bytes
+//! for the same reason: whether a draw is consumed depends on which message
+//! arrived, not only on which phase the SA is in.
 
 use proxima_clock::ticks::Ticks;
 use subtle::ConstantTimeEq;
@@ -606,18 +608,27 @@ impl Handshake {
         }
     }
 
-    /// Whether the next [`step`](Self::step) consumes entropy.
+    /// Whether [`step`](Self::step) would consume entropy for exactly these
+    /// bytes.
     ///
-    /// A driver backed by [`EntropyCell`](crate::EntropyCell) checks this
-    /// before drawing, because that cell is take-once and errors when empty —
-    /// requiring a value on every step would make the steps that need none
-    /// fail spuriously.
+    /// The pending input is a parameter because the phase alone cannot answer:
+    /// an authenticated SA draws for an inbound CREATE_CHILD_SA and draws
+    /// nothing for a DELETE or a short read, and a responder that has not yet
+    /// seen a whole SA_INIT draws nothing either. A driver backed by
+    /// [`EntropyCell`](crate::EntropyCell) needs the precise answer, not a
+    /// conservative one: that cell is take-once, so a draw the step then
+    /// discards is a value destroyed for nothing, and on an empty cell a
+    /// speculative draw turns an ordinary idle poll into a failure.
     #[must_use]
-    pub const fn needs_entropy(&self) -> bool {
-        matches!(
-            (self.role, &self.phase),
-            (Role::Initiator, Ok(Phase::Initial)) | (Role::Responder, Ok(Phase::Initial))
-        )
+    pub fn needs_entropy(&self, input: &[u8]) -> bool {
+        match (self.role, &self.phase) {
+            // the initiator opens from nothing, so its first step never
+            // depends on what has arrived
+            (Role::Initiator, Ok(Phase::Initial)) => true,
+            (Role::Responder, Ok(Phase::Initial)) => is_exchange(input, EXCHANGE_TYPE),
+            (_, Ok(Phase::Authenticated { .. })) => is_exchange(input, REKEY_EXCHANGE_TYPE),
+            _ => false,
+        }
     }
 
     /// Advance the handshake.
@@ -625,8 +636,9 @@ impl Handshake {
     /// `input` is whatever has been read so far; a short slice yields
     /// [`Progress::NeedInput`] with no state change, so a caller may call
     /// again with more bytes. `entropy` must be `Some` exactly when
-    /// [`needs_entropy`](Self::needs_entropy) is true. `now` is stamped into
-    /// the established SA for lifetime and rekey accounting.
+    /// [`needs_entropy`](Self::needs_entropy) is true *for the same bytes*.
+    /// `now` is stamped into the established SA for lifetime and rekey
+    /// accounting.
     ///
     /// # Errors
     ///
@@ -1196,6 +1208,15 @@ fn agree(ephemeral: &StaticSecret, peer_public: [u8; DH_LEN]) -> Result<[u8; 32]
     Ok(bytes)
 }
 
+/// Whether `input` is a complete exchange message of the given type.
+///
+/// Deliberately the same three conditions [`Message::parse_exchange`] accepts
+/// on, so [`Handshake::needs_entropy`] and the step it is predicting cannot
+/// disagree about whether a draw is about to be consumed.
+fn is_exchange(input: &[u8], expected: u8) -> bool {
+    input.len() >= MESSAGE_LEN && input[17] == VERSION && input[18] == expected
+}
+
 /// Compare two MACs without leaking where they diverge.
 ///
 /// `subtle` is already in the dependency graph — x25519-dalek pulls it — and is
@@ -1398,14 +1419,14 @@ mod tests {
         let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
         let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
 
-        assert!(initiator.needs_entropy());
+        assert!(initiator.needs_entropy(&[]));
         let progress = initiator
             .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
             .unwrap();
         assert_eq!(progress, Progress::Advanced);
         let init_message = captured(&initiator);
 
-        assert!(responder.needs_entropy());
+        assert!(responder.needs_entropy(&init_message));
         let progress = responder
             .step(&init_message, Some(Entropy32::new(RESPONDER_SEED)), now())
             .unwrap();
@@ -1417,7 +1438,7 @@ mod tests {
         let response = captured(&responder);
 
         assert!(
-            !initiator.needs_entropy(),
+            !initiator.needs_entropy(&response),
             "completing the handshake draws no entropy"
         );
         let progress = initiator.step(&response, None, now()).unwrap();
@@ -1493,11 +1514,16 @@ mod tests {
 
     #[test]
     fn short_input_asks_for_more_without_changing_state() {
-        let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
-        let partial = [0u8; MESSAGE_LEN - 1];
+        let mut initiator = Handshake::initiator(PSK, INITIATOR_SPI);
+        let _ = initiator
+            .step(&[], Some(Entropy32::new(INITIATOR_SEED)), now())
+            .unwrap();
+        let whole = captured(&initiator);
+        let partial = &whole[..MESSAGE_LEN - 1];
 
+        let mut responder = Handshake::responder(PSK, RESPONDER_SPI);
         let progress = responder
-            .step(&partial, Some(Entropy32::new(RESPONDER_SEED)), now())
+            .step(partial, Some(Entropy32::new(RESPONDER_SEED)), now())
             .unwrap();
 
         assert_eq!(progress, Progress::NeedInput);
@@ -1506,8 +1532,12 @@ mod tests {
             "no state change on a short read"
         );
         assert!(
-            responder.needs_entropy(),
-            "still waiting for the first message"
+            !responder.needs_entropy(partial),
+            "a short read consumes no draw, so a take-once source must not be asked for one"
+        );
+        assert!(
+            responder.needs_entropy(&whole),
+            "the whole message is what the draw is for"
         );
     }
 
@@ -2055,6 +2085,44 @@ mod tests {
             );
             seen[usize::from(round) + 1] = fresh;
         }
+    }
+
+    #[test]
+    fn an_authenticated_sa_asks_for_entropy_for_a_rekey_and_for_nothing_else() {
+        // Regression: this used to answer `false` for every authenticated SA,
+        // so a driver honouring the contract fed `None` to the one step that
+        // needs a draw and no inbound rekey could ever complete.
+        let (mut initiator, responder) = authenticated_pair();
+        let _ = initiator
+            .send_rekey(Some(Entropy32::new([0x31; 32])))
+            .unwrap();
+        let rekey = captured(&initiator);
+
+        assert!(
+            responder.needs_entropy(&rekey),
+            "answering the rekey derives a fresh ephemeral"
+        );
+        assert!(
+            !responder.needs_entropy(&[]),
+            "an idle poll must not empty a take-once cell"
+        );
+        assert!(
+            !responder.needs_entropy(&rekey[..MESSAGE_LEN - 1]),
+            "a short read consumes nothing"
+        );
+    }
+
+    #[test]
+    fn a_delete_arriving_at_an_authenticated_sa_consumes_no_draw() {
+        let (mut initiator, responder) = authenticated_pair();
+        let _ = initiator.send_delete().unwrap();
+        let delete = staged(&initiator);
+        let len = initiator.outbound().len();
+
+        assert!(
+            !responder.needs_entropy(&delete[..len]),
+            "a teardown derives nothing"
+        );
     }
 
     #[test]

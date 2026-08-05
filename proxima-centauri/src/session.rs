@@ -128,14 +128,20 @@ where
     /// Advance once, drawing entropy through the source pipe if the step needs
     /// it.
     async fn advance(&self) -> Result<Progress, CentauriError> {
-        let needs_entropy = self.handshake.borrow().needs_entropy();
+        let staged = self.inbound_len.get();
+
+        // the staged bytes decide whether a draw is consumed, so the borrow
+        // has to end before the await: a RefCell guard is not held across one
+        let needs_entropy = {
+            let inbound = self.inbound.borrow();
+            self.handshake.borrow().needs_entropy(&inbound[..staged])
+        };
         let entropy = if needs_entropy {
             Some(self.entropy.call(()).await?)
         } else {
             None
         };
 
-        let staged = self.inbound_len.get();
         let inbound = self.inbound.borrow();
         let progress =
             self.handshake
@@ -173,7 +179,7 @@ mod tests {
     use proxima_primitives::pipe::Pipe;
 
     use super::{INBOUND_LEN, Session};
-    use crate::entropy::{CounterDrbg, FixedSequence};
+    use crate::entropy::{CounterDrbg, Entropy32, EntropyCell, FixedSequence};
     use crate::error::CentauriError;
     use crate::handshake::{Handshake, IkeSpi, Progress};
 
@@ -295,11 +301,7 @@ mod tests {
         // the same seed by hand must produce the same message
         let mut by_hand = Handshake::initiator(PSK, IkeSpi::new(1));
         let _ = by_hand
-            .step(
-                &[],
-                Some(crate::entropy::Entropy32::new([0x11; 32])),
-                Ticks::from_raw(0),
-            )
+            .step(&[], Some(Entropy32::new([0x11; 32])), Ticks::from_raw(0))
             .unwrap();
 
         assert_eq!(&scripted_bytes.0[..scripted_bytes.1], by_hand.outbound());
@@ -317,6 +319,84 @@ mod tests {
                 Err(CentauriError::BufferTooSmall { .. })
             ),
             "a peer sending more than one message ahead is not speaking the protocol"
+        );
+    }
+
+    /// Two peers all the way through SA_INIT and mutual AUTH, driven by hand
+    /// so the session tests can start from a live, authenticated SA.
+    fn authenticated_pair() -> (Handshake, Handshake) {
+        let mut initiator = Handshake::initiator(PSK, IkeSpi::new(1))
+            .with_identity(b"peer-a")
+            .expect("identity fits");
+        let mut responder = Handshake::responder(PSK, IkeSpi::new(2))
+            .with_identity(b"peer-b")
+            .expect("identity fits");
+        let now = Ticks::from_raw(1_000);
+
+        let mut relay = [0u8; INBOUND_LEN];
+        let carry = |from: &Handshake, buffer: &mut [u8; INBOUND_LEN]| {
+            let out = from.outbound();
+            buffer[..out.len()].copy_from_slice(out);
+            out.len()
+        };
+
+        let _ = initiator
+            .step(&[], Some(Entropy32::new([0x11; 32])), now)
+            .unwrap();
+        let len = carry(&initiator, &mut relay);
+        let _ = responder
+            .step(&relay[..len], Some(Entropy32::new([0x22; 32])), now)
+            .unwrap();
+        let len = carry(&responder, &mut relay);
+        let _ = initiator.step(&relay[..len], None, now).unwrap();
+
+        let _ = initiator.send_auth().unwrap();
+        let len = carry(&initiator, &mut relay);
+        let _ = responder.step(&relay[..len], None, now).unwrap();
+        let _ = responder.send_auth().unwrap();
+        let len = carry(&responder, &mut relay);
+        let _ = initiator.step(&relay[..len], None, now).unwrap();
+
+        (initiator, responder)
+    }
+
+    #[test]
+    fn a_session_can_answer_an_inbound_rekey() {
+        // Regression for a defect the pipe form made unreachable rather than
+        // merely awkward: `needs_entropy` answered `false` for an
+        // authenticated SA, so the session fed `None` to the one step that
+        // draws and every inbound rekey failed with EntropyUnavailable. A
+        // take-once cell is the strict source here on purpose — it fails both
+        // ways, on a draw that was not needed and on one that was skipped.
+        let (mut initiator, responder) = authenticated_pair();
+        let before = *responder.keys().unwrap().encrypt_key();
+
+        let cell = EntropyCell::new();
+        let session = Session::new(responder, &cell);
+        session.set_now(Ticks::from_raw(2_000));
+
+        // an idle poll must not touch the cell
+        assert_eq!(
+            block_on((&session).call(())).unwrap(),
+            Progress::NeedInput,
+            "nothing staged, so nothing to do"
+        );
+        assert!(!cell.is_full(), "and the empty cell was never asked");
+
+        let _ = initiator
+            .send_rekey(Some(Entropy32::new([0x31; 32])))
+            .unwrap();
+        session.feed(initiator.outbound()).unwrap();
+        cell.set([0x32; 32]).expect("a fresh cell is empty");
+
+        assert_eq!(block_on((&session).call(())).unwrap(), Progress::Rekeyed);
+        assert!(!cell.is_full(), "the draw was claimed");
+
+        let responder = session.into_handshake();
+        assert_ne!(
+            responder.keys().unwrap().encrypt_key(),
+            &before,
+            "a rekey that does not change the keys is not a rekey"
         );
     }
 

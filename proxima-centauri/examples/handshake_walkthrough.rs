@@ -80,9 +80,12 @@ fn main() {
         .expect("identity fits");
     let now = Ticks::from_raw(1_000);
 
+    // the predicate takes the pending bytes, because which message arrived is
+    // half the answer: an authenticated SA draws for a rekey and not for a
+    // teardown, and a half-read message draws for neither
     println!(
         "initiator needs entropy for this step: {}",
-        initiator.needs_entropy()
+        initiator.needs_entropy(&[])
     );
     let progress = initiator
         .step(&[], Some(Entropy32::new([0x11; 32])), now)
@@ -107,8 +110,12 @@ fn main() {
     println!("  fed {} of 92 bytes -> {progress:?}", partial.len());
     assert_eq!(progress, Progress::NeedInput);
     println!(
-        "  still needs entropy (nothing was consumed): {}",
-        responder.needs_entropy()
+        "  a half-read message draws nothing: {}",
+        responder.needs_entropy(partial)
+    );
+    println!(
+        "  the whole one does: {}",
+        responder.needs_entropy(&init_message)
     );
 
     // ── responder: Initial → Established ──────────────────────────────────
@@ -129,7 +136,7 @@ fn main() {
 
     println!(
         "initiator needs entropy for this step: {}",
-        initiator.needs_entropy()
+        initiator.needs_entropy(&response)
     );
     let progress = initiator
         .step(&response, None, now)
