@@ -34,11 +34,11 @@
 //! [`SendPipe`](proxima_primitives::pipe::SendPipe) with
 //! `In = `[`Request<Bytes>`](proxima_primitives::pipe::Request),
 //! `Out = `[`Response<Bytes>`](proxima_primitives::pipe::Response),
-//! `Err = `[`ProximaError`](proxima_core::ProximaError). Write those three
+//! `Err = `[`ProximaError`]. Write those three
 //! types and you have written everything a listener needs.
 //!
 //! [`serve`](proxima_listen::ListenProtocol::serve) takes that pipe as a
-//! [`PipeHandle`](proxima_primitives::pipe::handler::PipeHandle) — the
+//! [`PipeHandle`] — the
 //! *erased* form. A listener holds a pipe whose concrete type it cannot
 //! know (it was written later, by you), so
 //! [`into_handle`](proxima_primitives::pipe::handler::into_handle) puts it
@@ -85,7 +85,7 @@
 //! - **a new listener** — a different port, a different spec, a different
 //!   protocol, ten of them instead of one — is **config**. No recompile.
 //! - **a new kind of listener** is code: implement
-//!   [`ListenProtocol`](proxima_listen::ListenProtocol), `register` it once,
+//!   [`ListenProtocol`], `register` it once,
 //!   and from then on it is reachable from config by name like every other.
 //!
 //! The compiled set grows only for a genuinely new protocol. Everything you
@@ -125,22 +125,24 @@
 //!
 //! # Creating one
 //!
-//! [`HttpListenProtocol`](crate::listener::HttpListenProtocol) has the worked example. Two knobs reach a running
+//! [`HttpListenProtocol`] has the worked example. Two knobs reach a running
 //! listener, and they are not the same thing:
 //!
 //! - the per-listener JSON `spec` passed to [`serve`](proxima_listen::ListenProtocol::serve)
 //!   — the only source that changes a *running* listener's policy today;
-//! - [`HttpListenerConfig`](crate::listener::HttpListenerConfig), the typed config surface, whose defaults come
-//!   from the [`sized`](crate::listener::sized) build-time constants. Read its docs before reaching
+//! - [`HttpListenerConfig`], the typed config surface, whose defaults come
+//!   from the [`sized`] build-time constants. Read its docs before reaching
 //!   for it: what it does and does not currently reach is documented there,
 //!   and it is narrower than the type suggests.
 //!
 //! # Where the code lives
 //!
 //! Drives [`crate::http1::serve_connection`] for h1 dispatch and
-//! `crate::http2::serve_h2_connection` for h2. The Linux + `io-uring` accept
-//! variant lives in the umbrella (`listeners/http_uring.rs`); this module
-//! ships the default-tokio accept loop.
+//! `crate::http2::serve_h2_connection` for h2, both reached through the
+//! [`AnyProtocol`] candidates in [`crate::any_listener`] — the bind and
+//! accept loop itself is [`AnyListenProtocol`]'s, not this module's (see
+//! [`HttpListenProtocol::serve`]). The Linux + `io-uring` accept variant
+//! lives in the umbrella (`listeners/http_uring.rs`).
 //!
 //! Folded from the former `proxima-listeners-http` satellite crate into
 //! `proxima-http` as the `listener` module (Cargo feature
@@ -334,7 +336,7 @@ impl ListenProtocol for HttpListenProtocol {
 pub use proxima_primitives::pipe::quiesce::QuiesceResponse;
 
 // serve_h1_connection + serve_connection + helpers live in
-// proxima-h1::serve / crate::any_listener. percent_decode tests live with
+// crate::http1::serve / crate::any_listener. percent_decode tests live with
 // the function there.
 
 // exercises the factory path via `TokioAcceptorFactory` + a tokio

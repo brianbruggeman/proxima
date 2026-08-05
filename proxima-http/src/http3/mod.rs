@@ -13,7 +13,7 @@
 //!   that want to ride the canonical implementations. Mounted at
 //!   [`listener::H3ListenProtocol`].
 //!
-//! Both protocols are exported from [`proxima::listeners`]; consumers
+//! Both protocols are exported from `proxima::listeners`; consumers
 //! pick by name in their listener spec (`"h3"` for legacy,
 //! `"h3-native"` for the proxima stack). The dual surface is the
 //! contract, not a transitional state.

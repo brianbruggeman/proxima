@@ -4,19 +4,20 @@
 //! any non-tokio transport plugs in directly via the core's
 //! `StreamConnection` trait.
 //!
-//! Built in layers, each with its own module:
+//! Built in layers. The sans-IO half lives in `proxima-protocols` and is
+//! re-exported below; the I/O half is this module's own:
 //!
 //! - [`frame`]: wire framing — 9-byte header + per-type payloads.
 //!   Parse / encode. State-machine-free; pure bytes.
 //! - [`hpack`]: header compression (RFC 7541) — integer / string
 //!   literal codec, Huffman, static + dynamic tables, encoder /
 //!   decoder.
-//! - [`stream`]: per-stream state machine + per-stream flow-control
-//!   windows (RFC 7540 §5).
-//! - `conn`: connection lifecycle (preface, SETTINGS exchange,
-//!   GOAWAY, drive loop) (planned).
-//!
-//! Today: framing + HPACK + stream state machine implemented.
+//! - [`stream`] + [`stream_table`]: per-stream state machine + per-stream
+//!   flow-control windows (RFC 7540 §5).
+//! - [`connection`]: connection lifecycle — preface, SETTINGS exchange,
+//!   GOAWAY.
+//! - [`server`] / [`client`]: the futures-io drive loops over the above
+//!   ([`serve_h2_connection`], [`H2ClientUpstream`]).
 //!
 //! # Where the standalone listener went
 //!
