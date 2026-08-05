@@ -22,7 +22,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::task::{Context, Poll};
 
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
 use proxima_primitives::stream::{DatagramFactory, DatagramSocket};
@@ -41,16 +40,7 @@ impl TokioDatagram {
     /// `tokio::net::UdpSocket::bind` itself is `async`. Must be called from
     /// within a future already running on a tokio worker.
     pub fn bind_sync(addr: SocketAddr) -> io::Result<Self> {
-        let domain = if addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
-        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_nonblocking(true)?;
-        socket.bind(&addr.into())?;
-        let std_socket: std::net::UdpSocket = socket.into();
-        let inner = UdpSocket::from_std(std_socket)?;
+        let inner = UdpSocket::from_std(super::bind_udp_std(addr)?)?;
         Ok(Self { inner })
     }
 }
