@@ -11,6 +11,9 @@
 //! that has not migrated yet.
 
 #[cfg(feature = "std")]
+use proxima_primitives::pipe::telemetry_surface::Labels;
+
+#[cfg(feature = "std")]
 pub mod auth;
 #[cfg(feature = "std")]
 pub mod client_auth;
@@ -23,18 +26,14 @@ pub mod write_back;
 /// copy of this under a different name (`with_extra` / `context_labels_with`)
 /// after the fold.
 #[cfg(feature = "std")]
-pub(crate) fn labels_with(
-    base: &proxima_primitives::pipe::telemetry_surface::Labels,
-    key: &str,
-    value: &str,
-) -> proxima_primitives::pipe::telemetry_surface::Labels {
+pub(crate) fn labels_with(base: &Labels, key: &str, value: &str) -> Labels {
     let mut pairs: Vec<(&str, &str)> = base
         .entries()
         .iter()
         .map(|(name, existing)| (name.as_str(), existing.as_str()))
         .collect();
     pairs.push((key, value));
-    proxima_primitives::pipe::telemetry_surface::Labels::from_pairs(&pairs)
+    Labels::from_pairs(&pairs)
 }
 
 #[cfg(feature = "std")]
