@@ -12,6 +12,7 @@
 
 use proc_macro::TokenStream;
 
+mod crate_path;
 mod describe;
 mod error_derive;
 mod fan_bang;

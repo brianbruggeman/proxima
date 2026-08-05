@@ -52,7 +52,6 @@
 //!
 //! [`Pipe`]: proxima_primitives::pipe::Pipe
 
-use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::parse::Parser;
@@ -61,6 +60,8 @@ use syn::{
     Error, Expr, FnArg, GenericArgument, Ident, ImplItem, ItemFn, ItemImpl, Meta, Pat,
     PathArguments, ReturnType, Token, Type, TypeParamBound, Visibility, parse2,
 };
+
+use crate::crate_path;
 
 /// Parsed `#[proxima::piped(...)]` args.
 // `pub(crate)`: the function-like leaf-lift macros (`pipe!`/`fanout!`/
@@ -297,27 +298,11 @@ fn future_output_result_types(sig: &syn::Signature) -> Result<(Type, Type), Erro
     result_types_from_type(output_type)
 }
 
-/// Resolve `…::pipe::#tail` for whatever crate invoked `#[proxima::piped]`: a
-/// direct `proxima-primitives` dep, the `proxima` umbrella re-export, or this
-/// crate itself. Mirrors `span_attr::recorder_path`.
+/// `…::pipe::#tail` — the umbrella re-exports `pipe` at the same depth
+/// `proxima-primitives` owns it, so both tails are the same.
 pub(crate) fn pipe_path(tail: TokenStream) -> TokenStream {
-    if let Ok(found) = crate_name("proxima-primitives") {
-        return match found {
-            FoundCrate::Itself => quote!(crate::pipe::#tail),
-            FoundCrate::Name(name) => {
-                let krate = Ident::new(&name, Span::call_site());
-                quote!(::#krate::pipe::#tail)
-            }
-        };
-    }
-    match crate_name("proxima") {
-        Ok(FoundCrate::Itself) => quote!(crate::pipe::#tail),
-        Ok(FoundCrate::Name(name)) => {
-            let krate = Ident::new(&name, Span::call_site());
-            quote!(::#krate::pipe::#tail)
-        }
-        Err(_) => quote!(::proxima_primitives::pipe::#tail),
-    }
+    let tail = quote!(pipe::#tail);
+    crate_path::resolve("proxima-primitives", &tail, &tail)
 }
 
 pub(crate) fn pipe_trait_path(trait_ident: &Ident) -> TokenStream {
