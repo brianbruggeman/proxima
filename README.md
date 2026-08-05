@@ -168,6 +168,81 @@ future, which is return-type notation, still unstable (rust#109417). When it
 lands, all three collapse back into `Pipe` plus a bound at the use site and
 get deleted. `docs/tutorials/00-foundations.md` walks the ladder.
 
+## the crate map
+
+35 crates, in seven groups. Each group only depends on the ones above it, so you
+can read down the list and never meet a name you have not been given yet. The
+one thing to hold onto: `Pipe` lives in `proxima-primitives`, and every other
+crate is either something it stands on, something shaped out of it, or somewhere
+to plug it in.
+
+**primitives** — the algebra and what it stands on.
+
+| crate | what it is |
+|---|---|
+| `proxima-core` | error, ring, arena, time, markers. Depends on no other proxima crate — the root of the tree. |
+| `proxima-primitives` | **`Pipe`** and its three tier siblings (`SendPipe`, `UnpinPipe`, `UnpinSendPipe`), `Handler`, `Body`, `HeaderList`, the sans-IO byte-stream traits, runtime-agnostic concurrency. |
+| `proxima-runtime` | the `Runtime` trait: per-core spawn, cross-core dispatch, background pool. |
+| `proxima-clock` | time as a pipe — tick sources, wall-clock anchoring, a coarse shared-time cell. |
+| `proxima-telemetry` | traces, metrics, logs — proxima's own surface, not `tracing`. |
+| `proxima-macros` | `#[proxima::piped]`, `#[proxima::instrument]`, `#[proxima::main]`, `#[proxima::test]`. |
+| `proxima-config` | format registry (JSON, JSON5, TOML, YAML, RON, XML), typed schema IR, desired-state store. |
+| `proxima-codec` | body marshalling registry — JSON and bytes-passthrough by default. |
+| `proxima-build` | `build.rs` library: resolve a typed profile, emit consts and cfgs for the crate being built. |
+| `proxima-test` | the `#[proxima::test]` harness — prime and tokio drivers, panic capture, cassettes. |
+
+**patterns** — pipes wired into a shape. No wire of their own.
+
+| crate | what it is |
+|---|---|
+| `proxima-patterns` | one feature per pattern: `alert`, `balancer`, `middleware`, `control_plane`, `kv`. |
+| `proxima-auth` | sans-IO auth cores — token lifecycle, SigV4, RFC 7616 Digest, SPNEGO. Depends on no proxima crate: an FSM you put pipes around, not one that holds them. |
+| `proxima-recording` | event model, binary and JSONL formats, capture, causal-order replay. |
+
+**protocols** — sans-IO. Bytes in, frames out; never touches a socket.
+
+| crate | what it is |
+|---|---|
+| `proxima-protocols` | 24 feature-gated codecs: HTTP/1, HTTP/2 + HPACK, HTTP/3, QUIC, TCP/IP, WebSocket, redis, pgwire, DNS, MQTT, AMQP, Kafka, memcached, gRPC framing, protobuf wire, JSON-RPC, PROXY protocol, NVMe. |
+| `proxima-centauri` | IKE-style key agreement, rekey, stateless cookies, and an ESP child SA with AEAD + anti-replay. No-alloc; entropy and time are pipe *inputs*, never held capabilities. |
+
+**stacks** — a codec plus a listener plus a client, so `proxima::Client` and
+`proxima::Listener` speak the wire. Each of the protocol stacks splits into a
+`client` and a `listen` feature, and `--no-default-features` leaves the bare
+codec.
+
+| crate | what it is |
+|---|---|
+| `proxima-listen` | the listener registry: `ListenProtocol`, `ListenRegistry`, `ServeContext`, and the `.any()` preface classifier. |
+| `proxima-http` | HTTP/1.1, HTTP/2, HTTP/3, WebSocket. |
+| `proxima-quic` | runtime-agnostic QUIC I/O facade over `proxima-protocols::quic`. |
+| `proxima-tls` | `TlsConfig`, rustls integration, SNI, self-signed dev certs. |
+| `proxima-redis` `proxima-pgwire` `proxima-dns` `proxima-kafka` `proxima-mqtt` `proxima-amqp` `proxima-memcached` | one per wire. |
+
+**backends, as features** — a backend is a feature flag, never a second API.
+
+| crate | what it is |
+|---|---|
+| `prime` | the from-scratch per-core runtime: one thread per core, no work-stealing, bounded SPSC inbox, reactor + executor + timer + background pool. |
+| `proxima-net` | UDP `PacketListener` and addressing, plus every platform backend — `prime`, `tokio`, `wasm`, `dpdk`, `xdp` — as a feature-gated module. |
+
+**substrates** — where bytes land, where processes run.
+
+| crate | what it is |
+|---|---|
+| `proxima-storage` | the NVMe queue-pair engine (`nvme`), the pmem crash-consistency leaf (unconditional, `no_std` + no-alloc), the DAX mmap facade (`dax`). |
+| `proxima-process` | capability-typed commands, PTY and FD pipes, libc shim dispatch, host grounds. |
+
+**apps** — things you run.
+
+| crate | what it is |
+|---|---|
+| `proxima` | the umbrella library, and `proximad`. |
+| `proxima-cli` | the `proxima` binary: call, serve, describe, daemon control, hot-swap, replay. |
+| `proxima-intercept` | TLS-terminating CONNECT proxy with per-host cert generation. |
+| `rekt` | the `rek` binary — a load tester built on proxima. |
+| `proxima-vm` | a VM-backed `Pipe` proof surface over KVM or Hypervisor.framework. |
+
 ## more
 
 - **feature flags** — default serves on Prime with HTTP/1–3; `runtime-tokio`,
