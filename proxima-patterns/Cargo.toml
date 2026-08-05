@@ -15,7 +15,7 @@ default = ["std", "alert", "balancer", "middleware", "control_plane", "kv"]
 
 # ── shared tier axis (workspace-standard alloc/std vocabulary) ──────────────
 alloc = ["proxima-core/alloc", "proxima-primitives/alloc", "serde/alloc"]
-std = ["alloc", "proxima-core/std", "proxima-primitives/std", "bytes/std", "serde/std"]
+std = ["alloc", "proxima-core/std", "proxima-primitives/std", "bytes/std", "serde/std", "ulid?/std"]
 
 # ── alert (was proxima-notify; renamed to resolve the collision with the
 # proxima_primitives::sync::Notify primitive) ───────────────────────────────
@@ -41,7 +41,14 @@ alloc-shim = ["alloc", "postcard?/alloc", "dep:serde_json"]
 json-shape = ["alloc-shim"]
 
 # C3: ScheduledTriggerPipe (interval-driven producer Pipe).
-scheduled-trigger = ["alert", "std", "proto", "dep:proxima-runtime"]
+scheduled-trigger = [
+    "alert",
+    "std",
+    "proto",
+    "dep:proxima-runtime",
+    "dep:serde_json",
+    "dep:proxima-telemetry",
+]
 
 # C4: StdoutAlertPipe (terminal sink, formats AlertEvent to stdout).
 stdout-alert = ["alert", "std", "proto", "json-shape"]
@@ -80,6 +87,7 @@ middleware = [
     "dep:fastrand",
     "dep:thiserror",
     "dep:tracing",
+    "dep:proxima-telemetry",
 ]
 runtime-prime-full = ["middleware", "proxima-primitives/runtime-prime-full"]
 
@@ -103,10 +111,20 @@ futures = { workspace = true }
 # alert (proxima-notify) deps — proto layer tier-3-capable, facade optional.
 heapless = { workspace = true, features = ["serde"], optional = true }
 postcard = { workspace = true, optional = true }
-ulid = { workspace = true, features = ["serde"], optional = true }
+# workspace.dependencies.ulid does not set default-features = false (other
+# consumers rely on its std feature staying on), so this crate pins its own
+# version + default-features = false directly — same pattern proxima-recording
+# already uses. No "serde" feature either: ulid's manifest leaves
+# default-features on its own serde edge, so asking for it turns serde/std on
+# for the whole build and breaks the alert tier-3 cliff. `event::ulid_str`
+# hand-rolls the identical 26-char canonical-string wire form instead.
+ulid = { version = "1.2.1", default-features = false, optional = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"], optional = true }
 serde_json = { workspace = true, optional = true }
 proxima-runtime = { workspace = true, features = ["std"], optional = true }
+# `emit` is default-off in proxima-telemetry; request it explicitly rather than
+# relying on another workspace member's feature unification to light it up.
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 
 # middleware deps.
 proxima-auth = { workspace = true, optional = true, features = ["std", "signing", "digest", "negotiate"] }
@@ -133,6 +151,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test
 tempfile = { workspace = true }
 proxima-telemetry = { workspace = true }
 proxima-core = { workspace = true, features = ["time-driver-mock"] }
+postcard = { workspace = true, features = ["alloc"] }
 
 [[test]]
 name = "event_roundtrip"
