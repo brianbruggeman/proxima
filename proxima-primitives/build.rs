@@ -95,24 +95,9 @@ fn main() {
     // heapless cap const — always emitted; the no-alloc RetryRules reads it.
     emit_sizing_consts(&out_dir);
 
-    // declare every cfg name proxima-build's emit_cfg_directives can emit, so
-    // the unexpected_cfgs lint stays quiet under deny-warnings. proxima_alloc is
-    // the only one this crate reads; the rest are declared because the broad
-    // emitter sets them whenever a profile is active.
-    for name in ["proxima_alloc", "proxima_std", "proxima_quic_enabled"] {
-        println!("cargo:rustc-check-cfg=cfg({name})");
-    }
-    for name in [
-        "proxima_executor",
-        "proxima_reactor",
-        "proxima_tls",
-        "proxima_timer",
-        "proxima_quic_impl",
-        "proxima_h3_impl",
-        "proxima_profile_schema",
-    ] {
-        println!("cargo:rustc-check-cfg=cfg({name}, values(any()))");
-    }
+    // unconditionally, because the profile-absent branch below still sets
+    // proxima_alloc from the cargo feature.
+    proxima_build::emit_cfg_check_directives();
 
     // former proxima-sync/build.rs: declares `loom` so `--cfg loom` builds
     // (which never set this via a cargo feature) stay clean under
