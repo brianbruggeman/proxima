@@ -4068,7 +4068,6 @@ dependencies = [
  "proc-macro2",
  "proxima",
  "quote",
- "rstest",
  "syn 2.0.119",
  "thiserror 2.0.19",
  "tokio",

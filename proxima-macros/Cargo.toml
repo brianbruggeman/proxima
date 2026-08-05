@@ -20,10 +20,12 @@ proc-macro-crate = "3"
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
-proxima = { workspace = true, features = ["test-support"] }
-rstest.workspace = true
+# `test-support-tokio` is the narrow forwarder for `#[proxima::test(runtime =
+# "tokio")]`'s driver — the span tests await inside the annotated fn, so they
+# need a real runtime under them.
+proxima = { workspace = true, features = ["test-support-tokio"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["rt"] }
 trybuild = { workspace = true }
 
 [lints]

@@ -1,13 +1,5 @@
 // integration tests for #[span] and #[derive(SpanCarrier)] macro expansion.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+#![allow(clippy::expect_used)]
 
 use std::sync::Arc;
 
@@ -18,7 +10,6 @@ use proxima::telemetry::recorder::Recorder;
 use proxima::telemetry::tag::{ScalarValue, Tag};
 use proxima::telemetry::trace::{SpanCarrier, SpanKind, Status};
 use proxima_macros::{SpanCarrier, instrument, span};
-use rstest::rstest;
 
 fn make_recorder() -> Recorder {
     Recorder::builder()
@@ -66,7 +57,7 @@ fn span_on_sync_fn_emits_span_record() {
 }
 
 // 2. #[span] on an async fn — span survives across an await point.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn span_on_async_fn_survives_await() {
     let recorder = make_recorder();
     let result = async_fn(&recorder, 41).await;
@@ -271,7 +262,7 @@ fn span_err_leaves_status_unset_on_ok() {
 }
 
 // err threads through an await point on an async fn too.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn span_err_async_sets_error_status() {
     let (recorder, pipe) = capturing();
     let result = fallible_async_fn(&recorder, false).await;
@@ -388,10 +379,10 @@ struct GenericEnvelope<T> {
     data: T,
 }
 
-#[rstest]
+#[proxima::test]
 #[case::value_42(42u32)]
 #[case::value_0(0u32)]
-fn span_carrier_generic_struct(#[case] value: u32) {
+async fn span_carrier_generic_struct(#[case] value: u32) {
     let mut env = GenericEnvelope {
         span_id: None,
         data: value,
