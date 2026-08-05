@@ -1,5 +1,7 @@
 //! Shared per-field merge core for every hand-rolled `XxxLayerBuilder` in this
-//! crate (`TelemetryConfig`, `EmitConfig`, `InstrumentConfig`). `.from_path`/
+//! crate (`TelemetryConfig`, `EmitConfig`, `InstrumentConfig`,
+//! `LogBufferConfig`; `ResilientOtlpConfig` is the one holdout — see its module
+//! doc for the nested-`horizons` reason). `.from_path`/
 //! `.from_env`/`.underlay_path`/`.underlay_env` each contribute only the
 //! fields their source actually specifies, merged onto the accumulated
 //! config — never a wholesale re-resolve that drops a prior layer's values.

@@ -21,11 +21,15 @@
 //! - **Operator config wins**: put `.with_*` BEFORE `.from_path` / `.from_env`.
 //! - **Code overrides win**: put `.with_*` AFTER `.from_path` / `.from_env`.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::config_merge::{MergeMode, apply_layer, insert_if_env_set};
 
 fn default_capacity() -> usize {
     super::sized::LOG_BUFFER_CAPACITY_DEFAULT
@@ -35,7 +39,7 @@ fn default_live_tail_channel_capacity() -> usize {
     super::sized::LIVE_TAIL_CHANNEL_CAPACITY_DEFAULT
 }
 
-/// Runtime configuration for a [`crate::LogBuffer`]. One built `LogBufferConfig`
+/// Runtime configuration for a [`crate::log_buffer::LogBuffer`]. One built `LogBufferConfig`
 /// == one serialisable config == one buffer sizing policy.
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "LOG_BUFFER")]
@@ -91,19 +95,9 @@ impl LogBufferConfig {
     pub fn layered() -> LogBufferLayerBuilder {
         LogBufferLayerBuilder {
             inner: LogBufferConfig::default(),
-            capacity_set: false,
-            live_tail_channel_capacity_set: false,
+            touched: BTreeSet::new(),
         }
     }
-}
-
-/// Partial view of [`LogBufferConfig`] used by `.from_path`/`.underlay_path` —
-/// only fields actually present in the file are applied, so a file setting
-/// one field never clobbers the other with a re-resolved default.
-#[derive(Debug, Default, Deserialize)]
-struct LogBufferConfigPartial {
-    capacity: Option<usize>,
-    live_tail_channel_capacity: Option<usize>,
 }
 
 /// Fluent builder for [`LogBufferConfig`]. Every source (`.from_path`,
@@ -115,42 +109,35 @@ struct LogBufferConfigPartial {
 /// always acts as an override at its call position.
 pub struct LogBufferLayerBuilder {
     inner: LogBufferConfig,
-    capacity_set: bool,
-    live_tail_channel_capacity_set: bool,
+    touched: BTreeSet<String>,
 }
 
 impl LogBufferLayerBuilder {
     /// Merge a TOML/JSON file's fields onto the accumulated config; the file
     /// wins for every field it specifies.
     pub fn from_path<P: AsRef<Path>>(mut self, path: P) -> Result<Self, conflaguration::Error> {
-        let partial: LogBufferConfigPartial = conflaguration::from_file(path.as_ref())?;
-        if let Some(capacity) = partial.capacity {
-            self.inner.capacity = capacity;
-            self.capacity_set = true;
-        }
-        if let Some(channel_capacity) = partial.live_tail_channel_capacity {
-            self.inner.live_tail_channel_capacity = channel_capacity;
-            self.live_tail_channel_capacity_set = true;
-        }
+        let incoming: Value = conflaguration::from_file(path.as_ref())?;
+        apply_layer(
+            &mut self.inner,
+            &mut self.touched,
+            incoming,
+            MergeMode::Override,
+            &[],
+        )?;
         Ok(self)
     }
 
     /// Fill any still-unset fields from a TOML/JSON file; already-set fields
     /// are left untouched.
     pub fn underlay_path<P: AsRef<Path>>(mut self, path: P) -> Result<Self, conflaguration::Error> {
-        let partial: LogBufferConfigPartial = conflaguration::from_file(path.as_ref())?;
-        if !self.capacity_set
-            && let Some(capacity) = partial.capacity
-        {
-            self.inner.capacity = capacity;
-            self.capacity_set = true;
-        }
-        if !self.live_tail_channel_capacity_set
-            && let Some(channel_capacity) = partial.live_tail_channel_capacity
-        {
-            self.inner.live_tail_channel_capacity = channel_capacity;
-            self.live_tail_channel_capacity_set = true;
-        }
+        let incoming: Value = conflaguration::from_file(path.as_ref())?;
+        apply_layer(
+            &mut self.inner,
+            &mut self.touched,
+            incoming,
+            MergeMode::Underlay,
+            &[],
+        )?;
         Ok(self)
     }
 
@@ -158,32 +145,28 @@ impl LogBufferLayerBuilder {
     /// wins for every field it sets. Unset env vars leave the current value
     /// untouched.
     pub fn from_env(mut self) -> Result<Self, conflaguration::Error> {
-        let resolved = LogBufferConfig::from_env()?;
-        if env_is_set("LOG_BUFFER_CAPACITY") {
-            self.inner.capacity = resolved.capacity;
-            self.capacity_set = true;
-        }
-        if env_is_set("LOG_BUFFER_LIVE_TAIL_CHANNEL_CAPACITY") {
-            self.inner.live_tail_channel_capacity = resolved.live_tail_channel_capacity;
-            self.live_tail_channel_capacity_set = true;
-        }
+        let incoming = log_buffer_env_partial()?;
+        apply_layer(
+            &mut self.inner,
+            &mut self.touched,
+            incoming,
+            MergeMode::Override,
+            &[],
+        )?;
         Ok(self)
     }
 
     /// Fill any still-unset fields from `LOG_BUFFER_*` env vars; already-set
     /// fields are left untouched even if the matching env var is set.
     pub fn underlay_env(mut self) -> Result<Self, conflaguration::Error> {
-        let resolved = LogBufferConfig::from_env()?;
-        if !self.capacity_set && env_is_set("LOG_BUFFER_CAPACITY") {
-            self.inner.capacity = resolved.capacity;
-            self.capacity_set = true;
-        }
-        if !self.live_tail_channel_capacity_set
-            && env_is_set("LOG_BUFFER_LIVE_TAIL_CHANNEL_CAPACITY")
-        {
-            self.inner.live_tail_channel_capacity = resolved.live_tail_channel_capacity;
-            self.live_tail_channel_capacity_set = true;
-        }
+        let incoming = log_buffer_env_partial()?;
+        apply_layer(
+            &mut self.inner,
+            &mut self.touched,
+            incoming,
+            MergeMode::Underlay,
+            &[],
+        )?;
         Ok(self)
     }
 
@@ -191,7 +174,7 @@ impl LogBufferLayerBuilder {
     #[must_use]
     pub fn with_capacity(mut self, capacity: usize) -> Self {
         self.inner.capacity = capacity;
-        self.capacity_set = true;
+        self.touched.insert("capacity".to_string());
         self
     }
 
@@ -199,7 +182,8 @@ impl LogBufferLayerBuilder {
     #[must_use]
     pub fn with_live_tail_channel_capacity(mut self, capacity: usize) -> Self {
         self.inner.live_tail_channel_capacity = capacity;
-        self.live_tail_channel_capacity_set = true;
+        self.touched
+            .insert("live_tail_channel_capacity".to_string());
         self
     }
 
@@ -210,8 +194,25 @@ impl LogBufferLayerBuilder {
     }
 }
 
-fn env_is_set(name: &str) -> bool {
-    std::env::var(name).is_ok()
+/// The env-set subset of [`LogBufferConfig`]'s fields, as a partial JSON
+/// object containing only the fields whose env var is actually present —
+/// never the ones `Settings::from_env` filled with a default.
+fn log_buffer_env_partial() -> Result<Value, conflaguration::Error> {
+    let resolved = LogBufferConfig::from_env()?;
+    let mut partial = Map::new();
+    insert_if_env_set(
+        &mut partial,
+        "capacity",
+        &["LOG_BUFFER_CAPACITY"],
+        &resolved.capacity,
+    )?;
+    insert_if_env_set(
+        &mut partial,
+        "live_tail_channel_capacity",
+        &["LOG_BUFFER_LIVE_TAIL_CHANNEL_CAPACITY"],
+        &resolved.live_tail_channel_capacity,
+    )?;
+    Ok(Value::Object(partial))
 }
 
 #[cfg(test)]
