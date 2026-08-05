@@ -199,6 +199,27 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-test-gate.sh
 
+  # proxima-storage-gate.sh — same shape again: the crate is `default = []`,
+  # so `cargo nextest run -p proxima-storage` ran 21 tests, every one of them
+  # `pmem::cow::tests`, while the nvme engine tests, the dax tests and the
+  # whole of `nvme/uio.rs` were never compiled by a crate-scoped command.
+  # Three folded-in former crates, two thirds of them invisible. Runs each
+  # feature ALONE, the union, and actually RUNS the cow_walkthrough example.
+  proxima-storage-gate:
+    name: proxima-storage-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-storage-gate.sh
+
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
   # directives. `continue-on-error: true` until DC5 finishes gating
