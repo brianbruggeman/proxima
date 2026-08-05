@@ -9,7 +9,6 @@ pub use upstream::WebSocketUpstream;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use async_tungstenite::WebSocketStream;
@@ -19,6 +18,7 @@ use futures::stream::Stream;
 
 use proxima_net::tokio::tokio_stream_listener::TokioTcpConnection;
 use proxima_primitives::stream::{BindAddr, PeerInfo, StreamConnection, StreamListener};
+use proxima_primitives::sync::blocking::Mutex;
 
 /// WebSocket connection wrapped as a byte stream. Generic over the
 /// underlying `StreamConnection`.
@@ -73,9 +73,7 @@ impl<C: StreamConnection> futures::io::AsyncRead for WebSocketConnection<C> {
         // drain whatever's left in the read_buffer first; only poll
         // the underlying ws stream when the buffer is empty.
         {
-            let Ok(mut leftover) = this.read_buffer.lock() else {
-                return Poll::Ready(Err(io::Error::other("ws read buffer lock poisoned")));
-            };
+            let mut leftover = this.read_buffer.lock();
             if !leftover.is_empty() {
                 let take = leftover.len().min(buf.len());
                 buf[..take].copy_from_slice(&leftover[..take]);
@@ -97,10 +95,7 @@ impl<C: StreamConnection> futures::io::AsyncRead for WebSocketConnection<C> {
                 let take = payload.len().min(buf.len());
                 buf[..take].copy_from_slice(&payload[..take]);
                 if take < payload.len() {
-                    let Ok(mut leftover) = this.read_buffer.lock() else {
-                        return Poll::Ready(Err(io::Error::other("ws read buffer lock poisoned")));
-                    };
-                    leftover.extend_from_slice(&payload[take..]);
+                    this.read_buffer.lock().extend_from_slice(&payload[take..]);
                 }
                 Poll::Ready(Ok(take))
             }
@@ -194,9 +189,7 @@ impl StreamListener for WebSocketListener {
     type Conn = WebSocketConnection<TokioTcpConnection>;
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
-        let Ok(mut slot) = self.in_flight.lock() else {
-            return Poll::Ready(Err(io::Error::other("ws in-flight lock poisoned")));
-        };
+        let mut slot = self.in_flight.lock();
         if slot.is_none() {
             match self.inner.poll_accept(cx) {
                 Poll::Ready(Ok((stream, peer))) => {
