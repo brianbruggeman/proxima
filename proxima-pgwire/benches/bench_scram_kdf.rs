@@ -5,8 +5,9 @@
 //! spent on the per-core async reactor, stalling it for every SCRAM auth.
 //! This bench measures that wall-time directly: the reported ns/auth IS
 //! the reactor-occupancy the `spawn_background_blocking` offload moves
-//! off-core. (It does not bench the offload itself — a concurrent
-//! auth-storm p99 needs a prime harness, gate G7 territory.)
+//! off-core. It does not bench the offload itself — a concurrent
+//! auth-storm p99 would need a multi-core prime harness driving real
+//! connections, which this micro-bench deliberately is not.
 //!
 //! required-features: scram.
 

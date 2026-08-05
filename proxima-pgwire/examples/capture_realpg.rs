@@ -16,8 +16,9 @@
 //!     PGWIRE_REALPG_PASSWORD=proxima \
 //!     cargo run -p proxima-pgwire --example capture_realpg
 //!
-//! The corpus test (`proxima-pgwire-codec/tests/realpg_corpus.rs`) then parses
-//! the vendored bytes on every build with no server required.
+//! The corpus test
+//! (`proxima-protocols/tests/pgwire_codec_realpg_corpus.rs`) then parses the
+//! vendored bytes on every build with no server required.
 
 #![allow(clippy::expect_used)]
 
@@ -27,7 +28,9 @@ use std::path::PathBuf;
 
 use proxima_pgwire::PgClient;
 
-const FIXTURE_DIR: &str = "proxima-pgwire-codec/tests/fixtures/realpg";
+/// Where the corpus test looks by default, resolved off this crate's
+/// manifest so the capture lands there from any working directory.
+const FIXTURE_DIR: &str = "../proxima-protocols/tests/fixtures/realpg";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("PGWIRE_REALPG_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -38,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(FIXTURE_DIR));
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_DIR));
     std::fs::create_dir_all(&out_dir)?;
     let addr = format!("{host}:{port}");
 

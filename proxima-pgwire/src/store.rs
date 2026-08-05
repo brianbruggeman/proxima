@@ -1,10 +1,14 @@
 //! Per-connection prepared-statement and portal stores.
 //!
-//! A connection is single-threaded, so the store needs no locks; a
-//! linear scan over a small bounded slot vector beats a hash map at the
-//! statement counts real clients hold (sqlx and tokio-postgres cache
-//! tens of statements, not thousands). The capacity cap is the
-//! protection against a peer that prepares in a loop.
+//! A connection is single-threaded, so the store needs no locks. The slot
+//! vector is a linear scan because the protocol's own naming rules need
+//! insertion order and a live/closed distinction, not because it was
+//! measured against a map; what makes the scan bounded is the capacity cap
+//! ([`crate::config::PgServerConfig::max_statements`] /
+//! `max_portals`), which is also the protection against a peer that
+//! prepares in a loop.
+
+use thiserror::Error;
 
 use proxima_protocols::pgwire_codec::{FormatCode, Oid};
 
@@ -61,11 +65,13 @@ pub struct Portal {
     pub pending: Option<PendingRows>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum StoreError {
     /// a non-empty name was inserted twice without an intervening Close
+    #[error("name already in use; close it first")]
     Duplicate,
     /// the configured slot cap is exhausted
+    #[error("slot capacity exhausted")]
     Full,
 }
 

@@ -1,6 +1,6 @@
 name: proxima-pgwire
 
-# Gate for the proxima-pgwire stack (docs/proxima-pgwire/discipline.md).
+# Gate for the proxima-pgwire stack (scripts/proxima-pgwire-gate.sh).
 # Re-proves the correctness claims on every push without anyone's memory
 # (guiding-principle 16): the sans-IO codec + session FSM, the Pipe-native
 # facade (SCRAM/MD5 auth, COPY, LISTEN/NOTIFY, portal suspension, direct-TLS,

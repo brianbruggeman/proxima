@@ -425,7 +425,7 @@ Step by step:
 4. Resolve `bind` — either `.bind(addr)` directly, or recovered from the `http` spec key `bind_from_spec` reads back (§10 explains why this recovery step exists at all).
 5. Require `.handle(pipe)` — the one input every listener has that a client never does (§10).
 6. `resolve_listen_protocol` (§5) picks the registry name, plus an optional self-registering `Arc`; `compose_tls` (§7) wraps that in `TlsListenProtocol` if `.tls(config)` was called.
-7. A fresh `App::new()` — self-registers whatever extra protocol was carried (from `resolve_listen_protocol`/`compose_tls`, from `.any()`/`.protocol()`'s own registration path, or a fresh `PgWireListenProtocol`/`DnsAnyProtocol`/`DnsDatagramProtocol` if `.pgwire(query)`/`.dns(handler)` carried a handle).
+7. A fresh `App::new()` — self-registers whatever extra protocol was carried (from `resolve_listen_protocol`/`compose_tls`, from `.any()`/`.protocol()`'s own registration path, or, if `.pgwire(query)`/`.dns(handler)` carried a handle, a single-candidate `AnyListenProtocol` around a fresh `PgWireAnyProtocol`/`DnsAnyProtocol`, or a fresh `DnsDatagramProtocol`). `.pgwire(query)` goes through `AnyListenProtocol` rather than the standalone `PgWireListenProtocol` so it inherits the same `ConnAdmission` shedding and graceful drain as every other TCP-stream listener.
 8. `app.mount("/{*path}", MountTarget::Handle(dispatch))` — every path routes to `.handle(pipe)`, using the exact catch-all glob convention the rest of the router uses for shorthand single-pipe listeners.
 9. `app.serve(RunConfig { bind, protocol, spec })` — the identical `App::serve` `examples/hello` calls directly.
 

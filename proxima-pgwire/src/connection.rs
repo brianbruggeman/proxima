@@ -33,6 +33,7 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures::stream::Stream;
 #[cfg(not(feature = "listen"))]
 use futures::stream::StreamExt;
+use subtle::ConstantTimeEq;
 
 #[cfg(feature = "listen")]
 use proxima_core::markers::DropSafe;
@@ -129,7 +130,7 @@ pub struct CancelRegistry {
 }
 
 fn constant_time_eq_i32(left: i32, right: i32) -> bool {
-    (left ^ right) == 0
+    left.ct_eq(&right).into()
 }
 
 impl CancelRegistry {
@@ -415,8 +416,7 @@ struct ConnState {
 impl ConnState {
     /// This connection's identity threaded into every engine request: the
     /// process-unique id (so the engine keys per-connection state) and the
-    /// cooperative cancel token (gate G12) — every `QueryRequest` variant
-    /// carries both.
+    /// cooperative cancel token — every `QueryRequest` variant carries both.
     fn identity(&self) -> (u64, CancelToken) {
         (self.connection_id, self.cancel.clone())
     }
@@ -663,7 +663,7 @@ where
     )
     .await?;
     let mut row_count: u64 = 0;
-    while let Ok(row) = rows.receiver().recv().await {
+    while let Ok(row) = rows.recv().await {
         append_data_row(out, &row, result_formats, columns)?;
         row_count += 1;
         flush_if_above(stream, out, high_water).await?;
@@ -1021,6 +1021,13 @@ fn decode_binary_parameter(bytes: &[u8], declared: Option<Oid>) -> SqlValue {
 /// TLS-wrapped — the driver does not care. Each protocol operation is a
 /// `Pipe::call` against `query`.
 ///
+/// The entry point for a session with no listener behind it (a test, a
+/// hand-driven socket): it supplies an unbounded, never-quiesced/-drained
+/// admission handle, which the caller could not construct itself because
+/// the handle's type collapses to `()` without the `listen` feature. A
+/// mount that holds the listener's real shared handle calls
+/// [`serve_session_admitted`] instead.
+///
 /// # Errors
 /// [`ServeError`] on transport failure or protocol violations that the
 /// wire could not express as an ErrorResponse.
@@ -1028,13 +1035,6 @@ fn decode_binary_parameter(bytes: &[u8], declared: Option<Oid>) -> SqlValue {
     clippy::too_many_arguments,
     reason = "mirrors the wire lifecycle one-to-one; bundling would invent a type with no other consumer"
 )]
-/// Behavior-preserving wrapper over [`serve_session_admitted`] for every
-/// EXISTING caller (this crate's own test suite, `differential_realpg.rs`,
-/// `client_smoke.rs`) — an unbounded, never-quiesced/-drained
-/// [`proxima_listen::admission::ConnAdmission`], so none of those call
-/// sites need to change. `PgWireAnyProtocol::drive` (the new
-/// admission-aware caller) calls [`serve_session_admitted`] directly with
-/// the listener's REAL shared handle instead.
 pub async fn serve_session<S>(
     stream: S,
     session: Session,
@@ -1063,7 +1063,10 @@ where
 /// [`proxima_listen::admission::ConnAdmission::request_admit`]/
 /// `request_release` through `admission`, rendering an `ErrorResponse`
 /// (SQLSTATE `57P03`, cannot_connect_now) instead of dispatching on `Shed`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the wire lifecycle one-to-one; bundling would invent a type with no other consumer"
+)]
 pub async fn serve_session_admitted<S>(
     mut stream: S,
     mut session: Session,
@@ -1128,7 +1131,7 @@ where
     // the registry registers the cancel flag (a matching CancelRequest sets
     // it); the driver keeps a handle and threads it into every engine
     // request as a CancelToken, so an interruptible engine can poll it
-    // mid-query and abort cooperatively (gate G12)
+    // mid-query and abort cooperatively
     let (key, cancelled) = match &registry {
         Some(registry) => registry.register(),
         None => (
@@ -1421,9 +1424,10 @@ where
 
 /// Builds a `ScramServer` (running the 4096-iteration PBKDF2-HMAC-SHA256
 /// key derivation) off the reactor core via the runtime's background
-/// blocking pool when one is present; otherwise inline. The KDF is
-/// ~0.5-1ms of pure CPU per auth — running it on the per-core async
-/// reactor stalls that core, so with a runtime we route it through
+/// blocking pool when one is present; otherwise inline. The KDF is pure
+/// CPU per auth — `benches/bench_scram_kdf.rs` measures exactly the
+/// wall-time this moves — and running it on the per-core async reactor
+/// stalls that core, so with a runtime we route it through
 /// `spawn_background_blocking` (the rayon-subsumed pool) and await the
 /// `Send` handle, resuming on this core when the result is ready.
 ///
@@ -1634,24 +1638,6 @@ where
     Ok(false)
 }
 
-/// `proxima_primitives::sync::blocking::Mutex` (parking_lot-backed on std,
-/// the workspace-canonical sync mutex) never poisons, so this is a plain
-/// passthrough — kept as a named helper so every call site reads
-/// `lock(mutex)` uniformly. Mirrors `proxima_redis::wait_sources`'s
-/// identical helper (same wall: `FanIn` sources need `&self`-shaped
-/// interior mutability, and `RefCell` — the obvious first reach — is never
-/// `Sync`, which the connection future's pre-existing `Send` requirement
-/// demands).
-#[cfg(feature = "listen")]
-fn lock<T>(mutex: &Mutex<T>) -> proxima_primitives::sync::blocking::MutexGuard<'_, T> {
-    mutex.lock()
-}
-
-#[cfg(feature = "listen")]
-fn into_inner<T>(mutex: Mutex<T>) -> T {
-    mutex.into_inner()
-}
-
 /// Encodes one `NotificationResponse` (no flush — the caller decides when
 /// to write it). Shared by [`emit_notification`] (the `not(listen)` outer
 /// wait, still racing via `select_biased!`) and [`PgConnSource::Notify`]
@@ -1729,8 +1715,8 @@ impl<R: AsyncRead + Unpin> Future for PgConnCall<'_, R> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
             PgConnCall::Read { read_half, scratch } => {
-                let mut read_half = lock(read_half);
-                let mut scratch = lock(scratch);
+                let mut read_half = read_half.lock();
+                let mut scratch = scratch.lock();
                 match Pin::new(&mut *read_half).poll_read(cx, &mut scratch) {
                     Poll::Ready(Ok(0)) => Poll::Ready(Ok(WireEvent::Stop)),
                     Poll::Ready(Ok(count)) => Poll::Ready(Ok(WireEvent::Read(
@@ -1741,7 +1727,7 @@ impl<R: AsyncRead + Unpin> Future for PgConnCall<'_, R> {
                 }
             }
             PgConnCall::Notify { notify_rx } => {
-                let mut notify_rx = lock(notify_rx);
+                let mut notify_rx = notify_rx.lock();
                 match Pin::new(&mut *notify_rx).poll_next(cx) {
                     Poll::Ready(Some(notification)) => match encode_notification(&notification) {
                         Ok(encoded) => Poll::Ready(Ok(WireEvent::Push(Bytes::from(encoded)))),
@@ -1798,6 +1784,9 @@ async fn main_loop<S>(
     state: &mut ConnState,
     query: &PgPipeHandle,
     config: &PgServerConfig,
+    // only the `listen` idle race reassigns `notify_rx` (it unwinds the
+    // transient `Mutex` back into the binding); the `not(listen)` sibling
+    // borrows it and never rebinds
     #[cfg_attr(not(feature = "listen"), allow(unused_mut))] mut notify_rx: UnboundedReceiver<
         Notification,
     >,
@@ -1929,8 +1918,8 @@ where
                 );
                 let outcome =
                     proxima_listen::wait_for_wire_event(&sources, &mut write_half).await?;
-                read_half = into_inner(read_lock);
-                notify_rx = into_inner(notify_lock);
+                read_half = read_lock.into_inner();
+                notify_rx = notify_lock.into_inner();
                 match outcome {
                     Some(bytes) => {
                         let count = bytes.len();
@@ -2027,8 +2016,8 @@ where
 /// A COPY IN transfer the engine signaled but the driver must run after
 /// the triggering message is consumed from `buf` (the sub-loop reads more
 /// frontend messages, so it cannot run while the trigger still borrows the
-/// buffer). `finish` distinguishes the simple tail (ReadyForQuery) from the
-/// extended tail.
+/// buffer). `finish_simple` distinguishes the simple tail (ReadyForQuery)
+/// from the extended tail.
 struct PendingCopyIn {
     format: CopyFormat,
     column_formats: Vec<FormatCode>,
@@ -2046,7 +2035,10 @@ enum DispatchOutcome {
 // Write-only (never reads `stream`) — narrower than the combined bound
 // this used to carry, so `main_loop` can pass its `write_half` split
 // directly with no reunite step.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the wire lifecycle one-to-one; bundling would invent a type with no other consumer"
+)]
 async fn dispatch<S>(
     message: &FrontendMessage<'_>,
     stream: &mut S,
@@ -4518,7 +4510,7 @@ mod tests {
                     });
                     PgReply::QueryStream {
                         columns: vec![ColumnDesc::new("n", Oid(23))],
-                        rows: RowStream::new(receiver),
+                        rows: receiver,
                         command_tag: None,
                     }
                 }

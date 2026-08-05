@@ -98,8 +98,9 @@ impl PgWireConnectionPipe {
     }
 
     /// Installs the runtime whose background-blocking pool the SCRAM KDF
-    /// offloads onto, keeping the ~0.5-1ms PBKDF2 off the reactor core.
-    /// Without it the KDF runs inline.
+    /// offloads onto, keeping PBKDF2 off the reactor core — the cost it
+    /// moves is what `benches/bench_scram_kdf.rs` measures. Without it the
+    /// KDF runs inline.
     #[must_use]
     pub fn with_runtime(mut self, runtime: RuntimeHandle) -> Self {
         self.runtime = runtime;

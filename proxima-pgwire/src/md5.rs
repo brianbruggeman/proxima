@@ -6,13 +6,16 @@
 //! recomputes the same value from the stored plaintext and the salt it
 //! issued, then compares constant-time.
 
+use core::fmt::Write as _;
+
 use md5::{Digest, Md5};
 
 fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+        // `String`'s `fmt::Write` is infallible; the discarded `Result` is
+        // the trait's, not this call's
+        let _ = write!(out, "{byte:02x}");
     }
     out
 }

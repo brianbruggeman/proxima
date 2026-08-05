@@ -13,10 +13,13 @@ use zeroize::Zeroizing;
 use crate::auth::{PgAuth, StaticCredentials};
 use crate::error::ServeError;
 
-/// Authentication section of the config mirror. Custom verifiers are an
-/// API-only surface (`PgWireListenProtocol::with_auth`); config selects
-/// between trust and a static cleartext identity.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Authentication section of the config mirror. Config selects a method
+/// backed by one static identity; a custom [`crate::auth::PasswordVerifier`]
+/// or [`crate::auth::PasswordSource`] is an API-only surface
+/// (`PgWireListenProtocol::with_auth` / `PgWireAnyProtocol::with_auth`),
+/// since a policy is code, not TOML. `Md5` and `Scram` are config errors
+/// unless the matching feature is on — see [`PgServerConfig::build_auth`].
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", tag = "mode")]
 pub enum AuthConfig {
     #[default]
@@ -33,6 +36,24 @@ pub enum AuthConfig {
         username: String,
         password: String,
     },
+}
+
+// `PgServerConfig` derives `Debug` and every listener logs its config, so a
+// derived variant Debug here would print the password on every mount
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (mode, username) = match self {
+            Self::Trust => return formatter.write_str("AuthConfig::Trust"),
+            Self::Cleartext { username, .. } => ("Cleartext", username),
+            Self::Md5 { username, .. } => ("Md5", username),
+            Self::Scram { username, .. } => ("Scram", username),
+        };
+        formatter
+            .debug_struct(mode)
+            .field("username", username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// ParameterStatus pairs reported after AuthenticationOk. A newtype so
@@ -247,4 +268,39 @@ fn static_identity(
         username: username.to_owned(),
         password: Zeroizing::new(password.to_owned()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn server_config_debug_does_not_leak_the_auth_password() {
+        let config = PgServerConfig::builder()
+            .auth(AuthConfig::Scram {
+                username: "alice".into(),
+                password: "top_secret_password".into(),
+            })
+            .build();
+
+        let rendered = format!("{config:?}");
+
+        assert!(
+            !rendered.contains("top_secret_password"),
+            "server config debug leaked the auth password: {rendered}"
+        );
+        assert!(
+            rendered.contains("alice"),
+            "the username is not the secret and stays visible for diagnosis: {rendered}"
+        );
+    }
+
+    #[test]
+    fn trust_auth_debug_names_the_mode() {
+        let rendered = format!("{:?}", AuthConfig::Trust);
+
+        assert_eq!(rendered, "AuthConfig::Trust");
+    }
 }

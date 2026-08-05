@@ -1,13 +1,20 @@
 //! Authentication policies for the pgwire facade.
 //!
-//! The codec models the full authentication message matrix (cleartext,
-//! MD5, SASL/SCRAM, GSS); the facade currently drives Trust and
-//! Cleartext. MD5 (deprecated upstream, removed in PostgreSQL 18) and
-//! SCRAM (a crypto component with its own review gate) are sequenced in
-//! the pgwire discipline log as gates G1/G2.
+//! [`PgAuth`] is what the driver switches on; each variant maps to one
+//! AuthenticationRequest the codec already models. Trust and Cleartext are
+//! unconditional; [`PgAuth::Md5`] rides the `md5-auth` feature (deprecated
+//! upstream, removed in PostgreSQL 18, kept for legacy clients) and
+//! [`PgAuth::Scram`] the `scram` feature. GSSAPI is refused during
+//! negotiation, not represented here.
+//!
+//! Two traits rather than one because the flows need different material: a
+//! [`PasswordVerifier`] is handed the client's plaintext and answers
+//! yes/no, so it may store a hash; MD5 and SCRAM must recompute a digest
+//! themselves and so need the plaintext back out of a [`PasswordSource`].
 
 use std::sync::Arc;
 
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// Verifies a cleartext password for a startup identity. Cleartext on a
@@ -18,10 +25,22 @@ pub trait PasswordVerifier: Send + Sync + 'static {
 
 /// Single static identity, compared in constant time. The password is
 /// held in [`Zeroizing`] so it is wiped from memory on drop.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StaticCredentials {
     pub username: String,
     pub password: Zeroizing<String>,
+}
+
+// `Zeroizing` derives `Debug` straight through to the inner value, so the
+// derive would print the plaintext into any `{:?}` log line
+impl std::fmt::Debug for StaticCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StaticCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl StaticCredentials {
@@ -36,12 +55,11 @@ impl StaticCredentials {
     }
 }
 
+/// Credential comparison. `subtle` rather than a hand-rolled fold: the
+/// optimizer is free to short-circuit the latter, and every caller here is
+/// comparing a secret against attacker-supplied bytes.
 pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let mut diff = u8::from(left.len() != right.len());
-    for index in 0..left.len().min(right.len()) {
-        diff |= left[index] ^ right[index];
-    }
-    diff == 0
+    left.ct_eq(right).into()
 }
 
 impl PasswordVerifier for StaticCredentials {
@@ -188,6 +206,22 @@ mod tests {
         let credentials = creds("alice", "pass");
 
         assert!(!credentials.verify("", None, "pass"));
+    }
+
+    #[test]
+    fn static_credentials_debug_does_not_leak_the_password() {
+        let credentials = creds("alice", "top_secret_password");
+
+        let rendered = format!("{credentials:?}");
+
+        assert!(
+            !rendered.contains("top_secret_password"),
+            "credential debug leaked the password: {rendered}"
+        );
+        assert!(
+            rendered.contains("alice"),
+            "the username is not the secret and stays visible for diagnosis: {rendered}"
+        );
     }
 
     #[test]

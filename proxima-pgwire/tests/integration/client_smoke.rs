@@ -2,8 +2,8 @@
 //! Real-client smoke tests: psql (libpq) over the simple protocol —
 //! trust, SSL-refusal + cleartext password, and TLS — plus
 //! tokio-postgres over the extended protocol with binary parameters.
-//! These are the discipline-log witnesses that the facade speaks actual
-//! PostgreSQL, not just our own codec round-tripped.
+//! These are the witnesses that the facade speaks actual PostgreSQL, not
+//! just our own codec round-tripped against itself.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::process::Stdio;
@@ -14,7 +14,7 @@ use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_pgwire::codec::Session;
 use proxima_pgwire::{
     ColumnDesc, DescribeReply, ErrorReply, Negotiation, PgAuth, PgPipeHandle, PgReply,
-    PgServerConfig, QueryReply, QueryRequest, RowStream, SqlValue, StaticCredentials, Verb,
+    PgServerConfig, QueryReply, QueryRequest, SqlValue, StaticCredentials, Verb,
     into_pg_handle, negotiate, serve_session,
 };
 use proxima_primitives::pipe::SendPipe;
@@ -257,7 +257,7 @@ impl SendPipe for StreamPipe {
                 });
                 PgReply::QueryStream {
                     columns: vec![ColumnDesc::new("n", OID_INT4)],
-                    rows: RowStream::new(receiver),
+                    rows: receiver,
                     command_tag: None,
                 }
             }

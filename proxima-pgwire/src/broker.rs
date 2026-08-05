@@ -9,10 +9,11 @@
 //! (after ReadyForQuery), so a NotificationResponse never interleaves a
 //! message sequence.
 //!
-//! Lock-free on the hot path: subscriptions are a [`DashMap`] keyed by
-//! channel, so a publish on one channel never blocks a subscribe on
-//! another. Publish prunes senders whose receiver has dropped, so a gone
-//! connection cannot leak a slot.
+//! Subscriptions are a [`DashMap`] keyed by channel: sharded, so two
+//! operations contend only when their channels land in the same shard —
+//! not lock-free, but far short of a listener-wide lock. Publish prunes
+//! senders whose receiver has dropped, so a gone connection cannot leak a
+//! slot.
 
 use dashmap::DashMap;
 use futures::channel::mpsc::UnboundedSender;

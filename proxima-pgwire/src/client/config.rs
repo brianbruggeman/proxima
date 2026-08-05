@@ -26,9 +26,9 @@ fn default_database() -> String {
 
 /// Connection parameters for proxima's PostgreSQL client. Maps 1:1 to a TOML
 /// `[pgwire]` table or `PGWIRE_CLIENT_*` env vars, and to the bon builder.
-#[derive(Debug, Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
+#[derive(Clone, PartialEq, Eq, Builder, Serialize, Deserialize, Settings)]
 #[settings(prefix = "PGWIRE_CLIENT")]
-#[builder(derive(Clone, Debug))]
+#[builder(derive(Clone))]
 pub struct PgClientConfig {
     /// Server host. Resolved to a socket address when the transport connects.
     #[setting(default = "localhost")]
@@ -60,6 +60,21 @@ pub struct PgClientConfig {
     #[serde(default = "default_database")]
     #[builder(default = default_database(), into)]
     pub database: String,
+}
+
+// conflaguration's `sensitive` masks only `ConfigDisplay`, so a derived
+// `Debug` would still print the password wherever a client config is logged
+impl std::fmt::Debug for PgClientConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PgClientConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .field("database", &self.database)
+            .finish()
+    }
 }
 
 impl Default for PgClientConfig {
@@ -220,5 +235,22 @@ mod tests {
         let json = serde_json::to_string(&config).expect("ser");
         let back: PgClientConfig = serde_json::from_str(&json).expect("de");
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn debug_does_not_leak_the_password() {
+        let config = PgClientConfig::from_dsn("postgres://alice:top_secret_password@db:5432/appdb")
+            .expect("a well-formed dsn must parse");
+
+        let rendered = format!("{config:?}");
+
+        assert!(
+            !rendered.contains("top_secret_password"),
+            "client config debug leaked the password: {rendered}"
+        );
+        assert!(
+            rendered.contains("alice") && rendered.contains("appdb"),
+            "everything that is not the secret stays visible for diagnosis: {rendered}"
+        );
     }
 }
