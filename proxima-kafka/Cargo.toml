@@ -39,7 +39,10 @@ futures = { workspace = true, features = ["std", "async-await"], optional = true
 futures-timer = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true }
-tracing = { workspace = true, optional = true }
+# the house telemetry surface, never `tracing` directly — the framed App's
+# violation/shed/handler-failure events are the only emitters, so it rides
+# `listen` alone.
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 # the tokio-free native listener stack: `KafkaAnyProtocol` mounts into
 # `proxima-listen`'s `AnyListenProtocol` open universal listener over the
 # runtime-matched acceptor factory — see the `listen` feature below.
@@ -71,7 +74,6 @@ client = [
     "dep:conflaguration",
     "dep:futures",
     "dep:serde",
-    "dep:tracing",
 ]
 # the tokio-free native (sans-IO) Kafka broker-facade LISTENER: the
 # `Connection` FSM + `KafkaAnyProtocol` mounting into `proxima-listen`'s
@@ -94,9 +96,9 @@ listen = [
     "dep:futures",
     "dep:futures-timer",
     "dep:serde",
-    "dep:tracing",
     "dep:proxima-listen",
     "dep:proxima-runtime",
+    "dep:proxima-telemetry",
     "dep:serde_json",
     "proxima-listen/framed-any",
     "proxima-protocols/codec-pipe",
