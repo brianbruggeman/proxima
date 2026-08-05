@@ -1,6 +1,6 @@
 [package]
 name = "proxima-centauri"
-description = "Sans-IO, no-alloc cryptographic FSM substrate: entropy source polymorphism and BLAKE3 primitives over the proxima-primitives Pipe algebra"
+description = "Sans-IO, no-alloc secure-channel state machines: IKE-style key agreement with mutual authentication, rekey and stateless cookies, plus an ESP child SA with AEAD and anti-replay. Entropy and time are Pipe-shaped inputs, never capabilities the machines hold."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

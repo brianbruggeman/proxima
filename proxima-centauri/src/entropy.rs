@@ -86,8 +86,10 @@
 use core::future::Future;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-// under `--cfg loom` the cell's atomics come from loom so its model checker can
-// drive every interleaving; everywhere else they are the real ones.
+// under the `loom` feature the cell's atomics come from loom so its model
+// checker can drive every interleaving; everywhere else they are the real
+// ones. A feature and not `--cfg loom`, because RUSTFLAGS would apply that cfg
+// to every crate in the graph.
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicU32;
 

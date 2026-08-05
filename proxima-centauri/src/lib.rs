@@ -36,8 +36,9 @@
 //! passed in per step:
 //!
 //! ```text
-//! fn step(&mut self, input: &[u8], entropy: Entropy32,
-//!         now: Ticks, out: &mut [u8]) -> Result<Poll, CentauriError>
+//! fn step(&mut self, input: &[u8], entropy: Option<Entropy32>, now: Ticks)
+//!     -> Result<Progress, CentauriError>
+//! fn outbound(&self) -> &[u8]
 //! ```
 //!
 //! Time comes from `proxima_clock`, whose `TickCell` lets a caller say what
@@ -47,9 +48,18 @@
 //! composition root — never this crate — decides whether the real one is a
 //! hardware register or a syscall.
 //!
-//! The output buffer is the caller's for the same reason: `out: &mut [u8]`
-//! returning a written length, rather than a returned `Vec`. Sizing is the
-//! caller's decision because only the caller knows where the bytes are going.
+//! `Option<Entropy32>` rather than a draw per step, because most steps need
+//! none: [`Handshake::needs_entropy`] answers for the exact bytes about to be
+//! stepped, so a driver holding a take-once [`EntropyCell`] never destroys a
+//! value a step would not have consumed.
+//!
+//! Bytes to send are staged in [`Handshake::outbound`] rather than written
+//! into a caller-supplied buffer. Every message the protocol defines is
+//! bounded, so the state machine can own storage for its worst case — which
+//! deletes `BufferTooSmall` from the handshake's failure modes entirely. The
+//! `esp` data path is the opposite case and takes the caller's buffer,
+//! because a payload is not bounded by the protocol and is encrypted in place
+//! where it already sits.
 
 #![no_std]
 
