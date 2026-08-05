@@ -268,7 +268,7 @@ fn rekey_exchange(criterion: &mut Criterion) {
             |(mut initiator, _)| {
                 black_box(
                     initiator
-                        .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                        .send_rekey(Some(Entropy32::new([0x31; 32])))
                         .unwrap(),
                 )
             },
@@ -282,7 +282,7 @@ fn rekey_exchange(criterion: &mut Criterion) {
             &authenticated,
             |(mut initiator, mut responder)| {
                 let _ = initiator
-                    .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                    .send_rekey(Some(Entropy32::new([0x31; 32])))
                     .unwrap();
                 let mut request = [0u8; 92];
                 request.copy_from_slice(initiator.outbound());

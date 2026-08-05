@@ -657,7 +657,7 @@ impl Handshake {
                 })
             }
             (_, Phase::Established { .. } | Phase::LocalAuthSent { .. }) => {
-                self.receive_auth(input, now)
+                self.receive_auth(input)
             }
             (_, Phase::PeerAuthenticated { .. }) => Err(CentauriError::InvalidTransition {
                 expected: "send_auth to complete mutual authentication",
@@ -820,7 +820,10 @@ impl Handshake {
         Ok(Progress::Advanced)
     }
 
-    fn receive_auth(&mut self, input: &[u8], _now: Ticks) -> Result<Progress, CentauriError> {
+    /// Verifying a peer's AUTH proves who already holds the SA; it does not
+    /// establish one, so the `at` stamp carries over untouched and no time is
+    /// needed here.
+    fn receive_auth(&mut self, input: &[u8]) -> Result<Progress, CentauriError> {
         let minimum = HEADER_LEN + IDENTITY_LEN_BYTES + MAC_LEN;
         if input.len() < minimum {
             return Ok(Progress::NeedInput);
@@ -913,11 +916,12 @@ impl Handshake {
     ///
     /// [`CentauriError::EntropyUnavailable`] without entropy, or
     /// [`CentauriError::InvalidTransition`] before the peer is authenticated.
-    pub fn send_rekey(
-        &mut self,
-        entropy: Option<Entropy32>,
-        _now: Ticks,
-    ) -> Result<Progress, CentauriError> {
+    ///
+    /// Takes no `now`, like [`send_auth`](Self::send_auth) and
+    /// [`send_delete`](Self::send_delete): opening a rekey settles nothing, so
+    /// there is no moment to stamp. The SA is re-stamped when the fresh keys
+    /// take effect, on the step that completes the exchange.
+    pub fn send_rekey(&mut self, entropy: Option<Entropy32>) -> Result<Progress, CentauriError> {
         self.outbound_len = 0;
 
         let (keys, at, peer_identity, peer_identity_len) = match self.take_phase()? {
@@ -1541,9 +1545,7 @@ mod tests {
 
         // a rekey is refused until both directions are proved
         assert!(
-            initiator
-                .send_rekey(Some(Entropy32::new([1; 32])), now())
-                .is_err(),
+            initiator.send_rekey(Some(Entropy32::new([1; 32]))).is_err(),
             "rekey requires mutual authentication"
         );
 
@@ -1558,11 +1560,7 @@ mod tests {
         assert_eq!(initiator.peer_identity(), Some(&b"peer-b"[..]));
 
         // and now it is allowed
-        assert!(
-            initiator
-                .send_rekey(Some(Entropy32::new([1; 32])), now())
-                .is_ok()
-        );
+        assert!(initiator.send_rekey(Some(Entropy32::new([1; 32]))).is_ok());
     }
 
     #[test]
@@ -1956,7 +1954,7 @@ mod tests {
 
         assert_eq!(
             initiator
-                .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+                .send_rekey(Some(Entropy32::new([0x31; 32])))
                 .unwrap(),
             Progress::Advanced
         );
@@ -1997,7 +1995,7 @@ mod tests {
         assert_eq!(responder.peer_identity(), Some(&b"peer-a"[..]));
 
         let _ = initiator
-            .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+            .send_rekey(Some(Entropy32::new([0x31; 32])))
             .unwrap();
         let request = captured(&initiator);
         let _ = responder
@@ -2026,7 +2024,7 @@ mod tests {
 
         for round in 0..3u8 {
             let _ = initiator
-                .send_rekey(Some(Entropy32::new([0x40 + round; 32])), now())
+                .send_rekey(Some(Entropy32::new([0x40 + round; 32])))
                 .unwrap();
             let request = captured(&initiator);
             let _ = responder
@@ -2056,7 +2054,7 @@ mod tests {
         let before = *initiator.keys().unwrap().encrypt_key();
 
         assert_eq!(
-            initiator.send_rekey(None, now()).err(),
+            initiator.send_rekey(None).err(),
             Some(CentauriError::EntropyUnavailable("step requires entropy"))
         );
         assert_eq!(
@@ -2096,9 +2094,7 @@ mod tests {
         let (mut initiator, _) = established_pair(b"peer-a", b"peer-b");
 
         assert_eq!(
-            initiator
-                .send_rekey(Some(Entropy32::new([0x31; 32])), now())
-                .err(),
+            initiator.send_rekey(Some(Entropy32::new([0x31; 32]))).err(),
             Some(CentauriError::InvalidTransition {
                 expected: "authenticated",
                 found: "established",
@@ -2200,7 +2196,7 @@ mod tests {
         // still appears to work
         let (mut initiator, mut responder) = authenticated_pair();
         let _ = initiator
-            .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+            .send_rekey(Some(Entropy32::new([0x31; 32])))
             .unwrap();
         let mut tampered = captured(&initiator);
         tampered[HEADER_LEN + NONCE_LEN..MESSAGE_LEN].copy_from_slice(&LOW_ORDER_POINTS[2]);
@@ -2263,7 +2259,7 @@ mod tests {
         // tearing down while a rekey is in flight is ordinary, not an error
         let (mut initiator, mut responder) = authenticated_pair();
         let _ = responder
-            .send_rekey(Some(Entropy32::new([0x31; 32])), now())
+            .send_rekey(Some(Entropy32::new([0x31; 32])))
             .unwrap();
 
         let _ = initiator.send_delete().unwrap();
@@ -2292,11 +2288,7 @@ mod tests {
             initiator.send_delete().is_err(),
             "closing twice is not a thing"
         );
-        assert!(
-            initiator
-                .send_rekey(Some(Entropy32::new([1; 32])), now())
-                .is_err()
-        );
+        assert!(initiator.send_rekey(Some(Entropy32::new([1; 32]))).is_err());
     }
 
     #[test]
