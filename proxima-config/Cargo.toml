@@ -35,7 +35,7 @@ sugar = ["alloc"]
 # is the alloc floor (IR, `Describe`, json_schema/openapi emit); `schema-std`
 # adds `SchemaRegistry`, the toml emitter, and the `serde_value` escape
 # hatch; `schema-derive` adds `#[derive(Schema)]`.
-schema = ["alloc", "dep:serde", "dep:regex", "dep:time", "dep:url"]
+schema = ["alloc", "dep:serde", "dep:regex", "dep:thiserror", "dep:time", "dep:url"]
 schema-std = ["schema", "proxima-core/std", "dep:arc-swap", "dep:toml", "dep:serde-value"]
 schema-derive = ["schema", "dep:proxima-macros"]
 
@@ -65,6 +65,7 @@ toml = { workspace = true, optional = true }
 regex = { version = "1.12.3", default-features = false, features = ["perf", "unicode"], optional = true }
 time = { version = "0.3.47", default-features = false, features = ["parsing", "macros"], optional = true }
 url = { version = "2.5.8", default-features = false, optional = true }
+thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
