@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::FutureExt as _;
+use proxima_core::signal::Signal;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::header_list::HeaderList;
@@ -32,9 +34,11 @@ use proxima_patterns::alert::pipes::{AlertPipeHandle, AlertRequest};
 use proxima_patterns::alert::scheduled_trigger::{Schedule, ScheduledTriggerPipe};
 use proxima_patterns::alert::stdout_alert::StdoutAlertPipe;
 
-/// A test sink that captures AlertEvents AND delegates to a real sink.
+/// A test sink that captures AlertEvents AND delegates to a real sink. Fires
+/// `saw_one` on the first event so the test awaits an edge, never a sleep.
 struct CaptureThenDelegate {
     captured: Mutex<Vec<AlertEvent>>,
+    saw_one: Signal,
     inner: AlertPipeHandle,
 }
 
@@ -42,6 +46,7 @@ impl CaptureThenDelegate {
     fn new(inner: AlertPipeHandle) -> Arc<Self> {
         Arc::new(Self {
             captured: Mutex::new(Vec::new()),
+            saw_one: Signal::new(),
             inner,
         })
     }
@@ -56,10 +61,10 @@ impl SendPipe for CaptureThenDelegate {
         &self,
         request: AlertRequest,
     ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
-        let _ = self
-            .captured
-            .lock()
-            .map(|mut guard| guard.push(request.payload.clone()));
+        if let Ok(mut guard) = self.captured.lock() {
+            guard.push(request.payload.clone());
+            self.saw_one.fire();
+        }
         let inner = self.inner.clone();
         async move { SendPipe::call(inner.as_ref(), request).await }
     }
@@ -80,19 +85,13 @@ async fn heartbeat_producer_fires_alert_events_to_stdout_sink_end_to_end() {
         .build()
         .expect("producer builder");
 
-    // drive the producer as a SourcePipe (Signal -> ()) inline until an
-    // event lands, then fire cancel so the loop returns; the loop never
+    // drive the producer as a SourcePipe (Signal -> ()) inline until the sink
+    // signals an event, then fire cancel so the loop returns; the loop never
     // resolves on its own before that, so the watcher arm always wins.
-    use futures::FutureExt as _;
-    let cancel = proxima_core::signal::Signal::new();
+    let cancel = Signal::new();
     let loop_future = SendPipe::call(&producer, cancel.clone()).fuse();
-    let capture_for_watch = Arc::clone(&capture);
-    let watcher = async move {
-        while capture_for_watch.captured.lock().expect("mutex").is_empty() {
-            proxima_core::time::sleep(Duration::from_millis(1)).await;
-        }
-    }
-    .fuse();
+    let saw_one = capture.saw_one.clone();
+    let watcher = async move { saw_one.fired().await }.fuse();
     futures::pin_mut!(loop_future, watcher);
     let raced = async {
         futures::select_biased! {
