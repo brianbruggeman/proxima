@@ -216,9 +216,12 @@ mod tests {
     use prime::os::core_shard;
     use proxima_primitives::stream::{StreamListenerExt, StreamUpstreamExt};
     use proxima_runtime::CoreId;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::time::Duration;
+
+    // hang guard only: the worker signals completion on the channel, so the
+    // test blocks on the event itself rather than polling a flag. no sleep.
+    const RESULT_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// full round-trip: prime `PrimeUnixListener` (server) +
     /// `PrimeUnixUpstream` (client), both on the same prime worker. client
@@ -231,20 +234,16 @@ mod tests {
         let socket_path = temp_dir.path().join("proxima-net-prime-unix.sock");
 
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let bound_signal = Arc::new(AtomicBool::new(false));
-        let bound_for_factory = bound_signal.clone();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
         let path_for_factory = socket_path.clone();
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let bound_handle = bound_for_factory.clone();
-                let path = path_for_factory.clone();
+                let path = path_for_factory;
                 Box::pin(async move {
+                    // bind before the client task exists, so the socket file is
+                    // already there when it dials — no wait-for-bind poll.
                     let listener = PrimeUnixListener::bind(path.clone()).expect("bind");
-                    bound_handle.store(true, Ordering::Release);
 
                     let server = async move {
                         let mut conn = listener.accept().await.expect("accept");
@@ -272,26 +271,14 @@ mod tests {
                     };
 
                     futures::future::join(server, client).await;
-                    done.store(true, Ordering::Release);
+                    let _ = done_tx.send(());
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !bound_signal.load(Ordering::Acquire) {
-            assert!(std::time::Instant::now() < deadline, "listener never bound");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "round-trip never completed"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        done_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("round-trip never completed");
         handle.shutdown_and_join().expect("shutdown");
     }
 
@@ -302,38 +289,24 @@ mod tests {
         let missing_path = temp_dir.path().join("nobody-listening.sock");
 
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let result_chan: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
-        let result_for_factory = result_chan.clone();
+        let (result_tx, result_rx) = mpsc::channel::<bool>();
         let path_for_factory = missing_path.clone();
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let result_handle = result_for_factory.clone();
-                let path = path_for_factory.clone();
+                let path = path_for_factory;
                 Box::pin(async move {
                     let upstream = PrimeUnixUpstream::new(path);
-                    let got_error = upstream.connect().await.is_err();
-                    *result_handle.lock().unwrap() = Some(got_error);
-                    done.store(true, Ordering::Release);
+                    let _ = result_tx.send(upstream.connect().await.is_err());
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "connect-missing-path test never completed (possible hang)"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        let got_error = result_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("connect-missing-path test never completed (possible hang)");
         handle.shutdown_and_join().expect("shutdown");
 
-        let got_error = result_chan.lock().unwrap().expect("result not set");
         assert!(
             got_error,
             "expected an error connecting to a missing path, got Ok"
@@ -349,38 +322,28 @@ mod tests {
         let socket_path = temp_dir.path().join("local-addr.sock");
 
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let result_chan: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
-        let result_for_factory = result_chan.clone();
+        let (result_tx, result_rx) = mpsc::channel::<PathBuf>();
         let path_for_factory = socket_path.clone();
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let result_handle = result_for_factory.clone();
-                let path = path_for_factory.clone();
+                let path = path_for_factory;
                 Box::pin(async move {
                     let listener = PrimeUnixListener::bind(path).expect("bind");
                     let reported = match listener.local_addr() {
                         Some(BindAddr::Unix(reported_path)) => reported_path,
                         other => panic!("expected BindAddr::Unix, got {other:?}"),
                     };
-                    *result_handle.lock().unwrap() = Some(reported);
-                    done.store(true, Ordering::Release);
+                    let _ = result_tx.send(reported);
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(std::time::Instant::now() < deadline, "test never completed");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        let reported = result_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("local-addr test never completed");
         handle.shutdown_and_join().expect("shutdown");
 
-        let reported = result_chan.lock().unwrap().clone().expect("result not set");
         assert_eq!(reported, socket_path);
     }
 }

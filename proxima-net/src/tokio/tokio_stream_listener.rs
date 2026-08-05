@@ -316,6 +316,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("proxima-stream.sock");
 
+        // `bind` awaits the socket file into existence before returning, so the
+        // client below can dial immediately — no wait-for-file poll.
         let listener = TokioUnixListener::bind(path.clone()).await.expect("bind");
         let server = tokio::spawn(async move {
             let mut conn = listener.accept().await.expect("accept");
@@ -325,14 +327,6 @@ mod tests {
             conn.flush().await.expect("flush");
             buf
         });
-
-        // small wait for bind file to appear; mirrors direct.rs test pattern.
-        for _ in 0..50 {
-            if path.exists() {
-                break;
-            }
-            proxima_core::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
 
         let mut client = tokio::net::UnixStream::connect(&path)
             .await
