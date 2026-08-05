@@ -16,8 +16,8 @@
 //! link to a module that a default build cfg's out is a rustdoc error.
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// only proxima-pmem's cow FSM tests reach for alloc collections; everything
-// else in the crate is either no-alloc or genuinely std.
+// only the pmem cow FSM tests reach for alloc collections; everything else in
+// the crate is either no-alloc or genuinely std.
 #[cfg(test)]
 extern crate alloc;
 
