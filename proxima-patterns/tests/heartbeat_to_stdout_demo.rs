@@ -28,7 +28,7 @@ use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
 
 use proxima_patterns::alert::event::{AlertEvent, Severity};
-use proxima_patterns::alert::pipes::{AlertPipeHandle, AlertRequest, into_alert_handle};
+use proxima_patterns::alert::pipes::{AlertPipeHandle, AlertRequest};
 use proxima_patterns::alert::scheduled_trigger::{Schedule, ScheduledTriggerPipe};
 use proxima_patterns::alert::stdout_alert::StdoutAlertPipe;
 
@@ -67,9 +67,9 @@ impl SendPipe for CaptureThenDelegate {
 
 #[proxima::test]
 async fn heartbeat_producer_fires_alert_events_to_stdout_sink_end_to_end() {
-    let stdout_sink = into_alert_handle(StdoutAlertPipe::default());
+    let stdout_sink = into_handle(StdoutAlertPipe::default());
     let capture = CaptureThenDelegate::new(stdout_sink);
-    let inner = into_alert_handle(Arc::clone(&capture));
+    let inner = into_handle(Arc::clone(&capture));
 
     let producer = ScheduledTriggerPipe::builder()
         .schedule(Schedule::Interval(Duration::from_millis(5)))
@@ -130,7 +130,7 @@ async fn heartbeat_producer_fires_alert_events_to_stdout_sink_end_to_end() {
 
 #[proxima::test(start_paused = true)]
 async fn unknown_method_routed_to_stdout_sink_returns_405_without_capture() {
-    let stdout_sink = into_alert_handle(StdoutAlertPipe::default());
+    let stdout_sink = into_handle(StdoutAlertPipe::default());
     let bogus_event = proxima_patterns::alert::event::AlertEvent {
         id: proxima_patterns::alert::event::AlertId(ulid::Ulid::nil()),
         severity: Severity::Info,
