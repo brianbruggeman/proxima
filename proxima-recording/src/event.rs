@@ -168,8 +168,8 @@ pub struct RecordingEvent {
 
 /// What protocol this interaction speaks. Each variant owns its full
 /// lifecycle (Started → middle events → Ended). New built-in protocols
-/// add a variant here. Plugin protocols ride `Custom` and register a
-/// `ProtocolRenderer` for display/parsing.
+/// add a variant here; plugin protocols ride `Custom`, whose `kind`
+/// discriminates and whose `payload` carries the protocol's own shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProtocolEvent {
     Pipeline(PipelineEvent),
@@ -282,16 +282,6 @@ impl RecordingEvent {
             ProtocolEvent::Custom { kind, .. } => kind,
         }
     }
-}
-
-/// Pluggable renderer for `ProtocolEvent::Custom` payloads (and any
-/// built-in protocol whose display can be customized). Registered in a
-/// `ProtocolRendererRegistry` parallel to the format-registry pattern.
-/// Built-in renderers ship for Pipeline / Process / Http; plugins
-/// register their own for the kinds they own.
-pub trait ProtocolRenderer: Send + Sync {
-    fn kind(&self) -> &str;
-    fn summary(&self, event: &RecordingEvent) -> String;
 }
 
 #[cfg(test)]

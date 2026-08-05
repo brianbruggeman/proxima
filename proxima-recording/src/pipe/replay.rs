@@ -1,7 +1,7 @@
 //! `TimedReplay` — replay a recording in one of two timing modes.
 //!
 //! The durable read path ([`crate::pipe::log_pipe::ReplayLog`]) and every
-//! [`RecordingSource`] yield events strictly IN RECORD ORDER, as fast as the
+//! [`RecordingSource`](crate::source::RecordingSource) yield events strictly IN RECORD ORDER, as fast as the
 //! reader produces them. That is the [`ReplayMode::CausalOrder`] behaviour:
 //! order is preserved, inter-event wall time is collapsed to zero. It is what
 //! verify / diff / fast-forward want.
@@ -20,9 +20,9 @@
 //!   [`Delay`](proxima_primitives::pipe::Delay), `Retry`, and `RateLimit` are
 //!   generic over. `TimedReplay` only calls `Clock::delay`; it never reads
 //!   `Clock::now_nanos`.
-//! - [`TimeClock`](proxima_primitives::pipe::clock::TimeClock) — the
+//! - [`TimeClock`] — the
 //!   production `Clock`, and the default `Clk` type parameter, so every
-//!   existing caller (`TimedReplay::new`, `ReplayConfig`) is unaffected.
+//!   existing caller of `TimedReplay::new` is unaffected.
 //!
 //! Production delegates to `proxima_core::time::sleep` (registers a waker via
 //! the active driver's `schedule_wake`, fired by the driver — never a busy
@@ -39,9 +39,12 @@ use proxima_core::ProximaError;
 use proxima_primitives::pipe::capabilities::Clock;
 use proxima_primitives::pipe::clock::TimeClock;
 
-// ── replay mode — config-expressible, the bidirectional twin of the builder ──
+// ── replay mode — the whole config surface, serde-expressible on its own ─────
 
-/// How a [`TimedReplay`] paces the events it yields.
+/// How a [`TimedReplay`] paces the events it yields. `Serialize`/`Deserialize`
+/// so an embedding config can carry the mode as a plain field; there is no
+/// separate config struct because a one-field wrapper would not let a caller
+/// do anything this enum plus [`TimedReplay::new`] does not already do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReplayMode {
@@ -66,7 +69,7 @@ impl ReplayMode {
 
 // ── main struct ──────────────────────────────────────────────────────────────
 
-/// Replay a [`RecordingSource`] under a chosen [`ReplayMode`]. Generic over
+/// Replay a [`RecordingSource`](crate::source::RecordingSource) under a chosen [`ReplayMode`]. Generic over
 /// the injected [`Clock`]; the default type parameter keeps production at
 /// [`TimeClock`]. [`TimedReplay::events`] yields the same events the
 /// underlying source yields, in the same order — under `TimingIntact` it sleeps
@@ -78,8 +81,7 @@ pub struct TimedReplay<Clk = TimeClock> {
 }
 
 impl TimedReplay<TimeClock> {
-    /// Build a replay over the production [`TimeClock`]. The fluent twin of
-    /// the [`ReplayConfig`] surface.
+    /// Build a replay over the production [`TimeClock`].
     #[must_use]
     pub fn new(source: DynRecordingSource, mode: ReplayMode) -> Self {
         Self::with_clock(source, mode, TimeClock)
@@ -105,17 +107,11 @@ impl<Clk> TimedReplay<Clk> {
         self
     }
 
-    /// The configured replay mode.
+    /// The configured replay mode — the projection back to config, and the
+    /// other half of the round-trip parity guarantee.
     #[must_use]
     pub fn replay_mode(&self) -> ReplayMode {
         self.mode
-    }
-
-    /// Project the built replay back to its config (the inverse of
-    /// [`ReplayConfig::into_replay`]). Powers the round-trip parity guarantee.
-    #[must_use]
-    pub fn to_config(&self) -> ReplayConfig {
-        ReplayConfig { mode: self.mode }
     }
 }
 
@@ -163,28 +159,6 @@ async fn next_event(
 ) -> Option<Result<crate::event::RecordingEvent, ProximaError>> {
     use futures::stream::StreamExt;
     stream.next().await
-}
-
-// ── serde config + bidirectional twin ────────────────────────────────────────
-//
-// `ReplayConfig` is the serde/conflaguration surface; it is the bidirectional
-// twin of the fluent builder (`TimedReplay::new` / `.mode`). `to_config` /
-// `into_replay` round-trip a built replay through the config and back.
-
-/// Serde/conflaguration config for a [`TimedReplay`]. Bidirectional with the
-/// fluent builder via [`ReplayConfig::into_replay`] / [`TimedReplay::to_config`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayConfig {
-    #[serde(default)]
-    pub mode: ReplayMode,
-}
-
-impl ReplayConfig {
-    /// Build a replay over the production [`TimeClock`] from this config.
-    #[must_use]
-    pub fn into_replay(self, source: DynRecordingSource) -> TimedReplay<TimeClock> {
-        TimedReplay::new(source, self.mode)
-    }
 }
 
 #[cfg(test)]
@@ -457,25 +431,23 @@ mod tests {
         let runtime = prime();
         record_three(&path, &runtime);
 
-        let config = ReplayConfig {
-            mode: ReplayMode::TimingIntact,
-        };
+        let mode = ReplayMode::TimingIntact;
         let source: DynRecordingSource = Arc::new(BinSource::new(&path, runtime));
 
         // config -> builder -> config, and config -> json -> config.
-        let replay = config.into_replay(source);
-        let back = replay.to_config();
-        let json = serde_json::to_value(config).expect("serialize");
-        let parsed: ReplayConfig = serde_json::from_value(json.clone()).expect("deserialize");
+        let replay = TimedReplay::new(source, mode);
+        let json = serde_json::to_value(mode).expect("serialize");
+        let parsed: ReplayMode = serde_json::from_value(json.clone()).expect("deserialize");
 
         assert_eq!(
-            back, config,
+            replay.replay_mode(),
+            mode,
             "builder projects back to the originating config"
         );
-        assert_eq!(parsed, config, "serde round-trip is lossless");
+        assert_eq!(parsed, mode, "serde round-trip is lossless");
         assert_eq!(
             json,
-            serde_json::json!({ "mode": { "kind": "timing_intact" } }),
+            serde_json::json!({ "kind": "timing_intact" }),
             "ReplayMode serializes as a tagged object"
         );
     }
@@ -485,7 +457,6 @@ mod tests {
         assert_eq!(ReplayMode::default(), ReplayMode::CausalOrder);
         assert!(!ReplayMode::CausalOrder.honors_timing());
         assert!(ReplayMode::TimingIntact.honors_timing());
-        assert_eq!(ReplayConfig::default().mode, ReplayMode::CausalOrder);
     }
 
     // ── fluent mode switch reaches the same config as the constructor ─────────
