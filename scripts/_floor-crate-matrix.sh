@@ -199,6 +199,17 @@ declare -a FLOOR_CRATE_CELLS=(
     # Produce/Fetch/Metadata/ApiVersions v0 body codec); `client` and `listen`
     # both imply `std`, so bare is the only floor and there is no `alloc` cell.
     "proxima-kafka-bare|proxima-kafka|"
+    # proxima-mqtt is the fifth crate with the identical fold-era shape --
+    # `default = ["std"]`, `std = []` gating nothing, no `#![no_std]`, no cell
+    # here -- while its `client` feature comment advertised that
+    # `--no-default-features` "leaves the bare sans-IO codec ... for bare-metal
+    # embedding". Measured before the fix on 2026-08-05: `cargo check -p
+    # proxima-mqtt --no-default-features --target thumbv7m-none-eabi` exits 101
+    # on "`std` is required by `proxima_mqtt` because it does not declare
+    # `#![no_std]`". Like redis and dns, the bare tier is re-exports only (the
+    # codec itself lives in proxima-protocols::mqtt); `client` and `listen`
+    # both imply `std`, so bare is the only floor and there is no `alloc` cell.
+    "proxima-mqtt-bare|proxima-mqtt|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
