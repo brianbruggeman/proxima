@@ -34,9 +34,7 @@ quinn-compat = ["dep:quinn", "dep:quinn-proto", "dep:rustls", "dep:rcgen", "dep:
 [dependencies]
 proxima-core = { workspace = true }
 proxima-primitives = { workspace = true, features = ["std"] }
-bytes = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
-tracing = { workspace = true }
 # Native path.
 proxima-protocols = { workspace = true, optional = true }
 prime = { workspace = true, optional = true, features = [
@@ -67,3 +65,4 @@ proxima-protocols = { workspace = true, features = ["quic-alloc", "quic-mock-tls
 proxima-runtime.workspace = true
 toml.workspace = true
 serde_json.workspace = true
+bytes.workspace = true
