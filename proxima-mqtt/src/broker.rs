@@ -122,22 +122,25 @@ impl MqttBroker {
     /// reached — the real MQTT broker's fan-out count (not part of the
     /// wire reply, but useful for logging/metrics call sites).
     pub async fn publish(&self, topic: &[u8], payload: &[u8]) -> Result<usize, ProximaError> {
-        let matched_filters: Vec<Vec<u8>> = {
-            let set = self.filter_set.snapshot();
-            set.matching(topic).map(<[u8]>::to_vec).collect()
-        };
-
+        // the snapshot is an immutable `Arc`, so a concurrent subscribe swaps
+        // the cell without disturbing this fan-out — the filter set is the one
+        // that was live when the PUBLISH arrived, same as before.
+        let filters = self.filter_set.snapshot();
+        let mut frame: Option<Bytes> = None;
         let mut reached = 0;
-        for filter in &matched_filters {
+        for filter in filters.matching(topic) {
             let count = self.subscriptions.subscription_count(filter);
             if count == 0 {
                 continue;
             }
-            let mut frame = Vec::new();
-            encode_publish(topic, None, payload, 0, false, false, &mut frame);
-            self.subscriptions
-                .publish(filter, Bytes::from(frame))
-                .await?;
+            let bytes = frame
+                .get_or_insert_with(|| {
+                    let mut buffer = Vec::new();
+                    encode_publish(topic, None, payload, 0, false, false, &mut buffer);
+                    Bytes::from(buffer)
+                })
+                .clone();
+            self.subscriptions.publish(filter, bytes).await?;
             reached += count;
         }
         Ok(reached)
@@ -220,8 +223,16 @@ mod tests {
             .expect("publish");
 
         assert_eq!(reached, 2);
-        assert!(exact_rx.next().await.is_some());
-        assert!(wildcard_rx.next().await.is_some());
+        let to_exact = exact_rx.next().await.expect("exact subscriber delivered");
+        let to_wildcard = wildcard_rx
+            .next()
+            .await
+            .expect("wildcard subscriber delivered");
+        assert_eq!(
+            to_exact, to_wildcard,
+            "the PUBLISH frame does not depend on which filter matched, so every \
+             subscriber gets the same encoded bytes"
+        );
     }
 
     #[proxima::test(runtime = "tokio")]
