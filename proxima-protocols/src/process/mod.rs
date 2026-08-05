@@ -20,19 +20,19 @@
 //! - [`protocol`] — `ChildRequest` / `ChildResponse` /
 //!   `ReadResponse` / `WriteResponse` typed envelope, serde-
 //!   derived for postcard framing.
-//! - [`markers`] — empty marker traits for compile-time effect
-//!   tracking (`NoStd`, `AllocFree`, `IsPure`, `Without*`,
-//!   `Deterministic`, etc.). Pure data types — re-exported by
-//!   proxima-process for backward compat.
 //!
-//! Both modules are also re-exported at the crate root for
-//! convenience.
+//! The compile-time effect markers (`NoStd`, `AllocFree`, `IsPure`,
+//! `Without*`, `Deterministic`, ...) are `proxima_core::markers`' and
+//! are named here so a consumer of the dispatch contract reaches them
+//! without a second dependency. There is no `markers` submodule: a
+//! module whose whole body was `pub use proxima_core::markers::*` let
+//! an open set through invisibly and let the two paths drift (the glob
+//! carried `DropSafe`, this list did not).
 
-pub mod markers;
 pub mod protocol;
 
-pub use markers::{
-    AllocFree, Commutative, Deterministic, IdempotentSideEffectFree, IsPure, NoStd, Reproducible,
-    WithoutFilesystem, WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime,
+pub use proxima_core::markers::{
+    AllocFree, Commutative, Deterministic, DropSafe, IdempotentSideEffectFree, IsPure, NoStd,
+    Reproducible, WithoutFilesystem, WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime,
 };
 pub use protocol::{ChildRequest, ChildResponse, ReadResponse, WriteResponse};
