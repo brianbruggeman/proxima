@@ -3,16 +3,18 @@
 //! useful for non-HTTP protocols that want QUIC's transport
 //! properties (encryption, 0-RTT, migration) without h3 framing.
 //!
-//! For HTTP/3, use [`crate::listeners::h3`] (rides on the full QUIC
-//! multiplexer at [`crate::quic`]). These two are sibling concerns:
+//! For HTTP/3, use `proxima::listeners::h3`, which rides the full QUIC
+//! multiplexer at [`crate::endpoint`]. These two are sibling concerns:
 //! stream-per-connection vs full-multiplexer-per-connection.
 //!
 //! TLS is mandatory — pass a pre-built `quinn::ServerConfig`.
+//! [`crate::dev_server_config`] builds a self-signed one for tests and
+//! local dev.
 
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use quinn::{Endpoint, RecvStream, SendStream, ServerConfig};
@@ -70,6 +72,9 @@ impl StreamConnection for QuicStreamConnection {
     }
 }
 
+// boxed because the accept sequence (accept → handshake → accept_bi) is an
+// async block with no nameable type, and `poll_accept` takes `&self`, so it
+// has to be stored across polls rather than held on the stack.
 type QuicAcceptFut =
     Pin<Box<dyn std::future::Future<Output = io::Result<QuicStreamConnection>> + Send>>;
 
@@ -136,21 +141,4 @@ impl StreamListener for QuicListener {
     fn local_addr(&self) -> Option<BindAddr> {
         self.local_addr.map(BindAddr::Tcp)
     }
-}
-
-/// Build a self-signed `ServerConfig` for tests / dev. Generates a
-/// fresh certificate for `localhost`. Production should plug in real
-/// certs.
-pub fn dev_server_config() -> io::Result<ServerConfig> {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .map_err(|err| io::Error::other(format!("rcgen: {err}")))?;
-    let cert_der = cert.cert.der().clone();
-    let key_der =
-        quinn::rustls::pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
-    let mut server_config = ServerConfig::with_single_cert(vec![cert_der], key_der)
-        .map_err(|err| io::Error::other(format!("server config: {err}")))?;
-    let transport = Arc::get_mut(&mut server_config.transport)
-        .ok_or_else(|| io::Error::other("server config transport not unique"))?;
-    transport.max_concurrent_uni_streams(0_u8.into());
-    Ok(server_config)
 }
