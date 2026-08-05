@@ -1,4 +1,5 @@
 use core::convert::Infallible;
+use core::fmt;
 use core::future::Future;
 
 use proxima_primitives::pipe::primitives::Pipe;
@@ -62,6 +63,19 @@ impl AnchorCell {
     }
 }
 
+// not derived: a derived impl reads each atomic half on its own, so a
+// `{:?}` racing a re-anchor can print a pair that was never stored.
+impl fmt::Debug for AnchorCell {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (ticks, unix_nanos) = self.get();
+        formatter
+            .debug_struct("AnchorCell")
+            .field("ticks", &ticks)
+            .field("unix_nanos", &unix_nanos)
+            .finish()
+    }
+}
+
 /// Converts [`Ticks`] to [`UnixNanos`] against a live, re-anchorable
 /// [`AnchorCell`] — the monotonic-to-wall-clock bridge, expressed as a
 /// plain [`Pipe`] transform (`In = Ticks, Out = UnixNanos`) instead of a
@@ -99,6 +113,7 @@ impl AnchorCell {
 /// `frequency_hz` is supplied once at construction (a hardware clock's
 /// nominal rate is fixed for its lifetime — a PTP discipline loop adjusts
 /// [`AnchorCell`]'s offset, not this rate); it is not re-read per call.
+#[derive(Debug, Clone, Copy)]
 pub struct ToUnixNanos<'anchor> {
     anchor: &'anchor AnchorCell,
     frequency_hz: u64,
@@ -286,5 +301,24 @@ mod tests {
             UnixNanos::from_nanos(3_000_000_000),
             "frequency_hz=0 clamps to 1 Hz rather than panicking on divide-by-zero"
         );
+    }
+
+    // `format!` needs an allocator, so the rendering assertions are std-tier;
+    // the `Debug` impl itself is `core`-only and compiles on the floor.
+    #[cfg(feature = "std")]
+    mod rendering {
+        use super::{AnchorCell, Ticks, UnixNanos};
+
+        #[test]
+        fn debug_renders_the_live_anchor_not_the_constructed_one() {
+            let anchor = AnchorCell::new(Ticks::from_raw(0), UnixNanos::from_nanos(0));
+
+            anchor.set(Ticks::from_raw(1_000), UnixNanos::from_nanos(50_000_000));
+
+            assert_eq!(
+                format!("{anchor:?}"),
+                "AnchorCell { ticks: Ticks(1000), unix_nanos: UnixNanos(50000000) }"
+            );
+        }
     }
 }
