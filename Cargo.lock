@@ -3796,16 +3796,14 @@ dependencies = [
 name = "proxima-codec"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "base64 0.22.1",
  "bytes",
  "proxima",
  "proxima-core",
- "rstest",
  "serde",
  "serde_json",
  "simd-json",
- "tokio",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
