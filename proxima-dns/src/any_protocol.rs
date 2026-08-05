@@ -4,34 +4,29 @@
 //! `proxima_pgwire`'s own `AnyProtocol` candidates.
 //!
 //! `drive` builds and delegates to a
-//! [`proxima_listen::any::FramedAny<DnsTcpCodec, DnsFramedApp, _, _>`] —
-//! the generic stateless `AnyProtocol` driver, proving DNS-over-TCP drops
-//! onto the pipe-centered driver rather than hand-rolling its own
-//! `serve_tcp_connection`/`handle_one_message` (see git history: both
-//! deleted). `DnsAnyProtocol` itself stays a thin, named constructor: it
-//! resolves the per-connection `DnsServerConfig` from the listener spec
-//! and BUILDS a fresh `FramedAny` per accepted connection, mirroring
-//! `MemcachedAnyProtocol`'s identical shape.
+//! [`proxima_listen::any::FramedAny<DnsTcpCodec, DnsFramedApp, _, _>`] — the
+//! generic stateless `AnyProtocol` driver. `DnsAnyProtocol` itself stays a
+//! thin, named constructor: it resolves the per-connection
+//! [`DnsServerConfig`] from the listener spec and BUILDS a fresh `FramedAny`
+//! per accepted connection, mirroring `MemcachedAnyProtocol`'s shape.
 //!
 //! **Gap this module fills, not one it hides:** `proxima_codec`'s only
 //! length-delimited framer, [`proxima_codec::LengthDelimitedCodec`], is
-//! hard-coded to a **4-byte** big-endian prefix (`[u32 BE len][payload]` —
-//! see its own doc comment). RFC 1035 §4.2.2's TCP framing is a **2-byte**
-//! prefix — a different width the shared codec cannot express, so
-//! [`proxima_protocols::dns::DnsTcpCodec`] reads/writes the 2-byte prefix
-//! itself as a plain [`proxima_codec::FrameCodec`] impl, rather than an
-//! extension to the shared codec crate; widening `LengthDelimitedCodec` to
-//! a generic prefix width is future work tracked here as the named gap,
-//! not solved inline.
+//! hard-coded to a **4-byte** big-endian prefix (`LengthDelimitedCodec::
+//! HEADER_BYTES == 4`). RFC 1035 §4.2.2's TCP framing is a **2-byte** prefix
+//! — a different width the shared codec cannot express, so
+//! [`proxima_protocols::dns::DnsTcpCodec`] reads and writes the 2-byte prefix
+//! itself as a plain [`proxima_codec::FrameCodec`] impl. Widening
+//! `LengthDelimitedCodec` to a generic prefix width is a change to a crate
+//! four other codecs depend on; it is named here as the gap rather than
+//! solved as a side effect of a DNS module.
 //!
-//! Positive-match probe: the 2-byte length prefix plus a plausible header
-//! (`QDCOUNT == 1`, matching this crate's single-question contract — see
-//! [`crate::pipes`]'s module doc) is enough signal for a **single-candidate
-//! registration** (`Listener::builder().accept("dns-tcp")`), the same
-//! "good enough because nothing else is registered under this name" positive
-//! -match reasoning [`proxima_redis::RedisAnyProtocol`]'s own doc lays out —
-//! DNS query IDs are arbitrary 16-bit values, so there's no sigil byte to
-//! sniff the way RESP's `*` or a fixed magic number would give.
+//! Positive-match probe: the 2-byte length prefix must declare at least a
+//! header, and that header must open a query — `QR == 0`, `OPCODE == 0`,
+//! `QDCOUNT == 1`. DNS has no sigil byte to sniff the way RESP's `*` or a
+//! fixed magic number would give, so the header's own reserved and count
+//! fields are the whole signal, and the DNS-over-UDP candidate classifies on
+//! exactly the same predicate.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -42,16 +37,18 @@ use proxima_core::ProximaError;
 use proxima_listen::admission::{ConnAdmission, ShedReason};
 use proxima_listen::any::{AnyHandler, AnyProtocol, FramedAny, ProbeVerdict};
 use proxima_primitives::stream::{PeerInfo, StreamConnection};
-use proxima_protocols::dns::DnsTcpCodec;
+use proxima_protocols::dns::{DnsTcpCodec, DnsTcpOwnedFrame};
 
-use crate::config::DnsServerConfig;
+use crate::config::{DnsServerConfig, resolve_config};
 use crate::framed_app::{DnsFramedApp, DnsTcpOutcome, shed_reply};
 use crate::pipes::DnsPipeHandle;
+use crate::wire::header_is_query;
 
-/// Smallest a framed TCP message can legally be: the 2-byte length prefix
-/// plus the 12-byte fixed DNS header (RFC 1035 §4.1.1) it must at least
-/// declare.
-const MIN_TCP_FRAME_PREFIX: usize = 2 + 12;
+/// RFC 1035 §4.2.2's big-endian length prefix, and §4.1.1's fixed header —
+/// the smallest a framed TCP message can legally be is one of each.
+const TCP_LENGTH_PREFIX_BYTES: usize = 2;
+const DNS_HEADER_BYTES: usize = 12;
+const MIN_TCP_FRAME_PREFIX: usize = TCP_LENGTH_PREFIX_BYTES + DNS_HEADER_BYTES;
 
 /// The concrete [`FramedAny`] instantiation DNS-over-TCP drives — `Probe`/
 /// `Shed` are plain `fn` items (no captured state), so `DnsAnyProtocol`
@@ -60,7 +57,7 @@ type DnsFramedAny = FramedAny<
     DnsTcpCodec,
     DnsFramedApp,
     fn(&[u8]) -> ProbeVerdict,
-    fn(ShedReason, &proxima_protocols::dns::DnsTcpOwnedFrame) -> DnsTcpOutcome,
+    fn(ShedReason, &DnsTcpOwnedFrame) -> DnsTcpOutcome,
 >;
 
 /// DNS-over-TCP wire candidate for the open universal listener. Two UDP
@@ -124,18 +121,9 @@ impl DnsAnyProtocol {
             DnsTcpCodec::new(config.max_message_bytes),
             DnsFramedApp::new(self.label.clone(), self.handler.clone()),
             probe as fn(&[u8]) -> ProbeVerdict,
-            shed_reply
-                as fn(ShedReason, &proxima_protocols::dns::DnsTcpOwnedFrame) -> DnsTcpOutcome,
+            shed_reply as fn(ShedReason, &DnsTcpOwnedFrame) -> DnsTcpOutcome,
             MIN_TCP_FRAME_PREFIX,
         )
-    }
-}
-
-fn resolve_config(base: &DnsServerConfig, spec: &Value) -> Result<DnsServerConfig, ProximaError> {
-    match spec.get("dns") {
-        None => Ok(base.clone()),
-        Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("dns spec: {error}"))),
     }
 }
 
@@ -146,14 +134,11 @@ fn probe(prefix: &[u8]) -> ProbeVerdict {
         };
     }
     let declared_len = usize::from(u16::from_be_bytes([prefix[0], prefix[1]]));
-    if declared_len < 12 {
+    if declared_len < DNS_HEADER_BYTES {
         // no framed DNS message is ever shorter than its own header.
         return ProbeVerdict::No;
     }
-    // header's QDCOUNT sits at header-relative offset 4..6, i.e.
-    // prefix-relative 2+4..2+6 — see RFC 1035 §4.1.1's field layout.
-    let qdcount = u16::from_be_bytes([prefix[6], prefix[7]]);
-    if qdcount == 1 {
+    if header_is_query(&prefix[TCP_LENGTH_PREFIX_BYTES..]) {
         ProbeVerdict::Match { consumed: 0 }
     } else {
         ProbeVerdict::No
@@ -266,17 +251,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_config_overrides_max_message_bytes_from_the_spec() {
-        let base = DnsServerConfig::default();
-        let spec = serde_json::json!({ "dns": { "max_message_bytes": 4096 } });
-        let resolved = resolve_config(&base, &spec).expect("spec resolves");
-        assert_eq!(resolved.max_message_bytes, 4096);
+    fn probe_rejects_a_framed_response_not_a_query() {
+        let protocol = DnsAnyProtocol::new("dns-tcp", handler());
+        let mut framed = framed_query(1234);
+        // set QR (prefix-relative byte 4, header byte 2, high bit): a reply
+        // arriving at a server is not this candidate's traffic.
+        framed[4] |= 0b1000_0000;
+        assert_eq!(
+            protocol.probe(&framed[..MIN_TCP_FRAME_PREFIX]),
+            ProbeVerdict::No
+        );
     }
 
     #[test]
-    fn resolve_config_falls_back_to_the_base_config_with_no_spec_override() {
-        let base = DnsServerConfig::default();
-        let resolved = resolve_config(&base, &Value::Null).expect("no override resolves");
-        assert_eq!(resolved, base);
+    fn probe_rejects_a_non_standard_opcode() {
+        let protocol = DnsAnyProtocol::new("dns-tcp", handler());
+        let mut framed = framed_query(1234);
+        // OPCODE 5 (UPDATE, RFC 2136) — a legal DNS message this crate's
+        // single-question query path cannot serve.
+        framed[4] |= 5 << 3;
+        assert_eq!(
+            protocol.probe(&framed[..MIN_TCP_FRAME_PREFIX]),
+            ProbeVerdict::No
+        );
     }
 }

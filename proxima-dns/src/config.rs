@@ -5,10 +5,31 @@
 
 use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
+use proxima_core::ProximaError;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 fn default_max_message() -> usize {
     65_535
+}
+
+/// Resolve the per-connection config a listener spec's `dns` object asks for,
+/// falling back to `base` when the spec says nothing. Both `.any()`
+/// candidates resolve identically — a spec that overrides the message cap for
+/// DNS-over-TCP means the same thing for DNS-over-UDP on the same bind.
+///
+/// # Errors
+/// [`ProximaError::Config`] when the `dns` object is present but does not
+/// deserialize into a [`DnsServerConfig`].
+pub(crate) fn resolve_config(
+    base: &DnsServerConfig,
+    spec: &Value,
+) -> Result<DnsServerConfig, ProximaError> {
+    match spec.get("dns") {
+        None => Ok(base.clone()),
+        Some(overrides) => serde_json::from_value(overrides.clone())
+            .map_err(|error| ProximaError::Config(format!("dns spec: {error}"))),
+    }
 }
 
 /// DNS wire-server configuration, shared by [`crate::DnsDatagramProtocol`]
@@ -103,5 +124,27 @@ mod tests {
         let json = serde_json::to_string(&config).expect("ser");
         let back: DnsServerConfig = serde_json::from_str(&json).expect("de");
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn resolve_config_overrides_max_message_bytes_from_the_spec() {
+        let base = DnsServerConfig::default();
+        let spec = serde_json::json!({ "dns": { "max_message_bytes": 4096 } });
+        let resolved = resolve_config(&base, &spec).expect("spec resolves");
+        assert_eq!(resolved.max_message_bytes, 4096);
+    }
+
+    #[test]
+    fn resolve_config_falls_back_to_the_base_config_with_no_spec_override() {
+        let base = DnsServerConfig::default();
+        let resolved = resolve_config(&base, &Value::Null).expect("no override resolves");
+        assert_eq!(resolved, base);
+    }
+
+    #[test]
+    fn resolve_config_rejects_a_malformed_dns_object() {
+        let base = DnsServerConfig::default();
+        let spec = serde_json::json!({ "dns": { "max_message_bytes": "not a number" } });
+        assert!(resolve_config(&base, &spec).is_err());
     }
 }

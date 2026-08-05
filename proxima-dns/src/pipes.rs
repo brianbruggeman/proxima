@@ -1,17 +1,24 @@
-//! Typed pipe surface for the DNS listener — the DNS sibling of
-//! `proxima_redis::pipes` / `proxima_pgwire::pipes`. A handler pipe never
+//! Typed pipe surface for the DNS client and listener. A handler pipe never
 //! touches wire bytes, borrowed [`proxima_protocols::dns::codec_trait::Message`]
 //! views, or the RFC 1035 §4.1.4 compression walk: [`DnsQuery`] /
-//! [`DnsAnswer`] are owned, business-level types decoded/encoded once at the
-//! wire edge (see [`crate::datagram_protocol::DnsDatagramProtocol::on_datagram`]).
+//! [`DnsAnswer`] are owned, business-level types decoded and encoded once at
+//! the wire edge, in `crate::wire`.
 //!
 //! A query's question section is, in every real-world resolver and stub
-//! client, exactly one [`super::proxima_protocols::dns::Question`] (RFC 1035
-//! §4.1.2 permits more, but no deployed client sends more than one and no
-//! deployed server answers more than one) — [`DnsQuery`] carries that single
-//! question typed; a listener facing a multi-question packet drops it as
-//! malformed rather than guessing which question the handler wants (see
-//! [`crate::datagram_protocol`]'s module doc for the drop reasoning).
+//! client, exactly one [`proxima_protocols::dns::Question`] (RFC 1035 §4.1.2
+//! permits more, but no deployed client sends more than one and no deployed
+//! server answers more than one) — [`DnsQuery`] carries that single question
+//! typed; a listener facing a multi-question packet drops it as malformed
+//! rather than guessing which question the handler wants.
+
+#[cfg(feature = "listen")]
+use bytes::Bytes;
+#[cfg(feature = "listen")]
+use proxima_primitives::pipe::header_list::HeaderList;
+#[cfg(feature = "listen")]
+use proxima_primitives::pipe::method::Method;
+#[cfg(feature = "listen")]
+use proxima_primitives::pipe::request::{Request, RequestContext};
 
 /// One decoded DNS query, owned. Built once per inbound datagram from the
 /// zero-copy [`proxima_protocols::dns::codec_trait::Message`] so a handler
@@ -94,12 +101,34 @@ pub type DnsPipeReply = proxima_primitives::pipe::request::Response<DnsAnswer>;
 pub type DnsPipeHandle =
     proxima_primitives::pipe::alloc_tier::PipeHandle<DnsPipeRequest, DnsPipeReply>;
 
+/// Transport labels [`build_request`] stamps into `Request::method`.
+#[cfg(feature = "listen")]
+pub(crate) const UDP_TRANSPORT: &[u8] = b"DNS";
+#[cfg(feature = "listen")]
+pub(crate) const TCP_TRANSPORT: &[u8] = b"DNS-TCP";
+
+/// Lift one decoded query into the request every listener dispatches. DNS has
+/// no method or path of its own, so `method` is the only field carrying
+/// information: it names the transport the query arrived over, which is the
+/// single thing a handler can act on that the payload does not already say.
+#[cfg(feature = "listen")]
+pub(crate) fn build_request(transport: &'static [u8], query: DnsQuery) -> DnsPipeRequest {
+    Request {
+        method: Method::from_wire(Bytes::from_static(transport)),
+        path: Bytes::from_static(b"/"),
+        query: HeaderList::new(),
+        metadata: HeaderList::new(),
+        payload: query,
+        stream: None,
+        context: RequestContext::default(),
+    }
+}
+
 /// Wrap any DNS-compatible pipe in a [`DnsPipeHandle`] — the bridge between
 /// a business handler you write (`impl SendPipe<In = DnsPipeRequest, Out =
 /// DnsPipeReply>`) and every seam that wants the type-erased
-/// [`DnsPipeHandle`] ([`crate::DnsAnyProtocol::new`],
-/// [`crate::DnsDatagramProtocol::listen_protocol`],
-/// `proxima::ListenerProtocolExt::dns`).
+/// [`DnsPipeHandle`]: `DnsAnyProtocol::new`, `DnsUdpAnyProtocol::new`,
+/// `DnsDatagramProtocol::listen_protocol`, `proxima::ListenerProtocolExt::dns`.
 ///
 /// ```
 /// use proxima_dns::{DnsPipeRequest, DnsPipeReply, into_dns_handle};

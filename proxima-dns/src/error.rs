@@ -1,29 +1,15 @@
-//! Facade-level serve/resolve errors. Wire-level detail stays in
-//! `proxima_protocols::dns` (`ParseError`/`EncodeError`); this layer adds
-//! transport, buffer-policy, and configuration failures. Mirrors
-//! `proxima_redis::error::RedisServeError` /
-//! `proxima_pgwire::error::ServeError`.
+//! Facade-level resolve errors. Wire-level detail stays in
+//! `proxima_protocols::dns` (`ParseError`/`EncodeError`/`DnsTcpFrameError`);
+//! this layer adds transport and configuration failures.
+//!
+//! There is no listener-side sibling: neither DNS server can fail. A
+//! malformed, oversized, or unanswerable query is warned and dropped at the
+//! point the decision is made — one bad query must never tear down a
+//! connectionless listener — so `DnsDatagramProtocol` names
+//! `core::convert::Infallible` as its error type and the DNS-over-TCP app
+//! surfaces the codec's own `DnsTcpFrameError` unwrapped.
 
 use thiserror::Error;
-
-/// Listener-side serve failure — surfaced by [`crate::DnsDatagramProtocol`]
-/// (UDP) and [`crate::DnsAnyProtocol`] (TCP).
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum DnsServeError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("handler pipe: {0}")]
-    Pipe(#[from] proxima_core::ProximaError),
-    #[error("inbound query exceeds the {limit}-byte message limit")]
-    MessageTooLarge { limit: usize },
-    #[error("dns wire error: {0}")]
-    Wire(String),
-    #[error("connection closed mid-message")]
-    UnexpectedEof,
-    #[error("config: {0}")]
-    Config(String),
-}
 
 /// Resolver-client failure — surfaced by [`crate::client::DnsClientUpstream`].
 /// A resolver-side RCODE (NXDOMAIN, SERVFAIL, …) is NOT one of these: it is a

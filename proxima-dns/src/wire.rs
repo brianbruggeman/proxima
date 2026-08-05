@@ -7,16 +7,27 @@
 //! become plain, `'static` business data (see [`crate::pipes`]'s module
 //! doc for why).
 
+#[cfg(feature = "listen")]
+use std::net::SocketAddr;
+
+#[cfg(feature = "listen")]
+use proxima_codec::Datagram;
+#[cfg(feature = "listen")]
+use proxima_primitives::pipe::SendPipe;
 #[cfg(feature = "client")]
 use proxima_protocols::dns::RData;
 use proxima_protocols::dns::codec_trait::Message;
+#[cfg(feature = "listen")]
+use proxima_protocols::dns::codec_trait::DnsDatagramCodec;
 use proxima_protocols::dns::encode;
+#[cfg(feature = "listen")]
+use proxima_telemetry::warn;
 
 use crate::pipes::DnsAnswer;
 #[cfg(feature = "client")]
 use crate::pipes::DnsAnswerRecord;
 #[cfg(feature = "listen")]
-use crate::pipes::DnsQuery;
+use crate::pipes::{DnsPipeHandle, DnsQuery, UDP_TRANSPORT, build_request};
 
 /// Decode a query out of an already-parsed [`Message`]. `None` for anything
 /// other than exactly one question (RFC 1035 §4.1.2 permits more; no
@@ -125,6 +136,90 @@ pub(crate) fn answer_to_wire(
         })
         .collect();
     encode::encode_response(query.id, flags, question, &records, out)
+}
+
+/// Does this fixed 12-byte header (RFC 1035 §4.1.1) open a query this crate
+/// serves? Both `.any()` candidates classify on it, over the raw header for
+/// UDP and past the 2-byte length prefix for TCP.
+///
+/// DNS carries no magic number and query ids are arbitrary — the only signal
+/// available to a positive-match probe is that the header's own reserved and
+/// count fields agree with a query: `QR == 0` (not a response), `OPCODE == 0`
+/// (a standard query, not NOTIFY/UPDATE), and `QDCOUNT == 1` (this crate's
+/// single-question contract, see [`crate::pipes`]'s module doc). Checking all
+/// three rather than `QDCOUNT` alone is what keeps a stray DNS *reply*, or
+/// another protocol's traffic, from claiming the connection.
+#[cfg(feature = "listen")]
+pub(crate) fn header_is_query(header: &[u8]) -> bool {
+    const QR_RESPONSE: u8 = 0b1000_0000;
+    const OPCODE_MASK: u8 = 0b0111_1000;
+
+    let Some(flags_high) = header.get(2) else {
+        return false;
+    };
+    let (Some(qdcount_high), Some(qdcount_low)) = (header.get(4), header.get(5)) else {
+        return false;
+    };
+    flags_high & QR_RESPONSE == 0
+        && flags_high & OPCODE_MASK == 0
+        && u16::from_be_bytes([*qdcount_high, *qdcount_low]) == 1
+}
+
+/// The whole DNS-over-UDP unit of work: cap-check, decode, dispatch to
+/// `handler`, encode the reply. `None` is every drop case — an oversized,
+/// unparseable, or multi-question query, a handler failure, an unencodable
+/// answer — each warned where the decision is made, because one bad query
+/// must never tear down a connectionless listener.
+///
+/// Both UDP listeners share this: [`crate::datagram_protocol`]'s dedicated
+/// `DatagramProtocol` state machine and [`crate::udp_any_protocol`]'s
+/// `.any()`-fanned candidate differ only in where the bytes come from and
+/// where the reply goes, never in what a query means.
+#[cfg(feature = "listen")]
+pub(crate) async fn answer_datagram(
+    label: &str,
+    handler: &DnsPipeHandle,
+    max_message_bytes: usize,
+    peer: SocketAddr,
+    datagram: &[u8],
+) -> Option<Vec<u8>> {
+    if datagram.len() > max_message_bytes {
+        warn!(
+            %label,
+            %peer,
+            len = datagram.len(),
+            limit = max_message_bytes,
+            "dns query exceeds message limit; dropping"
+        );
+        return None;
+    }
+    let addressed = match DnsDatagramCodec.decode(peer, datagram) {
+        Ok(addressed) => addressed,
+        Err(error) => {
+            warn!(%label, %peer, ?error, "dns query failed to parse; dropping");
+            return None;
+        }
+    };
+    let Some(query) = message_to_query(&addressed.message) else {
+        warn!(%label, %peer, "dns query is not exactly one question; dropping");
+        return None;
+    };
+
+    let request = build_request(UDP_TRANSPORT, query.clone());
+    let reply = match SendPipe::call(handler, request).await {
+        Ok(reply) => reply,
+        Err(error) => {
+            warn!(%label, %peer, ?error, "dns handler pipe failed; dropping");
+            return None;
+        }
+    };
+
+    let mut out = Vec::new();
+    if let Err(error) = answer_to_wire(&query, &reply.payload, &mut out) {
+        warn!(%label, %peer, ?error, "dns answer failed to encode; dropping");
+        return None;
+    }
+    Some(out)
 }
 
 // The round-trip tests below exercise both halves (listener-side encode,
