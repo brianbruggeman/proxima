@@ -1,23 +1,37 @@
-//! Foundation error type for the proxima workspace.
+//! Foundation primitives for the proxima workspace — the layer everything else
+//! is built out of, and the one crate that cannot itself be expressed as a pipe
+//! (`proxima_primitives::Pipe` is defined one level up, on top of this).
 //!
-//! Two surfaces today:
+//! Every module carries the finest tier it can reach, so a bare-metal consumer
+//! takes a subset rather than a fork:
 //!
-//! 1. **Legacy `String`-payload variants** (`Decode(String)`, `Config(String)`, etc.) —
-//!    used by 51 source files across the workspace. Kept as-is, deprecated.
-//! 2. **Typed-payload variants** (`DecodeKind(DecodeError)`, `ConfigKind(ConfigError)`,
-//!    etc.) — added alongside the legacy variants. New code uses these; legacy
-//!    sites migrate at their own pace.
+//! - **unconditional, down to no_std + no-alloc:** [`arch`], [`datagram_batch`],
+//!   [`factory::Named`], [`markers`], [`per_core`], [`ring`], [`time`]. The
+//!   buffered ones ([`datagram_batch`], [`per_core`], [`ring`]) carry an inline
+//!   fixed-cap form sized by `build.rs` alongside the heap form behind `alloc`.
+//!   CI builds both `--features alloc` and bare `--no-default-features` for
+//!   `thumbv7m-none-eabi` (`scripts/thumbv7m-cliff-gate.sh`).
+//! - **`alloc`:** [`arena`], [`batch`]
+//! - **`std`:** [`buffer`], [`signal`], and the [`factory`] registry (`registry`
+//!   / `config`) and [`live`], which ride their own default-off features
+//! - **orthogonal gates:** [`io`] (`io-async`) is no-alloc for the traits and
+//!   `alloc` for `Prepend`; [`park`] (`park`) is no_std but needs an OS futex;
+//!   [`histogram`] needs 64-bit atomics, so it is absent on cortex-m.
 //!
-//! Sub-enum surface is informed by a workspace-wide audit of the 14 String-payload
-//! call-site patterns (see `docs/runtime-prime-nostd/discipline.md`, DC2 row). The
-//! 6 most-common construction shapes per variant get a named typed kind; the rest
-//! fall back to a generic `Other(&'static str)` constructor for the long tail.
+//! [`ProximaError`] is the shared error type. It carries two surfaces: the
+//! `String`-payload variants (`Decode(String)`, `Config(String)`, …) that most
+//! of the workspace still constructs, and the typed `*Kind` variants
+//! (`DecodeKind(DecodeError)`, `ConfigKind(ConfigError)`, …) that let a caller
+//! match on the failure without parsing a message. **Typed is the convention**;
+//! this crate constructs only typed kinds. The `String` variants remain until
+//! their owning crates migrate, and render identically either way.
 //!
-//! Sources are erased through `Box<dyn core::error::Error + Send + Sync + 'static>`
-//! so the sub-enum surface stays uniform regardless of whether the underlying
-//! source is `std::io::Error`, `serde_json::Error`, `FromUtf8Error`, etc.
-//! `core::error::Error` is stable since Rust 1.81; the workspace is edition 2024
-//! which requires 1.85+, so the trait is always available.
+//! Typed sources are erased through
+//! `Box<dyn core::error::Error + Send + Sync + 'static>` so the sub-enum surface
+//! is uniform regardless of whether the underlying source is `std::io::Error`,
+//! `serde_json::Error`, `FromUtf8Error`, … `core::error::Error` is stable since
+//! Rust 1.81 and the workspace is edition 2024 (1.85+), so it is always
+//! available.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -32,13 +46,13 @@ pub mod ring;
 // analog). folded in from the former proxima-io satellite crate.
 #[cfg(feature = "std")]
 pub mod buffer;
-// histogram accumulates count/sum/buckets in AtomicU64; targets without
-// 64-bit atomics (cortex-m thumbv7m/em) can't back it lock-free, so gate it out
-// there — no_std consumers with 64-bit atomics still get it.
 #[cfg(feature = "alloc")]
 pub mod batch;
 pub mod datagram_batch;
 pub mod factory;
+// histogram accumulates count/sum/buckets in AtomicU64; targets without
+// 64-bit atomics (cortex-m thumbv7m/em) can't back it lock-free, so gate it out
+// there — no_std consumers with 64-bit atomics still get it.
 #[cfg(target_has_atomic = "64")]
 pub mod histogram;
 #[cfg(feature = "io-async")]
@@ -387,7 +401,8 @@ impl ProximaError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Timeout(_) | Self::RateLimited => matches!(self, Self::Timeout(_)),
+            Self::Timeout(_) => true,
+            Self::RateLimited => false,
             #[cfg(feature = "alloc")]
             Self::Upstream(_) | Self::Body(_) => true,
             #[cfg(feature = "std")]
