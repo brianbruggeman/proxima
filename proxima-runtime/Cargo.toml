@@ -17,8 +17,11 @@ alloc = ["proxima-core/alloc"]
 # trace-span context now travels via `telemetry::Spanned<T>`, not a field on
 # this enum). Kept declared because the root workspace Cargo.toml and prime
 # still forward into `proxima-runtime/runtime-prime-full`; removing the
-# feature here would break their feature unification.
-runtime-prime-full = ["proxima/runtime-prime-full"]
+# feature here would break their feature unification. Empty, like the sibling
+# `proxima-primitives/runtime-prime-full`: forwarding into `proxima` (a
+# dev-dependency of this crate, and the crate that forwards back into here)
+# made the edge a cycle that pulled the whole umbrella in to gate nothing.
+runtime-prime-full = []
 rayon = ["dep:rayon", "dep:futures", "std"]
 # Adaptive per-core concurrency control (Concurrency knob + strategy controller).
 # Default-off firewall: downstream opts in. Needs std (Instant timing in the
@@ -29,7 +32,7 @@ concurrency = ["std", "dep:serde", "dep:conflaguration"]
 # runtime backend consolidation). Enables the `tokio` module (`TokioPerCoreRuntime`
 # + the `*Like` primitive adapters). The base crate stays no_std + alloc;
 # tokio itself only enters the dependency graph behind this feature.
-tokio = ["std", "dep:tokio", "dep:core_affinity", "dep:flume", "dep:tracing"]
+tokio = ["std", "dep:tokio", "dep:core_affinity", "dep:flume"]
 # `io-uring` swaps epoll for io_uring on Linux under the tokio backend —
 # `tokio_uring::start` drives the per-core worker instead of a plain
 # current-thread tokio runtime. Composes with `tokio`; macOS/Windows builds
@@ -46,7 +49,6 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"], optional = true }
 core_affinity = { workspace = true, optional = true }
 flume = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
 
 [[bench]]
 name = "bench_runtime_dispatch"
