@@ -636,13 +636,6 @@ impl SchemaResolver for SchemaRegistry {
     }
 }
 
-#[cfg(feature = "schema-std")]
-impl SchemaResolver for Arc<SchemaRegistry> {
-    fn resolve(&self, name: &str) -> Option<Schema> {
-        SchemaRegistry::get(self, name)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
