@@ -1,18 +1,11 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
 //! End-to-end tests for `#[derive(Error)]`. Verifies that the derive's
 //! emitted code compiles, links, and behaves correctly — not just that
 //! the macro produces well-formed tokens (the proxima-macros unit tests
 //! cover that lower level).
 
-#![allow(dead_code)]
+// the enums below exist to be DERIVED on; several variants are never
+// constructed because the point is that the emitted impl compiles.
+#![allow(dead_code, clippy::expect_used)]
 
 use core::error::Error as _;
 use proxima_macros::Error;
