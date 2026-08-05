@@ -4114,6 +4114,7 @@ dependencies = [
  "proxima-primitives",
  "proxima-protocols",
  "proxima-runtime",
+ "proxima-telemetry",
  "rstest",
  "serde",
  "serde_json",
@@ -4121,7 +4122,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracing",
  "zeroize",
 ]
 
