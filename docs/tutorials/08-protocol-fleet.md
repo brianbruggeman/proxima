@@ -18,16 +18,16 @@ cargo run --example protocol_fleet --features "http1-native,memcached-listener,m
 
 **Scope:** text protocol ONLY (no binary protocol). `GET`/`GETS`/`SET`/`ADD`/`REPLACE`/`APPEND`/`PREPEND`/`CAS`/`DELETE`/`INCR`/`DECR`/`TOUCH`/`FLUSH_ALL`/`VERSION`/`QUIT`/`STATS` — the ASCII framing, not the binary one.
 
-**Listener:** `.memcached(handler)` takes a `MemcachedPipeHandle` — a typed pipe over `Request<MemcachedRequest>` -> `Response<Reply>` (`proxima-memcached/src/pipes.rs`). No downcasting, no type erasure — the handler pattern-matches the SAME `MemcachedRequest` enum the wire parser produced:
+**Listener:** `.memcached(handler)` takes a `MemcachedPipeHandle`, which is `MemcachedRequest` -> `Reply` directly — no `Request`/`Response` envelope cell around them, because `MemcachedRequest` is already self-describing and nothing downstream reads a path, query, or metadata the crate would have had to synthesize (`proxima-memcached/src/pipes.rs`). No downcasting, no type erasure — the handler pattern-matches the SAME `MemcachedRequest` enum the wire parser produced:
 
 ```rust
 impl SendPipe for KvStore {
-    type In = MemcachedPipeRequest;
-    type Out = MemcachedPipeReply;
+    type In = MemcachedRequest;
+    type Out = Reply;
     type Err = ProximaError;
 
-    async fn call(&self, request: MemcachedPipeRequest) -> Result<MemcachedPipeReply, ProximaError> {
-        let reply = match request.payload {
+    async fn call(&self, request: MemcachedRequest) -> Result<Reply, ProximaError> {
+        let reply = match request {
             MemcachedRequest::Store { key, value, .. } => {
                 store.insert(key, value);
                 Reply::Stored
@@ -35,7 +35,7 @@ impl SendPipe for KvStore {
             MemcachedRequest::Get { keys, .. } => Reply::Values(/* ... */),
             _ => Reply::Error,
         };
-        Ok(Response::typed(200, reply))
+        Ok(reply)
     }
 }
 
@@ -48,7 +48,7 @@ let server = Listener::builder()
     .await?;
 ```
 
-**Client:** `.memcached(dsn)` on `Client::builder()`. The wire convention is a NUL-delimited body specific to each verb (`key\0flags\0exptime\0value` for `SET`, a bare key list for `GET`) — `src/upstreams/memcached.rs`'s own module doc has the full table:
+**Client:** `.memcached(dsn)` on `Client::builder()`. The wire convention is a NUL-delimited body specific to each verb (`key\0flags\0exptime\0value` for `SET`, a bare key list for `GET`) — `proxima-memcached/src/client/pipe.rs`'s own module doc has the full table:
 
 ```rust
 let client = Client::builder().memcached(format!("memcached://{bind}")).build()?;
