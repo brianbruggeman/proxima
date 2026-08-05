@@ -387,9 +387,15 @@ impl Connection {
             });
         };
         received.extend_from_slice(payload);
+        // NOT MessageTooLarge: the peer overran the `body_size` IT declared
+        // in the content header, which is a framing violation. Reporting the
+        // configured `message_max_bytes` here named a limit that was never
+        // reached and sent the peer a RESOURCE_ERROR for its own bad framing.
         if received.len() as u64 > body_size {
-            return Err(Advanced::MessageTooLarge {
-                limit: self.limits.message_max_bytes,
+            return Err(Advanced::ProtocolError {
+                reason: format!(
+                    "content body on channel {channel} overran its declared {body_size}-byte size"
+                ),
             });
         }
         if received.len() as u64 == body_size {
@@ -680,6 +686,38 @@ mod tests {
             connection.advance(),
             Advanced::MessageTooLarge { limit: 1024 }
         );
+    }
+
+    #[test]
+    fn a_body_overrunning_its_declared_size_is_a_protocol_error_not_a_size_limit() {
+        let mut connection = Connection::with_limits(limits());
+        connection.feed_bytes(&PROTOCOL_HEADER);
+        assert_eq!(connection.advance(), Advanced::ProtocolHeader);
+
+        let mut wire = Vec::new();
+        encode_method_frame(
+            &mut wire,
+            1,
+            &Method::BasicPublish {
+                exchange: Vec::new(),
+                routing_key: b"orders".to_vec(),
+                mandatory: false,
+                immediate: false,
+            },
+        );
+        // declares 2 bytes, then sends 11 — well under the 1024-byte
+        // message_max, so the only thing violated is its own header.
+        encode_header_frame(&mut wire, 1, id::BASIC, 2, b"");
+        encode_body_frames(&mut wire, 1, b"hello world", 128);
+        connection.feed_bytes(&wire);
+
+        match connection.advance() {
+            Advanced::ProtocolError { reason } => assert!(
+                reason.contains("declared"),
+                "the reason must name the declared size, got {reason:?}"
+            ),
+            other => panic!("expected ProtocolError, got {other:?}"),
+        }
     }
 
     #[test]
