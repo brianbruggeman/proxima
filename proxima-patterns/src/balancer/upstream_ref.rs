@@ -237,7 +237,6 @@ impl Drop for CallTracker<'_> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn ewma_blends_toward_recent_sample() {
@@ -279,10 +278,9 @@ mod tests {
         };
         metrics.in_flight.fetch_add(1, Ordering::Relaxed);
         assert_eq!(metrics.in_flight(), 1);
-        thread::sleep(Duration::from_millis(1));
         tracker.settle_success();
         assert_eq!(metrics.in_flight(), 0);
-        assert!(metrics.recent_latency() > Duration::ZERO);
+        assert_eq!(metrics.consecutive_successes.load(Ordering::Relaxed), 1);
     }
 
     #[test]

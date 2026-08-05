@@ -26,11 +26,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::FutureExt;
-use proxima_primitives::pipe::alloc_tier::into_handle;
 use proxima_core::factory::Named;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::alloc_tier::into_handle;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
 use proxima_primitives::pipe::source::{SourceFactory, SourceHandle, into_source_handle};
@@ -427,14 +427,20 @@ mod tests {
 
     use super::*;
 
+    /// Captures every event and fires `reached` once `threshold` have landed,
+    /// so the test awaits an edge instead of polling on a sleep.
     struct CapturingPipe {
         captured: Mutex<Vec<AlertEvent>>,
+        threshold: usize,
+        reached: Signal,
     }
 
     impl CapturingPipe {
-        fn new() -> Arc<Self> {
+        fn new(threshold: usize) -> Arc<Self> {
             Arc::new(Self {
                 captured: Mutex::new(Vec::new()),
+                threshold,
+                reached: Signal::new(),
             })
         }
     }
@@ -449,17 +455,19 @@ mod tests {
             request: AlertRequest,
         ) -> impl std::future::Future<Output = Result<Response<Bytes>, ProximaError>> + Send
         {
-            let _ = self
-                .captured
-                .lock()
-                .map(|mut guard| guard.push(request.payload.clone()));
+            if let Ok(mut guard) = self.captured.lock() {
+                guard.push(request.payload.clone());
+                if guard.len() >= self.threshold {
+                    self.reached.fire();
+                }
+            }
             async { Ok(Response::ok(Bytes::new())) }
         }
     }
 
     #[proxima::test]
     async fn scheduled_trigger_fires_three_ticks_on_the_house_clock() {
-        let capture = CapturingPipe::new();
+        let capture = CapturingPipe::new(3);
         let inner = into_handle(Arc::clone(&capture));
         let pipe = ScheduledTriggerPipe::builder()
             .schedule(Schedule::Interval(Duration::from_millis(5)))
@@ -469,18 +477,13 @@ mod tests {
             .build()
             .expect("builder");
 
-        // drive the source inline until three events land; the loop never
-        // resolves on its own before cancel fires, so the watcher arm
-        // always wins.
+        // drive the source inline until the sink signals three events; the
+        // loop never resolves on its own before cancel fires, so the watcher
+        // arm always wins.
         let cancel = Signal::new();
         let loop_future = SendPipe::call(&pipe, cancel.clone()).fuse();
-        let capture_for_watch = Arc::clone(&capture);
-        let watcher = async move {
-            while capture_for_watch.captured.lock().unwrap().len() < 3 {
-                proxima_core::time::sleep(Duration::from_millis(1)).await;
-            }
-        }
-        .fuse();
+        let reached = capture.reached.clone();
+        let watcher = async move { reached.fired().await }.fuse();
         futures::pin_mut!(loop_future, watcher);
         let raced = async {
             futures::select_biased! {
@@ -513,7 +516,7 @@ mod tests {
 
     #[proxima::test]
     async fn builder_missing_schedule_returns_build_error() {
-        let capture = CapturingPipe::new();
+        let capture = CapturingPipe::new(1);
         let inner = into_handle(Arc::clone(&capture));
         let result = ScheduledTriggerPipe::builder().inner(inner).build();
         assert!(matches!(result, Err(BuildError::MissingSchedule)));
