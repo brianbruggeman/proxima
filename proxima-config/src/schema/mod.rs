@@ -8,14 +8,11 @@
 //! emitter / the `serde_value` escape hatch, `schema-derive` adds
 //! `#[derive(Schema)]`.
 
-#[cfg(feature = "schema")]
 pub mod describe;
-#[cfg(feature = "schema")]
 pub mod emit;
 #[cfg(feature = "schema-std")]
 pub mod scenario;
 
-#[cfg(feature = "schema")]
 pub use describe::{Describe, field};
 #[cfg(feature = "schema-std")]
 pub use scenario::register_scenario_schemas;
@@ -28,30 +25,23 @@ pub use scenario::register_scenario_schemas;
 #[cfg(feature = "schema-derive")]
 pub use proxima_macros::Schema;
 
-#[cfg(feature = "schema")]
 use alloc::boxed::Box;
 #[cfg(feature = "schema-std")]
 use alloc::collections::BTreeMap;
-#[cfg(feature = "schema")]
 use alloc::format;
-#[cfg(feature = "schema")]
 use alloc::string::{String, ToString};
 #[cfg(feature = "schema-std")]
 use alloc::sync::Arc;
-#[cfg(feature = "schema")]
 use alloc::vec::Vec;
 
 #[cfg(feature = "schema-std")]
 use arc_swap::ArcSwap;
-#[cfg(feature = "schema")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "schema")]
 use serde_json::Value;
 
 #[cfg(feature = "schema-std")]
 use proxima_core::ProximaError;
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Schema {
@@ -112,7 +102,6 @@ pub enum Schema {
     Any,
 }
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StringFormat {
@@ -126,7 +115,6 @@ pub enum StringFormat {
     Hostname,
 }
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructField {
     pub name: String,
@@ -135,7 +123,6 @@ pub struct StructField {
     pub flags: FieldFlags,
 }
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FieldFlags {
     /// when true the field may be absent from an instance value
@@ -149,7 +136,6 @@ pub struct FieldFlags {
     pub description: Option<String>,
 }
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumVariant {
     pub name: String,
@@ -158,21 +144,18 @@ pub struct EnumVariant {
     pub payload: Option<Box<Schema>>,
 }
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidationError {
     pub path: Vec<PathSegment>,
     pub message: String,
 }
 
-#[cfg(feature = "schema")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PathSegment {
     Field(String),
     Index(usize),
 }
 
-#[cfg(feature = "schema")]
 impl ValidationError {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
@@ -217,34 +200,28 @@ impl ValidationError {
     }
 }
 
-#[cfg(feature = "schema")]
 impl core::fmt::Display for ValidationError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(formatter, "{}: {}", self.path_string(), self.message)
     }
 }
 
-#[cfg(feature = "schema")]
 impl core::error::Error for ValidationError {}
 
 /// Resolves `Ref` schemas during validation.
-#[cfg(feature = "schema")]
 pub trait SchemaResolver {
     fn resolve(&self, name: &str) -> Option<Schema>;
 }
 
 /// A resolver with no registered shapes — `Ref` resolution always fails.
-#[cfg(feature = "schema")]
 pub struct EmptyResolver;
 
-#[cfg(feature = "schema")]
 impl SchemaResolver for EmptyResolver {
     fn resolve(&self, _name: &str) -> Option<Schema> {
         None
     }
 }
 
-#[cfg(feature = "schema")]
 impl Schema {
     /// Validate any serializable value against this schema. generic over the
     /// value type, so callers pass a typed struct, a `serde_value::Value`, or a
@@ -510,7 +487,6 @@ impl Schema {
     }
 }
 
-#[cfg(feature = "schema")]
 fn validate_string_format(format: StringFormat, text: &str) -> Result<(), ValidationError> {
     match format {
         StringFormat::Email => {
@@ -667,7 +643,7 @@ impl SchemaResolver for Arc<SchemaRegistry> {
     }
 }
 
-#[cfg(all(test, feature = "schema"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
@@ -939,7 +915,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "schema"))]
+#[cfg(test)]
 mod round_trip_tests {
     use super::*;
     use alloc::vec;
