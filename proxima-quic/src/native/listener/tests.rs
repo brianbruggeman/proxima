@@ -18,7 +18,7 @@ use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, Response};
 use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
 use proxima_primitives::stream::{DatagramFactory, DatagramSocket};
-use proxima_protocols::quic::connection::Connection;
+use proxima_protocols::quic::connection::{Connection, ConnectionError};
 use proxima_protocols::quic::tls::Epoch;
 use proxima_protocols::quic::tls::mock::{MockStep, MockTlsProvider};
 
@@ -494,10 +494,22 @@ fn second_client_datagram_routes_to_the_existing_connection_not_a_new_one_body()
 }
 
 #[test]
-fn listener_error_displays_io_variant() {
-    let err = ListenerError::Io(std::io::Error::other("oops"));
+fn listener_error_displays_accept_table_full() {
+    let err = ListenerError::AcceptTableFull;
     let formatted = format!("{err}");
-    assert!(formatted.contains("io:"));
+    assert!(formatted.contains("accept table at capacity"));
+}
+
+#[test]
+fn listener_error_displays_the_accept_fn_rejection_with_the_inner_reason() {
+    let err = ListenerError::from(ConnectionError::NotImplemented {
+        component: "retry token validation",
+    });
+    let formatted = format!("{err}");
+    assert_eq!(
+        formatted, "connection: not implemented: retry token validation",
+        "the inner ConnectionError's own Display must survive the wrap"
+    );
 }
 
 #[test]
