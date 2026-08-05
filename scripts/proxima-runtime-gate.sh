@@ -26,6 +26,19 @@
 
 set -euo pipefail
 
+# `cargo test --doc` exits 0 when it matched NOTHING, so the exit code alone
+# cannot tell "all passed" from "there were none" — the crate had zero doctests
+# until 2026-08-04 and every gate read that as green. Assert the count.
+doctests_ran_and_passed() {
+    local output
+    if ! output="$(cargo test -p proxima-runtime --all-features --doc 2>&1)"; then
+        printf '%s\n' "$output"
+        return 1
+    fi
+    printf '%s\n' "$output"
+    grep -qE 'test result: ok\. [1-9][0-9]* passed' <<<"$output"
+}
+
 declare -a cells=(
     # what the crate's own documented commands cover
     "default check|cargo check -p proxima-runtime --all-targets"
@@ -36,6 +49,8 @@ declare -a cells=(
     "all-features tests|cargo nextest run -p proxima-runtime --all-features --no-fail-fast"
     "all-features clippy|cargo clippy -p proxima-runtime --all-targets --all-features -- -D warnings"
     "all-features rustdoc|cargo doc -p proxima-runtime --all-features --no-deps"
+    "default rustdoc|cargo doc -p proxima-runtime --no-deps"
+    "all-features doctests, count asserted|doctests_ran_and_passed"
 
     # the tiers, host-side (the cliff proof lives in thumbv7m-cliff-gate.sh)
     "no_std no-alloc floor|cargo build -p proxima-runtime --no-default-features"

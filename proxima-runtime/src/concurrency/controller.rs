@@ -13,6 +13,32 @@ use super::strategy::{Concurrency, ConcurrencyStrategy, Strategy};
 /// A pool of identical in-flight workers whose count the controller raises and
 /// lowers. The caller implements this over its real workers (rekt's per-core
 /// keep-alive clients; a server's per-core handler slots).
+///
+/// ```
+/// use proxima_runtime::concurrency::{Concurrency, ConcurrencyController, WorkerPool};
+///
+/// #[derive(Default)]
+/// struct Slots {
+///     live: usize,
+/// }
+///
+/// impl WorkerPool for Slots {
+///     fn spawn_one(&mut self) {
+///         self.live += 1;
+///     }
+///     fn retire_one(&mut self) {
+///         self.live -= 1;
+///     }
+///     fn live(&self) -> usize {
+///         self.live
+///     }
+/// }
+///
+/// let controller = ConcurrencyController::new(Concurrency::fixed(8));
+/// let mut slots = Slots::default();
+/// controller.reconcile(&mut slots);
+/// assert_eq!(slots.live(), 8);
+/// ```
 pub trait WorkerPool {
     /// Add one in-flight worker.
     fn spawn_one(&mut self);
@@ -29,6 +55,32 @@ enum ControllerKind {
 
 /// Drives a [`Concurrency`] knob: holds the current target and turns each
 /// window's [`Sample`] into the next target.
+///
+/// The whole loop is runtime-free — the caller times the window and fills the
+/// sample, so this is drivable from a test with no clock and no IO:
+///
+/// ```
+/// use proxima_runtime::concurrency::{Concurrency, ConcurrencyController, Sample};
+///
+/// let knob = Concurrency::builder()
+///     .hillclimb()
+///     .start(16)
+///     .bounds(1, 64)
+///     .build()
+///     .expect("throughput/maximize is a coherent pair");
+///
+/// let mut controller = ConcurrencyController::new(knob);
+/// assert_eq!(controller.target(), 16);
+///
+/// // a workload whose throughput rises with in-flight work: the climber walks up.
+/// let mut target = controller.target();
+/// for _ in 0..8 {
+///     let mut sample = Sample::seed(target);
+///     sample.throughput = target as f64 * 100.0;
+///     target = controller.observe(sample);
+/// }
+/// assert!(target > 16, "monotonic gain climbs, got {target}");
+/// ```
 pub struct ConcurrencyController {
     kind: ControllerKind,
     target: usize,
