@@ -3,24 +3,29 @@
 //! Top-down reading order = request execution order; the response
 //! unwinds in reverse.
 //!
-//! ```ignore
-//! use proxima::{App, BearerAuth, Composable, HttpUpstream, MountTarget};
+//! ```no_run
+//! use proxima::{App, BearerAuth, Composable, HttpUpstream};
 //! use proxima::settings::RateLimit;
-//! use proxima::middlewares::retry::Retry;
 //! use std::time::Duration;
 //!
+//! # async fn doc() -> Result<(), proxima::ProximaError> {
 //! let mut app = App::new()?;
 //! app.pipe(
 //!     "api",
-//!     BearerAuth::allow_tokens(["t-1"])           // auth fires first
-//!         .then(RateLimit::token_bucket(100, 50)) // then rate limit
-//!         .then(Retry::up_to(3))                  // then retry the upstream
-//!         .then(HttpUpstream::builder()           // leaf upstream
+//!     BearerAuth::allow_tokens(["t-1"])            // auth fires first
+//!         .then(RateLimit::token_bucket(100, 50))  // then rate limit
+//!         .then(HttpUpstream::builder()            // leaf upstream
 //!             .url("https://backend.internal")
 //!             .timeout(Duration::from_secs(5))
 //!             .build()),
 //! ).await?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! The composable settings surface is `BearerAuth` and `RateLimit` today; the
+//! rest of the middleware set is reached through a spec rather than `.then()`
+//! (see `settings::middleware`'s module doc).
 //!
 //! Order is not commutative — `Auth` after `Retry` would retry
 //! unauthenticated requests; `Retry` after `Auth` retries only
