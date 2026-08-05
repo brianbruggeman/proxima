@@ -12,9 +12,9 @@
 //! RFC 7296 §2.6 answers this with a cookie, and the shape matters more than
 //! the construction: **the responder must not allocate state or spend
 //! asymmetric crypto before the peer proves it can receive.** So this module
-//! is free functions over raw bytes, not a method on [`Handshake`] — by the
-//! time you hold a `Handshake` you have already spent the state the cookie
-//! exists to protect.
+//! is free functions over raw bytes, not a method on
+//! [`Handshake`](crate::Handshake) — by the time you hold a `Handshake` you
+//! have already spent the state the cookie exists to protect.
 //!
 //! ```text
 //! bytes ── examine ──> Challenge  ── send 60 bytes, allocate nothing

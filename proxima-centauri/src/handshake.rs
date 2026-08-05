@@ -133,9 +133,9 @@ pub enum Role {
 /// are the information, and a parallel `emitted` flag would only restate them.
 /// Failure is the `Err` arm, never a variant.
 ///
-/// `#[non_exhaustive]`: rekey, close, and the AUTH exchange will add variants
-/// as the state graph grows, and a downstream `match` should not break when
-/// they do.
+/// `#[non_exhaustive]`: the state graph has already grown once — AUTH, rekey
+/// and close each added a variant here — and a downstream `match` should not
+/// break the next time it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 #[non_exhaustive]
@@ -288,13 +288,13 @@ enum Phase {
         peer_identity: [u8; AUTH_MAX_IDENTITY_BYTES],
         peer_identity_len: usize,
     },
+    /// Torn down. Carries nothing: the point of a close is that the key
+    /// material is unreachable, so there is no state left to hold.
+    Closed,
     /// Only the side that *initiated* a rekey waits here. The responder
     /// derives and replies in one step, exactly as it does in SA_INIT, so
     /// there is no "am I the rekey initiator" flag to carry — the state graph
     /// answers it.
-    /// Torn down. Carries nothing: the point of a close is that the key
-    /// material is unreachable, so there is no state left to hold.
-    Closed,
     Rekeying {
         keys: SessionKeys,
         at: Ticks,
