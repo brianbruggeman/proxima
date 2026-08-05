@@ -103,7 +103,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use super::markers::{AllocFree, Deterministic, IsPure, NoStd};
+use proxima_core::markers::{AllocFree, Deterministic, IsPure, NoStd};
 
 /// One IPC call from the child, as routed through the IPC fd.
 ///

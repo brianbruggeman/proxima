@@ -119,7 +119,8 @@ pgwire_codec = ["dep:memchr"]
 
 # Shared dispatch contract between the libc-interpose shim and
 # proxima-vm — extracted from proxima-process-protocol. Tier-1:
-# no_std + alloc. `markers` re-exports proxima-core's marker traits.
+# no_std + alloc. The effect markers are named re-exports of
+# proxima-core's, so consumers reach them without a second dependency.
 process = ["dep:serde", "dep:proxima-core"]
 
 grpc_framing = ["dep:thiserror"]
