@@ -29,7 +29,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -107,8 +107,11 @@ fn bench_tcp_connect(criterion: &mut Criterion) {
             let mut total = Duration::ZERO;
 
             for _ in 0..iters {
-                let result_slot: Arc<Mutex<Option<Duration>>> = Arc::new(Mutex::new(None));
-                let result_for_task = result_slot.clone();
+                // the worker hands the elapsed time back on the channel, so the
+                // harness blocks on the event instead of polling a slot — a
+                // 1ms poll would quantize the cross-thread rendezvous it is
+                // deliberately holding outside the measured bracket.
+                let (result_tx, result_rx) = mpsc::channel::<Duration>();
                 let addr = prime_addr;
 
                 handle
@@ -119,20 +122,13 @@ fn bench_tcp_connect(criterion: &mut Criterion) {
                             .expect("prime connect");
                         let elapsed = start.elapsed();
                         drop(stream);
-                        *result_for_task.lock().unwrap() = Some(elapsed);
+                        let _ = result_tx.send(elapsed);
                     }))
                     .expect("dispatch_send");
 
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    if result_slot.lock().unwrap().is_some() {
-                        break;
-                    }
-                    assert!(Instant::now() < deadline, "prime connect timed out");
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-
-                total += result_slot.lock().unwrap().expect("elapsed not set");
+                total += result_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("prime connect timed out");
             }
 
             total

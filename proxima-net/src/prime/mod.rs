@@ -313,9 +313,12 @@ mod tests {
     use prime::os::core_shard;
     use proxima_primitives::stream::StreamUpstreamExt;
     use proxima_runtime::CoreId;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::time::Duration;
+
+    // hang guard only: the worker signals completion on the channel, so the
+    // test blocks on the event itself rather than polling a flag. no sleep.
+    const RESULT_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// full round-trip: prime listener (server) + PrimeTcpUpstream (client),
     /// both on the same prime worker. client sends 4 bytes, server echoes,
@@ -323,22 +326,16 @@ mod tests {
     #[test]
     fn prime_tcp_upstream_connects_and_round_trips_bytes() {
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let addr_chan: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-        let addr_for_factory = addr_chan.clone();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let addr_handle = addr_for_factory.clone();
                 Box::pin(async move {
                     use prime::os::net::TcpListener;
 
                     let mut listener =
                         TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
                     let bound = listener.local_addr().expect("local_addr");
-                    *addr_handle.lock().unwrap() = Some(bound);
 
                     let server = async move {
                         let (mut stream, _peer) = listener.accept().await.expect("accept");
@@ -348,7 +345,6 @@ mod tests {
                     };
 
                     let client = async move {
-                        // small yield to let the server task start
                         let upstream = PrimeTcpUpstream::new(bound);
                         let mut conn = upstream.connect().await.expect("upstream connect");
                         conn.write_all(b"ping").await.expect("client write");
@@ -359,30 +355,14 @@ mod tests {
                     };
 
                     futures::future::join(server, client).await;
-                    done.store(true, Ordering::Release);
+                    let _ = done_tx.send(());
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        // wait for the listener to bind so the client knows the port.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if addr_chan.lock().unwrap().is_some() {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "listener never bound");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "round-trip never completed"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        done_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("round-trip never completed");
         handle.shutdown_and_join().expect("shutdown");
     }
 
@@ -395,22 +375,16 @@ mod tests {
         use core::future::poll_fn;
 
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let addr_chan: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-        let addr_for_factory = addr_chan.clone();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let addr_handle = addr_for_factory.clone();
                 Box::pin(async move {
                     let addr = "127.0.0.1:0".parse().expect("parse addr");
                     let mut acceptor = PrimeAcceptorFactory
                         .bind(addr, TcpBindOptions::default())
                         .expect("bind");
                     let bound = acceptor.local_addr().expect("local_addr");
-                    *addr_handle.lock().expect("addr lock") = Some(bound);
 
                     let server = async move {
                         let mut conn = poll_fn(|cx| acceptor.poll_accept(cx))
@@ -432,29 +406,14 @@ mod tests {
                     };
 
                     futures::future::join(server, client).await;
-                    done.store(true, Ordering::Release);
+                    let _ = done_tx.send(());
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if addr_chan.lock().expect("addr lock").is_some() {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "listener never bound");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "acceptor round-trip never completed"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        done_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("acceptor round-trip never completed");
         handle.shutdown_and_join().expect("shutdown");
     }
 
@@ -477,10 +436,7 @@ mod tests {
     #[test]
     fn prime_tcp_upstream_connect_refused_returns_error() {
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let result_chan: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
-        let result_for_factory = result_chan.clone();
+        let (result_tx, result_rx) = mpsc::channel::<bool>();
 
         // find a free port, then close it so nothing listens on it.
         let closed_port = {
@@ -491,29 +447,18 @@ mod tests {
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let result_handle = result_for_factory.clone();
                 Box::pin(async move {
                     let upstream = PrimeTcpUpstream::new(refused_addr);
-                    let got_error = upstream.connect().await.is_err();
-                    *result_handle.lock().unwrap() = Some(got_error);
-                    done.store(true, Ordering::Release);
+                    let _ = result_tx.send(upstream.connect().await.is_err());
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "connect-refused test never completed (possible hang)"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        let got_error = result_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("connect-refused test never completed (possible hang)");
         handle.shutdown_and_join().expect("shutdown");
 
-        let got_error = result_chan.lock().unwrap().expect("result not set");
         assert!(got_error, "expected an error on refused connect, got Ok");
     }
 
@@ -528,15 +473,10 @@ mod tests {
         use core::future::poll_fn;
 
         let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
-        let done = Arc::new(AtomicBool::new(false));
-        let done_clone = done.clone();
-        let result_chan: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-        let result_for_factory = result_chan.clone();
+        let (result_tx, result_rx) = mpsc::channel::<Vec<u8>>();
 
         handle
             .dispatch_factory(Box::new(move || {
-                let done = done_clone.clone();
-                let result_handle = result_for_factory.clone();
                 Box::pin(async move {
                     let factory = PrimeDatagramFactory;
                     assert_eq!(factory.backend_name(), "prime");
@@ -559,24 +499,16 @@ mod tests {
                         .await
                         .expect("server recv");
                     assert_eq!(peer, client_addr);
-                    *result_handle.lock().unwrap() = Some(buf[..len].to_vec());
-                    done.store(true, Ordering::Release);
+                    let _ = result_tx.send(buf[..len].to_vec());
                 }) as Pin<Box<dyn std::future::Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !done.load(Ordering::Acquire) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "datagram factory round-trip never completed"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
+        let received = result_rx
+            .recv_timeout(RESULT_TIMEOUT)
+            .expect("datagram factory round-trip never completed");
         handle.shutdown_and_join().expect("shutdown");
 
-        let received = result_chan.lock().unwrap().clone().expect("result not set");
         assert_eq!(&received[..], b"ping");
     }
 }
