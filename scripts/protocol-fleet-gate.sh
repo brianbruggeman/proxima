@@ -4,14 +4,14 @@
 # proxima-dns, proxima-kafka, proxima-mqtt, proxima-amqp. Mirrors
 # scripts/proxima-redis-gate.sh's shape, matrixed over the fleet instead of
 # a single crate. Re-proves, per crate, without anyone's memory
-# (guiding-principle 16): the sans-IO codec builds bare (no_std/alloc tier),
-# the all-features build (client + listen) is green, the listener e2e suites
-# (gated behind `required-features = ["listen"]` in memcached/kafka/mqtt) run
-# under --all-features, clippy is warning-free across that same surface, the
-# HARD invariant that the bare sans-IO codec graph carries zero tokio, and
-# each crate's doctests (nextest skips them by design) pass under
-# --all-features -- a zero-passed result fails the gate instead of looking
-# like success.
+# (guiding-principle 16): the bare feature set compiles, the all-features
+# build (client + listen) is green, the listener e2e suites (gated behind
+# `required-features = ["listen"]` in memcached/kafka/mqtt) run under
+# --all-features, clippy is warning-free across that same surface, the HARD
+# invariant that the bare sans-IO codec graph carries zero tokio, each
+# crate's rustdoc resolves, and each crate's doctests (nextest skips them by
+# design) pass under --all-features -- a zero-passed result fails the gate
+# instead of looking like success.
 #
 # usage:
 #   bash scripts/protocol-fleet-gate.sh            # every crate in the fleet
@@ -29,19 +29,30 @@ gate_one() {
 
     printf '\n== %s gate ==\n' "${crate}"
 
-    printf '\n[1/6] sans-IO codec builds no_std + alloc (no default features)\n'
+    # the no_std tier itself is NOT proven here -- a host build links libstd
+    # whether or not the crate declares `#![no_std]`, which is exactly how
+    # five of these crates shipped a false "bare-metal embedding" claim.
+    # scripts/thumbv7m-cliff-gate.sh owns that cell (`<crate>-bare`, one per
+    # fleet crate as of 2026-08-05); this step only proves the bare feature
+    # set still compiles.
+    printf '\n[1/7] bare feature set compiles (no default features, host)\n'
     cargo build -p "${crate}" --no-default-features
 
-    printf '\n[2/6] crate builds clean with client + listen (all features)\n'
+    printf '\n[2/7] crate builds clean with client + listen (all features)\n'
     cargo build -p "${crate}" --all-features
 
-    printf '\n[3/6] codec + client + listener e2e tests green (all features)\n'
+    printf '\n[3/7] codec + client + listener e2e tests green (all features)\n'
     cargo nextest run -p "${crate}" --all-features --no-fail-fast
 
-    printf '\n[4/6] clippy pedantic clean across client + listen\n'
+    printf '\n[4/7] clippy pedantic clean across client + listen\n'
     cargo clippy -p "${crate}" --all-features --all-targets -- -D warnings
 
-    printf '\n[5/6] TOKIO GATE — the bare sans-IO codec graph must carry zero tokio\n'
+    printf '\n[5/7] rustdoc resolves at the default, bare, and all-features tiers\n'
+    cargo doc -p "${crate}" --no-deps
+    cargo doc -p "${crate}" --no-deps --no-default-features
+    cargo doc -p "${crate}" --no-deps --all-features
+
+    printf '\n[6/7] TOKIO GATE — the bare sans-IO codec graph must carry zero tokio\n'
     local leaked
     leaked="$(cargo tree -p "${crate}" --no-default-features -e normal -i tokio 2>/dev/null || true)"
     if printf '%s' "${leaked}" | grep -q '^tokio'; then
@@ -53,7 +64,7 @@ gate_one() {
     # nextest skips doctests by design. `cargo test --doc` exits 0 on a
     # vacuous "0 passed" run, so grep for a nonzero count explicitly instead
     # of trusting the exit code alone.
-    printf '\n[6/6] doctests (all-features)\n'
+    printf '\n[7/7] doctests (all-features)\n'
     local doctest_output
     doctest_output="$(cargo test --doc -p "${crate}" --all-features 2>&1)"
     printf '%s\n' "${doctest_output}"
