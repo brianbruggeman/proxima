@@ -1,9 +1,9 @@
-//! Wasm host-clock driver. [`now`](Driver::now) and
-//! [`schedule_wake`](Driver::schedule_wake) delegate to three host
+//! Wasm host-clock driver. [`now`](crate::time::Driver::now) and
+//! [`schedule_wake`](crate::time::Driver::schedule_wake) delegate to three host
 //! imports the embedder supplies — there is no ambient monotonic clock
 //! or timer on `wasm32-unknown-unknown`, so the host (browser glue or a
 //! wasi shim) owns both. This mirrors the external-HAL model in
-//! [`drivers`](crate::drivers): the host IS the hardware here.
+//! [`drivers`](crate::time::drivers): the host IS the hardware here.
 //!
 //! # Host ABI
 //!
@@ -18,7 +18,7 @@
 //! fn proxima_time_fire();
 //! ```
 //!
-//! Over-firing is always safe: every [`Sleep`](crate::Sleep) re-checks
+//! Over-firing is always safe: every [`Sleep`](crate::time::Sleep) re-checks
 //! `now() >= deadline` on each poll, so a spurious `proxima_time_fire`
 //! costs one extra poll and nothing else. The host need only fire at or
 //! after the earliest requested deadline.
