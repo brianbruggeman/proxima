@@ -6,12 +6,15 @@
 //!   conventional durable store — fsync + atomic rename. No mmap, no pmem
 //!   hardware, unbounded value size ("big stuff"); slower (rewrites the value per
 //!   commit). This is the "always works, just slower" tier.
-//! - [`PmemCowStore`] (the pmem-native FAST tier, Linux): composes
+//! - `PmemCowStore` (the pmem-native FAST tier, Linux): composes
 //!   [`crate::pmem::CowRoot`] over an `mmap`'d region (a `/dev/dax` device, or a
 //!   regular file via `msync`). Byte-addressable in-place atomic-root-swap; the
 //!   8-byte root relies on SNIA/Intel ADR power-fail atomicity, so it needs the
 //!   mapped path. `mmap`/`munmap`/`msync` go through `rustix`'s `linux_raw`
 //!   backend (no libc) — pure Rust, zero C, like the leaf's `core::arch` flush.
+//!
+//! `PmemCowStore` is named as code, not linked: it is cfg'd out off Linux, and
+//! an intra-doc link into a cfg'd-out item is a rustdoc error on this host.
 //!
 //! Same guarantee, two mechanisms (atomic rename vs in-place root swap), perf
 //! tiers. The store-backed floor means "pmem" is never unavailable — it degrades
