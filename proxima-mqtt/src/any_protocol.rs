@@ -11,7 +11,7 @@
 //! alone is a plausible false-positive magic byte, so the probe goes one
 //! step further once enough bytes have arrived — it decodes the
 //! "remaining length" varint with [`decode_remaining_length`] (the SAME
-//! sans-IO primitive [`parse_packet`] itself uses, not a duplicate) to find
+//! sans-IO primitive `parse_packet` itself uses, not a duplicate) to find
 //! the protocol-name field, then checks it reads `MQTT` (v3.1.1/v5) or
 //! `MQIsdp` (v3.1). [`AnyProtocol::max_prefix_bytes`] bounds that walk at
 //! 13 — `1` (fixed header) + `4` (worst-case remaining-length varint) + `2`
