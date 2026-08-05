@@ -17,7 +17,10 @@ pub mod backend;
 pub mod engine;
 pub mod error;
 
-#[cfg(feature = "nvme-uio")]
+// uio reads /sys/bus/pci and /proc/self/pagemap and expects uio_pci_generic, so
+// it is Linux by construction — gated like dax's region/store, not just by
+// feature. Compiling it elsewhere proved nothing it could ever run.
+#[cfg(all(feature = "nvme-uio", target_os = "linux"))]
 pub mod uio;
 
 pub use backend::QueueBackend;

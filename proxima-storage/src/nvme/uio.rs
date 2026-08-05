@@ -10,13 +10,16 @@
 //! I/O path does, so the codec is exercised on admin commands too. Proven
 //! against a QEMU emulated NVMe 1.4 controller.
 //!
-//! This is the std I/O facade; the engine + codec it feeds stay no_std.
+//! This is the std I/O facade; the engine + codec it feeds stay no_std. Like
+//! the DAX facade next door, `mmap`/`mlock` go through `rustix`'s `linux_raw`
+//! backend rather than libc — pure Rust, zero C linked, the same claim
+//! `nvme/mod.rs` makes for the engine.
 
 use core::cell::Cell;
 use core::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 use std::ptr::{self, read_volatile as rd, write_volatile as wr};
 
@@ -24,6 +27,7 @@ use proxima_protocols::nvme::{
     CommandBuilder, CompletionEntry, CompletionRing, DecodeError, StatusField, SubmissionRing,
     command, completion,
 };
+use rustix::mm::{MapFlags, ProtFlags, mlock, mmap, mmap_anonymous};
 
 use crate::nvme::backend::QueueBackend;
 
@@ -41,12 +45,6 @@ const ACQ_O: usize = 0x1000;
 const ISQ_O: usize = 0x3000;
 const ICQ_O: usize = 0x4000;
 const POOL_O: usize = 0x5000;
-
-unsafe extern "C" {
-    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64)
-    -> *mut c_void;
-    fn mlock(addr: *const c_void, len: usize) -> i32;
-}
 
 fn phys(pagemap: &File, vaddr: usize) -> io::Result<u64> {
     let mut buf = [0u8; 8];
@@ -109,18 +107,22 @@ impl UioNvme {
         // within these regions, and the controller is single-owner (we just took
         // it from the kernel driver).
         unsafe {
-            let bar = mmap(ptr::null_mut(), BAR_SIZE, 3, 1, bar_file.as_raw_fd(), 0) as usize;
-            if bar as isize == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            let dma = mmap(ptr::null_mut(), DMA_SIZE, 3, 0x22, -1, 0) as usize;
-            if dma as isize == -1 {
-                return Err(io::Error::last_os_error());
-            }
+            let bar = mmap(
+                ptr::null_mut(),
+                BAR_SIZE,
+                ProtFlags::READ | ProtFlags::WRITE,
+                MapFlags::SHARED,
+                bar_file.as_fd(),
+                0,
+            )? as usize;
+            let dma = mmap_anonymous(
+                ptr::null_mut(),
+                DMA_SIZE,
+                ProtFlags::READ | ProtFlags::WRITE,
+                MapFlags::PRIVATE,
+            )? as usize;
             ptr::write_bytes(dma as *mut u8, 0, DMA_SIZE);
-            if mlock(dma as *const c_void, DMA_SIZE) != 0 {
-                return Err(io::Error::last_os_error());
-            }
+            mlock(dma as *mut c_void, DMA_SIZE)?;
 
             let cap = rd(bar as *const u64);
             let stride = 4usize << ((cap >> 32) & 0xf); // doorbell stride from CAP.DSTRD

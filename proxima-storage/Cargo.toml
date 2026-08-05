@@ -14,7 +14,7 @@ default = []
 pmem = []
 std = []
 nvme = ["dep:proxima-protocols", "proxima-protocols/nvme", "dep:proxima-primitives"]
-nvme-uio = ["nvme", "std"]
+nvme-uio = ["nvme", "std", "dep:rustix"]
 dax = ["pmem", "std", "dep:rustix", "dep:bon", "dep:conflaguration", "dep:serde"]
 
 [dependencies]
