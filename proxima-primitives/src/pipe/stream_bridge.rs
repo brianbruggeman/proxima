@@ -235,14 +235,14 @@ mod reader_writer {
         Error: Into<std::io::Error>,
     {
         /// Owns `self`; composes `StreamReader::new` over
-        /// [`Self::into_stream`](PollSourceExt::into_stream), then `.compat()`
+        /// [`Self::into_stream`](super::PollSourceExt::into_stream), then `.compat()`
         /// onto `futures::io::AsyncRead`.
         fn into_reader(self) -> Compat<StreamReader<AsStream<Self>, Bytes>> {
             StreamReader::new(self.into_stream()).compat()
         }
 
         /// Borrows `self` mutably; same composition over
-        /// [`Self::as_stream`](PollSourceExt::as_stream).
+        /// [`Self::as_stream`](super::PollSourceExt::as_stream).
         fn as_reader(&mut self) -> Compat<StreamReader<AsStream<&mut Self>, Bytes>> {
             StreamReader::new(self.as_stream()).compat()
         }
@@ -263,14 +263,14 @@ mod reader_writer {
     /// composition), so no new adapter is authored here, only wired.
     pub trait IntoWriter: DrainSink<Item = [u8]> + Unpin + Sized {
         /// Owns `self`; composes `SinkWriter::new(CopyToBytes::new(..))` over
-        /// [`Self::into_sink`](DrainSinkExt::into_sink), then `.compat_write()`
+        /// [`Self::into_sink`](super::DrainSinkExt::into_sink), then `.compat_write()`
         /// onto `futures::io::AsyncWrite`.
         fn into_writer(self) -> Compat<SinkWriter<CopyToBytes<AsSink<Self>>>> {
             SinkWriter::new(CopyToBytes::new(self.into_sink())).compat_write()
         }
 
         /// Borrows `self` mutably; same composition over
-        /// [`Self::as_sink`](DrainSinkExt::as_sink).
+        /// [`Self::as_sink`](super::DrainSinkExt::as_sink).
         fn as_writer(&mut self) -> Compat<SinkWriter<CopyToBytes<AsSink<&mut Self>>>> {
             SinkWriter::new(CopyToBytes::new(self.as_sink())).compat_write()
         }

@@ -3,7 +3,7 @@
 //!
 //! One input is broadcast to N sources concurrently (`futures::future::
 //! join_all`, wait-all, no cancellation); each source's `Out` is collected,
-//! ordered by source index. `Policy` governs errors: [`AllOrNothing`] returns
+//! ordered by source index. `Policy` governs errors: [`crate::pipe::AllOrNothing`] returns
 //! the first error; [`crate::pipe::BestEffort`] surfaces the first error after
 //! gathering; [`crate::pipe::IgnoreErrors`] drops errors and returns the partial
 //! `Vec`.
