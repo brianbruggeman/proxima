@@ -4462,7 +4462,6 @@ dependencies = [
  "tokio",
  "tokio-uring",
  "toml 0.8.23",
- "tracing",
 ]
 
 [[package]]
