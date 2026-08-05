@@ -11,10 +11,11 @@ readme.workspace = true
 
 [features]
 default = ["std", "aead-chacha20poly1305"]
-# Nothing in this crate is std-gated: the whole surface is no_std + no-alloc by
-# construction. The feature exists so a caller composing with std crates does
-# not have to write `default-features = false`, and so `std::error::Error` can
-# be implemented where it is available.
+# Nothing in the library surface is std-gated: it is no_std + no-alloc by
+# construction, and `CentauriError` implements `core::error::Error`, which std
+# re-exports as `std::error::Error`. The feature exists so a caller composing
+# with std crates does not have to write `default-features = false`, and it
+# admits the thread-based contention tests, which need an operating system.
 std = []
 # Swaps the entropy cell's atomics for loom's so its model checker can explore
 # every interleaving exhaustively, rather than sampling them the way the
@@ -59,6 +60,7 @@ serde = { workspace = true, features = ["derive"], optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 subtle = { version = "2.6.1", default-features = false }
 aead = { version = "0.5", default-features = false, optional = true }
+thiserror.workspace = true
 
 [lints]
 workspace = true
