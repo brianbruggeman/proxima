@@ -14,12 +14,12 @@
 //!
 //! # Two layers
 //!
-//! - **connection** ([`verb::CONNECT`]): the listener calls the mounted
-//!   connection `Pipe` once per accepted socket over the transport's own
-//!   `Request<Bytes>`/`Response<Bytes>` envelope (a raw-socket-hijack seam,
-//!   not the SQL contract below); the `Pipe` returns a `Response` whose
-//!   `upgrade` runs the session loop. This is the same seam WebSocket /
-//!   CONNECT tunnels use (`proxima_primitives::pipe::upgrade`).
+//! - **connection**: the listener calls the mounted connection `Pipe` once
+//!   per accepted socket. That pipe is `() -> UpgradeHandler` — every socket
+//!   is hijacked unconditionally, so there is no request to fabricate and no
+//!   envelope in play — and the returned handler runs the session loop. It
+//!   is the same raw-socket-hijack seam WebSocket / CONNECT tunnels use
+//!   (`proxima_primitives::pipe::upgrade`), not the SQL contract below.
 //! - **query** ([`Verb`]'s `Query`/`Parse`/`Execute`/`CopyData` variants):
 //!   inside the session, each protocol operation the driver actually
 //!   dispatches to the engine becomes one `Pipe::call(QueryRequest) ->
@@ -49,10 +49,6 @@ use proxima_protocols::pgwire_codec::{CopyFormat, FormatCode, Oid};
 /// them. `DESCRIBE` has no entry: the driver answers Describe locally and
 /// never dispatches it to the engine (see the module doc).
 pub mod verb {
-    /// a freshly accepted connection; the connection `Pipe` returns
-    /// `Response.upgrade` (the transport's own `Request<Bytes>` envelope,
-    /// not the `QueryRequest` contract)
-    pub const CONNECT: &[u8] = b"CONNECT";
     /// simple-protocol query -> [`super::Verb::Query`]
     pub const QUERY: &[u8] = b"QUERY";
     /// extended-protocol Parse -> [`super::Verb::Parse`]
@@ -242,42 +238,31 @@ impl QueryRequest {
     }
 }
 
-/// A lazy row source the engine hands the driver for [`PgReply::QueryStream`]
-/// (gate G10). One channel item is one row (`Vec<SqlValue>`), the same
-/// element shape as [`QueryReply::rows`]; the producer feeds the sender from
-/// a spawned task or lazy iterator while the driver drains, encodes, and
-/// flushes incrementally — so an unbounded result set rides bounded memory
-/// instead of a fully-materialized `Vec`.
+/// The lazy row source [`PgReply::QueryStream`] carries. One channel item is
+/// one row (`Vec<SqlValue>`), the same element shape as [`QueryReply::rows`];
+/// the producer feeds the sender from a spawned task or lazy iterator while
+/// the driver drains, encodes, and flushes incrementally — so an unbounded
+/// result set rides bounded memory instead of a fully-materialized `Vec`.
 ///
-/// `async_channel::Receiver` is the deliberate choice: `Carry` requires
-/// `Send + Sync + 'static`, which a `futures`/`tokio` mpsc `Receiver` is not
-/// (`Sync` is missing), but `async_channel::Receiver` is `Send + Sync +
-/// Clone` and executor-agnostic (no tokio in the bare graph).
-#[derive(Debug, Clone)]
-pub struct RowStream(async_channel::Receiver<Vec<SqlValue>>);
+/// `async_channel::Receiver` is the deliberate choice: the reply must stay
+/// `Send + Sync + 'static` to cross the pipe boundary, which a
+/// `futures`/`tokio` mpsc `Receiver` is not (`Sync` is missing), but
+/// `async_channel::Receiver` is `Send + Sync + Clone` and executor-agnostic
+/// (no tokio in the bare graph). It rides the reply naked: a newtype around
+/// it exposed the same `Receiver` through its own accessor, so it bought no
+/// encapsulation and only lengthened both the producer and the drain site.
+pub type RowStream = async_channel::Receiver<Vec<SqlValue>>;
 
-impl RowStream {
-    #[must_use]
-    pub fn new(receiver: async_channel::Receiver<Vec<SqlValue>>) -> Self {
-        Self(receiver)
-    }
-
-    #[must_use]
-    pub fn receiver(&self) -> &async_channel::Receiver<Vec<SqlValue>> {
-        &self.0
-    }
-}
-
-/// The typed payload a SQL `Pipe` puts in `Response.carry`. For a
-/// row-returning statement, `columns` describes the result and `rows`
-/// holds the typed cells; for a non-row statement (DDL/DML/tx-control),
-/// `columns`/`rows` are empty and `command_tag` carries the completion
-/// tag (`INSERT 0 2`, `BEGIN`, ...). When `columns` is non-empty the
-/// driver derives the tag (`SELECT n`) unless `command_tag` overrides it.
+/// The buffered result [`PgReply::Query`] carries. For a row-returning
+/// statement, `columns` describes the result and `rows` holds the typed
+/// cells; for a non-row statement (DDL/DML/tx-control), `columns`/`rows`
+/// are empty and `command_tag` carries the completion tag (`INSERT 0 2`,
+/// `BEGIN`, ...). When `columns` is non-empty the driver derives the tag
+/// (`SELECT n`) unless `command_tag` overrides it.
 ///
-/// v1 buffers `rows` (the engine materializes them anyway); the driver
-/// still streams the *encoding* with high-water flush. A lazy/streaming
-/// row source (a channel carried in `Carry`) is gate G10.
+/// Buffered because the engine materialized the rows anyway; the driver
+/// still streams the *encoding* with a high-water flush. An engine that can
+/// produce rows lazily answers with [`PgReply::QueryStream`] instead.
 #[derive(Debug, Clone, Default)]
 pub struct QueryReply {
     pub columns: Vec<ColumnDesc>,
@@ -306,9 +291,9 @@ pub struct NoticeReply {
     pub message: String,
 }
 
-/// What Parse/Describe answers: parameter types and result columns,
-/// carried in `Response.carry`. Empty `parameter_types` means the engine
-/// leaves parameter typing to bind time.
+/// What an engine answers a Parse with: parameter types and result
+/// columns. Empty `parameter_types` means the engine leaves parameter
+/// typing to bind time.
 #[derive(Debug, Clone, Default)]
 pub struct DescribeReply {
     pub parameter_types: Vec<Oid>,
@@ -340,17 +325,16 @@ impl ErrorReply {
     }
 }
 
-/// The single typed value a SQL `Pipe` returns in `Response.carry`. The
-/// driver downcasts this one type and matches; it knows which verb it
-/// sent, so a mismatched variant (e.g. `Describe` for a `QUERY`) is a
-/// contract violation it reports.
+/// A SQL `Pipe`'s `Out` — one enum, so the driver matches instead of
+/// downcasting. It knows which verb it sent, so a mismatched variant (e.g.
+/// `Describe` for a `Query`) is a contract violation it reports.
 #[derive(Debug, Clone)]
 pub enum PgReply {
     Query(QueryReply),
     /// Like [`PgReply::Query`] but rows arrive lazily over a [`RowStream`]
     /// instead of a buffered `Vec` — the engine produces them on demand and
-    /// the driver drains/encodes/flushes incrementally for bounded memory
-    /// (gate G10). The driver derives `SELECT n` (n = rows drained) unless
+    /// the driver drains/encodes/flushes incrementally for bounded
+    /// memory. The driver derives `SELECT n` (n = rows drained) unless
     /// `command_tag` overrides it.
     QueryStream {
         columns: Vec<ColumnDesc>,

@@ -4,8 +4,8 @@
 //! is the client-side mirror of the codec's server `session::Session`: it owns
 //! the startup + auth handshake (trust / cleartext / SCRAM-SHA-256) and the
 //! simple/extended query exchange, but never touches a socket (principle 11).
-//! A blocking driver, an async driver, and the `PipeFactory` client all wrap
-//! it — that is what makes the client agnostic to the transport shape.
+//! The blocking driver and the async `Pipe` driver both wrap it — that is
+//! what makes the client agnostic to the transport shape.
 
 use proxima_protocols::pgwire_codec::backend::{AuthRequest, parse_backend};
 use proxima_protocols::pgwire_codec::writer::MessageWriter;

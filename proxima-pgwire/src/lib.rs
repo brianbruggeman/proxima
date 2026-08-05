@@ -1,4 +1,4 @@
-//! PostgreSQL wire protocol server facade.
+//! PostgreSQL wire protocol facade — both halves of the connection.
 //!
 //! Composes the sans-IO [`proxima_protocols::pgwire_codec`] (message codec +
 //! session FSM — see its docs for the wire layer) with the workspace's
@@ -10,6 +10,8 @@
 //! every proxima middleware (`Auth`, `RateLimit`, `Retry`, `Tee`, `Diff`,
 //! record/replay, `RoutingPipe`) composes onto SQL with zero new code.
 //!
+//! Server side:
+//!
 //! - [`pipe_contract`] — the self-describing request enum + typed payloads
 //!   a SQL `Pipe` exchanges
 //! - [`connection`] — the runtime-agnostic per-connection driver over any
@@ -19,16 +21,24 @@
 //! - [`pipe`] (feature `listen`) — [`pipe::PgWireConnectionPipe`], the
 //!   connection layer as a `Pipe` whose `call` returns the upgrade that
 //!   runs the session loop
-//! - [`listen`] (feature `listen`, default) — `PgWireListenProtocol`
-//!   mounting into `proxima-listen`'s registry over the runtime-matched
-//!   acceptor factory, with SSLRequest TLS upgrades via `proxima-tls`
-//! - [`auth`] / [`config`] / [`store`] — authentication policies, the
-//!   conflaguration + bon config mirror, and the per-connection
-//!   statement/portal slots
+//! - [`any_protocol`] / [`listen`] (feature `listen`, default) — the two
+//!   mounts: a candidate for the universal listener's classifier, and a
+//!   standalone `ListenProtocol` over the runtime-matched acceptor factory.
+//!   Both answer SSLRequest through `proxima-tls`
+//! - [`auth`] / [`config`] / [`store`] — trust / cleartext / MD5 / SCRAM
+//!   policies, the conflaguration + bon config mirror, and the
+//!   per-connection statement/portal slots
 //!
-//! The remaining staged surfaces are sequenced as named gates in
-//! `docs/proxima-pgwire/discipline.md` (G8 CI/baseline layer, G11
-//! stream-listener upgrade-honor).
+//! Client side ([`client`], feature `scram`): a sans-IO
+//! [`client::ClientSession`] mirroring the server FSM, driven either by the
+//! blocking [`client::PgClient`] or — under feature `client` — by
+//! `client::pipe::PgwireClientUpstream`, the `Pipe` that lets
+//! `proxima::Client` speak pgwire as a registered protocol.
+//!
+//! `scripts/proxima-pgwire-gate.sh` (run by `.github/workflows/proxima-pgwire.yml`)
+//! is the proof substrate: the bare-metal codec build, the feature-matrix
+//! clippy sweep, the real-PostgreSQL differential, and the invariant that
+//! `--no-default-features` carries zero tokio.
 
 #[cfg(feature = "listen")]
 pub mod any_protocol;
@@ -50,18 +60,19 @@ pub mod pipe_contract;
 pub mod pipes;
 #[cfg(feature = "scram")]
 pub mod scram;
+#[cfg(feature = "listen")]
+mod spec;
 pub mod store;
 
 pub use proxima_protocols::pgwire_codec as codec;
 
-// the Handler surface a SQL engine builds against — re-exported so an engine
-// author imports everything from proxima-pgwire and never reaches past it
-// into proxima-pipe / proxima-core internals (teaching surface, principle 2)
+// everything a SQL engine names — `impl SendPipe { type Err = ProximaError }`
+// plus the handle it is erased into — re-exported so an engine author imports
+// from proxima-pgwire alone and never reaches past it into proxima-primitives
+// internals (teaching surface, principle 2)
 pub use pipes::{PgPipeHandle, into_pg_handle};
 pub use proxima_core::ProximaError;
 pub use proxima_primitives::pipe::SendPipe;
-pub use proxima_primitives::pipe::handler::{Handler, PipeHandle, into_handle};
-pub use proxima_primitives::pipe::request::{Request, Response};
 
 #[cfg(feature = "listen")]
 pub use any_protocol::PgWireAnyProtocol;

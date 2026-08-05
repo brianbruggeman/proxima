@@ -1,6 +1,6 @@
 [package]
 name = "proxima-pgwire"
-description = "PostgreSQL wire protocol server facade over proxima-primitives::stream / proxima-listen / proxima-tls: TCP + TLS lifecycle, authentication, statement/portal store, and the query-handler adapter around the sans-IO proxima-protocols::pgwire_codec session FSM."
+description = "PostgreSQL wire protocol facade over the sans-IO proxima-protocols::pgwire_codec session FSM: a server side (TCP/TLS lifecycle, trust/cleartext/MD5/SCRAM auth, statement and portal store, LISTEN/NOTIFY, COPY) where the SQL engine is a QueryRequest -> PgReply pipe, and a client side (sans-IO ClientSession plus blocking and pipe drivers)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,14 @@ readme.workspace = true
 
 [dependencies]
 proxima-protocols = { workspace = true, features = ["pgwire_codec", "std"] }
-# G10 streaming row source: `RowStream` carries an `async_channel::Receiver`,
-# the one mpsc whose `Receiver` is `Send + Sync + Clone` (so it rides `Carry`)
-# and that is executor-agnostic — it does NOT pull tokio into the bare graph.
+# `PgReply::QueryStream`'s row source: `async_channel::Receiver` is the one
+# mpsc `Receiver` that is `Send + Sync + Clone` AND executor-agnostic, so a
+# lazy row stream rides the reply without pulling tokio into the bare graph.
 async-channel = { workspace = true }
 # the SQL-over-Pipe contract is the core surface: the driver builds a
-# `Request` and calls a `Pipe` per operation. `alloc` (no std) keeps tokio
-# out of the no-default-features graph — the upgrade seam (`Response.upgrade`,
-# a std-only surface) is pulled in only by the `listen` feature below.
+# `QueryRequest` and calls a `Pipe` per operation. `alloc` (no std) keeps
+# tokio out of the no-default-features graph — the raw-socket-hijack seam
+# (`pipe::upgrade`, std-only) is pulled in only by the `listen` feature below.
 proxima-primitives = { workspace = true, default-features = false, features = ["alloc"] }
 proxima-core = { workspace = true, default-features = false }
 proxima-auth = { workspace = true, optional = true, features = ["alloc"] }
@@ -30,7 +30,6 @@ futures = { workspace = true, features = ["std", "async-await"] }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 proxima-listen = { workspace = true, optional = true }
 proxima-runtime = { workspace = true, optional = true, features = ["std"] }
@@ -45,10 +44,17 @@ sha2 = { version = "0.10", default-features = false, optional = true }
 md-5 = { version = "0.10", default-features = false, optional = true }
 stringprep = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }
-subtle = { version = "2.6.1", optional = true }
+# every credential comparison in the crate (username, password, MD5 digest,
+# SCRAM proof, cancel key) goes through `ConstantTimeEq`; core (not
+# feature-gated) because a hand-rolled loop the optimizer may short-circuit
+# is exactly the defect this crate cannot afford on an auth path.
+subtle = { version = "2.6.1", default-features = false }
 # plaintext password + derived SCRAM key material zeroized on drop; core
 # (not feature-gated) so the hygiene holds for Cleartext/MD5/SCRAM alike.
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
+# the house telemetry surface, never `tracing` directly; only the
+# `tokio-compat` accept loop logs, so the dep rides that feature.
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 
 [features]
 # the prime/native default: core driver + the connection-pipe upgrade seam
@@ -57,9 +63,10 @@ zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 # query `Pipe`, handler helpers, auth, store, config) with zero tokio in the
 # dependency graph for bare-metal embedding.
 default = ["listen", "tls", "scram", "md5-auth"]
-# `proxima-primitives/std` brings the `Response.upgrade` raw-socket-hijack
-# seam (std-only) the connection pipe returns, and lifts proxima-primitives::
-# stream's traits from "absent" to present; the listener deps mount it.
+# `proxima-primitives/std` brings the `pipe::upgrade` raw-socket-hijack seam
+# (std-only) the connection pipe's `UpgradeHandler` comes from, and lifts
+# proxima-primitives::stream's traits from "absent" to present; the listener
+# deps mount it.
 listen = [
     "proxima-primitives/std",
     "proxima-core/std",
@@ -70,20 +77,26 @@ listen = [
 ]
 tls = ["dep:proxima-tls", "dep:futures-rustls"]
 # legacy tokio TcpListener accept path + ambient spawn_local fallback for
-# apps built without a runtime-matched acceptor factory. Off by default
-# per the pgwire discipline log: prime/proxima-primitives::stream is the
-# first-class path, tokio is compat.
-tokio-compat = ["listen", "dep:proxima-net", "proxima-net/tokio", "dep:tokio"]
+# apps built without a runtime-matched acceptor factory. Off by default:
+# prime/proxima-primitives::stream is the first-class path, tokio is compat.
+tokio-compat = [
+    "listen",
+    "dep:proxima-net",
+    "proxima-net/tokio",
+    "dep:tokio",
+    "dep:proxima-telemetry",
+]
 # SCRAM-SHA-256 (RFC 7677 / RFC 5802) — PostgreSQL's standard auth. Pulls
 # the RustCrypto PBKDF2 / HMAC / SHA-256 primitives + SASLprep + base64.
-scram = ["dep:pbkdf2", "dep:hmac", "dep:sha2", "dep:stringprep", "dep:base64", "dep:subtle", "dep:proxima-auth"]
+scram = ["dep:pbkdf2", "dep:hmac", "dep:sha2", "dep:stringprep", "dep:base64", "dep:proxima-auth"]
 # MD5 password auth (deprecated upstream, removed in PostgreSQL 18) — kept
 # for legacy clients.
 md5-auth = ["dep:md-5"]
-# the async client `Pipe` + `PipeFactory`: drives the sans-IO ClientSession
-# over a `StreamUpstream` transport so `proxima::Client` speaks pgwire as a
-# registered protocol. Pulls proxima-primitives::stream (the transport seam);
-# the blocking `PgClient` (under `scram`) needs none of this.
+# the async client `Pipe`: drives the sans-IO ClientSession over a
+# `StreamUpstream` transport so `proxima::Client` speaks pgwire as a
+# registered protocol (`proxima::PgwirePipeFactory` wraps it). Pulls
+# proxima-primitives::stream (the transport seam); the blocking `PgClient`
+# (under `scram`) needs none of this.
 client = ["scram", "proxima-primitives/std"]
 
 [dev-dependencies]
