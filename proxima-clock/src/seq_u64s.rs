@@ -109,9 +109,6 @@ const fn join(high: u32, low: u32) -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::SeqU64s;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread;
 
     #[test]
     fn round_trips_a_value_spanning_both_halves() {
@@ -131,40 +128,50 @@ mod tests {
         assert_eq!(cell.load(), [24_000_000, 1_753_500_000_000_000_000]);
     }
 
-    #[test]
-    fn never_observes_a_torn_update() {
-        // one core-frequency reader race, matching the anchor cell's real
-        // shape: a writer re-anchors (ticks, unix_nanos) together while a
-        // reader loop reads the pair concurrently; every observed pair must
-        // be one the writer actually stored, never a hi/lo or first/second
-        // mismatch.
-        let cell = Arc::new(SeqU64s::new([0, 0]));
-        let stop = Arc::new(AtomicBool::new(false));
+    // a real reader/writer race needs real threads, so this one test is
+    // std-tier; everything above it runs at the crate's bare no_std floor.
+    #[cfg(feature = "std")]
+    mod concurrent {
+        use super::SeqU64s;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
 
-        let writer_cell = Arc::clone(&cell);
-        let writer_stop = Arc::clone(&stop);
-        let writer = thread::spawn(move || {
-            for generation in 1..200_000u64 {
-                if writer_stop.load(Ordering::Relaxed) {
-                    break;
+        #[test]
+        fn never_observes_a_torn_update() {
+            // one core-frequency reader race, matching the anchor cell's real
+            // shape: a writer re-anchors (ticks, unix_nanos) together while a
+            // reader loop reads the pair concurrently; every observed pair must
+            // be one the writer actually stored, never a hi/lo or first/second
+            // mismatch.
+            let cell = Arc::new(SeqU64s::new([0, 0]));
+            let stop = Arc::new(AtomicBool::new(false));
+
+            let writer_cell = Arc::clone(&cell);
+            let writer_stop = Arc::clone(&stop);
+            let writer = thread::spawn(move || {
+                for generation in 1..200_000u64 {
+                    if writer_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // both halves derived from the same generation counter, so a
+                    // reader can check `second == first * 3` to detect tearing.
+                    writer_cell.store([generation, generation.wrapping_mul(3)]);
                 }
-                // both halves derived from the same generation counter, so a
-                // reader can check `second == first * 3` to detect tearing.
-                writer_cell.store([generation, generation.wrapping_mul(3)]);
+            });
+
+            let reader_cell = Arc::clone(&cell);
+            for _ in 0..500_000 {
+                let [first, second] = reader_cell.load();
+                assert_eq!(
+                    second,
+                    first.wrapping_mul(3),
+                    "reader observed a torn (first, second) pair: {first}, {second}"
+                );
             }
-        });
 
-        let reader_cell = Arc::clone(&cell);
-        for _ in 0..500_000 {
-            let [first, second] = reader_cell.load();
-            assert_eq!(
-                second,
-                first.wrapping_mul(3),
-                "reader observed a torn (first, second) pair: {first}, {second}"
-            );
+            stop.store(true, Ordering::Relaxed);
+            writer.join().expect("writer thread panicked");
         }
-
-        stop.store(true, Ordering::Relaxed);
-        writer.join().expect("writer thread panicked");
     }
 }
