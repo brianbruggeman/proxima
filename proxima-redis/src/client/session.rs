@@ -7,7 +7,7 @@
 //! async driver, and the `PipeFactory` client all wrap it — that is what makes
 //! the client agnostic to the transport shape.
 //!
-//! The FSM is a two-state enum ([`Phase`]): `Handshake` drains a queue of
+//! The FSM is a private two-state enum: `Handshake` drains a queue of
 //! startup commands, validating each reply is not a server error; `Ready`
 //! accepts one user command at a time and yields its single reply. Pub/sub and
 //! MONITOR leave the request/reply rhythm — after the first reply the driver
@@ -129,7 +129,9 @@ impl ClientSession {
         }
     }
 
-    /// Drains the bytes the driver must send.
+    /// Drains the bytes the driver must send. Dropping the returned buffer
+    /// silently loses a command the session believes is on the wire.
+    #[must_use]
     pub fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }

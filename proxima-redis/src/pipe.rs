@@ -151,9 +151,8 @@ impl SendPipe for RedisConnectionPipe {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use std::io::Read;
     use std::pin::Pin;
     use std::task::{Context, Poll};
