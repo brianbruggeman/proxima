@@ -49,7 +49,12 @@ serde_json = { workspace = true, optional = true }
 
 [features]
 default = ["std"]
-std = []
+# `--no-default-features` leaves the sans-IO Produce/Fetch/Metadata/
+# ApiVersions body codec, and the crate declares `#![no_std]` at that tier —
+# proven on `thumbv7m-none-eabi` by `scripts/thumbv7m-cliff-gate.sh`'s
+# `proxima-kafka-bare` cell. `proxima-protocols` is weak here on purpose:
+# it only arrives with `client`/`listen`, which already imply `std`.
+std = ["thiserror/std", "bytes/std", "proxima-protocols?/std"]
 # the async client `Pipe` + `PipeFactory` driving the sans-IO ClientSession over
 # a `StreamUpstream`, so `proxima::Client` speaks Kafka as a registered
 # protocol. `--no-default-features` leaves the bare sans-IO wire codec with zero
