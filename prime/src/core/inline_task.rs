@@ -29,7 +29,6 @@ use core::pin::Pin;
 use core::ptr;
 use core::task::{Context, Poll};
 
-extern crate alloc;
 use alloc::boxed::Box;
 
 /// inline storage size — chosen so most async-block-based handler

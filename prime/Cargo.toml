@@ -69,14 +69,18 @@ std = [
 ]
 alloc = ["proxima-core/alloc", "proxima-runtime/alloc"]
 runtime-prime             = []
-runtime-prime-inbox-alloc = ["runtime-prime"]
+# every feature below that compiles `alloc::` code names `alloc`, so a
+# feature set is self-describing: if `alloc` is absent from the resolved
+# set, no heap type was compiled. `runtime-prime-inbox-const` is the only
+# runtime feature that survives that test, which is what makes it the floor.
+runtime-prime-inbox-alloc = ["runtime-prime", "alloc"]
 runtime-prime-inbox-const = ["runtime-prime"]
 # dynamic inbox: lane registry grows on demand (no NoLanes/exhaustion = no task
 # loss) and each lane ring allocates lazily on first claim (memory tracks active
 # producers, not num_lanes). N-lane floor allocated eagerly. default-off until
 # benched vs the inbox-alloc incumbent on the single-producer hot path.
 runtime-prime-inbox-dynamic = ["runtime-prime", "std"]
-runtime-prime-timer       = ["runtime-prime"]
+runtime-prime-timer       = ["runtime-prime", "alloc"]
 runtime-prime-reactor     = ["runtime-prime", "std", "dep:libc", "dep:core_affinity"]
 runtime-prime-reactor-harvest-io = ["runtime-prime-reactor"]
 runtime-prime-reactor-trace = ["runtime-prime-reactor"]
