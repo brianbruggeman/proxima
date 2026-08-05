@@ -75,7 +75,7 @@ Every binding exposes exactly this set, with identical names. No language-specif
 
 | primitive | role |
 | --- | --- |
-| `Pipe` | request → response, the unit of composition |
+| `Pipe` | the unit of composition — in Rust an async `In -> Result<Out, Err>`; a binding exposes the `Request`/`Response` instantiation of it, which is the shape a host-language handler wants |
 | `PipeHandle` | type-erased reference to a Pipe; what factories produce |
 | `Request` / `Response` | typed I/O envelopes |
 | `Body` | streaming bytes-or-buffer with explicit backpressure |
