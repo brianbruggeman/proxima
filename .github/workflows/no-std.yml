@@ -177,6 +177,28 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-config-gate.sh
 
+  # proxima-test-gate.sh — same shape, sharper edge: proxima-test is
+  # `default = []` and BOTH drivers are default-off, so the bare cell compiles
+  # none of the harness. On 2026-08-05 `cargo check -p proxima-test
+  # --all-targets` had been exiting 101 on sixteen dead-code errors, invisible
+  # to every workspace command because they all unify a driver in. Runs each
+  # driver ALONE (they select different `run` bodies), the bare cell, the
+  # union, the doctest count, and RUNS the macro's own e2e smoke.
+  proxima-test-gate:
+    name: proxima-test-gate.sh
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-test-gate.sh
+
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
   # directives. `continue-on-error: true` until DC5 finishes gating
