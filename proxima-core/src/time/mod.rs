@@ -1,16 +1,17 @@
 //! `proxima_core::time` (re-exported as `proxima::time`) — runtime-agnostic
 //! timer primitives shaped like `tokio::time`. The active backend (host
 //! thread, embassy, prime's per-core wheel, deterministic mock, or a
-//! user-supplied hardware driver) is selected by the active [`Profile`] via
-//! the `timer` axis; `build.rs` bakes a `&'static dyn Driver` symbol into
-//! the build, so `Delay::poll`'s only runtime cost is one virtual dispatch.
+//! user-supplied hardware driver) is selected by the active
+//! `proxima_build::Profile` via the `timer` axis; `build.rs` bakes a
+//! `&'static dyn Driver` symbol into the build, so [`Sleep::poll`]'s only
+//! runtime cost is one virtual dispatch.
 //!
 //! Folded in from the former `proxima-time` satellite crate (single
 //! consumer: the workspace's timer surface) — `proxima_core::time::{sleep,
 //! timeout, interval, Driver, Instant}` is unchanged for callers that used
 //! to spell it `proxima_time::{..}`.
 //!
-//! [`Profile`]: proxima_build::Profile
+//! [`Sleep::poll`]: core::future::Future::poll
 
 use core::future::Future;
 use core::pin::Pin;

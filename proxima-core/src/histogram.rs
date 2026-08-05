@@ -1,3 +1,8 @@
+//! Lock-free latency/size histogram with a branchless base-2 bucket pick.
+//!
+//! Gated on `target_has_atomic = "64"` at the crate root: the accumulators are
+//! `AtomicU64`, which a cortex-m target cannot back lock-free.
+
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -153,16 +158,11 @@ impl Histogram<u64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::field_reassign_with_default,
-        clippy::type_complexity,
-        clippy::useless_vec,
-        clippy::needless_range_loop,
-        clippy::default_constructed_unit_structs
-    )]
+    extern crate std;
+
+    use std::sync::Arc;
 
     use rstest::rstest;
 
@@ -252,9 +252,6 @@ mod tests {
     // 5. concurrent: 8 threads each calling record → total count = 8 × N
     #[test]
     fn concurrent_record_total_count_matches() {
-        extern crate std;
-        use std::sync::Arc;
-
         let hist = Arc::new(Histogram::<f64>::new("concurrent"));
         let threads: std::vec::Vec<_> = (0..8)
             .map(|_| {
