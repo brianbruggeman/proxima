@@ -319,9 +319,13 @@ fn decode_metadata(wire: BTreeMap<String, String>) -> Result<FrameMetadata, Prox
 }
 
 fn hex_encode(bytes: &[u8; 32]) -> String {
+    // nibble table, not `format!` per byte — the latter heap-allocates a
+    // String for every one of the 32 bytes on a codec path.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(64);
     for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     output
 }
