@@ -45,8 +45,10 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 use arc_swap::ArcSwap;
+#[cfg(feature = "alloc")]
 use serde_json::Value;
 
+#[cfg(feature = "alloc")]
 use proxima_core::ProximaError;
 
 // pure desugar pass for the TOML/JSON pipe spec (folded in from the former
@@ -394,7 +396,44 @@ pub(crate) fn toml_to_json(value: toml::Value) -> Value {
     }
 }
 
-#[cfg(test)]
+// the whole alloc-tier surface is `ConfigFormatFactory` + `JsonConfigFormat`,
+// so this module is what proves the floor tier still works with no OS under it.
+#[cfg(all(test, feature = "alloc"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod alloc_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn synth_value() -> Value {
+        json!({
+            "name": "x",
+            "synth": {"status": 200, "body": "hi"}
+        })
+    }
+
+    #[test]
+    fn json_parses_synth_shape() {
+        let raw = r#"{"name":"x","synth":{"status":200,"body":"hi"}}"#;
+        assert_eq!(JsonConfigFormat.parse(raw).expect("json"), synth_value());
+    }
+
+    #[test]
+    fn json_round_trips_value_for_value() {
+        let value = synth_value();
+        let text = JsonConfigFormat.serialize(&value).expect("json serialize");
+        assert_eq!(JsonConfigFormat.parse(&text).expect("json parse back"), value);
+    }
+
+    #[test]
+    fn json_rejects_garbage() {
+        let outcome = JsonConfigFormat.parse("@#$%^&*not-any-format");
+        assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+}
+
+// every case below reaches a std-gated format or the registry, so the test
+// module follows the code it covers rather than the crate's default features.
+#[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
@@ -411,12 +450,6 @@ mod tests {
     fn toml_parses_synth_shape() {
         let raw = "name = \"x\"\n[synth]\nstatus = 200\nbody = \"hi\"\n";
         assert_eq!(TomlConfigFormat.parse(raw).expect("toml"), synth_value());
-    }
-
-    #[test]
-    fn json_parses_synth_shape() {
-        let raw = r#"{"name":"x","synth":{"status":200,"body":"hi"}}"#;
-        assert_eq!(JsonConfigFormat.parse(raw).expect("json"), synth_value());
     }
 
     #[test]
