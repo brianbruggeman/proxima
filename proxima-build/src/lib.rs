@@ -53,6 +53,32 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Boolean cfgs, each paired with the axis that switches it on. Emission and
+/// declaration both read this table, so an axis added here cannot be set
+/// without also being declared.
+fn flag_cfgs(profile: &Profile) -> [(&'static str, bool); 3] {
+    [
+        ("proxima_alloc", profile.alloc),
+        ("proxima_std", profile.std),
+        ("proxima_quic_enabled", profile.quic_enabled),
+    ]
+}
+
+/// Value-carrying cfgs, each paired with the axis that supplies its value. The
+/// value sets are open — `proxima_timer` takes an arbitrary driver path — so
+/// the declaration side uses `values(any())` rather than an enumeration.
+fn value_cfgs(profile: &Profile) -> [(&'static str, String); 7] {
+    [
+        ("proxima_executor", profile.executor.clone()),
+        ("proxima_reactor", profile.reactor.clone()),
+        ("proxima_tls", profile.tls.clone()),
+        ("proxima_timer", profile.timer.clone()),
+        ("proxima_quic_impl", profile.quic_impl.clone()),
+        ("proxima_h3_impl", profile.h3_impl.clone()),
+        ("proxima_profile_schema", profile.schema.to_string()),
+    ]
+}
+
 /// Resolved profile + the source paths that were consulted (so
 /// callers can wire them into `cargo:rerun-if-changed` directives).
 #[derive(Debug)]
@@ -162,32 +188,38 @@ pub fn emit_generated_module(resolved: &Resolved) -> Result<()> {
     Ok(())
 }
 
+/// Declare every cfg name [`emit_cfg_directives`] can set, so a consumer that
+/// writes `#[cfg(proxima_std)]` does not trip `unexpected_cfgs`. Safe to call
+/// with no profile resolved — a crate that conditionally resolves a profile
+/// still has to declare the names its source mentions.
+pub fn emit_cfg_check_directives() {
+    // the names are profile-independent; a default profile is just the cheapest
+    // way to read them off the same table emission uses.
+    let axes = Profile::default();
+    for (name, _) in flag_cfgs(&axes) {
+        println!("cargo:rustc-check-cfg=cfg({name})");
+    }
+    for (name, _) in value_cfgs(&axes) {
+        println!("cargo:rustc-check-cfg=cfg({name}, values(any()))");
+    }
+}
+
 /// Emit `cargo:rustc-cfg=...` directives so consumers can `#[cfg(proxima_alloc)]`
-/// and `#[cfg(proxima_executor = "tokio")]` against the active profile.
+/// and `#[cfg(proxima_executor = "tokio")]` against the active profile. The
+/// matching `rustc-check-cfg` declarations are emitted alongside — an emitter
+/// that sets a cfg without declaring it hands the consumer a deny-level
+/// `unexpected_cfgs` error.
 pub fn emit_cfg_directives(resolved: &Resolved) {
-    let profile = &resolved.profile;
-    if profile.alloc {
-        println!("cargo:rustc-cfg=proxima_alloc");
+    emit_cfg_check_directives();
+
+    for (name, enabled) in flag_cfgs(&resolved.profile) {
+        if enabled {
+            println!("cargo:rustc-cfg={name}");
+        }
     }
-    if profile.std {
-        println!("cargo:rustc-cfg=proxima_std");
+    for (name, value) in value_cfgs(&resolved.profile) {
+        println!("cargo:rustc-cfg={name}=\"{value}\"");
     }
-    if profile.quic_enabled {
-        println!("cargo:rustc-cfg=proxima_quic_enabled");
-    }
-    println!("cargo:rustc-cfg=proxima_executor=\"{}\"", profile.executor);
-    println!("cargo:rustc-cfg=proxima_reactor=\"{}\"", profile.reactor);
-    println!("cargo:rustc-cfg=proxima_tls=\"{}\"", profile.tls);
-    println!("cargo:rustc-cfg=proxima_timer=\"{}\"", profile.timer);
-    println!(
-        "cargo:rustc-cfg=proxima_quic_impl=\"{}\"",
-        profile.quic_impl
-    );
-    println!("cargo:rustc-cfg=proxima_h3_impl=\"{}\"", profile.h3_impl);
-    println!(
-        "cargo:rustc-cfg=proxima_profile_schema=\"{}\"",
-        profile.schema
-    );
 }
 
 /// Emit `$OUT_DIR/proxima_time_bound_driver.rs` with the link-time-bound
@@ -409,6 +441,49 @@ timer = "std-thread"
             Error::Conflag(_) => {}
             other => panic!("expected validation error, got {other:?}"),
         }
+    }
+
+    fn sentinel_profile() -> Profile {
+        Profile {
+            schema: 7,
+            alloc: true,
+            std: false,
+            executor: "executor-axis".into(),
+            reactor: "reactor-axis".into(),
+            tls: "tls-axis".into(),
+            quic_enabled: true,
+            quic_impl: "quic-impl-axis".into(),
+            h3_impl: "h3-impl-axis".into(),
+            timer: "timer-axis".into(),
+        }
+    }
+
+    #[test]
+    fn flag_cfgs_pair_each_name_with_its_own_axis() {
+        assert_eq!(
+            flag_cfgs(&sentinel_profile()),
+            [
+                ("proxima_alloc", true),
+                ("proxima_std", false),
+                ("proxima_quic_enabled", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn value_cfgs_pair_each_name_with_its_own_axis() {
+        assert_eq!(
+            value_cfgs(&sentinel_profile()),
+            [
+                ("proxima_executor", "executor-axis".to_owned()),
+                ("proxima_reactor", "reactor-axis".to_owned()),
+                ("proxima_tls", "tls-axis".to_owned()),
+                ("proxima_timer", "timer-axis".to_owned()),
+                ("proxima_quic_impl", "quic-impl-axis".to_owned()),
+                ("proxima_h3_impl", "h3-impl-axis".to_owned()),
+                ("proxima_profile_schema", "7".to_owned()),
+            ]
+        );
     }
 
     #[test]
