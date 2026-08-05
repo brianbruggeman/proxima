@@ -167,7 +167,7 @@ fn parse_affinity(value: &str) -> Result<Affinity, ParseError> {
     Affinity::from_str(value)
 }
 
-/// Choice of [`BackgroundPool`](crate::runtime::BackgroundPool)
+/// Choice of [`BackgroundPool`](proxima_runtime::BackgroundPool)
 /// implementation for cross-thread CPU-bound work.
 ///
 /// `Rayon` (default) plugs in `RayonBackgroundPool` (feature `rayon`)
@@ -175,7 +175,7 @@ fn parse_affinity(value: &str) -> Result<Affinity, ParseError> {
 /// CPU-bound parallel compute. `Inline` falls back to a one-off
 /// `std::thread::spawn` per job — fine for tests and small workloads.
 /// `None` attaches no pool; calls to
-/// [`Runtime::spawn_background_blocking`](crate::runtime::Runtime::spawn_background_blocking)
+/// [`Runtime::spawn_background_blocking`](proxima_runtime::Runtime::spawn_background_blocking)
 /// still work via the inline fallback baked into `PrimeRuntime` itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PoolKind {
@@ -251,11 +251,12 @@ fn parse_compat_mode(value: &str) -> Result<CompatMode, ParseError> {
 /// `conflaguration`, file-driven via the same `Settings` derive, and
 /// composable into a [`PrimeRuntime::builder()`](super::os::runtime::PrimeRuntime::builder).
 ///
-/// ```ignore
+/// ```no_run
 /// // env: PRIME_CORES=8 PRIME_BACKGROUND_POOL=rayon
-/// use proxima::prime::PrimeConfig;
 /// use conflaguration::Settings;
+/// use prime::config::PrimeConfig;
 /// let config: PrimeConfig = PrimeConfig::from_env()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
 /// Env vars are prefixed `PRIME_` by default — override at the
