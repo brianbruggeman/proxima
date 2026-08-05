@@ -15,6 +15,8 @@
 use core::cmp::Ordering;
 use core::fmt;
 
+use thiserror::Error;
+
 /// Bits per path segment. 12 bits → each segment is `0..=4095`.
 const SEG_BITS: u32 = 12;
 /// Maximum path depth. A deeper path is a construction error, never a silent
@@ -42,34 +44,21 @@ pub struct Coord {
 
 /// Why a coordinate failed to parse — structured so the config validator can
 /// list what went wrong (P15 discoverability), unlike a flat opaque error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoordError {
     /// An empty string, or a path with an empty segment (`1..2`).
+    #[error("empty coordinate")]
     Empty,
     /// More than [`MAX_DEPTH`](self) segments.
+    #[error("coordinate too deep: {got} segments (max {max})")]
     TooDeep { got: usize, max: u32 },
     /// A segment exceeds [`SEG_MAX`].
+    #[error("segment {index} = {value} exceeds max {max}")]
     SegmentOverflow { index: usize, value: u32, max: u16 },
     /// A segment was not a base-10 number.
+    #[error("non-numeric segment")]
     NotNumeric,
 }
-
-impl fmt::Display for CoordError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("empty coordinate"),
-            Self::TooDeep { got, max } => {
-                write!(formatter, "coordinate too deep: {got} segments (max {max})")
-            }
-            Self::SegmentOverflow { index, value, max } => {
-                write!(formatter, "segment {index} = {value} exceeds max {max}")
-            }
-            Self::NotNumeric => formatter.write_str("non-numeric segment"),
-        }
-    }
-}
-
-impl core::error::Error for CoordError {}
 
 impl Coord {
     /// Build a coordinate from explicit segments. `const` so named levels can be

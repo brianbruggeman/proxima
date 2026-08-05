@@ -10,6 +10,8 @@
 
 use alloc::vec::Vec;
 
+use thiserror::Error;
+
 use crate::emit::Coord;
 use crate::level::Level;
 
@@ -81,9 +83,10 @@ impl LevelTree {
 }
 
 /// Why a [`LevelTree`] failed to build.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LevelTreeError {
     /// A child named a parent that was not declared before it.
+    #[error("level '{name}': unknown parent '{parent}' (declare it first)")]
     UnknownParent {
         /// The missing parent name.
         parent: &'static str,
@@ -91,27 +94,12 @@ pub enum LevelTreeError {
         name: &'static str,
     },
     /// A node would exceed the maximum coordinate depth.
+    #[error("level '{name}': exceeds max tree depth")]
     TooDeep {
         /// The node that overflowed.
         name: &'static str,
     },
 }
-
-impl core::fmt::Display for LevelTreeError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnknownParent { parent, name } => {
-                write!(
-                    formatter,
-                    "level '{name}': unknown parent '{parent}' (declare it first)"
-                )
-            }
-            Self::TooDeep { name } => write!(formatter, "level '{name}': exceeds max tree depth"),
-        }
-    }
-}
-
-impl core::error::Error for LevelTreeError {}
 
 enum Decl {
     Family {
