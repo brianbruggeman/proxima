@@ -21,6 +21,23 @@
 // h1_response}` call sites keep working.
 pub use proxima_protocols::http1_codec::{h1, h1_body, h1_connection, h1_response};
 
+/// HTTP status -> coarse class label for upstream telemetry. Shared by both
+/// h1 client backends so the prime one (`client`) and the hyper one
+/// (`upstream`) emit the same `status_class` metric label — they used to hold
+/// a copy each, with the prime copy's doc comment promising the parity that
+/// only one definition can actually guarantee.
+#[cfg(any(feature = "http1", feature = "http1-stream-client"))]
+pub(crate) fn status_class(status: u16) -> &'static str {
+    match status {
+        100..=199 => "1xx",
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        500..=599 => "5xx",
+        _ => "other",
+    }
+}
+
 #[cfg(feature = "http1-stream-client")]
 pub mod client;
 #[cfg(feature = "http1")]
