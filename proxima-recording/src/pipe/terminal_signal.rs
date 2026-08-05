@@ -1,5 +1,5 @@
 //! `TerminalSignal` — a [`RecordingSink`] decorator that fires a
-//! [`Signal`](proxima_core::signal::Signal) once a caller-chosen terminal
+//! [`Signal`] once a caller-chosen terminal
 //! event has been durably flushed, so a caller `.await`s completion instead
 //! of polling the cassette from outside.
 //!
@@ -15,7 +15,7 @@
 //! the terminal event is remembered but the signal only fires once a
 //! subsequent flush has actually completed — durable, not merely queued.
 //!
-//! One-shot by design, matching [`Signal`](proxima_core::signal::Signal)
+//! One-shot by design, matching [`Signal`]
 //! itself: built for a single wait window (one recorded interaction), not a
 //! long-lived sink that repeatedly quiesces and un-quiesces across many
 //! interactions over its lifetime.

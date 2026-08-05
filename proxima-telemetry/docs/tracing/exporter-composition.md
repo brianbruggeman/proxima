@@ -71,7 +71,7 @@ Fluent fallback (when you assemble in code) composes the same primitives:
 | **auth** mTLS client-cert | an external crypto crate's `TlsConfig::with_client_auth_cert` → `ClientConfig` → `TlsStreamUpstream::new` | COMPOSE-EXISTING (wiring only, no new crypto) | `proxima-tls/src/connector.rs:120` |
 | auth request-signing (Ed25519/HMAC) | an external crypto crate's signing / Blake3 mac | EXISTS (bonus option) | — |
 | auth OAuth2 client-creds / refresh | — | **GENUINELY-NEW** (only real new auth work) | token endpoint + cache + refresh |
-| **durable spool / replay** | `BinSink`/`BinSource` (WAL, offset-replay, crash-safe) | EXISTS (unwired; needs OTLP-bytes event wrapper) | `proxima-recording-core/src/binary/{sink,source}.rs` |
+| **durable spool / replay** | `AppendLog`/`BinSource` (WAL, offset-replay, crash-safe) | EXISTS (unwired; needs OTLP-bytes event wrapper) | `proxima-recording/src/pipe/log_pipe.rs`, `proxima-recording/src/binary/source.rs` |
 | **backpressure propagation** | async-await + `call_pipe` block_on + ring producer-assist | EXISTS (works; single drain blocks all → use `drain_range`/multi) | `src/recorder/drainer.rs:237`, ring producer-assist (this initiative) |
 
 **Headline (revised after digging timeout + security): ~90% is existing

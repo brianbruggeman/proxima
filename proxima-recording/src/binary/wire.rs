@@ -124,26 +124,26 @@ pub(super) struct BinRequestHeader {
     pub query: Vec<(String, String)>,
 }
 
+// postcard is not self-describing: it decodes a struct as a fixed-length
+// sequence, so `#[serde(default)]` never fires and adding or removing a field
+// here IS a wire break, gated by `RECORDING_FORMAT_VERSION`. The three W3C
+// trace-context slots below are part of the v3 layout but carry no value in
+// either direction today — `RecordMeta` has no trace-context fields, so
+// `record_meta_to_bin` writes `None` and `bin_to_record_meta` drops them.
+// Removing them would break every v3 recording on disk; populating them is a
+// `RecordMeta` change, not a codec change.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct BinRecordMeta {
     pub cache: Option<CacheOutcome>,
     pub retries: u32,
     pub upstream: Option<String>,
     pub instance_id: Option<String>,
-    #[serde(default)]
     pub source: Option<crate::event::EventSource>,
-    /// W3C trace-id bytes (16 bytes). `None` when the request arrived
-    /// without a traceparent header or before c15-prime-hooks typed the
-    /// field. `#[serde(default)]` preserves backward compat with fixtures
-    /// written before this field existed.
-    #[serde(default)]
+    /// W3C trace-id bytes (16 bytes).
     pub trace_id: Option<[u8; 16]>,
-    /// span-id of this request's top-level span (8 bytes). same backward-
-    /// compat guarantee as `trace_id`.
-    #[serde(default)]
+    /// span-id of this request's top-level span (8 bytes).
     pub span_id: Option<[u8; 8]>,
     /// parent span-id carried from the upstream caller (8 bytes).
-    #[serde(default)]
     pub parent_span_id: Option<[u8; 8]>,
     pub extra_json: Option<String>,
 }

@@ -85,7 +85,7 @@ fn default_slot_count() -> usize {
 /// chosen via `benches/causal_record_primitives.rs`. Numbers for
 /// `record` under N concurrent recorders (Linux host-b):
 ///
-/// | N recorders | ArcSwap<Vec> CoW | Mutex<Vec> | per-core 16 slots |
+/// | N recorders | `ArcSwap<Vec>` CoW | `Mutex<Vec>` | per-core 16 slots |
 /// |---|---|---|---|
 /// | 0 (uncontested) | 775 µs | 58 ns | **57 ns** (tied) |
 /// | 1 noise | 976 µs | 216 ns | **80 ns** (2.7×) |

@@ -14,7 +14,9 @@
 //!
 //! Both hold a `Box<dyn Format>` (the format is a config-selected CODEC axis,
 //! not a peer type) + the file, and run their blocking I/O off the caller's
-//! core via the `rt_fs` offload, on any injected `Runtime`. Fan-out to N
+//! core via the `rt_fs` offload, on any injected `Runtime`. The `Box` is here
+//! because [`Format`] is public and the codec set is open — a consumer crate
+//! can hand these terminals its own impl. Fan-out to N
 //! durables-each-with-its-own-format is composition over these (`FanOut`).
 
 use core::future::Future;

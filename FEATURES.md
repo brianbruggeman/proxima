@@ -333,23 +333,54 @@ The telemetry layer is built on the same `Pipe` primitive as every other proxima
 
 ## Recording + replay
 
-### Capture (`recording/cap.rs`, `recording/capture.rs`, `recording/event.rs`)
-- `RecordingEvent` enum: RequestBegin, RequestEnd, ChunkRecorded, etc.
-- `FrameMetadata` carries Pipe-attached key/values per frame
-- Recorded sessions are interaction-id-keyed (`InteractionId` = 16 bytes)
+All of the below lives in `proxima-recording` and is re-exported through
+`proxima::recording`.
 
-### Sinks (write)
-- `recording::jsonl::JsonlSink` — one JSON-encoded event per line
-- `recording::bin::BinSink` — length-prefixed binary frames + index file (zstd-compressed)
-- Pluggable via `RecordingSink` trait + `RecordingSinkFactory` registry
+### Event model (`proxima-recording/src/event.rs`, `pipe/cap.rs`, `pipe/capture.rs`)
+- `RecordingEvent { id, ts_ms, parent, event: ProtocolEvent }` — one universal
+  envelope; `ProtocolEvent` is `Pipeline | Process | Http | Custom{kind,payload}`,
+  each variant owning its own `Started → … → Ended` lifecycle
+- `FrameMetadata` carries Pipe-attached key/values per frame
+- Recorded sessions are interaction-id-keyed (`InteractionId` = a 16-byte ULID)
+- `parent` is the only first-class relationship (pipeline → stage)
+
+### Formats (`Format` trait — the codec axis, `pipe` feature not required)
+- `JsonFormat` — one JSON-enveloped line per event
+- `BinFormat` — `[u32 len|stored-flag]` + a zstd-or-stored block of postcard
+  frames; compression is per block, so a streaming turn's chunks compress together
+- Adding a format is one `Format` impl; choosing one is `FormatKind` config
+
+### Sinks (write — `pipe` feature)
+- `AppendLog: Pipe<Vec<RecordingEvent>, AppendAck>` — the durable terminal;
+  owns the file + offset, runs blocking I/O off-core via `rt_fs::offload`
+- `FanOut` — one batch to N `AppendLog`s, each with its own format, all-or-nothing
+- `LazyFanOut` — the same fan-out behind a spigot: disarmed until the App binds
+  a runtime at serve, so a disabled recorder opens no file
+- `AccumulatingSink` — per-event front that coalesces into blocks
+- `EventTap` — tees every append to a broadcast for live tailing
+- `BoundedRecordingSink` — bounded lock-free ring + drop policy (`FailMode`) and
+  a `record_dropped_total` counter
+- `TerminalSignal` — fires a `Signal` once a chosen terminal event is *flushed*
 
 ### Sources (read)
-- `recording::jsonl::JsonlSource` — reads JSONL recordings
-- `recording::bin::BinSource` — reads binary recordings with index-based seek
-- Pluggable via `RecordingSource` trait
+- `JsonlSource` / `BinSource` — stream a recording back as `RecordingEvent`s
+- `ReplayLog: Pipe<u64, ReplayChunk>` — cursor-paginated read terminal (`pipe`)
+- `BinSource::events_from_offset` — `(offset, event)` pairs for at-least-once
+  consumer drain (`durable-wal` feature)
+- `IndexWriter` / `IndexReader` — 36-byte fixed-stride `.idx` records with
+  `seek_by_ts` binary search
+- Pluggable via the `RecordingSource` trait + `RecordingSourceRegistry`
 
-### Replay (`upstreams::replay`)
-- `ReplaySource` Pipe replays a recorded interaction by interaction-id
+### Replay
+- `TimedReplay` + `ReplayMode` (`pipe`) — replay in `CausalOrder` (record order,
+  zero inter-event wait) or `TimingIntact` (sleeps the recorded `ts_ms` deltas
+  through an injectable `Clock`)
+- `ReplayUpstream` (`replay`) — serves a recorded HTTP interaction back by
+  matching method + path + sorted query (+ optional body digest) against the
+  cassette index; a miss is `ProximaError::ReplayMiss`
+- `WsReplayUpstream` (`replay`) — replays a recorded WebSocket session as a real
+  RFC 6455 upgrade, recomputing `Sec-WebSocket-Accept` from the replaying
+  client's own key
 - Determinism harness asserts replayed output matches recorded output
 
 ### `Tee` + recording

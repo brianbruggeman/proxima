@@ -24,7 +24,10 @@ pub enum FormatKind {
 }
 
 impl FormatKind {
-    /// Instantiate the codec for this format.
+    /// Instantiate the codec for this format. Boxed because [`Format`] is a
+    /// public trait an outside consumer can implement, so the terminals that
+    /// hold a codec ([`crate::pipe::AppendLog`], [`crate::pipe::ReplayLog`])
+    /// take any `dyn Format` — not just the two this enum names.
     pub fn codec(self) -> Result<Box<dyn Format>, ProximaError> {
         match self {
             Self::Bin => Ok(Box::new(BinFormat::new()?)),

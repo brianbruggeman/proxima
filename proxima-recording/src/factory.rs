@@ -10,6 +10,9 @@ use crate::source::DynRecordingSource;
 use proxima_core::ProximaError;
 use proxima_runtime::Runtime;
 
+/// What a factory's `build` resolves to. Boxed for the same reason
+/// [`crate::source::RecordingEventStream`] is: the registry holds factories as
+/// `dyn`, so the returned future cannot be an RPITIT opaque type.
 pub type SourceBuildFuture<'lifetime> =
     Pin<Box<dyn Future<Output = Result<DynRecordingSource, ProximaError>> + Send + 'lifetime>>;
 
