@@ -51,6 +51,14 @@ declare -a FLOOR_CRATE_CELLS=(
     # no-alloc half of every one of those two-tier modules ungated.
     "proxima-core-bare-no-alloc|proxima-core|"
     "proxima-protocols|proxima-protocols|tcp,mqtt,amqp,kafka,memcached,nvme,inet,pgwire_codec,process,jsonrpc,websocket_frame,proxy_protocol,redis,hpack,http1_codec,http2_codec,http3_codec-alloc,json_framing,quic-alloc,dns,grpc_framing,protobuf_wire,websocket_handshake,codec-pipe"
+    # proxima-codec's own Cargo.toml calls `alloc` its tier-1 floor and four
+    # crates consume it there (proxima-kafka, proxima-protocols' -codec-trait
+    # features, proxima-listen's framed-any, and the root crate's bench
+    # dev-dependency) -- but it was absent from this matrix, so neither gate
+    # ever proved the claim. Everything reachable at this tier (the codec
+    # traits, Addressed, FrameLimits, LengthDelimitedCodec, BytesPassthrough)
+    # is `Vec`-and-slices; JsonCodec + the registry are std-gated above it.
+    "proxima-codec|proxima-codec|alloc"
     # proxima-clock has no `alloc` feature at all -- every cell above proves
     # the no_std + alloc tier (`--features alloc`); this one proves the
     # strictly stricter no_std + NO-alloc floor (`--features ""`, i.e. bare
