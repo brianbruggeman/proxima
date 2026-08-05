@@ -26,7 +26,6 @@
 //!   shimming an `OwnedSemaphorePermit` over it is straightforward
 //!   but no caller today.
 
-use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use event_listener::Event;
@@ -164,36 +163,20 @@ impl Drop for SemaphorePermit<'_> {
 }
 
 /// Error returned by `acquire().await` when the semaphore is closed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("semaphore closed")]
 pub struct AcquireError(());
 
-impl fmt::Display for AcquireError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("semaphore closed")
-    }
-}
-
-impl std::error::Error for AcquireError {}
-
 /// Error returned by `try_acquire()`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TryAcquireError {
     /// Semaphore is closed.
+    #[error("semaphore closed")]
     Closed,
     /// No permits currently available.
+    #[error("no permits available")]
     NoPermits,
 }
-
-impl fmt::Display for TryAcquireError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Closed => formatter.write_str("semaphore closed"),
-            Self::NoPermits => formatter.write_str("no permits available"),
-        }
-    }
-}
-
-impl std::error::Error for TryAcquireError {}
 
 // Note: SemaphoreGuard / SemaphoreGuardArc re-exports stay available
 // for callers that need the underlying async-lock types (e.g. when
