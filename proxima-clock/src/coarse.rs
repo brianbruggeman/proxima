@@ -21,10 +21,10 @@ use crate::ticks::Ticks;
 ///
 /// `TickCell` reads exactly like a hardware counter: `impl Pipe for
 /// &TickCell` gives it the same `In = (), Out = Ticks, Err = Infallible`
-/// source shape as [`crate::coarse`]'s hardware-mmap counterpart (see
-/// `tests/hardware_mmap_seam.rs`) — a caller composing a pipeline does not
-/// know or care whether a given tick source is a raw register or this
-/// cell.
+/// source shape as a `read_volatile` on a memory-mapped register (see
+/// `tests/hardware_mmap_seam.rs`, which drives both through one
+/// pipeline) — a caller composing a pipeline does not know or care
+/// whether a given tick source is a raw register or this cell.
 ///
 /// Deliberately NOT a process-wide `static` here: how a cell is reached
 /// (a field on a per-core context, threaded through a runtime handle, a
