@@ -249,6 +249,19 @@ declare -a FLOOR_CRATE_CELLS=(
     # as the `alloc` cell while implying a no-alloc tier that does not exist.
     # Nothing in proxima-auth works without a heap -- every form carries owned
     # credential material -- so `alloc` is the finest tier there is to expose.
+    # proxima-recording/src/lib.rs:14-20 calls `alloc` "the default surface a
+    # bare-metal target builds against", and .github/ci-areas.toml already
+    # named the crate in the nostd area -- but there was no cell here, so that
+    # claim had never been compiled for an embedded target. Measured
+    # 2026-08-05: it builds clean. `alloc` is the real floor -- the event model
+    # is `String`/`BTreeMap`/`Bytes` and the postcard block codec allocates.
+    "proxima-recording|proxima-recording|alloc"
+    # the `replay` keying core is the other half of the crate's cliff claim
+    # (lib.rs:19) and it is NOT reached by the cell above: replay pulls
+    # proxima-protocols + sha1, whose default features are std. Without this
+    # cell a `cargo add` dropping a `default-features = false` pin would land
+    # unnoticed. `pipe` deliberately has no cell -- it forwards `std`.
+    "proxima-recording-replay|proxima-recording|alloc,replay"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
