@@ -3729,6 +3729,7 @@ version = "0.1.0"
 dependencies = [
  "conflaguration",
  "serde",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
 ]
