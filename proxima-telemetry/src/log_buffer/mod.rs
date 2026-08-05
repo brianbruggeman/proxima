@@ -17,7 +17,7 @@ use ring::LogRing;
 
 /// Build-time sizing constants generated from `proxima-log-buffer.toml`.
 /// They seed [`LogBufferConfig`]'s runtime defaults — never duplicated —
-/// and are the same values [`crate::log_buffer::ring::LogRing`] would use
+/// and are the same values `LogRing` would use
 /// as its no_std + alloc floor when constructed directly, without this
 /// crate's runtime config layer.
 pub mod sized {
@@ -89,7 +89,7 @@ impl Drop for LiveTailReceiver {
 /// Bounded ring buffer of stdout/stderr lines per supervised pipe,
 /// plus a lock-free fanout to live-tail subscribers.
 ///
-/// Implementation: the retained ring buffer is [`crate::ring::LogRing`]
+/// Implementation: the retained ring buffer is `LogRing`
 /// (sans-IO, `push` evicts oldest when full — see that crate for the
 /// no_std + alloc cliff this was carved for). Subscribers ride
 /// `ArcSwap<Vec<Subscriber>>` with per-subscriber `ArrayQueue<String>` +

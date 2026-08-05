@@ -33,7 +33,7 @@ pub struct HistogramDataPoint {
 
 /// A single metric sample — discriminated by instrument kind.
 ///
-/// Enum form avoids Box<dyn Trait> and keeps match exhaustive.
+/// Enum form avoids `Box<dyn Trait>` and keeps match exhaustive.
 #[derive(Clone, Debug)]
 pub enum MetricSample {
     Counter(NumberDataPoint),
