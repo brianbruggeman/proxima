@@ -1,6 +1,6 @@
 [package]
 name = "proxima-primitives"
-description = "Wave D Phase 3 fold of proxima-pipe + proxima-stream + proxima-sync + proxima-transport: the Pipe/SendPipe form family, Handler, SourcePipe, Body, HeaderList, sans-IO byte-stream traits, runtime-agnostic concurrency primitives, and the Replay/GenericStream transport seam — one crate, no more pipe<->stream<->transport dependency cycle."
+description = "The pipe algebra itself: the Pipe trait — an async In -> Result<Out, Err> that becomes a transform, source, sink or observe by choice of types — plus its three tier siblings (SendPipe, UnpinPipe, UnpinSendPipe), Handler, SourcePipe, Body, HeaderList, the sans-IO byte-stream traits, runtime-agnostic concurrency primitives, and the Replay/GenericStream transport seam. Everything else in proxima composes what is defined here."
 build = "build.rs"
 version.workspace = true
 edition.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "proxima-patterns"
-description = "Pattern-set primitives for proxima: pure pipe-primitive wiring (source/sink/transform/filter/gate/fan-in/out/observe/series) plus a domain data type, one feature per pattern — alert (alerting/guidance, formerly proxima-notify), balancer (load-balancing selection, formerly proxima-balancer), middleware (Pipe-graph HTTP-leaf auth/write-back, formerly proxima-middleware), control_plane (introspect/manage running Pipes, formerly proxima-control-plane), kv (cache-entry primitives + write-back rules, formerly proxima-kv)"
+description = "Recurring shapes built from nothing but the pipe primitives (source, sink, transform, filter, gate, fan-in, fan-out, observe, series) plus a domain data type — one feature per pattern: alert (alerting and guidance), balancer (load-balancing selection), middleware (Pipe-graph HTTP-leaf auth and write-back), control_plane (introspect and manage running Pipes), kv (cache-entry primitives and write-back rules)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
