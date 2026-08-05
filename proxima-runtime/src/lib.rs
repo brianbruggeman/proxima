@@ -2,10 +2,8 @@
 //! concrete runtimes (`TokioPerCoreRuntime`, `PrimeRuntime`,
 //! `RayonBackgroundPool`) implement.
 //!
-//! Moved out of the proxima umbrella during Phase 3 of the
-//! decomposition (see `proxima/rust/docs/decomposition/discipline.md`).
-//! The trait and value types live here so `prime` can be a separate
-//! crate without depending on the umbrella.
+//! The trait and value types live here, out of the proxima umbrella, so
+//! `prime` can be a separate crate without depending on it.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -266,7 +264,8 @@ fn block_on_dispatch_error(message: &str) -> ProximaError {
 /// Per-core executor abstraction. Implementations select the concrete
 /// threading + I/O model:
 /// - **Default**: tokio current-thread runtimes, one per pinned CPU core,
-///   spawned at app construction (see `runtime::tokio_per_core`, feature `runtime-tokio`).
+///   spawned at app construction (this crate's `tokio` module, feature
+///   `tokio`; the umbrella spells the same switch `runtime-tokio`).
 /// - **Alternatives**: monoio, glommio, custom kernels — all addressable
 ///   via the same trait surface.
 ///

@@ -1,17 +1,12 @@
-//! R1 of the runtime-shaped initiative: `RuntimeFactory` sibling
-//! trait + `*Like` primitive shapes.
+//! `RuntimeFactory` sibling trait + the `*Like` primitive shapes.
 //!
-//! Design constraint (locked at core landing): `Runtime` stays
-//! dyn-compatible because the runtime threads `&dyn Runtime` through
-//! per-core dispatch. Adding GAT associated-type factories to
-//! `Runtime` directly would break dyn-compat workspace-wide.
+//! Design constraint: [`Runtime`] stays dyn-compatible because the
+//! runtime threads `&dyn Runtime` through per-core dispatch, and GAT
+//! associated-type factories on it would break that workspace-wide.
 //! Resolution: a SIBLING trait `RuntimeFactory: Runtime` carries the
-//! typed primitive factories. `TokioRuntime` and `PrimeRuntime` impl
-//! BOTH traits; consumers that need typed Mutex / Notify / JoinSet /
+//! typed primitive factories. `TokioPerCoreRuntime` and `PrimeRuntime`
+//! impl BOTH; consumers that need typed Mutex / Notify / JoinSet /
 //! Sleep bound on `R: RuntimeFactory` (which implies `Runtime`).
-//!
-//! Per-primitive impls land as R2-R7 (TokioRuntime first, then the
-//! prime impls). See `docs/runtime-shaped/discipline.md`.
 
 use core::future::Future;
 use core::ops::DerefMut;
@@ -77,7 +72,7 @@ pub enum JoinError {
 
 /// Sibling extension of [`Runtime`]: typed factory methods for the
 /// per-session sync / task / time primitives. Implemented by every
-/// concrete runtime that ships in the workspace (`TokioRuntime`,
+/// concrete runtime that ships in the workspace (`TokioPerCoreRuntime`,
 /// `PrimeRuntime`). Consumers bound on `R: RuntimeFactory` when they
 /// need typed primitives; consumers that only need to spawn stay on
 /// `R: Runtime` and the trait stays dyn-compatible.
@@ -96,7 +91,7 @@ pub trait RuntimeFactory: Runtime {
     fn sleep(duration: Duration) -> Self::Sleep;
 }
 
-/// R8 — non-Send mutex shape for runtimes that pin tasks to a
+/// Non-Send mutex shape for runtimes that pin tasks to a
 /// single core. The guard is `!Send` so callers can't accidentally
 /// move it across cores; in exchange the underlying primitive can
 /// skip the atomic/notification dance a Send Mutex needs.
@@ -116,14 +111,14 @@ pub trait LocalMutexLike<T: 'static> {
     fn lock(&self) -> impl Future<Output = Self::Guard<'_>>;
 }
 
-/// R8 — non-Send notify shape. Same single-core opt-in contract as
+/// Non-Send notify shape. Same single-core opt-in contract as
 /// [`LocalMutexLike`].
 pub trait LocalNotifyLike {
     fn notify_one(&self);
     fn notified(&self) -> impl Future<Output = ()> + '_;
 }
 
-/// R8 — sibling extension of [`Runtime`] for runtimes that pin
+/// Sibling extension of [`Runtime`] for runtimes that pin
 /// tasks to a single core (prime's per-core executor, embedded
 /// runtimes with no multi-thread executor at all). Provides
 /// non-Send primitive factories that skip the atomic synchronization

@@ -8,11 +8,9 @@
 //! shape for fork-join compute.
 //!
 //! Plug into `TokioPerCoreRuntime` via `.with_background_pool(...)`.
-//!
-//! changelog:
-//! - v1: dyn-only BackgroundPool trait impl (rayon feature gate)
-//! - v2: typed spawn<F, T> fast-path (runtime-prime-bgpool-rayon gate);
-//!   mirrors ProximaBackgroundPool API exactly so callers can swap
+//! Two surfaces, both behind this crate's `rayon` feature: the erased
+//! [`BackgroundPool`] impl the runtime stores, and an inherent typed
+//! `spawn<F, T>` for callers holding the concrete pool.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -54,11 +52,11 @@ impl RayonBackgroundPool {
         })
     }
 
-    /// Type-specialized fast-path spawn. Mirrors `ProximaBackgroundPool::spawn<F, T>`:
-    /// no API-level `Box<dyn FnOnce>` — the closure is pushed directly into
-    /// rayon's work-stealing deque. Available whenever the `rayon` feature
-    /// is on; callers holding the concrete `RayonBackgroundPool` get the
-    /// no-alloc path.
+    /// Type-specialized fast-path spawn: no API-level `Box<dyn FnOnce>` and no
+    /// `Any` round trip — the closure is pushed straight into rayon's
+    /// work-stealing deque and `T` comes back as itself. Shadows the
+    /// [`BackgroundPool`] method of the same name for callers holding the
+    /// concrete pool, which is the point.
     pub fn spawn<F, T>(
         &self,
         work: F,
