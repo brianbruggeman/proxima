@@ -39,6 +39,14 @@
 //! encrypted-transport variants are not — `proxima::ListenerProtocolExt::dns`'s
 //! `.quic()` pairing is a named config error rather than a silent plaintext
 //! fallback (see that method's doc).
+//!
+//! ## Tiers
+//!
+//! `--no-default-features` drops `std` and leaves only the wire-layer
+//! re-exports above, so the bare tier links on a bare-metal target
+//! (`thumbv7m-none-eabi`); `client` and `listen` both imply `std`.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "client")]
 pub mod error;
