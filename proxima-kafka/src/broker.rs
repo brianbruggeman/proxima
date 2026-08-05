@@ -18,22 +18,26 @@
 //! delivery (`KeyedFanOut::publish`):
 //! - a durable per-topic-partition log ([`Live`]-backed copy-on-write
 //!   `BTreeMap`, the same discipline [`KeyedFanOut`] itself uses for its
-//!   registry) — batch-granularity offsets: one [`Self::produce`] call is
+//!   registry) — batch-granularity offsets: one [`KafkaBroker::produce`] call is
 //!   one opaque `record_set` blob, appended whole; this facade never
 //!   decodes individual records inside it, so the offset it hands back
 //!   addresses the BATCH's position in the partition's log, not a
 //!   record within it (documented simplification — a real Kafka broker's
 //!   offsets are per-record).
 //! - a [`KeyedFanOut`] of per-partition wake pings, published on every
-//!   [`Self::produce`] — [`Self::fetch`] subscribes to the target
+//!   [`KafkaBroker::produce`] — `fetch_partition` subscribes to the target
 //!   partition's key and races it against a `max_wait_ms` timer when the
 //!   log has nothing yet, giving Fetch's long-poll semantics real
 //!   (if per-partition-sequential, not whole-request-fanned) teeth instead
 //!   of a bare non-blocking read.
 
+use core::cell::Cell;
+use core::future::Future;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::FutureExt;
 use futures::channel::mpsc;
 use futures::stream::StreamExt;
@@ -60,7 +64,7 @@ fn partition_key(topic: &str, partition: i32) -> Vec<u8> {
     key
 }
 
-type PartitionLog = std::collections::BTreeMap<Vec<u8>, Vec<bytes::Bytes>>;
+type PartitionLog = BTreeMap<Vec<u8>, Vec<Bytes>>;
 
 /// A wake ping's sink half — a lightweight [`SendPipe`] over an unbounded
 /// `()` channel, adapted the same way `RedisBroker::PushSink` adapts its
@@ -74,7 +78,7 @@ impl SendPipe for WakeSink {
     type Out = ();
     type Err = ProximaError;
 
-    fn call(&self, (): ()) -> impl core::future::Future<Output = Result<(), ProximaError>> + Send {
+    fn call(&self, (): ()) -> impl Future<Output = Result<(), ProximaError>> + Send {
         let result = self.0.unbounded_send(());
         async move {
             result
@@ -107,14 +111,14 @@ impl KafkaBroker {
 
     /// Appends `record_set` to `topic`/`partition`'s log, returning the
     /// batch-granularity base offset (the log's length before the append).
-    /// Wakes any [`Self::fetch`] currently long-polling this partition.
-    pub async fn produce(&self, topic: &str, partition: i32, record_set: bytes::Bytes) -> i64 {
+    /// Wakes any `fetch_partition` currently long-polling this partition.
+    pub async fn produce(&self, topic: &str, partition: i32, record_set: Bytes) -> i64 {
         let key = partition_key(topic, partition);
         // `LiveControl::update`'s closure must be `Fn` (it may be retried
         // under CAS contention) — a `Cell` lets the winning retry record
         // its own offset through a shared reference instead of needing a
         // captured `&mut i64`, which would force `FnMut`.
-        let base_offset = core::cell::Cell::new(0_i64);
+        let base_offset = Cell::new(0_i64);
         self.logs_control.update(|current| {
             let mut next = current.clone();
             let entries = next.entry(key.clone()).or_default();
@@ -134,27 +138,39 @@ impl KafkaBroker {
     /// `record_set`, so concatenation stays wire-plausible even though
     /// this facade never decodes individual records), plus the partition's
     /// current high watermark (its log length).
+    ///
+    /// `max_bytes` is the request's own per-partition cap and is honored:
+    /// without it a 60-byte Fetch at offset 0 pulls back the entire
+    /// partition, however large it has grown. Kafka's contract is that the
+    /// FIRST batch always rides even when it alone exceeds the cap, so a
+    /// consumer whose `max_bytes` is smaller than one batch still makes
+    /// progress instead of spinning forever.
     fn read_from_offset(
         &self,
         topic: &str,
         partition: i32,
         fetch_offset: i64,
-    ) -> (i64, bytes::Bytes) {
+        max_bytes: i32,
+    ) -> (i64, Bytes) {
         let key = partition_key(topic, partition);
+        let budget = usize::try_from(max_bytes).unwrap_or(0);
         self.logs.read(|logs| {
             let Some(entries) = logs.get(&key) else {
-                return (0, bytes::Bytes::new());
+                return (0, Bytes::new());
             };
             let high_watermark = entries.len() as i64;
             let start = usize::try_from(fetch_offset.max(0)).unwrap_or(usize::MAX);
             if start >= entries.len() {
-                return (high_watermark, bytes::Bytes::new());
+                return (high_watermark, Bytes::new());
             }
             let mut combined = Vec::new();
             for batch in &entries[start..] {
+                if !combined.is_empty() && combined.len() + batch.len() > budget {
+                    break;
+                }
                 combined.extend_from_slice(batch);
             }
-            (high_watermark, bytes::Bytes::from(combined))
+            (high_watermark, Bytes::from(combined))
         })
     }
 
@@ -169,9 +185,11 @@ impl KafkaBroker {
         topic: &str,
         partition: i32,
         fetch_offset: i64,
+        max_bytes: i32,
         max_wait_ms: i32,
-    ) -> (i64, bytes::Bytes) {
-        let (high_watermark, record_set) = self.read_from_offset(topic, partition, fetch_offset);
+    ) -> (i64, Bytes) {
+        let (high_watermark, record_set) =
+            self.read_from_offset(topic, partition, fetch_offset, max_bytes);
         if !record_set.is_empty() || max_wait_ms <= 0 {
             return (high_watermark, record_set);
         }
@@ -185,7 +203,7 @@ impl KafkaBroker {
             () = timeout.fuse() => {}
         }
         self.wakers.unsubscribe(&key, subscription);
-        self.read_from_offset(topic, partition, fetch_offset)
+        self.read_from_offset(topic, partition, fetch_offset, max_bytes)
     }
 
     /// This facade's own `Metadata` truth: it always answers as the single
@@ -211,8 +229,7 @@ impl KafkaBroker {
                 .collect()
         });
 
-        let mut topics: std::collections::BTreeMap<String, Vec<i32>> =
-            std::collections::BTreeMap::new();
+        let mut topics: BTreeMap<String, Vec<i32>> = BTreeMap::new();
         for (topic, partition) in known_topics {
             topics.entry(topic).or_default().push(partition);
         }
@@ -296,6 +313,7 @@ impl SendPipe for KafkaBroker {
                                 &topic_data.topic,
                                 partition_data.partition,
                                 partition_data.fetch_offset,
+                                partition_data.max_bytes,
                                 fetch.max_wait_ms,
                             )
                             .await;
@@ -349,7 +367,7 @@ mod tests {
                 topic: topic.to_string(),
                 partitions: vec![wire::ProducePartitionData {
                     partition,
-                    record_set: bytes::Bytes::copy_from_slice(record_set),
+                    record_set: Bytes::copy_from_slice(record_set),
                 }],
             }],
         })
@@ -361,6 +379,16 @@ mod tests {
         fetch_offset: i64,
         max_wait_ms: i32,
     ) -> RequestBody {
+        fetch_request_capped(topic, partition, fetch_offset, max_wait_ms, 1_048_576)
+    }
+
+    fn fetch_request_capped(
+        topic: &str,
+        partition: i32,
+        fetch_offset: i64,
+        max_wait_ms: i32,
+        max_bytes: i32,
+    ) -> RequestBody {
         RequestBody::Fetch(wire::FetchRequest {
             replica_id: -1,
             max_wait_ms,
@@ -370,10 +398,17 @@ mod tests {
                 partitions: vec![wire::FetchPartitionData {
                     partition,
                     fetch_offset,
-                    max_bytes: 1_048_576,
+                    max_bytes,
                 }],
             }],
         })
+    }
+
+    fn fetched_record_set(response: ResponseBody) -> Bytes {
+        let ResponseBody::Fetch(fetch) = response else {
+            panic!("expected Fetch");
+        };
+        fetch.topics[0].partitions[0].record_set.clone()
     }
 
     #[proxima::test(runtime = "tokio")]
@@ -397,7 +432,7 @@ mod tests {
         };
         assert_eq!(
             response.topics[0].partitions[0].record_set,
-            bytes::Bytes::from_static(b"hello")
+            Bytes::from_static(b"hello")
         );
         assert_eq!(response.topics[0].partitions[0].high_watermark, 1);
     }
@@ -428,7 +463,7 @@ mod tests {
         };
         assert_eq!(
             response.topics[0].partitions[0].record_set,
-            bytes::Bytes::from_static(b"second")
+            Bytes::from_static(b"second")
         );
     }
 
@@ -453,24 +488,70 @@ mod tests {
             let broker = Arc::clone(&broker);
             tokio::spawn(async move { broker.call(fetch_request("orders", 0, 0, 5_000)).await })
         };
-        // give the fetch a moment to reach its long-poll wait before producing
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // rendezvous on the observable state, not on a clock: the fetch has
+        // reached its long-poll wait exactly when its wake sink is
+        // registered. Producing before that point would be answered by the
+        // immediate read and would prove nothing about the wake path.
+        let key = partition_key("orders", 0);
+        while broker.wakers.subscription_count(&key) == 0 {
+            tokio::task::yield_now().await;
+        }
         broker
             .call(produce_request("orders", 0, b"woke-me-up"))
             .await
             .expect("produce");
 
+        // the wake is what makes this return; the 5s max_wait_ms timer would
+        // blow past this bound.
         let fetched = tokio::time::timeout(Duration::from_secs(2), waiter)
             .await
             .expect("fetch must return well before the 5s max_wait_ms timeout")
             .expect("join")
             .expect("fetch");
-        let ResponseBody::Fetch(response) = fetched else {
-            panic!("expected Fetch");
-        };
         assert_eq!(
-            response.topics[0].partitions[0].record_set,
-            bytes::Bytes::from_static(b"woke-me-up")
+            fetched_record_set(fetched),
+            Bytes::from_static(b"woke-me-up")
+        );
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn fetch_stops_concatenating_batches_once_max_bytes_is_reached() {
+        let broker = broker();
+        for batch in [b"aaaa", b"bbbb", b"cccc"] {
+            broker
+                .call(produce_request("orders", 0, batch))
+                .await
+                .expect("produce");
+        }
+
+        let capped = broker
+            .call(fetch_request_capped("orders", 0, 0, 0, 6))
+            .await
+            .expect("fetch");
+        assert_eq!(fetched_record_set(capped), Bytes::from_static(b"aaaa"));
+
+        let roomier = broker
+            .call(fetch_request_capped("orders", 0, 0, 0, 8))
+            .await
+            .expect("fetch");
+        assert_eq!(fetched_record_set(roomier), Bytes::from_static(b"aaaabbbb"));
+    }
+
+    #[proxima::test(runtime = "tokio")]
+    async fn a_batch_larger_than_max_bytes_still_rides_so_a_consumer_makes_progress() {
+        let broker = broker();
+        broker
+            .call(produce_request("orders", 0, b"a-batch-longer-than-the-cap"))
+            .await
+            .expect("produce");
+
+        let fetched = broker
+            .call(fetch_request_capped("orders", 0, 0, 0, 1))
+            .await
+            .expect("fetch");
+        assert_eq!(
+            fetched_record_set(fetched),
+            Bytes::from_static(b"a-batch-longer-than-the-cap")
         );
     }
 
