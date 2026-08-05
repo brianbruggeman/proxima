@@ -6,7 +6,8 @@
 //! # The priority-ordered-wait rule
 //!
 //! Each candidate is one of three states across the connection's lifetime —
-//! see [`CandidateState`]: `Live { at_least }` (still deciding), `Dead`
+//! `CandidateState`, this module's own private state enum: `Live {
+//! at_least }` (still deciding), `Dead`
 //! (ruled out for good), or `Matched { consumed }` (resolved to its own
 //! wire). [`Classifier::advance`] probes every still-`Live` candidate
 //! against the accumulated prefix, then arbitrates: a `Matched` candidate's
@@ -124,7 +125,7 @@ enum CandidateState {
 
 /// Per-connection classification state. Sized once per connection —
 /// `states` tracks, per index into `candidates`, that candidate's
-/// [`CandidateState`].
+/// `CandidateState` (private to this module).
 pub struct Classifier {
     candidates: Arc<[Arc<dyn AnyProtocol>]>,
     states: Vec<CandidateState>,

@@ -189,10 +189,6 @@ pub trait ListenProtocol: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>>;
 }
 
-/// Per-thread sibling of [`ListenProtocol`]. The serve loop dispatches
-/// into a [`ThreadLocalPipeHandle`] and returns a `?Send` future,
-/// suitable for per-core executors that pin acceptance + dispatch to a
-/// single thread.
 /// Fluent builder for [`ListenProtocol::serve`]. Each setter is
 /// optional; awaiting the builder fills in defaults and dispatches
 /// to the protocol's positional `serve` implementation.
@@ -203,15 +199,21 @@ pub trait ListenProtocol: Send + Sync + 'static {
 /// `ServeContext::new(NoopTelemetry)`, shutdown = a never-fires
 /// receiver.
 ///
-/// ```ignore
+/// `no_run`: it binds a real socket and then accepts until shutdown, and
+/// with port 0 there is no way to learn which port was chosen.
+///
+/// ```no_run
 /// use proxima::{HttpListenProtocol, ListenProtocolFluent};
 ///
+/// # async fn example() -> Result<(), proxima_core::ProximaError> {
 /// HttpListenProtocol::new()
 ///     .fluent()
-///     .bind("127.0.0.1:0".parse().unwrap())
+///     .bind("127.0.0.1:0".parse().expect("loopback addr parses"))
 ///     // `.dispatch(handle)` — pass a `PipeHandle`; omitted here so
 ///     // missed wiring surfaces as a 503 rather than a panic.
 ///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct ServeBuilder<'protocol, P: ListenProtocol + ?Sized> {
     protocol: &'protocol P,
@@ -332,6 +334,10 @@ fn null_dispatch() -> PipeHandle {
     into_handle(NullPipe)
 }
 
+/// Per-thread sibling of [`ListenProtocol`]. The serve loop dispatches
+/// into a [`ThreadLocalPipeHandle`] and returns a `?Send` future,
+/// suitable for per-core executors that pin acceptance + dispatch to a
+/// single thread.
 pub trait ThreadLocalListenProtocol: 'static {
     fn name(&self) -> &str;
 

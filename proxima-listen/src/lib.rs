@@ -23,7 +23,7 @@ pub use config::{ListenTuningConfig, ListenTuningLayerBuilder};
 
 /// Build-time sizing constants generated from `proxima-listen.toml`. At
 /// no_std+no_alloc these consts ARE the config; at std they seed
-/// [`ListenTuningConfig`]'s runtime defaults — never duplicated.
+/// `ListenTuningConfig`'s runtime defaults — never duplicated.
 pub mod sized {
     include!(concat!(env!("OUT_DIR"), "/proxima_listen_sized.rs"));
 }

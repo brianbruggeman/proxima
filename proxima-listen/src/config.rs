@@ -48,7 +48,8 @@ fn parse_legacy_spread_flag(raw: &str) -> Result<bool, Infallible> {
 }
 
 /// Runtime configuration for [`crate::handle::Listener::run_with_runtime`]
-/// and [`crate::handle::bind_reuseport_listener_with_options`]. One built
+/// and `handle::bind_reuseport_listener_with_options` (behind the `tokio`
+/// feature). One built
 /// `ListenTuningConfig` == one serialisable config == one listener-tuning
 /// policy.
 ///
