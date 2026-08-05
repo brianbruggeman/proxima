@@ -47,8 +47,8 @@ pub enum RequestAdmit {
 }
 
 struct Inner {
-    in_flight: Arc<AtomicU64>,
-    quiescing: Arc<AtomicBool>,
+    in_flight: AtomicU64,
+    quiescing: AtomicBool,
     max_in_flight: u64,
     draining: AtomicBool,
 }
@@ -67,8 +67,8 @@ impl ConnAdmission {
     #[must_use]
     pub fn new(max_in_flight: usize) -> Self {
         Self(Arc::new(Inner {
-            in_flight: Arc::new(AtomicU64::new(0)),
-            quiescing: Arc::new(AtomicBool::new(false)),
+            in_flight: AtomicU64::new(0),
+            quiescing: AtomicBool::new(false),
             max_in_flight: u64::try_from(max_in_flight).unwrap_or(DEFAULT_MAX_IN_FLIGHT_REQUESTS),
             draining: AtomicBool::new(false),
         }))
@@ -146,26 +146,6 @@ impl ConnAdmission {
     pub fn is_draining(&self) -> bool {
         self.0.draining.load(Ordering::Acquire)
     }
-
-    /// Bridge for protocols whose existing per-request loop already takes
-    /// these exact atomics positionally (h1's `serve_connection`) — a
-    /// clone of the SAME shared counter `request_admit`/`request_release`
-    /// operate on, not a fresh one, so driving the legacy signature
-    /// through this handle keeps the listener-wide count accurate. New
-    /// integrations should call `request_admit`/`request_release`
-    /// directly instead of reaching for this.
-    #[must_use]
-    pub fn in_flight_counter(&self) -> Arc<AtomicU64> {
-        self.0.in_flight.clone()
-    }
-
-    /// Bridge for protocols whose existing loop already takes a bare
-    /// `Arc<AtomicBool>` quiesce flag positionally (h1's
-    /// `serve_connection`). See [`Self::in_flight_counter`]'s doc.
-    #[must_use]
-    pub fn quiescing_flag(&self) -> Arc<AtomicBool> {
-        self.0.quiescing.clone()
-    }
 }
 
 #[cfg(test)]
@@ -240,20 +220,5 @@ mod tests {
             },
             "a clone observes the same shared in-flight counter"
         );
-    }
-
-    #[test]
-    fn legacy_atomics_bridge_shares_state_with_request_admit() {
-        let admission = ConnAdmission::new(2);
-        let counter = admission.in_flight_counter();
-        counter.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(
-            admission.in_flight(),
-            1,
-            "the bridged Arc<AtomicU64> is the SAME counter, not a copy"
-        );
-        let flag = admission.quiescing_flag();
-        flag.store(true, Ordering::Relaxed);
-        assert!(admission.is_quiescing());
     }
 }
