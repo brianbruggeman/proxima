@@ -5,8 +5,6 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use hdrhistogram::Histogram;
-#[allow(unused_imports)]
-use serde::{Deserialize, Serialize};
 use thread_local::ThreadLocal;
 
 pub use proxima_primitives::pipe::telemetry_surface::{
