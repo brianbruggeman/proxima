@@ -1,7 +1,7 @@
 //! `InstrumentConfig` — the unified-instrument config + fluent builder surface
 //! (P4: first-class conflaguration AND first-class fluent builder, BOTH).
 //!
-//! Mirrors [`crate::config::TelemetryConfig`] and [`crate::emit::config::EmitConfig`]
+//! Mirrors [`crate::config::TelemetryConfig`] and [`crate::emit::EmitConfig`]
 //! exactly: `#[derive(Builder, Deserialize, Serialize, Settings)]` + [`Validate`],
 //! an `InstrumentLayerBuilder` with call-order precedence, and a typed env surface.
 //! The defaults come FROM the `sized` consts that `build.rs` generates from

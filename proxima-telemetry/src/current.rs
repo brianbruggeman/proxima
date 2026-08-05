@@ -186,7 +186,7 @@ pub fn set_verbose_admit_floor(elevated: crate::level::Level) {
     imp::set_verbose_admit_floor(elevated.severity());
 }
 
-/// The log macro's admit test — see [`imp::should_admit_below_floor`]. Taking a
+/// The log macro's admit test — see `imp::should_admit_below_floor`. Taking a
 /// [`Level`](crate::level::Level) keeps the macro call site level-typed.
 #[cfg(feature = "elevation")]
 #[must_use]

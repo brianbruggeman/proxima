@@ -84,10 +84,13 @@ default = ["std"]
 # `alloc` (no_std + alloc): the data + primitive layer — tag, trace records,
 # log, metric instruments, sampler, ring, level, clock, propagation (the W3C
 # traceparent/baggage codec over `proxima_primitives::pipe::HeaderList`). No OS.
-# NOTE: proxima-primitives::pipe's alloc tier currently still pulls parking_lot
-# (via proxima-core/transport), so this tier builds on a hosted target but not
-# yet bare-metal no_std. Pushing proxima-primitives::pipe parking_lot-free is
-# the next domino for a bare-metal T1. `id` (TraceId/SpanId) needs neither
+# NOTE: this tier builds on a hosted target but NOT on the thumbv7m cliff, and
+# the first thing that stops it is `fastrand`, whose default `std` feature the
+# workspace leaves on (sampler.rs calls the std-only free function
+# `fastrand::u64`); proxima-primitives::pipe's parking_lot (via
+# proxima-core/transport) is the second. Both have to go for a bare-metal T1;
+# only the no-alloc floor below has a cell in
+# scripts/_floor-crate-matrix.sh. `id` (TraceId/SpanId) needs neither
 # alloc nor proxima-primitives::pipe — it lives at the tier floor below, see
 # `pub mod id` in lib.rs.
 alloc = [
