@@ -303,6 +303,146 @@ mod tests {
         );
     }
 
+    // proptest needs an allocator and a test harness, so the properties are
+    // std-tier; the arithmetic they cover is `core`-only.
+    #[cfg(feature = "std")]
+    mod properties {
+        use super::{
+            AnchorCell, Pipe, TSC_NOMINAL_HZ, Ticks, ToUnixNanos, UnixNanos, block_on, convert,
+        };
+        use proptest::prelude::{ProptestConfig, any, prop_assert, prop_assert_eq, proptest};
+
+        /// 1 Hz up to ten times a nominal TSC. Drawing a frequency from the
+        /// whole `u64` space instead makes every property vacuous: at ~9e18 Hz
+        /// the elapsed nanosecond term rounds to 0 and the conversion
+        /// degenerates to the anchor, which a mutation of the saturation arm
+        /// survives unnoticed (measured — three properties went green against
+        /// a `u64::MAX` -> `0` mutation until this range replaced `any`). The
+        /// 0 Hz contract violation is owned deterministically by
+        /// [`super::zero_frequency_clamps_instead_of_dividing_by_zero`]
+        /// rather than left to a draw.
+        const PLAUSIBLE_COUNTER_HZ: core::ops::RangeInclusive<u64> = 1..=10_000_000_000;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(512))]
+
+            /// Reading the anchor's own tick value must reproduce the anchor's
+            /// own wall-clock value exactly, whatever the counter frequency —
+            /// the fixed point the whole conversion is defined around.
+            #[test]
+            fn the_anchor_point_is_a_fixed_point(
+                anchor_ticks in any::<u64>(),
+                anchor_nanos in any::<u64>(),
+                frequency_hz in PLAUSIBLE_COUNTER_HZ,
+            ) {
+                let anchor = AnchorCell::new(
+                    Ticks::from_raw(anchor_ticks),
+                    UnixNanos::from_nanos(anchor_nanos),
+                );
+
+                let converted = convert(&anchor, frequency_hz, Ticks::from_raw(anchor_ticks));
+
+                prop_assert_eq!(converted, UnixNanos::from_nanos(anchor_nanos));
+            }
+
+            /// A clock never reads earlier than its own anchor: the `u128`
+            /// widening, the `saturating_add` and the `u64::MAX` narrowing
+            /// fallback all have to preserve that, for every input including
+            /// the ones that saturate.
+            #[test]
+            fn a_reading_never_precedes_the_anchor(
+                anchor_ticks in any::<u64>(),
+                anchor_nanos in any::<u64>(),
+                frequency_hz in PLAUSIBLE_COUNTER_HZ,
+                elapsed_ticks in any::<u64>(),
+            ) {
+                let anchor = AnchorCell::new(
+                    Ticks::from_raw(anchor_ticks),
+                    UnixNanos::from_nanos(anchor_nanos),
+                );
+                let read = Ticks::from_raw(anchor_ticks.wrapping_add(elapsed_ticks));
+
+                let converted = convert(&anchor, frequency_hz, read);
+
+                prop_assert!(converted >= UnixNanos::from_nanos(anchor_nanos));
+            }
+
+            /// More elapsed ticks can never convert to an earlier instant, so a
+            /// span measured across two reads can never come out negative.
+            #[test]
+            fn more_elapsed_ticks_never_convert_backwards(
+                anchor_ticks in any::<u64>(),
+                anchor_nanos in any::<u64>(),
+                frequency_hz in PLAUSIBLE_COUNTER_HZ,
+                first_elapsed in any::<u64>(),
+                second_elapsed in any::<u64>(),
+            ) {
+                let (earlier, later) = if first_elapsed <= second_elapsed {
+                    (first_elapsed, second_elapsed)
+                } else {
+                    (second_elapsed, first_elapsed)
+                };
+                let anchor = AnchorCell::new(
+                    Ticks::from_raw(anchor_ticks),
+                    UnixNanos::from_nanos(anchor_nanos),
+                );
+
+                let earlier_reading = convert(
+                    &anchor,
+                    frequency_hz,
+                    Ticks::from_raw(anchor_ticks.wrapping_add(earlier)),
+                );
+                let later_reading = convert(
+                    &anchor,
+                    frequency_hz,
+                    Ticks::from_raw(anchor_ticks.wrapping_add(later)),
+                );
+
+                prop_assert!(earlier_reading <= later_reading);
+            }
+
+            /// At 1 GHz a tick IS a nanosecond, so the whole conversion must
+            /// reduce to `anchor.saturating_add(elapsed)` with no rounding
+            /// term anywhere — the oracle for the general case's arithmetic.
+            #[test]
+            fn a_1ghz_counter_converts_by_plain_saturating_addition(
+                anchor_ticks in any::<u64>(),
+                anchor_nanos in any::<u64>(),
+                elapsed_ticks in any::<u64>(),
+            ) {
+                let anchor = AnchorCell::new(
+                    Ticks::from_raw(anchor_ticks),
+                    UnixNanos::from_nanos(anchor_nanos),
+                );
+                let read = Ticks::from_raw(anchor_ticks.wrapping_add(elapsed_ticks));
+
+                let converted = convert(&anchor, TSC_NOMINAL_HZ, read);
+
+                prop_assert_eq!(
+                    converted,
+                    UnixNanos::from_nanos(anchor_nanos.saturating_add(elapsed_ticks))
+                );
+            }
+
+            /// The stage holds a borrow, not a snapshot: whatever a discipline
+            /// loop last stored is what the next reading is measured against.
+            #[test]
+            fn re_anchoring_is_observed_by_a_stage_built_beforehand(
+                first_nanos in any::<u64>(),
+                second_nanos in any::<u64>(),
+            ) {
+                let anchor = AnchorCell::new(Ticks::ZERO, UnixNanos::from_nanos(first_nanos));
+                let stage = ToUnixNanos::new(&anchor, TSC_NOMINAL_HZ);
+
+                anchor.set(Ticks::ZERO, UnixNanos::from_nanos(second_nanos));
+                let reading = block_on(Pipe::call(&stage, Ticks::ZERO))
+                    .expect("conversion never fails");
+
+                prop_assert_eq!(reading, UnixNanos::from_nanos(second_nanos));
+            }
+        }
+    }
+
     // `format!` needs an allocator, so the rendering assertions are std-tier;
     // the `Debug` impl itself is `core`-only and compiles on the floor.
     #[cfg(feature = "std")]
