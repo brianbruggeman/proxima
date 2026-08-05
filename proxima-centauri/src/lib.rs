@@ -63,7 +63,6 @@ pub mod sized {
     include!(concat!(env!("OUT_DIR"), "/proxima_centauri_sized.rs"));
 }
 
-pub mod aead;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod cookie;

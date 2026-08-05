@@ -30,14 +30,21 @@
 //! Also added: the header is bound as AEAD associated data, so tampering with
 //! the SPI or sequence number fails authentication instead of being ignored.
 
+use aead::consts::{U12, U16};
+use aead::generic_array::GenericArray;
 use aead::{AeadInPlace, KeyInit};
-
-use crate::aead::{Nonce, Tag};
 
 use crate::error::CentauriError;
 use crate::handshake::{Role, SessionKeys};
 use crate::hash::derive_key;
 use crate::sized::{ESP_MAX_PAYLOAD_BYTES, LIFETIME_MAX_PACKETS, REPLAY_WINDOW_WORDS};
+
+/// 96-bit AEAD nonce. Both suites declare `NonceSize = U12`, so one alias
+/// serves both and neither cipher crate is the one that names it.
+type Nonce = GenericArray<u8, U12>;
+
+/// 128-bit authentication tag. Both suites declare `TagSize = U16`.
+type Tag = GenericArray<u8, U16>;
 
 /// Poly1305 authentication tag.
 pub const TAG_LEN: usize = 16;
