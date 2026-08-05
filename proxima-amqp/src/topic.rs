@@ -9,6 +9,8 @@
 //! (e.g. `orders.*.created` matches `orders.eu.created` but not
 //! `orders.eu.region.created`; `orders.#` matches both).
 
+use alloc::vec::Vec;
+
 /// AMQP topic-exchange match: `.`-delimited words, `*` = exactly one word,
 /// `#` = zero or more words, anything else = literal word equality.
 #[must_use]

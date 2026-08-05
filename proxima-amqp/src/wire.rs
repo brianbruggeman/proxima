@@ -14,7 +14,9 @@
 //! no internal cursor state, so [`crate::method`] composes them by
 //! threading `rest` through each field in spec order.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A method-argument decode failure — too few bytes for the field being
 /// read, or (for a field table) an unrecognized type tag this decoder

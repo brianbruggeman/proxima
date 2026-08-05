@@ -69,6 +69,18 @@
 //!   [`method::decode`] reports [`method::MethodError::Unsupported`] for
 //!   any of these, which the connection driver renders as
 //!   `connection.close`.
+//!
+//! ## Tiers
+//!
+//! `--no-default-features` drops `std` and leaves the sans-IO half above
+//! ([`wire`], [`method`], [`frame`], [`fsm`], [`topic`]), which is
+//! `#![no_std]` + `alloc` and links on a bare-metal target
+//! (`thumbv7m-none-eabi`, proven by `scripts/thumbv7m-cliff-gate.sh`'s
+//! `proxima-amqp-bare` cell). `client` and `listen` both imply `std`.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 pub mod frame;
 pub mod fsm;

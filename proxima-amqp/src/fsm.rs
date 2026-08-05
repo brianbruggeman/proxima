@@ -37,7 +37,10 @@
 // real win.
 #![allow(clippy::result_large_err)]
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use proxima_protocols::amqp::{Frame, ParseError, parse_frame};
 

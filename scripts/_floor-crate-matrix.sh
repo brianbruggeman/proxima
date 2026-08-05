@@ -177,6 +177,17 @@ declare -a FLOOR_CRATE_CELLS=(
     # declare `#![no_std]`". Same shape, same single floor: `client` and
     # `listen` both imply `std`, so there is no `alloc` cell to add.
     "proxima-dns-bare|proxima-dns|"
+    # proxima-amqp is the third crate with the identical fold-era shape --
+    # `default = ["std"]`, `std = []` gating nothing, no `#![no_std]`, no cell
+    # here -- and it carried strictly MORE bare-tier surface than its redis and
+    # dns siblings: those two leave only re-exports at the floor, while amqp's
+    # own wire/method/frame/fsm/topic modules are ungated. Measured before the
+    # fix on 2026-08-05: `cargo build -p proxima-amqp --no-default-features
+    # --lib --target thumbv7m-none-eabi` exits 101 with 230 errors, opening on
+    # "`std` is required by `proxima_amqp` because it does not declare
+    # `#![no_std]`". `client` and `listen` both imply `std`, so bare is the
+    # only floor and there is no `alloc` cell to add.
+    "proxima-amqp-bare|proxima-amqp|"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they

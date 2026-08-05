@@ -6,6 +6,8 @@
 //! wrapper plus the three outbound frame shapes
 //! [`crate::fsm::Connection`]/[`crate::broker::AmqpBroker`] build.
 
+use alloc::vec::Vec;
+
 use proxima_protocols::amqp::{FRAME_END, FrameType};
 
 use crate::method::Method;
