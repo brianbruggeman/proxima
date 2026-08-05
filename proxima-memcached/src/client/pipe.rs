@@ -28,6 +28,12 @@
 //! | `FLUSH_ALL`                        | "" or delay                                    |
 //! | `STATS`                            | args (opaque, forwarded raw)                   |
 //! | `VERSION` / `QUIT`                 | ignored                                        |
+//!
+//! No verb in that table carries memcached's `noreply` flag: this boundary
+//! answers every call with a `Response`, so a fire-and-forget command has
+//! nothing to return. `noreply` is reachable through the sans-IO
+//! [`ClientSession`] and the blocking driver, which speak
+//! `MemcachedRequest` directly.
 
 use std::future::Future;
 use std::sync::Arc;

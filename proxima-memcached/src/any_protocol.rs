@@ -28,6 +28,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use conflaguration::Validate;
 use serde_json::Value;
 
 use proxima_core::ProximaError;
@@ -109,15 +110,24 @@ fn probe_verb(prefix: &[u8]) -> ProbeVerdict {
     ProbeVerdict::No
 }
 
+/// The listener spec is the one path a config reaches the codec on without
+/// having gone through `conflaguration`'s own validate step, so it runs
+/// [`Validate`] here — otherwise a spec-supplied `max_message_bytes` below
+/// the shortest command silently turns every fragmented command into a
+/// `MessageTooLarge` violation.
 fn resolve_config(
     base: &MemcachedServerConfig,
     spec: &Value,
 ) -> Result<MemcachedServerConfig, ProximaError> {
-    match spec.get("memcached") {
-        None => Ok(base.clone()),
+    let resolved = match spec.get("memcached") {
+        None => base.clone(),
         Some(overrides) => serde_json::from_value(overrides.clone())
-            .map_err(|error| ProximaError::Config(format!("memcached spec: {error}"))),
-    }
+            .map_err(|error| ProximaError::Config(format!("memcached spec: {error}")))?,
+    };
+    resolved
+        .validate()
+        .map_err(|error| ProximaError::Config(format!("memcached spec: {error}")))?;
+    Ok(resolved)
 }
 
 /// memcached (text protocol) wire candidate for the open universal
@@ -205,6 +215,9 @@ impl AnyProtocol for MemcachedAnyProtocol {
         peer: Option<PeerInfo>,
         admission: &'a ConnAdmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'a>> {
+        // the box is `AnyProtocol::drive`'s signature, not a choice here: the
+        // listener holds an open set of candidates as trait objects, and a
+        // dyn-compatible method cannot return `impl Future`.
         Box::pin(async move {
             let config = resolve_config(&self.config, spec)?;
             let framed = self.build(&config);
@@ -299,5 +312,16 @@ mod tests {
         let base = MemcachedServerConfig::default();
         let resolved = resolve_config(&base, &Value::Null).expect("no override resolves");
         assert_eq!(resolved, base);
+    }
+
+    #[test]
+    fn resolve_config_rejects_a_spec_cap_below_the_shortest_command() {
+        let base = MemcachedServerConfig::default();
+        let spec = serde_json::json!({ "memcached": { "max_message_bytes": 0 } });
+        let outcome = resolve_config(&base, &spec);
+        assert!(
+            matches!(outcome, Err(ProximaError::Config(_))),
+            "a cap that rejects every command must not reach the codec"
+        );
     }
 }
