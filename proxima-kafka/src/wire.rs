@@ -1,8 +1,8 @@
 //! Kafka Produce/Fetch/Metadata/ApiVersions v0 request+response body codec.
 //!
 //! `proxima_protocols::kafka` lifts the wire ENVELOPE only — the 4-byte
-//! length prefix ([`proxima_protocols::kafka::parse_frame`]) and the
-//! request header ([`proxima_protocols::kafka::parse_request_header`]:
+//! length prefix (`parse_frame`) and the request header
+//! (`parse_request_header`:
 //! api_key/api_version/correlation_id/client_id). It stops at the header's
 //! body offset; nothing in proxima-protocols decodes what follows for a
 //! given `api_key`. This module is that missing body layer — v0 layouts
@@ -694,8 +694,8 @@ impl ResponseBody {
 /// Client-side decode — the inverse of [`ResponseBody::encode`]. `api_key`
 /// is the CLIENT's own record of what it asked for (a Kafka response
 /// header carries only `correlation_id`, never `api_key` — the caller
-/// must remember, exactly like [`crate::client::session::ClientSession`]
-/// does via its `pending` field).
+/// must remember, exactly like `client::session::ClientSession` does via
+/// its `pending` field).
 pub fn decode_response(api_key: i16, body: &[u8]) -> Result<ResponseBody, WireError> {
     let mut reader = Reader::new(body);
     match ApiKey::from_i16(api_key) {
@@ -746,8 +746,8 @@ fn decode_metadata_response(reader: &mut Reader<'_>) -> Result<MetadataResponse,
     Ok(MetadataResponse { brokers, topics })
 }
 
-/// Decode `body` (the bytes past
-/// [`proxima_protocols::kafka::parse_request_header`]'s body offset) per
+/// Decode `body` (the bytes past `proxima_protocols::kafka`'s
+/// `parse_request_header` body offset) per
 /// `api_key`/`api_version`. Only [`SUPPORTED_API_VERSIONS`] decode; anything
 /// else is [`WireError::UnsupportedVersion`] / [`WireError::UnknownApiKey`]
 /// so the driver can render a real `UNSUPPORTED_VERSION` reply instead of
