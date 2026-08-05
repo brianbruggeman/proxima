@@ -1,26 +1,35 @@
-//! proxima's own Redis/Valkey client facade.
+//! proxima's own Redis/Valkey facade — both halves of the connection.
 //!
 //! The sans-IO RESP2/RESP3 codec ([`Frame`], [`ParseError`], [`RespValue`],
 //! [`parse`], [`encode`], [`encode_command`]) and the RESP-over-`Pipe`
 //! contract ([`pipe_contract`]) live in [`proxima_protocols::redis`] — see
-//! its docs for the wire layer. This crate is the std client built on top:
-//! the async [`client::RedisClientUpstream`] Pipe and the blocking
-//! [`client::RedisClient`] driver, both driving the sans-IO
-//! [`client::ClientSession`] over a pluggable transport (prime, tokio,
-//! TLS-wrapped) — the same split pgwire uses between `proxima-pgwire-codec`
-//! and `proxima-pgwire`.
+//! its docs for the wire layer. Everything here is built on top of it, so
+//! the two crates split the way `proxima-protocols::pgwire_codec` and
+//! `proxima-pgwire` do.
 //!
-//! The `listen` feature (below) adds the server side: [`connection`]'s
-//! sans-IO-over-any-`futures::io`-stream driver, [`pipe::RedisConnectionPipe`]
-//! (the connection layer as a real `Pipe`), and
-//! [`any_protocol::RedisAnyProtocol`] — the `AnyProtocol` candidate that
-//! mounts redis into the open universal listener
-//! (`Listener::builder().accept("redis")`). There is no standalone
+//! Feature `client`: the async `client::RedisClientUpstream` Pipe and the
+//! blocking `client::RedisClient` driver, both driving the sans-IO
+//! `client::ClientSession` over a pluggable transport (prime, tokio,
+//! TLS-wrapped).
+//!
+//! Feature `listen`: the server side — `connection`'s
+//! sans-IO-over-any-`futures::io`-stream driver, `pipe::RedisConnectionPipe`
+//! (the connection layer as a real `Pipe`), and `any_protocol::RedisAnyProtocol`,
+//! the `AnyProtocol` candidate that mounts redis into the open universal
+//! listener (`Listener::builder().accept("redis")`). There is no standalone
 //! `RedisListenProtocol` bind+accept loop: redis's listen-side surface has
 //! always been an `AnyProtocol` candidate, driven by
 //! `proxima_http::any_listener::AnyListenProtocol`'s ONE bind+accept loop
 //! (real `ListenerCore`/`ConnAdmission` admission, graceful drain) —
 //! mirroring `proxima-pgwire`'s own `listen` feature shape.
+//!
+//! `--no-default-features` drops `std` and leaves only the RESP codec
+//! re-exports, so the bare tier links on a bare-metal target
+//! (`thumbv7m-none-eabi`); both `client` and `listen` imply `std`. The
+//! feature-gated names above are deliberately unlinked — an intra-doc link
+//! to them would break `cargo doc` on the bare tier, where they do not exist.
+
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "client")]
 pub mod client;
