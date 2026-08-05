@@ -2,7 +2,7 @@
 //!
 //! All types are `Copy` and carry enough context (tag byte, field name,
 //! lengths) to explain the failure from a log line alone. No allocation,
-//! no `std` — `std::error::Error` impls are feature-gated.
+//! no `std` — the `core::error::Error` impls hold at every tier.
 
 use core::fmt;
 
@@ -69,8 +69,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for ParseError {}
+impl core::error::Error for ParseError {}
 
 /// Failure while encoding a wire message into a caller-owned buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,5 +97,4 @@ impl fmt::Display for EncodeError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for EncodeError {}
+impl core::error::Error for EncodeError {}

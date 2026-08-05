@@ -186,8 +186,7 @@ impl core::fmt::Display for SessionError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for SessionError {}
+impl core::error::Error for SessionError {}
 
 /// Server-side PostgreSQL connection session FSM.
 #[derive(Debug, Clone)]
