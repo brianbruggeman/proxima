@@ -191,6 +191,14 @@ pub enum AeadSuite {
     #[cfg(feature = "aead-chacha20poly1305")]
     ChaCha20Poly1305,
     /// AES-256-GCM. Wins where AES-NI or ARM crypto extensions exist.
+    ///
+    /// One property is weaker than the other suite's and the difference is not
+    /// this crate's to close: `chacha20poly1305` is `ZeroizeOnDrop`, so its key
+    /// is wiped when a [`ChildSa`] is dropped, while `aes-gcm` 0.10 has no
+    /// such impl. Its `zeroize` feature is switched on here — it is off by
+    /// default and wipes the derived GHASH subkey at construction — but the
+    /// cipher key itself outlives the SA in whatever memory it sat in. A
+    /// deployment where that matters wants the ChaCha suite.
     #[cfg(feature = "aead-aes-gcm")]
     Aes256Gcm,
 }
@@ -208,6 +216,13 @@ impl AeadSuite {
 }
 
 /// The keyed cipher behind a direction.
+///
+/// An AES-256 key schedule plus its GHASH table is an order of magnitude
+/// larger than ChaCha's 32-byte key, so with both suites compiled the variants
+/// differ in size by design.
+// clippy's remedy is a Box, and there is no allocator here; the large variant
+// only exists in a build that asked for AES.
+#[allow(clippy::large_enum_variant)]
 enum DirectionCipher {
     #[cfg(feature = "aead-chacha20poly1305")]
     ChaCha(chacha20poly1305::ChaCha20Poly1305),
