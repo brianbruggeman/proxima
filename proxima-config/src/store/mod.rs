@@ -17,14 +17,10 @@
 //! is the alloc floor (`PipeRecord` / `ListenerRecord`), `store-std` adds
 //! `StateStore` itself.
 
-#[cfg(feature = "store")]
 use alloc::string::String;
-#[cfg(feature = "store")]
 use alloc::vec::Vec;
 
-#[cfg(feature = "store")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "store")]
 use serde_json::Value;
 
 #[cfg(feature = "store-std")]
@@ -52,7 +48,6 @@ pub struct StateStore {
     root: PathBuf,
 }
 
-#[cfg(feature = "store")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipeRecord {
     pub name: String,
@@ -62,7 +57,6 @@ pub struct PipeRecord {
     pub requires: Vec<String>,
 }
 
-#[cfg(feature = "store")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListenerRecord {
     pub name: String,
