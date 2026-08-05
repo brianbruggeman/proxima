@@ -210,7 +210,7 @@ fn main() {
     let mut forged = [0u8; 128];
     let forged_len = fresh_initiator.outbound().len();
     forged[..forged_len].copy_from_slice(fresh_initiator.outbound());
-    forged[18] ^= 0x01; // the role flag, which the oracle leaves unauthenticated
+    forged[19] ^= 0x01; // the role flag, which the oracle leaves unauthenticated
 
     match fresh_responder.step(&forged[..forged_len], None, now) {
         Err(CentauriError::AuthenticationFailed) => {
