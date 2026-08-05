@@ -1,12 +1,5 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::field_reassign_with_default,
-    clippy::type_complexity,
-    clippy::useless_vec,
-    clippy::needless_range_loop,
-    clippy::default_constructed_unit_structs
-)]
+// unwrap/expect are workspace-denied; tests are the sanctioned exception.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Integration tests for S1: durable WAL semantics on the spigot write
 //! terminal + `BinSource` read side.
 //!
@@ -28,7 +21,6 @@
 #![cfg(feature = "durable-wal")]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
 use proxima::recording::sink::RecordingSink;
@@ -91,7 +83,11 @@ async fn sync_returns_success_on_happy_path() {
     sink.append(make_event("second")).await.expect("append 2");
     sink.sync().await.expect("sync should succeed");
 
-    let data_meta = tokio::fs::metadata(&bin_path).await.expect("data exists");
+    // std::fs, not tokio::fs: `#[proxima::test]` drives this body on a prime
+    // shard, where there is no tokio reactor to serve tokio's file ops. The
+    // sink under test does its own off-core offload; this assertion is
+    // out-of-band inspection and belongs on the blocking API.
+    let data_meta = std::fs::metadata(&bin_path).expect("data exists");
     assert!(
         data_meta.len() > 0,
         "data file should have bytes after sync"
@@ -225,18 +221,19 @@ async fn crash_mid_frame_yields_eof_not_corrupted_event() {
         .len();
     assert_eq!(pre_crash_count, 3, "should have 3 events pre-crash");
 
-    let full_len = tokio::fs::metadata(&bin_path).await.expect("meta").len();
+    // std::fs for the same reason as above: staging the crash is out-of-band
+    // to the code under test, and there is no tokio reactor on a prime shard.
+    let full_len = std::fs::metadata(&bin_path).expect("meta").len();
     assert!(
         full_len > 8,
         "file should be big enough to truncate inside last frame"
     );
     let truncate_to = full_len - 2;
-    let file = tokio::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .open(&bin_path)
-        .await
         .expect("open for truncate");
-    file.set_len(truncate_to).await.expect("truncate");
+    file.set_len(truncate_to).expect("truncate");
     drop(file);
 
     let source_post = BinSource::new(&bin_path, prime());
@@ -281,22 +278,34 @@ async fn sync_can_be_called_repeatedly_without_data_loss() {
     assert_eq!(count, 3, "all 3 events should survive repeated syncs");
 }
 
+// a sync per append, a hundred times over: every event must still be exactly
+// once in the log, in order. (The predecessor of this test asserted a 5s wall
+// clock instead — a machine-dependent number that pinned no contract.)
 #[proxima::test]
-async fn sync_completes_within_reasonable_time() {
+async fn sync_after_every_append_keeps_the_log_exact() {
     let dir = TempDir::new().expect("tempdir");
-    let bin_path = dir.path().join("sync_throughput.bin");
+    let bin_path = dir.path().join("sync_per_append.bin");
 
     let sink = durable_sink(&bin_path);
-    let started = std::time::Instant::now();
+    let mut written = Vec::new();
     for index in 0..100 {
-        sink.append(make_event(&format!("throughput-{index}")))
-            .await
-            .expect("append");
+        let event = make_event(&format!("throughput-{index}"));
+        written.push(event.id());
+        sink.append(event).await.expect("append");
         sink.sync().await.expect("sync");
     }
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "100 sync calls should complete in <5s, took {elapsed:?}"
+    drop(sink);
+
+    let source = BinSource::new(&bin_path, prime());
+    let read_back: Vec<InteractionId> = source
+        .events_from_offset(0)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|result| result.expect("event").1.id())
+        .collect();
+    assert_eq!(
+        read_back, written,
+        "one sync per append must leave every event exactly once, in order"
     );
 }
