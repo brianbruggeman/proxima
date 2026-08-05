@@ -16,9 +16,9 @@
 //!
 //! Positive-match probe: unlike RESP (every command is sigil-prefixed with
 //! `*`), memcached's text protocol has no framing sigil at all — a command
-//! is just its lowercase verb token. [`probe_verb`] matches the accumulated
+//! is just its lowercase verb token. `probe_verb` matches the accumulated
 //! prefix against the fixed, closed set of known verbs
-//! ([`KNOWN_VERBS`]), requiring the verb be immediately followed by a
+//! (`KNOWN_VERBS`), requiring the verb be immediately followed by a
 //! space (has-argument commands) or `\r` (the zero-argument commands:
 //! `version`, `quit`, bare `stats`) — this rules out `getx` false-matching
 //! the `get` verb. Real memcached clients only ever send lowercase verbs,

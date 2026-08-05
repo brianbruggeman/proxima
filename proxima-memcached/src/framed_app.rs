@@ -153,7 +153,7 @@ async fn dispatch(handler: &MemcachedPipeHandle, request: MemcachedRequest) -> M
 /// driver did — `quit` closes rather than being answered with an error
 /// (it never reaches the wire either way), and a `noreply`-flagged
 /// command that gets shed stays silent, matching the same command's own
-/// [`dispatch`] outcome had admission let it through.
+/// `dispatch` outcome had admission let it through.
 #[must_use]
 pub fn shed_reply(
     reason: proxima_listen::admission::ShedReason,

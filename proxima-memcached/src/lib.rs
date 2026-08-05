@@ -1,21 +1,21 @@
-//! proxima's own memcached client facade.
+//! proxima's own memcached facade — both halves of the connection.
 //!
 //! The sans-IO memcached text-protocol codec ([`Command`], [`ParseError`],
-//! [`parse_command`], the [`Connection`] FSM, the [`Reply`] model, and the
-//! memcached-over-`Pipe` contract [`MemcachedRequest`]) lives in
+//! [`parse_command`], the `Connection` FSM, the [`Reply`] model, and the
+//! memcached-over-`Pipe` contract `MemcachedRequest`) lives in
 //! [`proxima_protocols::memcached`] — see its docs for the wire layer.
-//! This crate is the std client built on top: the async
-//! [`client::MemcachedClientUpstream`] Pipe and the blocking
-//! [`client::MemcachedClient`] driver, both driving the sans-IO
-//! [`client::ClientSession`] over a pluggable transport (prime, tokio,
-//! TLS-wrapped) — the same split `proxima-redis` uses between
-//! `proxima-protocols::redis` and its own client half.
+//! Everything here is built on top of it, so the two crates split the way
+//! `proxima_protocols::redis` and `proxima-redis` do.
 //!
-//! The `listen` feature (below) adds the server side:
-//! [`framed_app::MemcachedFramedApp`] (the business-handler pipe wired as
-//! `proxima_listen::any::FramedAny`'s `App`) and
-//! [`any_protocol::MemcachedAnyProtocol`] — the `AnyProtocol` candidate
-//! that mounts memcached into the open universal listener
+//! Feature `client`: the async `client::MemcachedClientUpstream` Pipe and
+//! the blocking `client::MemcachedClient` driver, both driving the sans-IO
+//! `client::ClientSession` over a pluggable transport (prime, tokio,
+//! TLS-wrapped).
+//!
+//! Feature `listen`: the server side — `framed_app::MemcachedFramedApp`
+//! (the business-handler pipe wired as `proxima_listen::any::FramedAny`'s
+//! `App`) and `any_protocol::MemcachedAnyProtocol`, the `AnyProtocol`
+//! candidate that mounts memcached into the open universal listener
 //! (`Listener::builder().accept("memcached")`) by building a `FramedAny`
 //! internally. There is no standalone `MemcachedListenProtocol`
 //! bind+accept loop: memcached's listen-side surface has always been an
@@ -23,19 +23,21 @@
 //! `proxima_http::any_listener::AnyListenProtocol`'s ONE bind+accept loop
 //! (real `ListenerCore`/`ConnAdmission` admission, graceful drain).
 //!
-//! There is no bespoke per-connection I/O driver here anymore (no
-//! `connection::serve_connection`/`main_loop`, no
-//! `pipe::MemcachedConnectionPipe` CONNECT-and-upgrade indirection) —
-//! `proxima_listen::any::FramedAny` is the ONE generic stateless
-//! `AnyProtocol` driver every stateless request/reply wire shares; see
-//! `framed_app`'s module doc for how memcached's `noreply`/`quit`/
-//! protocol-violation semantics map onto its `AsFrame` seam.
-//!
-//! `FramedAny`'s `Shed` closure carries the shed frame itself
+//! `FramedAny` is the ONE generic stateless `AnyProtocol` driver every
+//! stateless request/reply wire shares; see `framed_app`'s module doc for
+//! how memcached's `noreply`/`quit`/protocol-violation semantics map onto
+//! its `AsFrame` seam. Its `Shed` closure carries the shed frame itself
 //! (`Fn(ShedReason, &App::In) -> App::Out`), so `framed_app::shed_reply`
-//! matches the deleted driver's admission behavior exactly: a
-//! `noreply`-flagged command that gets admission-shed stays silent, and
-//! `quit` closes rather than answering a `SERVER_ERROR`.
+//! can keep admission per-command: a `noreply`-flagged command that gets
+//! shed stays silent, and `quit` closes rather than answering a
+//! `SERVER_ERROR`.
+//!
+//! `--no-default-features` drops `std` and leaves only the codec
+//! re-exports, so the bare tier links on a bare-metal target
+//! (`thumbv7m-none-eabi`); both `client` and `listen` imply `std`. The
+//! feature-gated names above are deliberately unlinked — an intra-doc link
+//! to them would break `cargo doc` on the bare tier, where they do not
+//! exist.
 //!
 //! ## Scope
 //!
