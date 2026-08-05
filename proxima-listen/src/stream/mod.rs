@@ -13,8 +13,8 @@ use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::{Stream, StreamExt};
+use proxima_telemetry::{debug, warn};
 use serde_json::Value;
-use tracing::{debug, warn};
 
 use crate::{ListenProtocol, ServeContext};
 use proxima_core::ProximaError;
@@ -229,7 +229,12 @@ fn spawn_handler<C: StreamConnection>(
     }
 }
 
-async fn handle_connection<C: StreamConnection>(
+/// Frame one accepted connection as a single `Request` whose body streams
+/// the read half, then stream the `Response` body back into the write half.
+/// The ONE copy: `default_listener`'s admission-tracking accept loop drives
+/// the identical exchange and calls straight through to this (the fold left
+/// two byte-identical copies behind).
+pub(super) async fn handle_connection<C: StreamConnection>(
     conn: C,
     dispatch: PipeHandle,
     method: String,
@@ -257,15 +262,14 @@ async fn handle_connection<C: StreamConnection>(
         let bytes = chunk.map_err(|err| {
             ProximaError::Io(std::io::Error::other(format!("response body: {err}")))
         })?;
-        write_half
-            .write_all(&bytes)
-            .await
-            .map_err(|err| ProximaError::Io(std::io::Error::other(format!("write: {err}"))))?;
+        write_half.write_all(&bytes).await.map_err(|err| {
+            ProximaError::Io(std::io::Error::other(format!("stream write: {err}")))
+        })?;
     }
     write_half
         .close()
         .await
-        .map_err(|err| ProximaError::Io(std::io::Error::other(format!("close: {err}"))))?;
+        .map_err(|err| ProximaError::Io(std::io::Error::other(format!("stream close: {err}"))))?;
     cancel_guard.disarm();
     Ok(())
 }

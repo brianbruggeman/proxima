@@ -9,27 +9,20 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use futures::FutureExt;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
-use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::StreamExt;
+use proxima_telemetry::{debug, warn};
 use serde_json::Value;
-use tracing::{debug, warn};
 
-use super::reader_to_byte_stream;
+use super::handle_connection;
 use crate::{
     Admission, ConnectionHandle, DispatchPolicy, DrainOutcome, ListenProtocol, ListenerCore,
     ServeContext,
 };
 use proxima_core::ProximaError;
-use proxima_primitives::pipe::Method;
-use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::pipe::body::RequestStream;
 use proxima_primitives::pipe::handler::PipeHandle;
-use proxima_primitives::pipe::header_list::HeaderList;
-use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::stream::StreamConnection;
 use proxima_runtime::Runtime;
 
@@ -239,51 +232,15 @@ fn spawn_handler<C: StreamConnection>(
     }
 }
 
-async fn handle_connection<C: StreamConnection>(
-    conn: C,
-    dispatch: PipeHandle,
-    method: String,
-    path: String,
-    chunk_bytes: usize,
-) -> Result<(), ProximaError> {
-    let (read_half, mut write_half) = conn.split();
-    let context = RequestContext::default();
-    let cancel = context.child_signal();
-    let cancel_guard = cancel.clone().guard();
-    let stream = RequestStream::new(reader_to_byte_stream(read_half, chunk_bytes));
-    let request = Request {
-        method: Method::from(method.as_str()),
-        path: Bytes::from(path),
-        query: HeaderList::new(),
-        metadata: HeaderList::new(),
-        payload: Bytes::new(),
-        stream: Some(stream),
-        context: context.with_cancel(cancel),
-    };
-    let response = SendPipe::call(&dispatch, request).await?;
-    let mut response_stream = response.into_chunk_stream();
-    while let Some(chunk) = response_stream.next().await {
-        let bytes = chunk.map_err(|err| {
-            ProximaError::Io(std::io::Error::other(format!("response body: {err}")))
-        })?;
-        write_half.write_all(&bytes).await.map_err(|err| {
-            ProximaError::Io(std::io::Error::other(format!("stream write: {err}")))
-        })?;
-    }
-    write_half
-        .close()
-        .await
-        .map_err(|err| ProximaError::Io(std::io::Error::other(format!("stream close: {err}"))))?;
-    cancel_guard.disarm();
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use proxima_primitives::pipe::SendPipe;
     use proxima_primitives::pipe::handler::into_handle;
     use proxima_primitives::pipe::header_list::HeaderList;
+    use proxima_primitives::pipe::request::Request;
     use proxima_primitives::pipe::request::Response as ProximaResponse;
     use proxima_primitives::pipe::telemetry_surface::NoopTelemetry;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
