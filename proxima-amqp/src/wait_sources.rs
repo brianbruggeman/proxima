@@ -57,14 +57,7 @@ use futures::stream::Stream;
 use proxima_core::markers::DropSafe;
 use proxima_listen::WireEvent;
 use proxima_primitives::pipe::{Exhausted, UnpinPipe};
-use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
-
-/// `parking_lot::Mutex` never poisons, so this is a plain passthrough — kept
-/// as a named helper so every call site reads `lock(mutex)` uniformly rather
-/// than `mutex.lock()` in some places and a poison-recovery dance in others.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock()
-}
+use proxima_primitives::sync::blocking::Mutex;
 
 /// One of the three sources `connection.rs`'s outer wait races: the socket
 /// read half, this connection's consumer push channel (every registered
@@ -139,8 +132,8 @@ impl<R: AsyncRead + Unpin> Future for AmqpConnCall<'_, R> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
             AmqpConnCall::Read { read_half, scratch } => {
-                let mut read_half = lock(read_half);
-                let mut scratch = lock(scratch);
+                let mut read_half = read_half.lock();
+                let mut scratch = scratch.lock();
                 match Pin::new(&mut *read_half).poll_read(cx, &mut scratch) {
                     Poll::Ready(Ok(0)) => Poll::Ready(Ok(WireEvent::Stop)),
                     Poll::Ready(Ok(count)) => Poll::Ready(Ok(WireEvent::Read(
@@ -151,7 +144,7 @@ impl<R: AsyncRead + Unpin> Future for AmqpConnCall<'_, R> {
                 }
             }
             AmqpConnCall::Push { push_rx } => {
-                let mut push_rx = lock(push_rx);
+                let mut push_rx = push_rx.lock();
                 match Pin::new(&mut *push_rx).poll_next(cx) {
                     Poll::Ready(Some(bytes)) => Poll::Ready(Ok(WireEvent::Push(bytes))),
                     // the sender half lives on this same connection's
@@ -167,7 +160,7 @@ impl<R: AsyncRead + Unpin> Future for AmqpConnCall<'_, R> {
                 }
             }
             AmqpConnCall::Shutdown { receiver } => {
-                let mut receiver = lock(receiver);
+                let mut receiver = receiver.lock();
                 match receiver.as_mut() {
                     None => Poll::Ready(Err(Exhausted)),
                     Some(inner) => match Pin::new(inner).poll(cx) {

@@ -180,6 +180,8 @@ enum Outcome {
 /// [`proxima_listen::wait_for_wire_event`], the shared outer-wait driver
 /// (see `crate::wait_sources`'s doc for why the inner decode+dispatch loop
 /// stays sequential and outside that race).
+// bundling these into a context struct would buy a caller nothing (one call
+// site, all borrows already distinct) — a relocation, not a type.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<S>(
     stream: S,
@@ -235,6 +237,8 @@ where
     outcome
 }
 
+// same reason as `serve_connection`: one call site, and the split exists
+// only so `consumers.cancel_all` runs on every exit path.
 #[allow(clippy::too_many_arguments)]
 async fn main_loop<S>(
     write_half: &mut futures::io::WriteHalf<S>,
@@ -371,6 +375,7 @@ where
 /// method that DOES need the async business handler, `basic.publish`,
 /// never reaches here — the FSM diverts it straight to
 /// [`crate::fsm::Advanced::Publish`], dispatched by [`dispatch_publish`].
+// same reason as `serve_connection`: one call site, distinct borrows.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_method(
     channel: u16,
@@ -602,6 +607,8 @@ fn dispatch_handshake(
     }
 }
 
+// the six leading arguments are one destructured `Advanced::Publish` — a
+// struct here would only re-assemble what `main_loop` just took apart.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_publish(
     exchange: Vec<u8>,

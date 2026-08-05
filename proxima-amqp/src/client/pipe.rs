@@ -65,6 +65,7 @@ impl<U: StreamUpstream> AmqpClientUpstream<U> {
     /// let client = AmqpClientUpstream::new(transport, AmqpClientConfig::default());
     /// # let _ = client;
     /// ```
+    #[must_use]
     pub fn new(upstream: U, config: AmqpClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),
@@ -270,6 +271,12 @@ async fn delivery_step<C: StreamConnection>(
     }
 }
 
+/// A transport failure keeps its `io::ErrorKind` (a caller retrying on
+/// `ConnectionRefused` needs it); everything else is protocol detail with no
+/// structured counterpart, so it renders into the message.
 fn client_error_to_proxima(error: ClientError) -> ProximaError {
-    ProximaError::Upstream(format!("amqp client: {error}"))
+    match error {
+        ClientError::Io(io) => ProximaError::Io(io),
+        other => ProximaError::Upstream(format!("amqp client: {other}")),
+    }
 }
