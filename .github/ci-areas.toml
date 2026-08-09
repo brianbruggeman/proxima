@@ -62,6 +62,24 @@ packages = [
     # dependency on it; named directly because it now carries its own
     # thumbv7m cliff cells, which must not depend on a sibling for coverage.
     "proxima-auth",
+    # `packages` are dependency-closure ROOTS, so a leaf that DEPENDS on a root
+    # is not reached by it. Each crate below owns a cell in a script this area
+    # runs, yet editing it left `nostd=false` and the whole workflow skipped —
+    # a gate that cannot be triggered proves nothing. Verified with the
+    # detector itself: `python3 scripts/ci-affected.py --changed
+    # proxima-redis/src/lib.rs` printed `nostd=false` before this block.
+    # thumbv7m-cliff-gate.sh + tokio-free-floor.sh bare-tier cells:
+    "proxima-redis",
+    "proxima-dns",
+    "proxima-amqp",
+    "proxima-kafka",
+    "proxima-mqtt",
+    "proxima-memcached",
+    # quic-h3-gate.sh (quinn-free facade, http3 cells) + tier-lift-gate.sh:
+    "proxima-http",
+    "proxima-quic",
+    # proxima-test-gate.sh runs the macro smoke through the umbrella itself.
+    "proxima",
 ]
 paths = [
     "scripts/nostd-gate.sh",
