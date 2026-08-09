@@ -104,6 +104,24 @@ async fn main() -> Result<(), ProximaError> {
          the SAME h1+h2 combiner, not a spec key (see tests/e2e/listener_client_interop.rs for \
          the full handshake proof)"
     );
+
+    // The client's own `.tls()` (`ClientSecurityExt`) is the zero-arg twin —
+    // no cert material, because ALPN negotiation (not the client) does the
+    // actual work. `.build()` is lazy: it only accumulates the `transport:
+    // "tls"` spec key, never touches a socket, so this proves the axis
+    // composes without needing the client to trust `server_2`'s self-signed
+    // cert (a real `.send()` against it is out of scope here — see
+    // `tests/e2e/listener_client_interop.rs` for a real handshake, done with
+    // a raw `rustls` connector that accepts the test cert on purpose).
+    Client::builder()
+        .https(format!("https://{bind_2}"))
+        .tls()
+        .build()?;
+    println!(
+        "§2: .https(url).tls() client builds against {bind_2} — ClientSecurityExt::tls() only \
+         writes the transport: \"tls\" spec key; the assertion is checked on the first .send(), \
+         not here"
+    );
     server_2.stop();
 
     // ── §3: `.http().quic()` IS h3 — resolves the native h3 listener ────────
