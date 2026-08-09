@@ -175,13 +175,21 @@ fi
 # the transform; raised to 44 on 2026-08-09 after 00-foundations.md's
 # citations were resynced to current file:line and a stale `HalveError`
 # doctest snippet was given back the `#[derive(Debug, ...)]` its `Pipe::Err`
-# bound requires — 44 unchanged across two consecutive runs). A regression
-# — any currently-compiling block citing an API that gets renamed or
-# removed — drops the count below the floor and fails the build; growing
-# the floor by fixing a currently-failing block (prelude gap, tutorial
-# content, or the awk transform's own reach) is always welcome and never
-# blocked by this check.
-FLOOR=44
+# bound requires; raised to 47 later the same day after 01-ergonomics.md's
+# own citation resync, which also fixed two real bugs in this transform's
+# `is_bare_self_fn` detector — the container regex missed a generic `impl<T>
+# ..` header (no space before `<`) and a generic `fn foo<A, B>(&self, ..)`
+# signature (generics between the name and the paren) — that were silently
+# mis-marking 01-ergonomics.md's own `App::mount` and `Timer<ClockImpl>`
+# excerpts, plus added the `,compile_fail`/explicit-`,ignore` fence-attribute
+# passthrough a tutorial author can now reach for instead of an unexplained
+# FAILED block — 47 unchanged across two consecutive runs). A regression —
+# any currently-compiling block citing an API that gets renamed or removed —
+# drops the count below the floor and fails the build; growing the floor by
+# fixing a currently-failing block (prelude gap, tutorial content, or the
+# awk transform's own reach) is always welcome and never blocked by this
+# check.
+FLOOR=47
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
