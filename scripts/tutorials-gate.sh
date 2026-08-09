@@ -342,7 +342,34 @@ fi
 # `proxima-primitives/src/pipe/mod.rs:184`→`200`; `no-std/README.md:37-45`
 # and `:47-52`, which had drifted onto an unrelated paragraph, →`:32-36`
 # and `:64-66`).
-FLOOR=87
+# Raised to 90 after build-a-caching-reverse-proxy.md's own rewrite: all 4
+# of its original blocks were previously FAILED — the tutorial never showed
+# `CachedOriginDispatch`'s own struct definition at all (only its field-less
+# construction and its `impl SendPipe`), so no block could ever resolve the
+# type; `KvCache`/`KvCaps`/`KvUpstream`/`UpstreamRef`/`Fallthrough`/
+# `Selection`/`KvHandle`/`WriteBack`/`SynthUpstream` were also missing from
+# `tutorial_gate_prelude` entirely (a real gap, not a tutorial-content bug —
+# `examples/cache/main.rs` imports them from `proxima::{..}` /
+# `proxima::upstreams::KvUpstream` / `proxima::selection::Selection` the same
+# way); and the origin-upstream line was a bare comment
+# (`into_handle(/* ForwardPipe { client } | SynthUpstream::new(...) */)`),
+# an `into_handle` call with zero real arguments. Fixed by adding the 9
+# missing re-exports to `src/tutorial_doctests.rs`, replacing the comment
+# with a real `SynthUpstream::new(..)` call (the real example wraps it one
+# layer deeper in a call-counting `CountingOrigin` purely so its own
+# assertions can prove the origin was hit exactly once —
+# `cache/main.rs:190-209` — elided here as instrumentation, not concept),
+# and restructuring into 3 self-contained blocks: two upstreams; the
+# `CachedOriginDispatch` struct AND its `impl SendPipe` merged into ONE
+# block (splitting them across two blocks compiled each individually but
+# broke the chain — the impl block, needing the struct from a separate
+# chunk, could never pass pass 1 standalone itself, so it could never donate
+# both the struct AND the impl forward to the final wire-up block, which
+# needs both to resolve `into_handle(dispatch): PipeHandle` — measured
+# directly, E0277 "the trait bound `CachedOriginDispatch: SendPipe` is not
+# satisfied" even though the impl block itself showed `... ok` two blocks
+# earlier); and the `Fallthrough` construction + `WriteBack::single` wire-up.
+FLOOR=90
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1

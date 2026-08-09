@@ -37,6 +37,9 @@ pub mod tutorial_gate_prelude {
     pub use crate::listen::admission::{BlacklistConfig, ConnAdmission};
     pub use crate::listen::any::AnyHandler;
     pub use crate::prelude::*;
+    pub use crate::selection::Selection;
+    pub use crate::upstreams::KvUpstream;
+    pub use crate::{Fallthrough, KvCache, KvCaps, KvHandle, SynthUpstream, UpstreamRef, WriteBack};
     pub use crate::{PeerInfo, StreamConnection};
     #[cfg(feature = "runtime-tokio")]
     pub use crate::runtime::TokioPerCoreRuntime;
