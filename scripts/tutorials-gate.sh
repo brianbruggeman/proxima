@@ -324,7 +324,25 @@ fi
 # block itself needs §3's `LiteralUdpProtocol` as cross-block context and so
 # never compiles standalone in pass 1, meaning it can never be fed forward
 # as pass 2 context to §5's block).
-FLOOR=84
+# Raised to 87 after build-a-bare-metal-pipe.md's own rewrite: 2 of its 3
+# blocks were previously FAILED — the `FrameStore` excerpt cited `StoreError`,
+# `RingSink`, `RING_SLOTS`, and `RING_SLOT_BYTES` with none defined in the
+# block, and the build-time `mod config { include!(...) }` excerpt can never
+# compile inside this harness (its `include!` resolves `OUT_DIR` relative to
+# `proxima-example-no-std`'s own build, which does not run here) — fixed by
+# making the pipe excerpt self-contained (its real imports, `StoreError`
+# inline, the two constants shown as the literal values `no-std.toml` bakes)
+# and retagging the config excerpt `text` instead of leaving it silently
+# FAILED. The rewrite also added 2 new passing blocks teaching
+# `#[proxima_macros::piped]`'s auto-`Clone` holding at the same no-alloc
+# floor (`ring_capacity`, `no-std/src/lib.rs:89-92`, previously untaught
+# despite being tested in the answer key itself), and fixed 3 stale
+# `file:line` citations drifted by the crate doc-comment and README both
+# growing since this page was first written (`no-std/src/lib.rs:15`→`19`;
+# `proxima-primitives/src/pipe/mod.rs:184`→`200`; `no-std/README.md:37-45`
+# and `:47-52`, which had drifted onto an unrelated paragraph, →`:32-36`
+# and `:64-66`).
+FLOOR=87
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
