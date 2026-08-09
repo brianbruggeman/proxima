@@ -34,7 +34,7 @@ So we start with one pipe, and we do not touch networks or servers until the bui
 
 ## 2. Your first pipe
 
-In Rust, a pipe is any type that implements the `Pipe` trait. Here is its definition, copied verbatim from `proxima-primitives/src/pipe/primitives.rs:89–99` (its doc comments are trimmed here for space; the file has the full rationale):
+In Rust, a pipe is any type that implements the `Pipe` trait. Here is its definition, copied verbatim from `proxima-primitives/src/pipe/primitives.rs:91–101` (its doc comments are trimmed here for space; the file has the full rationale):
 
 ```rust
 pub trait Pipe {
@@ -50,7 +50,7 @@ Three names describe the station: `In` is what comes in, `Out` is what goes out,
 
 (There is a way to chain two pipes together, `and_then` — but it is not a second method on this trait; it lives on a separate sugar trait every pipe gets for free. That is section 5. Ignore it for now.)
 
-Here is a complete, real pipe — `Double`, copied verbatim from the doctest at `proxima-primitives/src/pipe/primitives.rs:46–54` (this exact block is compiled and run by `cargo test`, so it cannot describe a trait that no longer exists):
+Here is a complete, real pipe — `Double`, copied verbatim from the doctest at `proxima-primitives/src/pipe/primitives.rs:48–56` (this exact block is compiled and run by `cargo test`, so it cannot describe a trait that no longer exists):
 
 ```rust
 struct Double;
@@ -70,7 +70,7 @@ That is the entire building block. There is no shortcut and no macro required �
 
 ## 3. The four shapes a pipe can take
 
-You do not learn four different tools. You choose what `In` and `Out` are (where `()` is Rust's "nothing" value), and the same trait becomes four familiar things. This table is copied verbatim from `Pipe`'s doc comment, `proxima-primitives/src/pipe/primitives.rs:30–35`:
+You do not learn four different tools. You choose what `In` and `Out` are (where `()` is Rust's "nothing" value), and the same trait becomes four familiar things. This table is copied verbatim from `Pipe`'s doc comment, `proxima-primitives/src/pipe/primitives.rs:32–37`:
 
 | form      | shape       | what it is                                |
 |-----------|-------------|--------------------------------------------|
@@ -79,7 +79,7 @@ You do not learn four different tools. You choose what `In` and `Out` are (where
 | sink      | `In -> ()`  | takes something, produces nothing         |
 | observe   | `In -> In`  | hands back its input; acts on the side    |
 
-`Double` above is a **transform**. Here are the other three, also copied verbatim from the same doctest (`primitives.rs:56–87`):
+`Double` above is a **transform**. Here are the other three, also copied verbatim from the same doctest (`primitives.rs:58–89`):
 
 ```rust
 // source: () -> Out. Nothing goes in.
@@ -118,7 +118,7 @@ impl Pipe for Echo {
 
 Four roles, one trait, no new API — you just chose the types.
 
-To see this run as a real program, `examples/transform/main.rs` builds the same four shapes under different names (`Counter` = source, `Double` = transform, `Echo` = observe, `Print` = sink) and chains them in a loop. Its source form is worth reading because it shows a pipe holding its own state between calls — `Counter` uses a `Cell<u64>` (the standard library's way to mutate a value through a shared `&self`, since `call`'s signature only ever gives you `&self`, never `&mut self`) (`examples/transform/main.rs:22–38`):
+To see this run as a real program, `examples/transform/main.rs` builds the same four shapes under different names (`Counter` = source, `Double` = transform, `Echo` = observe, `Print` = sink) and chains them in a loop. Its source form is worth reading because it shows a pipe holding its own state between calls — `Counter` uses a `Cell<u64>` (the standard library's way to mutate a value through a shared `&self`, since `call`'s signature only ever gives you `&self`, never `&mut self`) (`examples/transform/main.rs:24–38`):
 
 ```rust
 struct Counter {
@@ -171,7 +171,7 @@ Use a real error type when a pipe *can* fail. Inside `call` you return failures 
 
 ## 5. Chain two pipes: `and_then`
 
-Here is the first way to combine pipes, and the reason "everything is a pipe" pays off. If one pipe's output is another pipe's input, you can run them back to back. `.and_then()` is not a method on `Pipe` itself — it lives on a small, separate *extension* trait, `PipeExt` (`proxima-primitives/src/pipe/ext.rs:44–53`), that is blanket-implemented for every `Pipe`:
+Here is the first way to combine pipes, and the reason "everything is a pipe" pays off. If one pipe's output is another pipe's input, you can run them back to back. `.and_then()` is not a method on `Pipe` itself — it lives on a small, separate *extension* trait, `PipeExt` (`proxima-primitives/src/pipe/ext.rs:45–54`), that is blanket-implemented for every `Pipe`:
 
 ```rust
 pub trait PipeExt: Pipe + Sized {
@@ -188,7 +188,7 @@ pub trait PipeExt: Pipe + Sized {
 impl<P: Pipe> PipeExt for P {}
 ```
 
-**A heads-up if you read older proxima code or docs:** `and_then` used to be a *default* method declared directly on `Pipe` itself (`Self: Sized` in its own `where` clause, so every `Pipe` got it automatically). It moved to this separate `PipeExt` trait — the module's own doc comment explains why (`ext.rs:1–15`): `Pipe`'s job is the minimal contract every implementor must satisfy (and `#[proxima::piped]`, section 7, generates that contract from a plain function); `.and_then()`/`.filter()`/`.fanout()`/`.fanin()` are fluent sugar over it, wanted at *every* call site but never load-bearing — nothing gates on whether a type has them. Separating "the contract" from "the sugar over the contract" means the sugar can change (new combinator methods, better ergonomics) without touching the trait every pipe author actually implements. Since every pipe already implements the root `Pipe` (the other three tiers are additive, never a replacement — section 6), one blanket `impl<P: Pipe> PipeExt for P {}` reaches all of them, and there is no second trait competing for the same method names. If you see `and_then` described as living directly on `Pipe`, that description is stale; `PipeExt` is where it lives now, everywhere in this codebase.
+**A heads-up if you read older proxima code or docs:** `and_then` used to be a *default* method declared directly on `Pipe` itself (`Self: Sized` in its own `where` clause, so every `Pipe` got it automatically). It moved to this separate `PipeExt` trait — the module's own doc comment explains why (`ext.rs:1–16`): `Pipe`'s job is the minimal contract every implementor must satisfy (and `#[proxima::piped]`, section 7, generates that contract from a plain function); `.and_then()`/`.filter()`/`.fanout()`/`.fanin()` are fluent sugar over it, wanted at *every* call site but never load-bearing — nothing gates on whether a type has them. Separating "the contract" from "the sugar over the contract" means the sugar can change (new combinator methods, better ergonomics) without touching the trait every pipe author actually implements. Since every pipe already implements the root `Pipe` (the other three tiers are additive, never a replacement — section 6), one blanket `impl<P: Pipe> PipeExt for P {}` reaches all of them, and there is no second trait competing for the same method names. If you see `and_then` described as living directly on `Pipe`, that description is stale; `PipeExt` is where it lives now, everywhere in this codebase.
 
 `Self: Sized` (now on `PipeExt`'s own supertrait bound, `PipeExt: Pipe + Sized`, rather than on `and_then` itself) excludes the rare case where `Self` is an unsized type like `dyn Pipe` — every ordinary `struct` you write satisfies it automatically, so you will not think about this bound again. You call `and_then` like this: `first.and_then(second)` runs `first`, then feeds its output into `second`. Two rules make it type-check:
 
@@ -219,9 +219,12 @@ where
 
 Because `AndThen` is itself a `Pipe`, you can call `.and_then()` on it again — chains nest without limit: `a.and_then(b).and_then(c)`.
 
-Here is a real, fallible chain, from the crate's own test suite (`primitives.rs:476–519`). `Increment` can overflow; `Halve` rejects odd numbers with its own, different error type, but absorbs `Increment`'s error via `From`:
+Here is a real, fallible chain, from the crate's own test suite (`primitives.rs:461–507`). `Increment` can overflow; `Halve` rejects odd numbers with its own, different error type, but absorbs `Increment`'s error via `From`:
 
 ```rust
+#[derive(Debug, PartialEq, Eq)]
+struct Overflow;
+
 struct Increment;
 impl Pipe for Increment {
     type In = u64;
@@ -232,6 +235,7 @@ impl Pipe for Increment {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum HalveError {
     Odd,
     Upstream(Overflow),
@@ -253,7 +257,7 @@ impl Pipe for Halve {
 }
 ```
 
-And the actual chain, from the same file's test module (`primitives.rs:599–604`):
+And the actual chain, from the same file's test module (`primitives.rs:587–590`):
 
 ```rust
 // 5 -> increment -> 6 -> halve -> 3. Both stages succeed.
@@ -264,7 +268,7 @@ assert_eq!(out, 3);
 
 That `From<Overflow> for HalveError` impl is *why* `?` works inside `AndThen::call`: it is what lets `self.first.call(input).await?` convert an `Overflow` into a `HalveError` automatically. This is the composition law of the whole algebra: error types absorb their upstream's errors via `From`, so a failure anywhere in a long chain always surfaces as one well-typed error at the end.
 
-The chain also genuinely stops on the first failure — it does not run the second stage "just in case." A test proves it by recording whether the second stage ever ran (`primitives.rs:696–708`):
+The chain also genuinely stops on the first failure — it does not run the second stage "just in case." A test proves it by recording whether the second stage ever ran (`primitives.rs:684–696`):
 
 ```rust
 #[test]
@@ -295,11 +299,11 @@ So far every pipe has implemented plain `Pipe`. But proxima actually defines **f
 - **`UnpinPipe`** — adds `Unpin` on the returned future, meaning a caller can poll it in place (`Pin::new(&mut future).poll(cx)`) without `unsafe`, `Box`, or heap allocation. An ordinary `async fn` body is *not* `Unpin` (the compiler-generated state machine can reference itself internally), so reaching this tier means hand-writing the future as a plain `poll` struct instead.
 - **`UnpinSendPipe`** — both extra promises at once: `Send` and `Unpin`.
 
-Here is why proxima writes these as four *separate*, standalone traits instead of one `Pipe` trait with optional bounds. `Pipe::call` returns `impl Future<...>` — this is called "return-position impl Trait in traits," or RPITIT. On today's stable Rust, there is no way to write a blanket impl like `impl<P: Pipe + Send> SendPipe for P` — doing so would require *bounding the future that `P::call` returns*, which needs a Rust feature called return-type notation (RTN) that is still unstable (tracked as [rust#109417](https://github.com/rust-lang/rust/issues/109417)). So each additive promise costs a full, separate copy of the trait, hand-written. `proxima-primitives/src/pipe/primitives.rs` says this plainly in its own doc comments (lines 118–123, on `SendPipe`):
+Here is why proxima writes these as four *separate*, standalone traits instead of one `Pipe` trait with optional bounds. `Pipe::call` returns `impl Future<...>` — this is called "return-position impl Trait in traits," or RPITIT. On today's stable Rust, there is no way to write a blanket impl like `impl<P: Pipe + Send> SendPipe for P` — doing so would require *bounding the future that `P::call` returns*, which needs a Rust feature called return-type notation (RTN) that is still unstable (tracked as [rust#109417](https://github.com/rust-lang/rust/issues/109417)). So each additive promise costs a full, separate copy of the trait, hand-written. `proxima-primitives/src/pipe/primitives.rs` says this plainly in its own doc comments (lines 108–113, on `SendPipe`):
 
 > There is no blanket bridge from `Pipe`, and there cannot be one: writing `impl<P: Pipe + Send> SendPipe for P` requires bounding `P::call`'s returned future — a bound on an RPITIT return type, i.e. return-type notation, which is unstable (rust#109417). So each additive constraint costs a full standalone copy of the contract. When RTN stabilises, every tier below collapses back into `Pipe` plus a bound at the use site, and these traits are deletable.
 
-That is not a design proxima wants to keep forever — it is a workaround for a compiler limitation that will one day go away. Until then, four traits it is. Section 5's `AndThen` struct showed you this tax directly: it has one `impl Pipe for AndThen<..>` (`primitives.rs:226`) and a second, nearly-identical `impl SendPipe for AndThen<..>` (`primitives.rs:246`) — the same logic, written twice, because there is no way to derive one from the other.
+That is not a design proxima wants to keep forever — it is a workaround for a compiler limitation that will one day go away. Until then, four traits it is. Section 5's `AndThen` struct showed you this tax directly: it has one `impl Pipe for AndThen<..>` (`primitives.rs:203`) and a second, nearly-identical `impl SendPipe for AndThen<..>` (`primitives.rs:223`) — the same logic, written twice, because there is no way to derive one from the other.
 
 `examples/send/main.rs` demonstrates the first two rungs of the ladder with two real pipes. `Borrows` holds a reference and can never leave the stack frame that owns it — `Pipe` puts no `Send` or `'static` bound on `Self`, so this compiles even though it cannot outlive `ledger` (`examples/send/main.rs:30–49`):
 
@@ -323,7 +327,7 @@ impl Pipe for Borrows<'_> {
 }
 ```
 
-`Summarize` owns its data outright and satisfies `Send + Sync + 'static`, so it can implement `SendPipe` and be spawned onto a real OS thread (`examples/send/main.rs:54–74`, spawn call at `main.rs:96`):
+`Summarize` owns its data outright and satisfies `Send + Sync + 'static`, so it can implement `SendPipe` and be spawned onto a real OS thread (`examples/send/main.rs:54–74`, spawn call at `main.rs:103`):
 
 ```rust
 struct Summarize {
@@ -366,7 +370,7 @@ The real, unedited transcript from `cargo run --example send`:
   SendPipe        (+Send, +Sync)    Summarize above -- crosses a thread
 ```
 
-`UnpinPipe` is the tier you reach for when you need to hold several in-flight calls at once and poll each one in place — exactly what section 10 (fan-in) needs, and exactly why fan-in requires its sources to be `UnpinPipe`. Here is a real (test-only, not public API) example of what implementing it by hand looks like, from `primitives.rs`'s own `unpin_tier_tests` module (`primitives.rs:620–636`). It writes `Future` directly instead of using `async`/`.await`: `poll` is the plain either-or every `Future` answers when asked — `Poll::Ready(value)` (done) or `Poll::Pending` (not yet) — that `.await` normally hides from you; note there is no `async` block anywhere, because an `async` block's future is never `Unpin`:
+`UnpinPipe` is the tier you reach for when you need to hold several in-flight calls at once and poll each one in place — exactly what section 10 (fan-in) needs, and exactly why fan-in requires its sources to be `UnpinPipe`. Here is a real (test-only, not public API) example of what implementing it by hand looks like, from `primitives.rs`'s own `unpin_tier_tests` module (`primitives.rs:710–726`). It writes `Future` directly instead of using `async`/`.await`: `poll` is the plain either-or every `Future` answers when asked — `Poll::Ready(value)` (done) or `Poll::Pending` (not yet) — that `.await` normally hides from you; note there is no `async` block anywhere, because an `async` block's future is never `Unpin`:
 
 ```rust
 struct RingPop(u8);
@@ -388,7 +392,7 @@ impl UnpinPipe for Ring {
 }
 ```
 
-`UnpinSendPipe` is the top rung — both promises at once — and the source code is direct about it not being a default choice (`primitives.rs:185–187`): "Do not reach for this rung by default. Wanting it usually means a caller is paying to poll `Send` futures in place; wanting it *speculatively* means nothing needs it yet." Climb the ladder only as far as your use case actually demands — every rung you skip is a cost you never pay.
+`UnpinSendPipe` is the top rung — both promises at once — and the source code is direct about it not being a default choice (`primitives.rs:162–164`): "Do not reach for this rung by default. Wanting it usually means a caller is paying to poll `Send` futures in place; wanting it *speculatively* means nothing needs it yet." Climb the ladder only as far as your use case actually demands — every rung you skip is a cost you never pay.
 
 ## 7. The idiomatic way to write one: `#[proxima::piped]`
 
@@ -411,12 +415,12 @@ async fn select_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, Proxim
 
 (`examples/hello/main.rs`'s own handler is deliberately the *other* shape — a bare `async fn` with no macro at all, mounted directly; section 13 shows it and explains why. `#[proxima::piped]` earns its keep when a handler needs to be a *named*, reusable pipe type — `select_pipe` above is exactly that case, since `examples/runtime_select/main.rs` mounts the same `PipeHandle` under two different runtimes.)
 
-This makes `select_pipe` — the function you just wrote — into the pipe itself, giving it the `SendPipe` impl the function's own signature implies: `In = Request<Bytes>` (its one parameter), `Out = Response<Bytes>` and `Err = ProximaError` (from its `Result<Out, Err>` return type). It adds **no** new noun to the pipe algebra — it picks the *downward closure* of tiers from section 6 a given function's shape qualifies for, and writes one impl block per tier in that closure. **Not just one tier**: since the higher tiers are additive constraints on the same root contract, never a replacement for it (section 6), a pipe implements every tier it qualifies for at once. `select_pipe`'s `async fn` plus `#[proxima::piped(send)]` puts it at `Pipe` *and* `SendPipe` both (a plain `fn` with `send` reaches all four — [Foundations, part 2](./01-ergonomics.md) proves this by compiling four separate trait-bound assertions against one macro-generated type). The rule the macro follows to compute that closure, exactly as its own module doc states it (`proxima-macros/src/pipe_attr.rs:9–24`, the closure itself computed by `Tier::plan`):
+This makes `select_pipe` — the function you just wrote — into the pipe itself, giving it the `SendPipe` impl the function's own signature implies: `In = Request<Bytes>` (its one parameter), `Out = Response<Bytes>` and `Err = ProximaError` (from its `Result<Out, Err>` return type). It adds **no** new noun to the pipe algebra — it picks the *downward closure* of tiers from section 6 a given function's shape qualifies for, and writes one impl block per tier in that closure. **Not just one tier**: since the higher tiers are additive constraints on the same root contract, never a replacement for it (section 6), a pipe implements every tier it qualifies for at once. `select_pipe`'s `async fn` plus `#[proxima::piped(send)]` puts it at `Pipe` *and* `SendPipe` both (a plain `fn` with `send` reaches all four — [Foundations, part 2](./01-ergonomics.md) proves this by compiling four separate trait-bound assertions against one macro-generated type). The rule the macro follows to compute that closure, exactly as its own module doc states it (`proxima-macros/src/pipe_attr.rs:10–30`, the closure itself computed by `Tier::plan`):
 
 - **whether the function is `async fn` decides the `Unpin` axis for free**: an `async fn`'s future is a compiler-generated state machine (`!Unpin`), so the macro emits `Pipe` (or `SendPipe`); a plain `fn` gets wrapped in `core::future::ready`, whose future *is* `Unpin` unconditionally and costs nothing, so the macro emits `UnpinPipe` (or `UnpinSendPipe`).
 - **`send` is never inferred.** Only writing `#[proxima::piped(send)]` explicitly climbs to `SendPipe`/`UnpinSendPipe`. Nothing about your function's types is inspected to guess whether you "could" be `Send` — climbing a tier is a cost (see section 6) and the macro will not charge it to you without being asked.
 - `#[proxima::piped(unpin, boxed)]` is how an `async fn` reaches the `Unpin` tier anyway: it wraps the call in `Box::pin`, which is `Unpin` for any future because a `Box` is a fixed heap address, not a self-referential state machine. That costs one heap allocation per call — and, like `send`, `boxed` is never inferred; you always ask for it explicitly.
-- **the generated struct always derives `Clone`.** Every pipe the free-function form generates is a fieldless unit struct — like `Double` in section 2, it holds no data — so cloning it costs nothing: no heap, no allocator, not even a `memcpy` of anything but zero bytes. `#[proxima::piped]` puts `#[derive(::core::clone::Clone)]` on that struct unconditionally (`pipe_attr.rs:600`; the module doc states the reason at `pipe_attr.rs:40–44`), because `Clone` is the one bound a *combinator* — a pipe that wraps another pipe to add behavior like chaining, retrying, or rate-limiting; section 5's `AndThen` is the one you already met — commonly needs on the pipe it wraps. There is no `derive(...)` argument to opt in or out of this — it is always there.
+- **the generated struct always derives `Clone`.** Every pipe the free-function form generates is a fieldless unit struct — like `Double` in section 2, it holds no data — so cloning it costs nothing: no heap, no allocator, not even a `memcpy` of anything but zero bytes. `#[proxima::piped]` puts `#[derive(::core::clone::Clone)]` on that struct unconditionally (`pipe_attr.rs:585`; the module doc states the reason at `pipe_attr.rs:40–44`), because `Clone` is the one bound a *combinator* — a pipe that wraps another pipe to add behavior like chaining, retrying, or rate-limiting; section 5's `AndThen` is the one you already met — commonly needs on the pipe it wraps. There is no `derive(...)` argument to opt in or out of this — it is always there.
 - **the pipe wears the function's name, and the function itself moves aside.** `select_pipe` *is* the pipe now — that is the `select_pipe` in `into_handle(select_pipe)`. There is one consequence worth knowing before it surprises you: a unit struct and a function both live in Rust's *value* namespace, so both cannot be called `select_pipe`. The macro renames your function body out of the way (to `__proxima_pipe_select_pipe`) and the pipe takes the name, so `select_pipe(request)` is no longer a call you can write. If you want the plain function *and* a pipe, name the pipe yourself — `#[proxima::piped(send, name = Greet)]` leaves `select_pipe` callable and makes `Greet` the pipe.
 
 `select_pipe` above is `async fn` plus `send`, so `Tier::plan`'s downward closure (`pipe_attr.rs`) puts it at `Pipe` *and* `SendPipe` — the async body never reaches the `Unpin` tier without the separate `unpin, boxed` opt-in (section 6), so those two are the whole closure here. `SendPipe` is the tier section 6 said an HTTP service needs, since a real server dispatches requests across many worker threads; `Pipe` comes along in the same expansion because `SendPipe` is additive on top of it, never a replacement for it.
@@ -454,7 +458,7 @@ async fn respond_ok(
 
 Same tier (`SendPipe`, from `async fn` plus `send`), same `Clone` bound satisfied — the explicit `#[derive(Clone)]` is gone because the macro writes it unconditionally now, on every generated struct, whether or not the call site in front of you happens to need it yet. `name = Backend` is here for the ordinary reason the naming bullet above already covered: `respond_ok` says what the function does, but `RateLimit::new(Backend, ...)` and every other call site in the file already expect a type named `Backend`, so the function keeps the descriptive name and the generated pipe keeps the name the rest of the example uses.
 
-**A real pipe often needs to hold onto something between calls — a client handle, a connection pool, a counter — and a fieldless struct can't do that.** `#[proxima::piped]` covers this shape too, by accepting a second, different kind of input: not a free function, but a plain `impl Foo { .. }` block naming no trait (Rust calls this an *inherent* impl — methods attached directly to a type, as opposed to `impl SomeTrait for Foo`). The macro tells the two shapes apart by grammar alone, before it inspects anything else — `impl ... { ... }` and `fn ... { ... }` never overlap, so trying the impl-block parse first can never mis-route an ordinary function (`pipe_attr.rs:450–455`):
+**A real pipe often needs to hold onto something between calls — a client handle, a connection pool, a counter — and a fieldless struct can't do that.** `#[proxima::piped]` covers this shape too, by accepting a second, different kind of input: not a free function, but a plain `impl Foo { .. }` block naming no trait (Rust calls this an *inherent* impl — methods attached directly to a type, as opposed to `impl SomeTrait for Foo`). The macro tells the two shapes apart by grammar alone, before it inspects anything else — `impl ... { ... }` and `fn ... { ... }` never overlap, so trying the impl-block parse first can never mis-route an ordinary function (`pipe_attr.rs:435–440`):
 
 ```rust
 pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
@@ -467,7 +471,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error
 
 (This is the macro's own source, not code you ever write — `TokenStream` is the proc-macro crate's name for "a chunk of Rust source not yet parsed," and `ItemImpl` is what a successfully-parsed `impl` block turns into. The only thing to take from it: the impl-block shape is tried first, and it can never accidentally swallow a plain function, so both forms coexist under the one attribute name with no ambiguity.)
 
-For this shape the macro **generates no struct at all** — `Foo` already exists, with whatever fields you gave it, so `Foo` itself is relocated unchanged into `impl #trait for Foo`. The block must hold exactly one method named `call`, taking `&self` (never `&mut self` or `self` by value — a pipe is always called through a shared handle, so a call that needed exclusive access could never be satisfied) and exactly one parameter after it, the same `In`/`Out`/`Err` contract as always, just read off a method signature instead of a free function's (`pipe_attr.rs:637–653, 660–685, 731–736`). Anything else the block carries (a helper method) survives untouched, relocated into a plain leftover `impl Foo { .. }` next to the trait impl.
+For this shape the macro **generates no struct at all** — `Foo` already exists, with whatever fields you gave it, so `Foo` itself is relocated unchanged into `impl #trait for Foo`. The block must hold exactly one method named `call`, taking `&self` (never `&mut self` or `self` by value — a pipe is always called through a shared handle, so a call that needed exclusive access could never be satisfied) and exactly one parameter after it, the same `In`/`Out`/`Err` contract as always, just read off a method signature instead of a free function's (`pipe_attr.rs:617–636, 638–665, 732–733`). Anything else the block carries (a helper method) survives untouched, relocated into a plain leftover `impl Foo { .. }` next to the trait impl.
 
 `examples/proxy/main.rs`'s `ProxyPipe` is exactly this shape — `client: Client` is state the free-function form has nowhere to put. Before (`main.rs:64–80` at `9f63d35b`):
 
@@ -507,7 +511,7 @@ impl ProxyPipe {
 }
 ```
 
-The struct is untouched — it was never the boilerplate. What disappeared is the trait header (`impl SendPipe for ProxyPipe { type In = ..; type Out = ..; type Err = ..; }`) and the `async move { .. }` wrapper the hand-written form needed to turn a plain `Result` into a `Future`: the macro reads `In`/`Out`/`Err` straight off `call`'s own signature, the same way it does for the free-function form, and — because `call` here is `async fn` — passes the relocated body straight through as its own future (wrapped only in `async move { .. }`, `pipe_attr.rs:817`), the same zero-cost RPITIT passthrough section 6 already described for `Pipe`/`SendPipe`.
+The struct is untouched — it was never the boilerplate. What disappeared is the trait header (`impl SendPipe for ProxyPipe { type In = ..; type Out = ..; type Err = ..; }`) and the `async move { .. }` wrapper the hand-written form needed to turn a plain `Result` into a `Future`: the macro reads `In`/`Out`/`Err` straight off `call`'s own signature, the same way it does for the free-function form, and — because `call` here is `async fn` — passes the relocated body straight through as its own future (wrapped only in `async move { .. }`, `pipe_attr.rs:802`), the same zero-cost RPITIT passthrough section 6 already described for `Pipe`/`SendPipe`.
 
 The sync half of this form has a real, `UnpinPipe`-tier example too, in section 11's gate curriculum: `BackendQueue` holds a `RefCell<VecDeque<u32>>` (state), and its `call` was always hand-written to return `impl Future<..> + Unpin` directly, without `async`/`.await` — the same shape as `Ring`/`RingPop` back in section 6. Before (`examples/gate/main.rs:255–266` at `9f63d35b`):
 
@@ -540,11 +544,11 @@ impl BackendQueue {
 }
 ```
 
-No `async` anywhere in either version — this `call` already returns the future it needs to return, so the macro relocates the body exactly as written, with no wrapper at all (`ImplShape::Direct`, `pipe_attr.rs:818`): there is nothing here for the macro to change but the trait header.
+No `async` anywhere in either version — this `call` already returns the future it needs to return, so the macro relocates the body exactly as written, with no wrapper at all (`ImplShape::Direct`, `pipe_attr.rs:803`): there is nothing here for the macro to change but the trait header.
 
 **Put the two forms together and the rule is: you almost never write `impl Pipe for X` by hand anymore.** A stateless pipe — no fields, nothing to remember between calls — is a free function under `#[proxima::piped]`. A stateful pipe — a client, a pool, a counter, anything living in `&self` — is an inherent `impl Foo { fn call(..) { .. } }` under the same attribute. Both write the same four-tier impl section 6 describes; neither adds a fifth. What is left to hand-write is the tier-selection logic itself, plus a small, mechanical set of pipes the macro's own rules put out of scope — and that boundary is worth being precise about, because it is not "when the macro feels too heavy," it is a compile error with a name:
 
-- `#[proxima::piped]` refuses a **generic** function or impl outright — `"#[proxima::piped] does not support a generic fn"` / `"...does not support a generic impl"` (`pipe_attr.rs:461–466, 705–709`) — because a macro that reads one concrete `In`/`Out`/`Err` off a signature has nothing to read when the types are still parameters. Every **combinator** in this codebase (a pipe generic over another pipe it wraps) is disqualified by this rule alone: `RateLimit<Inner, Extractor, Clk>` (`rate_limit.rs:113`), `Retry<Inner, Clk>` (`retry.rs:135`), `Delay<Inner, Clk>` (`delay.rs:88`), `Isolate<Inner>` (`isolate.rs:39`), `Diff<Inner>` (`diff.rs:31`), `Transform<Inner, InOp, OutOp>` (`transform.rs:38`), `Validate<Inner, Op>` (`validate.rs:43`) — plus `FanOut<S, Policy>` (`fanout.rs:71`) and `FanIn<S, Strategy, N>` (`fan_in.rs:131`), section 9 and section 10's own primitives. All nine hand-roll their `Pipe`/`SendPipe`/`UnpinPipe` impls, and will keep doing so until some future, generic form of this macro can express "one impl, over a type parameter" — a materially different job than "one impl, over one concrete function or method."
+- `#[proxima::piped]` refuses a **generic** function or impl outright — `"#[proxima::piped] does not support a generic fn"` / `"...does not support a generic impl"` (`pipe_attr.rs:446–450, 690–694`) — because a macro that reads one concrete `In`/`Out`/`Err` off a signature has nothing to read when the types are still parameters. Every **combinator** in this codebase (a pipe generic over another pipe it wraps) is disqualified by this rule alone: `RateLimit<Inner, Extractor, Clk>` (`rate_limit.rs:113`), `Retry<Inner, Clk>` (`retry.rs:135`), `Delay<Inner, Clk>` (`delay.rs:88`), `Isolate<Inner>` (`isolate.rs:39`), `Diff<Inner>` (`diff.rs:31`), `Transform<Inner, InOp, OutOp>` (`transform.rs:38`), `Validate<Inner, Op>` (`validate.rs:43`) — plus `FanOut<S, Policy>` (`fanout.rs:71`) and `FanIn<S, Strategy, N>` (`fan_in.rs:131`), section 9 and section 10's own primitives. All nine hand-roll their `Pipe`/`SendPipe`/`UnpinPipe` impls, and will keep doing so until some future, generic form of this macro can express "one impl, over a type parameter" — a materially different job than "one impl, over one concrete function or method."
 - The algebra-teaching examples this tutorial has already shown you — `Double`/`Always`/`Discard`/`Echo`/`Counter` (sections 2–3), `Ring`/`RingPop` (section 6) — stay hand-written **on purpose**, not because the macro can't reach them. They exist to show you the trait itself, one field at a time, before section 7 existed for you. Teaching the shortcut before the shape it shortcuts would leave you unable to read the four-tier ladder in section 6, or debug what the macro generates when something doesn't type-check.
 - Inside `examples/fan_out/main.rs`, the `CapturingSink` *arms* plugged into `FanOut` are themselves ordinary stateful pipes (`examples/fan_out/main.rs:96–106`) — the macro applies to them exactly as it does to `ProxyPipe`. It is `FanOut<S, Policy>` itself, the generic combinator that holds the arms, that stays hand-rolled — for the reason just given. Both things are true in the same file: the leaf pipes are macro-written, the combinator they are wired into is not, because "generic over what it wraps" and "one concrete pipe" are different jobs, and the macro only ever does the second one.
 
@@ -552,7 +556,7 @@ No `async` anywhere in either version — this `call` already returns the future
 
 A **filter** puts a yes/no rule in front of a pipe. Each item is checked; only the approved ones reach the inner pipe, and the rest are dropped — the inner pipe is never even called for a dropped item.
 
-The rule is an ordinary pipe: `In -> Result<In, Err>` — `Ok` admits (the item survives), `Err` rejects (carrying the reason). You compose it in front of the inner pipe with `.and_then(inner)` (section 5): `AndThen`'s own `?` already short-circuits before the inner pipe runs on a first-stage `Err`, so a rejected item never reaches it. This is a real, and honest, change from an older design: filter used to be a bespoke `Filter<Inner, Predicate>` combinator fed by a `Decide<In>::decide(&self, &In) -> bool` seam that threw the item and the rejection reason away, so two more types (`Rejectable`, `OnReject`) had to be grown just to carry them back — that whole apparatus is deleted now; the collapse is exactly this section's `predicate.and_then(inner)` (`proxima-primitives/src/pipe/filter.rs:24–33`, the module's own comment on why). Here is the real rule and the real call, copied from `examples/filter/main.rs:178–193,25–28`:
+The rule is an ordinary pipe: `In -> Result<In, Err>` — `Ok` admits (the item survives), `Err` rejects (carrying the reason). You compose it in front of the inner pipe with `.and_then(inner)` (section 5): `AndThen`'s own `?` already short-circuits before the inner pipe runs on a first-stage `Err`, so a rejected item never reaches it. This is a real, and honest, change from an older design: filter used to be a bespoke `Filter<Inner, Predicate>` combinator fed by a `Decide<In>::decide(&self, &In) -> bool` seam that threw the item and the rejection reason away, so two more types (`Rejectable`, `OnReject`) had to be grown just to carry them back — that whole apparatus is deleted now; the collapse is exactly this section's `predicate.and_then(inner)` (`proxima-primitives/src/pipe/filter.rs:24–34`, the module's own comment on why). Here is the real rule and the real call, copied from `examples/filter/main.rs:187–205,25–28`:
 
 ```rust
 // the rule: an ordinary pipe, `In -> Result<In, Err>` — admits by returning
@@ -574,7 +578,10 @@ impl SendPipe for MinAmount {
     }
 }
 
-let stack = MinAmount { threshold_cents: 2_000 }.and_then(ledger);
+let stack = MinAmount {
+    threshold_cents: 2_000,
+}
+.and_then(ledger);
 ```
 
 In that example, five orders go in; the two below the threshold are dropped. The proof that the inner pipe is *never even called* for them is not an assertion in the tutorial — it is asserted in the example itself, against a real counter the inner pipe increments on every call (`examples/filter/main.rs:85–90`):
@@ -592,11 +599,17 @@ Run it: `cargo run --example filter`.
 
 ## 9. Send one thing to many: fan-out
 
-**Fan-out** takes one input and delivers a copy to several pipes at once — for example, handle a request *and* send a copy to an audit log. Each downstream pipe (each "arm") is an ordinary sink (section 3): it takes the item and returns `()`. Build it with `FanOut::all_or_nothing(vec![...])` (`proxima-primitives/src/pipe/fanout.rs:111`), from `examples/fan_out/main.rs:29–43`:
+**Fan-out** takes one input and delivers a copy to several pipes at once — for example, handle a request *and* send a copy to an audit log. Each downstream pipe (each "arm") is an ordinary sink (section 3): it takes the item and returns `()`. Build it with `FanOut::all_or_nothing(vec![...])` (`proxima-primitives/src/pipe/fanout.rs:113`), from `examples/fan_out/main.rs:30–44`:
 
 ```rust
-let primary = CapturingSink { label: "primary", log: Arc::clone(&primary_log) };
-let mirror = CapturingSink { label: "mirror", log: Arc::clone(&mirror_log) };
+let primary = CapturingSink {
+    label: "primary",
+    log: Arc::clone(&primary_log),
+};
+let mirror = CapturingSink {
+    label: "mirror",
+    log: Arc::clone(&mirror_log),
+};
 
 let fan = FanOut::all_or_nothing(vec![primary, mirror]);
 println!("fanning one request to {} arms", fan.sink_count());
@@ -668,9 +681,9 @@ One more thing worth knowing, because it explains a constraint you will hit if y
 
 ## 11. Open or closed: gate
 
-A **gate** is a switch you put in front of a pipe: it is either **armed** (open) or **disarmed** (closed). It controls *readiness* — whether work should flow right now. This is how proxima expresses backpressure and rate-limiting, without baking a special "are you ready?" method into every pipe — `examples/gate/main.rs`'s own module doc says this plainly (`examples/gate/main.rs:4–6`): "`proxima_primitives::pipe::SendPipe` has no such method — every gate shape below is composed from existing primitives instead of being baked into the trait."
+A **gate** is a switch you put in front of a pipe: it is either **armed** (open) or **disarmed** (closed). It controls *readiness* — whether work should flow right now. This is how proxima expresses backpressure and rate-limiting, without baking a special "are you ready?" method into every pipe — `examples/gate/main.rs`'s own module doc says this plainly (`examples/gate/main.rs:3–5`): "`proxima_primitives::pipe::SendPipe` has no such method — every gate shape below is composed from existing primitives instead of being baked into the trait."
 
-You create a gate and its controller together with `AtomicGate::pair(initial_armed)` (`proxima-primitives/src/pipe/demand.rs:56`), and open or close it through the controller. The simplest way to use it is `Demand::new(pipe, gate)` (`demand.rs:100`): while the gate is closed, calls quietly do nothing (the inner pipe is never reached, a no-op `Ok`); while it is open, calls pass straight through. Here is the real setup, copied verbatim from `examples/gate/main.rs:203–210`:
+You create a gate and its controller together with `AtomicGate::pair(initial_armed)` (`proxima-primitives/src/pipe/demand.rs:56`), and open or close it through the controller. The simplest way to use it is `Demand::new(pipe, gate)` (`demand.rs:100`): while the gate is closed, calls quietly do nothing (the inner pipe is never reached, a no-op `Ok`); while it is open, calls pass straight through. Here is the real setup, copied verbatim from `examples/gate/main.rs:216–223`:
 
 ```rust
 let calls = Arc::new(AtomicUsize::new(0));
@@ -683,7 +696,7 @@ let production = Demand::new(
 );
 ```
 
-The rest of that function (`main.rs:212–234`) calls `SendPipe::call(&production, item)` three times while closed, then `controller.arm()` and three more calls, then `controller.disarm()` and one more call, asserting a call counter after each phase. The real transcript from `cargo run --example gate` (this is one of three shapes the example demonstrates; the transcript below is the middle one, "wait"):
+The rest of that function (`main.rs:225–247`) calls `SendPipe::call(&production, item)` three times while closed, then `controller.arm()` and three more calls, then `controller.disarm()` and one more call, asserting a call counter after each phase. The real transcript from `cargo run --example gate` (this is one of three shapes the example demonstrates; the transcript below is the middle one, "wait"):
 
 ```
 wait: dormant while the gate is closed
@@ -703,9 +716,9 @@ All three are a gate composed with an existing primitive — filter, `Demand`, o
 
 ## 12. Wait for a one-time event: signal
 
-A **signal** lets one part of your program wait for a one-time event — "the stream ended," "we are done draining" — without checking in a loop. `Signal::new()` creates one (`proxima-core/src/signal.rs:119`); someone calls `.fire()` once (`signal.rs:139`); anyone `.await`ing `.fired()` (`signal.rs:154`) wakes up. It is *sticky* — `.is_fired()` (`signal.rs:147`) stays `true` forever after — so even a latecomer who checks afterward sees it immediately, with no fresh wait.
+A **signal** lets one part of your program wait for a one-time event — "the stream ended," "we are done draining" — without checking in a loop. `Signal::new()` creates one (`proxima-core/src/signal.rs:124`); someone calls `.fire()` once (`signal.rs:144`); anyone `.await`ing `.fired()` (`signal.rs:159`) wakes up. It is *sticky* — `.is_fired()` (`signal.rs:152`) stays `true` forever after — so even a latecomer who checks afterward sees it immediately, with no fresh wait.
 
-`examples/signal/main.rs` shows this driving a real producer/consumer. A consumer task is spawned and yields once before the producer starts (`examples/signal/main.rs:42–43`), so it is genuinely parked, not merely about to run; the task itself does the parking, `.await`ing `signal.fired()` (`main.rs:112–120`):
+`examples/signal/main.rs` shows this driving a real producer/consumer. A consumer task is spawned and yields once before the producer starts (`examples/signal/main.rs:42–43`), so it is genuinely parked, not merely about to run; the task itself does the parking, `.await`ing `signal.fired()` (`main.rs:114–122`):
 
 ```rust
 async fn consumer_task(signal: Signal, polls: Arc<AtomicUsize>) {
@@ -719,7 +732,7 @@ async fn consumer_task(signal: Signal, polls: Arc<AtomicUsize>) {
 }
 ```
 
-Meanwhile the producer runs a stream through an **observe** pipe (section 3), then a **filter** (section 8) that recognizes the one terminal item, whose inner pipe calls `signal.fire()` (`main.rs:230–234`) — every other item is dropped by the filter before that inner pipe is ever reached. The example instruments the consumer's `.await` point to count how many times it was actually polled, and asserts it was exactly two — once to park, once to wake (`main.rs:89–93`):
+Meanwhile the producer runs a stream through an **observe** pipe (section 3), then a **filter** (section 8) that recognizes the one terminal item, whose inner pipe calls `signal.fire()` (`main.rs:217–226`) — every other item is dropped by the filter before that inner pipe is ever reached. The example instruments the consumer's `.await` point to count how many times it was actually polled, and asserts it was exactly two — once to park, once to wake (`main.rs:91–95`):
 
 ```rust
 assert_eq!(
@@ -735,9 +748,9 @@ That is the whole algebra: **`and_then` (chain), filter, fan-out, fan-in, gate, 
 
 ## 13. A pipe that answers web requests, and how to serve it
 
-To answer HTTP, a pipe's input is an HTTP request and its output an HTTP response. `Handler` (`proxima-primitives/src/pipe/handler.rs:73`) is exactly that shape, pinned down: it is a trait, but you never implement it yourself — it is *blanket*-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>` (`handler.rs:75–78`). Section 7's `select_pipe` reaches `Handler` this way directly, since `#[proxima::piped(send)]` already gave it that `SendPipe` impl.
+To answer HTTP, a pipe's input is an HTTP request and its output an HTTP response. `Handler` (`proxima-primitives/src/pipe/handler.rs:97`) is exactly that shape, pinned down: it is a trait, but you never implement it yourself — it is *blanket*-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>` (`handler.rs:102–105`). Section 7's `select_pipe` reaches `Handler` this way directly, since `#[proxima::piped(send)]` already gave it that `SendPipe` impl.
 
-A *bare* `async fn` — no `#[proxima::piped]` at all — reaches the server through an adjacent seam: `App::mount` accepts one directly via `IntoMountTarget<ViaFn>` (`src/app.rs:1286–1294`), which wraps the function in a small private `SendPipe` impl, `FnHandler` (`src/app.rs:1267`, `1269–1284`), before erasing it into a `Handler` the same way `select_pipe` was. This is the shape `hello` uses — mounted and served, this is `examples/hello/main.rs`, in full:
+A *bare* `async fn` — no `#[proxima::piped]` at all — reaches the server through an adjacent seam: `App::mount` accepts one directly via `IntoMountTarget<ViaFn>` (`src/app.rs:1498–1506`), which wraps the function in a small private `SendPipe` impl, `FnHandler` (`src/app.rs:1479`, `1481–1496`), before erasing it into a `Handler` the same way `select_pipe` was. This is the shape `hello` uses — mounted and served, this is `examples/hello/main.rs`, in full:
 
 ```rust
 /// A handler is just an `async fn`: typed request in, typed response out, nothing
@@ -760,9 +773,13 @@ async fn main() -> Result<(), ProximaError> {
     let app = App::new()?;
     app.mount("/", hello)?;
 
+    // `serve` spawns the listener and returns once it is actually accepting —
+    // no polling, no sleeping, no discovering ECONNREFUSED the hard way.
     let server = app.serve(RunConfig::http(bind)).await?;
     println!("listening on http://{bind}");
 
+    // serve until SIGINT/SIGTERM, then stop accepting and let in-flight
+    // requests finish. This is the whole shutdown story — no ceremony.
     server.run_until_signal().await;
     Ok(())
 }
@@ -770,9 +787,9 @@ async fn main() -> Result<(), ProximaError> {
 
 Three real pieces, each grounded in source:
 
-- **`App::new()`** (`src/app.rs:253`) builds the app with a runtime already set up — the engine that actually drives async work. Under a bare `#[proxima::main]`, `App::new()` adopts that same runtime rather than building a second, independent one.
-- **`app.mount("/", hello)`** (`mount` at `src/app.rs:577`) attaches your handler at a path. `mount` takes anything [`IntoMountTarget`] covers (`src/app.rs:1231`) — a handler-shaped pipe, a bare async fn, a registered pipe name, or an already-built `MountTarget`; `hello` here dispatches through the bare-fn arm just described. Underneath, that arm's own conversion runs `into_handle` (`proxima-primitives/src/pipe/handler.rs:86`), which wraps the erased `FnHandler` into a `PipeHandle`, one uniform type that can hold *any* handler. That is what lets `App` store handlers of different concrete types side by side, and mount several at different paths.
-- **`app.serve(RunConfig::http(bind))`** (`serve` at `src/app.rs:829`) spawns the listener and returns a `Server` handle *only once the socket is genuinely accepting* — no polling, no sleeping, no discovering `ECONNREFUSED` the hard way.
+- **`App::new()`** (`src/app.rs:325`) builds the app with a runtime already set up — the engine that actually drives async work. Under a bare `#[proxima::main]`, `App::new()` adopts that same runtime rather than building a second, independent one.
+- **`app.mount("/", hello)`** (`mount` at `src/app.rs:723`) attaches your handler at a path. `mount` takes anything [`IntoMountTarget`] covers (`src/app.rs:1443`) — a handler-shaped pipe, a bare async fn, a registered pipe name, or an already-built `MountTarget`; `hello` here dispatches through the bare-fn arm just described. Underneath, that arm's own conversion runs `into_handle` (`proxima-primitives/src/pipe/handler.rs:113`), which wraps the erased `FnHandler` into a `PipeHandle`, one uniform type that can hold *any* handler. That is what lets `App` store handlers of different concrete types side by side, and mount several at different paths.
+- **`app.serve(RunConfig::http(bind))`** (`serve` at `src/app.rs:999`) spawns the listener and returns a `Server` handle *only once the socket is genuinely accepting* — no polling, no sleeping, no discovering `ECONNREFUSED` the hard way.
 - **`server.run_until_signal()`** (`src/server.rs:94`) blocks until SIGINT/SIGTERM (or a `stop()` from any clone), then stops accepting and lets in-flight requests drain. That one line is the entire shutdown story — no `ShutdownBarrier` ceremony to hand-roll.
 
 Run it and, in another shell, curl it. `http1-native` is required, not default — it registers the h1+h2 listener `RunConfig::http` names, over the tokio-free sans-IO h1 driver (`serve_connection`/`serve_h1_connection` in `proxima-http`; `examples/hello/main.rs`'s own module doc explains this). `http1` (which layers the legacy hyper/tokio h1 stack on top of `http1-native`) is not needed for this example — `hello` is tokio-free end to end:
@@ -789,7 +806,7 @@ Ctrl-c the server (SIGINT) and `run_until_signal` returns: the listener stops, i
 
 ## 14. The algebra is enforced by the compiler, not by us
 
-"Everything is a pipe" is a strong claim, and strong claims rot the moment someone forgets to check them. proxima does not leave that check to a human doing a grep. `proxima-primitives/src/pipe/mod.rs:275–314` has a test-only module, `algebra_claims`, whose entire job is to fail to *compile* — not fail a test, fail to build at all — the moment a primitive this tutorial teaches stops being a pipe. Its own doc comment explains why that is the only check worth trusting (`mod.rs:270–274`):
+"Everything is a pipe" is a strong claim, and strong claims rot the moment someone forgets to check them. proxima does not leave that check to a human doing a grep. `proxima-primitives/src/pipe/mod.rs:288–334` has a test-only module, `algebra_claims`, whose entire job is to fail to *compile* — not fail a test, fail to build at all — the moment a primitive this tutorial teaches stops being a pipe. Its own doc comment explains why that is the only check worth trusting (`mod.rs:288–294`):
 
 > "Everything is a pipe" is falsifiable, so falsify it mechanically: each line below fails to compile the moment a primitive we teach stops being a pipe. A grep for `impl .* Pipe for X` cannot answer this — it cannot see through generics, re-exports, macros, or a renamed type parameter, and it has been wrong every time it was asked. rustc is never wrong about it.
 

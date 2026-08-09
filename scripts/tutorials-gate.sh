@@ -172,12 +172,16 @@ fi
 # from the count, and both are worse than the honest floor below: it is the
 # reproducible ok-count measured across repeated runs of this exact
 # mechanism (42, unchanged across three consecutive runs while iterating on
-# the transform). A regression — any currently-compiling block citing an
-# API that gets renamed or removed — drops the count below the floor and
-# fails the build; growing the floor by fixing a currently-failing block
-# (prelude gap, tutorial content, or the awk transform's own reach) is
-# always welcome and never blocked by this check.
-FLOOR=42
+# the transform; raised to 44 on 2026-08-09 after 00-foundations.md's
+# citations were resynced to current file:line and a stale `HalveError`
+# doctest snippet was given back the `#[derive(Debug, ...)]` its `Pipe::Err`
+# bound requires — 44 unchanged across two consecutive runs). A regression
+# — any currently-compiling block citing an API that gets renamed or
+# removed — drops the count below the floor and fails the build; growing
+# the floor by fixing a currently-failing block (prelude gap, tutorial
+# content, or the awk transform's own reach) is always welcome and never
+# blocked by this check.
+FLOOR=44
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
