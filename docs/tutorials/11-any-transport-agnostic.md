@@ -96,22 +96,40 @@ impl AnyProtocol for LiteralUdpProtocol {
 }
 ```
 
-Registered on the SAME `.any()` chain the built-in h1 candidate already answers on — `.protocol()` is exactly the escape hatch part 6 taught, no new method to learn:
+Registered on the SAME `.any()` chain the built-in h1 candidate already answers on — `.protocol()` is exactly the escape hatch part 6 taught, no new method to learn. `LegitOk` is the plain `SendPipe` h1 answers with — the same hand-written shape part 2's `ConstantOk` taught, unedited here from `examples/any_transport_agnostic.rs:117-127`:
 
 ```rust
-let server = Listener::builder()
-    .bind(bind)
-    .handle(into_handle(LegitOk))
-    .any()
-    .protocol(LiteralUdpProtocol {
-        name: "udpx",
-        priority: 100,
-        literal: b"UDPX/1\r\n",
-        reply: b"UDPX/1 200 OK\r\nhello-from-datagram-candidate",
-    })
-    .serve()
-    .await?;
+struct LegitOk;
+
+impl SendPipe for LegitOk {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+        Ok(Response::ok("legit-ok"))
+    }
+}
+
+async fn stream_and_datagram_share_one_port(bind: SocketAddr) -> Result<(), ProximaError> {
+    let server = Listener::builder()
+        .bind(bind)
+        .handle(into_handle(LegitOk))
+        .any()
+        .protocol(LiteralUdpProtocol {
+            name: "udpx",
+            priority: 100,
+            literal: b"UDPX/1\r\n",
+            reply: b"UDPX/1 200 OK\r\nhello-from-datagram-candidate",
+        })
+        .serve()
+        .await?;
+    server.stop();
+    Ok(())
+}
 ```
+
+(Wrapped in a `stream_and_datagram_share_one_port(bind: SocketAddr)` fn here instead of the real file's own `free_loopback_addr()?` helper, matching the convention part 2 used for the same reason — everything else is unedited.)
 
 Read that chain again: no `.tcp()`, no `.udp()`. Running it produces exactly this:
 
@@ -127,17 +145,35 @@ A plain `std::net::TcpStream` connect gets h1's real HTTP/1.1 response, exactly 
 Part 2 taught the classifier's priority-ordered-wait rule for stream candidates: a lower-priority match is held back as long as a higher-priority candidate could still win, and two candidates tied at the SAME winning priority resolve to `ClassifyOutcome::AmbiguousMatch` (`proxima-listen/src/any/classifier.rs:39–68`) rather than an arbitrary pick. That rule is arbitration over `AnyProtocol` candidates, full stop — it was never specific to TCP, and registering four datagram candidates on one UDP socket exercises the identical code path:
 
 ```rust
-let server = Listener::builder()
-    .bind(bind)
-    .handle(into_handle(LegitOk))
-    .any()
-    .protocol(LiteralUdpProtocol { name: "hipri", priority: 200, literal: b"HIPRI/1\r\n", reply: b"HIPRI-WINS" })
-    .protocol(LiteralUdpProtocol { name: "lopri", priority: 100, literal: b"LOPRI/1\r\n", reply: b"LOPRI-WINS" })
-    .protocol(LiteralUdpProtocol { name: "tied-a", priority: 150, literal: b"AMBIG/1\r\n", reply: b"TIED-A-WINS" })
-    .protocol(LiteralUdpProtocol { name: "tied-b", priority: 150, literal: b"AMBIG/1\r\n", reply: b"TIED-B-WINS" })
-    .serve()
-    .await?;
+struct LegitOk;
+
+impl SendPipe for LegitOk {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+        Ok(Response::ok("legit-ok"))
+    }
+}
+
+async fn datagram_candidates_are_priority_arbitrated(bind: SocketAddr) -> Result<(), ProximaError> {
+    let server = Listener::builder()
+        .bind(bind)
+        .handle(into_handle(LegitOk))
+        .any()
+        .protocol(LiteralUdpProtocol { name: "hipri", priority: 200, literal: b"HIPRI/1\r\n", reply: b"HIPRI-WINS" })
+        .protocol(LiteralUdpProtocol { name: "lopri", priority: 100, literal: b"LOPRI/1\r\n", reply: b"LOPRI-WINS" })
+        .protocol(LiteralUdpProtocol { name: "tied-a", priority: 150, literal: b"AMBIG/1\r\n", reply: b"TIED-A-WINS" })
+        .protocol(LiteralUdpProtocol { name: "tied-b", priority: 150, literal: b"AMBIG/1\r\n", reply: b"TIED-B-WINS" })
+        .serve()
+        .await?;
+    server.stop();
+    Ok(())
+}
 ```
+
+(Same wrapping as section 4's snippet, `LegitOk` repeated verbatim so this block also compiles standalone — real source at `examples/any_transport_agnostic.rs:227-259`.)
 
 ```
 4 datagram candidates, one socket, on 127.0.0.1:52056: hipri/lopri each answer their own disjoint literal regardless of priority order

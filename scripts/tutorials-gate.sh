@@ -313,7 +313,18 @@ fi
 # identical function proved) were resynced. The shared prelude fix also
 # incidentally raised 11-any-transport-agnostic.md's own passing count by
 # one (3 failing blocks down to 2) since it cites the same two types.
-FLOOR=82
+# Raised to 84 after 11-any-transport-agnostic.md's own remaining two
+# blocks were fixed with the identical `09-extend-your-own-protocol.md`
+# pattern above: both `.protocol(candidate)` registration blocks (§4's
+# worked example, §5's priority/ambiguity fleet) were bare
+# `let server = ...await?;` fragments referencing an undefined `bind` and
+# `LegitOk` — turned into real, self-contained
+# `async fn ..(bind: SocketAddr) -> Result<(), ProximaError>` excerpts with
+# `LegitOk` defined inline (repeated verbatim in both blocks, since §4's
+# block itself needs §3's `LiteralUdpProtocol` as cross-block context and so
+# never compiles standalone in pass 1, meaning it can never be fed forward
+# as pass 2 context to §5's block).
+FLOOR=84
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
