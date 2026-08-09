@@ -8,8 +8,9 @@ name: no-std
 #   - No wrapper binary; the env var IS the API.
 #   - The host-target linux-daemon profile is the floor that must
 #     always pass.
-#   - No_std cross-compile cells are continue-on-error until DC5
-#     finishes gating arc-swap / tracing / conflaguration behind std.
+#   - Every cell here is ENFORCED. The cross-compile cells were
+#     continue-on-error while DC5 was open; that made a red cell read
+#     as a green job, so nobody could tell which of them failed.
 
 on:
   push:
@@ -297,16 +298,16 @@ jobs:
 
   # No_std cross-compile cells. Each cell sets PROXIMA_PROFILE so the
   # build.rs can pick up the profile and emit profile-driven cfg
-  # directives. `continue-on-error: true` until DC5 finishes gating
-  # arc-swap / tracing / conflaguration runtime deps behind std —
-  # at which point flip each cell's continue-on-error to false to
-  # make the gate enforced.
+  # directives. Enforced as of 2026-08-08: `continue-on-error: true`
+  # reported a failing cell as a passing job, which is how the wasm32
+  # cell stayed red — `--features std` pulled `socket2`, whose every
+  # call site in prime is already macos/linux-gated but whose Cargo
+  # edge was not, and socket2 is a hard `compile_error!` on wasm32.
   no-std-matrix:
     name: PROXIMA_PROFILE=${{ matrix.profile }} target=${{ matrix.target }}
     needs: changes
     if: needs.changes.outputs.nostd == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -314,15 +315,15 @@ jobs:
           - profile: wasm-edge
             target: wasm32-unknown-unknown
             features: "alloc,std"
-            blocker: "DC5 — conflaguration runtime dep needs std-gating"
+            proves: "prime's std tier carries no socket/thread dependency edge a sandboxed target cannot link"
           - profile: embedded-mqtt-gateway
             target: thumbv7em-none-eabihf
             features: "alloc"
-            blocker: "DC5 — arc-swap + tracing + crossbeam-deque need std-gating"
+            proves: "the no_std + alloc floor links on hard-float Cortex-M4/M7"
           - profile: bare-metal
             target: thumbv7em-none-eabihf
             features: ""
-            blocker: "DC5 + the static-pool prime variant (out of scope of woolly-watching-cupcake)"
+            proves: "the bare no_std, no-alloc floor links with nothing turned on"
     env:
       PROXIMA_PROFILE: ${{ matrix.profile }}
     steps:
@@ -331,9 +332,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: blocker note for this cell
+      - name: what this cell proves
         run: |
-          echo "blocker for this cell: ${{ matrix.blocker }}"
+          echo "${{ matrix.proves }}"
       - name: cargo build (features=${{ matrix.features }})
         run: |
           if [ -z "${{ matrix.features }}" ]; then
