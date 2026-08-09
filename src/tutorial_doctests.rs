@@ -80,98 +80,98 @@ pub mod tutorial_gate_prelude {
     pub use crate::prime::PrimeRuntime;
 }
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/00-foundations.md")]
 mod tutorial_00_foundations {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/01-ergonomics.md")]
 mod tutorial_01_ergonomics {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/02-listener-builder.md")]
 mod tutorial_02_listener_builder {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/03-native-runtime.md")]
 mod tutorial_03_native_runtime {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/04-listener-hello.md")]
 mod tutorial_04_listener_hello {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/05-listener-universal.md")]
 mod tutorial_05_listener_universal {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/06-listener-production.md")]
 mod tutorial_06_listener_production {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/07-sugar-composition.md")]
 mod tutorial_07_sugar_composition {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/08-protocol-fleet.md")]
 mod tutorial_08_protocol_fleet {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/09-extend-your-own-protocol.md")]
 mod tutorial_09_extend_your_own_protocol {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/10-conflaguration.md")]
 mod tutorial_10_conflaguration {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/11-any-transport-agnostic.md")]
 mod tutorial_11_any_transport_agnostic {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-bare-metal-pipe.md")]
 mod tutorial_build_a_bare_metal_pipe {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-caching-reverse-proxy.md")]
 mod tutorial_build_a_caching_reverse_proxy {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-chaos-test-rig.md")]
 mod tutorial_build_a_chaos_test_rig {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-crud-origin-service.md")]
 mod tutorial_build_a_crud_origin_service {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-kafka-style-partitioner.md")]
 mod tutorial_build_a_kafka_style_partitioner {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-load-balancer.md")]
 mod tutorial_build_a_load_balancer {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-multi-runtime-service.md")]
 mod tutorial_build_a_multi_runtime_service {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-plugin.md")]
 mod tutorial_build_a_plugin {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-a-record-replay-harness.md")]
 mod tutorial_build_a_record_replay_harness {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-an-api-gateway.md")]
 mod tutorial_build_an_api_gateway {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-an-observability-pipeline.md")]
 mod tutorial_build_an_observability_pipeline {}
 
-#[cfg(doctest)]
+#[cfg(all(doctest, tutorial_gate))]
 #[doc = include_str!("../.tutorial-gate-generated/build-delivery-guarantees.md")]
 mod tutorial_build_delivery_guarantees {}
