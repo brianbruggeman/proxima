@@ -215,13 +215,27 @@ fi
 # `h1_in_flight_shed_renders_503_then_recovers_after_release` and
 # `tests/e2e/listener_h2.rs`'s
 # `native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset`)
-# rather than left asserted from stale prose. A regression — any
-# currently-compiling block citing an API that gets renamed or removed —
-# drops the count below the floor and fails the build; growing the floor by
-# fixing a currently-failing block (prelude gap, tutorial content, or the
-# awk transform's own reach) is always welcome and never blocked by this
-# check.
-FLOOR=61
+# rather than left asserted from stale prose. Raised to 67 later the same
+# day after 07-sugar-composition.md's own rewrite turned all 6 of its
+# blocks (5 previously FAILED — `main`-body fragments referencing
+# `bind_1`/`bind_2`/`bind_3`/`bind`/`bind_bad`, `FixedOk`, and
+# `stub_handle()`, none defined within the excerpt, plus a bare `json!`
+# macro call with no `use serde_json::json` in scope) into 7 real,
+# self-contained, compiling `fn`/`struct` excerpts (`FixedOk` defined once
+# and reused via same-file accumulation everywhere after; one new block
+# added for the `.grpc().quic()` rejection, which the prose already taught
+# but no code block ever proved) — the rewrite also caught two stale
+# `file:line` citations (the `prelude` module and `TlsConfig::self_signed`
+# had both drifted since the tutorial was written) and a dangling internal
+# forward-reference to a client-side `.tls()` section that was never
+# written, fixed by adding the real `ClientSecurityExt::tls()` composition
+# `examples/sugar_composition.rs` itself was missing, not just the prose
+# describing it. A regression — any currently-compiling block citing an
+# API that gets renamed or removed — drops the count below the floor and
+# fails the build; growing the floor by fixing a currently-failing block
+# (prelude gap, tutorial content, or the awk transform's own reach) is
+# always welcome and never blocked by this check.
+FLOOR=67
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
