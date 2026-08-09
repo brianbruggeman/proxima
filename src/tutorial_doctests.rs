@@ -35,7 +35,9 @@ pub mod tutorial_gate_prelude {
     pub use crate::app::{App, IntoMountTarget, MountTarget, RunConfig};
     pub use crate::listen::ListenerSpec;
     pub use crate::listen::admission::{BlacklistConfig, ConnAdmission};
+    pub use crate::listen::any::AnyHandler;
     pub use crate::prelude::*;
+    pub use crate::{PeerInfo, StreamConnection};
     #[cfg(feature = "runtime-tokio")]
     pub use crate::runtime::TokioPerCoreRuntime;
     pub use crate::runtime::{BackgroundHandle, BackgroundPool, CoreId, Runtime};

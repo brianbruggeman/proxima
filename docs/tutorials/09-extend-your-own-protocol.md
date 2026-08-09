@@ -8,7 +8,7 @@
 
 If you read one page in this whole series, make it this one. Every protocol in [part 5](./08-protocol-fleet.md) — kafka, mqtt, amqp, memcached, redis — is built on EXACTLY the mechanism this page teaches. The fleet is a demonstration of the seam, not a fixed menu bolted onto the crate from the inside.
 
-Every code block below is copied verbatim from `examples/extend_protocol.rs` and `tests/e2e/listener_any_protocol_extension.rs` (the same shape, proven as a `#[proxima::test]`), and every printed line is the ACTUAL output of running the example:
+Every code block below is either copied verbatim from `examples/extend_protocol.rs` and `tests/e2e/listener_any_protocol_extension.rs` (the same shape, proven as a `#[proxima::test]`), or a real excerpt wrapped in just enough real-signature scaffolding to type-check on its own — flagged inline, every time, right where it happens. Every printed line is the ACTUAL output of running the example:
 
 ```sh
 cargo run --example extend_protocol --features http1-native
@@ -25,7 +25,7 @@ Recall from [part 2](./05-listener-universal.md) that `.any()` binds ONE socket 
 1. **"Is this prefix you?"** — `probe(&self, prefix: &[u8]) -> ProbeVerdict`. Pure, sans-IO: no I/O, no allocation beyond the verdict itself. Answers `Match { consumed }`, `NeedMore { at_least }`, or `No`.
 2. **"Drive this already-accepted stream."** — `drive(&self, stream, handler, spec, peer, admission) -> impl Future<Output = Result<(), ProximaError>>`, called exactly once, after `probe` won.
 
-That's the whole trait (`proxima-listen/src/any/probe.rs:134–195`, re-exported as `proxima::AnyProtocol`/`proxima::prelude::AnyProtocol`):
+The trait has six methods total, not two — `name`, `priority`, and `max_prefix_bytes` carry the bookkeeping the classifier needs (a registry key, a tie-breaker, a read-buffer size cap); one more, `wants_datagram`, this page skips ON PURPOSE — it only matters once a candidate wants to answer over UDP too, and [part 8](./11-any-transport-agnostic.md) teaches it as the one additive question once you already know everything below. The five methods below are the whole ordinary-TCP-wire contract — exactly what `PingPongProtocol` implements in §2 (`proxima-listen/src/any/probe.rs:244–329`, re-exported as `proxima::AnyProtocol`/`proxima::prelude::AnyProtocol`):
 
 ```rust
 pub trait AnyProtocol: Send + Sync + 'static {
@@ -46,7 +46,7 @@ pub trait AnyProtocol: Send + Sync + 'static {
 
 `ListenProtocol` (the trait h1/h2/h3-native implement) owns a BIND and an accept loop — "run one socket." `AnyProtocol` owns neither — it's asked to classify a prefix, then drive ONE already-accepted stream. `Listener::builder().any()`'s single accept loop is the ONE thing that owns the socket; every registered candidate, first-party or not, is a peer under it.
 
-The three parameters this page's example doesn't use, briefly, so nothing in the signature is a mystery: `handler` is your business pipe, type-erased to `AnyHandler` (an `Arc<dyn Any + Send + Sync>`) because different candidates want different handler SHAPES (h1/h2 want a `Request -> Response` pipe; a future redis-shaped candidate would want a `Frame -> Frame` one) — your own `drive` downcasts it back to whatever concrete type you expect. `spec` is the listener's accumulated JSON spec (the same `Value` `.spec(key, value)` writes into). `admission` is the listener-wide request/connection cap — call `admission.request_admit()` at your OWN protocol's natural request boundary (per-command, per-message, whatever your wire's unit of work is) if you want to participate in `max_in_flight_requests` shedding ([part 3](./06-listener-production.md) §4 teaches this from the caller's side).
+The four `drive` parameters this page's example never reads, briefly, so nothing in the signature is a mystery: `handler` is your business pipe, type-erased to `AnyHandler` (an `Arc<dyn Any + Send + Sync>`) because different candidates want different handler SHAPES (h1/h2 want a `Request -> Response` pipe; a future redis-shaped candidate would want a `Frame -> Frame` one) — your own `drive` downcasts it back to whatever concrete type you expect. `spec` is the listener's accumulated JSON spec (the same `Value` `.spec(key, value)` writes into). `peer` is the connecting side's address, `Option<PeerInfo>` (`PeerInfo::Tcp(SocketAddr)` for the TCP accept this page always produces; `Unix`/`Other` cover the transports this page doesn't touch) — a logging or per-IP-rate-limiting candidate would read it, `PingPongProtocol` has no use for it. `admission` is the listener-wide request/connection cap — call `admission.request_admit()` at your OWN protocol's natural request boundary (per-command, per-message, whatever your wire's unit of work is) if you want to participate in `max_in_flight_requests` shedding ([part 3](./06-listener-production.md) §4 teaches this from the caller's side).
 
 `drive`'s signature returns `Pin<Box<dyn Future<...>>>` rather than an RPITIT `impl Future` — a deliberate, documented exception to proxima's box-free-by-default rule: `AnyProtocol` is an OPEN, unbounded dyn set (any downstream crate can add a candidate at runtime), so it has to be object-safe, and RPITIT methods aren't. This is the "open/unbounded dyn set" exception the house rules name explicitly, not a shortcut.
 
@@ -102,18 +102,36 @@ impl AnyProtocol for PingPongProtocol {
 
 ## 3. Register it: `.any().protocol(candidate)`
 
+`LegitOk` below is the real file's own stand-in first-party handler, wrapped in an `async fn start(bind: SocketAddr)` here in place of the real file's `free_loopback_addr()?` + `main` — everything else, including `LegitOk` itself, is unedited:
+
 ```rust
-let server = Listener::builder()
-    .bind(bind)
-    .tcp()
-    .handle(into_handle(LegitOk))
-    .any()
-    .protocol(PingPongProtocol)
-    .serve()
-    .await?;
+struct LegitOk;
+
+impl SendPipe for LegitOk {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+        Ok(Response::ok("legit-h1-still-works"))
+    }
+}
+
+async fn start(bind: SocketAddr) -> Result<(), ProximaError> {
+    let server = Listener::builder()
+        .bind(bind)
+        .tcp()
+        .handle(into_handle(LegitOk))
+        .any()
+        .protocol(PingPongProtocol)
+        .serve()
+        .await?;
+    server.stop();
+    Ok(())
+}
 ```
 
-Two things happen here that matter: `.any()` accepts every FIRST-PARTY candidate this `App` registers by default (h1, h2 prior-knowledge); `.protocol(PingPongProtocol)` (`ListenerBuilder::protocol`, `src/listener/handle.rs:277–289`) adds `PingPongProtocol` to that SAME accepted set — it does not replace it, narrow it, or require a separate bind. Running this proves BOTH halves at once:
+Two things happen here that matter: `.any()` accepts every FIRST-PARTY candidate this `App` registers by default (h1, h2 prior-knowledge); `.protocol(PingPongProtocol)` (`ListenerBuilder::protocol`, `src/listener/handle.rs:278–292`) adds `PingPongProtocol` to that SAME accepted set — it does not replace it, narrow it, or require a separate bind. Running the real example proves BOTH halves at once:
 
 ```
 .any().ping_pong(PingPongProtocol) still routes legit h1 traffic on 127.0.0.1:54857
@@ -126,7 +144,7 @@ A legit h1 client dialing the SAME address still gets a real HTTP/1.1 response �
 
 ## 4. The one-line ext trait: making it read like a first-party axis
 
-`.protocol(impl AnyProtocol)` already works standing alone (as shown above) — but a real crate usually wraps it in its own ext trait so `.kafka(handler)`-style call sites read the same way. This is the ACTUAL trait `examples/extend_protocol.rs` defines and uses:
+`.protocol(impl AnyProtocol)` already works standing alone (as shown above) — but a real crate usually wraps it in its own ext trait so `.kafka(handler)`-style call sites read the same way. This is the ACTUAL trait `examples/extend_protocol.rs` defines and uses; `LegitOk` and the `start` wrapper are repeated verbatim from §3 here so this block reads and compiles on its own, exactly as the real file's single `main` uses both together in one place:
 
 ```rust
 trait PingPongExt: Sized {
@@ -139,15 +157,31 @@ impl PingPongExt for ListenerBuilder {
     }
 }
 
+struct LegitOk;
+
+impl SendPipe for LegitOk {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    async fn call(&self, _request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+        Ok(Response::ok("legit-h1-still-works"))
+    }
+}
+
 // call site, in `main`:
-let server = Listener::builder()
-    .bind(bind)
-    .tcp()
-    .handle(into_handle(LegitOk))
-    .any()
-    .ping_pong(PingPongProtocol)
-    .serve()
-    .await?;
+async fn start(bind: SocketAddr) -> Result<(), ProximaError> {
+    let server = Listener::builder()
+        .bind(bind)
+        .tcp()
+        .handle(into_handle(LegitOk))
+        .any()
+        .ping_pong(PingPongProtocol)
+        .serve()
+        .await?;
+    server.stop();
+    Ok(())
+}
 ```
 
 **Why this is legal Rust — the part worth understanding, not just copying:** Rust's orphan rule forbids `impl ForeignTrait for ForeignType` (implementing a trait you don't own, for a type you don't own) — but it's satisfied the moment EITHER the trait or the type is local. `PingPongExt` is defined right here, in your crate; `ListenerBuilder` is defined in proxima. The trait is local, so the impl is legal, even though neither side has ever heard of the other. This is the EXACT same idiom `ListenerProtocolExt::kafka`/`.mqtt`/`.amqp`/`.memcached`/`.redis` use internally (`src/listener/protocol.rs`) — those are not special-cased into the crate; they are the SAME pattern, written once, by the crate that happens to also be the umbrella crate. `tests/e2e/listener_builder_sugar.rs`'s own `third_party_sugar` module proves this identically, with a `TestThriftExt` trait built entirely inside a test file, working exactly like the shipped ones.
