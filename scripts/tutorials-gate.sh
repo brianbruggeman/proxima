@@ -183,13 +183,18 @@ fi
 # mis-marking 01-ergonomics.md's own `App::mount` and `Timer<ClockImpl>`
 # excerpts, plus added the `,compile_fail`/explicit-`,ignore` fence-attribute
 # passthrough a tutorial author can now reach for instead of an unexplained
-# FAILED block — 47 unchanged across two consecutive runs). A regression —
+# FAILED block — 47 unchanged across two consecutive runs; raised to 49 later
+# the same day after 04-listener-hello.md's own rewrite turned its two
+# excerpted `main`-body fragments (needing a `?` inside a function that
+# actually returns `Result`, and a `server` to call `.run_until_signal()` on)
+# into small, honestly-labeled, self-contained wrappers around the same real
+# lines instead of leaving them silently FAILED). A regression —
 # any currently-compiling block citing an API that gets renamed or removed —
 # drops the count below the floor and fails the build; growing the floor by
 # fixing a currently-failing block (prelude gap, tutorial content, or the
 # awk transform's own reach) is always welcome and never blocked by this
 # check.
-FLOOR=47
+FLOOR=49
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
