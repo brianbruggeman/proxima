@@ -33,16 +33,20 @@
 //!
 //! `max_in_flight_requests` is a raw spec key
 //! (`.spec("max_in_flight_requests", json!(1))`), not a typed builder method
-//! — there is no `.max_in_flight_requests(n)` on `ListenerBuilder` today (see
-//! this file's own report). `proxima-http/src/any_listener.rs:574-583` reads
-//! it and builds a listener-wide `ConnAdmission::new(n)`
-//! (`proxima-listen/src/admission/request.rs`). h2 is the candidate that
-//! actually enforces it: `proxima-http/src/http2/server.rs:307-320` calls
-//! `admission.request_admit()` at its own per-stream boundary and renders a
-//! real in-band 503 + `retry-after: 1` on `RequestAdmit::Shed`. (h1's own
-//! request loop does NOT call `request_admit()` — see this file's report for
-//! why that matters and which candidate to reach for when you need the cap
-//! actually enforced.)
+//! — there is no `.max_in_flight_requests(n)` on `ListenerBuilder` today.
+//! `proxima-http/src/any_listener.rs:579-583` reads it and builds a
+//! listener-wide `ConnAdmission::new(n)`
+//! (`proxima-listen/src/admission/request.rs`) — cloned into every accepted
+//! connection so the cap is shared. Both native candidates enforce it today:
+//! h2 calls `admission.request_admit()` at its own per-stream boundary
+//! (`proxima-http/src/http2/server.rs:326`); h1 calls the identical
+//! `request_admit`/`request_release` pair from `serve_connection`
+//! (`proxima-http/src/http1/serve.rs`) — fixed in `8a12a93b5` ("enforce
+//! request admission on h1 and drain h2 shed bodies"), proven by
+//! `proxima-http/src/http1/serve.rs`'s
+//! `h1_in_flight_shed_renders_503_then_recovers_after_release` test. Both
+//! render a real in-band 503 + `retry-after: 1` on `RequestAdmit::Shed`,
+//! never a connection reset.
 //!
 //! # 7. Same port vs. separate port
 //!
@@ -148,16 +152,20 @@ fn legit_h1_request(addr: SocketAddr) -> String {
     String::from_utf8_lossy(&response).into_owned()
 }
 
-/// Bodyless GET — deliberately no request body. A body-carrying request
-/// that gets shed by `ConnAdmission::request_admit()` on the native h2
-/// listener drops its half-built `Request` (and the body-stream receiver
-/// bundled into it) before the client's own DATA frame arrives; the
-/// connection's `BodyData` handler then finds the channel closed and resets
-/// the stream (`INTERNAL_ERROR`) instead of delivering the 503 it already
-/// queued (`proxima-http/src/http2/server.rs`'s `BodyData` arm, `Some(Err(_))
-/// => send_rst`). Real, reproducible defect — filed in this task's report,
-/// not fixed here (out of scope for a docs task). A bodyless request never
-/// opens that channel, so §4's admission demo below is unaffected by it.
+/// Bodyless GET, for a simple/deterministic demo — not to route around a
+/// live bug: a body-carrying request that gets shed by
+/// `ConnAdmission::request_admit()` on the native h2 listener USED TO drop
+/// its half-built `Request` (and the body-stream receiver bundled into it)
+/// before the client's own DATA frame arrived, so the connection's
+/// `BodyData` handler found the channel closed and reset the stream
+/// (`INTERNAL_ERROR`) instead of delivering the 503 it had already queued.
+/// Fixed in `8a12a93b5` ("enforce request admission on h1 and drain h2 shed
+/// bodies"): a shed stream's body is now drained-and-discarded in the
+/// background (`proxima-http/src/http2/server.rs`'s `drain_request_body`),
+/// keeping the receiver alive so the client's DATA frames land cleanly and
+/// the stream closes with the 503 instead of a reset — proven directly by
+/// `tests/e2e/listener_h2.rs`'s
+/// `native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset`.
 fn constant_ok_request() -> Result<Request<Bytes>, ProximaError> {
     Request::builder().method("GET").path("/").build()
 }

@@ -16,9 +16,12 @@ the same-port-vs-separate-port decision.
 client-side `RateLimit` + `Retry`/`Backoff` · `BlacklistConfig::layered()` ·
 same-port vs. separate-port.
 
-Every code block below is real, cited by `file:line`, and backed by a
-runnable example that compiles and runs green on this repository as of the
-commit this page was written against (`86c9302f`):
+Every code block below is a real excerpt — either copied verbatim from a
+runnable file in this repository or wrapped in just enough real-signature
+scaffolding (a `fn` it never calls, matching parts 1–2's own convention) to
+type-check on its own — and every citation was re-verified against today's
+source, `file:line`, not trusted from a prior pass. The full, runnable files
+behind every section are:
 
 - `examples/any_listener_production.rs` (§1–§4, §7)
 - `examples/any_listener_client_resilience.rs` (§5)
@@ -33,35 +36,51 @@ Every production listener needs to be observable from `day 0`, not bolted
 on later. proxima's house rule: telemetry export is never OTLP-only —
 console and file sinks are wired side by side (`~/.claude/rules/rust.md`).
 There is no single `.export()` call that fans to two sinks yet
-(`proxima-telemetry/src/export.rs:277-282`'s own doc: "fan-out over
-multiple exporters lands with the OTLP slice's `FanOut` stage" — not built
-today), so two sinks side by side means building each as its own
-`FormatterPipe` and combining them with `fan_exporters` — the same
-combinator `examples/logs/main.rs`'s own fan-out section uses:
+(`proxima-telemetry/src/export.rs:285-286`'s own doc: "fan-out over multiple
+exporters lands with the OTLP slice's `FanOut` stage" — not built today), so
+two sinks side by side means building each as its own `FormatterPipe` and
+combining them with `fan_exporters` — the same combinator `examples/logs/
+main.rs`'s own fan-out section uses:
 
 ```rust
-let stdout_handle = into_telemetry_handle(FormatterPipe::new(std::io::stdout(), LogFormat::Human));
-let file_handle = into_telemetry_handle(FormatterPipe::new(
-    std::fs::File::create(&log_path).expect("create log file"),
-    LogFormat::Human,
-));
-let fanned = fan_exporters(vec![stdout_handle, file_handle]);
-let recorder = Recorder::builder()
-    .pipe(fanned)
-    .core_count(1)
-    .install()
-    .expect("recorder installs as the process default");
+use proxima::telemetry::emit::EnvFilter;
+use proxima::telemetry::emit::global::install as install_emit_filter;
+use proxima::telemetry::info;
+use proxima::telemetry::pipes::{FormatterPipe, LogFormat, fan_exporters, into_telemetry_handle};
+use proxima::telemetry::recorder::Recorder;
+
+fn wire_console_and_file_telemetry(
+    log_path: &std::path::Path,
+) -> Arc<proxima::telemetry::metric::Counter> {
+    install_emit_filter(EnvFilter::parse("debug"));
+    let stdout_handle = into_telemetry_handle(FormatterPipe::new(std::io::stdout(), LogFormat::Human));
+    let file_handle = into_telemetry_handle(FormatterPipe::new(
+        std::fs::File::create(log_path).expect("create log file"),
+        LogFormat::Human,
+    ));
+    let fanned = fan_exporters(vec![stdout_handle, file_handle]);
+    let recorder = Recorder::builder()
+        .pipe(fanned)
+        .core_count(1)
+        .install()
+        .expect("recorder installs as the process default");
+    let requests_total = recorder.counter("proxima.any_listener.requests_total");
+    info!(sink = "console+file", "telemetry installed");
+    requests_total
+}
 ```
 
 `.install()` registers this as the process-default recorder, so
 `proxima::telemetry::info!`/`warn!`/`error!` callsites anywhere in the
-process find it automatically (`proxima-telemetry/src/export.rs:285-291`).
+process find it automatically (`proxima-telemetry/src/export.rs:292-305`).
 A counter is the direct-instrument fast path — one `AtomicU64::fetch_add`
-per call, no ring, no allocation (`proxima-telemetry/src/recorder/mod.rs:1541`):
+per call, no ring, no allocation (`proxima-telemetry/src/recorder/
+mod.rs:1553`):
 
 ```rust
-let requests_total = recorder.counter("proxima.any_listener.requests_total");
-// inside your handler: requests_total.add(1, &[]);
+fn bump_counter(requests_total: &proxima::telemetry::metric::Counter) {
+    requests_total.add(1, &[]);
+}
 ```
 
 This is what "metrics on" means concretely for this on-ramp — a real
@@ -79,24 +98,51 @@ framing. `.accept("h1")` selects exactly the legit candidate this service
 speaks; `.deny(name, literal)` registers a fixed malicious/scanner byte
 literal ALONGSIDE it, reviewed by the same classifier every other candidate
 is — never instead of the legit ones
-(`src/listener/handle.rs:342-352`'s own doc). A match records a strike and
+(`src/listener/handle.rs:339-352`'s own doc). A match records a strike and
 drops the connection, no handler dispatch, ever
 (`proxima-listen/src/any/deny.rs`'s `DenySignature::drive`).
 `.blacklist(config)` turns strikes into a real ban:
 
 ```rust
-let service = Listener::builder()
-    .bind(service_bind)
-    .accept("h1")
-    .deny("scanner", SCANNER_LITERAL.to_vec())
-    .blacklist(
-        BlacklistConfig::layered()
-            .with_deny_strike_threshold(1)
-            .build(),
-    )
-    .handle(into_handle(CountingOk { requests_total: requests_total.clone() }))
-    .serve()
-    .await?;
+struct CountingOk {
+    requests_total: Arc<proxima::telemetry::metric::Counter>,
+}
+
+impl SendPipe for CountingOk {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        _request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        self.requests_total.add(1, &[]);
+        async move { Ok(Response::new(200).with_body(Bytes::from_static(b"legit-ok"))) }
+    }
+}
+
+const SCANNER_LITERAL: &[u8] = b"XSCANPROBE\r\n";
+
+async fn serve_with_deny_and_blacklist(
+    service_bind: SocketAddr,
+    requests_total: Arc<proxima::telemetry::metric::Counter>,
+) -> Result<(), ProximaError> {
+    let service = Listener::builder()
+        .bind(service_bind)
+        .accept("h1")
+        .deny("scanner", SCANNER_LITERAL.to_vec())
+        .blacklist(
+            BlacklistConfig::layered()
+                .with_deny_strike_threshold(1)
+                .build(),
+        )
+        .handle(into_handle(CountingOk { requests_total }))
+        .serve()
+        .await?;
+    service.stop();
+    Ok(())
+}
 ```
 
 A `DenySignature` candidate is registered at priority `60000`
@@ -105,14 +151,14 @@ deliberately far above the default `100` every legit candidate gets, so a
 positively-identified malicious literal is never held back waiting for a
 legit candidate to lose (`proxima-listen/src/any/deny.rs`'s own doc on
 why). `BlacklistConfig`'s default `deny_strike_threshold` is already `1`
-(`proxima-listen/src/admission/blacklist.rs:66-73`) — a signature match is
+(`proxima-listen/src/admission/blacklist.rs:90-97`) — a signature match is
 not ambiguous noise, it bans on the first hit; the `.with_deny_strike_threshold(1)`
 call above is explicit for teaching, not strictly required.
 
 Running `examples/any_listener_production.rs`'s §2/§3 against a real
 scanner literal and a real legit client produces exactly this:
 
-```
+```text
 §2/3: legit h1 request served, counter now at 1
 §2/3: scanner literal dropped, no HTTP response, peer now banned
 §2/3: same peer's next connection (legit payload!) dropped — banned pre-classify
@@ -131,72 +177,103 @@ Connections aren't the only thing worth capping — a single h2 connection
 can multiplex many concurrent streams, and you may want to cap *those*
 too. `max_in_flight_requests` is a raw spec key, reached through the
 `.spec(key, value)` escape hatch every `ListenerBuilder` chain has
-(`src/listener/handle.rs:427-431`) — there is no typed
+(`src/listener/handle.rs:419-421`) — there is no typed
 `.max_in_flight_requests(n)` builder method today:
 
 ```rust
-let admission_service = Listener::builder()
-    .bind(admission_bind)
-    .accept("h2")
-    .spec("max_in_flight_requests", json!(1))
-    .handle(into_handle(SlowOk))
-    .serve()
-    .await?;
+/// Sleeps long enough that two concurrent requests are guaranteed to
+/// overlap, so a `max_in_flight_requests = 1` cap has something real to
+/// shed.
+struct SlowOk;
+
+impl SendPipe for SlowOk {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        _request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        async move {
+            proxima::time::sleep(Duration::from_millis(200)).await;
+            Ok(Response::new(200).with_body(Bytes::from_static(b"slow-ok")))
+        }
+    }
+}
+
+async fn serve_with_request_cap(admission_bind: SocketAddr) -> Result<(), ProximaError> {
+    let admission_service = Listener::builder()
+        .bind(admission_bind)
+        .accept("h2")
+        .spec("max_in_flight_requests", serde_json::json!(1))
+        .handle(into_handle(SlowOk))
+        .serve()
+        .await?;
+    admission_service.stop();
+    Ok(())
+}
 ```
 
-`proxima-http/src/any_listener.rs:574-578` reads that spec key and builds a
-listener-wide [`ConnAdmission::new(n)`](../../proxima-listen/src/admission/request.rs)
-— cloned into every accepted connection so the cap is shared across all of
-them, not per-connection. h2 is the candidate that actually enforces it:
-`proxima-http/src/http2/server.rs:307-320` calls
-`admission.request_admit()` at its own per-STREAM boundary and renders a
-real in-band 503 + `retry-after: 1` on `RequestAdmit::Shed`:
+`proxima-http/src/any_listener.rs:579-583` reads that spec key and builds a
+listener-wide `ConnAdmission::new(n)` — cloned into every accepted
+connection so the cap is shared across all of them, not per-connection.
+Both native candidates enforce it: h2 calls `admission.request_admit()` at
+its own per-stream boundary (`proxima-http/src/http2/server.rs:320-334`),
+and h1 calls the identical `request_admit`/`request_release` pair from its
+own connection loop (`proxima-http/src/http1/serve.rs`). This is the same
+two-arm contract every candidate follows — h1, h2, or a protocol you
+register yourself — real and public, not library-private plumbing:
 
 ```rust
-match admission.request_admit() {
-    RequestAdmit::Admit => spawn_handler(stream_id, request, &dispatch, &mut handlers),
-    RequestAdmit::Shed { reason } => {
-        let response = Response::new(503)
-            .with_body(Bytes::from_static(b"service unavailable"))
-            .with_header("retry-after", "1");
-        // ... render it on THIS stream only; the connection and every
-        // other live stream keep running.
+use proxima::listen::admission::RequestAdmit;
+
+fn admission_gate_shape(admission: &ConnAdmission) -> &'static str {
+    match admission.request_admit() {
+        RequestAdmit::Admit => "dispatch to the handler, then admission.request_release() when done",
+        RequestAdmit::Shed { reason: _ } => "render a 503 with retry-after: 1 — no handler dispatch, nothing to release",
     }
 }
 ```
 
+On `Shed`, the real candidates render a 503 + `retry-after: 1` on THIS
+stream/connection only — the listener and every other live stream keep
+running.
+
 Two real, concurrent h2 requests against a cap of 1, driven by
 `examples/any_listener_production.rs`'s §4:
 
-```
+```text
 §4: two concurrent h2 requests against max_in_flight_requests=1 -> [200, 503]
 §4: the shed request's body is the listener's real 503 rendering, not a stub
 ```
 
-### A real defect this on-ramp found, and routed around
+### A real defect this on-ramp found — fixed the same day
 
-While verifying this section, a body-carrying (POST-with-bytes) request
-that gets shed on this exact path produced a hard `RST_STREAM
-(INTERNAL_ERROR)` instead of the documented in-band 503 — reproducible,
-deterministic, isolated by direct instrumentation of
-`proxima-http/src/http2/server.rs` (not left in the source; this
-paragraph is the record of it). Root cause: the shed branch never
-dispatches the built `Request` to a handler, so its embedded body-stream
-receiver (`body_senders.insert(stream_id, tx)`, `proxima-http/src/http2/
-server.rs:295`, unconditional whenever a request carries a body) is
-dropped with the `Request`; the client's own DATA frame then arrives to a
-closed channel, and the `BodyData` handler's `Some(Err(_))` arm resets the
-stream instead (`proxima-http/src/http2/server.rs:357-360`). A **bodyless**
-request never opens that channel, so it never hits this path — every shed
-demonstration in this on-ramp uses a bodyless GET for exactly that reason.
-This is filed as a real, reproducible gap for the owner to fix (not fixed
-here — out of scope for a docs task); h1's own request loop has a
-DIFFERENT gap worth knowing too: it never calls `request_admit()`/
-`request_release()` at all (it only bridges the raw `in_flight`/`quiescing`
-atomics for the quiesce/drain bookkeeping, `proxima-http/src/http1/
-serve.rs`), so `max_in_flight_requests` is silently NOT enforced on the h1
-candidate — h2 is the one this section demonstrates because it is the one
-that actually works.
+While first verifying this section, a body-carrying (POST-with-bytes)
+request that got shed on the h2 path produced a hard `RST_STREAM
+(INTERNAL_ERROR)` instead of the documented in-band 503: the shed branch
+never dispatched the built `Request` to a handler, so its embedded
+body-stream receiver was dropped with the `Request`, and the client's own
+DATA frame then landed on a closed channel. A companion gap sat on h1: its
+request loop never called `request_admit`/`request_release` at all, so
+`max_in_flight_requests` was silently NOT enforced there.
+
+Both are fixed, in commit `8a12a93b5` ("fix: enforce request admission on
+h1 and drain h2 shed bodies") — h1 now calls `request_admit`/
+`request_release` and renders the identical in-band 503 h2 does
+(`proxima-http/src/http1/serve.rs`'s `shed_response`); h2 drains a shed
+stream's body in the background instead of dropping it
+(`proxima-http/src/http2/server.rs`'s `drain_request_body`), so the DATA
+frames land cleanly and the stream closes with the 503 instead of a reset.
+Two real, passing tests prove it rather than asserting it from prose:
+`proxima-http/src/http1/serve.rs`'s
+`h1_in_flight_shed_renders_503_then_recovers_after_release` and
+`tests/e2e/listener_h2.rs`'s
+`native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset`
+— both green under `cargo nextest run` today. `examples/
+any_listener_production.rs`'s own §4 demo still uses a bodyless GET, now
+for simplicity and determinism rather than to route around a live bug.
 
 ## 5. Client-side resilience: composed, not a new type
 
@@ -216,45 +293,7 @@ already exist? Yes — three of them, composed:
   (`proxima_primitives::pipe::clock::TimeClock`) — real sleeps, proven
   against a real shedding listener, not a fake clock standing in for one.
 
-```rust
-let resilient = Retry::new(
-    AsPipe(client),                 // the real H2ClientUpstream, bridged (see below)
-    RetryController {
-        rules: RetryRules::default(),   // retries 502/503/504 + real transport errors
-        backoff: Backoff::Exponential {
-            initial: Duration::from_millis(80),
-            factor: 2,
-            max: Duration::from_millis(400),
-        },
-        jitter: Jitter::None,
-        max_attempts: 5,
-        deadline: None,
-    },
-    TimeClock,
-    7,
-);
-```
-
-Running `examples/any_listener_client_resilience.rs`'s §2 against a real
-listener capped at `max_in_flight_requests = 1`, with a second call
-occupying the one slot for 150ms:
-
-```
-occupier (no retry wrapper): status 503
-resilient client: Response { status: 200, ... } (the caller-visible outcome is always a
-  clean 200, whether or not it needed a retry underneath)
-```
-
-The un-wrapped `occupier` call surfaces the 503 directly, exactly as it
-should — it isn't wrapped in anything. The `resilient` client's
-caller-visible result is a clean 200 either way: if it loses the race for
-the one slot, its first attempt is shed and `Retry` recovers once the
-occupier releases; if it wins the race instead, `Retry` is a no-op on a
-non-retryable 200. (Which one wins that race is a genuine timing race, not
-a controllable outcome — that's *why* the client needs its own resilience
-in the first place.)
-
-### The one bridge this composition needed, and why
+### The one bridge this composition needs, and why
 
 `H2ClientUpstream` and `RateLimit` are both `SendPipe`-only — the
 cross-core, `Send`-future tier. `Retry`'s generic bound is the plain `Pipe`
@@ -288,6 +327,55 @@ This is a per-example bridge, not a library addition — exactly the kind of
 small, local adapter the house rules explicitly bless ("structures in
 `examples/` are FINE").
 
+### The composition itself
+
+```rust
+use proxima::h2::H2ClientUpstream;
+use proxima::PrimeTcpUpstream;
+use proxima_primitives::pipe::clock::TimeClock;
+use proxima_primitives::pipe::resilience::{Backoff, Jitter, Retry, RetryController};
+use proxima_primitives::pipe::retry_rules::RetryRules;
+
+fn wrap_client_with_retry(client: H2ClientUpstream<PrimeTcpUpstream>) {
+    let resilient = Retry::new(
+        AsPipe(client),                 // the real H2ClientUpstream, bridged above
+        RetryController {
+            rules: RetryRules::default(),   // retries 502/503/504 + real transport errors
+            backoff: Backoff::Exponential {
+                initial: Duration::from_millis(80),
+                factor: 2,
+                max: Duration::from_millis(400),
+            },
+            jitter: Jitter::None,
+            max_attempts: 5,
+            deadline: None,
+        },
+        TimeClock,
+        7,
+    );
+    let _ = resilient;
+}
+```
+
+Running `examples/any_listener_client_resilience.rs`'s §2 against a real
+listener capped at `max_in_flight_requests = 1`, with a second call
+occupying the one slot for 150ms:
+
+```text
+occupier (no retry wrapper): status 503
+resilient client: Response { status: 200, ... } (the caller-visible outcome is always a
+  clean 200, whether or not it needed a retry underneath)
+```
+
+The un-wrapped `occupier` call surfaces the 503 directly, exactly as it
+should — it isn't wrapped in anything. The `resilient` client's
+caller-visible result is a clean 200 either way: if it loses the race for
+the one slot, its first attempt is shed and `Retry` recovers once the
+occupier releases; if it wins the race instead, `Retry` is a no-op on a
+non-retryable 200. (Which one wins that race is a genuine timing race, not
+a controllable outcome — that's *why* the client needs its own resilience
+in the first place.)
+
 ### What is deliberately NOT here: `FanIn`
 
 You might expect `fanin!`/`FanIn` here, racing several backend candidates
@@ -310,7 +398,7 @@ that actually forwards a real request to a real backend pool,
 precedent — a hand-rolled round-robin-over-healthy pool, proven directly
 in `examples/any_listener_client_resilience.rs`'s §3:
 
-```
+```text
 4 requests round-robinned: 2 to backend A, 2 to backend B
 ```
 
@@ -322,10 +410,12 @@ fluent surface, a layered loader for config. `BlacklistConfig` (`proxima-
 listen/src/admission/blacklist.rs`) follows it exactly:
 
 ```rust
-let config = BlacklistConfig::layered()
-    .from_path(&toml_path)
-    .expect("a well-formed file loads")
-    .build();
+fn load_blacklist_config(toml_path: &std::path::Path) -> BlacklistConfig {
+    BlacklistConfig::layered()
+        .from_path(toml_path)
+        .expect("a well-formed file loads")
+        .build()
+}
 ```
 
 with `toml_path` pointing at a flat TOML file:
@@ -346,7 +436,7 @@ the no_std+no_alloc floor's `sized::` consts) nests its data under
 `[admission]` / `[admission.blacklist]` table headers. The RUNTIME layered
 loader shown above — the one `.from_path()` actually calls — is FLAT:
 `conflaguration::from_file` deserializes the file straight into
-`BlacklistConfigPartial` (`proxima-listen/src/admission/blacklist.rs:152`),
+`BlacklistConfigPartial` (`proxima-listen/src/admission/blacklist.rs:176`),
 which has no field literally named `admission`. Handing it a
 `[admission.blacklist]`-nested file (matching the *other* TOML's shape by
 habit) does not error — it's syntactically valid TOML — but it silently
@@ -354,7 +444,7 @@ changes nothing, because the partial never sees those nested keys.
 `examples/any_listener_conflag.rs`'s §2 proves this directly rather than
 asserting it from documentation:
 
-```
+```text
 §2: a [admission.blacklist]-nested TOML loads WITHOUT error but changes nothing
    (deny_strike_threshold stayed at the default 1, not the file's 99) — the runtime
    loader wants a FLAT file, unlike the build-time sizing TOML
@@ -371,12 +461,19 @@ side by side, on the same running process (`examples/any_listener_production.rs`
 **SAME port — `.any()`:**
 
 ```rust
-let server = Listener::builder()
-    .bind(same_port_bind)
-    .any()
-    .handle(into_handle(handler))
-    .serve()
-    .await?;
+async fn serve_same_port(
+    same_port_bind: SocketAddr,
+    requests_total: Arc<proxima::telemetry::metric::Counter>,
+) -> Result<(), ProximaError> {
+    let server = Listener::builder()
+        .bind(same_port_bind)
+        .any()
+        .handle(into_handle(CountingOk { requests_total }))
+        .serve()
+        .await?;
+    server.stop();
+    Ok(())
+}
 ```
 
 One socket. Every registered candidate reachable at one address. Use this
@@ -387,8 +484,29 @@ service speaks HTTP, I don't care which version a given client uses."
 **SEPARATE ports — N independent `.accept(name)` binds:**
 
 ```rust
-let h1_only = Listener::builder().bind(h1_only_bind).accept("h1").handle(...).serve().await?;
-let h2_only = Listener::builder().bind(h2_only_bind).accept("h2").handle(...).serve().await?;
+async fn serve_separate_ports(
+    h1_only_bind: SocketAddr,
+    h2_only_bind: SocketAddr,
+    requests_total: Arc<proxima::telemetry::metric::Counter>,
+) -> Result<(), ProximaError> {
+    let h1_only = Listener::builder()
+        .bind(h1_only_bind)
+        .accept("h1")
+        .handle(into_handle(CountingOk {
+            requests_total: requests_total.clone(),
+        }))
+        .serve()
+        .await?;
+    let h2_only = Listener::builder()
+        .bind(h2_only_bind)
+        .accept("h2")
+        .handle(into_handle(CountingOk { requests_total }))
+        .serve()
+        .await?;
+    h1_only.stop();
+    h2_only.stop();
+    Ok(())
+}
 ```
 
 N sockets, each pinned to exactly one wire, each with its OWN
@@ -399,7 +517,7 @@ wire has a conventional dedicated port you're expected to honor (h2 on
 8443, a metrics-only port on 9090). Both binds ran in the same process in
 this on-ramp's own example, proving the two shapes genuinely coexist:
 
-```
+```text
 §7: SAME port 127.0.0.1:54809 answers both h1 and h2 (.any())
 §7: SEPARATE ports — h1 only on 127.0.0.1:54811, h2 only on 127.0.0.1:54812 — each with
    its own bind, its own lifecycle
@@ -414,13 +532,14 @@ own bind, its own firewall rule, or its own restart schedule.
 
 Starting from part 1's three-line hello: telemetry wired from the start,
 an accept/deny allowlist backed by a real DoS blacklist, a request-level
-cap that renders a real `ShedReason` on the wire, a client that survives
-that shed gracefully by composing existing primitives (never inventing a
-new one), the same tuning driven from a config file instead of hardcoded
-calls, and — the question this whole on-ramp exists to answer — a clear,
-tested rule for when one port is right and when N ports are right. Nothing
-here required leaving the shape parts 1–2 taught; every section only added
-one more real call onto the same `Listener::builder()...serve()` chain.
+cap that renders a real `ShedReason` on the wire (on both h1 and h2), a
+client that survives that shed gracefully by composing existing primitives
+(never inventing a new one), the same tuning driven from a config file
+instead of hardcoded calls, and — the question this whole on-ramp exists to
+answer — a clear, tested rule for when one port is right and when N ports
+are right. Nothing here required leaving the shape parts 1–2 taught; every
+section only added one more real call onto the same
+`Listener::builder()...serve()` chain.
 
 ## Where to go next
 

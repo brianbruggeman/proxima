@@ -200,13 +200,28 @@ fi
 # `async fn` the way `App::mount` does (`App::mount`'s bare-fn adapter,
 # `FnHandler`, is private to `src/app.rs`, never reachable through
 # `Listener::builder()`) — confirmed by compiling `into_handle(bare_fn)`
-# directly and reading the resulting E0277. A regression — any
+# directly and reading the resulting E0277. Raised to 61 later the same day
+# after 06-listener-production.md's own rewrite turned all 10 of its blocks
+# (9 previously FAILED — undefined-variable fragments excerpted straight from
+# a runnable example with no enclosing fn, plus one library-internals `match`
+# over names nothing in the block ever defined) into 10 real, self-contained,
+# compiling `fn`/`struct` excerpts; the rewrite also caught the tutorial
+# teaching an actual defect as still-open — h1 silently not enforcing
+# `max_in_flight_requests` and a body-carrying h2 shed request getting
+# `RST_STREAM` instead of the documented 503 — that commit `8a12a93b5`
+# ("fix: enforce request admission on h1 and drain h2 shed bodies") had
+# already fixed the same day the tutorial was first written, proven by two
+# real, currently-green tests (`proxima-http/src/http1/serve.rs`'s
+# `h1_in_flight_shed_renders_503_then_recovers_after_release` and
+# `tests/e2e/listener_h2.rs`'s
+# `native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset`)
+# rather than left asserted from stale prose. A regression — any
 # currently-compiling block citing an API that gets renamed or removed —
 # drops the count below the floor and fails the build; growing the floor by
 # fixing a currently-failing block (prelude gap, tutorial content, or the
 # awk transform's own reach) is always welcome and never blocked by this
 # check.
-FLOOR=52
+FLOOR=61
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
