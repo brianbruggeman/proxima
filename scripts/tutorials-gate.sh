@@ -188,13 +188,25 @@ fi
 # excerpted `main`-body fragments (needing a `?` inside a function that
 # actually returns `Result`, and a `server` to call `.run_until_signal()` on)
 # into small, honestly-labeled, self-contained wrappers around the same real
-# lines instead of leaving them silently FAILED). A regression —
-# any currently-compiling block citing an API that gets renamed or removed —
+# lines instead of leaving them silently FAILED); raised to 52 later the same
+# day after 05-listener-universal.md's own rewrite turned all 5 of its blocks
+# (all 5 previously FAILED — an undefined-`bind`/`my_handler` fragment, two
+# further copies of the same undefined-variable shape, and a bare
+# `.accept("h2")` one-liner that isn't a legal standalone expression) into 3
+# real, self-contained, compiling excerpts of `examples/any_listener.rs`
+# (the redundant/broken fragments were cut, not replaced 1:1) — the rewrite
+# also caught a real bug the old prose taught: `Listener::builder().handle()`
+# takes an `impl Into<PipeHandle>` (a `Handler`-shaped VALUE), not a bare
+# `async fn` the way `App::mount` does (`App::mount`'s bare-fn adapter,
+# `FnHandler`, is private to `src/app.rs`, never reachable through
+# `Listener::builder()`) — confirmed by compiling `into_handle(bare_fn)`
+# directly and reading the resulting E0277. A regression — any
+# currently-compiling block citing an API that gets renamed or removed —
 # drops the count below the floor and fails the build; growing the floor by
 # fixing a currently-failing block (prelude gap, tutorial content, or the
 # awk transform's own reach) is always welcome and never blocked by this
 # check.
-FLOOR=49
+FLOOR=52
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
