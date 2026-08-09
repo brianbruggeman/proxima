@@ -235,8 +235,23 @@ fi
 # API that gets renamed or removed — drops the count below the floor and
 # fails the build; growing the floor by fixing a currently-failing block
 # (prelude gap, tutorial content, or the awk transform's own reach) is
-# always welcome and never blocked by this check.
-FLOOR=67
+# always welcome and never blocked by this check. Raised to 73 later the
+# same day after 08-protocol-fleet.md's own rewrite turned all 10 of its
+# blocks (all 10 previously FAILED — a bare `let server = ...await?;`
+# fragment with no enclosing fn using an undefined `bind`, a DNS section
+# whose "Listener:" prose described `.dns(handler)` but showed no
+# `Listener::builder()` code block at all, and three more handler-only
+# impl blocks with no round trip) into 6 real, self-contained, compiling
+# `async fn`/`struct` excerpts mirroring `examples/protocol_fleet.rs`'s
+# own per-protocol functions — one shared `NullHttp` fallback-handler
+# block plus one full listener+client round-trip block per protocol
+# (memcached/DNS/Kafka/MQTT/AMQP); the rewrite also fixed two stale
+# `file:line`/section citations (`.dns(dsn)` dialing UDP was cited to a
+# nonexistent DNS module doc, corrected to `src/upstreams/dns.rs`'s own
+# matching doc comment; the DNS `.quic()` config-error citation pointed at
+# 07-sugar-composition.md's own `.dns(handler)` section instead of its
+# failure-mode section that actually demonstrates a rejected composition).
+FLOOR=73
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
