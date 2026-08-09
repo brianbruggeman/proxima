@@ -1,0 +1,36 @@
+name: tutorials
+
+# Gate for docs/tutorials/*.md: every ```rust fenced block must still
+# compile against today's API. See scripts/tutorials-gate.sh for the
+# mechanism and why `cargo test --doc` (not a second bespoke harness) is
+# what runs it.
+
+on:
+  push:
+    branches: [main, "feat/*", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  tutorials-gate:
+    name: tutorials-gate.sh (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.tutorials == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/tutorials-gate.sh

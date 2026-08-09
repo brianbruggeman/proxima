@@ -92,3 +92,4 @@ book/book/
 
 # local git worktrees (never track as embedded repos)
 .worktrees/
+/.tutorial-gate-generated/
