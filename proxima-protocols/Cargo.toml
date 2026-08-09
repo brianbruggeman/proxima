@@ -528,6 +528,11 @@ name = "settings_adversarial_payload"
 path = "tests/settings_adversarial_payload.rs"
 required-features = ["http3_codec-alloc"]
 
+[[test]]
+name = "delimiter_ndjson_misalignment"
+path = "tests/delimiter_ndjson_misalignment.rs"
+required-features = ["codec-pipe"]
+
 [[bench]]
 name = "bench_pgwire_codec"
 harness = false

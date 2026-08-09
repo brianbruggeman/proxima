@@ -35,7 +35,7 @@
 use core::future::Future;
 
 use bytes::Bytes;
-use proxima_codec::{Addressed, Datagram, FrameCodec, ShareBuf};
+use proxima_codec::{Addressed, Datagram, DelimiterCodec, FrameCodec, FrameError, ShareBuf};
 use proxima_primitives::pipe::{Pipe, SendPipe};
 
 /// Bridges a borrowed `C::Frame<'a>` into an owned value backed by the
@@ -299,6 +299,33 @@ where
                 message: C::own_message(&input.message, &decoded.message),
             })
         }
+    }
+}
+
+/// [`OwnFrame`] for [`DelimiterCodec`] — the per-codec re-owning seam
+/// [`FrameCodecPipe`] is generic over. A delimiter-terminated frame is
+/// already one contiguous `&[u8]` view (no field-by-field re-owning like
+/// `H1RequestCodec`'s headers), so re-owning past the `Pipe::call`
+/// boundary is a single [`ShareBuf::share`] call.
+impl OwnFrame for DelimiterCodec {
+    type Source = Bytes;
+    type Owned = Bytes;
+
+    fn own_frame(source: &Bytes, frame: &&[u8]) -> Bytes {
+        source.share(frame)
+    }
+}
+
+/// The per-codec "need more bytes" seam [`FrameCodecPipe`] is generic
+/// over. [`proxima_codec::LengthDelimitedCodec`] shares this same
+/// [`FrameError`] and gets the same mapping for free — only
+/// `Incomplete` means "read more bytes and retry"; `ZeroLength` and
+/// `FrameTooLarge` stay hard errors, or a caller composed on top of
+/// [`FrameCodecPipe`] would sit waiting on bytes that can never make the
+/// frame valid.
+impl Incomplete for FrameError {
+    fn is_incomplete(&self) -> bool {
+        matches!(self, FrameError::Incomplete)
     }
 }
 
