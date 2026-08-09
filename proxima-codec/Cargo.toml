@@ -17,6 +17,7 @@ base64 = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 simd-json = { workspace = true, optional = true }
+memchr.workspace = true
 
 [features]
 default = ["std"]
@@ -45,6 +46,7 @@ std = [
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support"] }
+rstest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [lints]

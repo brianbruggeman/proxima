@@ -9,7 +9,7 @@ pub mod share_buf;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use proxima_core::ProximaError;
 use thiserror::Error;
 
@@ -423,9 +423,189 @@ impl FrameCodec for LengthDelimitedCodec {
     }
 }
 
+/// Delimiter-terminated [`FrameCodec`] — RESP (`\r\n`), NDJSON (`\n`),
+/// pgwire startup-parameter pairs (NUL) all frame this way instead of a
+/// length prefix. Zero-copy like [`LengthDelimitedCodec`]: `parse_frame`
+/// returns a borrowed `&[u8]` view up to (excluding) the delimiter, plus
+/// the bytes consumed (frame + delimiter).
+///
+/// ```
+/// use proxima_codec::{DelimiterCodec, FrameCodec, FrameError};
+///
+/// let codec = DelimiterCodec::unbounded(b"\n");
+/// let (frame, consumed) = codec.parse_frame(b"{\"op\":\"ping\"}\nrest").expect("parse");
+/// assert_eq!(frame, b"{\"op\":\"ping\"}");
+/// assert_eq!(consumed, frame.len() + 1);
+/// assert_eq!(codec.parse_frame(b"no newline yet"), Err(FrameError::Incomplete));
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct DelimiterCodec {
+    delimiter: &'static [u8],
+    limits: FrameLimits,
+}
+
+impl DelimiterCodec {
+    #[must_use]
+    pub const fn new(delimiter: &'static [u8], limits: FrameLimits) -> Self {
+        Self { delimiter, limits }
+    }
+
+    /// A cap of `usize::MAX` so a real long line is never rejected as
+    /// oversized — the caller trusts the transport to bound total memory
+    /// some other way (e.g. a connection-level read cap).
+    #[must_use]
+    pub const fn unbounded(delimiter: &'static [u8]) -> Self {
+        Self {
+            delimiter,
+            limits: FrameLimits::new(usize::MAX, false),
+        }
+    }
+
+    #[must_use]
+    pub const fn limits(self) -> FrameLimits {
+        self.limits
+    }
+
+    /// Scans `buf[search_start..]` for the delimiter, returning the
+    /// absolute offset where it starts. Shared by [`Self::parse_frame`]
+    /// (always `search_start = 0`) and [`DelimiterFraming::next_frame`]
+    /// (a backed-up `search_start` so a resumed scan never rereads bytes
+    /// already proven delimiter-free). An empty delimiter never matches —
+    /// matching at every position would either return a zero-length frame
+    /// forever or require special-casing; treating it as "never found"
+    /// keeps the caller's Incomplete/retry loop the single source of
+    /// truth instead of a second code path.
+    fn find_frame_end(&self, buf: &[u8], search_start: usize) -> Option<usize> {
+        if self.delimiter.is_empty() {
+            return None;
+        }
+        let start = search_start.min(buf.len());
+        memchr::memmem::find(&buf[start..], self.delimiter).map(|offset| start + offset)
+    }
+}
+
+impl FrameCodec for DelimiterCodec {
+    type Frame<'a> = &'a [u8];
+    type Error = FrameError;
+
+    fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(&'a [u8], usize), FrameError> {
+        match self.find_frame_end(buf, 0) {
+            Some(end) => Ok((&buf[..end], end + self.delimiter.len())),
+            None if buf.len() > self.limits.max_frame_bytes => {
+                Err(FrameError::FrameTooLarge { len: buf.len() })
+            }
+            None => Err(FrameError::Incomplete),
+        }
+    }
+
+    fn encode_frame(&self, frame: &&[u8], dest: &mut Vec<u8>) -> Result<(), FrameError> {
+        dest.extend_from_slice(frame);
+        dest.extend_from_slice(self.delimiter);
+        Ok(())
+    }
+}
+
+/// Frame-boundary scan state for [`DelimiterCodec`], modeled as a
+/// discriminated-enum FSM rather than a struct with a `scanned: usize`
+/// field sitting beside a buffer that also mutates: a struct shape lets a
+/// caller (or a future refactor) advance the buffer without advancing the
+/// cursor, silently reintroducing the whole-buffer rescan this type
+/// exists to rule out. Folding the cursor into the enum's own variant
+/// makes that bug unrepresentable — there is no state in which "the
+/// buffer changed" and "the scan position" can drift apart.
+#[derive(Debug, Clone)]
+pub enum DelimiterFraming {
+    /// No delimiter found in `buf[..scanned]` yet — a resumed scan starts
+    /// at (a small backup before) `scanned`, never at 0.
+    Scanning { buf: BytesMut, scanned: usize },
+    /// A frame was found and handed back via [`DelimiterFraming::next_frame`]'s
+    /// `Some`; `rest` is the buffered tail after the delimiter, not yet
+    /// scanned. No `scanned` field — a fresh tail starts its scan at 0.
+    FrameReady { frame: Bytes, rest: BytesMut },
+}
+
+impl DelimiterFraming {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::Scanning {
+            buf: BytesMut::new(),
+            scanned: 0,
+        }
+    }
+
+    /// Infallible append — never scans. Appends to whichever buffer the
+    /// current state is tracking (`Scanning::buf` or `FrameReady::rest`),
+    /// so bytes that arrive before the previous frame is drained via
+    /// [`Self::next_frame`] are not lost.
+    #[must_use]
+    pub fn push(self, chunk: &[u8]) -> Self {
+        match self {
+            Self::Scanning { mut buf, scanned } => {
+                buf.extend_from_slice(chunk);
+                Self::Scanning { buf, scanned }
+            }
+            Self::FrameReady { frame, mut rest } => {
+                rest.extend_from_slice(chunk);
+                Self::FrameReady { frame, rest }
+            }
+        }
+    }
+
+    /// Advances the FSM by one step. From `FrameReady`, the cached frame
+    /// was already handed to the caller by the call that produced this
+    /// state, so this call discards it and resumes scanning `rest` from
+    /// 0. From `Scanning`, resumes at `scanned` minus a `delimiter.len() -
+    /// 1` backup — mandatory, not an optimization: a delimiter split
+    /// across two `push` calls has its first byte inside `buf[..scanned]`
+    /// and would be silently missed without the backup.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameError::FrameTooLarge`] when the buffered, still-undelimited
+    /// tail exceeds `codec`'s `max_frame_bytes`.
+    pub fn next_frame(self, codec: DelimiterCodec) -> Result<(Self, Option<Bytes>), FrameError> {
+        let (buf, scanned) = match self {
+            Self::Scanning { buf, scanned } => (buf, scanned),
+            Self::FrameReady { rest, .. } => (rest, 0),
+        };
+        let backup = codec.delimiter.len().saturating_sub(1);
+        let search_start = scanned.saturating_sub(backup);
+        match codec.find_frame_end(&buf, search_start) {
+            Some(end) => {
+                let mut buf = buf;
+                let mut rest = buf.split_off(end);
+                let _ = rest.split_to(codec.delimiter.len());
+                let frame = buf.freeze();
+                Ok((
+                    Self::FrameReady {
+                        frame: frame.clone(),
+                        rest,
+                    },
+                    Some(frame),
+                ))
+            }
+            None if buf.len() > codec.limits.max_frame_bytes => {
+                Err(FrameError::FrameTooLarge { len: buf.len() })
+            }
+            None => {
+                let scanned = buf.len();
+                Ok((Self::Scanning { buf, scanned }, None))
+            }
+        }
+    }
+}
+
+impl Default for DelimiterFraming {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// Fixed-width 4-byte [`Datagram`] — a trivial POD message, borrowed
@@ -710,5 +890,116 @@ mod tests {
             .encode(&addressed, &mut dest)
             .expect("encode should succeed");
         assert_eq!(dest, packet);
+    }
+
+    // ── DelimiterCodec (REBUILD 1) ───────────────────────────────────
+
+    #[rstest]
+    #[case::resp_simple_string(&b"\r\n"[..], &b"+PONG\r\ntrailing"[..], &b"+PONG"[..], 7)]
+    #[case::ndjson_line(&b"\n"[..], b"{\"op\":\"ping\"}\n{\"op\":\"pong\"}", b"{\"op\":\"ping\"}", 14)]
+    #[case::pgwire_nul_terminated(&b"\0"[..], b"user\0rest", b"user", 5)]
+    fn delimiter_codec_parses_complete_frame_zero_copy(
+        #[case] delimiter: &'static [u8],
+        #[case] wire: &[u8],
+        #[case] expected_frame: &[u8],
+        #[case] expected_consumed: usize,
+    ) {
+        let codec = DelimiterCodec::unbounded(delimiter);
+        let (frame, consumed) = codec.parse_frame(wire).expect("parse");
+        assert_eq!(frame, expected_frame);
+        assert_eq!(consumed, expected_consumed);
+        assert_eq!(frame.as_ptr(), wire.as_ptr());
+    }
+
+    #[test]
+    fn delimiter_codec_signals_incomplete_for_missing_delimiter() {
+        let codec = DelimiterCodec::unbounded(b"\r\n");
+        assert_eq!(
+            codec.parse_frame(b"+PONG without a terminator"),
+            Err(FrameError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn delimiter_codec_enforces_cap_under_new_but_not_unbounded() {
+        let long_line = alloc::vec![b'x'; 100];
+        let bounded = DelimiterCodec::new(b"\n", FrameLimits::new(16, false));
+        assert_eq!(
+            bounded.parse_frame(&long_line),
+            Err(FrameError::FrameTooLarge { len: 100 })
+        );
+
+        let unbounded = DelimiterCodec::unbounded(b"\n");
+        assert_eq!(
+            unbounded.parse_frame(&long_line),
+            Err(FrameError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn delimiter_codec_empty_delimiter_is_permanently_incomplete_never_loops() {
+        let codec = DelimiterCodec::unbounded(b"");
+        assert_eq!(
+            codec.parse_frame(b"anything at all"),
+            Err(FrameError::Incomplete)
+        );
+        assert_eq!(codec.parse_frame(b""), Err(FrameError::Incomplete));
+    }
+
+    #[test]
+    fn delimiter_codec_encode_round_trips() {
+        let codec = DelimiterCodec::unbounded(b"\r\n");
+        let mut dest = Vec::new();
+        let payload: &[u8] = b"+PONG";
+        codec.encode_frame(&payload, &mut dest).expect("encode");
+        assert_eq!(dest, b"+PONG\r\n");
+        let (frame, consumed) = codec.parse_frame(&dest).expect("parse back");
+        assert_eq!(frame, payload);
+        assert_eq!(consumed, dest.len());
+    }
+
+    // ── DelimiterFraming (REBUILD 2) ─────────────────────────────────
+
+    #[test]
+    fn delimiter_framing_finds_delimiter_straddling_a_push_boundary() {
+        // without the mandatory backup in `next_frame`, the first push's
+        // trailing `\r` and the second push's leading `\n` never meet in
+        // one scan window, and "+PONG" is silently swallowed.
+        let codec = DelimiterCodec::unbounded(b"\r\n");
+        let state = DelimiterFraming::new().push(b"+PONG\r");
+
+        let (state, first_attempt) = state.next_frame(codec).expect("scan");
+        assert!(first_attempt.is_none(), "no delimiter buffered yet");
+
+        let state = state.push(b"\n+PANG\r\n");
+
+        let (state, first_frame) = state.next_frame(codec).expect("scan");
+        assert_eq!(first_frame, Some(Bytes::from_static(b"+PONG")));
+
+        let (_state, second_frame) = state.next_frame(codec).expect("scan");
+        assert_eq!(second_frame, Some(Bytes::from_static(b"+PANG")));
+    }
+
+    #[test]
+    fn delimiter_framing_returns_none_on_partial_buffer() {
+        let codec = DelimiterCodec::unbounded(b"\n");
+        let state = DelimiterFraming::new().push(b"no newline yet");
+        let (_state, frame) = state.next_frame(codec).expect("scan");
+        assert!(frame.is_none());
+    }
+
+    #[test]
+    fn delimiter_framing_drains_multiple_frames_from_one_push() {
+        let codec = DelimiterCodec::unbounded(b"\n");
+        let state = DelimiterFraming::new().push(b"one\ntwo\nthree\n");
+
+        let (state, first) = state.next_frame(codec).expect("scan");
+        assert_eq!(first, Some(Bytes::from_static(b"one")));
+        let (state, second) = state.next_frame(codec).expect("scan");
+        assert_eq!(second, Some(Bytes::from_static(b"two")));
+        let (state, third) = state.next_frame(codec).expect("scan");
+        assert_eq!(third, Some(Bytes::from_static(b"three")));
+        let (_state, none) = state.next_frame(codec).expect("scan");
+        assert!(none.is_none());
     }
 }
