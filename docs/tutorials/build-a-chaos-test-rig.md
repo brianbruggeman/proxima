@@ -53,7 +53,7 @@ let controller = RetryController { max_attempts: 4, backoff: Backoff::Exponentia
 
 ## 3. Fallback absorbs faults by routing to a different pipe
 
-Where retry re-runs the *same* pipe, `Fallback` routes to a **different** one on any failure. `Chaos(80% fault)` as the primary, a reliable `Cache` as the secondary — every request resolves `Ok` regardless of how hostile the policy is (`chaos/main.rs:429-486`):
+Where retry re-runs the *same* pipe, `Fallback` routes to a **different** one on any failure. `Chaos(80% fault)` as the primary, a reliable `Cache` as the secondary — every request resolves `Ok` regardless of how hostile the policy is (`chaos/main.rs:438-477`):
 
 ```rust
 let composite = Fallback { primary: chaos_80pct, secondary: Cache { .. } };

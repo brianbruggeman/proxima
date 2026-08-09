@@ -65,12 +65,16 @@ http-listener = [
 ]
 ```
 
-The umbrella `proxima` crate (this repository's top-level package, what `examples/*/main.rs` depend on) re-exposes that pairing as its own `http1-native` feature, `Cargo.toml:465–466`:
+The umbrella `proxima` crate (this repository's top-level package, what `examples/*/main.rs` depend on) re-exposes that pairing as its own `http1-native` feature, `Cargo.toml:514–515`:
 
 ```toml
-http1-native = ["proxima-http/http-listener"]
+http1-native = ["any-listener"]
 http1 = ["tokio", "http1-native", "proxima-http/http1"]
 ```
+
+(`http1-native` reaches `proxima-http/http-listener` one hop indirectly now,
+through `any-listener = ["proxima-http/http-listener"]`, `Cargo.toml:500` —
+same transitive dependency, one more named feature in between.)
 
 Read those two lines carefully: `http1-native` pulls in the sans-IO codec — "sans-IO" meaning the HTTP/1.1 framing/parsing logic itself never touches a socket or an async runtime; it only turns bytes into requests/responses and back, so it can be driven by *any* I/O source, prime's or tokio's or a plain in-memory buffer in a test — and the `AcceptorFactory`-driven accept path (`listener::serve_via_factory`) — no `dep:tokio` anywhere in that chain. `http1` is `http1-native` *plus* `dep:tokio` plus hyper's legacy tokio-coupled client/accept-loop machinery, kept around for callers who have not migrated. **`http1-native` is not a stripped-down `http1`** — it is the tokio-free base that `http1` is built on top of, not the other way around.
 
@@ -84,7 +88,7 @@ pub trait AcceptorFactory: Send + Sync + 'static {
 
 `proxima_net::prime::PrimeAcceptorFactory` (`proxima-net/src/prime/mod.rs:115`) binds the socket through prime's own reactor and hands back a connection (`PrimeTcpConnection`, implementing `futures::io::{AsyncRead, AsyncWrite}` at `proxima-net/src/prime/mod.rs:78,88`) that the tokio-free h1 driver can drive directly. A `TokioAcceptorFactory` exists too (`proxima_net::tokio::TokioAcceptorFactory`, used in section 9) — same trait, tokio underneath instead. **Runtime and acceptor factory are always a matched pair**: the runtime is what runs the connection's future; the acceptor factory is what produced the socket that future reads and writes. Mismatching them (a tokio socket handed to a task spawned on a prime worker with no tokio reactor registered) is exactly the kind of bug `App::with_runtime`/`App::with_acceptor_factory` (section 4) are designed to be called together to prevent.
 
-Finally, the umbrella `Cargo.toml`'s own default-feature list states the header claim plainly (comments elided for the middle section — the full block runs `Cargo.toml:403–425`):
+Finally, the umbrella `Cargo.toml`'s own default-feature list states the header claim plainly (comments elided for the middle section — the full block runs `Cargo.toml:434–456`):
 
 ```toml
 default = [
@@ -112,7 +116,7 @@ default = [
 
 `examples/proxy/main.rs` is the smallest of the five: one pipe, `ProxyPipe`, whose entire `call` body is handing the inbound request to a `Client` and returning what comes back (`proxy/main.rs:57–63`) — `proxima::Client` is itself a `SendPipe<In = Request<Bytes>, Out = Response<Bytes>>`, so forwarding is composition, not new machinery. That is not this tutorial's subject (`00-foundations.md` and the `build-a-*` project tutorials cover the pipe side in depth); this tutorial is about the handful of lines around it that decide *what runs it*.
 
-Its `Cargo.toml` entry, `Cargo.toml:1514–1516`:
+Its `Cargo.toml` entry, `Cargo.toml:1816–1818`:
 
 ```toml
 [[example]]
@@ -430,7 +434,7 @@ W3C header layer (RequestContext.trace_id via inject_propagation/establish_trace
 PASS: distributed tracing across two proxima instances lands in ONE trace.
 ```
 
-The runtime story here is entirely mundane — two `App`s, two independent `.with_runtime(...)` calls, exactly as taught in section 4 — and that is the point of placing it last: by now the pattern is load-bearing enough to disappear into the background of a much more interesting proof (W3C trace propagation across a real network hop), instead of being the thing under test. And it is still true: `cargo tree --no-default-features --features "serve-prime,http1-native,macros" -e normal -i tokio` prints nothing for this example's own required-features either (`Cargo.toml:1326`) — two real proxima server instances, a real TCP hop between them, still zero tokio.
+The runtime story here is entirely mundane — two `App`s, two independent `.with_runtime(...)` calls, exactly as taught in section 4 — and that is the point of placing it last: by now the pattern is load-bearing enough to disappear into the background of a much more interesting proof (W3C trace propagation across a real network hop), instead of being the thing under test. And it is still true: `cargo tree --no-default-features --features "serve-prime,http1-native,macros" -e normal -i tokio` prints nothing for this example's own required-features either (`Cargo.toml:1534`) — two real proxima server instances, a real TCP hop between them, still zero tokio.
 
 ## 9. When tokio *is* the right answer: `multi_runtime` and `runtime_select`
 
@@ -485,7 +489,7 @@ both runtimes shut down cleanly; final shared total = 6
 
 tokio and glommio and monoio are process-singletons by convention — one runtime per process is the norm everywhere else. `Runtime` here is just an interface (section 1); `multi_runtime` is the smallest proof that can't be faked that any number of implementations coexist in one process, side by side, sharing state safely across the boundary. Note the acceptor factory changes to match, exactly as section 2 said it must: `PrimeAcceptorFactory` for the prime-backed app, `proxima_net::tokio::TokioAcceptorFactory` for the tokio-backed one — the runtime and the socket-opener are still always a matched pair, even when there are two of each in the same process.
 
-**Update since this document's first pass — a gap this document itself flagged, now closed:** at the time this document was first written, neither example's `Cargo.toml` `required-features` (`multi_runtime`, `Cargo.toml:1283`; `runtime_select`, `:1307`) listed `http1-native` or `http1`, so the bare commands they printed (`cargo run --example multi_runtime --features "runtime-tokio tokio"`) failed with `Registry("no listen protocol named 'http'")` — no h1 listener is registered without one of those two features. Both entries have since been fixed to require `http1` directly (`required-features = [..., "http1"]`), so `cargo build --example multi_runtime --features "runtime-tokio,tokio,http1-native"` (the workaround this document originally suggested) now fails a DIFFERENT way — `error: target 'multi_runtime' ... requires the features: ... 'http1'` — because `http1-native` alone no longer satisfies the declared requirement; `http1` does (and pulls in `http1-native` underneath it, per §2). The commands shown above (`http1`, not `http1-native`) are the current verified-working form for both examples.
+**Update since this document's first pass — a gap this document itself flagged, now closed:** at the time this document was first written, neither example's `Cargo.toml` `required-features` (`multi_runtime`, `Cargo.toml:1491`; `runtime_select`, `:1515`) listed `http1-native` or `http1`, so the bare commands they printed (`cargo run --example multi_runtime --features "runtime-tokio tokio"`) failed with `Registry("no listen protocol named 'http'")` — no h1 listener is registered without one of those two features. Both entries have since been fixed to require `http1` directly (`required-features = [..., "http1"]`), so `cargo build --example multi_runtime --features "runtime-tokio,tokio,http1-native"` (the workaround this document originally suggested) now fails a DIFFERENT way — `error: target 'multi_runtime' ... requires the features: ... 'http1'` — because `http1-native` alone no longer satisfies the declared requirement; `http1` does (and pulls in `http1-native` underneath it, per §2). The commands shown above (`http1`, not `http1-native`) are the current verified-working form for both examples.
 
 And to be precise about what "opt-in" means at the dependency level — `runtime-tokio,tokio` genuinely does pull tokio into the graph, unlike everything in sections 3–8:
 

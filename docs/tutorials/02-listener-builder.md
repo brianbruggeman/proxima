@@ -112,7 +112,7 @@ impl ListenerBuilderEntry for Listener {
 
 Read that side by side with §1's `Client::http`/`Client::builder`. Same two entry points, same names, same shape: a one-liner that pre-fills the common case, and a bare `builder()` for everything else. `Listener::http(bind)` calls `.http(bind.to_string())` — the listener's OWN `ListenerProtocolExt::http` (`src/listener/protocol.rs:28–29`), a different trait impl from the client's `ClientProtocolExt::http`, but the same spec key (`"http"`) and the same idea: pre-fill the common case.
 
-Bring both entry points into scope together — `use proxima::{Listener, ListenerBuilderEntry};`, plus `use proxima::ListenerTransportExt;` for `.tcp()` below (or `use proxima::prelude::*;` for everything at once) — and you get the mirror of the manual `App::new()?; app.mount(...)?; app.serve(RunConfig::http(bind)).await?;` shape from `examples/hello/main.rs:108–111`:
+Bring both entry points into scope together — `use proxima::{Listener, ListenerBuilderEntry};`, plus `use proxima::ListenerTransportExt;` for `.tcp()` below (or `use proxima::prelude::*;` for everything at once) — and you get the mirror of the manual `App::new()?; app.mount(...)?; app.serve(RunConfig::http(bind)).await?;` shape from `examples/hello/main.rs:48–53`:
 
 ```rust
 use proxima::prelude::*;
