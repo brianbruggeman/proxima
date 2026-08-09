@@ -282,8 +282,38 @@ fi
 # verbatim from real crate doctests that don't know about each other)
 # collided too (E0252) once accumulated into one scope — fixed with
 # `use std::io::Write as _;` in the second, which still satisfies `write!`
-# without binding a second `Write` name.
-FLOOR=77
+# without binding a second `Write` name. Raised to 82 after
+# 09-extend-your-own-protocol.md's own rewrite: all 4 of its blocks were
+# previously FAILED — the `AnyProtocol` trait excerpt and the
+# `PingPongProtocol` impl excerpt both cited `StreamConnection`/`PeerInfo`
+# (and the trait excerpt also `AnyHandler`) bare, none of which
+# `tutorial_gate_prelude` re-exported (fixed by adding all three re-exports
+# to the prelude itself, `src/tutorial_doctests.rs` — a real gap, not a
+# tutorial-content bug, since `examples/extend_protocol.rs` imports them
+# from `proxima::{PeerInfo, StreamConnection}` /
+# `proxima::listen::any::AnyHandler` same as the excerpt), and the
+# `.protocol(candidate)`/`.ping_pong(candidate)` registration blocks were
+# bare `let server = ...await?;` fragments referencing an undefined `bind`
+# and `LegitOk` — fixed by turning both into real, self-contained
+# `async fn start(bind: SocketAddr) -> Result<(), ProximaError>` excerpts
+# with `LegitOk` defined inline, mirroring `examples/extend_protocol.rs`'s
+# own `main` minus the `free_loopback_addr()?` plumbing (same pattern
+# 05-listener-universal.md's own rewrite used for the identical shape).
+# The rewrite also fixed two real drift bugs the prose asserted as fact:
+# "that's the whole trait" showed 5 methods against a real trait that had
+# grown a 6th (`wants_datagram`, added by `a39c1c9e8` without updating this
+# page's own trait excerpt) — corrected to name and defer that method to
+# part 8 rather than silently omit it; and "the three parameters this
+# example doesn't use" undercounted by one — `peer: Option<PeerInfo>` was
+# unused by `PingPongProtocol::drive` but never explained. Both `file:line`
+# citations for the trait (`proxima-listen/src/any/probe.rs:134-195`, stale
+# by the same doc-comment growth) and `ListenerBuilder::protocol`
+# (`src/listener/handle.rs:277-289`, off by the same margin
+# 02-listener-builder.md's own already-correct `278-292` citation for the
+# identical function proved) were resynced. The shared prelude fix also
+# incidentally raised 11-any-transport-agnostic.md's own passing count by
+# one (3 failing blocks down to 2) since it cites the same two types.
+FLOOR=82
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
