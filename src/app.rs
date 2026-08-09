@@ -2081,12 +2081,15 @@ mod tests {
         let app = App::new().expect("app");
         let runtime = app.runtime().expect("default runtime installed");
         let drops_observed = Arc::new(AtomicU64::new(0));
+        let cores = runtime.num_cores();
+        let (registered_tx, mut registered_rx) = proxima_primitives::sync::mpsc::channel::<()>(cores.max(1));
 
         // Register a per-core cleanup hook on every worker core by
         // dispatching a registration factory to each core. The closure
         // pushes onto that core's thread_local stack.
-        for core_index in 0..runtime.num_cores() {
+        for core_index in 0..cores {
             let drops_for_core = drops_observed.clone();
+            let registered_on_core = registered_tx.clone();
             runtime
                 .spawn_factory_on_core(
                     crate::runtime::CoreId(core_index),
@@ -2098,14 +2101,22 @@ mod tests {
                                     drops_for_core.fetch_add(1, Ordering::SeqCst);
                                 }),
                             );
+                            let _ = registered_on_core.send(()).await;
                         })
                     }),
                 )
                 .expect("test-time spawn must succeed on a fresh runtime");
         }
 
-        // Give the registration tasks a moment to land on their cores.
-        proxima_core::time::sleep(std::time::Duration::from_millis(50)).await;
+        // await the registrations instead of guessing how long they take:
+        // under a loaded 8-core box the old 50ms sleep let drain observe
+        // 6 of 8 hooks.
+        for _ in 0..cores {
+            registered_rx
+                .recv()
+                .await
+                .expect("every per-core registration must report in");
+        }
 
         // Bind a no-op TCP HTTP listener so run_until_signal has
         // something to stop. The drain test only cares about
