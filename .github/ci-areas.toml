@@ -7,6 +7,19 @@
 packages = ["proxima"]
 paths = ["scripts/prime-serve-gate.sh", ".github/workflows/prime-serve.yml"]
 
+# tutorial snippets cite the public API of every crate `proxima` depends on
+# (proxima-primitives::pipe, App/RunConfig, the protocol crates); an
+# unrelated-looking rename anywhere in that closure is exactly the class of
+# change this gate exists to catch, so it shares prime_serve's package scope.
+[area.tutorials]
+packages = ["proxima"]
+paths = [
+    "docs/tutorials/**",
+    "scripts/tutorials-gate.sh",
+    ".github/workflows/tutorials.yml",
+    "src/tutorial_doctests.rs",
+]
+
 [area.pgwire]
 packages = ["proxima-pgwire"]
 paths = ["scripts/proxima-pgwire-gate.sh", ".github/workflows/proxima-pgwire.yml"]

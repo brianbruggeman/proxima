@@ -216,10 +216,13 @@ pub use proxima_http::templates;
 #[cfg(feature = "tls")]
 pub use proxima_tls as tls;
 pub mod tracing_init;
+pub mod tutorial_doctests;
 pub use proxima_patterns::balancer::upstream_ref;
 pub use proxima_patterns::kv::write_back;
 pub use proxima_primitives::pipe::pipe_factory;
 pub use proxima_primitives::pipe::upgrade;
+#[doc(hidden)]
+pub use tutorial_doctests::tutorial_gate_prelude;
 
 pub mod listeners;
 pub mod middlewares;
