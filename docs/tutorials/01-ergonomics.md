@@ -27,7 +27,7 @@ Everything Foundations taught you — `Pipe`, the four tiers, `AndThen`, `Handle
 
 ## 2. `PipeExt`: one blanket trait, four fluent methods
 
-Foundations §5 showed you `AndThen::new(first, second)` and `first.and_then(second)` side by side, without explaining where `.and_then()` actually lives. Here is the whole answer. It is a separate trait, `PipeExt`, blanket-implemented for every `Pipe` (`proxima-primitives/src/pipe/ext.rs:44,86`):
+Foundations §5 showed you `AndThen::new(first, second)` and `first.and_then(second)` side by side, without explaining where `.and_then()` actually lives. Here is the whole answer. It is a separate trait, `PipeExt`, blanket-implemented for every `Pipe` (`proxima-primitives/src/pipe/ext.rs:45,87`):
 
 ```rust
 pub trait PipeExt: Pipe + Sized {
@@ -43,10 +43,10 @@ Four methods live on `PipeExt`, and you already understand three of their return
 
 | method | signature (abbreviated) | builds | source |
 |---|---|---|---|
-| `.and_then(next)` | `Next: Pipe<In = Self::Out>` | `AndThen<Self, Next>` | `ext.rs:47–53` |
-| `.filter(predicate)` | `Pred: Pipe<Out = Self::In>` | `AndThen<Pred, Self>` | `ext.rs:56–62` |
-| `.fanout(other)` | `Self: Clone, Self::In: Clone` | `FanOut<Self, AllOrNothing>` | `ext.rs:66–72` |
-| `.fanin(other, strategy)` | `Self: UnpinPipe<In = (), Err = Exhausted>` | `FanIn<Self, Strategy, 2>` | `ext.rs:77–83` |
+| `.and_then(next)` | `Next: Pipe<In = Self::Out>` | `AndThen<Self, Next>` | `ext.rs:48–54` |
+| `.filter(predicate)` | `Pred: Pipe<Out = Self::In>` | `AndThen<Pred, Self>` | `ext.rs:57–63` |
+| `.fanout(other)` | `Self: Clone, Self::In: Clone` | `FanOut<Self, AllOrNothing>` | `ext.rs:67–73` |
+| `.fanin(other, strategy)` | `Self: UnpinPipe<In = (), Err = Exhausted>` | `FanIn<Self, Strategy, 2>` | `ext.rs:78–84` |
 
 `.filter(predicate)` is worth a second look, because the argument order flips relative to what the name suggests: `self.filter(predicate)` builds `AndThen::new(predicate, self)` — the predicate runs *first*, and only an admitted item reaches `self`. Read it from the inner pipe's side: "run me, but filtered by this predicate first." Section 5 shows this end to end with `filter!`.
 
@@ -78,7 +78,7 @@ Foundations §6 told you proxima needs *four separate* traits — `Pipe`, `SendP
 
 Because `PipeExt`'s methods never return a future. Look again at `.and_then`'s bound: `Next: Pipe<In = Self::Out>` — nothing about `Send` or `Unpin` anywhere. It returns a *value*, `AndThen<Self, Next>` — a plain struct that *wraps* the two pipes you gave it. The RTN limitation only bites the method that actually calls a pipe and hands back its future — `call` itself. `.and_then()` doesn't call anything; it just packages two values together. So the blanket `impl<P: Pipe> PipeExt for P {}` only ever needs `P: Pipe`, the one tier every pipe already has.
 
-The tier tax doesn't disappear — it moves to where the future actually gets produced. `AndThen<First, Second>` itself pays it in full: `proxima-primitives/src/pipe/primitives.rs` has four separate impl blocks for `AndThen` — `Pipe` (`primitives.rs:203–221`), `SendPipe` (`primitives.rs:223–240`), `UnpinPipe` (`primitives.rs:327–343`), `UnpinSendPipe` (`primitives.rs:345–364`) — each conditioned on both `First` and `Second` implementing that same tier. `ext.rs`'s own module doc states the resulting split precisely (`ext.rs:11–15`): "the combinator value `and_then`/`filter`/`fanout`/`fanin` build carries whatever higher tiers its own stages qualify for regardless of which trait constructed it." Building the value is sugar, needing only the root tier; what the built value can later do is algebra, and pays the tier tax like everything else. Section 7 comes back to this from the other direction — why the *tax itself* costs four traits, not one.
+The tier tax doesn't disappear — it moves to where the future actually gets produced. `AndThen<First, Second>` itself pays it in full: `proxima-primitives/src/pipe/primitives.rs` has four separate impl blocks for `AndThen` — `Pipe` (`primitives.rs:203–221`), `SendPipe` (`primitives.rs:223–240`), `UnpinPipe` (`primitives.rs:327–343`), `UnpinSendPipe` (`primitives.rs:345–364`) — each conditioned on both `First` and `Second` implementing that same tier. `ext.rs`'s own module doc states the resulting split precisely (`ext.rs:12–16`): "the combinator value `and_then`/`filter`/`fanout`/`fanin` build carries whatever higher tiers its own stages qualify for regardless of which trait constructed it." Building the value is sugar, needing only the root tier; what the built value can later do is algebra, and pays the tier tax like everything else. Section 7 comes back to this from the other direction — why the *tax itself* costs four traits, not one.
 
 ## 4. Leaf macros: lifting a closure at the exact spot you write it
 
@@ -88,14 +88,14 @@ The tier tax doesn't disappear — it moves to where the future actually gets pr
 let doubled = pipe!(|input: u64| -> Result<u64, Infallible> { Ok(input * 2) });
 ```
 
-Under the hood this expands to a fresh, unnamed tuple struct — `struct __ProximaPipeLeaf<F>(F)` — that owns the closure as a field and calls through it, plus whichever trait impls the closure's shape earns. That struct is minted *fresh at this call site*; it is never a shared type in `proxima-primitives` you could import (`pipe_bang.rs:142–151`). This is the one sanctioned pattern in this codebase for bridging a closure to a trait — a fresh struct per call site, never library machinery.
+Under the hood this expands to a fresh, unnamed tuple struct — `struct __ProximaPipeLeaf<F>(F)` — that owns the closure as a field and calls through it, plus whichever trait impls the closure's shape earns. That struct is minted *fresh at this call site*; it is never a shared type in `proxima-primitives` you could import (`pipe_bang.rs:118–127`). This is the one sanctioned pattern in this codebase for bridging a closure to a trait — a fresh struct per call site, never library machinery.
 
 What tier(s) the resulting value reaches depends entirely on the closure's own shape, and this is where `pipe!` and `#[proxima::piped]` genuinely diverge, not just in spelling:
 
-- **A plain (non-`async`) closure** — `|input: u64| -> Result<u64, Infallible> { .. }` — is wrapped in `core::future::ready`, whose future is `Unpin` unconditionally. It reaches `Pipe` *and* `UnpinPipe` by default, and — write `pipe!(.., send)` and nothing else changes about the closure — climbs to all four: `Pipe`, `SendPipe`, `UnpinPipe`, `UnpinSendPipe` in one expansion (`pipe_bang.rs:365–374`, `sync_closure_with_send_emits_all_four_tiers`), exactly the impl-all closure `#[proxima::piped]` computes (section 6).
-- **An `async` closure** — `async move |input: u64| -> Result<u64, Infallible> { .. }`, stable since Rust 1.85 — is called straight through with no wrapper, zero extra cost. It reaches **`Pipe` only**, and two climbs are refused outright, each for a distinct, real reason (`pipe_bang.rs:212–233`, and proven by a real compile error below):
+- **A plain (non-`async`) closure** — `|input: u64| -> Result<u64, Infallible> { .. }` — is wrapped in `core::future::ready`, whose future is `Unpin` unconditionally. It reaches `Pipe` *and* `UnpinPipe` by default, and — write `pipe!(.., send)` and nothing else changes about the closure — climbs to all four: `Pipe`, `SendPipe`, `UnpinPipe`, `UnpinSendPipe` in one expansion (`pipe_bang.rs:369–377`, `sync_closure_with_send_emits_all_four_tiers`), exactly the impl-all closure `#[proxima::piped]` computes (section 6).
+- **An `async` closure** — `async move |input: u64| -> Result<u64, Infallible> { .. }`, stable since Rust 1.85 — is called straight through with no wrapper, zero extra cost. It reaches **`Pipe` only**, and two climbs are refused outright, each for a distinct, real reason (`pipe_bang.rs:216–227`, and proven by a real compile error below):
 
-```rust
+```rust,compile_fail
 // examples/pipe_ergonomics — this does NOT compile, and the reason it
 // doesn't is worth reading in full:
 let leaf = pipe!(async move |input: u64| -> Result<u64, Infallible> { Ok(input) }, send);
@@ -115,13 +115,13 @@ This is a sharper distinction than "async closures are just more limited." An `a
 
 `unpin` on an async closure is refused for an unrelated, equally real reason — this bridge is deliberately **zero-box**: it never reaches for `Box::pin` the way `#[proxima::piped(unpin, boxed)]` can (Foundations §7). An async closure's body is a compiler-generated state machine, which is `!Unpin` by construction, and there is no escape hatch here to make it `Unpin` without a heap allocation. If you need that climb, the macro's own error tells you the exit: hand-write the closure as a real `async fn` and lift *that* with `#[proxima::piped(unpin, boxed)]`, paying the one allocation per call explicitly, at the one macro that offers it.
 
-A closure lifted either way must spell out its return type — `-> Result<Out, Err>` — because the macro reads that annotation; it does no type inference of its own (`pipe_bang.rs:250–260`). And passing an expression that is *not* a closure literal (an already-built pipe value) passes through unchanged — there is nothing to lift.
+A closure lifted either way must spell out its return type — `-> Result<Out, Err>` — because the macro reads that annotation; it does no type inference of its own (`pipe_bang.rs:255–264`). And passing an expression that is *not* a closure literal (an already-built pipe value) passes through unchanged — there is nothing to lift.
 
 ## 5. `filter!`, `fanout!`, `fanin!`: the same bridge, three shapes
 
 `filter!` is the *decision* shape from the same bridge: `In -> Result<In, Err>` — `Ok` admits (the value survives, unchanged), `Err` rejects (`proxima-macros/src/filter_bang.rs:1–15`). It shares `pipe!`'s exact closure-lifting machinery, plus one macro-time check: the closure's admit type must equal its input type, checked by comparing the token strings of `In` and `Out` (`filter_bang.rs:40–54`) — not a trait bound, because the constraint is about the closure's *own* shape, not something `PipeExt::filter` could express generically (it only ever requires `Pred::Out == Self::In`, never `Pred::In == Pred::Out`).
 
-Composed together, real and run (`examples/pipe_ergonomics/main.rs:42–57`):
+Composed together, real and run (`examples/pipe_ergonomics/main.rs:42–61`):
 
 ```rust
 #[derive(Debug, PartialEq, Eq)]
@@ -129,7 +129,11 @@ struct Odd;
 
 async fn filter_demo() {
     let reject_odd = filter!(|input: u64| -> Result<u64, Odd> {
-        if input.is_multiple_of(2) { Ok(input) } else { Err(Odd) }
+        if input.is_multiple_of(2) {
+            Ok(input)
+        } else {
+            Err(Odd)
+        }
     });
     let double = pipe!(|input: u64| -> Result<u64, Odd> { Ok(input * 2) });
     let gated = double.filter(reject_odd);
@@ -148,7 +152,7 @@ Variadic arity is the whole reason these two need their own macro rather than re
 
 Its `Pipe`/`SendPipe` impls dispatch with an ordinary `match` inside one shared `async move { .. }` block — the same trick that unifies `AndThen`'s two stages into one anonymous future (section 3) unifies all `N` arms' distinct future types into one here. The `Unpin`/`UnpinSendPipe` impls can't use that trick (there is no `async move` on that tier to hide the union behind), so they get a second, hand-rolled poll-dispatch enum instead — one variant per arm, each holding that arm's own `Unpin` future (`fan_bang.rs:18–27`). Zero boxes either way; the cost is entirely in macro-generated code you never have to write or read.
 
-`fanin!`'s arms carry one extra restriction `fanout!`'s don't, inherited directly from `FanIn` itself (Foundations §10): a synchronous, never-suspending merge loop needs `UnpinPipe`-shaped sources, so a closure-literal arm inside `fanin!` must be a plain, non-`async` closure — an async arm is refused with a specific, actionable message (`fan_bang.rs:133–141`):
+`fanin!`'s arms carry one extra restriction `fanout!`'s don't, inherited directly from `FanIn` itself (Foundations §10): a synchronous, never-suspending merge loop needs `UnpinPipe`-shaped sources, so a closure-literal arm inside `fanin!` must be a plain, non-`async` closure — an async arm is refused with a specific, actionable message (`fan_bang.rs:119–128`):
 
 ```
 error: fanin! arms must be plain (non-`async`) closures: FanIn's merge loop polls
@@ -158,7 +162,7 @@ on a hand-written `async fn` first and pass the resulting value in as a
 pass-through arm instead.
 ```
 
-Both, run for real (`examples/pipe_ergonomics/main.rs:60–72`, `75–99` — `fanin_demo`'s poll loop elided below, it is the same `merge_in_place` shape Foundations §10 already showed you):
+Both, run for real (`examples/pipe_ergonomics/main.rs:64–76`, `79–103` — `fanin_demo`'s poll loop elided below, it is the same `merge_in_place` shape Foundations §10 already showed you):
 
 ```rust
 async fn fanout_demo() {
@@ -180,7 +184,7 @@ fn fanin_demo() {
         |(): ()| -> Result<u8, Exhausted> { Ok(1) },
         |(): ()| -> Result<u8, Exhausted> { Ok(2) },
     );
-    // .. poll it in place, no allocation, no `unsafe` — see `examples/pipe_ergonomics/main.rs:80–95`
+    // .. poll it in place, no allocation, no `unsafe` — see `examples/pipe_ergonomics/main.rs:84–99`
 }
 ```
 
@@ -188,9 +192,11 @@ fn fanin_demo() {
 
 Foundations §7 told you `#[proxima::piped]` "picks which of the four tiers a given function belongs to, and writes that tier's impl" — singular. **That description is stale**, and this document's own edits to Foundations correct it in place; the precise behavior is worth stating here because it is the single most surprising thing about the attribute macro if you only skimmed it once.
 
-`#[proxima::piped]` computes the **full downward closure** of tiers your function's shape qualifies for, and writes one impl block for *every* tier in that closure — never just one — because the higher tiers are additive constraints on the same root contract, never a replacement for it (`proxima_primitives::pipe::primitives`'s own module doc says exactly this of the trait family; `proxima-macros/src/pipe_attr.rs:350–362`, `Tier::plan`):
+`#[proxima::piped]` computes the **full downward closure** of tiers your function's shape qualifies for, and writes one impl block for *every* tier in that closure — never just one — because the higher tiers are additive constraints on the same root contract, never a replacement for it (`proxima_primitives::pipe::primitives`'s own module doc says exactly this of the trait family; `proxima-macros/src/pipe_attr.rs:335–347`, `Tier::plan`):
 
-```rust
+```rust,ignore
+// Tier is pub(crate) to proxima-macros — real source, quoted for its
+// logic, not something you can compile standalone against `proxima`.
 pub(crate) fn plan(climbs_to_unpin: bool, send: bool) -> Vec<Tier> {
     let mut tiers = vec![Tier::Pipe];
     if send {
@@ -206,7 +212,7 @@ pub(crate) fn plan(climbs_to_unpin: bool, send: bool) -> Vec<Tier> {
 }
 ```
 
-A plain `fn` with `send` reaches every tier in one expansion: `Pipe`, `SendPipe`, `UnpinPipe`, `UnpinSendPipe`. Not asserted — compiled and proven, four separate trait-bound assertions against the *same* macro-generated type (`examples/pipe_ergonomics/main.rs:102–118`; the demo continues to line 123 by also calling `triple` and checking its output, elided here since the point is the four assertions):
+A plain `fn` with `send` reaches every tier in one expansion: `Pipe`, `SendPipe`, `UnpinPipe`, `UnpinSendPipe`. Not asserted — compiled and proven, four separate trait-bound assertions against the *same* macro-generated type (`examples/pipe_ergonomics/main.rs:106–122`; the demo continues to line 126 by also calling `triple` and checking its output, elided here since the point is the four assertions):
 
 ```rust
 #[proxima::piped(send)]
@@ -239,14 +245,14 @@ There is one real, and different, ambiguity this impl-all behavior creates, and 
 You now have enough vocabulary to see the whole shape of the constraint, not just its consequence. `Pipe::call` returns `impl Future<Output = ...>` — return-position `impl Trait` in a trait (RPITIT). The future that comes back is an *anonymous* type: you cannot write its name down anywhere, including in a `where` clause. That single fact is the entire reason this codebase has four traits instead of one:
 
 - Writing `impl<P: Pipe + Send> SendPipe for P` — the blanket bridge you would reach for instinctively — requires bounding *the future `P::call` returns* as `Send`. But that future has no name to bound. The only stable mechanism that could name it is return-type notation (`P::call(..): Send`), tracked as rust#109417 and still unstable.
-- So each additive promise — `Send`, `Unpin`, both — costs a full, separate, standalone trait, each with its *own* `call` method whose *own* RPITIT return type bakes the extra bound directly into its own signature (`+ Send`, `+ Unpin`, `+ Send + Unpin`). `proxima-primitives/src/pipe/primitives.rs:91–178` is literally the same four-field contract (`In`, `Out`, `Err`, `call`) written out four times — `Pipe` (91–102), `SendPipe` (104–124), `UnpinPipe` (142–152), `UnpinSendPipe` (165–178) — because there is no way to derive three of them from the fourth.
+- So each additive promise — `Send`, `Unpin`, both — costs a full, separate, standalone trait, each with its *own* `call` method whose *own* RPITIT return type bakes the extra bound directly into its own signature (`+ Send`, `+ Unpin`, `+ Send + Unpin`). `proxima-primitives/src/pipe/primitives.rs:91–178` is literally the same four-field contract (`In`, `Out`, `Err`, `call`) written out four times — `Pipe` (91–102), `SendPipe` (114–124), `UnpinPipe` (142–152), `UnpinSendPipe` (165–178) — because there is no way to derive three of them from the fourth.
 - Sections 3 and 6 of this document showed you the two faces of this cost from opposite directions: `PipeExt` (section 3) sidesteps it entirely because its methods never return a future, only a value. `#[proxima::piped]` (section 6) pays it in full and up front — the macro writes all four impl blocks so you never have to.
 
 This is not a design proxima wants to keep. `proxima-primitives/src/pipe/primitives.rs:104–113` says so directly in its own doc comment: "when RTN stabilises, every tier below collapses back into `Pipe` plus a bound at the use site, and these traits are deletable." Until then, the tax is real, and every ergonomic feature in this document is a decision about *where* to pay it: once, by hand, in a leaf macro's generated code (`pipe!`/`filter!`/`fanout!`/`fanin!`, sections 4–5); once, by a proc-macro, at the definition site (`#[proxima::piped]`, section 6); or not at all, because the operation in question never needed to name a future (`PipeExt`, sections 2–3).
 
 ## 8. One `mount`, four shapes
 
-Foundations §13 showed you `app.mount("/", hello)` once, with `hello` a `#[proxima::piped(send)]`-generated pipe. `App::mount` actually accepts four genuinely different kinds of value through that one method, with no runtime type-checking or branching on your part — the compiler picks the right path entirely at compile time (`src/app.rs:532–556`):
+Foundations §13 showed you `app.mount("/", hello)` once, with `hello` a `#[proxima::piped(send)]`-generated pipe. `App::mount` actually accepts four genuinely different kinds of value through that one method, with no runtime type-checking or branching on your part — the compiler picks the right path entirely at compile time (`src/app.rs:723–741`):
 
 ```rust
 pub fn mount<Target, Via>(&self, path: &str, target: Target) -> Result<(), ProximaError>
@@ -258,16 +264,16 @@ where
 }
 ```
 
-`Via` is a second, phantom type parameter you never name at the call site — Rust infers it. It exists to solve a coherence problem you would hit immediately without it: a handler-shaped pipe, a bare `async fn`, a registered name (`&str`/`String`), and an already-built `MountTarget` are four *overlapping-looking* shapes from the compiler's point of view, and writing one blanket `impl` per shape over the *same* trait would risk a coherence conflict (E0119) the moment some type could satisfy two of them at once. `src/app.rs:1159–1168` states the fix precisely: making `Via` part of the trait's own generic signature turns `IntoMountTarget<ViaName>`, `IntoMountTarget<ViaPipe>`, `IntoMountTarget<ViaFn>`, `IntoMountTarget<ViaTarget>` into four genuinely *distinct* trait instantiations. The compiler never needs to prove non-overlap between them — it's true by construction, because `ViaName` and `ViaPipe` are different concrete types, full stop.
+`Via` is a second, phantom type parameter you never name at the call site — Rust infers it. It exists to solve a coherence problem you would hit immediately without it: a handler-shaped pipe, a bare `async fn`, a registered name (`&str`/`String`), and an already-built `MountTarget` are four *overlapping-looking* shapes from the compiler's point of view, and writing one blanket `impl` per shape over the *same* trait would risk a coherence conflict (E0119) the moment some type could satisfy two of them at once. `src/app.rs:1429–1438` states the fix precisely: making `Via` part of the trait's own generic signature turns `IntoMountTarget<ViaName>`, `IntoMountTarget<ViaPipe>`, `IntoMountTarget<ViaFn>`, `IntoMountTarget<ViaTarget>` into four genuinely *distinct* trait instantiations. The compiler never needs to prove non-overlap between them — it's true by construction, because `ViaName` and `ViaPipe` are different concrete types, full stop.
 
 The four shapes, each a real, already-tested call site:
 
-- **`ViaPipe`** — a handler-shaped pipe: anything implementing `Handler` (which is blanket-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>`, per Foundations §13) — a `#[proxima::piped(send)]`-generated struct, or a hand-written one. `src/app.rs:1195–1202`.
-- **`ViaFn`** — a *bare* `async fn(Request<Bytes>) -> Result<Response<Bytes>, ProximaError>`, with no `#[proxima::piped]` at all. `mount` wraps it in a small internal `FnHandler` adapter to reach `Handler` the same way `ViaPipe` does (`src/app.rs:1204–1236`) — the one sanctioned app-edge blanket this design needs, never library machinery.
-- **`ViaName`** — a registered pipe name, `&str` or `String`, looked up in the app's own registry at mount time. Real usage: `app.mount("/foo", "cache")` (`src/app.rs:1547–1552`, test `unmatched_path_returns_404`).
-- **`ViaTarget`** — an already-built `MountTarget` passed straight through, unchanged — the shape the daemon control plane uses when it has already resolved a handle or a name itself (`src/app.rs:1189–1193`).
+- **`ViaPipe`** — a handler-shaped pipe: anything implementing `Handler` (which is blanket-implemented for every `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>`, per Foundations §13) — a `#[proxima::piped(send)]`-generated struct, or a hand-written one. `src/app.rs:1465–1472`.
+- **`ViaFn`** — a *bare* `async fn(Request<Bytes>) -> Result<Response<Bytes>, ProximaError>`, with no `#[proxima::piped]` at all. `mount` wraps it in a small internal `FnHandler` adapter to reach `Handler` the same way `ViaPipe` does (`src/app.rs:1474–1506`) — the one sanctioned app-edge blanket this design needs, never library machinery.
+- **`ViaName`** — a registered pipe name, `&str` or `String`, looked up in the app's own registry at mount time. Real usage: `app.mount("/foo", "cache")` (`src/app.rs:1814–1820`, test `unmatched_path_returns_404`).
+- **`ViaTarget`** — an already-built `MountTarget` passed straight through, unchanged — the shape the daemon control plane uses when it has already resolved a handle or a name itself (`src/app.rs:1459–1463`).
 
-The first two, compiled and mounted for real, no server actually started (`examples/pipe_ergonomics/main.rs:126–142`):
+The first two, compiled and mounted for real, no server actually started (`examples/pipe_ergonomics/main.rs:130–148`):
 
 ```rust
 #[proxima::piped(send)]
@@ -283,13 +289,15 @@ async fn echo_fn(request: Request<Bytes>) -> Result<Response<Bytes>, ProximaErro
 
 fn mount_shapes_demo() {
     let app = App::new().expect("app");
-    app.mount("/via-pipe", echo).expect("mount a handler-shaped pipe");
-    app.mount("/via-fn", echo_fn).expect("mount a bare async fn");
+    app.mount("/via-pipe", echo)
+        .expect("mount a handler-shaped pipe");
+    app.mount("/via-fn", echo_fn)
+        .expect("mount a bare async fn");
     println!("mount: ViaPipe and ViaFn both accepted by the same App::mount");
 }
 ```
 
-Notice `echo_fn` above has *no* `#[proxima::piped]` attribute anywhere — it is a completely ordinary `async fn`, and `App::mount` still accepts it. If your function's type does not satisfy any of the four `IntoMountTarget` arms, the compiler tells you so in plain language, not a wall of trait-resolution noise — `src/app.rs:1169–1172` puts a `#[diagnostic::on_unimplemented]` message directly on the trait (a stable, compile-error-only annotation; it changes nothing about what compiles, only what the error says when it doesn't):
+Notice `echo_fn` above has *no* `#[proxima::piped]` attribute anywhere — it is a completely ordinary `async fn`, and `App::mount` still accepts it. If your function's type does not satisfy any of the four `IntoMountTarget` arms, the compiler tells you so in plain language, not a wall of trait-resolution noise — `src/app.rs:1439–1442` puts a `#[diagnostic::on_unimplemented]` message directly on the trait (a stable, compile-error-only annotation; it changes nothing about what compiles, only what the error says when it doesn't):
 
 ```
 error[E0277]: `{Self}` can't be mounted: expected a request handler — an

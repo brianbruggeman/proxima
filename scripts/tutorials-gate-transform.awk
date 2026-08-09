@@ -53,7 +53,7 @@
 #      a fragment ending mid-`.await` (continuing the surrounding prose) is
 #      not valid inside rustdoc's own default SYNC `fn main` wrapper.
 #
-# Two classes of block cannot be made to compile standalone at all, no
+# Three classes of block cannot be made to compile standalone at all, no
 # matter which pass, and are marked accordingly rather than silently left to
 # fail or silently dropped:
 #
@@ -69,8 +69,26 @@
 #     a process signal nothing in a test harness will ever send — confirmed
 #     empirically (this hung the first gate run; SIGKILLed as a stuck
 #     process). Marked `no_run`: still compiled, never executed.
+#   - a snippet the tutorial teaches BY its own failure to compile (e.g.
+#     01-ergonomics.md §4's async-closure `send` refusal, whose surrounding
+#     prose reproduces the real compiler error). The source fence spells
+#     its own attribute, `` ```rust,compile_fail ``, captured verbatim at
+#     the opening fence and honored over the two heuristics above — this is
+#     the one case this generator cannot infer mechanically, since nothing
+#     about the code's own shape distinguishes "deliberately broken, teach
+#     from the error" from "stale". Getting this classification wrong reads
+#     as a silent FAILED block indistinguishable from real drift; rustdoc's
+#     `compile_fail` still compiles it and asserts the failure, so the
+#     claim stays gate-enforced rather than merely asserted in prose. An
+#     author-spelled `` ```rust,ignore `` is the same explicit escape hatch
+#     for a block that cites real source that cannot stand alone for a
+#     reason neither mechanical rule above covers (a `pub(crate)` type
+#     private to the crate being excerpted FROM, e.g. `Tier` in
+#     01-ergonomics.md §6's `pipe_attr.rs` excerpt — no prelude re-export
+#     could ever make an internal macro-crate type visible to `proxima`'s
+#     own doctest scope).
 #
-# All three rules are mechanical, applied to every block, not a hand-picked
+# All four rules are mechanical, applied to every block, not a hand-picked
 # list — a new tutorial block matching any of these shapes lands already
 # correctly classified.
 
@@ -114,8 +132,8 @@ function is_bare_self_fn(text,    n, lines, i, seen_container) {
     n = split(text, lines, "\n")
     seen_container = 0
     for (i = 1; i <= n; i++) {
-        if (lines[i] ~ /^[ \t]*(pub(\([a-z]+\))? )?(impl|trait)[ \t]/) seen_container = 1
-        if (!seen_container && lines[i] ~ /fn[ \t]+[A-Za-z_][A-Za-z0-9_]*\([ \t]*(&(mut[ \t]+)?)?self([ \t]*[,)]|:)/) return 1
+        if (lines[i] ~ /^[ \t]*(pub(\([a-z]+\))? )?(impl|trait)([ \t]|<)/) seen_container = 1
+        if (!seen_container && lines[i] ~ /fn[ \t]+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?\([ \t]*(&(mut[ \t]+)?)?self([ \t]*[,)]|:)/) return 1
     }
     return 0
 }
@@ -157,6 +175,8 @@ state == 0 && /^```rust(,[A-Za-z_,]+)?[ \t]*$/ {
     state = 1
     buf = ""
     ordinal++
+    cur_attrs = $0
+    sub(/^```rust,?/, "", cur_attrs)
     next
 }
 state == 0 && /^```[A-Za-z0-9_+-]+[ \t]*$/ {
@@ -201,7 +221,27 @@ state == 1 && /^```[ \t]*$/ {
         }
     }
 
-    tag = ((context buf) ~ /run_until_signal/) ? "```rust,no_run" : "```rust"
+    # a tutorial author's own explicit `,compile_fail` (a genuinely-broken
+    # snippet the surrounding prose teaches FROM, e.g. 01-ergonomics.md
+    # section 4's async-closure `send` refusal) is honored verbatim over
+    # the heuristics below — rustdoc compiles it and asserts it fails,
+    # which turns the prose's "this does NOT compile" claim into a real,
+    # regression-checked gate signal instead of a silently-FAILED block
+    # indistinguishable from actual drift. Explicit `,ignore` is the escape
+    # hatch for the rarer case a block cites real source that genuinely
+    # cannot stand alone for a reason neither heuristic below covers — e.g.
+    # a `pub(crate)` type private to the crate being excerpted FROM (no
+    # prelude re-export could ever make it visible to `proxima`'s own
+    # doctest scope; there is nothing to "fix" by wrapping it further).
+    if (cur_attrs ~ /(^|,)ignore(,|$)/) {
+        tag = "```rust,ignore"
+    } else if (cur_attrs ~ /(^|,)compile_fail(,|$)/) {
+        tag = "```rust,compile_fail"
+    } else if (cur_attrs ~ /(^|,)no_run(,|$)/ || (context buf) ~ /run_until_signal/) {
+        tag = "```rust,no_run"
+    } else {
+        tag = "```rust"
+    }
     if (MANIFEST != "") print FILEBASE "\t" ordinal "\t" (outline + 1) >> MANIFEST
     out(tag)
     out("# use proxima::tutorial_gate_prelude::*;")
