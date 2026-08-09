@@ -133,7 +133,13 @@ function is_bare_self_fn(text,    n, lines, i, seen_container) {
     seen_container = 0
     for (i = 1; i <= n; i++) {
         if (lines[i] ~ /^[ \t]*(pub(\([a-z]+\))? )?(impl|trait)([ \t]|<)/) seen_container = 1
-        if (!seen_container && lines[i] ~ /fn[ \t]+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?\([ \t]*(&(mut[ \t]+)?)?self([ \t]*[,)]|:)/) return 1
+        # `(self`, `(&self`, `(&mut self` AND owned `(mut self` (no `&`,
+        # e.g. `fn tls(mut self, ..)` — a consuming builder method that
+        # mutates its own owned copy, the shape 02-listener-builder.md's
+        # `.tls(TlsConfig)`/`.protocol(impl AnyProtocol)` excerpts use, and
+        # missing this form let both evade the detector and fail silently
+        # instead of being classified `ignore`).
+        if (!seen_container && lines[i] ~ /fn[ \t]+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?\([ \t]*((&(mut[ \t]+)?)|mut[ \t]+)?self([ \t]*[,)]|:)/) return 1
     }
     return 0
 }

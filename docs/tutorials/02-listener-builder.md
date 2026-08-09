@@ -6,7 +6,7 @@
 
 **New concepts (in order):** `SpecBuilder` (the shared accumulation seam) · the type-specific axis traits (`ClientTransportExt`/`ClientProtocolExt`/`ClientSecurityExt` vs. `ListenerTransportExt`/`ListenerProtocolExt`) · `ListenerBuilderEntry` (`Listener::builder()`/`Listener::http(bind)`) · `resolve_listen_protocol` · `TlsListenProtocol` (the TLS decorator) · `.protocol(impl AnyProtocol)` (the escape hatch) · the two asymmetric axes.
 
-Every code block below is copied verbatim from a real file in this repository (cited by `file:line`, checked against this worktree's `git rev-parse HEAD` off `ec02fc3f`) or a unit test that `cargo nextest run` in this repo actually passes. Nothing here is invented.
+Every code block below is copied verbatim from a real file in this repository (cited by `file:line`, checked against this worktree's `git rev-parse HEAD` off `288df5cc`) or a unit test that `cargo nextest run` in this repo actually passes. Nothing here is invented. Several blocks below cite code that is only reachable from inside this crate — a private struct field, a bare associated `fn` excerpted one method at a time from its `impl`, or an internal-only helper — and are marked `` ```rust,ignore `` for exactly that reason: the citation is real, but the excerpt cannot stand alone as an external doctest without either exposing crate-private state or re-deriving a whole file. `scripts/tutorials-gate.sh` compile-checks every other block against this HEAD.
 
 **Drift notice for anyone who read an earlier version of this page:** this document originally taught a blanket `ProtocolSugar`/`TransportSugar` pair — `impl<B: SpecBuilder> ProtocolSugar for B {}`, lighting up `.http()`/`.tls()`/`.h3()`/etc. on *any* `SpecBuilder` for free. That blanket pair is **deleted**. `.h3()` is also gone — HTTP/3 is now `.quic()` (composed with `.http()`: `.http().quic()`). Every axis method below is a TYPE-SPECIFIC trait, implemented once per concrete builder (`ClientTransportExt for ClientBuilder`, `ListenerTransportExt for ListenerBuilder`, and so on) — no blanket impl reaches across builders any more. This rewrite reflects that; if you see `ProtocolSugar`/`TransportSugar`/`.h3()` anywhere else in this tree, that's the same stale teaching and should be reported.
 
@@ -29,7 +29,9 @@ Every code block below is copied verbatim from a real file in this repository (c
 
 A `proxima::Client` dials an upstream. The one-liner is `Client::http(url)`, and the fluent form is `Client::builder()...build()` (`src/client/handle.rs:133–137,158–160`):
 
-```rust
+```rust,ignore
+// excerpted from `impl Client { .. }` — `Self`/`Result<Self, _>` only
+// resolve inside that block, which this excerpt does not repeat.
 pub fn http(url: impl Into<String>) -> Result<Self, ProximaError> {
     let mut spec = serde_json::Map::new();
     spec.insert("http".to_string(), Value::String(url.into()));
@@ -76,9 +78,12 @@ pub trait ClientSecurityExt: Sized {
 
 Each is implemented exactly once, for `ClientBuilder` (`impl ClientTransportExt for ClientBuilder { fn tcp(self) -> Self { self.set("transport", "tcp") } ... }`, `src/client/transport.rs:37–53`). `.tcp()`/`.udp()`/`.quic()` still just write the `transport` key; `.tls()` writes `transport: "tls"`; `.http(url)`/`.grpc(url)` still write `http`/`grpc`. The *mechanism* (write one key into the accumulated map) is unchanged from the old blanket design — only *how many types can reach the method* changed: before, importing `TransportSugar` lit up `.tcp()` on every `SpecBuilder` in the crate, including ones that had no business seeing it; now, `.tcp()` on a `ClientBuilder` comes from `ClientTransportExt`, a trait `ListenerBuilder` does not implement at all, so it is not even in the candidate set for method resolution on a `ListenerBuilder` value.
 
-Bring the client's three axis traits into scope with `use proxima::{ClientTransportExt, ClientProtocolExt, ClientSecurityExt};` (or the umbrella `use proxima::prelude::*;`, which re-exports all of them — `src/lib.rs:418–423`). This is why a fluent chain and a literal config `Value` are provably the same spec, checked directly in the client's own test suite (`verbs_map_to_methods_and_builder_lowers_axes`, `src/client/handle.rs:967`, parity block at `995–1012`, abbreviated):
+Bring the client's three axis traits into scope with `use proxima::{ClientTransportExt, ClientProtocolExt, ClientSecurityExt};` (or the umbrella `use proxima::prelude::*;`, which re-exports all of them — `src/lib.rs:523–529`). This is why a fluent chain and a literal config `Value` are provably the same spec, checked directly in the client's own test suite (`verbs_map_to_methods_and_builder_lowers_axes`, `src/client/handle.rs:1061`, parity block at `1091–1106`, abbreviated):
 
-```rust
+```rust,ignore
+// `fluent.inner`/`config.inner` are only reachable from the crate's own
+// `#[cfg(test)] mod tests` (`use super::*;` gives it the private field this
+// excerpt needs) — not something an external caller, or this doctest, can see.
 let fluent = Client::builder().http("http://api.example.com").tls().proxy("http://127.0.0.1:8080").build()?;
 let config = Client::from_value(json!({
     "http": "http://api.example.com", "transport": "tls", "proxy": "http://127.0.0.1:8080",
@@ -110,11 +115,11 @@ impl ListenerBuilderEntry for Listener {
 ```
 (`src/listener/handle.rs:36–61`)
 
-Read that side by side with §1's `Client::http`/`Client::builder`. Same two entry points, same names, same shape: a one-liner that pre-fills the common case, and a bare `builder()` for everything else. `Listener::http(bind)` calls `.http(bind.to_string())` — the listener's OWN `ListenerProtocolExt::http` (`src/listener/protocol.rs:28–29`), a different trait impl from the client's `ClientProtocolExt::http`, but the same spec key (`"http"`) and the same idea: pre-fill the common case.
+Read that side by side with §1's `Client::http`/`Client::builder`. Same two entry points, same names, same shape: a one-liner that pre-fills the common case, and a bare `builder()` for everything else. `Listener::http(bind)` calls `.http(bind.to_string())` — the listener's OWN `ListenerProtocolExt::http` (`src/listener/protocol.rs:73`), a different trait impl from the client's `ClientProtocolExt::http`, but the same spec key (`"http"`) and the same idea: pre-fill the common case.
 
-Bring both entry points into scope together — `use proxima::{Listener, ListenerBuilderEntry};`, plus `use proxima::ListenerTransportExt;` for `.tcp()` below (or `use proxima::prelude::*;` for everything at once) — and you get the mirror of the manual `App::new()?; app.mount(...)?; app.serve(RunConfig::http(bind)).await?;` shape from `examples/hello/main.rs:48–53`:
+Bring both entry points into scope together — `use proxima::{Listener, ListenerBuilderEntry};`, plus `use proxima::ListenerTransportExt;` for `.tcp()` below (or `use proxima::prelude::*;` for everything at once) — and you get the mirror of the manual `App::new()?; app.mount(...)?; app.serve(RunConfig::http(bind)).await?;` shape from `examples/hello/main.rs:48–53`. `my_pipe` below stands in for whatever `Handler` you already mount today — §11 is the concrete, compiling version of this exact shape, so this block is left illustrative (`ignore`d by the harness) rather than invented a throwaway pipe just to satisfy the compiler here:
 
-```rust
+```rust,ignore
 use proxima::prelude::*;
 use proxima::into_handle;
 
@@ -148,9 +153,15 @@ Note this is a NARROWER use of the same Rust mechanism §1's axis traits use: `L
 
 ## 4. One coin, two faces: the side-by-side axis table
 
-`ListenerBuilder` (`src/listener/handle.rs:82–158`) accumulates its own `serde_json::Map<String, Value>`, exactly like `ClientBuilder` does — plus several fields with no client-side twin (`tls: Option<proxima_tls::TlsConfig>` under `#[cfg(feature = "tls")]`, `pgwire_query`/`dns_handler`/`websocket_handler`/`any_mode`/`extra_protocols`/`blacklist_config` under their own feature gates), each accumulated separately from `spec` because none of them fits a plain `serde_json::Value` key — and implements the identical `SpecBuilder` seam (`src/listener/handle.rs:1127–1140`):
+`ListenerBuilder` (`src/listener/handle.rs:82–161`) accumulates its own `serde_json::Map<String, Value>`, exactly like `ClientBuilder` does — plus several fields with no client-side twin (`tls: Option<proxima_tls::TlsConfig>` under `#[cfg(feature = "tls")]`, `pgwire_query`/`dns_handler`/`websocket_handler`/`any_mode`/`extra_protocols`/`blacklist_config` under their own feature gates), each accumulated separately from `spec` because none of them fits a plain `serde_json::Value` key — and implements the identical `SpecBuilder` seam (`src/listener/handle.rs:1126–1139`):
 
-```rust
+```rust,ignore
+// `impl SpecBuilder for ListenerBuilder` — Rust's orphan rule only permits
+// this because `SpecBuilder` is a LOCAL trait implemented for a LOCAL
+// type here (`ListenerBuilder` lives in this same crate); a doctest
+// compiling against the published `proxima` crate sees `SpecBuilder` as
+// already implemented, so re-declaring the impl is a coherence error, not
+// a stale citation.
 impl proxima_config::sugar::SpecBuilder for ListenerBuilder {
     fn set(self, key: &str, value: impl Into<Value>) -> Self {
         self.spec(key, value.into())
@@ -166,9 +177,12 @@ impl proxima_config::sugar::SpecBuilder for ListenerBuilder {
 }
 ```
 
-On top of that seam, `ListenerBuilder` gets its OWN axis traits — `ListenerTransportExt` (`src/listener/transport.rs`) and `ListenerProtocolExt` (`src/listener/protocol.rs`) — separate types from the client's `ClientTransportExt`/`ClientProtocolExt`, not the same blanket trait reused. Bring them into scope with `use proxima::{ListenerTransportExt, ListenerProtocolExt};` (or `proxima::prelude::*`). A unit test proves the two sides still lower to identical spec keys for the axes they share, even though the trait behind each is now a different type (`listener_builder_mirrors_client_builder_axis_keys`, `src/listener/handle.rs:1255–1271`):
+On top of that seam, `ListenerBuilder` gets its OWN axis traits — `ListenerTransportExt` (`src/listener/transport.rs`) and `ListenerProtocolExt` (`src/listener/protocol.rs`) — separate types from the client's `ClientTransportExt`/`ClientProtocolExt`, not the same blanket trait reused. Bring them into scope with `use proxima::{ListenerTransportExt, ListenerProtocolExt};` (or `proxima::prelude::*`). A unit test proves the two sides still lower to identical spec keys for the axes they share, even though the trait behind each is now a different type (`listener_builder_mirrors_client_builder_axis_keys`, `src/listener/handle.rs:1254–1271`):
 
-```rust
+```rust,ignore
+// `.spec` is a private field on `ListenerBuilder`, visible only from
+// inside the crate's own `#[cfg(test)] mod tests` — the real assertion
+// this excerpts from.
 let fluent = ListenerBuilder::default()
     .https("127.0.0.1:8080")
     .spec("transport", json!("tls"));
@@ -201,9 +215,11 @@ Two rows say "shadowed" territory even though the table doesn't spell that word 
 
 One term this section needs before its code makes sense: a `ListenProtocol` (`proxima-listen`) is the listen-side trait each wire implementation — `HttpListenProtocol` (h1+h2), `H2PriorKnowledgeAnyProtocol`, `H3NativeListenProtocol` — implements; a `ListenRegistry` looks these up by name. (If you've read [Build a plugin](./build-a-plugin.md), this is structurally the listen-side twin of that tutorial's `PipeFactory`/registry pattern — not a prerequisite for this document, just a pointer if the shape looks familiar.)
 
-On the client side, `load()` reads the accumulated spec `Value` and dispatches on which key is present, ALSO now checking `transport == "quic"` to route through the native h3 upstream instead of the ordinary h1/h2 client (`src/load.rs:483–507`, abbreviated):
+On the client side, `load()` reads the accumulated spec `Value` and dispatches on which key is present, ALSO now checking `transport == "quic"` to route through the native h3 upstream instead of the ordinary h1/h2 client (`src/load.rs:487–511`, abbreviated):
 
-```rust
+```rust,ignore
+// excerpted from `build_pipe`'s match arm — `context`/`value` are that
+// function's own parameters, not redeclared here.
 let (handle, kv_backend): (PipeHandle, Option<Arc<dyn KvHandle>>) =
     if let Some(http) = value.get("http") {
         if value.get("transport").and_then(Value::as_str) == Some("quic") {
@@ -225,9 +241,12 @@ let (handle, kv_backend): (PipeHandle, Option<Arc<dyn KvHandle>>) =
 
 This is the concrete mechanism behind "`.http().quic()` IS h3" (the sugar-composition page, [part 4](./07-sugar-composition.md), teaches this from the reader's side; this is the implementation): `.quic()` never introduces a THIRD protocol key alongside `http`/`grpc` — it's a modifier on `http` that `load()` checks once it already knows `http` is present.
 
-`resolve_listen_protocol` is the listen-side twin of that same dispatch (`src/listener/handle.rs:955–974`, current source, with the `pgwire_axis`/`dns_axis` marker-key checks the client side has no equivalent of):
+`resolve_listen_protocol` is the listen-side twin of that same dispatch (`src/listener/handle.rs:952–971`, current source, with the `pgwire_axis`/`dns_axis` marker-key checks the client side has no equivalent of):
 
-```rust
+```rust,ignore
+// `ListenProtocol`, `h2_listen_protocol`, `h3_native_listen_protocol` are
+// crate-internal (the latter two `fn`-private helpers a few lines below
+// this one in the real file) — not reachable from an external doctest.
 fn resolve_listen_protocol(
     spec: &serde_json::Map<String, Value>,
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
@@ -252,14 +271,14 @@ fn resolve_listen_protocol(
 
 `.pgwire(query)`/`.dns(handler)` are checked **first**: each carries a typed handle no other axis combination can produce, so they always win, and neither returns an extra protocol here — `.serve()` (§9) registers its own fresh instance directly, since resolving needs the handle this spec-only function never sees. `.grpc()`/`.h2()` share one branch and resolve to the identical `"h2"` protocol — two names for the same wire, kept separate because `.grpc()` mirrors the client's `ClientProtocolExt::grpc` naming while `.h2()` names the transport directly, and gRPC rides h2 either way. Note the branch order: `.grpc()`/`.h2()` are checked BEFORE `transport == "quic"`, so `.grpc().quic()` would resolve to `"h2"`, not h3-native — except that combination is rejected earlier, by `reject_invalid_axis_combinations` (§10, [part 4](./07-sugar-composition.md) teaches this failure mode directly), before `resolve_listen_protocol` is ever called.
 
-Real unit tests exercise this directly and pass on this worktree today (`src/listener/handle.rs:1171–1243`):
+Real unit tests exercise this directly and pass on this worktree today (`src/listener/handle.rs:1169–1239`):
 
-- `resolve_listen_protocol_defaults_to_http_and_opts_into_grpc_via_the_same_key_load_reads` (`:1171`) — `.tcp()` and bare `transport: "tls"` both resolve to `"http"`, with no self-registered protocol (`extra.is_none()`), because `"http"` is already in `App::new()`'s default registry.
-- `grpc_axis_resolves_to_h2_and_self_registers` (`:1191`, needs `http2`) — `.grpc()` resolves to `"h2"` and *does* carry a protocol to register, because h2-as-a-listen-protocol is not in `App::new()`'s default set.
-- `quic_axis_resolves_to_h3_native_and_self_registers` (`:1201`, needs `http3`) — same shape for `.quic()` → `"h3-native"`.
-- `h2_axis_resolves_to_the_same_shared_h2_protocol_as_grpc` (`:1211`, needs `http2`) — `.h2()` resolves to the identical `"h2"` name and carried `Arc` as `.grpc()`.
-- `pgwire_axis_resolves_to_pgwire_and_carries_nothing_here` (`:1221`, needs `pgwire`) — the `pgwire_axis` marker resolves to `"pgwire"` with no carried protocol.
-- `pgwire_axis_takes_priority_over_grpc_and_quic` (`:1233`, needs `pgwire`) — `.pgwire(query)` combined with `.grpc()` and `.quic()` still resolves to `"pgwire"`, proving the priority order above.
+- `resolve_listen_protocol_defaults_to_http_and_opts_into_grpc_via_the_same_key_load_reads` (`:1169`) — `.tcp()` and bare `transport: "tls"` both resolve to `"http"`, with no self-registered protocol (`extra.is_none()`), because `"http"` is already in `App::new()`'s default registry.
+- `grpc_axis_resolves_to_h2_and_self_registers` (`:1189`, needs `http2`) — `.grpc()` resolves to `"h2"` and *does* carry a protocol to register, because h2-as-a-listen-protocol is not in `App::new()`'s default set.
+- `quic_axis_resolves_to_h3_native_and_self_registers` (`:1199`, needs `http3`) — same shape for `.quic()` → `"h3-native"`.
+- `h2_axis_resolves_to_the_same_shared_h2_protocol_as_grpc` (`:1209`, needs `http2`) — `.h2()` resolves to the identical `"h2"` name and carried `Arc` as `.grpc()`.
+- `pgwire_axis_resolves_to_pgwire_and_carries_nothing_here` (`:1219`, needs `pgwire`) — the `pgwire_axis` marker resolves to `"pgwire"` with no carried protocol.
+- `pgwire_axis_takes_priority_over_grpc_and_quic` (`:1231`, needs `pgwire`) — `.pgwire(query)` combined with `.grpc()` and `.quic()` still resolves to `"pgwire"`, proving the priority order above.
 
 ## 6. Why the listener names wire versions and the client doesn't
 
@@ -275,9 +294,12 @@ TLS is not a plain optional field on `ListenerSpec`/`Listener` — it composes a
 
 > A protocol resolved at construction time instead of by name through the `ListenRegistry` at serve time. ... This is also how TLS composes: there is deliberately no `tls` field on this struct (a typed `Option<TlsConfig>` slot would make TLS a property of every protocol variant — a protocol × tls matrix). TLS termination is instead `TlsListenProtocol`, a `ListenProtocol` DECORATOR that wraps whatever concrete protocol is carried here — on/off is the presence of that wrapper, composed the same way any other concrete protocol reaches this field: through `Self::protocol`.
 
-Walk that "matrix" claim through concretely: a field on `ListenerSpec` is one slot, shared no matter which protocol you picked — but the *code that reads it* still has to live somewhere. Add `h2`/`h3-native` as protocols and TLS-for-h2, TLS-for-h3 either both need their own copy of that same TLS-reading code, or the field silently does nothing for them — one axis (protocol) times another (tls on/off) has to be handled somewhere, and a struct field forces that somewhere to be *inside* each protocol implementation. A decorator sidesteps the multiplication entirely: `TlsListenProtocol` is generic over `Arc<dyn ListenProtocol>`, wraps *any* of them uniformly, and only one implementation of "stamp the TLS marker into the spec" needs to exist, ever (`proxima-listen/src/handle.rs`):
+Walk that "matrix" claim through concretely: a field on `ListenerSpec` is one slot, shared no matter which protocol you picked — but the *code that reads it* still has to live somewhere. Add `h2`/`h3-native` as protocols and TLS-for-h2, TLS-for-h3 either both need their own copy of that same TLS-reading code, or the field silently does nothing for them — one axis (protocol) times another (tls on/off) has to be handled somewhere, and a struct field forces that somewhere to be *inside* each protocol implementation. A decorator sidesteps the multiplication entirely: `TlsListenProtocol` is generic over `Arc<dyn ListenProtocol>`, wraps *any* of them uniformly, and only one implementation of "stamp the TLS marker into the spec" needs to exist, ever (`proxima-listen/src/handle.rs:497–530`):
 
-```rust
+```rust,ignore
+// `proxima_listen::TlsListenProtocol` already exists as a public type —
+// this excerpt redeclares its definition to show the real source, which a
+// doctest can never do (E0255: the name is already defined).
 #[cfg(feature = "tls")]
 pub struct TlsListenProtocol {
     inner: Arc<dyn ListenProtocol>,
@@ -310,7 +332,7 @@ impl ListenProtocol for TlsListenProtocol {
 
 `.serve()` clones whatever spec it was handed, stamps the same `__proxima_tls` marker key, and hands that spec to the wrapped protocol's own `serve`. `name()` delegates straight to `inner.name()`, so anything downstream that keys off the protocol's registered name sees straight through the wrapper — you get TLS termination without the wrapper pretending to be a *different* protocol.
 
-`ListenerBuilder::tls(config)` (the inherent `.tls(TlsConfig)` from §4's table) is the fluent front door onto this decorator — it does **not** write a spec key at all (`src/listener/handle.rs:414–417`, and proven directly by a unit test, `tls_composes_a_decorator_instead_of_writing_a_spec_key`, `src/listener/handle.rs:1334–1347`):
+`ListenerBuilder::tls(config)` (the inherent `.tls(TlsConfig)` from §4's table) is the fluent front door onto this decorator — it does **not** write a spec key at all (`src/listener/handle.rs:414–417`, and proven directly by a unit test, `tls_composes_a_decorator_instead_of_writing_a_spec_key`, `src/listener/handle.rs:1332–1342`):
 
 ```rust
 #[cfg(feature = "tls")]
@@ -321,8 +343,10 @@ pub fn tls(mut self, tls: proxima_tls::TlsConfig) -> Self {
 }
 ```
 
-```rust
+```rust,ignore
 // test: tls_composes_a_decorator_instead_of_writing_a_spec_key
+// `.tls`/`.spec` are private fields, visible only inside the crate's own
+// `#[cfg(test)] mod tests`.
 let fluent = ListenerBuilder::default().tls(proxima_tls::TlsConfig::self_signed());
 assert!(fluent.tls.is_some(), ".tls(config) must accumulate on the builder, not the spec");
 assert!(
@@ -331,9 +355,11 @@ assert!(
 );
 ```
 
-`.serve()` reads that separately-accumulated `self.tls` field and calls `compose_tls`, which wraps whatever `resolve_listen_protocol` already picked (`src/listener/handle.rs:1039–1063`):
+`.serve()` reads that separately-accumulated `self.tls` field and calls `compose_tls`, which wraps whatever `resolve_listen_protocol` already picked (`src/listener/handle.rs:1038–1067`):
 
-```rust
+```rust,ignore
+// `NamedListenProtocol` and `http_listen_protocol_for_tls` are
+// crate-private helpers this excerpt does not repeat.
 #[cfg(feature = "tls")]
 fn compose_tls(
     tls: Option<proxima_tls::TlsConfig>,
@@ -354,11 +380,11 @@ fn compose_tls(
 }
 ```
 
-One detail worth teaching in its own right: the registry key gets renamed to `"{name}+tls"` (e.g. `"http+tls"`). Why not just re-register under `"http"`? Because `App::new()` *already* registered a plain, non-TLS `HttpListenProtocol` under `"http"` — and `TlsListenProtocol::name()` delegates to the wrapped protocol's name, which is also `"http"`. Registering a second, TLS-wrapping protocol under the identical key `"http"` in the same registry would either collide or silently shadow the plain one. `NamedListenProtocol` (`src/listener/handle.rs:1074–1103`) is a small wrapper whose only job is to override the registry *key* without touching `serve` — the TLS-terminating decorator runs unchanged underneath; only the name used to look it up differs. `compose_tls_wraps_the_resolved_protocol_and_renames_the_registry_key` (`src/listener/handle.rs:1348–1365`) is the test proving `name == wrapped.name()` always holds, which is the invariant that keeps this registration collision-free.
+One detail worth teaching in its own right: the registry key gets renamed to `"{name}+tls"` (e.g. `"http+tls"`). Why not just re-register under `"http"`? Because `App::new()` *already* registered a plain, non-TLS `HttpListenProtocol` under `"http"` — and `TlsListenProtocol::name()` delegates to the wrapped protocol's name, which is also `"http"`. Registering a second, TLS-wrapping protocol under the identical key `"http"` in the same registry would either collide or silently shadow the plain one. `NamedListenProtocol` (`src/listener/handle.rs:1073–1103`) is a small wrapper whose only job is to override the registry *key* without touching `serve` — the TLS-terminating decorator runs unchanged underneath; only the name used to look it up differs. `compose_tls_wraps_the_resolved_protocol_and_renames_the_registry_key` (`src/listener/handle.rs:1346–1360`) is the test proving `name == wrapped.name()` always holds, which is the invariant that keeps this registration collision-free.
 
 ## 8. The general escape hatch: `.protocol(impl AnyProtocol)`
 
-`compose_tls` above (and `resolve_listen_protocol`'s h2/h3 arms) both produce the same shape: a registry-name string, plus an *optional*, already-built `Arc<dyn ListenProtocol>` to self-register instead of relying on a by-name lookup. That shape isn't invented by the umbrella crate — `ListenerSpec::protocol` already exists for exactly this, one layer down in `proxima-listen`. But the escape hatch a THIRD PARTY actually reaches for is one level higher and simpler: `ListenerBuilder::protocol(impl AnyProtocol)` (`src/listener/handle.rs:278–292`), the listener-side mirror of the client's `.protocol(impl ClientProtocol)` (`src/client/handle.rs:463–471`):
+`compose_tls` above (and `resolve_listen_protocol`'s h2/h3 arms) both produce the same shape: a registry-name string, plus an *optional*, already-built `Arc<dyn ListenProtocol>` to self-register instead of relying on a by-name lookup. That shape isn't invented by the umbrella crate — `ListenerSpec::protocol` already exists for exactly this, one layer down in `proxima-listen`. But the escape hatch a THIRD PARTY actually reaches for is one level higher and simpler: `ListenerBuilder::protocol(impl AnyProtocol)` (`src/listener/handle.rs:278–292`), the listener-side mirror of the client's `.protocol(impl ClientProtocol)` (`src/client/handle.rs:553–561`):
 
 ```rust
 #[cfg(feature = "any-listener")]
@@ -384,7 +410,7 @@ This is the SAME mechanism `.kafka(handler)`/`.mqtt(handler)`/`.amqp(handler)`/`
 
 ## 9. `.serve()`: what it actually composes
 
-`ListenerBuilder::serve()` is a terminal — it consumes the builder and returns a running `Server`. Reading its full body (`src/listener/handle.rs:449–530`) end to end is the fastest way to see that it invents no new serve loop; it is the exact `App::new()? -> app.mount(...)? -> app.serve(config).await?` idiom from `examples/hello/main.rs`, automated, with two guard checks up front:
+`ListenerBuilder::serve()` is a terminal — it consumes the builder and returns a running `Server`. Reading its full body (`src/listener/handle.rs:449–580`) end to end is the fastest way to see that it invents no new serve loop; it is the exact `App::new()? -> app.mount(...)? -> app.serve(config).await?` idiom from `examples/hello/main.rs`, automated, with two guard checks up front:
 
 ```rust
 pub async fn serve(self) -> Result<Server, ProximaError> {
@@ -429,7 +455,7 @@ Step by step:
 8. `app.mount("/{*path}", MountTarget::Handle(dispatch))` — every path routes to `.handle(pipe)`, using the exact catch-all glob convention the rest of the router uses for shorthand single-pipe listeners.
 9. `app.serve(RunConfig { bind, protocol, spec })` — the identical `App::serve` `examples/hello` calls directly.
 
-One genuine behavioral gap worth carrying forward rather than discovering the hard way: `App::serve` returns as soon as the listener lane is *spawned* — not once it's actually accepting connections — whereas the lower-level `proxima_listen::handle::Listener::run_with_runtime` (which `ListenerBuilder` does **not** go through) blocks for a per-lane ready acknowledgment first. A caller that dials immediately after `Listener::builder()....serve()` resolves can race a not-yet-listening socket. Today's workaround is a bounded poll-connect retry loop — see `wait_until_listening` in `examples/any_listener.rs` or `tests/e2e/listener_client_interop.rs`.
+A behavioral question worth answering explicitly rather than assuming: does a caller that dials immediately after `Listener::builder()....serve()` resolves risk racing a not-yet-listening socket? No — `App::serve` does not return until the listener lane has actually bound. `App::run_until_signal` (`src/app.rs:886–969`, which `App::serve` calls directly) spawns the listener's `serve` future on core 0, then blocks on a `std::sync::mpsc::Receiver::recv_timeout` (`ready_rx`, `src/app.rs:961–968`, timeout `proxima_listen::handle::LISTENER_READY_TIMEOUT`) before returning — its own comment states the intent directly: "the factory's spawn returning does not mean the socket is listening yet — block on one ack from the serve future's real bind/listen so a caller dialing immediately after this returns never sees ECONNREFUSED" (`src/app.rs:922–926`). Every `ListenProtocol::serve` implementation fires that ack (`context.ready_signal`) only AFTER its real bind syscall returns — see `proxima-http/src/http1/listener.rs:73–76` (`TcpListener::bind(bind).await?` then `sender.send(())`) or the shared `proxima-listen/src/serve_pipe.rs:107–113` upgrade-loop helper for the same ordering. This mirrors `proxima_listen::handle::Listener::run_with_runtime`'s own per-lane readiness gate — `ListenerBuilder::serve()` reuses the identical mechanism through `App::serve` rather than reimplementing it. `examples/hello/main.rs`'s own comment confirms the same guarantee for the plain `App::serve` path: "`serve` spawns the listener and returns once it is actually accepting — no polling, no sleeping, no discovering ECONNREFUSED the hard way." (A defensive retry loop still exists in a couple of older tests and examples predating this gate's addition — harmless, since it now succeeds on the first attempt, but no longer load-bearing.)
 
 ## 10. The two honest asymmetries
 
@@ -443,11 +469,14 @@ fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<SocketAddr> {
 }
 ```
 
-`.serve()` requires one or the other be present, and says so precisely rather than failing on a `None.unwrap()` deep in a socket call (`serve_without_bind_errors_before_touching_a_socket`, `src/listener/handle.rs:1295–1304`, and the client has no equivalent test because it has no equivalent failure mode — a `Client` with no url just never resolves a factory, it doesn't need a bind check).
+`.serve()` requires one or the other be present, and says so precisely rather than failing on a `None.unwrap()` deep in a socket call (`serve_without_bind_errors_before_touching_a_socket`, `src/listener/handle.rs:1293–1300`, and the client has no equivalent test because it has no equivalent failure mode — a `Client` with no url just never resolves a factory, it doesn't need a bind check).
 
-**`.tls(TlsConfig)` and `.grpc()` are inherent, not trait methods, and for two different reasons.** `.tls()` on the client is bare — zero arguments, because ALPN negotiation (§6) does the actual work; all `.tls()` needs to do is flip the transport marker. A listener terminating TLS needs real key material — a certificate and a private key, or a self-signed generator — which a zero-arg method has no slot for. So `ListenerBuilder` defines its own `.tls(proxima_tls::TlsConfig)`, a plain inherent method — not a trait implementation at all, because minting `ListenerSecurityExt` for exactly one method with no second implementor would be a trait with a single member (see the module doc's own reasoning, `src/listener/transport.rs`'s sibling `src/client/security.rs:1–12`, which explains the client side's OWN choice not to mint a trait either, for the opposite reason — it needs no divergence to defend against). `reject_dead_axes` (`src/listener/handle.rs:909–923`) is the safety net for the one remaining door: a caller reaching a bare `.spec("transport", "tls")` directly (or a `tls`-feature-off build, where the inherent `.tls(TlsConfig)` doesn't exist to intercept anything) would otherwise leave a listener silently unterminated:
+**`.tls(TlsConfig)` and `.grpc()` are inherent, not trait methods, and for two different reasons.** `.tls()` on the client is bare — zero arguments, because ALPN negotiation (§6) does the actual work; all `.tls()` needs to do is flip the transport marker. A listener terminating TLS needs real key material — a certificate and a private key, or a self-signed generator — which a zero-arg method has no slot for. So `ListenerBuilder` defines its own `.tls(proxima_tls::TlsConfig)`, a plain inherent method — not a trait implementation at all, because minting `ListenerSecurityExt` for exactly one method with no second implementor would be a trait with a single member (see the module doc's own reasoning, `src/listener/transport.rs`'s sibling `src/client/security.rs:1–12`, which explains the client side's OWN choice not to mint a trait either, for the opposite reason — it needs no divergence to defend against). `reject_dead_axes` (`src/listener/handle.rs:906–921`) is the safety net for the one remaining door: a caller reaching a bare `.spec("transport", "tls")` directly (or a `tls`-feature-off build, where the inherent `.tls(TlsConfig)` doesn't exist to intercept anything) would otherwise leave a listener silently unterminated:
 
-```rust
+```rust,ignore
+// the second of `reject_dead_axes`'s two checks — `spec` is that
+// function's own parameter, `tls_marker_present` its private sibling
+// helper; neither is repeated here.
 if spec.get("transport").and_then(Value::as_str) == Some("tls") && !tls_marker_present(spec) {
     return Err(ProximaError::Config(
         "Listener::builder(): bare .tls() only sets a marker key and terminates nothing; \
@@ -459,7 +488,7 @@ if spec.get("transport").and_then(Value::as_str) == Some("tls") && !tls_marker_p
 
 `.grpc()` is inherent for the opposite reason: the client's `ClientProtocolExt::grpc(url)` carries a *dial target* — there is nowhere else for that url to live. A listener has nothing to dial; it already has `.handle(pipe)` on hand and only needs to flip which wire protocol it resolves to (§5's `spec.contains_key("grpc")` check). So `ListenerProtocolExt::grpc(self)` is zero-argument (`src/listener/handle.rs:601–604`) — a different trait method on a different trait from the client's, not a shadowing of it. `.h2()` (§4) is the same shape, minus even a same-named counterpart to distinguish itself from — there is no `ClientTransportExt::h2()` at all, so it needs no divergence, just a plain inherent method. `.pgwire(query)` (§4, §5, §9) carries a typed `PgPipeHandle` accumulated on the builder the same way `.tls(config)` accumulates a `TlsConfig` — a listener-only shape with no client-side concept to extend.
 
-`.proxy(url)` — an *actual* client-only concept, an egress CONNECT tunnel before the dial — has no listener meaning at all, and `ListenerBuilder` cannot even reach it through `ClientTransportExt` (it doesn't implement that trait). `reject_dead_axes` is what stops the ONE remaining door (the raw `SpecBuilder::set`/`.spec()` escape hatch) from doing something wrong silently — `.serve()` hard-errors if the `proxy` key is present at all, rather than binding a listener that quietly ignores it (`proxy_axis_hard_errors_at_serve_instead_of_silently_ignoring_it`, `src/listener/handle.rs:1316–1333`).
+`.proxy(url)` — an *actual* client-only concept, an egress CONNECT tunnel before the dial — has no listener meaning at all, and `ListenerBuilder` cannot even reach it through `ClientTransportExt` (it doesn't implement that trait). `reject_dead_axes` is what stops the ONE remaining door (the raw `SpecBuilder::set`/`.spec()` escape hatch) from doing something wrong silently — `.serve()` hard-errors if the `proxy` key is present at all, rather than binding a listener that quietly ignores it (`proxy_axis_hard_errors_at_serve_instead_of_silently_ignoring_it`, `src/listener/handle.rs:1314–1328`).
 
 ## 11. A full walkthrough, compiled and run
 
@@ -522,4 +551,4 @@ Note `hello` had to be `#[proxima::piped(send)]` here, not the bare `async fn` `
 - [Foundations, part 2](./01-ergonomics.md) §8, if `IntoMountTarget`'s four shapes (referenced in §11 above) weren't already solid.
 - [Build an API gateway](./build-an-api-gateway.md) for `Client::http`/`Client::builder` used against a real upstream, end to end.
 - `docs/configuration.md`'s "typed listener configs" section for a *third*, unrelated way to reach a running listener — `HttpListener::http(addr)` / `HttpsListener::https(addr, cert, key)` (`src/settings/listener.rs`). Don't confuse it with this document's `Listener::builder()`: those are `Into<RunConfig>` typed config shapes for `App::serve(impl Into<RunConfig>)`, one layer above the spec/registry resolution this document covers, and they carry no `.tcp()`/`.tls()`/`.quic()`/`.grpc()` axis sugar at all.
-- `proxima-listen`'s own crate docs for `ListenProtocol`, `ListenRegistry`, and `Listener::run_with_runtime`'s per-core SO_REUSEPORT fan-out — this document treated `run_with_runtime` as a fact (§9's readiness-race caveat), not something to re-derive.
+- `proxima-listen`'s own crate docs for `ListenProtocol`, `ListenRegistry`, and `Listener::run_with_runtime`'s per-core SO_REUSEPORT fan-out — `ListenerBuilder::serve()` (§9) goes through `App::serve`'s single-lane readiness gate, not `run_with_runtime`'s multi-lane one; the two are siblings, not the same call path.
