@@ -251,7 +251,39 @@ fi
 # matching doc comment; the DNS `.quic()` config-error citation pointed at
 # 07-sugar-composition.md's own `.dns(handler)` section instead of its
 # failure-mode section that actually demonstrates a rejected composition).
-FLOOR=73
+# Raised to 77 after 10-conflaguration.md's own rewrite turned all 6 of its
+# blocks (all 6 previously FAILED — every one referenced a name from
+# nowhere in its own file: `toml_path`/`bind`/`built`/`handler` never
+# defined, `default_host`/`default_max_message` helper fns never excerpted
+# alongside the `#[serde(default = ..)]` that cites them, and a
+# `Validate::validate` stub returning bare `()` against a `conflaguration::
+# Result<()>` signature) into 4 real, self-contained, compiling excerpts:
+# the full `ServerConfig` struct+`Default`+`Validate` from
+# `examples/config/main.rs`, `ListenTuningConfig`'s and `BlacklistConfig`'s
+# own crate-doctest builder-vs-TOML parity assertions verbatim from
+# `proxima-listen/src/config.rs`/`src/admission/blacklist.rs`, and — the
+# rewrite's real find — `examples/protocol_fleet.rs`'s own `KafkaServerConfig`
+# section, whose doc comment already CLAIMED "wired into a real listener"
+# while its body only ever compared two structs for equality and never
+# touched `Listener::builder()` at all; extended that function itself (not
+# just the tutorial prose) into an actual `.protocol(KafkaAnyProtocol::new(..)
+# .with_config(config))` listener serving one real PRODUCE round trip, which
+# is what closed the tutorial's own "illustrative, not run" hedge for good.
+# Two structural bugs surfaced only by making every block compile in the SAME
+# file: a locally re-declared `struct KafkaServerConfig` (mirroring the real
+# type's shape, teaching-style) collided (E0255 + orphan-rule E0116/E0117)
+# with a LATER block's `use proxima_kafka::{.., KafkaServerConfig, ..}` of
+# the real type, since same-file context accumulation carries a struct
+# definition forward but has no way to know a later block's IMPORT of an
+# identically-named real type should retire it — fixed by dropping the
+# redundant local mirror (the struct's anatomy was already fully taught by
+# `ServerConfig` in §1) rather than teaching the same shape twice; and two
+# independent blocks each spelling `use std::io::Write;` (both borrowed
+# verbatim from real crate doctests that don't know about each other)
+# collided too (E0252) once accumulated into one scope — fixed with
+# `use std::io::Write as _;` in the second, which still satisfies `write!`
+# without binding a second `Write` name.
+FLOOR=77
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1

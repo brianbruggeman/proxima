@@ -14,7 +14,7 @@
 //! that sugar shorthand doesn't (yet) carry a config argument.
 //!
 //! Run: `cargo run --example protocol_fleet --features
-//! "memcached-listener,memcached-client,dns-listener,dns-client,kafka-listener,kafka-client,mqtt-listener,mqtt-client,amqp-listener,amqp-client"`
+//! "http1-native,memcached-listener,memcached-client,dns-listener,dns-client,kafka-listener,kafka-client,mqtt-listener,mqtt-client,amqp-listener,amqp-client"`
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -64,7 +64,7 @@ async fn main() -> Result<(), ProximaError> {
     kafka_section().await?;
     mqtt_section().await?;
     amqp_section().await?;
-    kafka_conflaguration_section()?;
+    kafka_conflaguration_section().await?;
     println!("\nprotocol_fleet: memcached/DNS/Kafka/MQTT/AMQP client+listener round trips all OK");
     Ok(())
 }
@@ -401,9 +401,15 @@ async fn amqp_section() -> Result<(), ProximaError> {
 /// fluent form, and a real TOML file via `conflaguration::from_file` — then
 /// wired into a real listener through `.protocol(KafkaAnyProtocol::new(..).
 /// with_config(config))`, since `.kafka(handler)` sugar doesn't (yet) carry
-/// a config argument.
-fn kafka_conflaguration_section() -> Result<(), ProximaError> {
-    use proxima_kafka::KafkaServerConfig;
+/// a config argument. A real PRODUCE round trip through that listener is
+/// the proof the built config reached the wire, not just the struct
+/// comparison above it.
+async fn kafka_conflaguration_section() -> Result<(), ProximaError> {
+    use proxima_kafka::wire::{
+        ApiKey, ProducePartitionData, ProduceRequest, ProduceResponse, ProduceTopicData,
+        RequestBody, ResponseBody, decode_response,
+    };
+    use proxima_kafka::{KafkaAnyProtocol, KafkaServerConfig, into_kafka_handle};
 
     let built = KafkaServerConfig::builder()
         .max_message_bytes(4096)
@@ -430,6 +436,64 @@ fn kafka_conflaguration_section() -> Result<(), ProximaError> {
          produce the IDENTICAL config (max_message_bytes={})",
         toml_path.display(),
         from_file.max_message_bytes
+    );
+
+    struct EchoProduce;
+
+    impl SendPipe for EchoProduce {
+        type In = RequestBody;
+        type Out = ResponseBody;
+        type Err = ProximaError;
+
+        async fn call(&self, request: RequestBody) -> Result<ResponseBody, ProximaError> {
+            match request {
+                RequestBody::Produce(_) => Ok(ResponseBody::Produce(ProduceResponse::default())),
+                _ => Err(ProximaError::Upstream("unexpected api".into())),
+            }
+        }
+    }
+
+    let bind = free_loopback_addr()?;
+    let configured =
+        KafkaAnyProtocol::new("kafka", into_kafka_handle(EchoProduce)).with_config(built);
+    let server = Listener::builder()
+        .bind(bind)
+        .tcp()
+        .handle(into_handle(NullHttp))
+        .any()
+        .protocol(configured)
+        .serve()
+        .await?;
+    wait_until_listening(bind);
+
+    let client = Client::builder().kafka(format!("kafka://{bind}")).build()?;
+    let request = RequestBody::Produce(ProduceRequest {
+        acks: 1,
+        timeout_ms: 100,
+        topics: vec![ProduceTopicData {
+            topic: "orders".to_string(),
+            partitions: vec![ProducePartitionData {
+                partition: 0,
+                record_set: bytes::Bytes::new(),
+            }],
+        }],
+    });
+    let response = client
+        .call("PRODUCE", "")
+        .body(request.encode())
+        .send()
+        .await?;
+    let body = response.bytes().await?;
+    let decoded = decode_response(ApiKey::Produce.to_i16(), &body)
+        .map_err(|error| ProximaError::Decode(format!("kafka decode: {error}")))?;
+    let ResponseBody::Produce(_produce_response) = decoded else {
+        return Err(ProximaError::Upstream("expected a Produce reply".into()));
+    };
+    server.stop();
+
+    println!(
+        "§6 conflaguration: .protocol(KafkaAnyProtocol::new(..).with_config(config)) listener \
+         -> PRODUCE acked through the config-carrying door .kafka(handler) doesn't have"
     );
     Ok(())
 }
