@@ -77,9 +77,9 @@ async fn main() -> Result<(), ProximaError> {
         .serve()
         .await?;
 
-    // `.serve()` resolves once the listener lane is SPAWNED, not once it is
-    // actually accepting (`ListenerBuilder::serve`'s readiness-race doc) —
-    // bounded retry-connect closes that gap.
+    // `.serve()` already blocks until the listener's real bind/listen ack
+    // fires (`App::run_until_signal`'s ready-signal gate) — this retry loop
+    // predates that guarantee and is defensive, not load-bearing today.
     let client = H2ClientUpstream::new(
         PrimeTcpUpstream::new(bind),
         format!("{bind}"),

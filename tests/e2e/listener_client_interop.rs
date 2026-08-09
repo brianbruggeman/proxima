@@ -62,10 +62,11 @@ fn free_loopback_addr() -> SocketAddr {
 }
 
 /// Poll a raw connect until the listener's real `bind`/`listen` syscalls have
-/// run — `App::serve` (unlike `proxima_listen::handle::Listener::run_with_runtime`)
-/// returns before the spawned lane's first poll, so a caller must not assume
-/// the socket is live the instant `.serve()` resolves. Mirrors
-/// `examples/hello/main.rs`'s `wait_until_listening`.
+/// run. `App::serve` already blocks on a per-lane ready ack before returning
+/// (`App::run_until_signal`'s `ready_rx.recv_timeout`, mirroring
+/// `proxima_listen::handle::Listener::run_with_runtime`'s own readiness
+/// gate), so this loop is defensive rather than load-bearing — kept as a
+/// cheap belt-and-suspenders check rather than a bare single `connect`.
 fn wait_until_listening(addr: SocketAddr) {
     for _ in 0..200 {
         if TcpStream::connect(addr).is_ok() {
