@@ -9,16 +9,18 @@ The example says it plainly: *"There is no single `Cache` primitive in proxima. 
 
 ## 1. Two upstreams: the cache and the origin
 
-An *upstream* is anything that answers a request — a `Pipe` behind an `UpstreamRef`. Here, a KV cache lookup and an origin (`cache/main.rs:44-60`):
+An *upstream* is anything that answers a request — a `Pipe` behind an `UpstreamRef`. Here, a KV cache lookup and an origin (`cache/main.rs:44-46,57-60`):
 
 ```rust
-let cache_backend = KvCache::new("cache", None, KvCaps::entries(1024))
-    .expect("kv cache backend");
+let cache_backend =
+    KvCache::new("cache", None, KvCaps::entries(1024)).expect("kv cache backend");
 let cache_upstream = into_handle(KvUpstream::new(cache_backend.clone()));
 
-// in a real reverse proxy this is the Gateway's ForwardPipe to the upstream;
-// the example uses a SynthUpstream so it has a deterministic body to assert on.
-let origin_upstream = into_handle(/* ForwardPipe { client } | SynthUpstream::new(...) */);
+let origin_upstream = into_handle(SynthUpstream::new(
+    "origin",
+    200,
+    r#"{"id":"chatcmpl-fake","object":"chat.completion","choices":[]}"#,
+));
 
 let upstreams = Arc::new(vec![
     UpstreamRef::new(cache_upstream, "cache", 1),
@@ -30,29 +32,32 @@ let upstreams = Arc::new(vec![
 
 `KvUpstream` turns that `KvCache` into an upstream that answers from stored entries — and returns `ProximaError::NoData` on a miss. That miss is the signal the next piece keys on.
 
+The origin here is a bare `SynthUpstream` — a canned-response `Pipe`, so the example has a deterministic body to assert on. The real `cache/main.rs:48-55` wraps it one layer deeper, in a small `CountingOrigin` struct (`cache/main.rs:190-209`) that just bumps an `AtomicUsize` before delegating — pure instrumentation so the example's own assertions can prove the origin was called exactly once, no different from the `Ledger` trick `filter`'s tutorial used. Nothing about the cache/fallthrough/write-back composition needs it, so it's elided here.
+
 The trailing `1` in `UpstreamRef::new(handle, "cache", 1)` is a selection *weight*. `Fallthrough` (§2) ignores it and always tries upstreams in list order; other `Selection` strategies (round-robin, least-connections) use it to split traffic proportionally. `UpstreamRef::new` always takes one, even when — as here — nothing reads it.
 
-## 2. Fallthrough: try the cache, fall through to the origin on a miss
+## 2. The dispatch pipe: `Selection` + `Fallthrough`
 
-`Selection` picks which upstream answers; `Fallthrough` tries them in order and moves on when one *misses*. `miss_on_no_data()` defines a miss as `ProximaError::NoData` — exactly what the empty cache returns. `CachedOriginDispatch` below isn't a proxima primitive — it's a small `Pipe` type the example authors itself, the same way Foundations' `HelloPipe` is example code, just to hold the two pieces `Selection::dispatch` needs (`cache/main.rs:61-64`):
+`Selection` picks which upstream answers; `Fallthrough` tries them in order and moves on when one *misses*. `miss_on_no_data()` defines a miss as `ProximaError::NoData` — exactly what the empty cache returns.
 
-```rust
-let dispatch = CachedOriginDispatch {
-    upstreams,
-    selection: Arc::new(Fallthrough::miss_on_no_data()),
-};
-```
-
-The dispatch is a thin `Pipe` whose whole job is `Selection::dispatch` over the fixed upstream list (`cache/main.rs:165-181`):
+`CachedOriginDispatch` isn't a proxima primitive — it's a small `Pipe` type the example authors itself, the same way Foundations' `HelloPipe` is example code, just to hold the two pieces `Selection::dispatch` needs: the fixed upstream list and the strategy that picks among them (`cache/main.rs:159-163`). Both fields are `Arc`-wrapped so `call` below can `.clone()` them cheaply into the `async move` block rather than borrowing `&self` across an `.await`. The whole job of `call` is to hand those two straight to `Selection::dispatch` (`cache/main.rs:165-181`):
 
 ```rust
+#[derive(Clone)]
+struct CachedOriginDispatch {
+    upstreams: Arc<Vec<UpstreamRef>>,
+    selection: Arc<Fallthrough>,
+}
+
 impl SendPipe for CachedOriginDispatch {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
     type Err = ProximaError;
 
-    fn call(&self, request: Request<Bytes>)
-        -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+    fn call(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
         let upstreams = self.upstreams.clone();
         let selection = self.selection.clone();
         async move {
@@ -69,14 +74,21 @@ That is the whole type — there is no second `impl Pipe for CachedOriginDispatc
 
 A hit answers from the cache; a miss falls through to the origin. There is no "cache combinator" — **this wiring is the composition.**
 
-## 3. Write-back: a miss now is a hit next time
+## 3. Wire it up: `Fallthrough` + write-back
 
-`WriteBack` wraps the whole dispatch. After *any* response it captures the body and `put`s it into the cache backend — so the origin's answer to a miss populates the cache for next time (`cache/main.rs:66-67`):
+Building the pipe is just handing `CachedOriginDispatch` the upstream list from §1 and a `Fallthrough` (`cache/main.rs:61-64`):
 
 ```rust
+let dispatch = CachedOriginDispatch {
+    upstreams,
+    selection: Arc::new(Fallthrough::miss_on_no_data()),
+};
+
 let write_back_target: Arc<dyn KvHandle> = cache_backend.clone();
 let cached_origin = WriteBack::single(into_handle(dispatch), write_back_target);
 ```
+
+`WriteBack` wraps the whole dispatch. After *any* response it captures the body and `put`s it into the cache backend — so the origin's answer to a miss populates the cache for next time.
 
 `cache_backend` is the same `Arc<KvCache>` from §1; retyping the clone as `Arc<dyn KvHandle>` just switches which face of it `WriteBack` sees — the `KvHandle` trait, not the concrete `KvCache` type — so `WriteBack` can store into any cache backend that implements it, not only this one.
 
