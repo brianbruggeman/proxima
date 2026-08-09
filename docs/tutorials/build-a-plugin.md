@@ -89,7 +89,7 @@ The factory names the pipe (`"stamp_header"`) so config can reference it, reads 
 
 ## 3. `PluginRegistry` and `register(builder)` — the one-line entry point
 
-A plugin needs somewhere to register its factory. That somewhere is a trait, not the concrete app type, so a plugin crate can add itself without depending on the whole `proxima` umbrella crate. `PluginRegistry` is that trait, copied verbatim from `proxima-primitives/src/pipe/plugin.rs:16-25`:
+A plugin needs somewhere to register its factory. That somewhere is a trait, not the concrete app type, so a plugin crate can add itself without depending on the whole `proxima` umbrella crate. `PluginRegistry` is that trait, copied verbatim from `proxima-primitives/src/pipe/plugin.rs:15-24`:
 
 ```rust
 pub trait PluginRegistry: Sized {

@@ -67,7 +67,7 @@ let server = app.serve(RunConfig::http(bind)).await?;
 ```
 
 `App::new()` builds (or adopts — more on this in
-[Foundations part 3](./03-native-runtime.md) if you're curious later) the
+[The native runtime](./03-native-runtime.md) if you're curious later) the
 runtime that will drive your handler's futures. `app.mount("/", hello)`
 registers `hello` at the root path — mount takes a bare `async fn` directly,
 no wrapping required. `app.serve(RunConfig::http(bind))` binds the address

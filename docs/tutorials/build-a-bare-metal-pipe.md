@@ -9,7 +9,7 @@ The example frames it, verbatim from its own module doc-comment (`no-std/src/lib
 
 ## 1. The same Pipe, on a smaller planet
 
-The crate root carries `#![cfg_attr(not(feature = "std"), no_std)]` (`no-std/src/lib.rs:15`) — genuinely `#![no_std]` unless the `std` feature is turned on. `FrameStore` is a plain `Pipe` — the exact trait Foundations taught — writing a borrowed frame into a `RingSink`, a fixed-capacity array sized by two const generics. No `Box`, no `Vec`, no allocator. Copied verbatim from `no-std/src/lib.rs:44-73`:
+The crate root carries `#![cfg_attr(not(feature = "std"), no_std)]` (`no-std/src/lib.rs:15`) — genuinely `#![no_std]` unless the `std` feature is turned on. `FrameStore` is a plain `Pipe` — the exact trait Foundations taught — writing a borrowed frame into a `RingSink`, a fixed-capacity array sized by two const generics. No `Box`, no `Vec`, no allocator. Copied verbatim from `no-std/src/lib.rs:47-76`:
 
 ```rust
 pub struct FrameStore {
@@ -52,21 +52,21 @@ The same `trait Pipe { type In; type Out; type Err; fn call(...) -> impl Future<
 
 ## 2. `block_on` is a polling loop
 
-With no executor, `block_on` drives the pipe's future to completion with a `Waker::noop()` (stable since Rust 1.85) — polling in a loop **is** the runtime (`no-std/src/lib.rs:80-88`):
+With no executor, `block_on` drives the pipe's future to completion with a `Waker::noop()` (stable since Rust 1.85) — polling in a loop **is** the runtime. This crate no longer hand-rolls its own copy: it re-exports the workspace's own no-runtime floor primitive, `pub use proxima_primitives::block_on;` (`no-std/src/lib.rs:25`), so every `no_std` caller in the workspace shares the identical loop rather than each crate writing its own. Copied verbatim from where it actually lives, `proxima-primitives/src/driver.rs:13-21`:
 
 ```rust
-pub fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
-    let mut future = pin!(future);
-    let mut context = Context::from_waker(Waker::noop());
+pub fn block_on<Fut: core::future::Future>(future: Fut) -> Fut::Output {
+    let mut future = core::pin::pin!(future);
+    let mut context = core::task::Context::from_waker(core::task::Waker::noop());
     loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+        if let core::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
             return output;
         }
     }
 }
 ```
 
-You don't need to trace every token in that loop — `pin!`, `Context::from_waker`, `.poll(...)`, and `Poll::Ready` are just the mechanics of asking a future "are you done yet?". The loop asks, over and over, until the answer is yes; that polling loop **is** the runtime — the same black box Foundations waved off, just cracked open once so you can see there's no magic inside, only asking-and-checking.
+You don't need to trace every token in that loop — `pin!`, `Context::from_waker`, `.poll(...)`, and `Poll::Ready` are just the mechanics of asking a future "are you done yet?". The loop asks, over and over, until the answer is yes; that polling loop **is** the runtime — the same black box Foundations waved off, just cracked open once so you can see there's no magic inside, only asking-and-checking. Its own doc comment names the reason it lives in `proxima-primitives` rather than in this example crate: "the floor every other `block_on` in the workspace points down to" — `proxima_runtime::block_on(&dyn Runtime, ..)` and the edge `run*` drivers add a real runtime on top of this same verb; this is what is left once there is nothing left to add one to.
 
 If you've read the [chaos](./build-a-chaos-test-rig.md) or [delivery](./build-delivery-guarantees.md) tutorials, this is the same one-shot poll shape they used (`block_on_ready`) — not required reading, just a familiar face if you have. Here it's the *entire* runtime, no reactor, no allocator.
 

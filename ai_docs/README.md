@@ -4,6 +4,13 @@ This tree is the agent-facing **project memory** for Proxima. It records
 decisions, failures, open questions, and the evidence behind them, in a
 shape an agent can query before touching code.
 
+**If you are a person new to proxima, this is not your entry point** — these
+are terse, evidence-bearing routing records for an agent that already knows
+the vocabulary (`Pipe`, sans-IO, tier, and so on), not teaching material.
+Start at [`docs/tutorials/00-foundations.md`](../docs/tutorials/00-foundations.md)
+instead, which defines every term before using it. Come back here once you
+know the algebra and want the agent-facing index.
+
 Start with `AGENT.md`.
 
 ## What belongs here, and what does not
