@@ -53,6 +53,10 @@ readme = "README.md"
 
 [workspace.lints.rust]
 warnings = "deny"
+# only scripts/tutorials-gate.sh sets this: it regenerates the gitignored
+# .tutorial-gate-generated/ that the tutorial doctests include, so an
+# ordinary `cargo test --doc` on a fresh checkout must not compile them
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(tutorial_gate)'] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
