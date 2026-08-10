@@ -469,7 +469,44 @@ fi
 # two-`App` build span: `77-93` -> real `76-92`; the `build_listener` pair:
 # `98-99` -> real `97-98`; the shared-counter-assertion span: `109-148` ->
 # real `108-147`).
-FLOOR=98
+# Raised to 102 after build-a-plugin.md's own rewrite: all 4 of its original
+# blocks were previously FAILED — `PipeFactory`/`DynPipeFactory`/
+# `PluginRegistry` were missing from `tutorial_gate_prelude` entirely (a real
+# gap: `examples/plugin-skeleton/src/lib.rs` imports `PipeFactory`/
+# `PipeHandle`/... from `proxima_primitives::pipe` and `PluginRegistry` from
+# `proxima_primitives::pipe::plugin` the same way, but neither module was
+# re-exported into the harness's prelude), and even after that fix the
+# `PipeFactory` impl block cited `StampHeaderFactory` — never defined in its
+# own block, only in the crate's own source two blocks away — and the final
+# `my_plugin::register(...)` composition example cannot compile at all
+# (`my_plugin` names a separate crate this doctest harness has no way to
+# link against) plus used a bare `?` inside the awk-injected unit-returning
+# `fn main`. Fixed by merging `StampHeader` into the factory block (repeated
+# verbatim, the same "make each block stand on its own" precedent
+# load-balance's `LoadBalancerPipe` §3 rewrite set) so it passes pass 1
+# standalone and can donate `StampHeaderFactory` forward; retagging the
+# module-doc-comment quote `text` instead of leaving it silently FAILED,
+# and replacing it with a real, self-contained `compose_app() -> Result<App,
+# ProximaError>` excerpt (`register` repeated verbatim once more, for the
+# same self-containment reason) that drops the crate-qualifier the doc
+# comment shows and asserts on the real call chain instead. The rewrite
+# also caught a genuine harness bug this page's own `PluginRegistry`
+# excerpt exposed for the first time: a tutorial block that re-declares a
+# `tutorial_gate_prelude`-only trait (not one of `proxima::prelude`'s own
+# exports, so outside the transform's existing shadow-guard list) and a
+# LATER block bounds a generic fn over that trait name, the later block's
+# bound silently resolves to the FORWARDED LOCAL trait instead of the real
+# one, so it fails to type-check the moment it is instantiated with a real
+# `AppBuilder` — fixed by adding `PluginRegistry` to
+# `scripts/tutorials-gate-transform.awk`'s own shadow-guard list alongside
+# `proxima::prelude`'s exports. The rewrite also resynced 6 stale
+# `file:line` citations drifted since this page was first written
+# (`pipe_factory.rs`'s `DynPipeFactory` alias: `30` -> real `34`;
+# `app_builder.rs`'s `impl PluginRegistry for AppBuilder`: `193-197` -> real
+# `228-232`; `App::builder()`: `src/app.rs:637` -> real `882`; `AppBuilder`'s
+# own struct: `src/app_builder.rs:48` -> real `56`; `with_defaults()`: `96`
+# -> real `106`; `build()`: `259` -> real `330`).
+FLOOR=102
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1

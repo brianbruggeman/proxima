@@ -9,7 +9,7 @@ The example frames it, verbatim from its own module doc-comment (`plugin-skeleto
 
 ## 1. Your pipe — a wrapper
 
-The plugin's pipe wraps an inner `PipeHandle` and adds behavior. `StampHeader` stamps a configurable header onto every response, copied verbatim from `plugin-skeleton/src/lib.rs:28-51`:
+The plugin's pipe wraps an inner `PipeHandle` and adds behavior. `StampHeader` stamps a configurable header onto every response, copied verbatim from `plugin-skeleton/src/lib.rs:30-53`:
 
 ```rust
 pub struct StampHeader {
@@ -44,9 +44,49 @@ Same wrapping shape as the [gateway](./build-an-api-gateway.md)'s `Auth` or the 
 
 ## 2. A factory — build the pipe from config
 
-A `PipeFactory` builds your pipe from a `spec: &serde_json::Value` — arbitrary JSON config — and an optional inner pipe. This is config-as-composition: the config selects and parameterizes the pipe. Copied verbatim from `plugin-skeleton/src/lib.rs:69-100` (the trivial `StampHeaderFactory::new()`/`Default` boilerplate at lines 54-67 is omitted here for space):
+A `PipeFactory` builds your pipe from a `spec: &serde_json::Value` — arbitrary JSON config — and an optional inner pipe. This is config-as-composition: the config selects and parameterizes the pipe. `StampHeader` (repeated below so this block stands on its own) is copied verbatim from `plugin-skeleton/src/lib.rs:30-53`; the factory itself — the trivial `StampHeaderFactory::new()`/`Default` boilerplate plus the `PipeFactory` impl — from `plugin-skeleton/src/lib.rs:55-101`:
 
 ```rust
+pub struct StampHeader {
+    inner: PipeHandle,
+    name: String,
+    value: String,
+}
+
+impl SendPipe for StampHeader {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> {
+        let inner = self.inner.clone();
+        let header_name = self.name.clone();
+        let header_value = self.value.clone();
+        async move {
+            let response = SendPipe::call(&inner, request).await?;
+            Ok(response.with_header(header_name, header_value))
+        }
+    }
+}
+
+pub struct StampHeaderFactory;
+
+impl StampHeaderFactory {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for StampHeaderFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PipeFactory for StampHeaderFactory {
     fn name(&self) -> &str {
         "stamp_header"
@@ -104,9 +144,9 @@ pub trait PluginRegistry: Sized {
 }
 ```
 
-One method, `with_upstream_factory(self, factory) -> Result<Self, ProximaError>`, that takes a factory and hands back the same builder with it registered (or an error, e.g. a duplicate name). `DynPipeFactory` is `Arc<dyn PipeFactory>` (`proxima-primitives/src/pipe/pipe_factory.rs:30`) — the type-erased form, since the registry holds many factories for many different pipe types side by side. The app's builder type, `AppBuilder`, implements `PluginRegistry` (`src/app_builder.rs:193-197`), so anything written against the trait works against a real app.
+One method, `with_upstream_factory(self, factory) -> Result<Self, ProximaError>`, that takes a factory and hands back the same builder with it registered (or an error, e.g. a duplicate name). `DynPipeFactory` is `Arc<dyn PipeFactory>` (`proxima-primitives/src/pipe/pipe_factory.rs:34`) — the type-erased form, since the registry holds many factories for many different pipe types side by side. The app's builder type, `AppBuilder`, implements `PluginRegistry` (`src/app_builder.rs:228-232`), so anything written against the trait works against a real app.
 
-The convention plugin crates expose: a `register` function, generic over any `PluginRegistry`, that adds the factory to a builder and returns it. Copied verbatim from `plugin-skeleton/src/lib.rs:104-106`:
+The convention plugin crates expose: a `register` function, generic over any `PluginRegistry`, that adds the factory to a builder and returns it. Copied verbatim from `plugin-skeleton/src/lib.rs:105-107`:
 
 ```rust
 pub fn register<R: PluginRegistry>(builder: R) -> Result<R, ProximaError> {
@@ -116,9 +156,9 @@ pub fn register<R: PluginRegistry>(builder: R) -> Result<R, ProximaError> {
 
 `Arc::new(...)` wraps the factory for shared ownership — the registry, and anything else holding a reference to it, can share the one factory instance safely.
 
-Consumers compose it in one line — this is the crate's own module doc-comment, copied verbatim from `plugin-skeleton/src/lib.rs:9-13`:
+Consumers compose it in one line — this is the crate's own module doc-comment, copied verbatim from `plugin-skeleton/src/lib.rs:9-13`. A real consumer crate depends on `my_plugin` and writes exactly this (shown as text here, not compiled — `my_plugin` names a separate crate this tutorial's own harness has no way to link against):
 
-```rust
+```text
 use proxima::App;
 let app = my_plugin::register(
     App::builder().with_defaults()?
@@ -126,12 +166,26 @@ let app = my_plugin::register(
 .build()?;
 ```
 
+`register` is not a method call — it is the free function section 3 just defined, called with the builder as its one argument. From *inside* this file `my_plugin::` is dropped (it is the same crate), which is the only difference from the real, cross-crate call above. `register` is repeated here (identical to the definition above) so this block stands on its own:
+
+```rust
+fn register<R: PluginRegistry>(builder: R) -> Result<R, ProximaError> {
+    builder.with_upstream_factory(Arc::new(StampHeaderFactory::new()))
+}
+
+fn compose_app() -> Result<App, ProximaError> {
+    let app = register(App::builder().with_defaults()?)?.build()?;
+    Ok(app)
+}
+compose_app().expect("compose app");
+```
+
 Read it left to right:
 
-- `App::builder()` — a new concept this tutorial introduces: the builder form of `App::new()` (Foundations section 13). Same `App`, but assembled step by step so a plugin can add to it before it is built. `App::builder()` is defined at `src/app.rs:637`, and returns an `AppBuilder` (`src/app_builder.rs:48`).
-- `.with_defaults()?` — fills in the builder's default pipes and settings (`src/app_builder.rs:96`); `?` propagates a `ProximaError` if that fails.
-- `my_plugin::register(...)?` — hands the builder to your plugin, which registers its factory and returns the builder, or a `ProximaError` if registration failed.
-- `.build()?` — turns the finished builder into a real `App` (`src/app_builder.rs:259`), ready to `mount` and serve.
+- `App::builder()` — a new concept this tutorial introduces: the builder form of `App::new()` (Foundations section 13). Same `App`, but assembled step by step so a plugin can add to it before it is built. `App::builder()` is defined at `src/app.rs:882`, and returns an `AppBuilder` (`src/app_builder.rs:56`).
+- `.with_defaults()?` — fills in the builder's default pipes and settings (`src/app_builder.rs:106`); `?` propagates a `ProximaError` if that fails.
+- `register(...)?` (`my_plugin::register(...)?` from outside the crate) — hands the builder to your plugin, which registers its factory and returns the builder, or a `ProximaError` if registration failed.
+- `.build()?` — turns the finished builder into a real `App` (`src/app_builder.rs:330`), ready to `mount` and serve.
 
 ## What you built
 
