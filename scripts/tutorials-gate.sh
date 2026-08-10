@@ -408,7 +408,29 @@ fi
 # which had drifted by a small, non-constant margin (e.g. the `Store` struct
 # cited `33-40` against a real `35-39`; the CREATE handler cited `67-90`
 # against a real `66-89`) since this page was first written.
-FLOOR=94
+# Raised to 97 after build-a-kafka-style-partitioner.md's own rewrite: 4 of
+# its blocks were FAILED for the "excerpt of private/module-relative
+# internals" reason 01-ergonomics.md's own `Tier::plan` precedent already
+# covers (`impl Pipe for FanIn`'s elided body returns the private
+# `FanInCall`; both `algebra_claims` fn excerpts use `super::`/private
+# helpers that only resolve inside that module; `FanIn::new`'s bare
+# signature is excerpted from an impl over private fields) — all four given
+# the same `,ignore` treatment with a one-line why. 2 more (`PartitionKey`,
+# `route`) were FAILED because they cited `Record`/`fnv1a`/`PARTITIONS`/
+# `block_on_ready` without defining them in-block — fixed by repeating the
+# real definitions inline (each still cited separately) the same way
+# `build-a-crud-origin-service.md`'s own rewrite merged handlers with the
+# struct they need. The real gaps this surfaced: `DropSafe`, `ControlFlow`,
+# `DrainState`, and `Waker` were all missing from `tutorial_gate_prelude`
+# despite the tutorial's own real-source excerpts needing them (`impl Pipe
+# for FanIn`'s trait bound, `DrainSource::drain_ready`'s signature, and
+# `block_on_ready`'s manual poll loop) — added to
+# `src/tutorial_doctests.rs`. Also caught a real drift bug: `fanout.rs`
+# grew a base-tier `impl Pipe for FanOut` (commit `4e31e74f8`) that the
+# tutorial's own compile-checked-proof paragraph never updated to mention,
+# still asserting "there is no `impl Pipe for FanOut`" against source that
+# had had one for months.
+FLOOR=97
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
