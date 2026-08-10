@@ -178,7 +178,7 @@ impl DispatchedChild {
     /// - `ProximaError::Body` if the dispatch thread returned an
     ///   I/O error before EOF.
     pub fn wait(self) -> Result<libc::c_int, ProximaError> {
-        let pid = self.child.pid;
+        let pid = self.child.pid();
         let mut status: libc::c_int = 0;
         // SAFETY: waitpid is a kernel call with a u32 pid and i32* status;
         // no Rust-level invariants are at risk.

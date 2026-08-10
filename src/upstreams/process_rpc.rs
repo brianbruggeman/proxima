@@ -15,7 +15,7 @@ use proxima_codec::{DelimiterCodec, DelimiterFraming};
 use proxima_core::time;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::sync::{AsyncMutex, AsyncMutexGuard, oneshot};
-use proxima_process::{Command, Stdio};
+use proxima_process::{Child, Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -51,20 +51,37 @@ struct RpcState {
 }
 
 struct RpcChild {
-    pid: libc::pid_t,
+    // `Option` so `Drop` can move the handle onto a background reap
+    // thread; `None` only in the instant between that move and RpcChild's
+    // own destruction.
+    child: Option<Child>,
     stdin: OwnedFd,
     stdout: OwnedFd,
     framing: DelimiterFraming,
-    // set once this pid has already been signalled/reaped elsewhere, so
-    // Drop doesn't re-signal a pid the kernel may have since recycled.
-    terminated: bool,
+}
+
+impl RpcChild {
+    fn child_mut(&mut self) -> Result<&mut Child, ProximaError> {
+        self.child.as_mut().ok_or_else(|| {
+            ProximaError::Upstream("process_rpc: subprocess handle already taken".into())
+        })
+    }
 }
 
 impl Drop for RpcChild {
     fn drop(&mut self) {
-        if !self.terminated {
-            kill_and_reap(self.pid);
-        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.kill();
+        // reap on a background thread — waitpid(2) is a blocking syscall
+        // and must not run inline in Drop. Child::wait caches the exit
+        // code once reaped, so if this pid was already reaped elsewhere
+        // (ensure_alive's try_wait, the timeout path) this returns
+        // instantly instead of risking a waitpid on a recycled pid.
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 
@@ -83,11 +100,10 @@ impl ProcessRpcUpstream {
 
 impl Drop for ProcessRpcUpstream {
     fn drop(&mut self) {
-        if let Some(mut guard) = self.state.child.try_lock()
-            && let Some(rpc_child) = guard.as_mut()
-        {
-            kill_and_reap(rpc_child.pid);
-            rpc_child.terminated = true;
+        // take() removes the RpcChild from the guard and drops it here,
+        // which runs RpcChild::drop (kill + background reap) exactly once.
+        if let Some(mut guard) = self.state.child.try_lock() {
+            guard.take();
         }
     }
 }
@@ -117,12 +133,12 @@ impl SendPipe for ProcessRpcUpstream {
             match outcome {
                 Ok(Ok(line)) => Ok(Response::ok(line)),
                 Ok(Err(error)) => {
+                    // dropping the old RpcChild here runs its Drop impl:
+                    // kill + background reap.
                     *guard = None;
                     Err(error)
                 }
                 Err(_elapsed) => {
-                    kill_and_reap(rpc_child.pid);
-                    rpc_child.terminated = true;
                     *guard = None;
                     Err(ProximaError::Timeout(timeout))
                 }
@@ -136,20 +152,18 @@ async fn ensure_alive(
     guard: &mut AsyncMutexGuard<'_, Option<RpcChild>>,
 ) -> Result<(), ProximaError> {
     if let Some(rpc_child) = guard.as_mut() {
-        match try_wait_child(rpc_child.pid) {
-            Ok(Some(_status)) => {
+        match rpc_child.child_mut()?.try_wait() {
+            Ok(Some(_code)) => {
                 if !state.spec.restart {
                     return Err(ProximaError::Upstream(format!(
                         "process_rpc `{}`: subprocess exited and restart=false",
                         state.label,
                     )));
                 }
-                rpc_child.terminated = true;
                 **guard = None;
             }
             Ok(None) => return Ok(()),
             Err(error) => {
-                rpc_child.terminated = true;
                 **guard = None;
                 return Err(ProximaError::Upstream(format!(
                     "process_rpc `{}`: try_wait: {error}",
@@ -189,11 +203,10 @@ fn spawn_child(spec: &ProcessRpcSpec, label: &str) -> Result<RpcChild, ProximaEr
         ProximaError::Upstream(format!("process_rpc `{label}` has no stdout pipe"))
     })?;
     Ok(RpcChild {
-        pid: child.pid,
+        child: Some(child),
         stdin,
         stdout,
         framing: DelimiterFraming::new(),
-        terminated: false,
     })
 }
 
@@ -331,37 +344,6 @@ fn read_chunk_raw(raw_fd: RawFd) -> io::Result<Vec<u8>> {
         }
         return Ok(buffer[..bytes_read as usize].to_vec());
     }
-}
-
-fn try_wait_child(pid: libc::pid_t) -> io::Result<Option<i32>> {
-    let mut status: libc::c_int = 0;
-    // SAFETY: pid is our own spawned child; WNOHANG makes this a
-    // non-blocking poll rather than a wait.
-    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-    if waited == 0 {
-        Ok(None)
-    } else if waited == pid {
-        Ok(Some(status))
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-fn kill_and_reap(pid: libc::pid_t) {
-    // SAFETY: pid is our own spawned child; SIGKILL against our own child is
-    // always a valid operation.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    // reap on a background thread — waitpid(2) is a blocking syscall and
-    // must not run inline on the polling task (same discipline
-    // proxima-process's own command.rs::finish() follows).
-    thread::spawn(move || {
-        let mut status: libc::c_int = 0;
-        unsafe {
-            libc::waitpid(pid, &mut status, 0);
-        }
-    });
 }
 
 pub struct ProcessRpcPipeFactory;

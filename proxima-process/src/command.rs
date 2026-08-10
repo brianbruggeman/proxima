@@ -588,7 +588,7 @@ fn drain_fd(fd: std::os::fd::OwnedFd) -> Vec<u8> {
 }
 
 fn wait_child(child: &mut Child) -> Result<i32, ProximaError> {
-    let pid = child.pid;
+    let pid = child.pid();
     let mut status: libc::c_int = 0;
     // SAFETY: waitpid kernel call; no Rust invariants at risk.
     let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
@@ -692,7 +692,7 @@ async fn run_pipe_call(
                     umask,
                 },
             )?;
-            let pid = dispatched.child.pid;
+            let pid = dispatched.child.pid();
             let stdin = take_piped(&mut dispatched.child.stdin, "stdin")?;
             let stdout = take_piped(&mut dispatched.child.stdout, "stdout")?;
             (stdin, stdout, pid, AfterPipe::Dispatched(dispatched))
@@ -706,7 +706,7 @@ async fn run_pipe_call(
                     umask,
                 },
             )?;
-            let pid = child.pid;
+            let pid = child.pid();
             let stdin = take_piped(&mut child.stdin, "stdin")?;
             let stdout = take_piped(&mut child.stdout, "stdout")?;
             (stdin, stdout, pid, AfterPipe::Vanilla)
