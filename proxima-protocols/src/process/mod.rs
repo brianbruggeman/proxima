@@ -31,8 +31,8 @@
 
 pub mod protocol;
 
+pub use protocol::{ChildRequest, ChildResponse, ReadResponse, WriteResponse};
 pub use proxima_core::markers::{
     AllocFree, Commutative, Deterministic, DropSafe, IdempotentSideEffectFree, IsPure, NoStd,
     Reproducible, WithoutFilesystem, WithoutNetwork, WithoutRandom, WithoutSpawn, WithoutTime,
 };
-pub use protocol::{ChildRequest, ChildResponse, ReadResponse, WriteResponse};
