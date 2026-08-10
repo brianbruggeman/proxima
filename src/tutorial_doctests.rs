@@ -46,6 +46,9 @@ pub mod tutorial_gate_prelude {
     pub use crate::runtime::TokioPerCoreRuntime;
     pub use crate::runtime::{BackgroundHandle, BackgroundPool, CoreId, Runtime};
     pub use crate::{ProximaError, ProximaResult, Request, RequestBuilder, Response};
+    // every one of these is `cfg(any(feature = "macros", test))` at the root;
+    // an ungated re-export here broke any consumer building without `macros`
+    #[cfg(any(feature = "macros", test))]
     pub use crate::{fanin, fanout, filter, fixture, instrument, main, pipe, piped, span, test};
     pub use bon::Builder;
     pub use bytes::Bytes;
