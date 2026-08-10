@@ -51,6 +51,7 @@ pub mod tutorial_gate_prelude {
     pub use bytes::Bytes;
     pub use conflaguration::{Settings, Validate, ValidationMessage};
     pub use futures::executor::block_on;
+    pub use proxima_core::markers::DropSafe;
     pub use proxima_core::signal::Signal;
     pub use proxima_primitives::pipe::demand::{
         AlwaysArmed, AtomicGate, AtomicGateController, Demand,
@@ -65,6 +66,7 @@ pub mod tutorial_gate_prelude {
         AndThen, Pipe, SendPipe, UnpinPipe, UnpinSendPipe,
     };
     pub use proxima_primitives::pipe::routing::MethodFilter;
+    pub use proxima_primitives::pipe::DrainState;
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::Value;
     pub use std::cell::{Cell, RefCell};
@@ -73,10 +75,11 @@ pub mod tutorial_gate_prelude {
     pub use std::fmt::Debug;
     pub use std::future::Future;
     pub use std::net::{Ipv4Addr, SocketAddr};
+    pub use std::ops::ControlFlow;
     pub use std::pin::Pin;
     pub use std::sync::Arc;
     pub use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    pub use std::task::{Context, Poll};
+    pub use std::task::{Context, Poll, Waker};
     pub use std::time::Duration;
 
     #[cfg(all(
