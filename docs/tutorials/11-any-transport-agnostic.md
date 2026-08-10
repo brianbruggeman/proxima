@@ -16,7 +16,7 @@ That restriction is gone. `.any()` now classifies over TCP AND UDP, on the SAME 
 
 ## 2. The one new question: `AnyProtocol::wants_datagram()`
 
-A candidate opts in with one method (`proxima-listen/src/any/probe.rs:265–287`):
+A candidate opts in with one method (`proxima-listen/src/any/probe.rs:266–288`):
 
 ```rust
 fn wants_datagram(&self) -> bool {
@@ -30,7 +30,7 @@ A candidate whose own wire is naturally connectionless — DNS, a custom datagra
 
 ## 3. What does NOT change, and why that's the point
 
-Re-read `ProbeVerdict` (`proxima-listen/src/any/probe.rs:91–118`) — nothing there is TCP-specific. `Match { consumed }` / `NeedMore { at_least }` / `No` describe a decision about accumulated bytes, never about how those bytes arrived. A datagram simply arrives WHOLE rather than incrementally: where a TCP-fed candidate might see 4 bytes, then 12, then the full frame across several `probe` calls, a UDP-fed candidate typically sees its entire message on the first call, because a `recv_from` either returns the whole datagram or nothing. `probe` doesn't need to know which happened — it just gets called again with a longer prefix, same as always, if it asks for more.
+Re-read `ProbeVerdict` (`proxima-listen/src/any/probe.rs:87–119`) — nothing there is TCP-specific. `Match { consumed }` / `NeedMore { at_least }` / `No` describe a decision about accumulated bytes, never about how those bytes arrived. A datagram simply arrives WHOLE rather than incrementally: where a TCP-fed candidate might see 4 bytes, then 12, then the full frame across several `probe` calls, a UDP-fed candidate typically sees its entire message on the first call, because a `recv_from` either returns the whole datagram or nothing. `probe` doesn't need to know which happened — it just gets called again with a longer prefix, same as always, if it asks for more.
 
 `drive` is the more interesting case, because it still receives a `Box<dyn StreamConnection>` — the SAME stream-shaped handle. For a UDP-sourced connection, this is a one-shot adapter over the single already-received datagram: one `read` returns the whole message, the next `read` is `Ok(0)` (EOF) — a UDP message has no more bytes coming, and a stream reports "no more bytes" the same way. Every `write` your candidate makes before it closes the connection is buffered, not sent immediately — a request/reply protocol may write a response in more than one call (say, a header then a body), and UDP has no notion of a partial send, so those writes coalesce into exactly ONE outbound datagram, shipped back to the original sender the moment your `drive` closes the stream. `LiteralUdpProtocol` below never calls anything datagram-specific — it calls `read_to_end` then `write_all` then `close`, the exact three calls a TCP-fed candidate would make.
 
@@ -142,7 +142,7 @@ A plain `std::net::TcpStream` connect gets h1's real HTTP/1.1 response, exactly 
 
 ## 5. Priority and ambiguity: the same rule you already trust
 
-Part 2 taught the classifier's priority-ordered-wait rule for stream candidates: a lower-priority match is held back as long as a higher-priority candidate could still win, and two candidates tied at the SAME winning priority resolve to `ClassifyOutcome::AmbiguousMatch` (`proxima-listen/src/any/classifier.rs:39–68`) rather than an arbitrary pick. That rule is arbitration over `AnyProtocol` candidates, full stop — it was never specific to TCP, and registering four datagram candidates on one UDP socket exercises the identical code path:
+Part 2 taught the classifier's priority-ordered-wait rule for stream candidates: a lower-priority match is held back as long as a higher-priority candidate could still win, and two candidates tied at the SAME winning priority resolve to `ClassifyOutcome::AmbiguousMatch` (`proxima-listen/src/any/classifier.rs:37–71`) rather than an arbitrary pick. That rule is arbitration over `AnyProtocol` candidates, full stop — it was never specific to TCP, and registering four datagram candidates on one UDP socket exercises the identical code path:
 
 ```rust
 struct LegitOk;
@@ -180,28 +180,28 @@ async fn datagram_candidates_are_priority_arbitrated(bind: SocketAddr) -> Result
 tied-a/tied-b share both a literal AND a priority: the datagram is DROPPED (no reply within 500ms), never routed to either one
 ```
 
-`hipri`/`lopri` answer their own disjoint literals independently of registration or priority order. `tied-a`/`tied-b` share both a literal and a priority — the listener's own dispatch (`proxima_http::any_listener::classify_and_drive_plaintext`'s `ClassifyOutcome::AmbiguousMatch` arm, `proxima-http/src/any_listener.rs:1484–1494`) logs the collision and drops the datagram rather than guessing. This is reachable from EITHER transport `.any()` binds — a stream candidate set with a genuine priority collision behaves identically.
+`hipri`/`lopri` answer their own disjoint literals independently of registration or priority order. `tied-a`/`tied-b` share both a literal and a priority — the listener's own dispatch (`proxima_http::any_listener::classify_and_drive_plaintext`'s `ClassifyOutcome::AmbiguousMatch` arm, `proxima-http/src/any_listener.rs:1489–1507`) logs the collision and drops the datagram rather than guessing. This is reachable from EITHER transport `.any()` binds — a stream candidate set with a genuine priority collision behaves identically.
 
 ## 6. The honest constraint this hides but cannot eliminate
 
-**One port number, two sockets, invisible to the caller.** `.any()`'s own doc says this plainly (`proxima-listen/src/any/probe.rs:265–271`): a candidate that opts into `wants_datagram` needs `.any()` to ALSO bind a UDP socket on the SAME port number for it to be reachable. TCP:N and UDP:N are two distinct sockets at the OS level — different protocol, different kernel object, different bind call — and this API hides that seam behind one `.bind(addr)`, but it cannot make the two sockets into one. When no candidate wants a datagram, `.any()` binds exactly the one TCP socket it always did (`AcceptDriver::Plain`, internal — see §8); the moment one does, it binds both (`AcceptDriver::Fanned`, also internal), racing a TCP accept against a UDP receive with `FanIn`/`Select` (`proxima-http/src/any_listener.rs:867–889`).
+**One port number, two sockets, invisible to the caller.** `.any()`'s own doc says this plainly (`proxima-listen/src/any/probe.rs:266–272`): a candidate that opts into `wants_datagram` needs `.any()` to ALSO bind a UDP socket on the SAME port number for it to be reachable. TCP:N and UDP:N are two distinct sockets at the OS level — different protocol, different kernel object, different bind call — and this API hides that seam behind one `.bind(addr)`, but it cannot make the two sockets into one. When no candidate wants a datagram, `.any()` binds exactly the one TCP socket it always did (`AcceptDriver::Plain`, internal — see §8); the moment one does, it binds both (`AcceptDriver::Fanned`, also internal), racing a TCP accept against a UDP receive with `FanIn`/`Select` (`proxima-http/src/any_listener.rs:863–892`).
 
 Two consequences worth stating plainly:
 
-- **TLS + a datagram candidate is a config error, not a silent gap.** TLS assumes a multi-round-trip byte stream; a UDP-sourced connection is one already-complete datagram with no handshake to terminate. `.any()` refuses this combination at `.serve()` time rather than pretending to secure it (`proxima-http/src/any_listener.rs:940–948`).
-- **`.quic()` is still rejected under `.any()`; `.udp()` is not.** QUIC multiplexes many logical connections over one UDP socket by Destination Connection ID (DCID) — a completely different demultiplexing mechanism from this byte-prefix classifier, out of scope here (`src/listener/handle.rs:683–698`). `.udp()`, by contrast, no longer means anything to `.any()` at all: a registered candidate's own `wants_datagram()` already decides whether a UDP socket gets bound, so pairing `.any()` with `.udp()` is redundant, never an error.
+- **TLS + a datagram candidate is a config error, not a silent gap.** TLS assumes a multi-round-trip byte stream; a UDP-sourced connection is one already-complete datagram with no handshake to terminate. `.any()` refuses this combination at `.serve()` time rather than pretending to secure it (`proxima-http/src/any_listener.rs:947–956`).
+- **`.quic()` is still rejected under `.any()`; `.udp()` is not.** QUIC multiplexes many logical connections over one UDP socket by Destination Connection ID (DCID) — a completely different demultiplexing mechanism from this byte-prefix classifier, out of scope here (`src/listener/handle.rs:683–701`). `.udp()`, by contrast, no longer means anything to `.any()` at all: a registered candidate's own `wants_datagram()` already decides whether a UDP socket gets bound, so pairing `.any()` with `.udp()` is redundant, never an error.
 
 ## 7. The concrete payoff: `.dns(handler)` needed no branch at all
 
-[Part 4](./07-sugar-composition.md) §5 and [Part 5](./08-protocol-fleet.md) §2 used to describe `.dns(handler)` as "the one dual-transport axis" — `.serve()` read `spec["transport"]` and picked ONE of two non-composable listen protocols, a TCP `AnyListenProtocol` or a standalone UDP `DatagramProtocolListenProtocol`. That branch is retired (`src/listener/handle.rs:536–559`): `.dns(handler)` now registers `proxima_dns::DnsAnyProtocol` (DNS-over-TCP) and `proxima_dns::DnsUdpAnyProtocol` (DNS-over-UDP, `wants_datagram() == true`) as two ordinary `AnyProtocol` candidates under one `.any()`-fanned listener. `DnsUdpAnyProtocol` is not internal plumbing — it is the exact pattern this page just taught you, written by the same crate that ships `DnsAnyProtocol`, registered the same way `LiteralUdpProtocol` was registered above. If you write your OWN datagram-shaped protocol, `DnsUdpAnyProtocol`'s source (`proxima-dns/src/udp_any_protocol.rs`) is a second, real-world worked example beyond this page's.
+[Part 4](./07-sugar-composition.md) §5 and [Part 5](./08-protocol-fleet.md) §2 used to describe `.dns(handler)` as "the one dual-transport axis" — `.serve()` read `spec["transport"]` and picked ONE of two non-composable listen protocols, a TCP `AnyListenProtocol` or a standalone UDP `DatagramProtocolListenProtocol`. That branch is retired (`src/listener/handle.rs:539–558`): `.dns(handler)` now registers `proxima_dns::DnsAnyProtocol` (DNS-over-TCP) and `proxima_dns::DnsUdpAnyProtocol` (DNS-over-UDP, `wants_datagram() == true`) as two ordinary `AnyProtocol` candidates under one `.any()`-fanned listener. `DnsUdpAnyProtocol` is not internal plumbing — it is the exact pattern this page just taught you, written by the same crate that ships `DnsAnyProtocol`, registered the same way `LiteralUdpProtocol` was registered above. If you write your OWN datagram-shaped protocol, `DnsUdpAnyProtocol`'s source (`proxima-dns/src/udp_any_protocol.rs`) is a second, real-world worked example beyond this page's.
 
 ## 8. What's internal here, named only so you can trace it, never to `use`
 
-Two things make this work under the hood, and neither is public API — you cannot `use` them, and you never need to:
+Three things make this work under the hood, and none is public API — you cannot `use` them, and you never need to:
 
-- `proxima_http::any_listener::AcceptSource` (private, `proxima-http/src/any_listener.rs:697`) — the fan-in's two variants, `Tcp` and `Datagram`.
-- `proxima_http::any_listener::DatagramAsStream` (private, `:777`) — the one-shot `StreamConnection` adapter §3 described.
-- `proxima_http::any_listener::AcceptDriver` (private, `:867`) — `Plain` (the byte-identical TCP-only path) or `Fanned` (`FanIn<AcceptSource, Select, 2>`), chosen once at `.serve()` time from whether any candidate's `wants_datagram()` is `true`.
+- `proxima_http::any_listener::AcceptSource` (private, `proxima-http/src/any_listener.rs:699`) — the fan-in's two variants, `Tcp` and `Datagram`.
+- `proxima_http::any_listener::DatagramAsStream` (private, `:779`) — the one-shot `StreamConnection` adapter §3 described.
+- `proxima_http::any_listener::AcceptDriver` (private, `:869`) — `Plain` (the byte-identical TCP-only path) or `Fanned` (`FanIn<AcceptSource, Select, 2>`), chosen once at `.serve()` time from whether any candidate's `wants_datagram()` is `true`.
 
 Everything you can actually call is public and already taught: `AnyProtocol` (with its new `wants_datagram` method), `Listener::builder().any().protocol(..)`, and the sugar (`.dns(handler)`) that uses this underneath.
 
