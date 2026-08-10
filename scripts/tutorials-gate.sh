@@ -408,7 +408,35 @@ fi
 # which had drifted by a small, non-constant margin (e.g. the `Store` struct
 # cited `33-40` against a real `35-39`; the CREATE handler cited `67-90`
 # against a real `66-89`) since this page was first written.
-FLOOR=94
+# Raised to 96 after build-a-load-balancer.md's own rewrite: its 2 blocks
+# were both previously FAILED — the `Backend`/pool-vec block used a bare
+# `?` on `build_backend(...)` at the top of the awk-injected unit-returning
+# `fn main() { block_on(async { .. }); }` wrapper (needs an enclosing
+# `Result`-returning `fn`, which the excerpt never had) referencing three
+# undefined `origin_*_bind` locals besides; fixed by wrapping the pool
+# construction in a real, self-contained `fn build_pool() -> Result<Vec
+# <Backend>, ProximaError>` (mirroring `load-balance/main.rs`'s own
+# `parse_addr` + `build_backend`) that the block then calls and asserts
+# on instead of leaving `?` floating. The `impl SendPipe for
+# LoadBalancerPipe` block never defined `LoadBalancerPipe` at all (only
+# its `impl`) and its `None` arm was elided pseudocode the tutorial's own
+# prose already admitted doesn't compile (`Err(/* .. */)` is `Err()`,
+# missing its one required argument) — fixed by repeating the real
+# `LoadBalancerPipe`/`select_backend` definitions from §2 (safe: the awk
+# transform's own name-redefinition rule retires §1's `Backend` context
+# for this block, so the two `struct Backend` copies never collide) and
+# swapping in the real typed error, `Err(ProximaError::Io(std::io::Error
+# ::other("load balancer: no healthy backend available")))`. The rewrite
+# also resynced 5 stale `file:line` citations that had drifted by a
+# constant +4 lines starting partway through the file (the `#[proxima::
+# main(cores = 1)]` doc comment above `main` grew by 4 lines after this
+# page was first written): the backends-vec excerpt (`147-151` -> real
+# `151-155`), `build_backend` (`213-224` -> real `217-228`), the mount/
+# serve boilerplate (`243-256` -> real `247-261`, the full `spin_up_
+# load_balancer` function), and the 12-request-drive-plus-assertions
+# citation (`261-297` -> real `266-302`, `drive_requests` through
+# `assert_distribution`).
+FLOOR=96
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1

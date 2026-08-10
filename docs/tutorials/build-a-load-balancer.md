@@ -9,19 +9,38 @@ The example frames it: *"A load balancer is `proxy`'s forward composed with a se
 
 ## 1. A pool of backends
 
-Instead of one `Client` bound to one upstream (the gateway's forward), N clients bound to N backends, each with a health flag (`load-balance/main.rs:65-69, 147-151`):
+Instead of one `Client` bound to one upstream (the gateway's forward), N clients bound to N backends, each with a health flag (`load-balance/main.rs:65-69, 151-155`):
 
 ```rust
 struct Backend { label: &'static str, healthy: bool, client: Client }
 
-let backends = vec![
-    build_backend(origin_a_bind, "origin-a", true)?,   // healthy
-    build_backend(origin_b_bind, "origin-b", false)?,  // unhealthy — never selected
-    build_backend(origin_c_bind, "origin-c", true)?,   // healthy
-];
+fn parse_addr(raw: &str) -> Result<SocketAddr, ProximaError> {
+    raw.parse().map_err(|parse_error| {
+        ProximaError::Config(format!("invalid socket address {raw}: {parse_error}"))
+    })
+}
+
+fn build_backend(bind: SocketAddr, label: &'static str, healthy: bool) -> Result<Backend, ProximaError> {
+    let client = Client::http(format!("http://{bind}"))?;
+    Ok(Backend { label, healthy, client })
+}
+
+fn build_pool() -> Result<Vec<Backend>, ProximaError> {
+    let origin_a_bind = parse_addr("127.0.0.1:8091")?;
+    let origin_b_bind = parse_addr("127.0.0.1:8092")?;
+    let origin_c_bind = parse_addr("127.0.0.1:8093")?;
+    Ok(vec![
+        build_backend(origin_a_bind, "origin-a", true)?,   // healthy
+        build_backend(origin_b_bind, "origin-b", false)?,  // unhealthy — never selected
+        build_backend(origin_c_bind, "origin-c", true)?,   // healthy
+    ])
+}
+
+let backends = build_pool().expect("three known-good addresses parse and dial");
+assert_eq!(backends.len(), 3);
 ```
 
-`build_backend` (`load-balance/main.rs:213-224`, not shown) builds one `Backend` from an origin address, a label, and a health flag.
+`build_backend` (`load-balance/main.rs:217-228`) builds one `Backend` from an origin address, a label, and a health flag; `parse_addr` (`load-balance/main.rs:187-191`) is the same address-parsing helper the gateway and every other tutorial's answer key uses.
 
 ## 2. Round-robin over the healthy subset
 
@@ -47,9 +66,30 @@ The cursor walks the *full* pool (not a healthy-only subset), so a backend that 
 
 ## 3. Forward to the picked backend
 
-The pipe's `call` is exactly proxy's forward, aimed at whichever `Client` selection picked (`load-balance/main.rs:105-124`):
+The pipe's `call` is exactly proxy's forward, aimed at whichever `Client` selection picked (`load-balance/main.rs:105-124`); repeating `Backend` / `LoadBalancerPipe` / `select_backend` from §1–2 makes this block stand on its own:
 
 ```rust
+struct Backend { label: &'static str, healthy: bool, client: Client }
+
+struct LoadBalancerPipe {
+    backends: Vec<Backend>,
+    cursor: AtomicUsize,
+}
+
+impl LoadBalancerPipe {
+    fn select_backend(&self) -> Option<Client> {
+        let backend_count = self.backends.len();
+        for _ in 0..backend_count {
+            let index = self.cursor.fetch_add(1, Ordering::SeqCst) % backend_count;
+            let backend = &self.backends[index];
+            if backend.healthy {
+                return Some(backend.client.clone());
+            }
+        }
+        None   // pool down
+    }
+}
+
 impl SendPipe for LoadBalancerPipe {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -61,18 +101,20 @@ impl SendPipe for LoadBalancerPipe {
         async move {
             match selected {
                 Some(client) => SendPipe::call(&client, request).await,   // forward
-                None => Err(/* no healthy backend available */),
+                None => Err(ProximaError::Io(std::io::Error::other(
+                    "load balancer: no healthy backend available",
+                ))),
             }
         }
     }
 }
 ```
 
-That `None` arm is elided pseudocode — `Err(/* ... */)` doesn't compile as written. The real code returns a typed error: `Err(ProximaError::Io(std::io::Error::other("load balancer: no healthy backend available")))` (`load-balance/main.rs:118-120`).
+That `None` arm is a typed error, not a papered-over fallback: `Err(ProximaError::Io(std::io::Error::other("load balancer: no healthy backend available")))` (`load-balance/main.rs:118-120`).
 
 That is the whole type — there is no second `impl Pipe for LoadBalancerPipe {}` marker to write. `Handler` is blanket-implemented for any `SendPipe<In = Request<Bytes>, Out = Response<Bytes>, Err = ProximaError>` (Foundations §13), so `LoadBalancerPipe` is already mountable the moment its `impl SendPipe` above compiles — "there is no second trait to opt into and nothing more to write."
 
-Mount and serve as in Foundations, through `App::builder().with_defaults()?.build()?` + `app.mount("/", pipe)?` + `app.build_listener(ListenerSpec::http(bind))?` (`load-balance/main.rs:243-256`). The example drives 12 requests and asserts they split evenly across the two healthy backends while the unhealthy one sees zero (`load-balance/main.rs:261-297`).
+Mount and serve as in Foundations, through `App::builder().with_defaults()?.build()?` + `app.mount("/", pipe)?` + `app.build_listener(ListenerSpec::http(bind))?` (`load-balance/main.rs:247-261`). The example drives 12 requests and asserts they split evenly across the two healthy backends while the unhealthy one sees zero (`load-balance/main.rs:266-302`).
 
 ## What you built
 
