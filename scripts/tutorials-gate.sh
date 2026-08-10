@@ -561,7 +561,19 @@ fi
 # "Foundations §12", which is `signal`, not `mount` — corrected to
 # Ergonomics §8, the `ViaPipe` shape of `IntoMountTarget`, where that claim
 # is actually taught).
-FLOOR=110
+# Raised to 113 after build-an-observability-pipeline.md's own rewrite
+# turned all 3 of its blocks (all 3 previously FAILED — bare `RUST_LOG`/
+# `?`-chained fragments referencing macros and types (`Recorder`, `Exporter`,
+# `trace!`..`error!`) nowhere in `tutorial_gate_prelude`, plus a struct-update
+# `LevelGate { .. }` literal with no base — `..` is pattern syntax, not valid
+# in a struct expression) into 3 real, self-contained excerpts of
+# `examples/logs/main.rs`'s three sections (§2/§3 rely on §1's/§2's
+# imports rather than re-importing the same name, since two blocks both
+# explicitly importing e.g. `Exporter` collide E0252 once pass 2
+# concatenates them), proven against the real `cargo run --example logs`
+# output for every numeric claim (drained 4, fanned 3, file 3/0,
+# console 1/2, DropOldest drops 2).
+FLOOR=113
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
