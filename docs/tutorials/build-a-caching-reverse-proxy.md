@@ -3,7 +3,7 @@
 **Prerequisites:** [Foundations](./00-foundations.md); the [Gateway's forward proxy](./build-an-api-gateway.md) (§1) for the "an origin is just an upstream" idea.
 **You will:** put a cache in front of an origin so a repeated request is served from the cache and the origin is hit once. There is no single `Cache` primitive — you compose three.
 **New concepts (in order):** cache backend (`KvCache`/`KvUpstream`) · upstream selection (`Selection` + `Fallthrough`) · write-back (`WriteBack`).
-**Answer key:** [`examples/cache/main.rs`](../../examples/cache/main.rs) — `cargo run --example cache`.
+**Answer key:** [`examples/cache/main.rs`](../../examples/cache/main.rs) — `cargo run --example cache --features tokio`.
 
 The example says it plainly: *"There is no single `Cache` primitive in proxima. A cache in front of an origin is three real primitives wired together."*
 
@@ -99,7 +99,7 @@ let cached_origin = WriteBack::single(into_handle(dispatch), write_back_target);
 The example calls the composed pipe six times (`cache/main.rs:77-139`): request 1 misses → falls through to the origin → write-back stores the body; requests 2–6 hit the cache (`x-proxima-cache: HIT`) and the origin is never called again. It asserts the origin was called exactly once across all six.
 
 ```
-cargo run --example cache
+cargo run --example cache --features tokio
 ```
 
 ## What you built
