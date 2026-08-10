@@ -13,11 +13,11 @@ Sections are **self-contained**: each states its prerequisites up front and can 
 - **[Foundations: the Pipe](./00-foundations.md)** — the base. `Pipe` · the four roles · errors · `and_then`/`AndThen` · the four tiers (`Pipe`/`SendPipe`/`UnpinPipe`/`UnpinSendPipe`) · `#[proxima::piped]` (stateless free-fn form + stateful `impl` form — you almost never hand-write `impl Pipe` anymore) · the pipe algebra (filter, fan-out, fan-in, gate, signal) · `Handler`, the erased form a listener serves · `into_handle` · serve. Everything else stands on this.
 - **[Foundations, part 2: the pipe ergonomic surface](./01-ergonomics.md)** — the sugar layer on top: `PipeExt` (`.and_then`/`.filter`/`.fanout`/`.fanin`, one blanket trait) · the leaf macros (`pipe!`/`filter!`/`fanout!`/`fanin!`) · `#[proxima::piped]`'s impl-all tier closure, precisely · `App::mount`'s four accepted shapes (`IntoMountTarget<Via>`) · why time is a composed `Clock` capability, never a special method on `Pipe`. Adds no new capability over Foundations — read it once Foundations feels solid, to stop hand-rolling what these already give you for free.
 - **[Foundations, part 3: the Listener builder, mirrored from the Client](./02-listener-builder.md)** — `Listener::builder()`/`Listener::http(bind)`, the serve-side mirror of `Client::builder()`/`Client::http(url)`, built from the same `SpecBuilder` seam, each side's own TYPE-SPECIFIC axis traits on top (`ListenerTransportExt`/`ListenerProtocolExt` vs. `ClientTransportExt`/`ClientProtocolExt`/`ClientSecurityExt` — no blanket impl over every `SpecBuilder`) · `resolve_listen_protocol` (`.tcp()`/`.udp()`/`.quic()`/`.grpc()`/`.h2()`/`.pgwire(query)` resolved to one concrete `ListenProtocol`) · `TlsListenProtocol`, TLS as a composed decorator instead of a spec field · `.protocol(impl AnyProtocol)`, the escape hatch for an out-of-crate wire · the two places a listener's builder honestly cannot mirror the client's. Read after Foundations part 2 if you are about to hand-roll `App::new()` + manual `RunConfig` wiring more than once.
-- **[The native runtime: serving real HTTP with zero tokio](./03-native-runtime.md)** — the `Runtime` trait · `http1` vs. `http1-native` (tokio-coupled vs. tokio-free h1) · `#[proxima::main]`'s ambient-runtime seam and the collapse it causes if you don't opt out with `.with_runtime`/`.with_acceptor_factory` · `ShutdownBarrier` · a runtime shared on purpose (`deferred_runtime`) vs. adopted by accident. Walks `proxy` → `gateway` → `load-balance` → `integration` → `distributed_trace`, all served tokio-free, then contrasts `multi_runtime`/`runtime_select` where tokio is deliberately opted into.
+- **[The native runtime: serving real HTTP with zero tokio](./03-native-runtime.md)** — the `Runtime` trait · `http1` vs. `http1-native` (tokio-coupled vs. tokio-free h1) · `#[proxima::main]`'s ambient-runtime seam and the collapse it causes if you don't opt out with `.with_runtime`/`.with_acceptor_factory` (both flagged a HAZARD in their own doc comments, since nothing stops mismatching them) or, in new code, the mismatch-proof matched-bundle surface `RuntimeSelection` via `AppBuilder::runtime(selection)`/`App::with_runtime_selection(selection)` · `ShutdownBarrier` · a runtime shared on purpose (`deferred_runtime`) vs. adopted by accident. Walks `proxy` → `gateway` → `load-balance` → `integration` → `distributed_trace`, all served tokio-free, then contrasts `multi_runtime`/`runtime_select` where tokio is deliberately opted into.
 
 ## Listener on-ramp (a faster path to a running listener)
 
-A standalone, self-contained 7-page series for a reader who wants to stand up and grow a real listener WITHOUT first reading Foundations end to end — the reader only needs to be comfortable with Rust and `async`/`.await`, and to have built an HTTP server in some other framework before. Cross-links to Foundations and to [02-listener-builder.md](./02-listener-builder.md) where the deeper story lives, but does not require reading them first.
+A standalone, self-contained 8-page series for a reader who wants to stand up and grow a real listener WITHOUT first reading Foundations end to end — the reader only needs to be comfortable with Rust and `async`/`.await`, and to have built an HTTP server in some other framework before. Cross-links to Foundations and to [02-listener-builder.md](./02-listener-builder.md) where the deeper story lives, but does not require reading them first.
 
 - **[Part 1: hello](./04-listener-hello.md)** — the smallest complete proxima service: one handler, `App::mount`, `app.serve`, one real `curl` round trip.
 - **[Part 2: the universal listener](./05-listener-universal.md)** — `Listener::builder()` · `.any()` (stop picking a protocol, let the listener sniff it) · `.accept(name)`/`.accepts([...])` (narrow back down to one wire).
@@ -72,7 +72,7 @@ graph TD
   BASE --> PLUG["Build a plugin"]
   BASE --> DEL["Build delivery guarantees"]
   BASE --> NOSTD["Build a bare-metal pipe"]
-  BASE --> KAFKA["Build a Kafka-style partitioner"]
+  KAFKA["Build a Kafka-style partitioner"]
   GW --> CACHE["Build a caching reverse proxy"]
   GW --> REC["Build a record/replay harness"]
   GW --> LB["Build a load balancer"]
@@ -92,6 +92,9 @@ it does not require Foundations first. The dashed arrows OUT of part 3 are
 "read next if you want more," not prerequisites. Parts 4-8 extend the same
 `Listener::builder()`/`Client::builder()` shape parts 1-3 taught — no new
 serve loop, no new client type, just more axes on the identical builders.
+The Kafka-style partitioner is standalone for the same reason: it needs no
+edge from Foundations because its own §1 gives the one `Pipe` concept it
+uses a two-paragraph primer, and it says so in its own prerequisites line.
 
 Suggested reading order: Foundations → Gateway (broadest coverage) → then any project. The proxy-based projects (caching proxy, record/replay, load balancer) read most smoothly after the Gateway.
 
@@ -106,4 +109,4 @@ Suggested reading order: Foundations → Gateway (broadest coverage) → then an
 1. Add a row to the correct wave table with the new primitives it introduces, in order.
 2. Add its node + edges to the dependency graph — if an edge would point "backward" (using an untaught concept), the section is mis-scoped.
 3. Open the section with **Prerequisites / You will / New concepts (in order)**, exactly like [Foundations](./00-foundations.md).
-4. Every code block must trace to a runnable `examples/` file; cite it. No invented signatures — verify against the source (`~/.claude/skills/guiding-principles/SKILL.md` principle 6: never teach from inference).
+4. Every code block must trace to a runnable `examples/` file; cite it. No invented signatures — verify against the source (`AGENTS.md` principle 6: never teach from inference).
