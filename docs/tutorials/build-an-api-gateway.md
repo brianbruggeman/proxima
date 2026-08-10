@@ -5,7 +5,20 @@
 **New concepts (in order):** forward/proxy (`Client`) · routing (`RoutingPipe`) · rate-limit gate (`RateLimit`) · auth (`Auth`, the short-circuit filter).
 **Answer key:** [`examples/gateway/main.rs`](../../examples/gateway/main.rs) — `cargo run --example gateway --features http1-native`.
 
-The example states the whole idea in its own header: *"A gateway is the proxy example's forward pipe with a policy chain composed in front of it. No new primitive family — `Auth` and `RoutingPipe` are ordinary `Pipe`s, `RateLimit` is the token-bucket gate. A request rejected by one policy never reaches the next."* We build it one policy at a time.
+The example states the whole idea in its own header: *"A gateway is the proxy example's forward pipe with a policy chain composed in front of it. No new primitive family — `Auth` and `RoutingPipe` are ordinary `Pipe`s, `RateLimit` is the token-bucket gate. A request rejected by one policy never reaches the next."* We build it one policy at a time. Each code block below is a real, self-contained, compiling excerpt — a small function taking the previous stage's output as a typed parameter, rather than a fragment that only makes sense read alongside the whole file — so you can copy any one of them and see it type-check on its own; the file:line citations point at the real, non-parameterized code these are lifted from.
+
+## 0. What's already in scope
+
+The real file imports everything below from proxima's top level, plus the `Clock` capability trait the rate-limit gate is generic over (`gateway/main.rs:33-38`):
+
+```rust
+use proxima::{
+    Auth, KeyExtractor, ListenerHandle, RateLimit, RateLimitCaps, RoutingPipe, TokenBucketConfig,
+};
+use proxima_primitives::pipe::capabilities::Clock;
+```
+
+`App`, `Client`, `ListenerHandle`, `ListenerSpec`, `PipeHandle`, `ProximaError`, `Request`, `Response`, `SendPipe`, and `into_handle` are already the common cast every earlier tutorial put in scope; the two lines above add only what this tutorial introduces.
 
 ## 1. Forward — the proxy is one call
 
@@ -34,12 +47,14 @@ That is the whole type — there is no second `impl Pipe for ForwardPipe {}` to 
 
 ## 2. Route — pick an upstream by path
 
-Two upstreams (an `api` origin and a `web` origin), each behind its own `ForwardPipe`. `RoutingPipe` picks one by path prefix (`gateway/main.rs:103-105`). `api_forward` and `web_forward` are each a `PipeHandle` (built in section 3 below) that wraps a rate-limited `ForwardPipe` for that upstream — for now, just read them as "the api handle" and "the web handle":
+Two upstreams (an `api` origin and a `web` origin), each behind its own `ForwardPipe`. `RoutingPipe` picks one by path prefix (`gateway/main.rs:103-105`). `api_forward` and `web_forward` are each a `PipeHandle` — built in §3 below — that wraps a rate-limited `ForwardPipe` for that upstream; taking them as parameters here lets this section show the shape of the composition before §3 fills in how they're built:
 
 ```rust
-let routed = RoutingPipe::new("gateway-router")
-    .route("/api/{*rest}", api_forward)   // "/api/..." -> api upstream (built in §3 below)
-    .fallback(web_forward);               // everything else -> web upstream (built in §3 below)
+fn gateway_router(api_forward: PipeHandle, web_forward: PipeHandle) -> RoutingPipe {
+    RoutingPipe::new("gateway-router")
+        .route("/api/{*rest}", api_forward)   // "/api/..." -> api upstream
+        .fallback(web_forward)                // everything else -> web upstream
+}
 ```
 
 `RoutingPipe` is a `Pipe`: its `call` matches the request path against each route's pattern and delegates to the chosen `PipeHandle`. Routing is composition, not a network detail.
@@ -49,55 +64,68 @@ let routed = RoutingPipe::new("gateway-router")
 Wrap each `ForwardPipe` in `RateLimit`, a token-bucket **gate**. Once a per-upstream budget is spent, the gate answers `429` (with a `retry-after`) and the forward never runs (`gateway/main.rs:78-87`):
 
 ```rust
-let api_forward: PipeHandle = into_handle(RateLimit::with_clock(
-    ForwardPipe { client: api_client },
-    TokenBucketConfig { capacity: 2, refill_per_sec: 0 },
-    KeyExtractor::ConstantKey("api-upstream".into()),
-    RateLimitCaps::default(),
-    clock,
-));
+fn build_api_forward<Clk>(api_client: Client, clock: Clk) -> PipeHandle
+where
+    Clk: Clock + Send + Sync + 'static,
+{
+    into_handle(RateLimit::with_clock(
+        ForwardPipe { client: api_client },
+        TokenBucketConfig { capacity: 2, refill_per_sec: 0 },
+        KeyExtractor::ConstantKey("api-upstream".into()),
+        RateLimitCaps::default(),
+        clock,
+    ))
+}
 ```
 
 `TokenBucketConfig` is the budget: `capacity` tokens, refilled at `refill_per_sec` (here `0`, so the bucket never refills and the boundary is reached purely by call count). `KeyExtractor` picks the rate-limit bucket key per request; `ConstantKey("api-upstream".into())` means every request to this upstream draws from the same one bucket, so the whole `api` origin shares a single budget rather than one bucket per caller. `RateLimitCaps::default()` is a light cap on the bucket map itself (how many distinct keys it will track, how long an idle key is kept, how often it is swept) — irrelevant here since `ConstantKey` only ever produces one key, but required by the gate's signature.
 
-Note the `Clock` seam: rate limiting is measured against an **injected** clock, never a real `sleep`, so it is deterministic and testable. The example injects a `FakeClock` whose time only advances when told (`gateway/main.rs:346-364`); [`examples/rate_limit`](../../examples/rate_limit) drives the same seam with an advancing clock. This is the `gate` idiom — SHED (reject now) / WAIT / BALANCE readiness composed as a pipe, instead of a bespoke `poll_ready`. See [`examples/gate`](../../examples/gate).
+Note the `Clock` seam: `with_clock` is generic over any `Clk: Clock`, never a real `sleep`, so rate limiting is deterministic and testable — the function above takes `clock` as a parameter rather than pinning a concrete type. The real example injects a `FakeClock` whose time only advances when told (`gateway/main.rs:346-364`); [`examples/rate_limit`](../../examples/rate_limit) drives the same seam with an advancing clock. This is the `gate` idiom — SHED (reject now) / WAIT / BALANCE readiness composed as a pipe, instead of a bespoke `poll_ready`. See [`examples/gate`](../../examples/gate).
 
 ## 4. Auth — short-circuit before anything runs
 
 Wrap the whole router in `Auth`, a **filter** that rejects a missing/wrong bearer token with `401` before routing or rate-limiting is ever reached (`gateway/main.rs:109-116`):
 
 ```rust
-let gateway_pipe = Auth {
-    inner: into_handle(routed),
-    header: "authorization".to_string(),
-    allow: BTreeSet::from([VALID_TOKEN.to_string()]),
-    realm: Arc::from(b"gateway".as_slice()),
-    on_unauthorized_status: 401,
-    strip_prefix: Some("Bearer ".to_string()),
-};
+fn gateway_auth(routed: RoutingPipe) -> Auth {
+    Auth {
+        inner: into_handle(routed),
+        header: "authorization".to_string(),
+        allow: std::collections::BTreeSet::from(["let-me-in".to_string()]),
+        realm: Arc::from(b"gateway".as_slice()),
+        on_unauthorized_status: 401,
+        strip_prefix: Some("Bearer ".to_string()),
+    }
+}
 ```
 
-`realm` is just a byte-string label echoed back in the `401` response's challenge; wrapping it in `Arc` (shared ownership — many owners can point at the same bytes without copying them) is only there because `Auth` gets cloned across cores, not because the value itself needs anything special.
+(`"let-me-in"` above is `gateway/main.rs`'s own `VALID_TOKEN` constant, inlined here.) `realm` is just a byte-string label echoed back in the `401` response's challenge; wrapping it in `Arc` (shared ownership — many owners can point at the same bytes without copying them) is only there because `Auth` gets cloned across cores, not because the value itself needs anything special.
 
 `Auth<Inner>` is the short-circuit `filter` idiom (see [`examples/filter`](../../examples/filter)): a pure decision admits or rejects the request before the inner pipe runs. Because `Auth` wraps the router, an unauthorized request never touches routing or the rate limiter — **the composition order is the policy order.**
 
 ## 5. Compose outside-in and serve
 
-The chain, outermost first: `Auth` → `RoutingPipe` → `RateLimit<ForwardPipe>` → upstream. Mount and build the listener directly — `mount` accepts a handle directly (Foundations §12) — with a wildcard mount so every path reaches the gateway (`gateway/main.rs:120-130`):
+The chain, outermost first: `Auth` → `RoutingPipe` → `RateLimit<ForwardPipe>` → upstream. Mount and build the listener directly — `mount` accepts a handle directly, the `ViaPipe` shape of `IntoMountTarget` (Ergonomics §8) — with a wildcard mount so every path reaches the gateway (`gateway/main.rs:120-130`):
 
 ```rust
-let gateway_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(Arc::new(PrimeRuntime::new(1)?))
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
-gateway_app.mount("/{*rest}", into_handle(gateway_pipe))?;
-let gateway_listener = gateway_app.build_listener(ListenerSpec::http(gateway_bind))?;
+fn build_gateway(
+    gateway_pipe: Auth,
+    gateway_bind: std::net::SocketAddr,
+) -> Result<(App, ListenerHandle), ProximaError> {
+    let gateway_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    gateway_app.mount("/{*rest}", into_handle(gateway_pipe))?;
+    let gateway_listener = gateway_app.build_listener(ListenerSpec::http(gateway_bind))?;
+    Ok((gateway_app, gateway_listener))
+}
 ```
 
-**Update (this citation had drifted to a pre-migration idiom; corrected here):** `.with_runtime_cores(1)` called before `.build()` — the form this section used to show — is no longer this example's idiom, and for good reason: `AppBuilder::with_runtime_cores` only sizes a *fallback* runtime, consulted solely when nothing has already been installed ambiently. Inside a `#[proxima::main(cores = N)]`-driven binary — which `gateway/main.rs`'s `main` now is, not `#[proxima::main(runtime = "tokio")]` — something is *always* already installed (`#[proxima::main]` publishes it), so `.with_runtime_cores(...)` before `.build()` would be silently ignored. The current idiom instead calls `.with_runtime(Arc::new(PrimeRuntime::new(1)?)).with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory))` *after* `.build()`, directly on the constructed `App` — an explicit, unconditional override with no ambient check to lose to. [The native runtime tutorial](./03-native-runtime.md) §4 is the full account of why this ordering matters and what breaks without it, if the one line above isn't enough context. `build_listener` is synchronous: it blocks the calling thread only until the accept lane has acked ready, no `futures::executor::block_on` and no `run_until_signal` — the example's own `main` already has an async context to `.await` on (from `#[proxima::main(cores = 1)]`) for the later `ShutdownBarrier` drain, but nothing here needs to `.await` the serving itself.
+`AppBuilder::with_runtime_cores` — a fallback-runtime sizing knob, only consulted when nothing has already been installed ambiently — is not what wires the runtime above; it would be silently ignored here. Inside a `#[proxima::main(cores = N)]`-driven binary, which is what `gateway/main.rs`'s own `main` is, `#[proxima::main]` has already published an ambient runtime by the time `App::builder().with_defaults()?.build()?` runs, so each app instead opts *out* of adopting that shared one with an explicit, unconditional `.with_runtime(...).with_acceptor_factory(...)` call directly on the constructed `App` — no ambient check to lose to. [The native runtime tutorial](./03-native-runtime.md) §4 is the full account of why this ordering matters and what breaks without it. `build_listener` is synchronous: it blocks the calling thread only until the accept lane has acked ready, no `futures::executor::block_on` and no `run_until_signal` — the example's own `main` already has an async context to `.await` on (from `#[proxima::main(cores = 1)]`) for the later `ShutdownBarrier` drain, but nothing here needs to `.await` the serving itself.
 
-Run it and watch the six scenarios the example asserts end-to-end (`gateway/main.rs:166-272`, called from `main` at line 133): a missing/wrong token is `401` and the origin is never hit; `/api/...` reaches the api origin and `/web/...` the web; the third call to a capacity-2 bucket is `429` and never forwards.
+Run it and watch the six scenarios the example asserts end-to-end (`gateway/main.rs:170-277`, called from `main` at line 133): a missing/wrong token is `401` and the origin is never hit; `/api/...` reaches the api origin and `/web/...` the web; the third call to a capacity-2 bucket is `429` and never forwards.
 
 ```
 cargo run --example gateway --features http1-native

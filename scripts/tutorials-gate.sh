@@ -532,7 +532,36 @@ fi
 # nearest one) and already imports those same names, so the two collide
 # (E0252) the moment both are live in one generated file — merging removes
 # the need for block 3 to donate context to anything after it.
-FLOOR=105
+# Raised to 110 after build-an-api-gateway.md's own rewrite: 4 of its 5
+# original blocks were previously FAILED — the routing block used
+# `api_forward`/`web_forward` before §3 built them; the rate-limit block
+# referenced `api_client`/`clock`, neither shown in any block; the auth
+# block referenced `routed`/`VALID_TOKEN`/`BTreeSet`, none in reach; the
+# compose block used bare `?` at the top of the awk-injected unit-returning
+# `fn main` wrapper and referenced `gateway_pipe`/`gateway_bind`. None of
+# `Auth`/`KeyExtractor`/`RateLimit`/`RateLimitCaps`/`RoutingPipe`/
+# `TokenBucketConfig`/`ListenerHandle`/the `Clock` trait live in
+# `tutorial_gate_prelude` either. Rather than chase pass-2 forwarding order
+# (the routing block's own dependency, built one section later, cannot be
+# satisfied by backward accumulation at all), every block after §1 was
+# turned into a small, self-contained function taking the previous stage's
+# output as a typed parameter — `gateway_router(api_forward: PipeHandle,
+# web_forward: PipeHandle) -> RoutingPipe`, `build_api_forward<Clk: Clock +
+# Send + Sync + 'static>(api_client: Client, clock: Clk) -> PipeHandle`,
+# `gateway_auth(routed: RoutingPipe) -> Auth`, `build_gateway(gateway_pipe:
+# Auth, gateway_bind: SocketAddr) -> Result<(App, ListenerHandle),
+# ProximaError>` — each real, matching `examples/gateway/main.rs` line for
+# line inside the function body, none needing the sections before it to
+# have run. A new §0 states the real import block once
+# (`gateway/main.rs:33-38`) so every later block forwards it instead of
+# repeating it. The rewrite also fixed two citations stale since
+# `6689d05cc`'s reformat shifted everything after line 145 by +4
+# (`run_scenarios`: cited `166-272` against a real `170-277`) and one wrong
+# since the file's first version (`mount` accepts a handle directly cited
+# "Foundations §12", which is `signal`, not `mount` — corrected to
+# Ergonomics §8, the `ViaPipe` shape of `IntoMountTarget`, where that claim
+# is actually taught).
+FLOOR=110
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
