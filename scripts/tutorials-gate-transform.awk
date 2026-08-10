@@ -97,22 +97,28 @@ BEGIN {
     buf = ""
     ordinal = 0
     outline = 0
-    # `proxima::prelude`'s own export list (src/lib.rs, `pub mod prelude`) —
-    # every block already has these in real scope via
-    # `use proxima::tutorial_gate_prelude::*;` (which itself globs
-    # `crate::prelude::*`). A tutorial block that teaches one of these
-    # traits by re-declaring it AND implementing it for the real
-    # `proxima::Listener`/`Client` (02-listener-builder.md's whole style —
-    # showing one axis method at a time) creates a second, differently-
-    # named-but-identically-spelled trait live in the SAME scope as the
-    # real one: `Listener::builder()` becomes genuinely ambiguous between
-    # the real trait's impl and the excerpt's own (measured directly:
-    # E0034 "multiple applicable items", one candidate cited as
-    # `main::{closure#0}::ListenerBuilderEntry`, the other as the real
-    # `proxima::ListenerBuilderEntry`). Such a block still compiles fine on
+    # `proxima::prelude`'s own export list (src/lib.rs, `pub mod prelude`),
+    # plus the handful of `tutorial_gate_prelude`-only names a tutorial's
+    # own excerpt re-declares (`PluginRegistry`, from build-a-plugin.md
+    # section 3, which quotes the real trait verbatim from
+    # `proxima-primitives/src/pipe/plugin.rs`) — every block already has
+    # these in real scope via `use proxima::tutorial_gate_prelude::*;`
+    # (which itself globs `crate::prelude::*` plus the extra pipe-module
+    # re-exports `tutorial_gate_prelude` adds on top). A tutorial block
+    # that teaches one of these traits by re-declaring it AND implementing
+    # it for (or binding a generic fn over) the real
+    # `proxima::Listener`/`Client`/`AppBuilder` (02-listener-builder.md's
+    # whole axis-method style; build-a-plugin.md's `PluginRegistry`
+    # excerpt) creates a second, differently-named-but-identically-spelled
+    # trait live in the SAME scope as the real one: a bound like `R:
+    # PluginRegistry` resolves to the LOCAL (shadowing) trait instead of
+    # the real one, so a later call site instantiating it with the real
+    # `AppBuilder` (which only implements the real trait) fails to
+    # type-check — measured directly building build-a-plugin.md section 3
+    # before this name was added here. Such a block still compiles fine on
     # its own; it must simply never be fed forward into a LATER block that
     # also has the real trait in scope.
-    split("AnyProtocol App ClassifyOutcome Client ClientBuilder ClientProtocol ClientProtocolExt ClientSecurityExt ClientTransportExt Listener ListenerBuilder ListenerBuilderEntry ListenerProtocolExt ListenerTransportExt ProbeVerdict", prelude_names_arr, " ")
+    split("AnyProtocol App ClassifyOutcome Client ClientBuilder ClientProtocol ClientProtocolExt ClientSecurityExt ClientTransportExt Listener ListenerBuilder ListenerBuilderEntry ListenerProtocolExt ListenerTransportExt ProbeVerdict PluginRegistry", prelude_names_arr, " ")
     for (pn in prelude_names_arr) prelude_names[prelude_names_arr[pn]] = 1
     if (GOODFILE != "") {
         while ((getline gline < GOODFILE) > 0) {
