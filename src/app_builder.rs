@@ -51,7 +51,7 @@ use crate::upstreams::kv_cache::KvCacheFactory;
 use crate::upstreams::kv_file::KvFileFactory;
 #[cfg(feature = "tokio")]
 use crate::upstreams::process::ProcessPipeFactory;
-#[cfg(feature = "tokio")]
+#[cfg(unix)]
 use crate::upstreams::process_rpc::ProcessRpcPipeFactory;
 #[cfg(feature = "recording")]
 use crate::upstreams::record::RecordPipeFactory;
@@ -204,7 +204,7 @@ impl AppBuilder {
         #[cfg(any(feature = "tcp", feature = "unix"))]
         self.pipe_factory_registry
             .register(Arc::new(StreamPassthroughPipeFactory::new()))?;
-        #[cfg(feature = "tokio")]
+        #[cfg(unix)]
         self.pipe_factory_registry
             .register(Arc::new(ProcessRpcPipeFactory))?;
         self.defaults_replay = true;

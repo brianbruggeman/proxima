@@ -520,9 +520,10 @@ pub use upstreams::{
 pub use upstreams::{RecordPipeFactory, RecordUpstream, ReplayPipeFactory, ReplayUpstream};
 #[cfg(feature = "tokio")]
 pub use upstreams::{
-    ProcessPipeFactory, ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream, ProcessSpec,
-    ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal,
+    ProcessPipeFactory, ProcessSpec, ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal,
 };
+#[cfg(unix)]
+pub use upstreams::{ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream};
 pub use write_back::{WriteBackConditions, WriteBackRule};
 
 /// The one import for both halves of the builder-sugar surface:

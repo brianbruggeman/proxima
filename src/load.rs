@@ -55,7 +55,7 @@ use crate::upstreams::kv_file::{KvFileFactory, build_kv_file};
 use crate::upstreams::kv_upstream::KvUpstream;
 #[cfg(feature = "tokio")]
 use crate::upstreams::process::ProcessPipeFactory;
-#[cfg(feature = "tokio")]
+#[cfg(unix)]
 use crate::upstreams::process_rpc::ProcessRpcPipeFactory;
 #[cfg(feature = "recording")]
 use crate::upstreams::record::RecordPipeFactory;
@@ -339,7 +339,7 @@ fn default_pipe_factory_registry(
     registry.register(Arc::new(ProcessPipeFactory::with_log_buffer_registry(
         log_buffers,
     )))?;
-    #[cfg(feature = "tokio")]
+    #[cfg(unix)]
     registry.register(Arc::new(ProcessRpcPipeFactory))?;
     registry.register(Arc::new(RetryFactory))?;
     registry.register(Arc::new(RateLimitFactory))?;
