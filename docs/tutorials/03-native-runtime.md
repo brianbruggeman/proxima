@@ -25,10 +25,15 @@ Every code block below is copied verbatim from a real file in this repository, c
 
 Foundations §13 built `hello` on `App::new()` and never named what actually executes the `Future` a `Pipe::call` returns. Here is the answer, copied (doc comments trimmed) from `proxima-runtime/src/lib.rs:276`:
 
-```rust,ignore
+```rust
 // doc comments trimmed and the tail methods elided — the real trait has
-// the imports (`SpawnError`, `CoreId`, ...) this excerpt does not repeat.
-pub trait Runtime: Send + Sync + 'static {
+// the imports (`SpawnError`, `CoreId`, ...) this excerpt does not repeat,
+// but both are already real, public names in scope here regardless
+// (`proxima::runtime::{CoreId, SpawnError}`, already re-exported into this
+// gate's own prelude) — the trait itself is redeclared locally (trimmed,
+// same as this page's own convention) so `Runtime` here never collides
+// with a call site elsewhere in this file expecting the real trait.
+trait Runtime: Send + Sync + 'static {
     fn spawn_on_current_core(&self, future: Pin<Box<dyn Future<Output = ()> + 'static>>);
     fn spawn_on_core(
         &self,
@@ -84,10 +89,16 @@ Read those two lines carefully: `http1-native` pulls in the sans-IO codec — "s
 
 One more precision worth having exact, since it corrects a claim in an older tutorial: `http1-native`'s connection driver (`serve_h1_connection`/`serve_connection`, `proxima-http/src/http1/serve.rs:107,166`) is generic over `Stream: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send` (imported at `proxima-http/src/http1/serve.rs:26` — the `futures` crate's I/O traits, not tokio's). The h1 *protocol driver* has always been sans-IO once `http1-native` exists; what still varies by backend is one layer below it — who opens the listening socket and hands back an accepted connection that implements those traits. That is the `AcceptorFactory` trait, `proxima-primitives/src/stream/mod.rs:197–199`:
 
-```rust,ignore
-// excerpted without the crate's own `use` block — `SocketAddr`/
-// `TcpBindOptions`/`TcpAcceptor`/`io` resolve inside that file, not here.
-pub trait AcceptorFactory: Send + Sync + 'static {
+```rust
+// excerpted without the crate's own `use` block; `SocketAddr`/
+// `TcpBindOptions`/`TcpAcceptor` are real, already re-exported into this
+// gate's own prelude — only `io` needed an inline `use`. Redeclared
+// locally (guarded, so it is never forwarded past this block) since this
+// is showing the trait's own real definition, not a call site that needs
+// the real one in scope.
+use std::io;
+
+trait AcceptorFactory: Send + Sync + 'static {
     fn bind(&self, addr: SocketAddr, options: TcpBindOptions) -> io::Result<Box<dyn TcpAcceptor>>;
 }
 ```
@@ -163,23 +174,39 @@ A real HTTP/1.1 response, over a real `TcpStream` (`proxy/main.rs`'s own client 
 
 Now the two Apps that make it happen, `proxy/main.rs:81–99`:
 
-```rust,ignore
-// excerpted from `proxy/main.rs`'s `main` — `origin_pipe`/`origin_bind` are
-// defined earlier in that function, not repeated in this excerpt.
-let origin_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(Arc::new(PrimeRuntime::new(1)?))
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
-origin_app.mount("/", origin_pipe)?;
+```rust
+// wrapped in a real, self-contained fn; `origin_pipe` is `proxy/main.rs`'s
+// own real handler (`examples/proxy/main.rs:40-44`, `#[proxima::instrument]`
+// over a bare `async fn` — no `#[proxima::piped]` needed, the bare-fn
+// `App::mount` shape Foundations part 2 §8 taught), repeated verbatim.
+#[proxima::instrument]
+async fn origin_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    Ok(Response::new(201)
+        .with_header("x-origin", "proxima-origin")
+        .with_body("origin response body\n"))
+}
 
-let origin_listener = origin_app.build_listener(ListenerSpec::http(origin_bind))?;
-// ...
-let proxy_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(Arc::new(PrimeRuntime::new(1)?))
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+fn run() -> Result<(), ProximaError> {
+    let origin_bind: std::net::SocketAddr = "127.0.0.1:8081".parse().expect("valid socket addr");
+    let origin_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    origin_app.mount("/", origin_pipe)?;
+
+    let origin_listener = origin_app.build_listener(ListenerSpec::http(origin_bind))?;
+    drop(origin_listener);
+    // ...
+    let proxy_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    drop(proxy_app);
+    Ok(())
+}
+run().expect("both apps build and bind cleanly");
 ```
 
 Piece by piece, each grounded in source:
@@ -191,14 +218,19 @@ Piece by piece, each grounded in source:
 
 At the end, instead of `Foundations`'s `server.run_until_signal()` (which blocks forever waiting for `SIGINT`/`SIGTERM` — right for a long-running server, wrong for a demo/test process that needs to prove something and then exit), `proxy` drains deterministically with `ShutdownBarrier` (`proxima_primitives::sync::shutdown::ShutdownBarrier`, re-exported as `proxima::shutdown::ShutdownBarrier`, `src/lib.rs:189`):
 
-```rust,ignore
-// excerpted from `proxy/main.rs`'s `main` — `proxy_runtime` and the
-// `ShutdownBarrier` import are defined/brought in earlier in that file.
-let proxy_report = ShutdownBarrier::new(proxy_runtime).broadcast_drop().await;
-println!(
-    "proxy  drained: cores_acked={} hooks_drained={}",
-    proxy_report.cores_acked, proxy_report.hooks_drained
-);
+```rust
+// `proxy_runtime` given a real value — the same one-core `PrimeRuntime`
+// §3's app-building excerpt above hands to `.with_runtime(...)`.
+async fn run() -> Result<(), ProximaError> {
+    let proxy_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(1)?);
+    let proxy_report = ShutdownBarrier::new(proxy_runtime).broadcast_drop().await;
+    println!(
+        "proxy  drained: cores_acked={} hooks_drained={}",
+        proxy_report.cores_acked, proxy_report.hooks_drained
+    );
+    Ok(())
+}
+run().await.expect("a freshly built runtime with nothing running drains cleanly");
 ```
 
 `ShutdownBarrier::new(runtime)` (`proxima-primitives/src/sync/shutdown.rs:151`) and `.broadcast_drop()` (same file, returning a `ShutdownReport { cores_acked, hooks_drained }` at line 213–217) broadcast a stop signal to every worker on *that one runtime* and wait for every core to acknowledge — a report you print and assert on, not a signal you have to send yourself from another shell. Two `App`s, two independent runtimes, two independent drains: nothing here waits on the other.
@@ -217,12 +249,19 @@ Every one of the five migrated examples repeats the same four-line idiom — `.b
 
 `install_runtime` (`src/runtime.rs:252–254`) and its reader `installed_runtime` (`src/runtime.rs:260–263`) are a process-wide, set-once cell holding one `RuntimeSelection` — the matched bundle a runtime travels with everywhere now:
 
-```rust,ignore
+```rust
 // excerpted without the crate's own `use` block — `RuntimeBackend`/
 // `Runtime`/`AcceptorFactory`/`DatagramFactory`/`UnixUpstreamFactory`/
-// `PacketListenerFactory` resolve inside that file, not repeated here.
+// `PacketListenerFactory` are all real, already re-exported into this
+// gate's own prelude, so only `std::sync::OnceLock` needed an inline `use`.
+// `RuntimeSelection` (and the two free functions around it) is redeclared
+// locally, guarded so it is never forwarded past this block — the point
+// here is showing the real shape, not a call site that needs the real one.
+use std::sync::OnceLock;
+
 static INSTALLED_RUNTIME: OnceLock<RuntimeSelection> = OnceLock::new();
 
+#[derive(Clone)]
 pub struct RuntimeSelection {
     pub backend: RuntimeBackend,
     pub runtime: Arc<dyn Runtime>,
@@ -248,10 +287,24 @@ pub fn installed_runtime() -> Option<RuntimeSelection> {
 
 `#[proxima::main(cores = 1)]` calls this once, at startup, with the one-core runtime it just booted (wrapped in `AdoptedRuntime`, per the aside above). And here is the seam that matters: `App::builder()...build()`'s internals check this cell **first**, before considering anything else — `resolve_runtime_selection`, `src/app.rs:139–150`:
 
-```rust,ignore
+```rust
 // excerpted without the crate's own `use` block — `RuntimeSelection`/
-// `ProximaError`/`resolve_default_runtime_selection` resolve inside that
-// file, not repeated here.
+// `ProximaError` are real, already in scope via this gate's own prelude;
+// `crate::runtime::installed_runtime()` (the real fn resolves paths
+// relative to `proxima`'s own crate root, which this doctest is not)
+// becomes `proxima::runtime::installed_runtime()`.
+// `resolve_default_runtime_selection`'s real body picks among four
+// cfg-gated backend arms (prime+tokio-compat, prime alone, tokio alone,
+// or no runtime linked at all) — genuinely out of scope for the point
+// THIS function makes (the three-tier check ORDER), so it is stood in
+// here as the honest "nothing built" fallback its own last cfg arm
+// already is.
+fn resolve_default_runtime_selection(
+    _cores_override: Option<usize>,
+) -> Result<Option<RuntimeSelection>, ProximaError> {
+    Ok(None)
+}
+
 fn resolve_runtime_selection(
     explicit: Option<RuntimeSelection>,
     cores_override: Option<usize>,
@@ -259,7 +312,7 @@ fn resolve_runtime_selection(
     if let Some(selection) = explicit {
         return Ok(Some(selection));
     }
-    if let Some(installed) = crate::runtime::installed_runtime() {
+    if let Some(installed) = proxima::runtime::installed_runtime() {
         return Ok(Some(installed));
     }
     resolve_default_runtime_selection(cores_override)
@@ -307,14 +360,32 @@ same runtime instance (Arc::ptr_eq) = true
 There is a method that *looks* like the right tool and is not, once you are inside `#[proxima::main]`: `AppBuilder::with_runtime_cores(usize)` (`src/app_builder.rs:289–296`):
 
 ```rust
-/// Sugar for `.with_runtime_config(RuntimeConfig::builder().cores(cores).build())`.
-#[must_use]
-pub fn with_runtime_cores(self, cores: usize) -> Self {
-    self.with_runtime_config(
-        crate::app_config::RuntimeConfig::builder()
-            .cores(cores)
-            .build(),
-    )
+// `AppBuilder` redeclared locally, mirroring only the one field this
+// method touches (mechanically detected as a bare associated-fn
+// otherwise): `self` is only legal inside a real enclosing impl. `crate::
+// app_config::RuntimeConfig` becomes `proxima::app_config::RuntimeConfig`
+// — `crate::` in the real source resolves relative to `proxima`'s own
+// crate root, which this doctest is not.
+struct AppBuilder {
+    runtime_config: Option<proxima::app_config::RuntimeConfig>,
+}
+
+impl AppBuilder {
+    #[must_use]
+    pub fn with_runtime_config(mut self, config: proxima::app_config::RuntimeConfig) -> Self {
+        self.runtime_config = Some(config);
+        self
+    }
+
+    /// Sugar for `.with_runtime_config(RuntimeConfig::builder().cores(cores).build())`.
+    #[must_use]
+    pub fn with_runtime_cores(self, cores: usize) -> Self {
+        self.with_runtime_config(
+            proxima::app_config::RuntimeConfig::builder()
+                .cores(cores)
+                .build(),
+        )
+    }
 }
 ```
 
@@ -327,24 +398,48 @@ It is real, public API, called *before* `.build()` — which reads as "size this
 `App::with_runtime` (`src/app.rs:413`) is different in kind from `with_runtime_cores`, not just in name: it runs **after** `.build()`, directly on the already-constructed `App`, and it unconditionally overwrites `self.runtime` — no ambient check, no fallback branch, no way for it to be silently skipped:
 
 ```rust
-#[must_use]
-pub fn with_runtime(mut self, runtime: Arc<dyn crate::runtime::Runtime>) -> Self {
-    self.runtime = Some(runtime);
-    self
+// `App` redeclared locally, mirroring only the one field this method
+// touches (mechanically detected as a bare associated-fn otherwise):
+// `self` is only legal inside a real enclosing impl. `crate::runtime::
+// Runtime` becomes the real, already-in-scope `Runtime`. Scoped inside its
+// own module (`mod local`) rather than declared bare: the REAL `App` is
+// also genuinely used elsewhere in this same file's accumulated context
+// (section 4's own "collapse, proven" example above), and an unscoped
+// local `struct App` would shadow it there too — Rust item visibility
+// does not care about source order within one flat scope, only which
+// module it lives in.
+mod local {
+    use super::*;
+
+    pub struct App {
+        pub runtime: Option<Arc<dyn Runtime>>,
+    }
+
+    impl App {
+        #[must_use]
+        pub fn with_runtime(mut self, runtime: Arc<dyn Runtime>) -> Self {
+            self.runtime = Some(runtime);
+            self
+        }
+    }
 }
 ```
 
 That is the mechanism every one of this tutorial's five examples uses — paired with `App::with_acceptor_factory` (`src/app.rs:431`), exactly as walked in section 3. But read `with_runtime`'s own doc comment today (`src/app.rs:402–411`) and it flags itself, in the source, a **HAZARD**: it, `with_acceptor_factory`, and `with_datagram_factory` are three INDEPENDENT setters — nothing stops calling only one, or pairing a prime `runtime` with a tokio `acceptor_factory`, and an `App` built that way has its chain dispatch and its socket accept disagreeing about which backend is live. The promoted fix for new code — one this tutorial's examples predate — is the matched-bundle setter `App::with_runtime_selection(selection)` (`src/app.rs:473–481`), or, before `.build()`, `AppBuilder::runtime(selection)` (`app_builder.rs:324–328`). Both take one `RuntimeSelection` (section 4's `RuntimeSelection::prime(cores)`/`::tokio(cores)`, `src/runtime.rs:214–216,244–246`) and set every matched field atomically, so the runtime/acceptor/datagram/unix-upstream/packet-listener quintet can never disagree:
 
-```rust,ignore
-// verified compiling+running standalone (`use proxima::runtime::
-// RuntimeSelection;` plus a `#[proxima::main]`-driven `async fn main() ->
-// Result<(), ProximaError>`) against this repository's current source —
-// this excerpt omits that wrapping for brevity, matching the style above.
-let app = App::builder()
-    .runtime(RuntimeSelection::prime(1)?)
-    .with_defaults()?
-    .build()?;
+```rust
+// verified compiling+running standalone against this repository's current
+// source; `RuntimeSelection` here is the REAL type (this block does not
+// redeclare it, unlike section 4's excerpt above).
+fn run() -> Result<(), ProximaError> {
+    let app = App::builder()
+        .runtime(RuntimeSelection::prime(1)?)
+        .with_defaults()?
+        .build()?;
+    assert_eq!(app.runtime().unwrap().num_cores(), 1);
+    Ok(())
+}
+run().expect("a fresh one-core prime RuntimeSelection builds and installs cleanly");
 ```
 
 is the same override as this tutorial's `.build()?.with_runtime(Arc::new(PrimeRuntime::new(1)?)).with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory))` idiom, minus the ability to mismatch the two pieces — verified compiling and running (`app.runtime().unwrap().num_cores() == 1`) against this repository's current source. This tutorial keeps teaching the older trio through section 8 because that is the real, unmodified code in every one of `proxy`/`gateway`/`load-balance`/`integration`/`distributed_trace` today — but write new code against `.runtime(selection)`.
@@ -355,15 +450,20 @@ Either surface teaches the same rule this section exists for: **inside `#[proxim
 
 `gateway/main.rs` builds **three** independent `App`s: the gateway itself, and two upstream origins (`api`, `web`), each behind the identical idiom (`gateway/main.rs:120–124`, and `spawn_origin`, `312–316`):
 
-```rust,ignore
+```rust
 // excerpted from `gateway/main.rs`'s `main` — real, unmodified running code
-// (verified live via `cargo run --example gateway` below), not a
-// standalone program.
-let gateway_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(Arc::new(PrimeRuntime::new(1)?))
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+// (verified live via `cargo run --example gateway` below); wrapped in a
+// real, self-contained fn so it stands alone here.
+fn run() -> Result<(), ProximaError> {
+    let gateway_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    drop(gateway_app);
+    Ok(())
+}
+run().expect("a fresh one-core PrimeRuntime builds cleanly");
 ```
 
 Everything the gateway *does* — `Auth` (401 on a missing/wrong bearer token), `RoutingPipe` (path-prefix dispatch to one of the two upstreams), `RateLimit` (429 once a per-upstream token bucket is exhausted), each wrapping a `ForwardPipe` that is exactly `proxy`'s one-line forward — is ordinary pipe composition, already taught by [Build an API gateway](./build-an-api-gateway.md) and Foundations' filter/gate sections. Nothing about *that* composition changes because there are now three `App`s instead of one; that is the point of this section. The runtime idiom from section 4 does not know or care what pipes are mounted on the `App` it is attached to — a rejected request never even reaches routing (`gateway/main.rs`'s `run_scenarios`, verified live below), and the runtime wiring around it is identical whether the pipe chain behind it is one line (`proxy`) or four policies deep (`gateway`).
@@ -406,14 +506,39 @@ Twelve real HTTP requests, routed across four independently-runtimed `App`s in o
 
 What *is* new: a component that is not an `App` at all, but still needs a runtime to drive its own background work — `RecordUpstream`'s durable sink-drain. Rather than handing it a **fourth** independent runtime, the example deliberately *shares* `edge_live_app`'s own (`integration/main.rs:91–112`):
 
-```rust,ignore
+```rust
 // excerpted from `integration/main.rs`'s `main` — real, unmodified running
-// code (verified live via `cargo run --example integration` below).
-let edge_runtime = edge_live_app.runtime().expect("builder installs a runtime");
-let spigot = deferred_runtime();
-spigot.set(Arc::clone(&edge_runtime)).ok();
-// ...
-let recorder = RecordUpstream::new("live-front", client, sink, "third-party").with_runtime(spigot);
+// code (verified live via `cargo run --example integration` below);
+// `edge_live_app`/`client`/`sink` given real values (the same
+// `SynthUpstream`/`AccumulatingSink`/`LazyFanOut` construction
+// build-a-record-replay-harness.md's own Part A already teaches and
+// gates) so this stands on its own.
+async fn run() -> Result<(), ProximaError> {
+    let edge_live_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(1)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+
+    let edge_runtime = edge_live_app.runtime().expect("builder installs a runtime");
+    let spigot = deferred_runtime();
+    spigot.set(Arc::clone(&edge_runtime)).ok();
+
+    let cassette_dir = tempfile::tempdir().expect("tempdir");
+    let cassette_path = cassette_dir.path().join("session.jsonl");
+    let durable = Arc::new(LazyFanOut::new(
+        vec![SinkSpec::new(cassette_path.to_string_lossy(), FormatKind::Json)],
+        spigot.clone(),
+    ));
+    let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(durable));
+    let client = into_handle(SynthUpstream::new("third-party", 200, "hello from the vendor"));
+
+    let recorder = RecordUpstream::new("live-front", client, sink, "third-party").with_runtime(spigot);
+    drop(recorder);
+    drop(edge_live_app);
+    Ok(())
+}
+run().await.expect("edge app builds and the recorder shares its runtime cleanly");
 ```
 
 `deferred_runtime()` (`proxima_recording::pipe::lazy::deferred_runtime`, re-exported at `src/lib.rs:419`) returns a `DeferredRuntime` — `Arc<OnceLock<Arc<dyn Runtime>>>` (`proxima-recording/src/pipe/lazy.rs:31,36`) — a runtime *cell* you can build a component around before the actual runtime exists, then fill in once (`spigot.set(...)`) with whichever `Arc<dyn Runtime>` you choose. `RecordUpstream::with_runtime` (`src/upstreams/record.rs:179`) accepts exactly that cell. The result: the recorder's background drain and `edge_live_app`'s own listener run on the *same* `PrimeRuntime` — one core doing both jobs, on purpose, spelled out explicitly at the call site.
@@ -422,11 +547,38 @@ Contrast the two mechanisms precisely, because they look similar and are not: se
 
 Phase 2 adds one more wrinkle: a runtime that is never attached to an `App` at all. `recorded_response_body` (`integration/main.rs:232–245`) reads the cassette back off disk to compute the ground truth `replay` is checked against, using `JsonlSource::new(path, runtime)` — a sans-IO component one level below `App`, needing only *a* `Runtime` to offload its blocking file read, built and thrown away in a few lines (`integration/main.rs:154–155`):
 
-```rust,ignore
-// excerpted from `integration/main.rs`'s `main` — `cassette_path` is
-// defined earlier in that function, not repeated in this excerpt.
-let cassette_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(1)?);
-let recorded_body = recorded_response_body(&cassette_path, cassette_runtime).await?;
+```rust
+// `recorded_response_body` (`integration/main.rs:232-244`) repeated
+// verbatim, since `main` itself is private; `cassette_path` given a real
+// value — an empty file (zero JSONL lines is a legitimate, if uneventful,
+// cassette) instead of the one the real `main` spent two phases building.
+use futures::StreamExt;
+
+async fn recorded_response_body(
+    path: &std::path::Path,
+    runtime: Arc<dyn Runtime>,
+) -> Result<Bytes, ProximaError> {
+    let source = JsonlSource::new(path, runtime);
+    let mut events = source.events();
+    let mut body = bytes::BytesMut::new();
+    while let Some(event) = events.next().await {
+        if let ProtocolEvent::Http(HttpEvent::ResponseChunk { data, .. }) = event?.event {
+            body.extend_from_slice(&data);
+        }
+    }
+    Ok(body.freeze())
+}
+
+async fn run() -> Result<(), ProximaError> {
+    let cassette_dir = tempfile::tempdir().expect("tempdir");
+    let cassette_path = cassette_dir.path().join("empty.jsonl");
+    std::fs::File::create(&cassette_path).expect("create empty cassette");
+    let cassette_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(1)?);
+    let recorded_body = recorded_response_body(&cassette_path, cassette_runtime).await?;
+    assert!(recorded_body.is_empty(), "an empty cassette replays zero bytes");
+    Ok(())
+}
+run().await.expect("reading an empty (but real) cassette back succeeds with zero bytes");
 ```
 
 Runtimes compose at whatever level actually needs one — an `App`, a `RecordUpstream`, a bare `JsonlSource` — not only at `App::builder()` call sites.
@@ -450,21 +602,27 @@ The vendor's `App` — and its runtime — are fully torn down (`ShutdownBarrier
 
 `distributed_trace/main.rs` is the capstone: two `App`s, `front` (instance A) and `origin` (instance B), each on its own two-core `PrimeRuntime` (`distributed_trace/main.rs:180–191`):
 
-```rust,ignore
+```rust
 // excerpted from `distributed_trace/main.rs`'s `main` — real, unmodified
 // running code (verified live via `cargo run --example distributed_trace`
-// below).
-let origin_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(Arc::new(PrimeRuntime::new(2)?))
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
-// ...
-let front_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(Arc::new(PrimeRuntime::new(2)?))
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+// below); wrapped in a real, self-contained fn so it stands alone here.
+fn run() -> Result<(), ProximaError> {
+    let origin_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(2)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    drop(origin_app);
+    // ...
+    let front_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(Arc::new(PrimeRuntime::new(2)?))
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    drop(front_app);
+    Ok(())
+}
+run().expect("two independent two-core PrimeRuntimes build cleanly");
 ```
 
 — the identical section-4 idiom, sized to two cores each this time instead of one, purely because this example chose to; nothing about the mechanism changes with the count. The interesting question this example answers is not about runtimes at all: a real client hits `front` over a plain blocking `TcpStream`; `front` forwards to `origin` over a *second*, hand-rolled blocking TCP request (deliberately not `proxima::Client`, so the proof does not depend on a client stack); do the two instances' spans land in the same trace, or two disconnected ones?
@@ -514,23 +672,29 @@ same Pipe, two runtimes, identical response both times.
 
 `multi_runtime/main.rs` goes further — prime and tokio serving **concurrently**, in the same process, dispatching into the *same* `Arc<AtomicU64>`-backed pipe from two independently-scheduled runtimes at once (`multi_runtime/main.rs:76–91`):
 
-```rust,ignore
+```rust
 // excerpted from `multi_runtime/main.rs`'s `main` — real, unmodified
 // running code (verified live via `cargo run --example multi_runtime`
-// below).
-let prime_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(2)?);
-let prime_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(prime_runtime.clone())
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
-// ...
-let tokio_runtime: Arc<dyn Runtime> = Arc::new(TokioPerCoreRuntime::new(2)?);
-let tokio_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(tokio_runtime.clone())
-    .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
+// below); wrapped in a real, self-contained fn so it stands alone here.
+fn run() -> Result<(), ProximaError> {
+    let prime_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(2)?);
+    let prime_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(prime_runtime.clone())
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    drop(prime_app);
+    // ...
+    let tokio_runtime: Arc<dyn Runtime> = Arc::new(TokioPerCoreRuntime::new(2)?);
+    let tokio_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(tokio_runtime.clone())
+        .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
+    drop(tokio_app);
+    Ok(())
+}
+run().expect("a prime app and a tokio app both build cleanly in the same process");
 ```
 
 ```

@@ -162,10 +162,14 @@ without consuming). Concretely it implements two of the sibling traits
 mentioned in §1: `Pipe` and `UnpinPipe`
 (`proxima-primitives/src/pipe/fan_in.rs:272–284` and `:286–298`):
 
-```rust,ignore
-// real source, quoted for the signature — the elided body returns
-// `FanInCall`, a private struct internal to fan_in.rs, so nothing outside
-// that module can compile this impl standalone.
+```rust
+// real source, quoted verbatim, the elided body given a real placeholder:
+// the actual body returns `FanInCall { fan: self }`, a private struct that
+// polls `self.sources`/`self.live`/`self.cursor` — all private fields this
+// excerpt has no access to from outside fan_in.rs, so the real algorithm
+// cannot be reproduced here (see `fan_in.rs:171-220` for it in full). What
+// this DOES prove, genuinely compiled against the real, foreign `FanIn`:
+// the signature and trait bounds shown are exactly right.
 impl<S, Strategy, const N: usize> Pipe for FanIn<S, Strategy, N>
 where
     S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
@@ -174,7 +178,10 @@ where
     type In = ();
     type Out = S::Out;
     type Err = Exhausted;
-    // ...
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> {
+        async move { todo!("see fan_in.rs:171-220 for the real FanInCall body") }
+    }
 }
 ```
 
@@ -203,16 +210,24 @@ checked by the compiler on every build, in a test-only module whose whole
 job is to fail to *compile* the moment it stops being true
 (`proxima-primitives/src/pipe/mod.rs:297–334`, `mod algebra_claims`):
 
-```rust,ignore
-// real source, quoted verbatim — `super::` and `assert_pipe` only resolve
-// inside `mod algebra_claims` itself, not standalone against `proxima`.
+```rust
+// real source, quoted verbatim: `super::` (only resolves inside
+// `mod algebra_claims` itself) spelled out as the same real modules'
+// absolute paths, and `assert_pipe`'s own bound fully qualified — this
+// page's own §1 hand-rolls a teaching `trait Pipe`, still in scope this far
+// into the file, so a bare `Pipe` bound here would resolve to that
+// stand-in instead of the real trait `FanIn` actually implements.
+fn assert_pipe<P: proxima_primitives::pipe::primitives::Pipe>() {}
+
 fn _fan_in_is_a_pipe<S, Strategy, const N: usize>()
 where
-    S: super::primitives::UnpinPipe<In = (), Err = super::fan_in::Exhausted>
-        + proxima_core::markers::DropSafe,
-    Strategy: super::fan_in::FanInStrategy,
+    S: proxima_primitives::pipe::primitives::UnpinPipe<
+            In = (),
+            Err = proxima_primitives::pipe::fan_in::Exhausted,
+        > + proxima_core::markers::DropSafe,
+    Strategy: proxima_primitives::pipe::fan_in::FanInStrategy,
 {
-    assert_pipe::<super::fan_in::FanIn<S, Strategy, N>>();
+    assert_pipe::<proxima_primitives::pipe::fan_in::FanIn<S, Strategy, N>>();
 }
 ```
 
@@ -262,12 +277,33 @@ second name for a choice you already made when you built the array"
 (`fan_in.rs:76–78`). `FanIn::new` takes the sources and the strategy
 together, always both (`fan_in.rs:143`):
 
-```rust,ignore
-// real signature, quoted for its shape — excerpted from
-// impl<S, Strategy, const N: usize> FanIn<S, Strategy, N>, whose fields
-// (sources/live/remaining/cursor/strategy) are private, so this
-// constructor cannot stand alone outside that impl block.
-pub fn new(sources: [S; N], strategy: Strategy) -> Self
+```rust
+// `FanIn` redeclared locally, mirroring the real fields verbatim
+// (`fan_in.rs:131-137`): its real fields are private, and Rust forbids an
+// inherent impl for a foreign type (E0116) regardless, so this constructor
+// can never be added to the REAL `proxima::FanIn` from outside its crate no
+// matter how the excerpt is wrapped. Guarded in the awk transform's
+// shadow-name list, so this redeclaration is never forwarded past this
+// block.
+struct FanIn<S, Strategy, const N: usize> {
+    sources: [S; N],
+    live: [AtomicBool; N],
+    remaining: AtomicUsize,
+    cursor: AtomicUsize,
+    strategy: Strategy,
+}
+
+impl<S, Strategy, const N: usize> FanIn<S, Strategy, N> {
+    pub fn new(sources: [S; N], strategy: Strategy) -> Self {
+        Self {
+            sources,
+            live: core::array::from_fn(|_| AtomicBool::new(true)),
+            remaining: AtomicUsize::new(N),
+            cursor: AtomicUsize::new(0),
+            strategy,
+        }
+    }
+}
 ```
 
 Run the plain merge (`examples/fan_in/main.rs`, three upstreams — `orders`,
@@ -330,18 +366,19 @@ comment predates the base-tier `impl Pipe` above:
 `// fan-out IS a pipe, for any sink and any fan policy.` — checked with
 `assert_send_pipe`, not `assert_pipe`:
 
-```rust,ignore
-// real source, quoted verbatim — `super::` and `assert_send_pipe` only
-// resolve inside `mod algebra_claims` itself, not standalone against
-// `proxima`.
+```rust
+// real source, quoted verbatim — `super::`/bare `SendPipe` spelled out the
+// same way §3's `_fan_in_is_a_pipe` excerpt is above.
+fn assert_send_pipe<P: proxima_primitives::pipe::primitives::SendPipe>() {}
+
 fn _fan_out_is_a_pipe<S, Policy>()
 where
-    S: SendPipe<Out = ()> + Clone,
+    S: proxima_primitives::pipe::primitives::SendPipe<Out = ()> + Clone,
     S::In: Clone + Send,
     S::Err: Send,
-    Policy: FanPolicy,
+    Policy: proxima_primitives::pipe::fanout::FanPolicy,
 {
-    assert_send_pipe::<super::fanout::FanOut<S, Policy>>();
+    assert_send_pipe::<proxima_primitives::pipe::fanout::FanOut<S, Policy>>();
 }
 ```
 
@@ -696,17 +733,28 @@ dual, pushing one borrowed item into every `DrainSink`
 (`proxima-primitives/src/pipe/drain_sink.rs:240–275`):
 
 ```rust
-pub fn push_all(&mut self, item: &K::Item) -> ControlFlow<()> {
-    for sink in &mut self.sinks {
-        sink.accept(item)?;
-    }
-    ControlFlow::Continue(())
+// `DrainFanOut` redeclared locally, mirroring its one real field
+// (`drain_sink.rs:240-242`): Rust forbids an inherent impl for a foreign
+// type (E0116) regardless of field visibility, so these methods cannot be
+// added to the real, foreign `DrainFanOut` from outside its crate no
+// matter how the excerpt is wrapped.
+struct DrainFanOut<K, const N: usize> {
+    sinks: [K; N],
 }
 
-pub fn push_best_effort(&mut self, item: &K::Item) {
-    for sink in &mut self.sinks {
-        if sink.has_capacity() {
-            let _ = sink.accept(item);
+impl<K: DrainSink, const N: usize> DrainFanOut<K, N> {
+    pub fn push_all(&mut self, item: &K::Item) -> ControlFlow<()> {
+        for sink in &mut self.sinks {
+            sink.accept(item)?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    pub fn push_best_effort(&mut self, item: &K::Item) {
+        for sink in &mut self.sinks {
+            if sink.has_capacity() {
+                let _ = sink.accept(item);
+            }
         }
     }
 }

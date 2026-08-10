@@ -29,18 +29,38 @@ Every code block below is copied verbatim from a real file in this repository (c
 
 A `proxima::Client` dials an upstream. The one-liner is `Client::http(url)`, and the fluent form is `Client::builder()...build()` (`src/client/handle.rs:133–137,158–160`):
 
-```rust,ignore
-// excerpted from `impl Client { .. }` — `Self`/`Result<Self, _>` only
-// resolve inside that block, which this excerpt does not repeat.
-pub fn http(url: impl Into<String>) -> Result<Self, ProximaError> {
-    let mut spec = serde_json::Map::new();
-    spec.insert("http".to_string(), Value::String(url.into()));
-    Self::from_value(Value::Object(spec))
+```rust
+// `Client` redeclared locally, mirroring only what these two entry points
+// need: Rust forbids adding an inherent impl to the real, foreign `Client`
+// from outside its crate (E0116) regardless of field visibility, and the
+// real `Self::from_value` (`src/client/handle.rs:163+`) resolves a whole
+// factory registry — far larger than these two entry points' own point
+// (the signatures). `builder()` still returns the REAL, unshadowed
+// `ClientBuilder` — only `Self`/`Client` here is a stand-in.
+struct Client {
+    spec: serde_json::Map<String, Value>,
 }
 
-#[must_use]
-pub fn builder() -> ClientBuilder {
-    ClientBuilder::default()
+impl Client {
+    fn from_value(value: Value) -> Result<Self, ProximaError> {
+        let Value::Object(spec) = value else {
+            return Err(ProximaError::Config(
+                "Client::from_value: expected a JSON object".into(),
+            ));
+        };
+        Ok(Self { spec })
+    }
+
+    pub fn http(url: impl Into<String>) -> Result<Self, ProximaError> {
+        let mut spec = serde_json::Map::new();
+        spec.insert("http".to_string(), Value::String(url.into()));
+        Self::from_value(Value::Object(spec))
+    }
+
+    #[must_use]
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::default()
+    }
 }
 ```
 
@@ -80,15 +100,66 @@ Each is implemented exactly once, for `ClientBuilder` (`impl ClientTransportExt 
 
 Bring the client's three axis traits into scope with `use proxima::{ClientTransportExt, ClientProtocolExt, ClientSecurityExt};` (or the umbrella `use proxima::prelude::*;`, which re-exports all of them — `src/lib.rs:523–529`). This is why a fluent chain and a literal config `Value` are provably the same spec, checked directly in the client's own test suite (`verbs_map_to_methods_and_builder_lowers_axes`, `src/client/handle.rs:1061`, parity block at `1091–1106`, abbreviated):
 
-```rust,ignore
-// `fluent.inner`/`config.inner` are only reachable from the crate's own
-// `#[cfg(test)] mod tests` (`use super::*;` gives it the private field this
-// excerpt needs) — not something an external caller, or this doctest, can see.
-let fluent = Client::builder().http("http://api.example.com").tls().proxy("http://127.0.0.1:8080").build()?;
-let config = Client::from_value(json!({
-    "http": "http://api.example.com", "transport": "tls", "proxy": "http://127.0.0.1:8080",
-}))?;
-assert_eq!(fluent.inner.spec, config.inner.spec);
+```rust
+// `Client`/`ClientBuilder` redeclared locally, mirroring the real
+// accumulation mechanism (`set`/`push` into a `serde_json::Map`) so the
+// assertion has something accessible to compare: `fluent.inner`/
+// `config.inner` in the real test are only reachable from the crate's own
+// `#[cfg(test)] mod tests` (`use super::*;`), never from an external
+// doctest.
+use serde_json::json;
+
+#[derive(Default)]
+struct ClientBuilder {
+    spec: serde_json::Map<String, Value>,
+}
+
+impl ClientBuilder {
+    fn http(mut self, url: impl Into<String>) -> Self {
+        self.spec.insert("http".to_string(), Value::String(url.into()));
+        self
+    }
+
+    fn tls(mut self) -> Self {
+        self.spec
+            .insert("transport".to_string(), Value::String("tls".to_string()));
+        self
+    }
+
+    fn proxy(mut self, url: impl Into<String>) -> Self {
+        self.spec.insert("proxy".to_string(), Value::String(url.into()));
+        self
+    }
+
+    fn build(self) -> Result<Client, ProximaError> {
+        Client::from_value(Value::Object(self.spec))
+    }
+}
+
+struct Client {
+    spec: serde_json::Map<String, Value>,
+}
+
+impl Client {
+    fn from_value(value: Value) -> Result<Self, ProximaError> {
+        let Value::Object(spec) = value else {
+            return Err(ProximaError::Config(
+                "Client::from_value: expected a JSON object".into(),
+            ));
+        };
+        Ok(Self { spec })
+    }
+}
+
+fn run() -> Result<(), ProximaError> {
+    let fluent = ClientBuilder::default().http("http://api.example.com").tls().proxy("http://127.0.0.1:8080").build()?;
+    let config = Client::from_value(json!({
+        "http": "http://api.example.com", "transport": "tls", "proxy": "http://127.0.0.1:8080",
+    }))?;
+    assert_eq!(fluent.spec, config.spec);
+    Ok(())
+}
+run().expect("both spec-construction paths agree");
 ```
 
 That's the whole shape you already know: one accumulated JSON spec, a handful of type-specific axis traits giving it fluent methods, and a terminal (`.build()`) that freezes it. Everything below is the identical shape, reused — not reinvented — for the serve side.
@@ -117,25 +188,35 @@ impl ListenerBuilderEntry for Listener {
 
 Read that side by side with §1's `Client::http`/`Client::builder`. Same two entry points, same names, same shape: a one-liner that pre-fills the common case, and a bare `builder()` for everything else. `Listener::http(bind)` calls `.http(bind.to_string())` — the listener's OWN `ListenerProtocolExt::http` (`src/listener/protocol.rs:73`), a different trait impl from the client's `ClientProtocolExt::http`, but the same spec key (`"http"`) and the same idea: pre-fill the common case.
 
-Bring both entry points into scope together — `use proxima::{Listener, ListenerBuilderEntry};`, plus `use proxima::ListenerTransportExt;` for `.tcp()` below (or `use proxima::prelude::*;` for everything at once) — and you get the mirror of the manual `App::new()?; app.mount(...)?; app.serve(RunConfig::http(bind)).await?;` shape from `examples/hello/main.rs:48–53`. `my_pipe` below stands in for whatever `Handler` you already mount today — §11 is the concrete, compiling version of this exact shape, so this block is left illustrative (`ignore`d by the harness) rather than invented a throwaway pipe just to satisfy the compiler here:
+Bring both entry points into scope together — `use proxima::{Listener, ListenerBuilderEntry};`, plus `use proxima::ListenerTransportExt;` for `.tcp()` below (or `use proxima::prelude::*;` for everything at once) — and you get the mirror of the manual `App::new()?; app.mount(...)?; app.serve(RunConfig::http(bind)).await?;` shape from `examples/hello/main.rs:48–53`. `my_pipe` below stands in for whatever `Handler` you already mount today (a real, minimal one, `#[proxima::piped(send)]` over an `async fn` — Foundations §13 — since `into_handle` needs `SendPipe`, not a bare fn); `server.run_until_signal()` genuinely blocks forever waiting for a process signal, so this block still never runs, only compiles — §11 is the concrete, compiling AND run version of this exact shape:
 
-```rust,ignore
+```rust
 use proxima::prelude::*;
-use proxima::into_handle;
 
-let server = Listener::builder()
-    .bind("127.0.0.1:8080".parse()?)
-    .tcp()
-    .handle(into_handle(my_pipe))
-    .serve()
-    .await?;
-server.run_until_signal().await;
+#[proxima::piped(send)]
+async fn my_pipe(_request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+    Ok(Response::ok("hello, proxima\n"))
+}
 
-// mirrors `Client::http(url)`:
-let server = Listener::http("127.0.0.1:8080".parse()?)
-    .handle(into_handle(my_pipe))
-    .serve()
-    .await?;
+async fn run() -> Result<(), ProximaError> {
+    let bind: std::net::SocketAddr = "127.0.0.1:8080".parse().expect("known-good literal address");
+    let server = Listener::builder()
+        .bind(bind)
+        .tcp()
+        .handle(into_handle(my_pipe))
+        .serve()
+        .await?;
+    server.run_until_signal().await;
+
+    // mirrors `Client::http(url)`:
+    let server = Listener::http(bind)
+        .handle(into_handle(my_pipe))
+        .serve()
+        .await?;
+    drop(server);
+    Ok(())
+}
+let _ = run; // never called: server.run_until_signal() blocks forever — see prose above
 ```
 (`src/listener/mod.rs:49–66`, its own module-doc example)
 
@@ -155,13 +236,26 @@ Note this is a NARROWER use of the same Rust mechanism §1's axis traits use: `L
 
 `ListenerBuilder` (`src/listener/handle.rs:82–161`) accumulates its own `serde_json::Map<String, Value>`, exactly like `ClientBuilder` does — plus several fields with no client-side twin (`tls: Option<proxima_tls::TlsConfig>` under `#[cfg(feature = "tls")]`, `pgwire_query`/`dns_handler`/`websocket_handler`/`any_mode`/`extra_protocols`/`blacklist_config` under their own feature gates), each accumulated separately from `spec` because none of them fits a plain `serde_json::Value` key — and implements the identical `SpecBuilder` seam (`src/listener/handle.rs:1126–1139`):
 
-```rust,ignore
-// `impl SpecBuilder for ListenerBuilder` — Rust's orphan rule only permits
-// this because `SpecBuilder` is a LOCAL trait implemented for a LOCAL
-// type here (`ListenerBuilder` lives in this same crate); a doctest
-// compiling against the published `proxima` crate sees `SpecBuilder` as
-// already implemented, so re-declaring the impl is a coherence error, not
-// a stale citation.
+```rust
+// `ListenerBuilder` redeclared locally, mirroring only the one field this
+// impl touches: the real `push` body reads `self.spec` (the FIELD, not the
+// `.spec(key, value)` method below) directly, and that field is private —
+// inaccessible regardless of where the impl lives. Declaring both the
+// struct and the impl together here, in the same module, is what makes
+// `self.spec` resolve, the same way section 5's `AndThen` excerpt does in
+// 00-foundations.md.
+struct ListenerBuilder {
+    spec: serde_json::Map<String, Value>,
+}
+
+impl ListenerBuilder {
+    #[must_use]
+    fn spec(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.spec.insert(key.into(), value);
+        self
+    }
+}
+
 impl proxima_config::sugar::SpecBuilder for ListenerBuilder {
     fn set(self, key: &str, value: impl Into<Value>) -> Self {
         self.spec(key, value.into())
@@ -179,10 +273,31 @@ impl proxima_config::sugar::SpecBuilder for ListenerBuilder {
 
 On top of that seam, `ListenerBuilder` gets its OWN axis traits — `ListenerTransportExt` (`src/listener/transport.rs`) and `ListenerProtocolExt` (`src/listener/protocol.rs`) — separate types from the client's `ClientTransportExt`/`ClientProtocolExt`, not the same blanket trait reused. Bring them into scope with `use proxima::{ListenerTransportExt, ListenerProtocolExt};` (or `proxima::prelude::*`). A unit test proves the two sides still lower to identical spec keys for the axes they share, even though the trait behind each is now a different type (`listener_builder_mirrors_client_builder_axis_keys`, `src/listener/handle.rs:1254–1271`):
 
-```rust,ignore
-// `.spec` is a private field on `ListenerBuilder`, visible only from
-// inside the crate's own `#[cfg(test)] mod tests` — the real assertion
-// this excerpts from.
+```rust
+// `ListenerBuilder` redeclared locally again (see §4's `SpecBuilder`
+// excerpt above for why): `.spec` is a private field, visible only from
+// inside the crate's own `#[cfg(test)] mod tests` in the real source —
+// declaring the struct and its real `.https()`/`.spec()` methods together
+// here is what makes the field accessible to this assertion.
+use serde_json::json;
+
+#[derive(Default)]
+struct ListenerBuilder {
+    spec: serde_json::Map<String, Value>,
+}
+
+impl ListenerBuilder {
+    #[must_use]
+    fn spec(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.spec.insert(key.into(), value);
+        self
+    }
+
+    fn https(self, bind: impl Into<String>) -> Self {
+        self.spec("http", Value::String(bind.into()))
+    }
+}
+
 let fluent = ListenerBuilder::default()
     .https("127.0.0.1:8080")
     .spec("transport", json!("tls"));
@@ -217,36 +332,101 @@ One term this section needs before its code makes sense: a `ListenProtocol` (`pr
 
 On the client side, `load()` reads the accumulated spec `Value` and dispatches on which key is present, ALSO now checking `transport == "quic"` to route through the native h3 upstream instead of the ordinary h1/h2 client (`src/load.rs:487–511`, abbreviated):
 
-```rust,ignore
-// excerpted from `build_pipe`'s match arm — `context`/`value` are that
-// function's own parameters, not redeclared here.
-let (handle, kv_backend): (PipeHandle, Option<Arc<dyn KvHandle>>) =
-    if let Some(http) = value.get("http") {
-        if value.get("transport").and_then(Value::as_str) == Some("quic") {
-            let canonical = canonical_h3(http, value)?;
-            let factory = context.registry.get("h3-native")?;
-            (factory.build(&canonical, None).await?, None)
-        } else {
-            let canonical = canonical_http(http, value)?;
-            let key = match value.get("wire").and_then(Value::as_str) {
-                Some("tokio") if context.registry.get("http-tokio").is_ok() => "http-tokio",
-                _ => "http",
-            };
-            let factory = context.registry.get(key)?;
-            (factory.build(&canonical, None).await?, None)
+```rust
+// wrapped in a real, self-contained fn mirroring `build_pipe`'s own
+// signature (`context`/`value` are its real parameters); `canonical_http`/
+// `canonical_h3` are real, private free functions repeated verbatim
+// (`src/load.rs:607–626,638–650`) since `build_pipe` itself is private too
+// and this excerpt cannot call the real one directly.
+fn canonical_http(http_field: &Value, full: &Value) -> Result<Value, ProximaError> {
+    let url = http_field
+        .as_str()
+        .ok_or_else(|| ProximaError::Config("`http` shorthand must be a string url".into()))?;
+    let mut spec = serde_json::Map::new();
+    spec.insert("url".into(), Value::String(url.into()));
+    for forwarded in [
+        "name",
+        "timeout",
+        "method",
+        "headers",
+        "proxy",
+        "response",
+        "transport",
+    ] {
+        if let Some(value) = full.get(forwarded) {
+            spec.insert(forwarded.into(), value.clone());
         }
-    } else if let Some(grpc) = value.get("grpc") {
-        // ...
+    }
+    Ok(Value::Object(spec))
+}
+
+fn canonical_h3(http_field: &Value, full: &Value) -> Result<Value, ProximaError> {
+    let url = http_field
+        .as_str()
+        .ok_or_else(|| ProximaError::Config("`http` shorthand must be a string url".into()))?;
+    let mut spec = serde_json::Map::new();
+    spec.insert("url".into(), Value::String(url.into()));
+    for forwarded in ["addr", "server_name", "insecure", "timeout_ms"] {
+        if let Some(value) = full.get(forwarded) {
+            spec.insert(forwarded.into(), value.clone());
+        }
+    }
+    Ok(Value::Object(spec))
+}
+
+async fn build_pipe_http_arm(
+    context: &LoadContext,
+    value: &Value,
+) -> Result<(PipeHandle, Option<Arc<dyn KvHandle>>), ProximaError> {
+    let (handle, kv_backend): (PipeHandle, Option<Arc<dyn KvHandle>>) =
+        if let Some(http) = value.get("http") {
+            if value.get("transport").and_then(Value::as_str) == Some("quic") {
+                let canonical = canonical_h3(http, value)?;
+                let factory = context.registry.get("h3-native")?;
+                (factory.build(&canonical, None).await?, None)
+            } else {
+                let canonical = canonical_http(http, value)?;
+                let key = match value.get("wire").and_then(Value::as_str) {
+                    Some("tokio") if context.registry.get("http-tokio").is_ok() => "http-tokio",
+                    _ => "http",
+                };
+                let factory = context.registry.get(key)?;
+                (factory.build(&canonical, None).await?, None)
+            }
+        } else if let Some(_grpc) = value.get("grpc") {
+            // ...
+            return Err(ProximaError::Config("elided: see src/load.rs for the grpc arm".into()));
+        } else {
+            return Err(ProximaError::Config("elided: see src/load.rs for the remaining arms".into()));
+        };
+    Ok((handle, kv_backend))
+}
 ```
 
 This is the concrete mechanism behind "`.http().quic()` IS h3" (the sugar-composition page, [part 4](./07-sugar-composition.md), teaches this from the reader's side; this is the implementation): `.quic()` never introduces a THIRD protocol key alongside `http`/`grpc` — it's a modifier on `http` that `load()` checks once it already knows `http` is present.
 
 `resolve_listen_protocol` is the listen-side twin of that same dispatch (`src/listener/handle.rs:952–971`, current source, with the `pgwire_axis`/`dns_axis` marker-key checks the client side has no equivalent of):
 
-```rust,ignore
-// `ListenProtocol`, `h2_listen_protocol`, `h3_native_listen_protocol` are
-// crate-internal (the latter two `fn`-private helpers a few lines below
-// this one in the real file) — not reachable from an external doctest.
+```rust
+// `h2_listen_protocol`/`h3_native_listen_protocol` are crate-private
+// helpers a few lines below this one in the real file — repeated verbatim
+// (the `any-listener`-feature-on arm of each, the one active under this
+// gate's own feature union) rather than assumed away.
+fn h2_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
+    let protocol: Arc<dyn ListenProtocol> =
+        Arc::new(proxima::listeners::AnyListenProtocol::single_candidate(
+            "h2",
+            Arc::new(proxima::listeners::H2PriorKnowledgeAnyProtocol::new()),
+        ));
+    Ok(("h2".to_string(), Some(protocol)))
+}
+
+fn h3_native_listen_protocol() -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
+    let protocol: Arc<dyn ListenProtocol> =
+        Arc::new(proxima::listeners::H3NativeListenProtocol::new());
+    Ok(("h3-native".to_string(), Some(protocol)))
+}
+
 fn resolve_listen_protocol(
     spec: &serde_json::Map<String, Value>,
 ) -> Result<(String, Option<Arc<dyn ListenProtocol>>), ProximaError> {
@@ -296,10 +476,26 @@ TLS is not a plain optional field on `ListenerSpec`/`Listener` — it composes a
 
 Walk that "matrix" claim through concretely: a field on `ListenerSpec` is one slot, shared no matter which protocol you picked — but the *code that reads it* still has to live somewhere. Add `h2`/`h3-native` as protocols and TLS-for-h2, TLS-for-h3 either both need their own copy of that same TLS-reading code, or the field silently does nothing for them — one axis (protocol) times another (tls on/off) has to be handled somewhere, and a struct field forces that somewhere to be *inside* each protocol implementation. A decorator sidesteps the multiplication entirely: `TlsListenProtocol` is generic over `Arc<dyn ListenProtocol>`, wraps *any* of them uniformly, and only one implementation of "stamp the TLS marker into the spec" needs to exist, ever (`proxima-listen/src/handle.rs:497–530`):
 
-```rust,ignore
-// `proxima_listen::TlsListenProtocol` already exists as a public type —
-// this excerpt redeclares its definition to show the real source, which a
-// doctest can never do (E0255: the name is already defined).
+```rust
+// `proxima_listen::TlsListenProtocol` already exists as a public type but
+// is not glob-imported by this gate's own prelude, so redeclaring it here
+// (with `attach_tls_to_spec`, its own private helper, repeated verbatim —
+// `proxima-listen/src/handle.rs:467-478`) does not collide with it.
+use futures::channel::oneshot;
+
+fn attach_tls_to_spec(spec: &mut Value, tls: &proxima_tls::TlsConfig) {
+    if !matches!(spec, Value::Object(_)) {
+        *spec = Value::Object(serde_json::Map::new());
+    }
+    let Value::Object(table) = spec else {
+        return;
+    };
+    table.insert(
+        proxima_tls::SPEC_KEY.to_string(),
+        proxima_tls::config_to_spec_value(tls),
+    );
+}
+
 #[cfg(feature = "tls")]
 pub struct TlsListenProtocol {
     inner: Arc<dyn ListenProtocol>,
@@ -335,18 +531,42 @@ impl ListenProtocol for TlsListenProtocol {
 `ListenerBuilder::tls(config)` (the inherent `.tls(TlsConfig)` from §4's table) is the fluent front door onto this decorator — it does **not** write a spec key at all (`src/listener/handle.rs:414–417`, and proven directly by a unit test, `tls_composes_a_decorator_instead_of_writing_a_spec_key`, `src/listener/handle.rs:1332–1342`):
 
 ```rust
-#[cfg(feature = "tls")]
-#[must_use]
-pub fn tls(mut self, tls: proxima_tls::TlsConfig) -> Self {
-    self.tls = Some(tls);
-    self
+// `ListenerBuilder` redeclared locally (mechanically detected as a bare
+// associated-fn otherwise — see §4/§7's identical treatment above): `self`
+// is only legal inside a real enclosing impl.
+struct ListenerBuilder {
+    tls: Option<proxima_tls::TlsConfig>,
+}
+
+impl ListenerBuilder {
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn tls(mut self, tls: proxima_tls::TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
 }
 ```
 
-```rust,ignore
+```rust
 // test: tls_composes_a_decorator_instead_of_writing_a_spec_key
-// `.tls`/`.spec` are private fields, visible only inside the crate's own
-// `#[cfg(test)] mod tests`.
+// `ListenerBuilder` redeclared locally once more (see §4): `.tls`/`.spec`
+// are private fields, visible only inside the crate's own `#[cfg(test)]
+// mod tests` in the real source.
+#[derive(Default)]
+struct ListenerBuilder {
+    spec: serde_json::Map<String, Value>,
+    tls: Option<proxima_tls::TlsConfig>,
+}
+
+impl ListenerBuilder {
+    #[must_use]
+    pub fn tls(mut self, tls: proxima_tls::TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+}
+
 let fluent = ListenerBuilder::default().tls(proxima_tls::TlsConfig::self_signed());
 assert!(fluent.tls.is_some(), ".tls(config) must accumulate on the builder, not the spec");
 assert!(
@@ -357,9 +577,39 @@ assert!(
 
 `.serve()` reads that separately-accumulated `self.tls` field and calls `compose_tls`, which wraps whatever `resolve_listen_protocol` already picked (`src/listener/handle.rs:1038–1067`):
 
-```rust,ignore
+```rust
 // `NamedListenProtocol` and `http_listen_protocol_for_tls` are
-// crate-private helpers this excerpt does not repeat.
+// crate-private helpers, repeated verbatim (`src/listener/handle.rs:
+// 1073-1094,1105-1107`, the `any(http1, http1-native)` arm of the latter —
+// the one active under this gate's own feature union; `use
+// futures::channel::oneshot;` carries forward from §7's `TlsListenProtocol`
+// block above).
+struct NamedListenProtocol {
+    name: String,
+    inner: Arc<dyn ListenProtocol>,
+}
+
+impl ListenProtocol for NamedListenProtocol {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn serve(
+        &self,
+        bind: SocketAddr,
+        dispatch: PipeHandle,
+        spec: &Value,
+        context: ServeContext,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+        self.inner.serve(bind, dispatch, spec, context, shutdown)
+    }
+}
+
+fn http_listen_protocol_for_tls() -> Result<Arc<dyn ListenProtocol>, ProximaError> {
+    Ok(Arc::new(proxima::listeners::HttpListenProtocol::new()))
+}
+
 #[cfg(feature = "tls")]
 fn compose_tls(
     tls: Option<proxima_tls::TlsConfig>,
@@ -387,22 +637,39 @@ One detail worth teaching in its own right: the registry key gets renamed to `"{
 `compose_tls` above (and `resolve_listen_protocol`'s h2/h3 arms) both produce the same shape: a registry-name string, plus an *optional*, already-built `Arc<dyn ListenProtocol>` to self-register instead of relying on a by-name lookup. That shape isn't invented by the umbrella crate — `ListenerSpec::protocol` already exists for exactly this, one layer down in `proxima-listen`. But the escape hatch a THIRD PARTY actually reaches for is one level higher and simpler: `ListenerBuilder::protocol(impl AnyProtocol)` (`src/listener/handle.rs:278–292`), the listener-side mirror of the client's `.protocol(impl ClientProtocol)` (`src/client/handle.rs:553–561`):
 
 ```rust
-#[cfg(feature = "any-listener")]
-#[must_use]
-pub fn protocol(mut self, protocol: impl proxima_listen::any::AnyProtocol) -> Self {
-    let protocol: Arc<dyn proxima_listen::any::AnyProtocol> = Arc::new(protocol);
-    let name = protocol.name().to_string();
-    self.any_mode = Some(match self.any_mode.take() {
-        None | Some(AnyMode::All) => AnyMode::All,
-        Some(AnyMode::Subset(mut names)) => {
-            if !names.contains(&name) {
-                names.push(name);
+// `ListenerBuilder`/`AnyMode` redeclared locally (mechanically detected as
+// a bare associated-fn otherwise): `self` is only legal inside a real
+// enclosing impl, and `AnyMode` (`src/listener/handle.rs:165-171`) is
+// private to that module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnyMode {
+    All,
+    Subset(Vec<String>),
+}
+
+struct ListenerBuilder {
+    any_mode: Option<AnyMode>,
+    extra_protocols: Vec<Arc<dyn proxima_listen::any::AnyProtocol>>,
+}
+
+impl ListenerBuilder {
+    #[cfg(feature = "any-listener")]
+    #[must_use]
+    pub fn protocol(mut self, protocol: impl proxima_listen::any::AnyProtocol) -> Self {
+        let protocol: Arc<dyn proxima_listen::any::AnyProtocol> = Arc::new(protocol);
+        let name = protocol.name().to_string();
+        self.any_mode = Some(match self.any_mode.take() {
+            None | Some(AnyMode::All) => AnyMode::All,
+            Some(AnyMode::Subset(mut names)) => {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+                AnyMode::Subset(names)
             }
-            AnyMode::Subset(names)
-        }
-    });
-    self.extra_protocols.push(protocol);
-    self
+        });
+        self.extra_protocols.push(protocol);
+        self
+    }
 }
 ```
 
@@ -413,33 +680,86 @@ This is the SAME mechanism `.kafka(handler)`/`.mqtt(handler)`/`.amqp(handler)`/`
 `ListenerBuilder::serve()` is a terminal — it consumes the builder and returns a running `Server`. Reading its full body (`src/listener/handle.rs:449–580`) end to end is the fastest way to see that it invents no new serve loop; it is the exact `App::new()? -> app.mount(...)? -> app.serve(config).await?` idiom from `examples/hello/main.rs`, automated, with two guard checks up front:
 
 ```rust
-pub async fn serve(self) -> Result<Server, ProximaError> {
-    reject_dead_axes(&self.spec)?;
-    reject_invalid_axis_combinations(&self)?;
-    #[cfg(all(feature = "tls", feature = "pgwire"))]
-    if self.tls.is_some() && self.pgwire_query.is_some() {
+// `ListenerBuilder` redeclared locally once more (see §4/§7/§8 above),
+// this time with every field this specific method touches. `bind_from_spec`
+// is repeated verbatim from §10 below (this section comes first in the
+// document, so it cannot forward from there). `reject_dead_axes` is
+// repeated verbatim (its `tls`-feature-on arm, `src/listener/handle.rs:
+// 906-920`, plus its own `tls_marker_present` sibling). `reject_invalid_
+// axis_combinations`'s real body is genuinely out of scope for this
+// section (part 4 of the sugar-composition tutorial teaches it directly)
+// — stood in here as a stub that always accepts, matching this excerpt's
+// own "..." elisions for the pgwire/dns/any() registration steps below.
+struct ListenerBuilder {
+    spec: serde_json::Map<String, Value>,
+    bind: Option<std::net::SocketAddr>,
+    dispatch: Option<PipeHandle>,
+    #[cfg(feature = "tls")]
+    tls: Option<proxima_tls::TlsConfig>,
+    #[cfg(feature = "pgwire")]
+    pgwire_query: Option<()>,
+}
+
+fn tls_marker_present(spec: &serde_json::Map<String, Value>) -> bool {
+    spec.contains_key(proxima_tls::SPEC_KEY)
+}
+
+fn reject_dead_axes(spec: &serde_json::Map<String, Value>) -> Result<(), ProximaError> {
+    if spec.contains_key("proxy") {
         return Err(ProximaError::Config(
-            "Listener::builder(): .pgwire(query) manages its own TLS upgrade \
-             (proxima-pgwire's `listen` feature); .tls(config) would double-wrap it \
-             with the wrong (http) protocol underneath — drop one"
-                .into(),
+            "Listener::builder(): .proxy(url) is a client-side egress axis with no listener meaning; drop it".into(),
         ));
     }
-    let bind = self.bind.or_else(|| bind_from_spec(&self.spec)).ok_or_else(|| {
-        ProximaError::Config(
-            "Listener::builder(): .bind(addr) (or .http(bind.to_string())) is required before .serve()".into(),
-        )
-    })?;
-    let dispatch = self.dispatch.ok_or_else(|| {
-        ProximaError::Config("Listener::builder(): .handle(pipe) is required before .serve()".into())
-    })?;
-    // ... websocket-wrap / pgwire / dns / any() registration, then:
-    let app = App::new()?;
-    // ... register any extra protocol resolve_listen_protocol/compose_tls/
-    //     .any()/.protocol() produced ...
-    app.mount("/{*path}", MountTarget::Handle(dispatch))?;
-    let config = RunConfig { bind, protocol, spec: Value::Object(self.spec) };
-    app.serve(config).await
+    if spec.get("transport").and_then(Value::as_str) == Some("tls") && !tls_marker_present(spec) {
+        return Err(ProximaError::Config(
+            "Listener::builder(): bare .tls() only sets a marker key and terminates nothing; \
+             call .tls(TlsConfig::self_signed() | TlsConfig::pem(..) | TlsConfig::files(..)?), \
+             which requires the `tls` feature".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_invalid_axis_combinations(_builder: &ListenerBuilder) -> Result<(), ProximaError> {
+    // elided: see [Part 4](./07-sugar-composition.md) for the real,
+    // taught-in-full axis-pair rejection this stands in for.
+    Ok(())
+}
+
+fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<std::net::SocketAddr> {
+    spec.get("http").and_then(Value::as_str).and_then(|value| value.parse().ok())
+}
+
+impl ListenerBuilder {
+    pub async fn serve(self) -> Result<Server, ProximaError> {
+        reject_dead_axes(&self.spec)?;
+        reject_invalid_axis_combinations(&self)?;
+        #[cfg(all(feature = "tls", feature = "pgwire"))]
+        if self.tls.is_some() && self.pgwire_query.is_some() {
+            return Err(ProximaError::Config(
+                "Listener::builder(): .pgwire(query) manages its own TLS upgrade \
+                 (proxima-pgwire's `listen` feature); .tls(config) would double-wrap it \
+                 with the wrong (http) protocol underneath — drop one"
+                    .into(),
+            ));
+        }
+        let bind = self.bind.or_else(|| bind_from_spec(&self.spec)).ok_or_else(|| {
+            ProximaError::Config(
+                "Listener::builder(): .bind(addr) (or .http(bind.to_string())) is required before .serve()".into(),
+            )
+        })?;
+        let dispatch = self.dispatch.ok_or_else(|| {
+            ProximaError::Config("Listener::builder(): .handle(pipe) is required before .serve()".into())
+        })?;
+        // ... websocket-wrap / pgwire / dns / any() registration, then:
+        let app = App::new()?;
+        // ... register any extra protocol resolve_listen_protocol/compose_tls/
+        //     .any()/.protocol() produced ...
+        let protocol: String = "http".to_string();
+        app.mount("/{*path}", MountTarget::Handle(dispatch))?;
+        let config = RunConfig { bind, protocol, spec: Value::Object(self.spec) };
+        app.serve(config).await
+    }
 }
 ```
 
@@ -473,16 +793,25 @@ fn bind_from_spec(spec: &serde_json::Map<String, Value>) -> Option<SocketAddr> {
 
 **`.tls(TlsConfig)` and `.grpc()` are inherent, not trait methods, and for two different reasons.** `.tls()` on the client is bare — zero arguments, because ALPN negotiation (§6) does the actual work; all `.tls()` needs to do is flip the transport marker. A listener terminating TLS needs real key material — a certificate and a private key, or a self-signed generator — which a zero-arg method has no slot for. So `ListenerBuilder` defines its own `.tls(proxima_tls::TlsConfig)`, a plain inherent method — not a trait implementation at all, because minting `ListenerSecurityExt` for exactly one method with no second implementor would be a trait with a single member (see the module doc's own reasoning, `src/listener/transport.rs`'s sibling `src/client/security.rs:1–12`, which explains the client side's OWN choice not to mint a trait either, for the opposite reason — it needs no divergence to defend against). `reject_dead_axes` (`src/listener/handle.rs:906–921`) is the safety net for the one remaining door: a caller reaching a bare `.spec("transport", "tls")` directly (or a `tls`-feature-off build, where the inherent `.tls(TlsConfig)` doesn't exist to intercept anything) would otherwise leave a listener silently unterminated:
 
-```rust,ignore
-// the second of `reject_dead_axes`'s two checks — `spec` is that
-// function's own parameter, `tls_marker_present` its private sibling
-// helper; neither is repeated here.
-if spec.get("transport").and_then(Value::as_str) == Some("tls") && !tls_marker_present(spec) {
-    return Err(ProximaError::Config(
-        "Listener::builder(): bare .tls() only sets a marker key and terminates nothing; \
-         call .tls(TlsConfig::self_signed() | TlsConfig::pem(..) | TlsConfig::files(..)?), \
-         which requires the `tls` feature".into(),
-    ));
+```rust
+// `tls_marker_present`, `reject_dead_axes`'s own private sibling helper,
+// repeated verbatim (the `tls`-feature-on arm, `src/listener/handle.rs:
+// 922-925`) so this — the second of `reject_dead_axes`'s two checks — has
+// something real to call; wrapped in a fn taking `spec` as its own real
+// parameter, mirroring `reject_dead_axes`'s own signature.
+fn tls_marker_present(spec: &serde_json::Map<String, Value>) -> bool {
+    spec.contains_key(proxima_tls::SPEC_KEY)
+}
+
+fn reject_dead_axes_tls_check(spec: &serde_json::Map<String, Value>) -> Result<(), ProximaError> {
+    if spec.get("transport").and_then(Value::as_str) == Some("tls") && !tls_marker_present(spec) {
+        return Err(ProximaError::Config(
+            "Listener::builder(): bare .tls() only sets a marker key and terminates nothing; \
+             call .tls(TlsConfig::self_signed() | TlsConfig::pem(..) | TlsConfig::files(..)?), \
+             which requires the `tls` feature".into(),
+        ));
+    }
+    Ok(())
 }
 ```
 

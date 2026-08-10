@@ -429,6 +429,10 @@ tempfile.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 once_cell = "1.21.4"
 proxima-primitives = { workspace = true, features = ["test-support"] }
+proc-macro2.workspace = true
+syn = { workspace = true, features = ["full"] }
+quote.workspace = true
+proc-macro-crate = "3.5.0"
 
 [lints]
 workspace = true

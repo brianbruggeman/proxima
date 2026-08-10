@@ -22,10 +22,103 @@ The wire returns one of three outcomes per attempt: `Dropped`, `DeliveredAckLost
 
 One attempt per message. A first-attempt drop is a permanent loss; nobody watches for the ack (`delivery/main.rs:201-227`):
 
-```rust,ignore
-// excerpt: `id`/`script`/`landed` are placeholder names for values built
-// earlier in the same loop — see delivery/main.rs:204-227 for the real,
-// complete construction and driver loop.
+```rust
+// the wire, sink, and driver, repeated verbatim so `id`/`script`/`landed`
+// (placeholders for values the real driver loop builds) have real values
+// here too — `(1, &[WireEvent::Dropped, WireEvent::DeliveredAckOk])` is
+// `MESSAGE_SCRIPTS`'s own first entry (`delivery/main.rs:186-199`).
+use std::collections::HashSet;
+use std::rc::Rc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireEvent {
+    Dropped,
+    DeliveredAckLost,
+    DeliveredAckOk,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SendOutcome {
+    id: u32,
+    event: WireEvent,
+}
+
+impl SendOutcome {
+    fn is_success(self) -> bool {
+        self.event == WireEvent::DeliveredAckOk
+    }
+}
+
+#[derive(Clone)]
+enum SinkLedger {
+    Raw(Rc<RefCell<Vec<u32>>>),
+    Dedup(Rc<RefCell<HashSet<u32>>>, Rc<Cell<u32>>),
+}
+
+impl SinkLedger {
+    fn record(&self, id: u32) {
+        match self {
+            SinkLedger::Raw(landed) => landed.borrow_mut().push(id),
+            SinkLedger::Dedup(seen, rejected) => {
+                if !seen.borrow_mut().insert(id) {
+                    rejected.set(rejected.get() + 1);
+                }
+            }
+        }
+    }
+}
+
+struct UnreliableSink {
+    id: u32,
+    script: &'static [WireEvent],
+    attempt: Cell<usize>,
+    ledger: SinkLedger,
+}
+
+impl UnreliableSink {
+    fn new(id: u32, script: &'static [WireEvent], ledger: SinkLedger) -> Self {
+        Self {
+            id,
+            script,
+            attempt: Cell::new(0),
+            ledger,
+        }
+    }
+}
+
+impl Pipe for UnreliableSink {
+    type In = ();
+    type Out = SendOutcome;
+    type Err = Infallible;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<SendOutcome, Infallible>> {
+        let index = self.attempt.get();
+        self.attempt.set(index + 1);
+        let event = self.script[index];
+        if matches!(
+            event,
+            WireEvent::DeliveredAckLost | WireEvent::DeliveredAckOk
+        ) {
+            self.ledger.record(self.id);
+        }
+        let outcome = SendOutcome { id: self.id, event };
+        async move { Ok(outcome) }
+    }
+}
+
+fn block_on_ready<Fut: Future>(future: Fut) -> Fut::Output {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = core::pin::pin!(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => unreachable!("delivery example futures resolve on first poll"),
+    }
+}
+
+let id = 1;
+let script: &'static [WireEvent] = &[WireEvent::Dropped, WireEvent::DeliveredAckOk];
+let landed = Rc::new(RefCell::new(Vec::new()));
 let sink = UnreliableSink::new(id, script, SinkLedger::Raw(landed));
 block_on_ready(sink.call(()));   // one attempt, whatever happens happens
 ```
@@ -44,17 +137,30 @@ at-most-once:  sent 5  delivered 3  lost 2  duplicates 0
 
 Keep sending until the ack is observed, giving up only when the attempt budget is spent — the retry-until-ack loop, its give-up a fired `Signal` (`delivery/main.rs:160-181`):
 
-```rust,ignore
-// excerpt: `SendOutcome` is `UnreliableSink::Out`, private to this example
-// binary, so this block cannot resolve as a standalone doctest — see
-// delivery/main.rs:160-181 for the full function, or run
-// `cargo run --example delivery`.
+```rust
+// `AttemptBudget` (real, `delivery/main.rs:148-158`) repeated so the
+// signature resolves; `UnreliableSink`/`SendOutcome`/`block_on_ready` carry
+// forward from §1 above. `.unwrap_or_else(|never: Infallible| match
+// never {})` is the one line this excerpt had dropped relative to the real
+// function — `sink.call(())` returns `Result<SendOutcome, Infallible>`, not
+// `SendOutcome`, so `outcome.is_success()` needs it unwrapped first.
+struct AttemptBudget {
+    max_attempts: u32,
+}
+
+impl AttemptBudget {
+    fn exhausted(&self, attempts_made: u32) -> bool {
+        attempts_made >= self.max_attempts
+    }
+}
+
 fn send_until_acked(sink: &UnreliableSink, budget: &AttemptBudget) -> (SendOutcome, u32) {
     let give_up = Signal::new();
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let outcome = block_on_ready(sink.call(()));
+        let outcome =
+            block_on_ready(sink.call(())).unwrap_or_else(|never: Infallible| match never {});
         if outcome.is_success() { return (outcome, attempts); }
         if budget.exhausted(attempts) { give_up.fire(); }
         if give_up.is_fired() { return (outcome, attempts); }   // stop at the checkpoint
@@ -74,11 +180,12 @@ at-least-once: sent 5  delivered 5 (raw 7)  lost 0  duplicates 2
 
 The **same** retry-until-ack loop, plus one more stage: the sink remembers every id it has recorded and rejects a repeat instead of counting it twice (`delivery/main.rs:265-300`):
 
-```rust,ignore
-// excerpt: `seen`/`rejected` are placeholder names for the shared
-// `Rc<RefCell<HashSet<u32>>>` / `Rc<Cell<u32>>` built earlier in the same
-// function — see delivery/main.rs:268-300 for the real, complete
-// construction.
+```rust
+// `seen`/`rejected` given real values (`delivery/main.rs:269-270`) instead
+// of the placeholder names the real driver loop builds them under —
+// `SinkLedger`/`Rc`/`HashSet`/`Cell` all carry forward from §1 above.
+let seen: Rc<RefCell<HashSet<u32>>> = Rc::new(RefCell::new(HashSet::new()));
+let rejected: Rc<Cell<u32>> = Rc::new(Cell::new(0));
 let ledger = SinkLedger::Dedup(seen, rejected);         // HashSet of ids seen
 // SinkLedger::record: if !seen.insert(id) { rejected += 1 }   // a repeat is rejected, not stored
 ```

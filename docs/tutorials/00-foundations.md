@@ -195,9 +195,28 @@ impl<P: Pipe> PipeExt for P {}
 - `second`'s `In` must equal `first`'s `Out` (`Next: Pipe<In = Self::Out>`) — the output of one must fit the input of the next.
 - `second`'s `Err` must be able to absorb `first`'s `Err` (`Next::Err: From<Self::Err>` — `From` is the standard library's "can be built from" conversion) — so a failure anywhere in the chain surfaces as one error type.
 
-`and_then` returns `AndThen<First, Second>`, a real struct (`primitives.rs:189–193`) that is *itself* a `Pipe` (`primitives.rs:203–221`):
+`and_then` returns `AndThen<First, Second>`, a real struct (`primitives.rs:190–200`) that is *itself* a `Pipe` (`primitives.rs:203–221`):
 
 ```rust
+// the struct and its constructor are repeated here alongside the impl (all
+// real, verbatim) so `self.first`/`self.second` resolve: those fields are
+// private, and privacy is scoped to the defining module — accessible only
+// because struct and impl are quoted together in this one module. This
+// local `AndThen` is never reused past this block (the harness never
+// forwards it forward — a same-name real type exists everywhere else).
+struct AndThen<First, Second> {
+    first: First,
+    second: Second,
+}
+
+impl<First, Second> AndThen<First, Second> {
+    /// Construct a two-stage `AndThen`. Nest for longer chains.
+    #[must_use]
+    const fn new(first: First, second: Second) -> Self {
+        Self { first, second }
+    }
+}
+
 impl<First, Second> Pipe for AndThen<First, Second>
 where
     First: Pipe,
@@ -257,26 +276,122 @@ impl Pipe for Halve {
 }
 ```
 
-And the actual chain, from the same file's test module (`primitives.rs:587–590`):
+And the actual chain, from the same file's test module (`primitives.rs:588–591`):
 
 ```rust
-// 5 -> increment -> 6 -> halve -> 3. Both stages succeed.
+// the real Pipe trait, spelled out fully here since this doctest's own
+// hand-rolled `trait Pipe` from section 2 is also in scope by this point —
+// fully qualifying picks the real one so `chain` (a real AndThen) resolves.
+#[derive(Debug, PartialEq, Eq)]
+struct Overflow;
+
+struct Increment;
+impl proxima_primitives::pipe::primitives::Pipe for Increment {
+    type In = u64;
+    type Out = u64;
+    type Err = Overflow;
+    fn call(&self, input: u64) -> impl Future<Output = Result<u64, Overflow>> {
+        async move { input.checked_add(1).ok_or(Overflow) }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HalveError {
+    Odd,
+    Upstream(Overflow),
+}
+impl From<Overflow> for HalveError {
+    fn from(value: Overflow) -> Self {
+        HalveError::Upstream(value)
+    }
+}
+
+struct Halve;
+impl proxima_primitives::pipe::primitives::Pipe for Halve {
+    type In = u64;
+    type Out = u64;
+    type Err = HalveError;
+    fn call(&self, input: u64) -> impl Future<Output = Result<u64, HalveError>> {
+        async move {
+            if input.is_multiple_of(2) {
+                Ok(input / 2)
+            } else {
+                Err(HalveError::Odd)
+            }
+        }
+    }
+}
+
+// 5 -> increment -> 6 -> halve -> 3. Both stages succeed. The real test is a
+// plain sync fn and needs block_on to bridge into async; this doctest is
+// already inside an async block (the harness's own wrapper), so `.await`
+// alone reaches the same result without nesting one block_on inside another.
 let chain = Increment.and_then(Halve);
-let out = block_on(Pipe::call(&chain, 5)).expect("even intermediate halves");
+let out = proxima_primitives::pipe::primitives::Pipe::call(&chain, 5)
+    .await
+    .expect("even intermediate halves");
 assert_eq!(out, 3);
 ```
 
 That `From<Overflow> for HalveError` impl is *why* `?` works inside `AndThen::call`: it is what lets `self.first.call(input).await?` convert an `Overflow` into a `HalveError` automatically. This is the composition law of the whole algebra: error types absorb their upstream's errors via `From`, so a failure anywhere in a long chain always surfaces as one well-typed error at the end.
 
-The chain also genuinely stops on the first failure — it does not run the second stage "just in case." A test proves it by recording whether the second stage ever ran (`primitives.rs:684–696`):
+The chain also genuinely stops on the first failure — it does not run the second stage "just in case." A test proves it by recording whether the second stage ever ran (`primitives.rs:685–696`):
 
 ```rust
+#[derive(Debug, PartialEq, Eq)]
+struct Overflow;
+
+#[derive(Debug, PartialEq, Eq)]
+enum HalveError {
+    Odd,
+    Upstream(Overflow),
+}
+impl From<Overflow> for HalveError {
+    fn from(value: Overflow) -> Self {
+        HalveError::Upstream(value)
+    }
+}
+
+/// Always-erroring first stage — used to prove a downstream stage never
+/// runs when an upstream stage short-circuits the chain.
+struct AlwaysFail;
+impl proxima_primitives::pipe::primitives::Pipe for AlwaysFail {
+    type In = u64;
+    type Out = u64;
+    type Err = Overflow;
+    fn call(&self, _input: u64) -> impl Future<Output = Result<u64, Overflow>> {
+        async move { Err(Overflow) }
+    }
+}
+
+/// Records whether it was ever invoked, via a caller-owned flag borrowed
+/// for the probe's lifetime.
+struct SpyRef<'flag> {
+    ran: &'flag core::cell::Cell<bool>,
+}
+impl proxima_primitives::pipe::primitives::Pipe for SpyRef<'_> {
+    type In = u64;
+    type Out = u64;
+    type Err = HalveError;
+    fn call(&self, input: u64) -> impl Future<Output = Result<u64, HalveError>> {
+        self.ran.set(true);
+        async move { Ok(input) }
+    }
+}
+
+// the doctest harness's own prelude glob-imports `#[proxima::test]` under
+// the same name `test`; this explicit import outranks that glob so the
+// plain std `#[test]` below (what the real crate's test module uses) is
+// the one that resolves.
+use std::prelude::v1::test;
+
 #[test]
 fn and_then_short_circuits_before_the_second_stage_on_first_stage_error() {
     let ran = core::cell::Cell::new(false);
     let chain = AlwaysFail.and_then(SpyRef { ran: &ran });
 
-    let err = block_on(Pipe::call(&chain, 1)).expect_err("first stage always fails");
+    let err = block_on(proxima_primitives::pipe::primitives::Pipe::call(&chain, 1))
+        .expect_err("first stage always fails");
 
     assert_eq!(err, HalveError::Upstream(Overflow));
     assert!(
@@ -460,7 +575,7 @@ Same tier (`SendPipe`, from `async fn` plus `send`), same `Clone` bound satisfie
 
 **A real pipe often needs to hold onto something between calls — a client handle, a connection pool, a counter — and a fieldless struct can't do that.** `#[proxima::piped]` covers this shape too, by accepting a second, different kind of input: not a free function, but a plain `impl Foo { .. }` block naming no trait (Rust calls this an *inherent* impl — methods attached directly to a type, as opposed to `impl SomeTrait for Foo`). The macro tells the two shapes apart by grammar alone, before it inspects anything else — `impl ... { ... }` and `fn ... { ... }` never overlap, so trying the impl-block parse first can never mis-route an ordinary function (`pipe_attr.rs:435–440`):
 
-```rust
+```text
 pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream, Error> {
     match parse2::<ItemImpl>(item.clone()) {
         Ok(item_impl) => expand_impl_form(args, item_impl),
@@ -513,9 +628,14 @@ impl ProxyPipe {
 
 The struct is untouched — it was never the boilerplate. What disappeared is the trait header (`impl SendPipe for ProxyPipe { type In = ..; type Out = ..; type Err = ..; }`) and the `async move { .. }` wrapper the hand-written form needed to turn a plain `Result` into a `Future`: the macro reads `In`/`Out`/`Err` straight off `call`'s own signature, the same way it does for the free-function form, and — because `call` here is `async fn` — passes the relocated body straight through as its own future (wrapped only in `async move { .. }`, `pipe_attr.rs:802`), the same zero-cost RPITIT passthrough section 6 already described for `Pipe`/`SendPipe`.
 
-The sync half of this form has a real, `UnpinPipe`-tier example too, in section 11's gate curriculum: `BackendQueue` holds a `RefCell<VecDeque<u32>>` (state), and its `call` was always hand-written to return `impl Future<..> + Unpin` directly, without `async`/`.await` — the same shape as `Ring`/`RingPop` back in section 6. Before (`examples/gate/main.rs:255–266` at `9f63d35b`):
+The sync half of this form has a real, `UnpinPipe`-tier example too, in section 11's gate curriculum: `BackendQueue` holds a `RefCell<VecDeque<u32>>` (state), and its `call` was always hand-written to return `impl Future<..> + Unpin` directly, without `async`/`.await` — the same shape as `Ring`/`RingPop` back in section 6. Before (`examples/gate/main.rs:252–266` at `9f63d35b`):
 
 ```rust
+struct BackendQueue {
+    label: &'static str,
+    items: RefCell<VecDeque<u32>>,
+}
+
 impl UnpinPipe for BackendQueue {
     type In = ();
     type Out = (&'static str, u32);
@@ -530,9 +650,14 @@ impl UnpinPipe for BackendQueue {
 }
 ```
 
-Today (`examples/gate/main.rs:259–267`):
+Today (`examples/gate/main.rs:252–267`):
 
 ```rust
+struct BackendQueue {
+    label: &'static str,
+    items: RefCell<VecDeque<u32>>,
+}
+
 #[piped]
 impl BackendQueue {
     fn call(&self, (): ()) -> impl Future<Output = Result<(&'static str, u32), Exhausted>> + Unpin {
@@ -556,11 +681,71 @@ No `async` anywhere in either version — this `call` already returns the future
 
 A **filter** puts a yes/no rule in front of a pipe. Each item is checked; only the approved ones reach the inner pipe, and the rest are dropped — the inner pipe is never even called for a dropped item.
 
-The rule is an ordinary pipe: `In -> Result<In, Err>` — `Ok` admits (the item survives), `Err` rejects (carrying the reason). You compose it in front of the inner pipe with `.and_then(inner)` (section 5): `AndThen`'s own `?` already short-circuits before the inner pipe runs on a first-stage `Err`, so a rejected item never reaches it. This is a real, and honest, change from an older design: filter used to be a bespoke `Filter<Inner, Predicate>` combinator fed by a `Decide<In>::decide(&self, &In) -> bool` seam that threw the item and the rejection reason away, so two more types (`Rejectable`, `OnReject`) had to be grown just to carry them back — that whole apparatus is deleted now; the collapse is exactly this section's `predicate.and_then(inner)` (`proxima-primitives/src/pipe/filter.rs:24–34`, the module's own comment on why). Here is the real rule and the real call, copied from `examples/filter/main.rs:187–205,25–28`:
+The rule is an ordinary pipe: `In -> Result<In, Err>` — `Ok` admits (the item survives), `Err` rejects (carrying the reason). You compose it in front of the inner pipe with `.and_then(inner)` (section 5): `AndThen`'s own `?` already short-circuits before the inner pipe runs on a first-stage `Err`, so a rejected item never reaches it. This is a real, and honest, change from an older design: filter used to be a bespoke `Filter<Inner, Predicate>` combinator fed by a `Decide<In>::decide(&self, &In) -> bool` seam that threw the item and the rejection reason away, so two more types (`Rejectable`, `OnReject`) had to be grown just to carry them back — that whole apparatus is deleted now; the collapse is exactly this section's `predicate.and_then(inner)` (`proxima-primitives/src/pipe/filter.rs:24–34`, the module's own comment on why). Here is the real rule and the real call, copied from `examples/filter/main.rs:118–215,24–28`:
 
 ```rust
-// the rule: an ordinary pipe, `In -> Result<In, Err>` — admits by returning
-// `Ok`, rejects by returning `Err` with the reason
+#[derive(Clone, Copy, Debug)]
+struct Order {
+    id: u32,
+    amount_cents: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Processed { id: u32 },
+    Dropped { id: u32 },
+}
+
+#[derive(Clone)]
+struct Ledger {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Ledger {
+    fn new() -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+// the ledger's `Err` is `Outcome`, not `Infallible` — it must match the
+// gate's `Err` so `MinAmount.and_then(ledger)` type-checks (`AndThen`
+// requires `Second::Err: From<First::Err>`; here both sides are the same
+// type, so the identity `From` applies).
+impl SendPipe for Ledger {
+    type In = Order;
+    type Out = Outcome;
+    type Err = Outcome;
+
+    fn call(&self, order: Order) -> impl Future<Output = Result<Outcome, Outcome>> + Send {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        async move { Ok(Outcome::Processed { id: order.id }) }
+    }
+}
+
+impl Pipe for Ledger {
+    type In = Order;
+    type Out = Outcome;
+    type Err = Outcome;
+
+    fn call(&self, order: Order) -> impl Future<Output = Result<Outcome, Outcome>> {
+        SendPipe::call(self, order)
+    }
+}
+
+#[derive(Clone)]
+struct MinAmount {
+    threshold_cents: u32,
+}
+
+// `In = Order`, `Out = Order` (the item survives on admit), `Err = Outcome`
+// (the rejection reason on reject) — reusing `Outcome` as the reject payload
+// needs no separate sentinel type.
 impl SendPipe for MinAmount {
     type In = Order;
     type Out = Order;
@@ -578,15 +763,62 @@ impl SendPipe for MinAmount {
     }
 }
 
+impl Pipe for MinAmount {
+    type In = Order;
+    type Out = Order;
+    type Err = Outcome;
+
+    fn call(&self, order: Order) -> impl Future<Output = Result<Order, Outcome>> {
+        SendPipe::call(self, order)
+    }
+}
+
+let (ledger, calls) = Ledger::new();
 let stack = MinAmount {
     threshold_cents: 2_000,
 }
 .and_then(ledger);
 ```
 
-In that example, five orders go in; the two below the threshold are dropped. The proof that the inner pipe is *never even called* for them is not an assertion in the tutorial — it is asserted in the example itself, against a real counter the inner pipe increments on every call (`examples/filter/main.rs:85–90`):
+In that example, five orders go in; the two below the threshold are dropped. The proof that the inner pipe is *never even called* for them is not an assertion in the tutorial — it is asserted in the example itself, against a real counter the inner pipe increments on every call (`examples/filter/main.rs:30–73,85–90`):
 
 ```rust
+let orders = [
+    Order {
+        id: 1,
+        amount_cents: 1_200,
+    },
+    Order {
+        id: 2,
+        amount_cents: 4_500,
+    },
+    Order {
+        id: 3,
+        amount_cents: 9_900,
+    },
+    Order {
+        id: 4,
+        amount_cents: 300,
+    },
+    Order {
+        id: 5,
+        amount_cents: 5_000,
+    },
+];
+
+let mut processed = Vec::new();
+let mut dropped = Vec::new();
+
+for order in orders {
+    let outcome = match SendPipe::call(&stack, order).await {
+        Ok(outcome) | Err(outcome) => outcome,
+    };
+    match outcome {
+        Outcome::Processed { id } => processed.push(id),
+        Outcome::Dropped { id } => dropped.push(id),
+    }
+}
+
 assert_eq!(
     calls.load(Ordering::Relaxed),
     processed.len(),
@@ -599,9 +831,38 @@ Run it: `cargo run --example filter`.
 
 ## 9. Send one thing to many: fan-out
 
-**Fan-out** takes one input and delivers a copy to several pipes at once — for example, handle a request *and* send a copy to an audit log. Each downstream pipe (each "arm") is an ordinary sink (section 3): it takes the item and returns `()`. Build it with `FanOut::all_or_nothing(vec![...])` (`proxima-primitives/src/pipe/fanout.rs:113`), from `examples/fan_out/main.rs:30–44`:
+**Fan-out** takes one input and delivers a copy to several pipes at once — for example, handle a request *and* send a copy to an audit log. Each downstream pipe (each "arm") is an ordinary sink (section 3): it takes the item and returns `()`. Build it with `FanOut::all_or_nothing(vec![...])` (`proxima-primitives/src/pipe/fanout.rs:113`), from `examples/fan_out/main.rs:84–106,27–44`:
 
 ```rust
+use std::sync::Mutex;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Message(String);
+
+// a sink that records every message it receives under its own label, so the
+// example can assert which arms the fan-out actually reached and prove each
+// arm's copy is independent of the others.
+#[derive(Clone)]
+struct CapturingSink {
+    label: &'static str,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+#[piped(send)]
+impl CapturingSink {
+    async fn call(&self, message: Message) -> Result<(), Infallible> {
+        let log = Arc::clone(&self.log);
+        let label = self.label;
+        log.lock()
+            .expect("capture lock")
+            .push(format!("{label}: {}", message.0));
+        Ok(())
+    }
+}
+
+let primary_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+let mirror_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
 let primary = CapturingSink {
     label: "primary",
     log: Arc::clone(&primary_log),
@@ -614,7 +875,11 @@ let mirror = CapturingSink {
 let fan = FanOut::all_or_nothing(vec![primary, mirror]);
 println!("fanning one request to {} arms", fan.sink_count());
 
-fan.call(Message("checkout order 42".into()))
+// SendPipe::call, qualified: the real example's own `main.rs` only imports
+// SendPipe, but this doctest's shared prelude also brings `Pipe` into
+// scope, and FanOut implements both tiers — `fan.call(..)` alone would be
+// an ambiguous-method error here that the real source never hits.
+SendPipe::call(&fan, Message("checkout order 42".into()))
     .await
     .expect("fan-out delivers to every arm");
 ```
@@ -653,9 +918,136 @@ There is deliberately no `Priority` variant — the source code explains why (`f
 
 `FanInStrategy` is an *open* trait, not a closed enum welded onto `FanIn` — a deliberate, recent change (`67074baf`, "make the fan-in strategy an open trait"). Before it, `Select` was the only three-variant enum `FanIn` could take, so weighted, least-loaded, or a caller's own fairness rule were simply not expressible without editing this library. Now `Select` is one implementor of the open trait, and `FanIn` itself carries the `Strategy` type parameter shown above — a caller who needs a strategy this library never shipped just implements `FanInStrategy` for their own type and passes it to `FanIn::new` exactly the same way, no library change. Section 14's compile-time proof already reflects this: it is generic over `Strategy: FanInStrategy`, not hard-coded to `Select`.
 
-Here is the real call, from `examples/fan_in/main.rs:30–34`:
+Here is the real call, from `examples/fan_in/main.rs:124–205,75–118,30–34`:
 
 ```rust
+// source: `Pipe<In = (), Out = u32>` — no input to consume, so each call
+// produces the next value in an arithmetic sequence (`start`, `start+step`, ...).
+struct Counter {
+    next: Cell<u32>,
+    step: u32,
+}
+
+impl Counter {
+    fn new(start: u32, step: u32) -> Self {
+        Self {
+            next: Cell::new(start),
+            step,
+        }
+    }
+}
+
+impl proxima_primitives::pipe::primitives::Pipe for Counter {
+    type In = ();
+    type Out = u32;
+    type Err = Infallible;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<u32, Infallible>> {
+        let value = self.next.get();
+        self.next.set(value + self.step);
+        async move { Ok(value) }
+    }
+}
+
+// resolves immediately to a fixed outcome — the hand-written poll struct an
+// `UnpinPipe::call` needs in place of an `!Unpin` async block.
+struct UpstreamCall(Poll<Result<(&'static str, u32), Exhausted>>);
+
+impl Future for UpstreamCall {
+    type Output = Result<(&'static str, u32), Exhausted>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0
+    }
+}
+
+// an `UnpinPipe` source that plays back a fixed readiness schedule, calling
+// `inner` for the item on every `true`.
+struct Upstream<P> {
+    label: &'static str,
+    schedule: RefCell<VecDeque<bool>>,
+    inner: P,
+}
+
+impl<P> Upstream<P> {
+    fn new(label: &'static str, schedule: impl IntoIterator<Item = bool>, inner: P) -> Self {
+        Self {
+            label,
+            schedule: RefCell::new(schedule.into_iter().collect()),
+            inner,
+        }
+    }
+}
+
+impl<P> DropSafe for Upstream<P> {}
+
+impl<P> UnpinPipe for Upstream<P>
+where
+    P: proxima_primitives::pipe::primitives::Pipe<In = (), Out = u32, Err = Infallible>,
+{
+    type In = ();
+    type Out = (&'static str, u32);
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Unpin {
+        match self.schedule.borrow_mut().pop_front() {
+            Some(true) => {
+                let value = block_on_ready(self.inner.call(()))
+                    .expect("Err = Infallible, so this can never fail");
+                UpstreamCall(Poll::Ready(Ok((self.label, value))))
+            }
+            Some(false) => UpstreamCall(Poll::Pending),
+            None => UpstreamCall(Poll::Ready(Err(Exhausted))),
+        }
+    }
+}
+
+// every Counter future resolves on its first poll (no real I/O), so a
+// one-shot poll is a legitimate block_on for driving it from call().
+fn block_on_ready<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = core::pin::pin!(future);
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(value) => value,
+        Poll::Pending => unreachable!("fan_in example futures resolve on first poll"),
+    }
+}
+
+// drives a fan-in to completion, printing each call's outcome as it goes.
+fn drain_merged<S, Strategy, const N: usize>(
+    fan_in: FanIn<S, Strategy, N>,
+) -> Vec<(&'static str, u32)>
+where
+    S: UnpinPipe<In = (), Out = (&'static str, u32), Err = Exhausted> + DropSafe,
+    Strategy: FanInStrategy,
+{
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut drained = Vec::new();
+    let mut poll_number = 0_u32;
+
+    loop {
+        poll_number += 1;
+        let mut call = proxima_primitives::pipe::primitives::Pipe::call(&fan_in, ());
+        match Pin::new(&mut call).poll(&mut cx) {
+            Poll::Ready(Ok(item)) => {
+                println!("poll {poll_number}: drained {item:?}");
+                drained.push(item);
+            }
+            Poll::Ready(Err(Exhausted)) => {
+                println!("poll {poll_number}: all upstreams drained");
+                break;
+            }
+            Poll::Pending => {
+                println!("poll {poll_number}: nothing ready yet, all live upstreams pending");
+            }
+        }
+    }
+
+    drained
+}
+
 let orders = Upstream::new("orders", [false, true, true], Counter::new(1, 1));
 let payments = Upstream::new("payments", [false, true, true], Counter::new(10, 10));
 let shipping = Upstream::new("shipping", [false, true], Counter::new(100, 100));
@@ -683,9 +1075,27 @@ One more thing worth knowing, because it explains a constraint you will hit if y
 
 A **gate** is a switch you put in front of a pipe: it is either **armed** (open) or **disarmed** (closed). It controls *readiness* — whether work should flow right now. This is how proxima expresses backpressure and rate-limiting, without baking a special "are you ready?" method into every pipe — `examples/gate/main.rs`'s own module doc says this plainly (`examples/gate/main.rs:3–5`): "`proxima_primitives::pipe::SendPipe` has no such method — every gate shape below is composed from existing primitives instead of being baked into the trait."
 
-You create a gate and its controller together with `AtomicGate::pair(initial_armed)` (`proxima-primitives/src/pipe/demand.rs:56`), and open or close it through the controller. The simplest way to use it is `Demand::new(pipe, gate)` (`demand.rs:100`): while the gate is closed, calls quietly do nothing (the inner pipe is never reached, a no-op `Ok`); while it is open, calls pass straight through. Here is the real setup, copied verbatim from `examples/gate/main.rs:216–223`:
+You create a gate and its controller together with `AtomicGate::pair(initial_armed)` (`proxima-primitives/src/pipe/demand.rs:56`), and open or close it through the controller. The simplest way to use it is `Demand::new(pipe, gate)` (`demand.rs:100`): while the gate is closed, calls quietly do nothing (the inner pipe is never reached, a no-op `Ok`); while it is open, calls pass straight through. Here is the real setup, copied verbatim from `examples/gate/main.rs:181–197,216–223`:
 
 ```rust
+struct CountingSink {
+    calls: Arc<AtomicUsize>,
+}
+
+impl SendPipe for CountingSink {
+    type In = u32;
+    type Out = ();
+    type Err = Infallible;
+
+    fn call(&self, _item: u32) -> impl Future<Output = Result<(), Infallible>> + Send {
+        let calls = Arc::clone(&self.calls);
+        async move {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+}
+
 let calls = Arc::new(AtomicUsize::new(0));
 let (gate, controller) = AtomicGate::pair(false);
 let production = Demand::new(
@@ -718,9 +1128,26 @@ All three are a gate composed with an existing primitive — filter, `Demand`, o
 
 A **signal** lets one part of your program wait for a one-time event — "the stream ended," "we are done draining" — without checking in a loop. `Signal::new()` creates one (`proxima-core/src/signal.rs:124`); someone calls `.fire()` once (`signal.rs:144`); anyone `.await`ing `.fired()` (`signal.rs:159`) wakes up. It is *sticky* — `.is_fired()` (`signal.rs:152`) stays `true` forever after — so even a latecomer who checks afterward sees it immediately, with no fresh wait.
 
-`examples/signal/main.rs` shows this driving a real producer/consumer. A consumer task is spawned and yields once before the producer starts (`examples/signal/main.rs:42–43`), so it is genuinely parked, not merely about to run; the task itself does the parking, `.await`ing `signal.fired()` (`main.rs:114–122`):
+`examples/signal/main.rs` shows this driving a real producer/consumer. A consumer task is spawned and yields once before the producer starts (`examples/signal/main.rs:42–43`), so it is genuinely parked, not merely about to run; the task itself does the parking, `.await`ing `signal.fired()` (`main.rs:127–139,114–122`):
 
 ```rust
+// wraps any Unpin future and counts how many times it is polled — the proof
+// instrument for "parked, not spinning". Fired is Unpin (its fields are
+// Arc/Option<Arc<..>>), so this needs no unsafe pin projection.
+struct CountingFuture<InnerFuture> {
+    inner: InnerFuture,
+    polls: Arc<AtomicUsize>,
+}
+
+impl<InnerFuture: Future<Output = ()> + Unpin> Future for CountingFuture<InnerFuture> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.polls.fetch_add(1, Ordering::Relaxed);
+        Pin::new(&mut self.inner).poll(cx)
+    }
+}
+
 async fn consumer_task(signal: Signal, polls: Arc<AtomicUsize>) {
     println!("consumer: parked on signal.fired() (no poll loop, no timeout)");
     CountingFuture {
@@ -732,11 +1159,35 @@ async fn consumer_task(signal: Signal, polls: Arc<AtomicUsize>) {
 }
 ```
 
-Meanwhile the producer runs a stream through an **observe** pipe (section 3), then a **filter** (section 8) that recognizes the one terminal item, whose inner pipe calls `signal.fire()` (`main.rs:217–226`) — every other item is dropped by the filter before that inner pipe is ever reached. The example instruments the consumer's `.await` point to count how many times it was actually polled, and asserts it was exactly two — once to park, once to wake (`main.rs:91–95`):
+Meanwhile the producer runs a stream through an **observe** pipe (section 3), then a **filter** (section 8) that recognizes the one terminal item, whose inner pipe calls `signal.fire()` (`main.rs:217–226`) — every other item is dropped by the filter before that inner pipe is ever reached. The example instruments the consumer's `.await` point to count how many times it was actually polled, and asserts it was exactly two — once to park, once to wake (`main.rs:91–95`). The real example drives this with a spawned `tokio` task; here, with no executor to spawn onto, the same proof is driven by hand — poll once before the fire (parks), fire, poll again (resolves) — the same two polls `CountingFuture` above counts either way:
 
 ```rust
+let signal = Signal::new();
+let polls = Arc::new(AtomicUsize::new(0));
+
+let waker = Waker::noop();
+let mut cx = Context::from_waker(waker);
+let mut watched = core::pin::pin!(CountingFuture {
+    inner: signal.fired(),
+    polls: Arc::clone(&polls),
+});
+
 assert_eq!(
-    polls, 2,
+    watched.as_mut().poll(&mut cx),
+    Poll::Pending,
+    "not yet fired: the first poll parks and registers a waker"
+);
+
+signal.fire();
+
+assert_eq!(
+    watched.as_mut().poll(&mut cx),
+    Poll::Ready(()),
+    "fired: the second poll resolves"
+);
+
+assert_eq!(
+    polls.load(Ordering::Relaxed), 2,
     "park (Pending, registers a waker) + wake (Ready) is the whole story; \
      a busy-poll loop would have called poll() far more than twice"
 );
@@ -806,34 +1257,36 @@ Ctrl-c the server (SIGINT) and `run_until_signal` returns: the listener stops, i
 
 ## 14. The algebra is enforced by the compiler, not by us
 
-"Everything is a pipe" is a strong claim, and strong claims rot the moment someone forgets to check them. proxima does not leave that check to a human doing a grep. `proxima-primitives/src/pipe/mod.rs:288–334` has a test-only module, `algebra_claims`, whose entire job is to fail to *compile* — not fail a test, fail to build at all — the moment a primitive this tutorial teaches stops being a pipe. Its own doc comment explains why that is the only check worth trusting (`mod.rs:288–294`):
+"Everything is a pipe" is a strong claim, and strong claims rot the moment someone forgets to check them. proxima does not leave that check to a human doing a grep. `proxima-primitives/src/pipe/mod.rs:288–334` has a test-only module, `algebra_claims`, whose entire job is to fail to *compile* — not fail a test, fail to build at all — the moment a primitive this tutorial teaches stops being a pipe. Its own doc comment explains why that is the only check worth trusting (`mod.rs:288–293`):
 
 > "Everything is a pipe" is falsifiable, so falsify it mechanically: each line below fails to compile the moment a primitive we teach stops being a pipe. A grep for `impl .* Pipe for X` cannot answer this — it cannot see through generics, re-exports, macros, or a renamed type parameter, and it has been wrong every time it was asked. rustc is never wrong about it.
 
-Here is the claim for fan-in (section 10) and chaining (section 5), copied verbatim — note the `Strategy: FanInStrategy` bound on the fan-in claim, mirroring section 10's open trait, not the closed `Select` enum an older version of this module checked. (`DropSafe` is a marker trait not otherwise covered by this tutorial — it says a type has no observable state left over if you drop it mid-call; fan-in's sources need it because, as section 10 explained, a source found `Pending` this scan has its transient call future dropped and gets asked fresh next time.)
+Here is the claim for fan-in (section 10) and chaining (section 5), copied verbatim — note the `Strategy: FanInStrategy` bound on the fan-in claim, mirroring section 10's open trait, not the closed `Select` enum an older version of this module checked. (`DropSafe` is a marker trait not otherwise covered by this tutorial — it says a type has no observable state left over if you drop it mid-call; fan-in's sources need it because, as section 10 explained, a source found `Pending` this scan has its transient call future dropped and gets asked fresh next time.) The real module reaches `primitives`/`fan_in` via `super::` — this excerpt has no such parent module to climb to, so `super::primitives::`/`super::fan_in::` are spelled out as the same real modules' absolute paths instead; nothing else about the logic changes. `Pipe`/`SendPipe` are fully qualified too, for the same reason section 5's own `AndThen` excerpt above already is: section 2's hand-rolled `trait Pipe` is still in scope this far into the file, and a bare `Pipe` bound here would resolve to that teaching stand-in instead of the real trait `AndThen`/`FanIn` actually implement.
 
 ```rust
-fn assert_pipe<P: Pipe>() {}
-fn assert_send_pipe<P: SendPipe>() {}
+fn assert_pipe<P: proxima_primitives::pipe::primitives::Pipe>() {}
+fn assert_send_pipe<P: proxima_primitives::pipe::primitives::SendPipe>() {}
 
 // the chain of two pipes is itself a pipe — the composition law, checked.
 fn _a_chain_is_a_pipe<First, Second>()
 where
-    First: Pipe,
-    Second: Pipe<In = First::Out>,
+    First: proxima_primitives::pipe::primitives::Pipe,
+    Second: proxima_primitives::pipe::primitives::Pipe<In = First::Out>,
     Second::Err: From<First::Err>,
 {
-    assert_pipe::<super::primitives::AndThen<First, Second>>();
+    assert_pipe::<proxima_primitives::pipe::primitives::AndThen<First, Second>>();
 }
 
 // fan-in IS a pipe, for any DropSafe UnpinPipe source.
 fn _fan_in_is_a_pipe<S, Strategy, const N: usize>()
 where
-    S: super::primitives::UnpinPipe<In = (), Err = super::fan_in::Exhausted>
-        + proxima_core::markers::DropSafe,
-    Strategy: super::fan_in::FanInStrategy,
+    S: proxima_primitives::pipe::primitives::UnpinPipe<
+            In = (),
+            Err = proxima_primitives::pipe::fan_in::Exhausted,
+        > + proxima_core::markers::DropSafe,
+    Strategy: proxima_primitives::pipe::fan_in::FanInStrategy,
 {
-    assert_pipe::<super::fan_in::FanIn<S, Strategy, N>>();
+    assert_pipe::<proxima_primitives::pipe::fan_in::FanIn<S, Strategy, N>>();
 }
 ```
 
