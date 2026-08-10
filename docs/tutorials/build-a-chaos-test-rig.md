@@ -7,11 +7,16 @@
 
 The example frames it: *"Chaos testing in proxima is not a framework bolted on from outside; it is a `Pipe` you compose IN FRONT of the system under test."*
 
+Every code block below cites real, current lines in `examples/chaos/main.rs`. Three of them are marked `` ```rust,ignore ``: `Chaos<Inner>`, `ChaosPolicy`, and `ChaosFault` are types private to that one example binary, not exported by the `proxima` library, so no doctest prelude could ever make them resolve standalone — the same class of excerpt [03-native-runtime.md](./03-native-runtime.md) documents. Each is verified instead by the real `cargo run --example chaos` transcript quoted in the section that uses it, captured the day this document was rewritten; the same seeds are hard-coded in the example, so re-running it reproduces the exact same numbers.
+
 ## 1. `Chaos<Inner>`: fault injection as a decorator
 
 `Chaos<Inner>` wraps any `Pipe`. On every call it rolls a seeded, deterministic PRNG against a `ChaosPolicy` — plain data: a percentage for each fault kind (error, drop, delay) plus how long a `Delay` fault should pretend to wait (`chaos/main.rs:96-102`) — and injects one of three faults, or lets `inner` run clean (`chaos/main.rs:193-246`):
 
-```rust
+```rust,ignore
+// excerpt: Self = Chaos<Inner>, defined only in this example binary, so
+// this block cannot resolve as a standalone doctest — see chaos/main.rs
+// for the full file, or run `cargo run --example chaos`.
 impl<Inner: Pipe> Pipe for Chaos<Inner> {
     type In = Inner::In;
     type Out = Inner::Out;
@@ -39,28 +44,57 @@ Two things make the assertions provable, not eyeballed: the PRNG is **seeded** (
 
 ## 2. Retry absorbs faults by re-running the same pipe
 
-Stack a `RetryController` in front of `Chaos(50% fault)`: a failed attempt re-runs the **same** pipe, so every request in the batch still resolves `Ok` (`chaos/main.rs:338-399`):
+Stack a `RetryController` in front of `Chaos(50% fault)`: a failed attempt re-runs the **same** pipe, so every request in the batch still resolves `Ok` (`chaos/main.rs:329-391`):
 
-```rust
+```rust,ignore
+// excerpt: `UpstreamService`/`policy_50pct`/`seed`/`stats` are placeholder
+// names for values built earlier in the same function — see
+// chaos/main.rs:329-391 for the real, complete construction.
 let chaos = Chaos::new(UpstreamService, policy_50pct, seed, stats);
 let controller = RetryController { max_attempts: 4, backoff: Backoff::Exponential { .. }, .. };
 // per attempt: controller.on_outcome(...) -> Retry { after } | Done | Exhausted
 ```
 
-`stats` above is the shared `ChaosStats` counter from `Chaos::new` — the same one the wrap-up print reads to report what was actually injected. `Backoff::Exponential` grows the wait between retries with each attempt, so a flaky call backs off instead of hammering the system immediately (`chaos/main.rs:357-361`). The bare `{ .. }` is this tutorial's shorthand for "other fields omitted for brevity" — not runnable on its own; see `chaos/main.rs:355-365` for the real, complete values.
+`stats` above is the shared `ChaosStats` counter from `Chaos::new` — the same one the wrap-up print reads to report what was actually injected. `Backoff::Exponential` grows the wait between retries with each attempt, so a flaky call backs off instead of hammering the system immediately (`chaos/main.rs:348-352`). The bare `{ .. }` is this tutorial's shorthand for "other fields omitted for brevity" — not runnable on its own; see `chaos/main.rs:346-356` for the real, complete values.
 
-`RetryController::on_outcome` decides Retry/Done/Exhausted from the outcome + rules; the loop re-calls the pipe on `Retry` (`chaos/main.rs:318-336`). 16/16 requests recover despite a 50% per-attempt fault rate.
+`RetryController::on_outcome` decides Retry/Done/Exhausted from the outcome + rules; the loop re-calls the pipe on `Retry` (`chaos/main.rs:309-327`). Real, captured output from `cargo run --example chaos` (deterministic — the seed is hard-coded, so a re-run reproduces these exact numbers):
+
+```text
+-- chaos(50% fault) + retry(4): every request still resolves --
+  request 5: resolved Ok(Response { id: 5, source: Upstream }) after 3 attempt(s)
+  request 6: resolved Ok(Response { id: 6, source: Upstream }) after 2 attempt(s)
+  request 9: resolved Ok(Response { id: 9, source: Upstream }) after 2 attempt(s)
+  ...
+  faults injected: 2 error, 2 drop, 2 delay, 14 clean (20 attempts over 16 requests)
+  simulated chaos-clock advance: 150ms (no real sleep)
+  16/16 requests recovered — graceful degradation via retry
+```
+
+16/16 requests recover despite a 50% per-attempt fault rate (35% error + 15% drop, `chaos/main.rs:333-338`): every request that drew a fault on attempt one simply drew again, and the controller's 4-attempt cap was never exhausted.
 
 ## 3. Fallback absorbs faults by routing to a different pipe
 
 Where retry re-runs the *same* pipe, `Fallback` routes to a **different** one on any failure. `Chaos(80% fault)` as the primary, a reliable `Cache` as the secondary — every request resolves `Ok` regardless of how hostile the policy is (`chaos/main.rs:438-477`):
 
-```rust
+```rust,ignore
+// excerpt: `chaos_80pct`/`request` are placeholder names for values built
+// earlier in the same function — see chaos/main.rs:420-477 for the real,
+// complete construction and driver loop.
 let composite = Fallback { primary: chaos_80pct, secondary: Cache { .. } };
 let response = composite.call(request).await.unwrap();  // always resolves
 ```
 
-`Fallback`'s guarantee does not depend on tuning luck: any primary failure → the secondary answers.
+`Fallback`'s guarantee does not depend on tuning luck: any primary failure → the secondary answers. Real, captured output from the same run (30% error + 30% drop + 20% delay = 80% of rolls hit a fault bucket, `chaos/main.rs:424-429`):
+
+```text
+-- chaos(80% fault) + fallback: every request still resolves --
+  request 2: resolved Ok(Response { id: 2, source: Cache }) via Cache
+  request 5: resolved Ok(Response { id: 5, source: Cache }) via Cache
+  ...
+  faults injected: 4 error, 4 drop, 1 delay, 7 clean over 16 requests
+  cache served 8 of 16 requests (primary's faults routed here)
+  16/16 requests recovered — graceful degradation via fallback
+```
 
 ## What you built
 
