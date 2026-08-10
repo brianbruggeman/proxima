@@ -65,7 +65,7 @@ idea whether `In`/`Out` are both real types (a transform), `In` is `()` (a
 source — it produces without consuming, like a partition reader), or `Out` is
 `()` (a sink — it consumes without producing, like a producer write). Here is
 the shape, trimmed for space, copied verbatim from
-`proxima-primitives/src/pipe/primitives.rs:89–99`:
+`proxima-primitives/src/pipe/primitives.rs:91–102`:
 
 ```rust
 pub trait Pipe {
@@ -116,7 +116,7 @@ carry back what the `bool` destroyed. `Decide` is gone now; a filter is
 `predicate.and_then(inner)` — `and_then` chains two pipes so the second only
 runs if the first succeeded, and the predicate is an ordinary pipe,
 `In -> Result<In, Err>`, not a bespoke `bool`-returning seam
-(`proxima-primitives/src/pipe/filter.rs:24–33`). The
+(`proxima-primitives/src/pipe/filter.rs:25–34`). The
 lesson generalizes: getting the pipe/strategy line wrong doesn't fail loudly,
 it fails by *accretion* — companion types grow up around the wrong shape to
 carry back what it threw away. Watch for that shape as you read the rest of
@@ -160,9 +160,12 @@ family: N sources merged into one item stream"
 `FanIn` **is** a pipe — in the source form (§1: `In = ()`, it produces
 without consuming). Concretely it implements two of the sibling traits
 mentioned in §1: `Pipe` and `UnpinPipe`
-(`proxima-primitives/src/pipe/fan_in.rs:222–234` and `:236–248`):
+(`proxima-primitives/src/pipe/fan_in.rs:272–284` and `:286–298`):
 
-```rust
+```rust,ignore
+// real source, quoted for the signature — the elided body returns
+// `FanInCall`, a private struct internal to fan_in.rs, so nothing outside
+// that module can compile this impl standalone.
 impl<S, Strategy, const N: usize> Pipe for FanIn<S, Strategy, N>
 where
     S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
@@ -181,7 +184,7 @@ that will never produce again resolves it instead of a second
 implement `UnpinPipe`, not the plain `Pipe` from §1 — `UnpinPipe` is the
 sibling trait whose returned future is `Unpin`, so a caller can poll it in
 place with no heap and no `unsafe`
-(`proxima-primitives/src/pipe/primitives.rs:165`, doc comment above). A merge
+(`proxima-primitives/src/pipe/primitives.rs:126–142`, doc comment above). A merge
 over `N` sources has to hold every source's in-flight call future at once and
 poll each one in turn; doing that with no heap is exactly what `UnpinPipe`
 buys. Sources also need `DropSafe` (`proxima_core::markers::DropSafe`) — a
@@ -193,15 +196,16 @@ Because `FanIn` implements `Pipe`, a `FanIn` can itself be one of the sources
 inside a *bigger* `FanIn` — a merge of merges, e.g. per-broker partition
 merges rolled up into a per-consumer merge — with no adapter type, proven by
 a real test: `fan_in_nests_inside_a_bigger_fan_in`
-(`fan_in.rs:469–485`).
+(`fan_in.rs:577–596`).
 
 This claim — "`FanIn` is a pipe" — is not asserted only in prose. It is
 checked by the compiler on every build, in a test-only module whose whole
 job is to fail to *compile* the moment it stops being true
-(`proxima-primitives/src/pipe/mod.rs:267–314`, `mod algebra_claims`):
+(`proxima-primitives/src/pipe/mod.rs:297–334`, `mod algebra_claims`):
 
-```rust
-// fan-in IS a pipe, for any DropSafe UnpinPipe source.
+```rust,ignore
+// real source, quoted verbatim — `super::` and `assert_pipe` only resolve
+// inside `mod algebra_claims` itself, not standalone against `proxima`.
 fn _fan_in_is_a_pipe<S, Strategy, const N: usize>()
 where
     S: super::primitives::UnpinPipe<In = (), Err = super::fan_in::Exhausted>
@@ -214,7 +218,7 @@ where
 
 `FanIn`, `FanInStrategy`, `Select`, and `Exhausted` are all public:
 `proxima_primitives::pipe::{FanIn, FanInStrategy, Select, Exhausted}`
-(re-exported at `proxima-primitives/src/pipe/mod.rs:186`).
+(re-exported at `proxima-primitives/src/pipe/mod.rs:202`).
 
 ## 4. Which partition wins is a strategy: `FanInStrategy` and `Select`
 
@@ -258,7 +262,11 @@ second name for a choice you already made when you built the array"
 (`fan_in.rs:76–78`). `FanIn::new` takes the sources and the strategy
 together, always both (`fan_in.rs:143`):
 
-```rust
+```rust,ignore
+// real signature, quoted for its shape — excerpted from
+// impl<S, Strategy, const N: usize> FanIn<S, Strategy, N>, whose fields
+// (sources/live/remaining/cursor/strategy) are private, so this
+// constructor cannot stand alone outside that impl block.
 pub fn new(sources: [S; N], strategy: Strategy) -> Self
 ```
 
@@ -303,20 +311,29 @@ mirroring live traffic to a shadow/canary path. Its module doc: "broadcast
 one input to N sink `SendPipe`s (a 1→N tee)"
 (`proxima-primitives/src/pipe/fanout.rs:1`).
 
-Concretely, `FanOut` implements `SendPipe`
-(`proxima-primitives/src/pipe/fanout.rs:134`) — the sibling trait from §1
-whose `call` is additionally `Send`, so it can be dispatched across cores.
-It does **not** implement the plain `Pipe` from §1 today; there is no
-`impl Pipe for FanOut` in the source, only `impl SendPipe for FanOut`. This
-still satisfies §1's rule — the input passes through every sink, so
-`FanOut` is unambiguously on the pipe side of the pipe/strategy line — it
-just satisfies it through the cross-core sibling trait, not the base one. The
-codebase's own compile-checked proof (§3's `algebra_claims` module,
-`mod.rs:280–292`) states the claim exactly this way, in its own comment:
+Concretely, `FanOut` implements all four sibling traits from §1's family —
+`Pipe`, `SendPipe`, `UnpinPipe`, `UnpinSendPipe`
+(`proxima-primitives/src/pipe/fanout.rs:185`, `:136`, `:378`, `:399`). The
+base-tier `impl Pipe for FanOut` is a deliberate byte-for-byte mirror of the
+`SendPipe` arm — its own comment says why: "the base-tier mirror of the
+`SendPipe` impl above — same broadcast, no `Send` bound on the sinks or the
+returned future, so `PipeExt` (which only ever assumes `Pipe`) reaches
+`FanOut` too. Kept byte-for-byte parallel to the `SendPipe` arm on purpose:
+one broadcast law, two tiers" (`fanout.rs:181–184`). This satisfies §1's
+rule on either tier — the input passes through every sink, so `FanOut` is
+unambiguously on the pipe side of the pipe/strategy line, whichever trait a
+caller reaches for.
+
+The codebase's compile-checked proof (§3's `algebra_claims` module,
+`mod.rs:304–313`) currently exercises only the cross-core tier — its own
+comment predates the base-tier `impl Pipe` above:
 `// fan-out IS a pipe, for any sink and any fan policy.` — checked with
 `assert_send_pipe`, not `assert_pipe`:
 
-```rust
+```rust,ignore
+// real source, quoted verbatim — `super::` and `assert_send_pipe` only
+// resolve inside `mod algebra_claims` itself, not standalone against
+// `proxima`.
 fn _fan_out_is_a_pipe<S, Policy>()
 where
     S: SendPipe<Out = ()> + Clone,
@@ -327,6 +344,13 @@ where
     assert_send_pipe::<super::fanout::FanOut<S, Policy>>();
 }
 ```
+
+That the compile-checked claim exercises only `SendPipe` does not mean
+`Pipe` goes unimplemented — reading `fanout.rs:185` directly settles it:
+there is a second, real `impl Pipe for FanOut` next to the `SendPipe` one
+this test checks. The index is not the thing; a compile-checked test is a
+pointer to one fact about `FanOut`, not an inventory of every trait it
+implements.
 
 The input reaches every sink with the minimum number of clones — moved into
 the last sink, cloned into the earlier ones, so N sinks cost N−1 clones, not
@@ -343,7 +367,7 @@ both arms received the one request, independently processed: fan-out proven
 
 `FanOut` and `FanPolicy` are public:
 `proxima_primitives::pipe::{FanOut, FanPolicy, AllOrNothing, BestEffort, IgnoreErrors}`
-(`proxima-primitives/src/pipe/mod.rs:233`).
+(`proxima-primitives/src/pipe/mod.rs:247`).
 
 ## 6. The ack policy is a strategy: `FanPolicy`
 
@@ -353,7 +377,7 @@ it is a strategy under §1's rule for an even stronger reason than
 `FanInStrategy`: it never runs at all as a function over data. It is a
 marker trait carrying two `const`s, so the failure reaction folds away at
 compile time — no runtime branch on the hot path
-(`proxima-primitives/src/pipe/fanout.rs:24–37`):
+(`proxima-primitives/src/pipe/fanout.rs:26–39`):
 
 ```rust
 pub trait FanPolicy: Send + Sync + 'static {
@@ -362,7 +386,7 @@ pub trait FanPolicy: Send + Sync + 'static {
 }
 ```
 
-Three built-ins (`fanout.rs:39–63`), constructed by name at the call site
+Three built-ins (`fanout.rs:41–65`), constructed by name at the call site
 instead of a turbofish (`FanOut::all_or_nothing(sinks)`,
 `FanOut::best_effort(sinks)`, `FanOut::ignore_errors(sinks)`):
 
@@ -423,9 +447,25 @@ its own side of the line.
 
 **Keying is a pipe.** It reads the whole record and produces a routing key —
 the record passes *through* it, which is legal precisely because it is a
-pipe (`examples/fan_out_affinity/main.rs:60–71`):
+pipe (`examples/fan_out_affinity/main.rs:63–74`; `Record` and `fnv1a` repeated
+below only so this block stands alone — their own citations follow):
 
 ```rust
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Record {
+    customer: &'static str,
+    order: u64,
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 struct PartitionKey;
 
 impl Pipe for PartitionKey {
@@ -440,13 +480,14 @@ impl Pipe for PartitionKey {
 }
 ```
 
-(`fnv1a` is a small dependency-free hash defined in the same file,
-`main.rs:179–186` — a real fleet would use the same hash on every producer,
+(`Record` is the record type every strategy in this section stays blind to,
+`main.rs:161–164`. `fnv1a` is a small dependency-free hash defined in the same file,
+`main.rs:184–191` — a real fleet would use the same hash on every producer,
 the way Kafka's own default uses murmur2, so the mapping agrees everywhere.)
 
 **Choosing the partition is a strategy.** It sees only the key `PartitionKey`
 produced, never the record — the signature is the proof
-(`examples/fan_out_affinity/main.rs:77–79`):
+(`examples/fan_out_affinity/main.rs:80–82`):
 
 ```rust
 trait Distribute {
@@ -458,7 +499,7 @@ trait Distribute {
 read the record without it becoming a pipe instead — which is precisely why
 keying lives upstream, in its own pipe, and never inside `Distribute`.
 Kafka's key partitioner, `hash(key) % partitions`, is `HashAffinity`
-(`main.rs:81–89`):
+(`main.rs:86–92`):
 
 ```rust
 struct HashAffinity;
@@ -472,9 +513,13 @@ impl Distribute for HashAffinity {
 
 The router composes the two, and — this is the part worth reading twice —
 the router itself is the only thing that ever sees both the record and the
-key at once; the strategy never does (`main.rs:144–156`):
+key at once; the strategy never does (`main.rs:150–159`; `PARTITIONS` and
+`block_on_ready` repeated below only so this block stands alone — their own
+citations follow):
 
 ```rust
+const PARTITIONS: usize = 3;
+
 fn route(records: &[Record], strategy: &dyn Distribute) -> [Vec<Record>; PARTITIONS] {
     let keyer = PartitionKey;
     let mut partitions: [Vec<Record>; PARTITIONS] = Default::default();
@@ -485,7 +530,21 @@ fn route(records: &[Record], strategy: &dyn Distribute) -> [Vec<Record>; PARTITI
     }
     partitions
 }
+
+fn block_on_ready<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = core::pin::pin!(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => unreachable!("fan_out_affinity example futures resolve on first poll"),
+    }
+}
 ```
+
+(`PARTITIONS`, `main.rs:30`. `block_on_ready`, `main.rs:245–253` — every future
+in this example resolves on its first poll, so a one-shot poll is a
+legitimate `block_on`; see §9 for why.)
 
 `keyer.call(record.clone())` — the pipe, reading the record. Then
 `strategy.partition(key, PARTITIONS)` — the strategy, handed only the `u64`
@@ -495,7 +554,7 @@ that came out.
 
 Three strategies plug into the one `Distribute` seam, and the example runs
 all three over the same eight-record stream (customers `ada`, `linus`,
-`grace`, `dennis`, `ada`, `grace`, `linus`, `ada` — `main.rs:164–174`) so you
+`grace`, `dennis`, `ada`, `grace`, `linus`, `ada` — `main.rs:168–170`) so you
 can see the difference directly. Real output, captured by running the
 example:
 
@@ -527,15 +586,15 @@ Read the three blocks against each other:
   partition 2. This is the Kafka guarantee: same key, same partition, always
   — because the strategy is a deterministic function of the key and nothing
   else. The example asserts this directly:
-  `assert_affinity_holds` (`main.rs:202–215`) checks every record sits on
+  `assert_affinity_holds` (`main.rs:207–220`) checks every record sits on
   `hash(customer) % PARTITIONS`.
-- **`RoundRobin`** (`main.rs:93–111`, `Distribute::partition` ignores `_key`
+- **`RoundRobin`** (`main.rs:96–114`, `Distribute::partition` ignores `_key`
   and walks a `Cell<usize>` cursor) — `ada`'s records scatter across
   partition 0 *and* partition 1. This is the contrast that proves the affinity
   above was the strategy's doing, not an accident of the input:
-  `assert_customer_scatters` (`main.rs:219–231`) asserts at least one
+  `assert_customer_scatters` (`main.rs:224–240`) asserts at least one
   customer spans more than one partition.
-- **`Sticky`** (`main.rs:113–142`, batch size 4) — the first four records
+- **`Sticky`** (`main.rs:120–145`, batch size 4) — the first four records
   land on partition 0, the next four on partition 1, in fat contiguous runs
   rather than per-key. This is Kafka's own sticky partitioner (2.4+):
   fewer, larger batches, at the cost of dropping the key-affinity guarantee
@@ -547,7 +606,7 @@ Read the three blocks against each other:
 
 Every future in this example resolves on its first poll — `PartitionKey` is
 a plain hash, no real I/O — so `route` drives it with a one-shot
-`block_on_ready` (`main.rs:236–244`) instead of a real executor. That's a
+`block_on_ready` (`main.rs:245–253`) instead of a real executor. That's a
 property of this example's payload, not of `Pipe` in general: a real keying
 pipe reading from a network buffer would `.await` normally, under any
 runtime.
@@ -571,7 +630,7 @@ arguments). Two real, working proofs, neither touching the library:
 
 `StickyThen`, defined inside a `#[cfg(test)]` module in `fan_in.rs` itself —
 "a strategy the library never heard of," pinning one source first, then
-falling back to round-robin (`fan_in.rs:390–398`):
+falling back to round-robin (`fan_in.rs:480–489`):
 
 ```rust
 struct StickyThen(usize);
@@ -584,7 +643,7 @@ impl FanInStrategy for StickyThen {
 
 And `Sticky` from §9, which is the same proof for `Distribute`, defined
 entirely inside an example binary, not the library
-(`examples/fan_out_affinity/main.rs:117–142`).
+(`examples/fan_out_affinity/main.rs:120–145`).
 
 Recall §1's cautionary tale: `Decide` took the item and answered a `bool`,
 and grew two companion types to carry back what the `bool` threw away. Look
@@ -665,7 +724,7 @@ hardwired into `drain_each`, not a pluggable seam
 has no `Policy` type either — `push_all` and `push_best_effort` are two fixed
 methods, not implementors of an open trait the way `FanPolicy` is. Both are
 public (`proxima_primitives::pipe::{DrainFanIn, DrainSource, DrainFanOut,
-DrainSink, RingSource, RingSink}`, `pipe/mod.rs:184–185`), both are
+DrainSink, RingSource, RingSink}`, `pipe/mod.rs:200–201`), both are
 production-ready for what they do today, and both would need real design
 work — not a small patch — to gain the same open seam `FanIn`/`FanOut`
 already have. If your kernel-bypass consumer needs Kafka-style key affinity
@@ -679,15 +738,15 @@ The payoff — every piece of the vocabulary you started with, classified:
 
 | your vocabulary | proxima classification | primitive | cite |
 |---|---|---|---|
-| consumer-group partition merge (pull from N assigned partitions) | pipe (`Pipe`/`UnpinPipe`) | `FanIn<S, Strategy, N>` | `fan_in.rs:131,222,236` |
-| fair partition consumption (no partition starves) | strategy | `Select::RoundRobin` | `fan_in.rs:105–108,119` |
+| consumer-group partition merge (pull from N assigned partitions) | pipe (`Pipe`/`UnpinPipe`) | `FanIn<S, Strategy, N>` | `fan_in.rs:131,272,286` |
+| fair partition consumption (no partition starves) | strategy | `Select::RoundRobin` | `fan_in.rs:106–108,119` |
 | static priority / ordered preference | strategy | `Select::Fifo` / `Select::Lifo` | `fan_in.rs:109–113,120–121` |
-| custom assignor (e.g. cooperative-sticky) | strategy, open trait | your `impl FanInStrategy` (e.g. `StickyThen`) | `fan_in.rs:390–398` |
-| replication to every in-sync replica / mirroring | pipe (`SendPipe`) | `FanOut<S, Policy>` | `fanout.rs:69,134` |
-| `acks=all` / `acks=1` / fire-and-forget | strategy, open trait, compile-time | `FanPolicy` (`AllOrNothing`/`BestEffort`/`IgnoreErrors`) | `fanout.rs:24–63` |
-| key-hash producer partitioner (`hash(key) % n`) | split: pipe (read key) + strategy (key → partition) | `PartitionKey` (pipe) + `HashAffinity` (strategy) | `examples/fan_out_affinity/main.rs:60–89` |
-| keyless round-robin partitioner | strategy (example, consumer-side) | `RoundRobin` | `main.rs:93–111` |
-| sticky partitioner (2.4+) | strategy, library never heard of it (example) | `Sticky` | `main.rs:117–142` |
+| custom assignor (e.g. cooperative-sticky) | strategy, open trait | your `impl FanInStrategy` (e.g. `StickyThen`) | `fan_in.rs:480–489` |
+| replication to every in-sync replica / mirroring | pipe (`Pipe`/`SendPipe`) | `FanOut<S, Policy>` | `fanout.rs:71,136,185` |
+| `acks=all` / `acks=1` / fire-and-forget | strategy, open trait, compile-time | `FanPolicy` (`AllOrNothing`/`BestEffort`/`IgnoreErrors`) | `fanout.rs:26–65` |
+| key-hash producer partitioner (`hash(key) % n`) | split: pipe (read key) + strategy (key → partition) | `PartitionKey` (pipe) + `HashAffinity` (strategy) | `examples/fan_out_affinity/main.rs:63–92` |
+| keyless round-robin partitioner | strategy (example, consumer-side) | `RoundRobin` | `main.rs:96–114` |
+| sticky partitioner (2.4+) | strategy, library never heard of it (example) | `Sticky` | `main.rs:120–145` |
 | consistent hashing / rendezvous (HRW) — resize-stable partitioning | strategy — **same seam, not built** | none; would be `impl Distribute` over a ring, `&self`, key in | `examples/fan_out_affinity/README.md:67–70` (design note only) |
 | WAL fan-out to replicas with an ack quorum | pipe (broadcast) + strategy (ack policy) | `FanOut` + `FanPolicy` | `fanout.rs` |
 | kernel-bypass NIC/NVMe ring merge (zero-copy consumer) | pipe (visitor-push, **no strategy seam yet**) | `DrainFanIn`/`DrainSource` | `drain_source.rs:70,54` |
