@@ -227,7 +227,9 @@ mod tests {
         let outcome = resolve(&registry, &json!({"type": "nope"})).await;
         assert!(matches!(
             outcome,
-            Err(ProximaError::RegistryKind(RegistryError::NotRegistered { .. }))
+            Err(ProximaError::RegistryKind(
+                RegistryError::NotRegistered { .. }
+            ))
         ));
     }
 
