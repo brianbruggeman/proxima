@@ -573,7 +573,22 @@ fi
 # concatenates them), proven against the real `cargo run --example logs`
 # output for every numeric claim (drained 4, fanned 3, file 3/0,
 # console 1/2, DropOldest drops 2).
-FLOOR=113
+# Raised again after build-a-kafka-style-partitioner.md's own rewrite: 4 of
+# its blocks were FAILED for the "excerpt of private/module-relative
+# internals" reason 01-ergonomics.md's `Tier::plan` precedent already covers
+# (`impl Pipe for FanIn`'s elided body returns the private `FanInCall`; both
+# `algebra_claims` fn excerpts use `super::`/private helpers that only
+# resolve inside that module; `FanIn::new`'s bare signature is excerpted
+# from an impl over private fields) — all four given the same `,ignore`
+# treatment with a one-line why. 2 more (`PartitionKey`, `route`) were
+# FAILED for citing `Record`/`fnv1a`/`PARTITIONS`/`block_on_ready` without
+# defining them in-block — fixed by repeating the real definitions inline.
+# The real gaps this surfaced: `DropSafe`, `ControlFlow`, `DrainState` and
+# `Waker` were missing from `tutorial_gate_prelude` despite the tutorial's
+# own real-source excerpts needing them. Also caught a real drift bug:
+# `fanout.rs` grew a base-tier `impl Pipe for FanOut` (commit `4e31e74f8`)
+# that the tutorial's compile-checked-proof paragraph still denied existed.
+FLOOR=116
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
