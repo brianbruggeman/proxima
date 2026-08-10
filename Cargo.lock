@@ -3803,8 +3803,10 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "memchr",
  "proxima",
  "proxima-core",
+ "rstest",
  "serde",
  "serde_json",
  "simd-json",
