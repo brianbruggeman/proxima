@@ -436,7 +436,40 @@ fi
 # load_balancer` function), and the 12-request-drive-plus-assertions
 # citation (`261-297` -> real `266-302`, `drive_requests` through
 # `assert_distribution`).
-FLOOR=96
+# Raised to 98 after build-a-multi-runtime-service.md's own rewrite: all 3
+# of its original blocks were previously FAILED — the `SharedCounterPipe`
+# struct+impl block cited `AtomicU64` and `shared_total` with neither
+# imported nor defined in the block (`tutorial_gate_prelude` re-exports
+# `AtomicUsize`/`AtomicBool` but never `AtomicU64`); the two-`App` block
+# referenced an undefined `pipe` (from a separate, unfed-forward block) and
+# used bare `?` at the top of the awk-injected `fn main() { block_on(async
+# { .. }); }` wrapper, which only accepts `?` inside a `Result`-returning
+# fn; the `build_listener` block referenced `prime_app`/`tokio_app`/
+# `prime_bind`/`tokio_bind`, none defined within reach. Splitting the fix
+# across 3 forwarded blocks hits the same chaining trap
+# build-a-caching-reverse-proxy.md's rewrite already found (a block that
+# doesn't itself compile standalone in pass 1 never donates its bindings
+# to a later block in pass 2) — so instead of chasing forwarding, the two
+# `App`-building blocks were merged into ONE self-contained block, `use
+# std::sync::atomic::AtomicU64;` added directly (matching the tutorials'
+# established convention of an inline `use` over growing the prelude for a
+# single-cited std type), and the `?`-heavy body wrapped in a real `async
+# fn build_serve_and_drain(pipe: PipeHandle, prime_bind: SocketAddr,
+# tokio_bind: SocketAddr) -> Result<(usize, usize), ProximaError>` mirroring
+# `multi_runtime/main.rs`'s own `main` (both `App`s, both listeners, both
+# `ShutdownBarrier::broadcast_drop` drains) that the block then calls with
+# `.await.expect(..)` and asserts `cores_acked == 2` on for both runtimes —
+# real cleanup, not just real construction. `SharedCounterPipe` is repeated
+# verbatim in this block (the same "make each block stand on its own"
+# precedent load-balance's `LoadBalancerPipe` §3 rewrite set), so the file
+# now compiles as 2 fully independent blocks instead of 3 forwarding-
+# dependent fragments. The rewrite also resynced 4 stale `file:line`
+# citations drifted by a small, non-constant margin since this page was
+# first written (`shared_total`'s own declaration: `68` -> real `67`; the
+# two-`App` build span: `77-93` -> real `76-92`; the `build_listener` pair:
+# `98-99` -> real `97-98`; the shared-counter-assertion span: `109-148` ->
+# real `108-147`).
+FLOOR=98
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
