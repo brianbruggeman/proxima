@@ -38,6 +38,7 @@ pub mod tutorial_gate_prelude {
     pub use crate::listen::any::AnyHandler;
     pub use crate::prelude::*;
     pub use crate::selection::Selection;
+    pub use crate::shutdown::ShutdownBarrier;
     pub use crate::upstreams::KvUpstream;
     pub use crate::{Fallthrough, KvCache, KvCaps, KvHandle, SynthUpstream, UpstreamRef, WriteBack};
     pub use crate::{PeerInfo, StreamConnection};

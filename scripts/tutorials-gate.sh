@@ -369,7 +369,46 @@ fi
 # directly, E0277 "the trait bound `CachedOriginDispatch: SendPipe` is not
 # satisfied" even though the impl block itself showed `... ok` two blocks
 # earlier); and the `Fallthrough` construction + `WriteBack::single` wire-up.
-FLOOR=90
+# Raised to 94 after build-a-crud-origin-service.md's own rewrite: all 4 of
+# its blocks were previously FAILED — the `Store` struct cited `BTreeMap`/
+# `Mutex`/`MutexGuard`/`PoisonError`/`AtomicU64` with none imported and none
+# in `tutorial_gate_prelude` (fixed with real `use` lines in the block
+# itself, matching the tutorials' own established convention of showing a
+# plain `std` import inline rather than adding a std collection type to the
+# prelude); the routing block's `mount_with_methods` calls referenced
+# `ReadItem`/`UpdateItem`/`DeleteItem`, none of which any earlier block ever
+# defined (`ReadItem`'s prose described its 404 behavior but showed no code,
+# `UpdateItem`/`DeleteItem` were never shown at all); and the serve block
+# was a bare fragment (`app.build_listener(...)`, `run_crud_flow(bind)`,
+# `listener.shutdown()`) with no enclosing fn and an undefined `app`, plus
+# `ShutdownBarrier` — which the real file imports from `proxima::shutdown`
+# — missing from `tutorial_gate_prelude` entirely (a real gap, fixed by
+# adding it). Fixed by merging `CreateItem` and `ReadItem` (plus the
+# `item_id` path-param helper and a duplicated `Store`) into ONE
+# self-contained block — the same "impl needs the struct from a separate
+# chunk" chaining trap `build-a-caching-reverse-proxy.md` hit, except here
+# TWO downstream blocks (routing, serve) each needed BOTH handlers forwarded,
+# so splitting `CreateItem`/`ReadItem` into two independently-standalone
+# blocks would have made each redefine `Store` and mutually retire the
+# other from later context (the awk transform's redefinition rule disables
+# the WHOLE earlier chunk, not just the redefined name) — merging them into
+# one chunk that defines `Store` exactly once was the only shape that
+# survives forwarding into both downstream blocks; then turning the routing
+# fragment into a real, self-contained `mount_routes(app: &App, store:
+# Store) -> Result<(), ProximaError>` mounting the two taught handlers (UPDATE
+# and DELETE described in prose with a real citation instead of shown code,
+# preserving the tutorial's original scope rather than inflating it), and the
+# serve fragment into a real, self-contained `async fn start(bind:
+# SocketAddr) -> Result<(), ProximaError>` mirroring `crud/main.rs`'s own
+# `main` (build, mount inline, `build_listener`, `shutdown`,
+# `ShutdownBarrier::broadcast_drop`) minus the `run_crud_flow` HTTP-client
+# harness, which is test plumbing, not concept — same elision precedent
+# `build-a-caching-reverse-proxy.md` used for its own call-counting wrapper.
+# The rewrite also resynced every `crud/main.rs` `file:line` citation, all of
+# which had drifted by a small, non-constant margin (e.g. the `Store` struct
+# cited `33-40` against a real `35-39`; the CREATE handler cited `67-90`
+# against a real `66-89`) since this page was first written.
+FLOOR=94
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
