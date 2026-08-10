@@ -38,12 +38,16 @@ pub use proxima_http::http1::upstream as http;
 pub mod kv_cache;
 pub mod kv_file;
 pub mod kv_upstream;
-// child-process upstreams: tokio::process::Command supervision +
+// child-process upstream: tokio::process::Command supervision +
 // tokio::spawn + tokio::sync (mpsc/watch/Mutex/JoinHandle) — a genuine
 // tokio::process capability with no prime equivalent today.
 #[cfg(feature = "tokio")]
 pub mod process;
-#[cfg(feature = "tokio")]
+// newline-framed stdin/stdout RPC to a subprocess — built on
+// proxima_process + proxima_core::time + proxima_primitives::sync, no
+// tokio surface, so it is not gated behind the `tokio` feature. its
+// child-liveness/fd-dup syscalls (waitpid/kill/dup) are unix-only.
+#[cfg(unix)]
 pub mod process_rpc;
 #[cfg(feature = "recording")]
 pub mod record;
@@ -114,7 +118,7 @@ pub use pgwire::{PgwireClientProtocol, PgwirePipeFactory};
 pub use process::{
     ProcessPipeFactory, ProcessSpec, ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal,
 };
-#[cfg(feature = "tokio")]
+#[cfg(unix)]
 pub use process_rpc::{ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream};
 #[cfg(feature = "recording")]
 pub use record::{RecordPipeFactory, RecordUpstream};

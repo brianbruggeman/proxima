@@ -3648,6 +3648,7 @@ dependencies = [
  "proxima-patterns",
  "proxima-pgwire",
  "proxima-primitives",
+ "proxima-process",
  "proxima-protocols",
  "proxima-quic",
  "proxima-recording",

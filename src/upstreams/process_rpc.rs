@@ -1,24 +1,23 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Stdio;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
-#[cfg(feature = "sync-wrappers")]
-use crate::sync::{Mutex, MutexGuard};
 use bon::Builder;
 use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
+use proxima_codec::{DelimiterCodec, DelimiterFraming};
+use proxima_core::time;
+use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::sync::{AsyncMutex, AsyncMutexGuard, oneshot};
+use proxima_process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-#[cfg(not(feature = "sync-wrappers"))]
-use tokio::sync::{Mutex, MutexGuard};
-
-use proxima_primitives::pipe::SendPipe;
 
 use crate::error::ProximaError;
 use crate::pipe::{PipeHandle, into_handle};
@@ -27,7 +26,7 @@ use crate::request::{Request, Response};
 
 /// Newline-framed stdin/stdout pipe to a subprocess. One request per
 /// `\n` write + one line read; protocol agnostic (JSON-RPC, MCP, etc.).
-/// Serialized through a tokio Mutex — one in-flight call per upstream
+/// Serialized through an `AsyncMutex` — one in-flight call per upstream
 /// because stdin/stdout are shared. On death the next call respawns
 /// (when `restart = true`); Drop kills + reaps.
 pub struct ProcessRpcUpstream {
@@ -48,13 +47,25 @@ pub struct ProcessRpcSpec {
 struct RpcState {
     spec: ProcessRpcSpec,
     label: String,
-    child: Mutex<Option<RpcChild>>,
+    child: AsyncMutex<Option<RpcChild>>,
 }
 
 struct RpcChild {
-    process: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    pid: libc::pid_t,
+    stdin: OwnedFd,
+    stdout: OwnedFd,
+    framing: DelimiterFraming,
+    // set once this pid has already been signalled/reaped elsewhere, so
+    // Drop doesn't re-signal a pid the kernel may have since recycled.
+    terminated: bool,
+}
+
+impl Drop for RpcChild {
+    fn drop(&mut self) {
+        if !self.terminated {
+            kill_and_reap(self.pid);
+        }
+    }
 }
 
 impl ProcessRpcUpstream {
@@ -64,7 +75,7 @@ impl ProcessRpcUpstream {
             state: Arc::new(RpcState {
                 spec,
                 label: String::new(),
-                child: Mutex::new(None),
+                child: AsyncMutex::new(None),
             }),
         }
     }
@@ -72,10 +83,11 @@ impl ProcessRpcUpstream {
 
 impl Drop for ProcessRpcUpstream {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.state.child.try_lock()
+        if let Some(mut guard) = self.state.child.try_lock()
             && let Some(rpc_child) = guard.as_mut()
         {
-            let _ = rpc_child.process.start_kill();
+            kill_and_reap(rpc_child.pid);
+            rpc_child.terminated = true;
         }
     }
 }
@@ -101,7 +113,7 @@ impl SendPipe for ProcessRpcUpstream {
                 ))
             })?;
             let timeout = Duration::from_millis(state.spec.request_timeout_ms);
-            let outcome = tokio::time::timeout(timeout, dispatch_one(rpc_child, &body)).await;
+            let outcome = time::timeout(timeout, dispatch_one(rpc_child, body)).await;
             match outcome {
                 Ok(Ok(line)) => Ok(Response::ok(line)),
                 Ok(Err(error)) => {
@@ -109,7 +121,8 @@ impl SendPipe for ProcessRpcUpstream {
                     Err(error)
                 }
                 Err(_elapsed) => {
-                    let _ = rpc_child.process.start_kill();
+                    kill_and_reap(rpc_child.pid);
+                    rpc_child.terminated = true;
                     *guard = None;
                     Err(ProximaError::Timeout(timeout))
                 }
@@ -120,10 +133,10 @@ impl SendPipe for ProcessRpcUpstream {
 
 async fn ensure_alive(
     state: &Arc<RpcState>,
-    guard: &mut MutexGuard<'_, Option<RpcChild>>,
+    guard: &mut AsyncMutexGuard<'_, Option<RpcChild>>,
 ) -> Result<(), ProximaError> {
     if let Some(rpc_child) = guard.as_mut() {
-        match rpc_child.process.try_wait() {
+        match try_wait_child(rpc_child.pid) {
             Ok(Some(_status)) => {
                 if !state.spec.restart {
                     return Err(ProximaError::Upstream(format!(
@@ -131,10 +144,12 @@ async fn ensure_alive(
                         state.label,
                     )));
                 }
+                rpc_child.terminated = true;
                 **guard = None;
             }
             Ok(None) => return Ok(()),
             Err(error) => {
+                rpc_child.terminated = true;
                 **guard = None;
                 return Err(ProximaError::Upstream(format!(
                     "process_rpc `{}`: try_wait: {error}",
@@ -160,8 +175,7 @@ fn spawn_child(spec: &ProcessRpcSpec, label: &str) -> Result<RpcChild, ProximaEr
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
+        .stderr(Stdio::inherit());
     let mut child = command.spawn().map_err(|err| {
         ProximaError::Upstream(format!(
             "process_rpc `{label}` spawn ({}): {err}",
@@ -175,48 +189,179 @@ fn spawn_child(spec: &ProcessRpcSpec, label: &str) -> Result<RpcChild, ProximaEr
         ProximaError::Upstream(format!("process_rpc `{label}` has no stdout pipe"))
     })?;
     Ok(RpcChild {
-        process: child,
+        pid: child.pid,
         stdin,
-        stdout: BufReader::new(stdout),
+        stdout,
+        framing: DelimiterFraming::new(),
+        terminated: false,
     })
 }
 
-async fn dispatch_one(rpc_child: &mut RpcChild, body: &[u8]) -> Result<Bytes, ProximaError> {
-    rpc_child
-        .stdin
-        .write_all(body)
-        .await
+async fn dispatch_one(rpc_child: &mut RpcChild, body: Bytes) -> Result<Bytes, ProximaError> {
+    let stdin_fd = rpc_child.stdin.as_raw_fd();
+    let stdout_fd = rpc_child.stdout.as_raw_fd();
+    let needs_newline = !body.ends_with(b"\n");
+    let framing = std::mem::replace(&mut rpc_child.framing, DelimiterFraming::new());
+
+    // duped so the worker owns independent descriptors: `time::timeout`
+    // cancels this future, not the OS thread, and a timed-out `call` drops
+    // RpcChild (closing its fds) while the orphaned worker may still be
+    // blocked in read/write on the same fd numbers.
+    let stdin_owned = dup_fd(stdin_fd, "stdin")?;
+    let stdout_owned = dup_fd(stdout_fd, "stdout")?;
+
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let stdin_fd = stdin_owned.as_raw_fd();
+        let stdout_fd = stdout_owned.as_raw_fd();
+        let outcome = blocking_round_trip(stdin_fd, stdout_fd, &body, needs_newline, framing);
+        let _ = sender.send(outcome);
+    });
+    let outcome = receiver.await.unwrap_or_else(|_| {
+        Err(ProximaError::Upstream(
+            "process_rpc round-trip worker thread dropped".into(),
+        ))
+    });
+
+    match outcome {
+        Ok((line, framing)) => {
+            rpc_child.framing = framing;
+            Ok(line)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+// one background thread owns the whole write-then-read round trip for a
+// single call — mirrors fd_pipe.rs's "spawn once per call, not per syscall"
+// discipline. Safe because the AsyncMutex already serializes calls per
+// child, so nothing else touches these fds while this thread runs.
+fn blocking_round_trip(
+    stdin_fd: RawFd,
+    stdout_fd: RawFd,
+    body: &[u8],
+    needs_newline: bool,
+    mut framing: DelimiterFraming,
+) -> Result<(Bytes, DelimiterFraming), ProximaError> {
+    write_all_raw(stdin_fd, body)
         .map_err(|err| ProximaError::Upstream(format!("write rpc body: {err}")))?;
-    if !body.ends_with(b"\n") {
-        rpc_child
-            .stdin
-            .write_all(b"\n")
-            .await
+    if needs_newline {
+        write_all_raw(stdin_fd, b"\n")
             .map_err(|err| ProximaError::Upstream(format!("write rpc newline: {err}")))?;
     }
-    rpc_child
-        .stdin
-        .flush()
-        .await
-        .map_err(|err| ProximaError::Upstream(format!("flush rpc stdin: {err}")))?;
-    let mut line = String::new();
-    let bytes_read = rpc_child
-        .stdout
-        .read_line(&mut line)
-        .await
-        .map_err(|err| ProximaError::Upstream(format!("read rpc reply: {err}")))?;
-    if bytes_read == 0 {
-        return Err(ProximaError::Upstream(
-            "process_rpc subprocess closed stdout".into(),
-        ));
-    }
-    if line.ends_with('\n') {
-        line.pop();
-        if line.ends_with('\r') {
-            line.pop();
+
+    let codec = DelimiterCodec::unbounded(b"\n");
+    loop {
+        let (next_state, frame) = framing
+            .next_frame(codec)
+            .map_err(|err| ProximaError::Upstream(format!("read rpc reply: {err}")))?;
+        framing = next_state;
+        if let Some(line) = frame {
+            return Ok((strip_trailing_cr(line), framing));
         }
+        let chunk = read_chunk_raw(stdout_fd)
+            .map_err(|err| ProximaError::Upstream(format!("read rpc reply: {err}")))?;
+        if chunk.is_empty() {
+            return Err(ProximaError::Upstream(
+                "process_rpc subprocess closed stdout".into(),
+            ));
+        }
+        framing = framing.push(&chunk);
     }
-    Ok(Bytes::from(line.into_bytes()))
+}
+
+fn dup_fd(raw_fd: RawFd, purpose: &str) -> Result<OwnedFd, ProximaError> {
+    // SAFETY: raw_fd is an open descriptor owned by the caller for the
+    // duration of this call; dup(2) either fails or returns a fresh fd.
+    let duplicated = unsafe { libc::dup(raw_fd) };
+    if duplicated < 0 {
+        let error = io::Error::last_os_error();
+        return Err(ProximaError::Upstream(format!(
+            "process_rpc dup {purpose}: {error}"
+        )));
+    }
+    // SAFETY: duplicated was just returned by dup(2) above and is not owned
+    // by anything else.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+}
+
+fn strip_trailing_cr(mut line: Bytes) -> Bytes {
+    if line.last() == Some(&b'\r') {
+        line.truncate(line.len() - 1);
+    }
+    line
+}
+
+fn write_all_raw(raw_fd: RawFd, buffer: &[u8]) -> io::Result<()> {
+    let mut written_total = 0;
+    while written_total < buffer.len() {
+        // SAFETY: raw_fd is a pipe fd owned by the caller's RpcChild for the
+        // duration of this call; the slice outlives the syscall.
+        let written = unsafe {
+            libc::write(
+                raw_fd,
+                buffer[written_total..].as_ptr().cast(),
+                buffer.len() - written_total,
+            )
+        };
+        if written < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        written_total += written as usize;
+    }
+    Ok(())
+}
+
+fn read_chunk_raw(raw_fd: RawFd) -> io::Result<Vec<u8>> {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        // SAFETY: raw_fd is a pipe fd owned by the caller's RpcChild; buffer
+        // is stack-local and sized for the requested read length.
+        let bytes_read = unsafe { libc::read(raw_fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if bytes_read < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Ok(buffer[..bytes_read as usize].to_vec());
+    }
+}
+
+fn try_wait_child(pid: libc::pid_t) -> io::Result<Option<i32>> {
+    let mut status: libc::c_int = 0;
+    // SAFETY: pid is our own spawned child; WNOHANG makes this a
+    // non-blocking poll rather than a wait.
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if waited == 0 {
+        Ok(None)
+    } else if waited == pid {
+        Ok(Some(status))
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn kill_and_reap(pid: libc::pid_t) {
+    // SAFETY: pid is our own spawned child; SIGKILL against our own child is
+    // always a valid operation.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    // reap on a background thread — waitpid(2) is a blocking syscall and
+    // must not run inline on the polling task (same discipline
+    // proxima-process's own command.rs::finish() follows).
+    thread::spawn(move || {
+        let mut status: libc::c_int = 0;
+        unsafe {
+            libc::waitpid(pid, &mut status, 0);
+        }
+    });
 }
 
 pub struct ProcessRpcPipeFactory;
@@ -334,6 +479,8 @@ impl ProcessRpcConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
     use serde_json::json;
 
@@ -499,5 +646,77 @@ mod tests {
         let factory = ProcessRpcPipeFactory;
         let outcome = factory.build(&json!({"name": "no_cmd"}), None).await;
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+
+    // reproduces the use-after-close race directly: without dup_fd, the
+    // worker would still hold the *number* `original_read` after the parent
+    // closes it, and a subsequent open() reusing that number would hand the
+    // worker's next syscall someone else's file. This drives that exact
+    // sequence with channels (never a sleep) so it is deterministic under
+    // nextest's process-per-test isolation.
+    #[test]
+    fn duped_fd_outlives_original_and_ignores_recycled_number() {
+        let mut original = [0_i32; 2];
+        let pipe_result = unsafe { libc::pipe(original.as_mut_ptr()) };
+        assert_eq!(pipe_result, 0, "pipe: {}", io::Error::last_os_error());
+        let original_read = original[0];
+        let original_write = original[1];
+
+        let duped_read = dup_fd(original_read, "stdout").expect("dup_fd");
+
+        let (worker_ready_tx, worker_ready_rx) = mpsc::channel::<()>();
+        let (proceed_tx, proceed_rx) = mpsc::channel::<()>();
+        let (result_tx, result_rx) = mpsc::channel::<Vec<u8>>();
+
+        let worker = thread::spawn(move || {
+            worker_ready_tx.send(()).expect("signal ready");
+            proceed_rx.recv().expect("wait for proceed");
+            let mut buffer = [0_u8; 32];
+            // SAFETY: duped_read is a live fd owned by this thread.
+            let bytes_read = unsafe {
+                libc::read(duped_read.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len())
+            };
+            assert!(bytes_read >= 0, "read: {}", io::Error::last_os_error());
+            result_tx
+                .send(buffer[..bytes_read as usize].to_vec())
+                .expect("send result");
+        });
+
+        worker_ready_rx.recv().expect("worker ready");
+
+        // mirrors `*guard = None` dropping RpcChild's OwnedFd on the timeout
+        // path, while the worker above is still holding its own duped copy.
+        let closed = unsafe { libc::close(original_read) };
+        assert_eq!(closed, 0, "close: {}", io::Error::last_os_error());
+
+        let mut recycled = [0_i32; 2];
+        let recycled_result = unsafe { libc::pipe(recycled.as_mut_ptr()) };
+        assert_eq!(recycled_result, 0, "pipe: {}", io::Error::last_os_error());
+        assert_eq!(
+            recycled[0], original_read,
+            "test assumption violated: kernel did not recycle the freed fd number"
+        );
+        let sentinel = b"wrong pipe";
+        write_all_raw(recycled[1], sentinel).expect("write sentinel into recycled fd");
+
+        let genuine = b"right pipe";
+        write_all_raw(original_write, genuine).expect("write to the real pipe");
+
+        proceed_tx.send(()).expect("release worker");
+        let observed = result_rx.recv().expect("worker result");
+        worker.join().expect("worker thread panicked");
+
+        assert_eq!(
+            &observed[..],
+            genuine,
+            "worker must read the genuine pipe through its duped fd, never the sentinel \
+             written into the recycled fd number"
+        );
+
+        unsafe {
+            libc::close(original_write);
+            libc::close(recycled[0]);
+            libc::close(recycled[1]);
+        }
     }
 }

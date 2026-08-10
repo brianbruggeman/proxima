@@ -86,6 +86,7 @@ proxima-test = { path = "proxima-test" }
 proxima-net = { path = "proxima-net", default-features = false }
 proxima-pgwire = { path = "proxima-pgwire" }
 proxima-primitives = { path = "proxima-primitives", default-features = false }
+proxima-process = { path = "proxima-process", default-features = false }
 proxima-protocols = { path = "proxima-protocols", default-features = false }
 proxima-quic = { path = "proxima-quic", default-features = false }
 proxima-recording = { path = "proxima-recording" }
@@ -238,11 +239,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-libc = { workspace = true, optional = true }
 proxima-macros = { workspace = true, optional = true }
 proxima-test = { workspace = true }
 proxima-core = { workspace = true }
-proxima-primitives = { workspace = true, features = ["std"] }
+proxima-primitives = { workspace = true, features = ["std", "async-mutex"] }
 proxima-runtime = { workspace = true, features = ["std"] }
 proxima-net = { workspace = true, features = ["std"] }
 proxima-pgwire = { workspace = true, optional = true }
@@ -360,6 +360,15 @@ tokio-uring = { workspace = true, optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_wasm_03 = { version = "0.3", package = "getrandom", features = ["wasm_js"] }
+
+# process_rpc's child-liveness/fd-dup syscalls (waitpid/kill/dup) are
+# unix-only by nature; scoping libc to the target keeps it out of the
+# wasm32 dependency graph instead of gating it behind a feature.
+# proxima-process (the process_rpc upstream's only consumer) is itself
+# std::os::unix-only, so it rides the same target gate.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+proxima-process = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
@@ -933,7 +942,7 @@ runtime-prime-inbox-alloc = ["runtime-prime", "prime/runtime-prime-inbox-alloc",
 runtime-prime-inbox-const = ["runtime-prime", "prime/runtime-prime-inbox-const", "proxima-net/runtime-prime-inbox-const"]
 runtime-prime-inbox-dynamic = ["runtime-prime", "prime/runtime-prime-inbox-dynamic"]
 runtime-prime-timer       = ["runtime-prime", "prime/runtime-prime-timer"]
-runtime-prime-reactor     = ["runtime-prime", "dep:libc", "prime/runtime-prime-reactor"]
+runtime-prime-reactor     = ["runtime-prime", "prime/runtime-prime-reactor"]
 runtime-prime-executor    = ["runtime-prime-timer", "prime/runtime-prime-executor"]
 runtime-prime-bgpool      = ["runtime-prime", "prime/runtime-prime-bgpool"]
 # marker feature gating the optional span-carry arms of bench_c15_prime_hooks
