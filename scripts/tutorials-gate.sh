@@ -36,14 +36,25 @@
 #
 # The original docs/tutorials/*.md files are never modified by this script.
 #
-# This does NOT require every block to compile — see the FLOOR comment
-# near the bottom of this file for why a floor, not zero failures, is the
-# honest bar today, and what growing it actually takes.
+# The bar is every rust block, with no tunable: compiled == counted. There is
+# deliberately no threshold here. A threshold is blind to a swap — one block
+# rots while another is fixed, the total holds, and the gate stays green over
+# a broken page — and it has to be hand-bumped on every edit, which made it
+# a standing merge conflict.
+#
+# `,ignore` is not an outcome either; it is the same blindness hidden per
+# block. If a block cannot stand alone, either make it self-contained (repeat
+# the real definitions and imports it elides, copied verbatim from source) or
+# admit it is a quotation, not a program, and fence it as `text` — the docs
+# already do this for terminal transcripts. The one exception is
+# `,compile_fail`, which is a real assertion that the type system rejects
+# something; rustdoc still compiles it and still enforces the failure.
 #
 # Usage:  bash scripts/tutorials-gate.sh
-# Exits 0 if at least FLOOR blocks compile (regression-detecting); non-zero
-# if the compiling count drops below FLOOR, or if zero tutorial doctests
-# ran at all (the empty-match false-green AGENTS.md warns about).
+# Exits 0 only when every rust block compiled. Non-zero if any block failed,
+# any block was ignored, the compiled count and the block count disagree, or
+# zero tutorial doctests ran at all (the empty-match false-green AGENTS.md
+# warns about).
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -159,441 +170,22 @@ if [ "$tutorial_ok" -eq 0 ]; then
   exit 1
 fi
 
-# FLOOR, not zero-failures. Two-pass accumulation (prelude + same-file
-# known-good context) still leaves a large residual: most of the remaining
-# failures cite a name that exists ONLY in that tutorial's own PROSE, never
-# in any code block this generator can see — a local variable introduced
-# mid-paragraph ("bind", "store", "app"), or a narrative type invented for
-# one worked example (`Order`, `Overflow`, `Reply`) whose defining block
-# itself needs context this gate has no way to reconstruct without either a
-# real Rust name resolver or rewriting the snippets to be self-contained —
-# out of scope here per this task's own framing ("before any tutorial is
-# REWRITTEN, build the gate"). Requiring zero failures today would mean
-# either a permanently-red required check or silently dropping 129 blocks
-# from the count, and both are worse than the honest floor below: it is the
-# reproducible ok-count measured across repeated runs of this exact
-# mechanism (42, unchanged across three consecutive runs while iterating on
-# the transform; raised to 44 on 2026-08-09 after 00-foundations.md's
-# citations were resynced to current file:line and a stale `HalveError`
-# doctest snippet was given back the `#[derive(Debug, ...)]` its `Pipe::Err`
-# bound requires; raised to 47 later the same day after 01-ergonomics.md's
-# own citation resync, which also fixed two real bugs in this transform's
-# `is_bare_self_fn` detector — the container regex missed a generic `impl<T>
-# ..` header (no space before `<`) and a generic `fn foo<A, B>(&self, ..)`
-# signature (generics between the name and the paren) — that were silently
-# mis-marking 01-ergonomics.md's own `App::mount` and `Timer<ClockImpl>`
-# excerpts, plus added the `,compile_fail`/explicit-`,ignore` fence-attribute
-# passthrough a tutorial author can now reach for instead of an unexplained
-# FAILED block — 47 unchanged across two consecutive runs; raised to 49 later
-# the same day after 04-listener-hello.md's own rewrite turned its two
-# excerpted `main`-body fragments (needing a `?` inside a function that
-# actually returns `Result`, and a `server` to call `.run_until_signal()` on)
-# into small, honestly-labeled, self-contained wrappers around the same real
-# lines instead of leaving them silently FAILED); raised to 52 later the same
-# day after 05-listener-universal.md's own rewrite turned all 5 of its blocks
-# (all 5 previously FAILED — an undefined-`bind`/`my_handler` fragment, two
-# further copies of the same undefined-variable shape, and a bare
-# `.accept("h2")` one-liner that isn't a legal standalone expression) into 3
-# real, self-contained, compiling excerpts of `examples/any_listener.rs`
-# (the redundant/broken fragments were cut, not replaced 1:1) — the rewrite
-# also caught a real bug the old prose taught: `Listener::builder().handle()`
-# takes an `impl Into<PipeHandle>` (a `Handler`-shaped VALUE), not a bare
-# `async fn` the way `App::mount` does (`App::mount`'s bare-fn adapter,
-# `FnHandler`, is private to `src/app.rs`, never reachable through
-# `Listener::builder()`) — confirmed by compiling `into_handle(bare_fn)`
-# directly and reading the resulting E0277. Raised to 61 later the same day
-# after 06-listener-production.md's own rewrite turned all 10 of its blocks
-# (9 previously FAILED — undefined-variable fragments excerpted straight from
-# a runnable example with no enclosing fn, plus one library-internals `match`
-# over names nothing in the block ever defined) into 10 real, self-contained,
-# compiling `fn`/`struct` excerpts; the rewrite also caught the tutorial
-# teaching an actual defect as still-open — h1 silently not enforcing
-# `max_in_flight_requests` and a body-carrying h2 shed request getting
-# `RST_STREAM` instead of the documented 503 — that commit `8a12a93b5`
-# ("fix: enforce request admission on h1 and drain h2 shed bodies") had
-# already fixed the same day the tutorial was first written, proven by two
-# real, currently-green tests (`proxima-http/src/http1/serve.rs`'s
-# `h1_in_flight_shed_renders_503_then_recovers_after_release` and
-# `tests/e2e/listener_h2.rs`'s
-# `native_h2_listener_body_carrying_shed_request_receives_in_band_503_not_reset`)
-# rather than left asserted from stale prose. Raised to 67 later the same
-# day after 07-sugar-composition.md's own rewrite turned all 6 of its
-# blocks (5 previously FAILED — `main`-body fragments referencing
-# `bind_1`/`bind_2`/`bind_3`/`bind`/`bind_bad`, `FixedOk`, and
-# `stub_handle()`, none defined within the excerpt, plus a bare `json!`
-# macro call with no `use serde_json::json` in scope) into 7 real,
-# self-contained, compiling `fn`/`struct` excerpts (`FixedOk` defined once
-# and reused via same-file accumulation everywhere after; one new block
-# added for the `.grpc().quic()` rejection, which the prose already taught
-# but no code block ever proved) — the rewrite also caught two stale
-# `file:line` citations (the `prelude` module and `TlsConfig::self_signed`
-# had both drifted since the tutorial was written) and a dangling internal
-# forward-reference to a client-side `.tls()` section that was never
-# written, fixed by adding the real `ClientSecurityExt::tls()` composition
-# `examples/sugar_composition.rs` itself was missing, not just the prose
-# describing it. A regression — any currently-compiling block citing an
-# API that gets renamed or removed — drops the count below the floor and
-# fails the build; growing the floor by fixing a currently-failing block
-# (prelude gap, tutorial content, or the awk transform's own reach) is
-# always welcome and never blocked by this check. Raised to 73 later the
-# same day after 08-protocol-fleet.md's own rewrite turned all 10 of its
-# blocks (all 10 previously FAILED — a bare `let server = ...await?;`
-# fragment with no enclosing fn using an undefined `bind`, a DNS section
-# whose "Listener:" prose described `.dns(handler)` but showed no
-# `Listener::builder()` code block at all, and three more handler-only
-# impl blocks with no round trip) into 6 real, self-contained, compiling
-# `async fn`/`struct` excerpts mirroring `examples/protocol_fleet.rs`'s
-# own per-protocol functions — one shared `NullHttp` fallback-handler
-# block plus one full listener+client round-trip block per protocol
-# (memcached/DNS/Kafka/MQTT/AMQP); the rewrite also fixed two stale
-# `file:line`/section citations (`.dns(dsn)` dialing UDP was cited to a
-# nonexistent DNS module doc, corrected to `src/upstreams/dns.rs`'s own
-# matching doc comment; the DNS `.quic()` config-error citation pointed at
-# 07-sugar-composition.md's own `.dns(handler)` section instead of its
-# failure-mode section that actually demonstrates a rejected composition).
-# Raised to 77 after 10-conflaguration.md's own rewrite turned all 6 of its
-# blocks (all 6 previously FAILED — every one referenced a name from
-# nowhere in its own file: `toml_path`/`bind`/`built`/`handler` never
-# defined, `default_host`/`default_max_message` helper fns never excerpted
-# alongside the `#[serde(default = ..)]` that cites them, and a
-# `Validate::validate` stub returning bare `()` against a `conflaguration::
-# Result<()>` signature) into 4 real, self-contained, compiling excerpts:
-# the full `ServerConfig` struct+`Default`+`Validate` from
-# `examples/config/main.rs`, `ListenTuningConfig`'s and `BlacklistConfig`'s
-# own crate-doctest builder-vs-TOML parity assertions verbatim from
-# `proxima-listen/src/config.rs`/`src/admission/blacklist.rs`, and — the
-# rewrite's real find — `examples/protocol_fleet.rs`'s own `KafkaServerConfig`
-# section, whose doc comment already CLAIMED "wired into a real listener"
-# while its body only ever compared two structs for equality and never
-# touched `Listener::builder()` at all; extended that function itself (not
-# just the tutorial prose) into an actual `.protocol(KafkaAnyProtocol::new(..)
-# .with_config(config))` listener serving one real PRODUCE round trip, which
-# is what closed the tutorial's own "illustrative, not run" hedge for good.
-# Two structural bugs surfaced only by making every block compile in the SAME
-# file: a locally re-declared `struct KafkaServerConfig` (mirroring the real
-# type's shape, teaching-style) collided (E0255 + orphan-rule E0116/E0117)
-# with a LATER block's `use proxima_kafka::{.., KafkaServerConfig, ..}` of
-# the real type, since same-file context accumulation carries a struct
-# definition forward but has no way to know a later block's IMPORT of an
-# identically-named real type should retire it — fixed by dropping the
-# redundant local mirror (the struct's anatomy was already fully taught by
-# `ServerConfig` in §1) rather than teaching the same shape twice; and two
-# independent blocks each spelling `use std::io::Write;` (both borrowed
-# verbatim from real crate doctests that don't know about each other)
-# collided too (E0252) once accumulated into one scope — fixed with
-# `use std::io::Write as _;` in the second, which still satisfies `write!`
-# without binding a second `Write` name. Raised to 82 after
-# 09-extend-your-own-protocol.md's own rewrite: all 4 of its blocks were
-# previously FAILED — the `AnyProtocol` trait excerpt and the
-# `PingPongProtocol` impl excerpt both cited `StreamConnection`/`PeerInfo`
-# (and the trait excerpt also `AnyHandler`) bare, none of which
-# `tutorial_gate_prelude` re-exported (fixed by adding all three re-exports
-# to the prelude itself, `src/tutorial_doctests.rs` — a real gap, not a
-# tutorial-content bug, since `examples/extend_protocol.rs` imports them
-# from `proxima::{PeerInfo, StreamConnection}` /
-# `proxima::listen::any::AnyHandler` same as the excerpt), and the
-# `.protocol(candidate)`/`.ping_pong(candidate)` registration blocks were
-# bare `let server = ...await?;` fragments referencing an undefined `bind`
-# and `LegitOk` — fixed by turning both into real, self-contained
-# `async fn start(bind: SocketAddr) -> Result<(), ProximaError>` excerpts
-# with `LegitOk` defined inline, mirroring `examples/extend_protocol.rs`'s
-# own `main` minus the `free_loopback_addr()?` plumbing (same pattern
-# 05-listener-universal.md's own rewrite used for the identical shape).
-# The rewrite also fixed two real drift bugs the prose asserted as fact:
-# "that's the whole trait" showed 5 methods against a real trait that had
-# grown a 6th (`wants_datagram`, added by `a39c1c9e8` without updating this
-# page's own trait excerpt) — corrected to name and defer that method to
-# part 8 rather than silently omit it; and "the three parameters this
-# example doesn't use" undercounted by one — `peer: Option<PeerInfo>` was
-# unused by `PingPongProtocol::drive` but never explained. Both `file:line`
-# citations for the trait (`proxima-listen/src/any/probe.rs:134-195`, stale
-# by the same doc-comment growth) and `ListenerBuilder::protocol`
-# (`src/listener/handle.rs:277-289`, off by the same margin
-# 02-listener-builder.md's own already-correct `278-292` citation for the
-# identical function proved) were resynced. The shared prelude fix also
-# incidentally raised 11-any-transport-agnostic.md's own passing count by
-# one (3 failing blocks down to 2) since it cites the same two types.
-# Raised to 84 after 11-any-transport-agnostic.md's own remaining two
-# blocks were fixed with the identical `09-extend-your-own-protocol.md`
-# pattern above: both `.protocol(candidate)` registration blocks (§4's
-# worked example, §5's priority/ambiguity fleet) were bare
-# `let server = ...await?;` fragments referencing an undefined `bind` and
-# `LegitOk` — turned into real, self-contained
-# `async fn ..(bind: SocketAddr) -> Result<(), ProximaError>` excerpts with
-# `LegitOk` defined inline (repeated verbatim in both blocks, since §4's
-# block itself needs §3's `LiteralUdpProtocol` as cross-block context and so
-# never compiles standalone in pass 1, meaning it can never be fed forward
-# as pass 2 context to §5's block).
-# Raised to 87 after build-a-bare-metal-pipe.md's own rewrite: 2 of its 3
-# blocks were previously FAILED — the `FrameStore` excerpt cited `StoreError`,
-# `RingSink`, `RING_SLOTS`, and `RING_SLOT_BYTES` with none defined in the
-# block, and the build-time `mod config { include!(...) }` excerpt can never
-# compile inside this harness (its `include!` resolves `OUT_DIR` relative to
-# `proxima-example-no-std`'s own build, which does not run here) — fixed by
-# making the pipe excerpt self-contained (its real imports, `StoreError`
-# inline, the two constants shown as the literal values `no-std.toml` bakes)
-# and retagging the config excerpt `text` instead of leaving it silently
-# FAILED. The rewrite also added 2 new passing blocks teaching
-# `#[proxima_macros::piped]`'s auto-`Clone` holding at the same no-alloc
-# floor (`ring_capacity`, `no-std/src/lib.rs:89-92`, previously untaught
-# despite being tested in the answer key itself), and fixed 3 stale
-# `file:line` citations drifted by the crate doc-comment and README both
-# growing since this page was first written (`no-std/src/lib.rs:15`→`19`;
-# `proxima-primitives/src/pipe/mod.rs:184`→`200`; `no-std/README.md:37-45`
-# and `:47-52`, which had drifted onto an unrelated paragraph, →`:32-36`
-# and `:64-66`).
-# Raised to 90 after build-a-caching-reverse-proxy.md's own rewrite: all 4
-# of its original blocks were previously FAILED — the tutorial never showed
-# `CachedOriginDispatch`'s own struct definition at all (only its field-less
-# construction and its `impl SendPipe`), so no block could ever resolve the
-# type; `KvCache`/`KvCaps`/`KvUpstream`/`UpstreamRef`/`Fallthrough`/
-# `Selection`/`KvHandle`/`WriteBack`/`SynthUpstream` were also missing from
-# `tutorial_gate_prelude` entirely (a real gap, not a tutorial-content bug —
-# `examples/cache/main.rs` imports them from `proxima::{..}` /
-# `proxima::upstreams::KvUpstream` / `proxima::selection::Selection` the same
-# way); and the origin-upstream line was a bare comment
-# (`into_handle(/* ForwardPipe { client } | SynthUpstream::new(...) */)`),
-# an `into_handle` call with zero real arguments. Fixed by adding the 9
-# missing re-exports to `src/tutorial_doctests.rs`, replacing the comment
-# with a real `SynthUpstream::new(..)` call (the real example wraps it one
-# layer deeper in a call-counting `CountingOrigin` purely so its own
-# assertions can prove the origin was hit exactly once —
-# `cache/main.rs:190-209` — elided here as instrumentation, not concept),
-# and restructuring into 3 self-contained blocks: two upstreams; the
-# `CachedOriginDispatch` struct AND its `impl SendPipe` merged into ONE
-# block (splitting them across two blocks compiled each individually but
-# broke the chain — the impl block, needing the struct from a separate
-# chunk, could never pass pass 1 standalone itself, so it could never donate
-# both the struct AND the impl forward to the final wire-up block, which
-# needs both to resolve `into_handle(dispatch): PipeHandle` — measured
-# directly, E0277 "the trait bound `CachedOriginDispatch: SendPipe` is not
-# satisfied" even though the impl block itself showed `... ok` two blocks
-# earlier); and the `Fallthrough` construction + `WriteBack::single` wire-up.
-# Raised to 94 after build-a-crud-origin-service.md's own rewrite: all 4 of
-# its blocks were previously FAILED — the `Store` struct cited `BTreeMap`/
-# `Mutex`/`MutexGuard`/`PoisonError`/`AtomicU64` with none imported and none
-# in `tutorial_gate_prelude` (fixed with real `use` lines in the block
-# itself, matching the tutorials' own established convention of showing a
-# plain `std` import inline rather than adding a std collection type to the
-# prelude); the routing block's `mount_with_methods` calls referenced
-# `ReadItem`/`UpdateItem`/`DeleteItem`, none of which any earlier block ever
-# defined (`ReadItem`'s prose described its 404 behavior but showed no code,
-# `UpdateItem`/`DeleteItem` were never shown at all); and the serve block
-# was a bare fragment (`app.build_listener(...)`, `run_crud_flow(bind)`,
-# `listener.shutdown()`) with no enclosing fn and an undefined `app`, plus
-# `ShutdownBarrier` — which the real file imports from `proxima::shutdown`
-# — missing from `tutorial_gate_prelude` entirely (a real gap, fixed by
-# adding it). Fixed by merging `CreateItem` and `ReadItem` (plus the
-# `item_id` path-param helper and a duplicated `Store`) into ONE
-# self-contained block — the same "impl needs the struct from a separate
-# chunk" chaining trap `build-a-caching-reverse-proxy.md` hit, except here
-# TWO downstream blocks (routing, serve) each needed BOTH handlers forwarded,
-# so splitting `CreateItem`/`ReadItem` into two independently-standalone
-# blocks would have made each redefine `Store` and mutually retire the
-# other from later context (the awk transform's redefinition rule disables
-# the WHOLE earlier chunk, not just the redefined name) — merging them into
-# one chunk that defines `Store` exactly once was the only shape that
-# survives forwarding into both downstream blocks; then turning the routing
-# fragment into a real, self-contained `mount_routes(app: &App, store:
-# Store) -> Result<(), ProximaError>` mounting the two taught handlers (UPDATE
-# and DELETE described in prose with a real citation instead of shown code,
-# preserving the tutorial's original scope rather than inflating it), and the
-# serve fragment into a real, self-contained `async fn start(bind:
-# SocketAddr) -> Result<(), ProximaError>` mirroring `crud/main.rs`'s own
-# `main` (build, mount inline, `build_listener`, `shutdown`,
-# `ShutdownBarrier::broadcast_drop`) minus the `run_crud_flow` HTTP-client
-# harness, which is test plumbing, not concept — same elision precedent
-# `build-a-caching-reverse-proxy.md` used for its own call-counting wrapper.
-# The rewrite also resynced every `crud/main.rs` `file:line` citation, all of
-# which had drifted by a small, non-constant margin (e.g. the `Store` struct
-# cited `33-40` against a real `35-39`; the CREATE handler cited `67-90`
-# against a real `66-89`) since this page was first written.
-# Raised to 96 after build-a-load-balancer.md's own rewrite: its 2 blocks
-# were both previously FAILED — the `Backend`/pool-vec block used a bare
-# `?` on `build_backend(...)` at the top of the awk-injected unit-returning
-# `fn main() { block_on(async { .. }); }` wrapper (needs an enclosing
-# `Result`-returning `fn`, which the excerpt never had) referencing three
-# undefined `origin_*_bind` locals besides; fixed by wrapping the pool
-# construction in a real, self-contained `fn build_pool() -> Result<Vec
-# <Backend>, ProximaError>` (mirroring `load-balance/main.rs`'s own
-# `parse_addr` + `build_backend`) that the block then calls and asserts
-# on instead of leaving `?` floating. The `impl SendPipe for
-# LoadBalancerPipe` block never defined `LoadBalancerPipe` at all (only
-# its `impl`) and its `None` arm was elided pseudocode the tutorial's own
-# prose already admitted doesn't compile (`Err(/* .. */)` is `Err()`,
-# missing its one required argument) — fixed by repeating the real
-# `LoadBalancerPipe`/`select_backend` definitions from §2 (safe: the awk
-# transform's own name-redefinition rule retires §1's `Backend` context
-# for this block, so the two `struct Backend` copies never collide) and
-# swapping in the real typed error, `Err(ProximaError::Io(std::io::Error
-# ::other("load balancer: no healthy backend available")))`. The rewrite
-# also resynced 5 stale `file:line` citations that had drifted by a
-# constant +4 lines starting partway through the file (the `#[proxima::
-# main(cores = 1)]` doc comment above `main` grew by 4 lines after this
-# page was first written): the backends-vec excerpt (`147-151` -> real
-# `151-155`), `build_backend` (`213-224` -> real `217-228`), the mount/
-# serve boilerplate (`243-256` -> real `247-261`, the full `spin_up_
-# load_balancer` function), and the 12-request-drive-plus-assertions
-# citation (`261-297` -> real `266-302`, `drive_requests` through
-# `assert_distribution`).
-# Raised to 98 after build-a-multi-runtime-service.md's own rewrite: all 3
-# of its original blocks were previously FAILED — the `SharedCounterPipe`
-# struct+impl block cited `AtomicU64` and `shared_total` with neither
-# imported nor defined in the block (`tutorial_gate_prelude` re-exports
-# `AtomicUsize`/`AtomicBool` but never `AtomicU64`); the two-`App` block
-# referenced an undefined `pipe` (from a separate, unfed-forward block) and
-# used bare `?` at the top of the awk-injected `fn main() { block_on(async
-# { .. }); }` wrapper, which only accepts `?` inside a `Result`-returning
-# fn; the `build_listener` block referenced `prime_app`/`tokio_app`/
-# `prime_bind`/`tokio_bind`, none defined within reach. Splitting the fix
-# across 3 forwarded blocks hits the same chaining trap
-# build-a-caching-reverse-proxy.md's rewrite already found (a block that
-# doesn't itself compile standalone in pass 1 never donates its bindings
-# to a later block in pass 2) — so instead of chasing forwarding, the two
-# `App`-building blocks were merged into ONE self-contained block, `use
-# std::sync::atomic::AtomicU64;` added directly (matching the tutorials'
-# established convention of an inline `use` over growing the prelude for a
-# single-cited std type), and the `?`-heavy body wrapped in a real `async
-# fn build_serve_and_drain(pipe: PipeHandle, prime_bind: SocketAddr,
-# tokio_bind: SocketAddr) -> Result<(usize, usize), ProximaError>` mirroring
-# `multi_runtime/main.rs`'s own `main` (both `App`s, both listeners, both
-# `ShutdownBarrier::broadcast_drop` drains) that the block then calls with
-# `.await.expect(..)` and asserts `cores_acked == 2` on for both runtimes —
-# real cleanup, not just real construction. `SharedCounterPipe` is repeated
-# verbatim in this block (the same "make each block stand on its own"
-# precedent load-balance's `LoadBalancerPipe` §3 rewrite set), so the file
-# now compiles as 2 fully independent blocks instead of 3 forwarding-
-# dependent fragments. The rewrite also resynced 4 stale `file:line`
-# citations drifted by a small, non-constant margin since this page was
-# first written (`shared_total`'s own declaration: `68` -> real `67`; the
-# two-`App` build span: `77-93` -> real `76-92`; the `build_listener` pair:
-# `98-99` -> real `97-98`; the shared-counter-assertion span: `109-148` ->
-# real `108-147`).
-# Raised to 102 after build-a-plugin.md's own rewrite: all 4 of its original
-# blocks were previously FAILED — `PipeFactory`/`DynPipeFactory`/
-# `PluginRegistry` were missing from `tutorial_gate_prelude` entirely (a real
-# gap: `examples/plugin-skeleton/src/lib.rs` imports `PipeFactory`/
-# `PipeHandle`/... from `proxima_primitives::pipe` and `PluginRegistry` from
-# `proxima_primitives::pipe::plugin` the same way, but neither module was
-# re-exported into the harness's prelude), and even after that fix the
-# `PipeFactory` impl block cited `StampHeaderFactory` — never defined in its
-# own block, only in the crate's own source two blocks away — and the final
-# `my_plugin::register(...)` composition example cannot compile at all
-# (`my_plugin` names a separate crate this doctest harness has no way to
-# link against) plus used a bare `?` inside the awk-injected unit-returning
-# `fn main`. Fixed by merging `StampHeader` into the factory block (repeated
-# verbatim, the same "make each block stand on its own" precedent
-# load-balance's `LoadBalancerPipe` §3 rewrite set) so it passes pass 1
-# standalone and can donate `StampHeaderFactory` forward; retagging the
-# module-doc-comment quote `text` instead of leaving it silently FAILED,
-# and replacing it with a real, self-contained `compose_app() -> Result<App,
-# ProximaError>` excerpt (`register` repeated verbatim once more, for the
-# same self-containment reason) that drops the crate-qualifier the doc
-# comment shows and asserts on the real call chain instead. The rewrite
-# also caught a genuine harness bug this page's own `PluginRegistry`
-# excerpt exposed for the first time: a tutorial block that re-declares a
-# `tutorial_gate_prelude`-only trait (not one of `proxima::prelude`'s own
-# exports, so outside the transform's existing shadow-guard list) and a
-# LATER block bounds a generic fn over that trait name, the later block's
-# bound silently resolves to the FORWARDED LOCAL trait instead of the real
-# one, so it fails to type-check the moment it is instantiated with a real
-# `AppBuilder` — fixed by adding `PluginRegistry` to
-# `scripts/tutorials-gate-transform.awk`'s own shadow-guard list alongside
-# `proxima::prelude`'s exports. The rewrite also resynced 6 stale
-# `file:line` citations drifted since this page was first written
-# (`pipe_factory.rs`'s `DynPipeFactory` alias: `30` -> real `34`;
-# `app_builder.rs`'s `impl PluginRegistry for AppBuilder`: `193-197` -> real
-# `228-232`; `App::builder()`: `src/app.rs:637` -> real `882`; `AppBuilder`'s
-# own struct: `src/app_builder.rs:48` -> real `56`; `with_defaults()`: `96`
-# -> real `106`; `build()`: `259` -> real `330`).
-# Raised to 105 after build-a-record-replay-harness.md's own rewrite: all 4
-# of its original blocks were previously FAILED — every block was an
-# excerpt referencing `sink`/`request`/`terminal`/`cassette_path`/`runtime`/
-# `replay`/`unrecorded`, none of them bound anywhere in that block or any
-# earlier one this generator could see, plus zero `use` imports for
-# `RecordUpstream`/`ReplayUpstream`/`AccumulatingSink`/`LazyFanOut`/
-# `TerminalSignal`/etc, none of which live in `tutorial_gate_prelude`.
-# Rebuilt as 3 real, self-contained blocks against `examples/record/main.rs`
-# and `examples/replay/main.rs` (both confirmed still current and running
-# clean via `cargo run --example record` / `--example replay`): block 1
-# builds the full record flow (`SynthUpstream` -> `RecordUpstream` ->
-# `SendPipe::call`), block 2 awaits `TerminalSignal::drained` and reads the
-# cassette back (forwards block 1's context — the same pass-2 accumulation
-# 00-foundations.md's own multi-block sections rely on), block 3 merges the
-# replay-serves-cassette flow AND the typed-`ReplayMiss` match into one
-# fence (the same "make each block stand on its own" precedent
-# build-a-plugin.md's `StampHeader` rewrite set) rather than splitting them
-# across two forwarding-dependent blocks — splitting them hit a genuine
-# forwarding conflict pass-1-isolated compilation never surfaces until
-# tried: block 3 needs its own `HttpEvent`/`ProtocolEvent`/`RecordingEvent`
-# imports to pass standalone (required for pass 2 to forward it into a
-# would-be block 4), but block 1 is ALSO forwarded into block 3 in pass 2
-# (pass 2 accumulates every earlier standalone-good block, not just the
-# nearest one) and already imports those same names, so the two collide
-# (E0252) the moment both are live in one generated file — merging removes
-# the need for block 3 to donate context to anything after it.
-# Raised to 110 after build-an-api-gateway.md's own rewrite: 4 of its 5
-# original blocks were previously FAILED — the routing block used
-# `api_forward`/`web_forward` before §3 built them; the rate-limit block
-# referenced `api_client`/`clock`, neither shown in any block; the auth
-# block referenced `routed`/`VALID_TOKEN`/`BTreeSet`, none in reach; the
-# compose block used bare `?` at the top of the awk-injected unit-returning
-# `fn main` wrapper and referenced `gateway_pipe`/`gateway_bind`. None of
-# `Auth`/`KeyExtractor`/`RateLimit`/`RateLimitCaps`/`RoutingPipe`/
-# `TokenBucketConfig`/`ListenerHandle`/the `Clock` trait live in
-# `tutorial_gate_prelude` either. Rather than chase pass-2 forwarding order
-# (the routing block's own dependency, built one section later, cannot be
-# satisfied by backward accumulation at all), every block after §1 was
-# turned into a small, self-contained function taking the previous stage's
-# output as a typed parameter — `gateway_router(api_forward: PipeHandle,
-# web_forward: PipeHandle) -> RoutingPipe`, `build_api_forward<Clk: Clock +
-# Send + Sync + 'static>(api_client: Client, clock: Clk) -> PipeHandle`,
-# `gateway_auth(routed: RoutingPipe) -> Auth`, `build_gateway(gateway_pipe:
-# Auth, gateway_bind: SocketAddr) -> Result<(App, ListenerHandle),
-# ProximaError>` — each real, matching `examples/gateway/main.rs` line for
-# line inside the function body, none needing the sections before it to
-# have run. A new §0 states the real import block once
-# (`gateway/main.rs:33-38`) so every later block forwards it instead of
-# repeating it. The rewrite also fixed two citations stale since
-# `6689d05cc`'s reformat shifted everything after line 145 by +4
-# (`run_scenarios`: cited `166-272` against a real `170-277`) and one wrong
-# since the file's first version (`mount` accepts a handle directly cited
-# "Foundations §12", which is `signal`, not `mount` — corrected to
-# Ergonomics §8, the `ViaPipe` shape of `IntoMountTarget`, where that claim
-# is actually taught).
-# Raised to 113 after build-an-observability-pipeline.md's own rewrite
-# turned all 3 of its blocks (all 3 previously FAILED — bare `RUST_LOG`/
-# `?`-chained fragments referencing macros and types (`Recorder`, `Exporter`,
-# `trace!`..`error!`) nowhere in `tutorial_gate_prelude`, plus a struct-update
-# `LevelGate { .. }` literal with no base — `..` is pattern syntax, not valid
-# in a struct expression) into 3 real, self-contained excerpts of
-# `examples/logs/main.rs`'s three sections (§2/§3 rely on §1's/§2's
-# imports rather than re-importing the same name, since two blocks both
-# explicitly importing e.g. `Exporter` collide E0252 once pass 2
-# concatenates them), proven against the real `cargo run --example logs`
-# output for every numeric claim (drained 4, fanned 3, file 3/0,
-# console 1/2, DropOldest drops 2).
-# Raised again after build-a-kafka-style-partitioner.md's own rewrite: 4 of
-# its blocks were FAILED for the "excerpt of private/module-relative
-# internals" reason 01-ergonomics.md's `Tier::plan` precedent already covers
-# (`impl Pipe for FanIn`'s elided body returns the private `FanInCall`; both
-# `algebra_claims` fn excerpts use `super::`/private helpers that only
-# resolve inside that module; `FanIn::new`'s bare signature is excerpted
-# from an impl over private fields) — all four given the same `,ignore`
-# treatment with a one-line why. 2 more (`PartitionKey`, `route`) were
-# FAILED for citing `Record`/`fnv1a`/`PARTITIONS`/`block_on_ready` without
-# defining them in-block — fixed by repeating the real definitions inline.
-# The real gaps this surfaced: `DropSafe`, `ControlFlow`, `DrainState` and
-# `Waker` were missing from `tutorial_gate_prelude` despite the tutorial's
-# own real-source excerpts needing them. Also caught a real drift bug:
-# `fanout.rs` grew a base-tier `impl Pipe for FanOut` (commit `4e31e74f8`)
-# that the tutorial's compile-checked-proof paragraph still denied existed.
-FLOOR=116
-if [ "$tutorial_ok" -lt "$FLOOR" ]; then
-  echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
+# The residual this gate used to tolerate is gone: every rust block under
+# docs/tutorials/ now compiles. The technique that closed the last 45 was
+# always the same one — repeat, verbatim from source, the definitions and
+# imports the excerpt elided, and where the quoted thing is not a program
+# at all (a proc-macro crate's private internals), fence it as `text` and
+# cite it instead of pretending it is compilable.
+if [ "$tutorial_failed" -ne 0 ]; then
+  echo "tutorials-gate: FAIL — $tutorial_failed block(s) fail to compile"
   exit 1
 fi
-if [ "$code" -ne 0 ] && [ "$tutorial_ok" -ge "$FLOOR" ]; then
-  echo "tutorials-gate: $tutorial_failed block(s) below the floor still fail to compile (see full log above) — not a regression, tracked as residual coverage"
+if [ "$tutorial_ignored" -ne 0 ]; then
+  echo "tutorials-gate: FAIL — $tutorial_ignored block(s) ignored; a block that cannot compile is not rust, fence it as \`text\`"
+  exit 1
 fi
-echo "tutorials-gate: clean ($tutorial_ok >= floor $FLOOR)"
+if [ "$tutorial_ok" -ne "$block_count" ]; then
+  echo "tutorials-gate: FAIL — $tutorial_ok of $block_count rust blocks compiled; the two must match exactly"
+  exit 1
+fi
+echo "tutorials-gate: clean — all $block_count rust blocks compile"
