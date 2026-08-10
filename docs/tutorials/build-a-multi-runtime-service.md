@@ -14,12 +14,21 @@ The example frames it: *"tokio and glommio and monoio are process-singletons —
 The pipe is a plain sans-IO `SendPipe` with shared state; nothing in it names a runtime (`multi_runtime/main.rs:40-59`):
 
 ```rust
-struct SharedCounterPipe { total: Arc<AtomicU64> }
+use std::sync::atomic::AtomicU64;
+
+struct SharedCounterPipe {
+    total: Arc<AtomicU64>,
+}
 
 impl SendPipe for SharedCounterPipe {
-    type In = Request<Bytes>; type Out = Response<Bytes>; type Err = ProximaError;
-    fn call(&self, _request: Request<Bytes>)
-        -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        _request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
         let total = self.total.clone();
         async move {
             let observed = total.fetch_add(1, Ordering::AcqRel) + 1;
@@ -27,49 +36,103 @@ impl SendPipe for SharedCounterPipe {
         }
     }
 }
-let pipe: PipeHandle = into_handle(SharedCounterPipe { total: shared_total.clone() });
+
+let shared_total = Arc::new(AtomicU64::new(0));
+let pipe: PipeHandle = into_handle(SharedCounterPipe {
+    total: shared_total.clone(),
+});
+assert_eq!(shared_total.load(Ordering::Acquire), 0);
 ```
 
-`shared_total` is an `Arc<AtomicU64>` — `let shared_total = Arc::new(AtomicU64::new(0));` — created once, earlier in `main` (`multi_runtime/main.rs:68`). Read it as "a shared counter that's safe to bump from many threads at once"; `.clone()` makes another pointer to that *same* counter, not a copy of its value. Inside `call`, `total.fetch_add(1, Ordering::AcqRel)` bumps the counter by one and returns the value it had *before* the bump (hence the `+ 1`) — the `Ordering::AcqRel` detail is about cross-thread memory visibility and isn't important here.
+`shared_total` is an `Arc<AtomicU64>` — `let shared_total = Arc::new(AtomicU64::new(0));` — created once, earlier in `main` (`multi_runtime/main.rs:67`). Read it as "a shared counter that's safe to bump from many threads at once"; `.clone()` makes another pointer to that *same* counter, not a copy of its value. Inside `call`, `total.fetch_add(1, Ordering::AcqRel)` bumps the counter by one and returns the value it had *before* the bump (hence the `+ 1`) — the `Ordering::AcqRel` detail is about cross-thread memory visibility and isn't important here.
 
 ## 2. Two runtimes, two listeners, one pipe
 
-Build two `App`s — one on prime, one on tokio — each with its own runtime and acceptor factory, both mounting the **same** handle (`multi_runtime/main.rs:77-93`):
+Build two `App`s — one on prime, one on tokio — each with its own runtime and acceptor factory, both mounting the **same** handle, then build both listeners directly — no `block_on` needed, since `build_listener` is a plain synchronous call that blocks the calling thread only until its own accept lane has acked ready, no polling, no sleeping (`multi_runtime/main.rs:67-98, 149-152`; `SharedCounterPipe` repeated from §1 so this block stands on its own):
 
 ```rust
-let prime_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(2)?);
-let prime_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(prime_runtime.clone())
-    .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
-prime_app.mount("/", pipe.clone())?;
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
 
-let tokio_runtime: Arc<dyn Runtime> = Arc::new(TokioPerCoreRuntime::new(2)?);
-let tokio_app = App::builder()
-    .with_defaults()?
-    .build()?
-    .with_runtime(tokio_runtime.clone())
-    .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
-tokio_app.mount("/", pipe.clone())?;
+struct SharedCounterPipe {
+    total: Arc<AtomicU64>,
+}
+
+impl SendPipe for SharedCounterPipe {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        _request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        let total = self.total.clone();
+        async move {
+            let observed = total.fetch_add(1, Ordering::AcqRel) + 1;
+            Ok(Response::ok(format!("shared_total={observed}\n")))
+        }
+    }
+}
+
+async fn build_serve_and_drain(
+    pipe: PipeHandle,
+    prime_bind: SocketAddr,
+    tokio_bind: SocketAddr,
+) -> Result<(usize, usize), ProximaError> {
+    // prime: N worker threads it owns, its own reactor, its own executor.
+    let prime_runtime: Arc<dyn Runtime> = Arc::new(PrimeRuntime::new(2)?);
+    let prime_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(prime_runtime.clone())
+        .with_acceptor_factory(Arc::new(proxima_net::prime::PrimeAcceptorFactory));
+    prime_app.mount("/", pipe.clone())?;
+
+    // tokio: a completely separate set of worker threads, a separate
+    // executor, wired to the SAME pipe (same Arc<AtomicU64> inside it).
+    let tokio_runtime: Arc<dyn Runtime> = Arc::new(TokioPerCoreRuntime::new(2)?);
+    let tokio_app = App::builder()
+        .with_defaults()?
+        .build()?
+        .with_runtime(tokio_runtime.clone())
+        .with_acceptor_factory(Arc::new(proxima_net::tokio::TokioAcceptorFactory));
+    tokio_app.mount("/", pipe.clone())?;
+
+    // both listeners bind and start accepting now — two live runtimes, one
+    // process, at the same time.
+    let prime_listener = prime_app.build_listener(ListenerSpec::http(prime_bind))?;
+    let tokio_listener = tokio_app.build_listener(ListenerSpec::http(tokio_bind))?;
+    prime_listener.shutdown();
+    tokio_listener.shutdown();
+
+    let prime_report = ShutdownBarrier::new(prime_runtime).broadcast_drop().await;
+    let tokio_report = ShutdownBarrier::new(tokio_runtime).broadcast_drop().await;
+    Ok((prime_report.cores_acked, tokio_report.cores_acked))
+}
+
+let shared_total = Arc::new(AtomicU64::new(0));
+let pipe: PipeHandle = into_handle(SharedCounterPipe {
+    total: shared_total.clone(),
+});
+let prime_bind: SocketAddr = "127.0.0.1:8081".parse().expect("valid socket addr");
+let tokio_bind: SocketAddr = "127.0.0.1:8082".parse().expect("valid socket addr");
+let (prime_acked, tokio_acked) = build_serve_and_drain(pipe, prime_bind, tokio_bind)
+    .await
+    .expect("both apps build, mount, bind, and drain cleanly");
+assert_eq!(prime_acked, 2);
+assert_eq!(tokio_acked, 2);
 ```
 
-`mount("/", pipe.clone())` is the same terse mount from Foundations Section 12 — `pipe` is already a `PipeHandle`, so it is passed straight in, no wrapper. The `2` passed to `PrimeRuntime::new` and `TokioPerCoreRuntime::new` is the number of worker threads (cores) that runtime gets to run on. `with_acceptor_factory` is the other half of "run on this runtime": an acceptor factory is the piece that accepts incoming network connections for a given runtime, so `proxima_net::prime::PrimeAcceptorFactory` accepts connections on prime's reactor (its event loop) and `proxima_net::tokio::TokioAcceptorFactory` accepts them on tokio's — every runtime needs its own. Note both live as submodules of the one `proxima_net` crate (`proxima_net::prime`, `proxima_net::tokio`), not as separate `proxima_net_prime`/`proxima_net_tokio` crates.
+`mount("/", pipe.clone())` is the same terse mount from Foundations §13 (`app.mount("/", hello)`, `src/app.rs:723`) — `pipe` is already a `PipeHandle`, so it is passed straight in, no wrapper. The `2` passed to `PrimeRuntime::new` and `TokioPerCoreRuntime::new` is the number of worker threads (cores) that runtime gets to run on. `with_acceptor_factory` is the other half of "run on this runtime": an acceptor factory is the piece that accepts incoming network connections for a given runtime, so `proxima_net::prime::PrimeAcceptorFactory` accepts connections on prime's reactor (its event loop) and `proxima_net::tokio::TokioAcceptorFactory` accepts them on tokio's — every runtime needs its own. Note both live as submodules of the one `proxima_net` crate (`proxima_net::prime`, `proxima_net::tokio`), not as separate `proxima_net_prime`/`proxima_net_tokio` crates.
 
 `App::builder().with_defaults()?.build()?` builds the app the same way Foundations' `App::new()` does, just spelled out through the builder so `.with_runtime(...)` and `.with_acceptor_factory(...)` can immediately override the defaults it installs. `with_runtime` + `with_acceptor_factory` is the *only* difference between serving on prime vs tokio — the pipe is identical.
 
-Each app then builds its own listener directly, no `block_on` needed — `build_listener` is a plain synchronous call that blocks the calling thread only until its own accept lane has acked ready, no polling, no sleeping (`multi_runtime/main.rs:98-99`):
-
-```rust
-let prime_listener = prime_app.build_listener(ListenerSpec::http(prime_bind))?;
-let tokio_listener = tokio_app.build_listener(ListenerSpec::http(tokio_bind))?;
-```
-
-Because each `build_listener` call returns as soon as *that* listener is accepting — and the serving itself then runs on the runtime's own worker threads, not on the thread that called `build_listener` — both listeners end up running concurrently on their separate runtimes by the time the second call returns (`multi_runtime/main.rs:100-107`).
+Because each `build_listener` call returns as soon as *that* listener is accepting — and the serving itself then runs on the runtime's own worker threads, not on the thread that called `build_listener` — both listeners end up running concurrently on their separate runtimes by the time the second call returns. `ListenerHandle::shutdown` (`proxima-listen/src/handle.rs:602`) consumes the handle and stops accepting; `ShutdownBarrier::broadcast_drop` (`proxima-primitives/src/sync/shutdown.rs:157`) then drains every core each runtime is holding — `cores_acked` above is `2` for both because each runtime owns 2 cores, and every one of them acks the drop signal.
 
 ## 3. Shared state across the boundary
 
-The two runtimes race requests from separate OS threads against the one `Arc<AtomicU64>`. The example asserts the shared counter is contiguous and lock-free across both — no lost updates, no double counts: it sorts the totals observed across both listeners and asserts they equal `1..=(REQUESTS_PER_LISTENER * 2)` (`multi_runtime/main.rs:109-148`).
+The two runtimes race requests from separate OS threads against the one `Arc<AtomicU64>`. The example asserts the shared counter is contiguous and lock-free across both — no lost updates, no double counts: it sorts the totals observed across both listeners and asserts they equal `1..=(REQUESTS_PER_LISTENER * 2)` (`multi_runtime/main.rs:108-147`).
 
 ## What you built
 
