@@ -194,21 +194,31 @@ Foundations §7 told you `#[proxima::piped]` "picks which of the four tiers a gi
 
 `#[proxima::piped]` computes the **full downward closure** of tiers your function's shape qualifies for, and writes one impl block for *every* tier in that closure — never just one — because the higher tiers are additive constraints on the same root contract, never a replacement for it (`proxima_primitives::pipe::primitives`'s own module doc says exactly this of the trait family; `proxima-macros/src/pipe_attr.rs:335–347`, `Tier::plan`):
 
-```rust,ignore
-// Tier is pub(crate) to proxima-macros — real source, quoted for its
-// logic, not something you can compile standalone against `proxima`.
-pub(crate) fn plan(climbs_to_unpin: bool, send: bool) -> Vec<Tier> {
-    let mut tiers = vec![Tier::Pipe];
-    if send {
-        tiers.push(Tier::SendPipe);
+```rust
+// Tier is pub(crate) to proxima-macros — its definition is repeated here,
+// verbatim, alongside the real `plan` body so the excerpt stands on its own.
+#[derive(PartialEq, Eq)]
+pub(crate) enum Tier {
+    Pipe,
+    SendPipe,
+    UnpinPipe,
+    UnpinSendPipe,
+}
+
+impl Tier {
+    pub(crate) fn plan(climbs_to_unpin: bool, send: bool) -> Vec<Tier> {
+        let mut tiers = vec![Tier::Pipe];
+        if send {
+            tiers.push(Tier::SendPipe);
+        }
+        if climbs_to_unpin {
+            tiers.push(Tier::UnpinPipe);
+        }
+        if climbs_to_unpin && send {
+            tiers.push(Tier::UnpinSendPipe);
+        }
+        tiers
     }
-    if climbs_to_unpin {
-        tiers.push(Tier::UnpinPipe);
-    }
-    if climbs_to_unpin && send {
-        tiers.push(Tier::UnpinSendPipe);
-    }
-    tiers
 }
 ```
 
@@ -252,15 +262,30 @@ This is not a design proxima wants to keep. `proxima-primitives/src/pipe/primiti
 
 ## 8. One `mount`, four shapes
 
-Foundations §13 showed you `app.mount("/", hello)` once, with `hello` a `#[proxima::piped(send)]`-generated pipe. `App::mount` actually accepts four genuinely different kinds of value through that one method, with no runtime type-checking or branching on your part — the compiler picks the right path entirely at compile time (`src/app.rs:723–741`):
+Foundations §13 showed you `app.mount("/", hello)` once, with `hello` a `#[proxima::piped(send)]`-generated pipe. `App::mount` actually accepts four genuinely different kinds of value through that one method, with no runtime type-checking or branching on your part — the compiler picks the right path entirely at compile time (`src/app.rs:724–742`):
 
 ```rust
-pub fn mount<Target, Via>(&self, path: &str, target: Target) -> Result<(), ProximaError>
-where
-    Target: IntoMountTarget<Via>,
-{
-    let target = target.into_mount_target();
-    // ..
+// `App` here is a local stand-in for the real type: `impl App { .. }` for
+// the REAL `proxima::App` is not legal from outside its defining crate
+// (E0116, the inherent-impl orphan rule), and `App`'s real fields
+// (`router`/`pipes`) are private, so this excerpt cannot borrow the real
+// instance either. The signature and the shown line are real and verbatim;
+// the router/registry mechanics `// ..` elides are the same ones section 4
+// already covered are not the point of this excerpt (the dispatch on
+// `Target`/`Via`, at compile time, is) — see `src/app.rs:724–742` for that
+// body in full.
+struct App;
+
+impl App {
+    pub fn mount<Target, Via>(&self, path: &str, target: Target) -> Result<(), ProximaError>
+    where
+        Target: IntoMountTarget<Via>,
+    {
+        let target = target.into_mount_target();
+        // ..
+        let _ = (path, target);
+        Ok(())
+    }
 }
 ```
 

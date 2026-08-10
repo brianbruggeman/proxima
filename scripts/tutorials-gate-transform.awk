@@ -118,7 +118,45 @@ BEGIN {
     # before this name was added here. Such a block still compiles fine on
     # its own; it must simply never be fed forward into a LATER block that
     # also has the real trait in scope.
-    split("AnyProtocol App ClassifyOutcome Client ClientBuilder ClientProtocol ClientProtocolExt ClientSecurityExt ClientTransportExt Listener ListenerBuilder ListenerBuilderEntry ListenerProtocolExt ListenerTransportExt ProbeVerdict PluginRegistry", prelude_names_arr, " ")
+    #
+    # `AndThen`/`Select` cover the same shape for a STRUCT/ENUM rather than
+    # a trait: 00-foundations.md section 5 quotes `AndThen`'s real struct
+    # alongside its `impl Pipe` (needed so the excerpt's `self.first`/
+    # `self.second` resolve — those fields are private, and privacy is
+    # scoped to the defining module) and section 10 quotes `Select` verbatim
+    # from its own doc comment. Forwarded unguarded, the local `AndThen`
+    # shadows the real one for every later `.and_then()` call (whose real
+    # `PipeExt::and_then` body calls `AndThen::new`, which the local
+    # excerpt never defines — measured directly: 18 unrelated later blocks
+    # broke on "no associated function `new`" the moment this excerpt was
+    # added), and the local `Select` shadows the real one for `FanIn::new`'s
+    # `Strategy: FanInStrategy` bound (measured: `Select: FanInStrategy` not
+    # satisfied for the LOCAL enum, only for the real `proxima::pipe::Select`).
+    #
+    # `Request`/`Response` cover the same shape for the example-local structs
+    # build-a-chaos-test-rig.md and build-delivery-guarantees.md's answer
+    # keys happen to name identically to `tutorial_gate_prelude`'s own
+    # `crate::{Request, Response}` (the HTTP request/response types) — pure
+    # name collision, unrelated concepts. Guarded so a local `struct Request
+    # { id: u32 }` never shadows the real HTTP type into a later block that
+    # actually needs it.
+    #
+    # `FanIn` covers the same shape, for build-a-kafka-style-partitioner.md's
+    # own `FanIn::new` excerpt: the real constructor cannot be added to the
+    # real, foreign `FanIn` via an inherent impl (E0116) no matter what, so
+    # the excerpt redeclares `FanIn` locally instead — guarded so it never
+    # shadows the real `proxima_primitives::pipe::fan_in::FanIn` into a
+    # later block.
+    #
+    # `Runtime`/`RuntimeSelection`/`SpecBuilder`/`ListenProtocol` cover
+    # 02-listener-builder.md/03-native-runtime.md's own trimmed-trait and
+    # private-field excerpts (`Runtime`'s own module doc trims 3 of 5
+    # methods; `RuntimeSelection`/`install_runtime`/`installed_runtime` are
+    # quoted together so the static resolves; `SpecBuilder`'s impl for
+    # `ListenerBuilder` and `ListenProtocol`'s `resolve_listen_protocol`
+    # excerpt both need the trait name free to redeclare against a
+    # private-fielded local stand-in) — guarded the same way.
+    split("AnyProtocol App ClassifyOutcome Client ClientBuilder ClientProtocol ClientProtocolExt ClientSecurityExt ClientTransportExt Listener ListenerBuilder ListenerBuilderEntry ListenerProtocolExt ListenerTransportExt ProbeVerdict PluginRegistry AndThen Select Request Response FanIn Runtime RuntimeSelection SpecBuilder ListenProtocol AcceptorFactory", prelude_names_arr, " ")
     for (pn in prelude_names_arr) prelude_names[prelude_names_arr[pn]] = 1
     if (GOODFILE != "") {
         while ((getline gline < GOODFILE) > 0) {

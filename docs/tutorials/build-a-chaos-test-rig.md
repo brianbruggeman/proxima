@@ -7,16 +7,165 @@
 
 The example frames it: *"Chaos testing in proxima is not a framework bolted on from outside; it is a `Pipe` you compose IN FRONT of the system under test."*
 
-Every code block below cites real, current lines in `examples/chaos/main.rs`. Three of them are marked `` ```rust,ignore ``: `Chaos<Inner>`, `ChaosPolicy`, and `ChaosFault` are types private to that one example binary, not exported by the `proxima` library, so no doctest prelude could ever make them resolve standalone — the same class of excerpt [03-native-runtime.md](./03-native-runtime.md) documents. Each is verified instead by the real `cargo run --example chaos` transcript quoted in the section that uses it, captured the day this document was rewritten; the same seeds are hard-coded in the example, so re-running it reproduces the exact same numbers.
+Every code block below cites real, current lines in `examples/chaos/main.rs` and compiles: `Chaos<Inner>`, `ChaosPolicy`, and `ChaosFault` are types private to that one example binary, not exported by the `proxima` library, so each block repeats the supporting definitions it needs verbatim rather than assuming a shared prelude. Each claim is also verified independently by the real `cargo run --example chaos` transcript quoted in the section that uses it, captured the day this document was rewritten; the same seeds are hard-coded in the example, so re-running it reproduces the exact same numbers.
 
 ## 1. `Chaos<Inner>`: fault injection as a decorator
 
-`Chaos<Inner>` wraps any `Pipe`. On every call it rolls a seeded, deterministic PRNG against a `ChaosPolicy` — plain data: a percentage for each fault kind (error, drop, delay) plus how long a `Delay` fault should pretend to wait (`chaos/main.rs:96-102`) — and injects one of three faults, or lets `inner` run clean (`chaos/main.rs:193-246`):
+`Chaos<Inner>` wraps any `Pipe`. On every call it rolls a seeded, deterministic PRNG against a `ChaosPolicy` — plain data: a percentage for each fault kind (error, drop, delay) plus how long a `Delay` fault should pretend to wait (`chaos/main.rs:96-102`) — and injects one of three faults, or lets `inner` run clean (`chaos/main.rs:222-246`):
 
-```rust,ignore
-// excerpt: Self = Chaos<Inner>, defined only in this example binary, so
-// this block cannot resolve as a standalone doctest — see chaos/main.rs
-// for the full file, or run `cargo run --example chaos`.
+```rust
+// real source, quoted verbatim and in full: `Chaos<Inner>`'s own supporting
+// types (the PRNG, the fault policy/stats/clock, and its error) so `Self`
+// has a real definition to belong to, since none of these are exported by
+// the `proxima` library — `Chaos<Inner>` is private to this one example
+// binary, by design (fault injection is example-shaped, not library
+// machinery).
+use std::sync::atomic::AtomicU32;
+
+struct Xorshift64 {
+    state: u64,
+}
+
+impl Xorshift64 {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut state = self.state;
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        self.state = state;
+        state
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultKind {
+    Clean,
+    Error,
+    Dropped,
+    Delay,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChaosPolicy {
+    error_percent: u64,
+    drop_percent: u64,
+    delay_percent: u64,
+    delay: Duration,
+}
+
+impl ChaosPolicy {
+    fn classify(&self, roll: u64) -> FaultKind {
+        let roll = roll % 100;
+        let error_edge = self.error_percent;
+        let drop_edge = error_edge + self.drop_percent;
+        let delay_edge = drop_edge + self.delay_percent;
+        if roll < error_edge {
+            FaultKind::Error
+        } else if roll < drop_edge {
+            FaultKind::Dropped
+        } else if roll < delay_edge {
+            FaultKind::Delay
+        } else {
+            FaultKind::Clean
+        }
+    }
+}
+
+#[derive(Default)]
+struct ChaosStats {
+    errors: AtomicU32,
+    drops: AtomicU32,
+    delays: AtomicU32,
+    clean: AtomicU32,
+}
+
+impl ChaosStats {
+    fn record(&self, fault: FaultKind) {
+        let counter = match fault {
+            FaultKind::Error => &self.errors,
+            FaultKind::Dropped => &self.drops,
+            FaultKind::Delay => &self.delays,
+            FaultKind::Clean => &self.clean,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> FaultCounts {
+        FaultCounts {
+            errors: self.errors.load(Ordering::Relaxed),
+            drops: self.drops.load(Ordering::Relaxed),
+            delays: self.delays.load(Ordering::Relaxed),
+            clean: self.clean.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FaultCounts {
+    errors: u32,
+    drops: u32,
+    delays: u32,
+    clean: u32,
+}
+
+#[derive(Default)]
+struct FaultClock {
+    now_nanos: Cell<u64>,
+}
+
+impl FaultClock {
+    fn advance(&self, elapsed: Duration) {
+        let elapsed_nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        self.now_nanos
+            .set(self.now_nanos.get().saturating_add(elapsed_nanos));
+    }
+
+    fn now_nanos(&self) -> u64 {
+        self.now_nanos.get()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ChaosFault<InnerErr> {
+    Injected,
+    Dropped,
+    Inner(InnerErr),
+}
+
+struct Chaos<Inner> {
+    inner: Inner,
+    policy: ChaosPolicy,
+    rng: RefCell<Xorshift64>,
+    clock: FaultClock,
+    stats: Arc<ChaosStats>,
+}
+
+impl<Inner> Chaos<Inner> {
+    fn new(inner: Inner, policy: ChaosPolicy, seed: u64, stats: Arc<ChaosStats>) -> Self {
+        Self {
+            inner,
+            policy,
+            rng: RefCell::new(Xorshift64::new(seed)),
+            clock: FaultClock::default(),
+            stats,
+        }
+    }
+
+    fn simulated_delay(&self) -> Duration {
+        Duration::from_nanos(self.clock.now_nanos())
+    }
+}
+
 impl<Inner: Pipe> Pipe for Chaos<Inner> {
     type In = Inner::In;
     type Out = Inner::Out;
@@ -46,16 +195,75 @@ Two things make the assertions provable, not eyeballed: the PRNG is **seeded** (
 
 Stack a `RetryController` in front of `Chaos(50% fault)`: a failed attempt re-runs the **same** pipe, so every request in the batch still resolves `Ok` (`chaos/main.rs:329-391`):
 
-```rust,ignore
-// excerpt: `UpstreamService`/`policy_50pct`/`seed`/`stats` are placeholder
-// names for values built earlier in the same function — see
-// chaos/main.rs:329-391 for the real, complete construction.
-let chaos = Chaos::new(UpstreamService, policy_50pct, seed, stats);
-let controller = RetryController { max_attempts: 4, backoff: Backoff::Exponential { .. }, .. };
+```rust
+// `Request`/`Response`/`Source`/`upstream_service` — the pipe under test —
+// real, verbatim (`chaos/main.rs:266-305`); repeated here since `Request`/
+// `Response` collide by name only with the unrelated HTTP types
+// `tutorial_gate_prelude` already exports (guarded in the awk transform so
+// this redeclaration is never forwarded past this block). `Chaos`/
+// `ChaosPolicy`/`ChaosStats` carry forward from §1 above.
+#[derive(Debug, Clone, Copy)]
+struct Request {
+    id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Upstream,
+    Cache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Response {
+    id: u32,
+    source: Source,
+}
+
+impl Retryable for Response {
+    fn retry_status(&self) -> Option<u16> {
+        None
+    }
+
+    fn is_success(&self) -> bool {
+        true
+    }
+}
+
+#[proxima::piped]
+async fn upstream_service(request: Request) -> Result<Response, Infallible> {
+    Ok(Response {
+        id: request.id,
+        source: Source::Upstream,
+    })
+}
+
+// `policy_50pct`/`seed`/`stats` given their real values
+// (`chaos/main.rs:333-345`) instead of the placeholder names the real
+// driver function builds them under.
+let policy_50pct = ChaosPolicy {
+    error_percent: 35,
+    drop_percent: 15,
+    delay_percent: 10,
+    delay: Duration::from_millis(75),
+};
+let seed = 0xA5A5_1234_9E37_79B9;
+let stats = Arc::new(ChaosStats::default());
+let chaos = Chaos::new(upstream_service, policy_50pct, seed, stats);
+let controller = RetryController {
+    rules: RetryRules::default(),
+    backoff: Backoff::Exponential {
+        initial: Duration::from_millis(20),
+        factor: 2,
+        max: Duration::from_millis(500),
+    },
+    jitter: Jitter::None,
+    max_attempts: 4,
+    deadline: None,
+};
 // per attempt: controller.on_outcome(...) -> Retry { after } | Done | Exhausted
 ```
 
-`stats` above is the shared `ChaosStats` counter from `Chaos::new` — the same one the wrap-up print reads to report what was actually injected. `Backoff::Exponential` grows the wait between retries with each attempt, so a flaky call backs off instead of hammering the system immediately (`chaos/main.rs:348-352`). The bare `{ .. }` is this tutorial's shorthand for "other fields omitted for brevity" — not runnable on its own; see `chaos/main.rs:346-356` for the real, complete values.
+`stats` above is the shared `ChaosStats` counter from `Chaos::new` — the same one the wrap-up print reads to report what was actually injected. `Backoff::Exponential` grows the wait between retries with each attempt, so a flaky call backs off instead of hammering the system immediately (`chaos/main.rs:348-352`).
 
 `RetryController::on_outcome` decides Retry/Done/Exhausted from the outcome + rules; the loop re-calls the pipe on `Retry` (`chaos/main.rs:309-327`). Real, captured output from `cargo run --example chaos` (deterministic — the seed is hard-coded, so a re-run reproduces these exact numbers):
 
@@ -74,13 +282,80 @@ let controller = RetryController { max_attempts: 4, backoff: Backoff::Exponentia
 
 ## 3. Fallback absorbs faults by routing to a different pipe
 
-Where retry re-runs the *same* pipe, `Fallback` routes to a **different** one on any failure. `Chaos(80% fault)` as the primary, a reliable `Cache` as the secondary — every request resolves `Ok` regardless of how hostile the policy is (`chaos/main.rs:438-477`):
+Where retry re-runs the *same* pipe, `Fallback` routes to a **different** one on any failure. `Chaos(80% fault)` as the primary, a reliable `Cache` as the secondary — every request resolves `Ok` regardless of how hostile the policy is (`chaos/main.rs:438-443`):
 
-```rust,ignore
-// excerpt: `chaos_80pct`/`request` are placeholder names for values built
-// earlier in the same function — see chaos/main.rs:420-477 for the real,
-// complete construction and driver loop.
-let composite = Fallback { primary: chaos_80pct, secondary: Cache { .. } };
+```rust
+// `Request`/`Response`/`Source`/`upstream_service` repeated (self-contained
+// per block, per the awk transform's `Request`/`Response` shadow guard —
+// see §2 above); `Cache`, the reliable secondary, real and verbatim
+// (`chaos/main.rs:397-418`). `Chaos`/`ChaosPolicy`/`ChaosStats`/`AtomicU32`
+// (the `use` above §1's own `ChaosStats`) carry forward from §1.
+#[derive(Debug, Clone, Copy)]
+struct Request {
+    id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Upstream,
+    Cache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Response {
+    id: u32,
+    source: Source,
+}
+
+#[proxima::piped]
+async fn upstream_service(request: Request) -> Result<Response, Infallible> {
+    Ok(Response {
+        id: request.id,
+        source: Source::Upstream,
+    })
+}
+
+struct Cache {
+    hits: Arc<AtomicU32>,
+}
+
+impl Pipe for Cache {
+    type In = Request;
+    type Out = Response;
+    type Err = ChaosFault<Infallible>;
+
+    fn call(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Response, ChaosFault<Infallible>>> {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        async move {
+            Ok(Response {
+                id: request.id,
+                source: Source::Cache,
+            })
+        }
+    }
+}
+
+// `chaos_80pct`/`request` given real values (`chaos/main.rs:424-436,446`)
+// instead of the placeholder names the real driver loop builds them under.
+let policy_80pct = ChaosPolicy {
+    error_percent: 30,
+    drop_percent: 30,
+    delay_percent: 20,
+    delay: Duration::from_millis(120),
+};
+let stats = Arc::new(ChaosStats::default());
+let chaos_80pct = Chaos::new(upstream_service, policy_80pct, 0xC0FF_EE00_1357_2468, stats);
+let cache_hits = Arc::new(AtomicU32::new(0));
+let request = Request { id: 1 };
+let composite = Fallback {
+    primary: chaos_80pct,
+    secondary: Cache {
+        hits: Arc::clone(&cache_hits),
+    },
+};
 let response = composite.call(request).await.unwrap();  // always resolves
 ```
 

@@ -33,18 +33,30 @@
 #[doc(hidden)]
 pub mod tutorial_gate_prelude {
     pub use crate::app::{App, IntoMountTarget, MountTarget, RunConfig};
-    pub use crate::listen::ListenerSpec;
     pub use crate::listen::admission::{BlacklistConfig, ConnAdmission};
     pub use crate::listen::any::AnyHandler;
+    pub use crate::listen::ListenerSpec;
     pub use crate::prelude::*;
-    pub use crate::selection::Selection;
-    pub use crate::shutdown::ShutdownBarrier;
-    pub use crate::upstreams::KvUpstream;
-    pub use crate::{Fallthrough, KvCache, KvCaps, KvHandle, SynthUpstream, UpstreamRef, WriteBack};
-    pub use crate::{PeerInfo, StreamConnection};
     #[cfg(feature = "runtime-tokio")]
     pub use crate::runtime::TokioPerCoreRuntime;
-    pub use crate::runtime::{BackgroundHandle, BackgroundPool, CoreId, Runtime};
+    pub use crate::runtime::{BackgroundHandle, BackgroundPool, CoreId, Runtime, SpawnError};
+    pub use crate::runtime::{RuntimeBackend, RuntimeSelection};
+    pub use crate::selection::Selection;
+    pub use crate::server::Server;
+    pub use crate::shutdown::ShutdownBarrier;
+    pub use crate::upstreams::KvUpstream;
+    #[cfg(feature = "recording")]
+    pub use crate::{
+        deferred_runtime, AccumulatingSink, DeferredRuntime, DynRecordingSink, FormatKind,
+        HttpEvent, JsonlSource, LazyFanOut, ProtocolEvent, RecordingSource, SinkSpec,
+    };
+    pub use crate::{
+        Fallthrough, KvCache, KvCaps, KvHandle, SynthUpstream, UpstreamRef, WriteBack,
+    };
+    pub use crate::{ListenProtocol, LoadContext, PipeFactoryRegistry, ServeContext};
+    #[cfg(feature = "recording")]
+    pub use crate::RecordUpstream;
+    pub use crate::{PeerInfo, StreamConnection};
     pub use crate::{ProximaError, ProximaResult, Request, RequestBuilder, Response};
     // every one of these is `cfg(any(feature = "macros", test))` at the root;
     // an ungated re-export here broke any consumer building without `macros`
@@ -54,22 +66,34 @@ pub mod tutorial_gate_prelude {
     pub use bytes::Bytes;
     pub use conflaguration::{Settings, Validate, ValidationMessage};
     pub use futures::executor::block_on;
+    pub use proxima_config::sugar::SpecBuilder;
     pub use proxima_core::markers::DropSafe;
     pub use proxima_core::signal::Signal;
+    pub use proxima_net::packet::PacketListenerFactory;
+    pub use proxima_primitives::pipe::capabilities::Retryable;
     pub use proxima_primitives::pipe::demand::{
         AlwaysArmed, AtomicGate, AtomicGateController, Demand,
     };
     pub use proxima_primitives::pipe::ext::PipeExt;
     pub use proxima_primitives::pipe::fan_in::{Exhausted, FanIn, FanInStrategy, Select};
     pub use proxima_primitives::pipe::fanout::FanOut;
-    pub use proxima_primitives::pipe::handler::{Handler, PipeHandle, into_handle};
+    pub use proxima_primitives::pipe::handler::{into_handle, Handler, PipeHandle};
     pub use proxima_primitives::pipe::pipe_factory::{DynPipeFactory, PipeFactory};
     pub use proxima_primitives::pipe::plugin::PluginRegistry;
     pub use proxima_primitives::pipe::primitives::{
         AndThen, Pipe, SendPipe, UnpinPipe, UnpinSendPipe,
     };
+    pub use proxima_primitives::pipe::resilience::{
+        Backoff, CircuitBreaker, CircuitState, Deadline, Fallback, Jitter, RetryAction,
+        RetryController,
+    };
+    pub use proxima_primitives::pipe::retry_rules::RetryRules;
     pub use proxima_primitives::pipe::routing::MethodFilter;
+    pub use proxima_primitives::pipe::DrainSink;
     pub use proxima_primitives::pipe::DrainState;
+    pub use proxima_primitives::stream::{
+        AcceptorFactory, DatagramFactory, TcpAcceptor, TcpBindOptions, UnixUpstreamFactory,
+    };
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::Value;
     pub use std::cell::{Cell, RefCell};
@@ -80,8 +104,8 @@ pub mod tutorial_gate_prelude {
     pub use std::net::{Ipv4Addr, SocketAddr};
     pub use std::ops::ControlFlow;
     pub use std::pin::Pin;
-    pub use std::sync::Arc;
     pub use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    pub use std::sync::Arc;
     pub use std::task::{Context, Poll, Waker};
     pub use std::time::Duration;
 

@@ -19,8 +19,14 @@ That restriction is gone. `.any()` now classifies over TCP AND UDP, on the SAME 
 A candidate opts in with one method (`proxima-listen/src/any/probe.rs:266–288`):
 
 ```rust
-fn wants_datagram(&self) -> bool {
-    false
+// the real trait has six methods (part 6's own excerpt shows the other
+// five); only the one new one is quoted here, as a default method on a
+// trait declaring nothing else, so `&self` has an enclosing trait to
+// belong to.
+trait AnyProtocol {
+    fn wants_datagram(&self) -> bool {
+        false
+    }
 }
 ```
 

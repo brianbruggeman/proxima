@@ -47,16 +47,25 @@ assert_eq!(backends.len(), 3);
 `LoadBalancerPipe` holds the pool and a cursor. `select_backend` walks the full pool from the cursor and returns the first healthy client; none healthy is the pool being *down* — a typed error, not a papered-over fallback (`load-balance/main.rs:92-102`):
 
 ```rust
-fn select_backend(&self) -> Option<Client> {
-    let backend_count = self.backends.len();
-    for _ in 0..backend_count {
-        let index = self.cursor.fetch_add(1, Ordering::SeqCst) % backend_count;
-        let backend = &self.backends[index];
-        if backend.healthy {
-            return Some(backend.client.clone());
+// `LoadBalancerPipe` (repeated verbatim; §3 shows the rest of it) so `&self`
+// has a real enclosing impl to belong to.
+struct LoadBalancerPipe {
+    backends: Vec<Backend>,
+    cursor: AtomicUsize,
+}
+
+impl LoadBalancerPipe {
+    fn select_backend(&self) -> Option<Client> {
+        let backend_count = self.backends.len();
+        for _ in 0..backend_count {
+            let index = self.cursor.fetch_add(1, Ordering::SeqCst) % backend_count;
+            let backend = &self.backends[index];
+            if backend.healthy {
+                return Some(backend.client.clone());
+            }
         }
+        None   // pool down
     }
-    None   // pool down
 }
 ```
 
