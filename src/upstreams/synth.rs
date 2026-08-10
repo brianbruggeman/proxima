@@ -137,7 +137,19 @@ impl SendPipe for SynthUpstream {
             let body = match (pre_body, template) {
                 (Some(body), _) => body,
                 (None, Some(template_text)) => {
-                    expand_template_body(&template_text, request).await?
+                    #[cfg(any(feature = "http1", feature = "http-prime-deps"))]
+                    {
+                        expand_template_body(&template_text, request).await?
+                    }
+                    #[cfg(not(any(feature = "http1", feature = "http-prime-deps")))]
+                    {
+                        let _ = (template_text, request);
+                        return Err(ProximaError::Config(
+                            "synth template body requires the `http1` or \
+                             `http-prime-deps` feature (templates engine)"
+                                .into(),
+                        ));
+                    }
                 }
                 (None, None) => SynthBody::Buffered(Bytes::new()),
             };
@@ -167,6 +179,7 @@ impl SendPipe for SynthUpstream {
     }
 }
 
+#[cfg(any(feature = "http1", feature = "http-prime-deps"))]
 async fn expand_template_body(
     template: &str,
     request: Request<Bytes>,

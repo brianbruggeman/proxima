@@ -791,17 +791,44 @@ where
 ///
 /// # Errors
 /// Returns `ProximaError::Io` if the tokio runtime fails to build.
-#[cfg(not(all(
-    feature = "runtime-prime-executor",
-    feature = "runtime-prime-inbox-alloc",
-    feature = "runtime-prime-reactor",
-    feature = "runtime-prime-bgpool"
-)))]
+#[cfg(all(
+    not(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    )),
+    feature = "tokio"
+))]
 pub fn run<F>(future: F) -> Result<F::Output, ProximaError>
 where
     F: Future,
 {
     run_tokio(true, None, future)
+}
+
+/// `run` — no backend compiled in at all (neither the prime bundle nor
+/// `tokio`): a `--no-default-features` build with no runtime feature added.
+///
+/// # Errors
+/// Always returns `ProximaError::Config`.
+#[cfg(not(any(
+    all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    ),
+    feature = "tokio"
+)))]
+pub fn run<F>(_future: F) -> Result<F::Output, ProximaError>
+where
+    F: Future,
+{
+    Err(ProximaError::Config(
+        "no runtime backend compiled in: enable the prime bundle (serve-prime) or `tokio`"
+            .into(),
+    ))
 }
 
 /// Like [`run`], but sizes and places whichever backend `Default`
@@ -842,12 +869,15 @@ where
 ///
 /// # Errors
 /// Returns `ProximaError::Io` if the tokio runtime fails to build.
-#[cfg(not(all(
-    feature = "runtime-prime-executor",
-    feature = "runtime-prime-inbox-alloc",
-    feature = "runtime-prime-reactor",
-    feature = "runtime-prime-bgpool"
-)))]
+#[cfg(all(
+    not(all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    )),
+    feature = "tokio"
+))]
 pub fn run_with_cores<F>(
     cores: Option<usize>,
     affinity: Option<&str>,
@@ -858,6 +888,34 @@ where
 {
     let _ = affinity;
     run_tokio(true, cores, future)
+}
+
+/// `run_with_cores` — no backend compiled in at all. See the no-backend
+/// `run` variant.
+///
+/// # Errors
+/// Always returns `ProximaError::Config`.
+#[cfg(not(any(
+    all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    ),
+    feature = "tokio"
+)))]
+pub fn run_with_cores<F>(
+    _cores: Option<usize>,
+    _affinity: Option<&str>,
+    _future: F,
+) -> Result<F::Output, ProximaError>
+where
+    F: Future,
+{
+    Err(ProximaError::Config(
+        "no runtime backend compiled in: enable the prime bundle (serve-prime) or `tokio`"
+            .into(),
+    ))
 }
 
 // nextest runs one test per process, so `INSTALLED_RUNTIME`'s set-once

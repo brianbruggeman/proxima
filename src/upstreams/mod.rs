@@ -45,7 +45,9 @@ pub mod kv_upstream;
 pub mod process;
 #[cfg(feature = "tokio")]
 pub mod process_rpc;
+#[cfg(feature = "recording")]
 pub mod record;
+#[cfg(feature = "recording")]
 pub use proxima_recording::replay;
 #[cfg(all(
     feature = "h3-native-upstream",
@@ -114,12 +116,14 @@ pub use process::{
 };
 #[cfg(feature = "tokio")]
 pub use process_rpc::{ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream};
+#[cfg(feature = "recording")]
 pub use record::{RecordPipeFactory, RecordUpstream};
 #[cfg(all(
     feature = "redis-client",
     any(target_os = "linux", target_os = "macos")
 ))]
 pub use redis::{RedisClientProtocol, RedisPipeFactory};
+#[cfg(feature = "recording")]
 pub use replay::{ReplayPipeFactory, ReplayUpstream};
 #[cfg(any(feature = "tcp", feature = "unix"))]
 pub use stream_passthrough::{

@@ -249,7 +249,6 @@ proxima-pgwire = { workspace = true, optional = true }
 proxima-tls = { workspace = true, optional = true }
 proxima-http = { workspace = true }
 proxima-quic = { workspace = true, optional = true }
-proxima-recording = { workspace = true, features = ["pipe", "replay"] }
 proxima-protocols = { workspace = true, features = ["proxy_protocol-std"] }
 proxima-redis = { workspace = true, optional = true }
 proxima-memcached = { workspace = true, optional = true }
@@ -325,7 +324,6 @@ tracing.workspace = true
 ulid = { workspace = true, features = ["serde"] }
 url = { workspace = true }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
-zstd = { workspace = true }
 webpki-roots = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 h2 = { workspace = true, features = ["unstable"], optional = true }
@@ -343,6 +341,7 @@ crossbeam-utils = { workspace = true }
 # OTLP request encoding. Dev-deps also carry prost 0.14 as the P9b baseline.
 prost = { workspace = true, features = ["std", "derive"], optional = true }
 rand.workspace = true
+proxima-recording = { version = "0.1.0", path = "proxima-recording", features = ["pipe", "replay"], optional = true }
 
 [dependencies.tracing-subscriber]
 workspace = true
@@ -449,7 +448,7 @@ default = [
     # below for the tokio-free flagship built on it.
     "serve-prime",
     "http2", "http3",
-    "histogram", "macros",
+    "histogram", "macros", "recording",
     # prime is the DEFAULT `http` upstream backend. The dep bundle is
     # always pulled (proxima_net::prime is empty on non-unix via its own
     # `#![cfg]`, so it links everywhere); the registration sites pick prime
@@ -642,6 +641,11 @@ tokio = [
     # restores the sister-tokio Handle on `#[proxima::test]`'s shared prime
     # test runtime too (see `serve-prime`'s `proxima-test/test-prime`).
     "proxima-test/test-prime-tokio-compat",
+    # the `pipelines` executor and the mcp listener's `verify_replay` tool
+    # (both tokio-gated) use recording types unconditionally in their own
+    # bodies — without this, `--no-default-features --features tokio` fails
+    # to compile on an unresolved `crate::recording`/`crate::verify::replay_walker`.
+    "recording",
 ]
 
 # Runtime-agnostic: `proxima-listen`'s `stream` module
@@ -1006,7 +1010,13 @@ prime-tokio-compat-inverted = [
 histogram   = ["proxima-telemetry/histogram"]
 otlp-http   = ["proxima-telemetry/otlp-http", "dep:prost"]
 otlp-grpc   = ["proxima-telemetry/otlp-grpc", "otlp-http"]
-macros      = ["proxima-telemetry/macros", "proxima-telemetry/std", "proxima-telemetry/emit", "dep:proxima-macros"]
+# record/replay + cassette plumbing. pulls proxima-recording, which pulls
+# zstd-sys — a C library, so this must be off-able for wasm32 targets.
+# Default-on so no existing consumer changes behavior; `macros` also
+# requires it below because `#[proxima::test]`'s test_support/cassette_config
+# modules use the recording types unconditionally once `macros` is on.
+recording   = ["dep:proxima-recording"]
+macros      = ["proxima-telemetry/macros", "proxima-telemetry/std", "proxima-telemetry/emit", "dep:proxima-macros", "recording"]
 # unified-instrument seam: a #[instrument]/#[span] close also records its
 # duration into a per-name histogram, so one annotation yields a trace span AND
 # a duration metric. Compile-time default-off firewall, forwarded from
