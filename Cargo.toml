@@ -357,6 +357,10 @@ optional = true
 io-uring = { workspace = true, optional = true }
 tokio-uring = { workspace = true, optional = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_wasm_03 = { version = "0.3", package = "getrandom", features = ["wasm_js"] }
+
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
 loom = { workspace = true }

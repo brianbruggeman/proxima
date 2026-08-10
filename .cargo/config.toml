@@ -1,0 +1,5 @@
+# getrandom 0.3 refuses to build for wasm32-unknown-unknown unless the backend
+# is named explicitly — the feature alone is insufficient, per its own docs.
+# Scoped to the wasm target so no host build sees this flag.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
