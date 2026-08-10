@@ -59,6 +59,8 @@ pub mod tutorial_gate_prelude {
     pub use proxima_primitives::pipe::fan_in::{Exhausted, FanIn, FanInStrategy, Select};
     pub use proxima_primitives::pipe::fanout::FanOut;
     pub use proxima_primitives::pipe::handler::{Handler, PipeHandle, into_handle};
+    pub use proxima_primitives::pipe::pipe_factory::{DynPipeFactory, PipeFactory};
+    pub use proxima_primitives::pipe::plugin::PluginRegistry;
     pub use proxima_primitives::pipe::primitives::{
         AndThen, Pipe, SendPipe, UnpinPipe, UnpinSendPipe,
     };
