@@ -24,7 +24,9 @@ use crate::middlewares::validate::ValidateFactory;
 use crate::middlewares::write_back::{WriteBack, WriteBackTarget};
 use crate::pipe::{PipeHandle, into_handle};
 use crate::pipe_factory::PipeFactoryRegistry;
+#[cfg(feature = "recording")]
 use crate::recording::factory::RecordingSourceRegistry;
+#[cfg(feature = "recording")]
 use crate::recording::{BinSourceFactory, JsonlSourceFactory};
 use crate::request::{Request, Response};
 use crate::schema::SchemaRegistry;
@@ -55,7 +57,9 @@ use crate::upstreams::kv_upstream::KvUpstream;
 use crate::upstreams::process::ProcessPipeFactory;
 #[cfg(feature = "tokio")]
 use crate::upstreams::process_rpc::ProcessRpcPipeFactory;
+#[cfg(feature = "recording")]
 use crate::upstreams::record::RecordPipeFactory;
+#[cfg(feature = "recording")]
 use crate::upstreams::replay::ReplayPipeFactory;
 #[cfg(any(feature = "tcp", feature = "unix"))]
 use crate::upstreams::stream_passthrough::StreamPassthroughPipeFactory;
@@ -112,7 +116,9 @@ pub struct LoadContext {
     pub source_registry: Arc<proxima_primitives::pipe::SourceFactoryRegistry>,
     /// Shared spigot armed at serve; the `record` upstream's durable sink
     /// stays inert until then (C7 spigot model).
+    #[cfg(feature = "recording")]
     pub recording_spigot: crate::recording::DeferredRuntime,
+    #[cfg(feature = "recording")]
     pub recording_source_registry: Arc<RecordingSourceRegistry>,
     pub codec_registry: Arc<CodecRegistry>,
     pub config_formats: Arc<ConfigFormatRegistry>,
@@ -138,7 +144,9 @@ impl LoadContext {
         #[allow(clippy::let_unit_value)]
         let http_client = new_http_client_handle();
         let log_buffers = Arc::new(LogBufferRegistry::new());
+        #[cfg(feature = "recording")]
         let recording_spigot = crate::recording::deferred_runtime();
+        #[cfg(feature = "recording")]
         let recording_source_registry = Arc::new(default_recording_source_registry()?);
         let codec_registry = Arc::new(default_codec_registry()?);
         let config_formats = Arc::new(default_config_format_registry()?);
@@ -146,12 +154,14 @@ impl LoadContext {
         crate::schema::register_scenario_schemas(&schemas)?;
         let registry = Arc::new(default_pipe_factory_registry(
             &http_client,
+            #[cfg(feature = "recording")]
             recording_source_registry.clone(),
             log_buffers.clone(),
             schemas.clone(),
         )?);
         // record upstream needs a Weak<PipeFactoryRegistry> to recursively
         // resolve its `inner` spec; register after the Arc is constructed.
+        #[cfg(feature = "recording")]
         registry.register(Arc::new(RecordPipeFactory::new(
             Arc::downgrade(&registry),
             recording_spigot.clone(),
@@ -163,7 +173,9 @@ impl LoadContext {
         Ok(Self {
             registry,
             source_registry: Arc::new(proxima_primitives::pipe::SourceFactoryRegistry::new()),
+            #[cfg(feature = "recording")]
             recording_spigot,
+            #[cfg(feature = "recording")]
             recording_source_registry,
             codec_registry,
             config_formats,
@@ -182,7 +194,9 @@ impl LoadContext {
         #[allow(clippy::let_unit_value)]
         let http_client = new_http_client_handle();
         let log_buffers = Arc::new(LogBufferRegistry::new());
+        #[cfg(feature = "recording")]
         let recording_spigot = crate::recording::deferred_runtime();
+        #[cfg(feature = "recording")]
         let recording_source_registry = Arc::new(default_recording_source_registry()?);
         let codec_registry = Arc::new(default_codec_registry()?);
         let config_formats = Arc::new(default_config_format_registry()?);
@@ -190,10 +204,12 @@ impl LoadContext {
         crate::schema::register_scenario_schemas(&schemas)?;
         let registry = Arc::new(default_pipe_factory_registry(
             &http_client,
+            #[cfg(feature = "recording")]
             recording_source_registry.clone(),
             log_buffers.clone(),
             schemas.clone(),
         )?);
+        #[cfg(feature = "recording")]
         registry.register(Arc::new(RecordPipeFactory::new(
             Arc::downgrade(&registry),
             recording_spigot.clone(),
@@ -204,7 +220,9 @@ impl LoadContext {
         Ok(Self {
             registry,
             source_registry: Arc::new(proxima_primitives::pipe::SourceFactoryRegistry::new()),
+            #[cfg(feature = "recording")]
             recording_spigot,
+            #[cfg(feature = "recording")]
             recording_source_registry,
             codec_registry,
             config_formats,
@@ -216,6 +234,7 @@ impl LoadContext {
         })
     }
 
+    #[cfg(feature = "recording")]
     pub fn register_recording_source(
         &self,
         factory: crate::recording::factory::DynRecordingSourceFactory,
@@ -230,7 +249,7 @@ impl LoadContext {
 
 fn default_pipe_factory_registry(
     http_client: &HttpClientHandle,
-    sources: Arc<RecordingSourceRegistry>,
+    #[cfg(feature = "recording")] sources: Arc<RecordingSourceRegistry>,
     log_buffers: Arc<LogBufferRegistry>,
     schemas: Arc<SchemaRegistry>,
 ) -> Result<PipeFactoryRegistry, ProximaError> {
@@ -311,6 +330,7 @@ fn default_pipe_factory_registry(
         crate::upstreams::h3_native::H3NativeUpstreamFactory::new(),
     ))?;
     registry.register(Arc::new(FsPipeFactory))?;
+    #[cfg(feature = "recording")]
     registry.register(Arc::new(ReplayPipeFactory::new(sources)))?;
     registry.register(Arc::new(CallbackPipeFactory))?;
     #[cfg(any(feature = "tcp", feature = "unix"))]
@@ -332,6 +352,7 @@ fn default_pipe_factory_registry(
     Ok(registry)
 }
 
+#[cfg(feature = "recording")]
 fn default_recording_source_registry() -> Result<RecordingSourceRegistry, ProximaError> {
     let registry = RecordingSourceRegistry::new();
     registry.register(Arc::new(JsonlSourceFactory))?;
@@ -961,7 +982,9 @@ mod tests {
         let context = LoadContext {
             registry,
             source_registry: Arc::new(proxima_primitives::pipe::SourceFactoryRegistry::new()),
+            #[cfg(feature = "recording")]
             recording_spigot: crate::recording::deferred_runtime(),
+            #[cfg(feature = "recording")]
             recording_source_registry: Arc::new(
                 default_recording_source_registry().expect("recording registry"),
             ),

@@ -372,6 +372,7 @@ impl App {
         // arm the recording spigot with the App's runtime so a directly-called
         // `record` upstream pumps without a serve loop; files still open lazily
         // on first call (C7 spigot model).
+        #[cfg(feature = "recording")]
         if let Some(rt) = &runtime {
             let _ = load_context.recording_spigot.set(rt.clone());
             // read-source factories offload their file I/O through this same
@@ -832,6 +833,7 @@ impl App {
         ) = split_runtime_selection(resolved);
         // arm the recording spigot at build (see App::new) — a builder-made App
         // whose `record` upstream is called directly still pumps.
+        #[cfg(feature = "recording")]
         if let Some(rt) = &runtime {
             let _ = load_context.recording_spigot.set(rt.clone());
             load_context
@@ -905,10 +907,13 @@ impl App {
         // arm the recording spigot with the serve runtime: the `record`
         // upstream's durable sink stays inert until here (C7 spigot model).
         // set-once — a re-serve observes the already-armed spigot.
-        let _ = self.load_context.recording_spigot.set(runtime.clone());
-        self.load_context
-            .recording_source_registry
-            .set_runtime(runtime.clone());
+        #[cfg(feature = "recording")]
+        {
+            let _ = self.load_context.recording_spigot.set(runtime.clone());
+            self.load_context
+                .recording_source_registry
+                .set_runtime(runtime.clone());
+        }
         let runtime_for_factory = runtime.clone();
         let acceptor_factory = self.acceptor_factory.clone();
         let datagram_factory = self.datagram_factory.clone();

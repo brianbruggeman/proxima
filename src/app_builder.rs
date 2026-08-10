@@ -26,16 +26,25 @@ use crate::middlewares::transform::TransformFactory;
 use crate::middlewares::validate::ValidateFactory;
 use crate::mount::Router;
 use crate::pipe_factory::{DynPipeFactory, PipeFactoryRegistry};
+#[cfg(feature = "recording")]
 use crate::recording::factory::{DynRecordingSourceFactory, RecordingSourceRegistry};
+#[cfg(feature = "recording")]
 use crate::recording::{BinSourceFactory, JsonlSourceFactory};
 use crate::schema::SchemaRegistry;
 #[cfg(feature = "http1")]
 use crate::shared_http::SharedHttpClient;
 use crate::telemetry::{Metrics, NoopTelemetry, TelemetryHandle};
 use crate::upstreams::callback::CallbackPipeFactory;
-#[cfg(any(
-    not(all(unix, feature = "http-prime-deps", feature = "runtime-prime")),
-    feature = "http-hyper"
+// hyper only backs `"http"` when it's actually compiled in (`http1`,
+// forced on by `http-hyper` too) — without this, a bare
+// `--no-default-features` build (neither the prime path nor `http1`) hit
+// this arm anyway and failed on an unresolved `crate::upstreams::http`.
+#[cfg(all(
+    feature = "http1",
+    any(
+        not(all(unix, feature = "http-prime-deps", feature = "runtime-prime")),
+        feature = "http-hyper"
+    )
 ))]
 use crate::upstreams::http::HttpPipeFactory;
 use crate::upstreams::kv_cache::KvCacheFactory;
@@ -44,7 +53,9 @@ use crate::upstreams::kv_file::KvFileFactory;
 use crate::upstreams::process::ProcessPipeFactory;
 #[cfg(feature = "tokio")]
 use crate::upstreams::process_rpc::ProcessRpcPipeFactory;
+#[cfg(feature = "recording")]
 use crate::upstreams::record::RecordPipeFactory;
+#[cfg(feature = "recording")]
 use crate::upstreams::replay::ReplayPipeFactory;
 #[cfg(any(feature = "tcp", feature = "unix"))]
 use crate::upstreams::stream_passthrough::StreamPassthroughPipeFactory;
@@ -56,7 +67,9 @@ use proxima_listen::{ListenProtocol, ListenRegistry};
 pub struct AppBuilder {
     listen_registry: ListenRegistry,
     pipe_factory_registry: PipeFactoryRegistry,
+    #[cfg(feature = "recording")]
     recording_spigot: crate::recording::DeferredRuntime,
+    #[cfg(feature = "recording")]
     recording_source_registry: RecordingSourceRegistry,
     codec_registry: CodecRegistry,
     config_formats: ConfigFormatRegistry,
@@ -78,7 +91,9 @@ impl Default for AppBuilder {
         Self {
             listen_registry: ListenRegistry::new(),
             pipe_factory_registry: PipeFactoryRegistry::new(),
+            #[cfg(feature = "recording")]
             recording_spigot: crate::recording::deferred_runtime(),
+            #[cfg(feature = "recording")]
             recording_source_registry: RecordingSourceRegistry::new(),
             codec_registry: CodecRegistry::new(),
             config_formats: ConfigFormatRegistry::new(),
@@ -143,10 +158,13 @@ impl AppBuilder {
         // recording first — replay holds an Arc<RecordingSourceRegistry>
         // and needs every source registered before it's built. (Sinks are
         // built directly from the spigot now — no sink registry.)
-        self.recording_source_registry
-            .register(Arc::new(JsonlSourceFactory))?;
-        self.recording_source_registry
-            .register(Arc::new(BinSourceFactory))?;
+        #[cfg(feature = "recording")]
+        {
+            self.recording_source_registry
+                .register(Arc::new(JsonlSourceFactory))?;
+            self.recording_source_registry
+                .register(Arc::new(BinSourceFactory))?;
+        }
 
         // replay + process + record register in build() once registries
         // are finalized into Arcs.
@@ -168,9 +186,12 @@ impl AppBuilder {
         ))]
         self.pipe_factory_registry
             .register(Arc::new(proxima_http::http1::PrimeHttpPipeFactory::new()))?;
-        #[cfg(any(
-            not(all(unix, feature = "http-prime-deps", feature = "runtime-prime")),
-            feature = "http-hyper"
+        #[cfg(all(
+            feature = "http1",
+            any(
+                not(all(unix, feature = "http-prime-deps", feature = "runtime-prime")),
+                feature = "http-hyper"
+            )
         ))]
         self.pipe_factory_registry
             .register(Arc::new(HttpPipeFactory::with_shared_client(
@@ -232,6 +253,7 @@ impl proxima_primitives::pipe::plugin::PluginRegistry for AppBuilder {
 }
 
 impl AppBuilder {
+    #[cfg(feature = "recording")]
     pub fn with_recording_source_factory(
         self,
         factory: DynRecordingSourceFactory,
@@ -328,9 +350,12 @@ impl AppBuilder {
     }
 
     pub fn build(self) -> Result<App, ProximaError> {
+        #[cfg(feature = "recording")]
         let recording_source_registry = Arc::new(self.recording_source_registry);
+        #[cfg(feature = "recording")]
         let recording_spigot = self.recording_spigot;
         // replay/process/record close over the finalized Arc'd registries.
+        #[cfg(feature = "recording")]
         if self.defaults_replay && self.pipe_factory_registry.get("replay").is_err() {
             self.pipe_factory_registry
                 .register(Arc::new(ReplayPipeFactory::new(
@@ -344,6 +369,7 @@ impl AppBuilder {
             ))?;
         }
         let pipe_factory_registry = Arc::new(self.pipe_factory_registry);
+        #[cfg(feature = "recording")]
         if self.defaults_record && pipe_factory_registry.get("record").is_err() {
             pipe_factory_registry.register(Arc::new(RecordPipeFactory::new(
                 Arc::downgrade(&pipe_factory_registry),
@@ -365,7 +391,9 @@ impl AppBuilder {
         let load_context = LoadContext {
             registry: pipe_factory_registry,
             source_registry: Arc::new(proxima_primitives::pipe::SourceFactoryRegistry::new()),
+            #[cfg(feature = "recording")]
             recording_spigot,
+            #[cfg(feature = "recording")]
             recording_source_registry,
             codec_registry: Arc::new(self.codec_registry),
             config_formats: Arc::new(self.config_formats),

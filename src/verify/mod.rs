@@ -12,21 +12,27 @@
 //!
 //! Discovery rules for zero-arg invocation live in [`discover`].
 
+#[cfg(feature = "recording")]
 pub mod byte_drift;
 pub mod discover;
 pub mod policy;
+#[cfg(feature = "recording")]
 pub mod repair;
+#[cfg(feature = "recording")]
 pub mod replay_walker;
 pub mod report;
 pub mod static_walker;
 
+#[cfg(feature = "recording")]
 pub use byte_drift::{skip_byte_drift_without_spec, verify_byte_drift};
 pub use policy::Policy;
+#[cfg(feature = "recording")]
 pub use repair::{
     RecordingRepairOutcome, RepairItem, RepairOutcome, Weight, project_max_coherent,
     repair_from_recording, repair_from_recording_file, repair_kind_claims, repair_spec_cycles,
     repair_static,
 };
+#[cfg(feature = "recording")]
 pub use replay_walker::{verify_replay, verify_replay_with_spec};
 pub use report::{Level, Report, ReportEntry};
 pub use static_walker::verify_static;

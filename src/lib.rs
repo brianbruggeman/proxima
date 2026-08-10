@@ -104,6 +104,7 @@ pub use proxima_core::buffer as buffer_pool;
 // runtime-holding sibling, and the `run*` edge drivers boot a runtime on top.
 pub use proxima_primitives::block_on;
 pub use proxima_primitives::pipe::body;
+#[cfg(feature = "recording")]
 pub use proxima_recording::pipe::causality;
 pub mod client;
 pub use proxima_codec as codec;
@@ -112,11 +113,37 @@ pub use proxima_config as config_format;
 pub use proxima_patterns::control_plane;
 pub use proxima_patterns::middleware::context_inject;
 pub mod daemon_control_plane;
+#[cfg(feature = "recording")]
 pub mod determinism;
 pub use proxima_core as error;
+// mirrors proxima-http's own gate on `pub mod http1` (`any(http1,
+// http1-native, http1-stream-client)`) — `http-prime-deps` is what forwards
+// `http1-stream-client` here, and is on by default, so this stays reachable
+// under default builds; a bare `--no-default-features` build has none of
+// the three and correctly loses the module.
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "http-prime-deps"
+))]
 pub use proxima_http::http1::h1;
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "http-prime-deps"
+))]
 pub use proxima_http::http1::h1_body;
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "http-prime-deps"
+))]
 pub use proxima_http::http1::h1_connection;
+#[cfg(any(
+    feature = "http1",
+    feature = "http1-native",
+    feature = "http-prime-deps"
+))]
 pub use proxima_http::http1::h1_response;
 #[cfg(feature = "http1")]
 pub use proxima_http::http1::hyper_body;
@@ -171,6 +198,7 @@ pub use proxima_protocols::proxy_protocol;
 #[cfg(feature = "websocket-frame")]
 pub use proxima_protocols::websocket_frame;
 pub use proxima_telemetry::log_buffer;
+#[cfg(feature = "recording")]
 pub mod recording;
 pub use proxima_primitives::pipe::request;
 
@@ -212,6 +240,9 @@ pub use proxima_telemetry as telemetry;
     any(target_os = "linux", target_os = "macos")
 ))]
 pub mod otlp;
+// mirrors proxima-http's own gate on `pub mod templates`
+// (`any(http1, http1-stream-client)`); see the `h1` re-exports above.
+#[cfg(any(feature = "http1", feature = "http-prime-deps"))]
 pub use proxima_http::templates;
 #[cfg(feature = "tls")]
 pub use proxima_tls as tls;
@@ -238,7 +269,9 @@ pub mod verify;
 pub use app::{
     App, AppPipeBuilder, IntoMountTarget, MountTarget, RunConfig, Shutdown, offline_runtime,
 };
+#[cfg(feature = "recording")]
 pub use causality::{ByteRange, Causal, CausalEdge, CausalIndex};
+#[cfg(feature = "recording")]
 pub use determinism::check_determinism;
 #[cfg(feature = "rayon")]
 pub use runtime::RayonBackgroundPool;
@@ -406,6 +439,7 @@ pub use pipe::{
 pub use proxima_patterns::middleware::context_inject::ContextInjector;
 pub use proxima_primitives::pipe::RoutingPipe;
 pub use proxima_primitives::pipe::SendPipe;
+#[cfg(feature = "recording")]
 pub use recording::{
     AccumulatingSink, AppendFuture as RecordingAppendFuture, AppendLog, BinSource,
     BinSourceFactory, BoundedRecordingSink, CacheOutcome, DeferredRuntime, DropReason,
@@ -463,6 +497,7 @@ pub use sugar::SpecBuilder;
 pub use telemetry::{
     HistogramSummary, Labels, Metrics, MetricsSnapshot, NoopTelemetry, Telemetry, TelemetryHandle,
 };
+#[cfg(any(feature = "http1", feature = "http-prime-deps"))]
 pub use templates::{TemplateContext, expand as expand_template};
 // init_tracing_default is #[deprecated] in favor of init_telemetry_with;
 // re-exporting it here is not a new call site, so silence the lint here
@@ -479,9 +514,10 @@ pub use upstream_ref::{
 };
 pub use upstreams::{
     CallbackFn, CallbackFuture, CallbackPipeFactory, CallbackRegistry, CallbackUpstream,
-    DynCallbackFn, KvCache, KvCacheFactory, KvFile, KvFileFactory, RecordPipeFactory,
-    RecordUpstream, ReplayPipeFactory, ReplayUpstream, SynthPipeFactory, SynthUpstream,
+    DynCallbackFn, KvCache, KvCacheFactory, KvFile, KvFileFactory, SynthPipeFactory, SynthUpstream,
 };
+#[cfg(feature = "recording")]
+pub use upstreams::{RecordPipeFactory, RecordUpstream, ReplayPipeFactory, ReplayUpstream};
 #[cfg(feature = "tokio")]
 pub use upstreams::{
     ProcessPipeFactory, ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream, ProcessSpec,
