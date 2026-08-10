@@ -59,4 +59,4 @@ pub use pty_config::{PtyConfig, PtySizeConfig};
 #[cfg(feature = "std")]
 pub use pty_pipe::PtyCommandPipe;
 #[cfg(feature = "std")]
-pub use spawn::SpawnOptions;
+pub use spawn::{Child, SpawnOptions};

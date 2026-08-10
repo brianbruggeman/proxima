@@ -48,8 +48,15 @@ use super::fd_pipe::make_pipe;
 /// every [`Stdio::Piped`] slot.
 #[derive(Debug)]
 pub struct Child {
-    /// Child process id.
-    pub pid: libc::pid_t,
+    /// Child process id. Private — once reaped, the OS is free to
+    /// recycle this number for an unrelated process, so it must
+    /// only ever reach a syscall through [`Child`]'s own methods,
+    /// which know whether it has been reaped.
+    pid: libc::pid_t,
+    /// Cached exit code once the child has been reaped via
+    /// [`Child::wait`] or [`Child::try_wait`]. `None` means not yet
+    /// reaped — the pid is still safe to signal or wait on.
+    exit: Option<i32>,
     /// Parent's write end of the input pipe when
     /// `CommandDescriptor.input == Stdio::Piped`; `None` otherwise.
     pub stdin: Option<OwnedFd>,
@@ -62,18 +69,39 @@ pub struct Child {
 }
 
 impl Child {
+    /// The child's process id.
+    ///
+    /// Prefer [`Child::try_wait`] / [`Child::kill`] over handing this
+    /// raw pid to a syscall directly — once reaped, the OS may recycle
+    /// it for an unrelated process, and only `Child` itself tracks
+    /// whether that has happened.
+    #[must_use]
+    pub fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
     /// Block until the child exits, returning its exit code.
     ///
     /// A child killed by a signal reports `128 + signal`, matching shell
     /// convention. Drop any piped `stdin` first — a child reading stdin will
     /// not exit while the parent holds the write end open.
     ///
+    /// Once the child has been reaped (by a prior `wait` or `try_wait`),
+    /// returns the cached exit code without issuing another `waitpid` —
+    /// the pid may have since been recycled by the OS.
+    ///
     /// Mirrors [`std::process::Child::wait`] in shape.
-    pub fn wait(&self) -> Result<i32, ProximaError> {
+    pub fn wait(&mut self) -> Result<i32, ProximaError> {
+        if let Some(code) = self.exit {
+            return Ok(code);
+        }
+
         let mut status: libc::c_int = 0;
 
         // SAFETY: waitpid is a kernel call taking our own child's pid and a
-        // pointer to a stack int; no Rust invariant is at risk.
+        // pointer to a stack int; no Rust invariant is at risk. self.exit is
+        // still None here, so this pid has not yet been reaped and cannot
+        // have been recycled by the OS.
         let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
 
         if waited != self.pid {
@@ -83,7 +111,70 @@ impl Child {
             )));
         }
 
-        Ok(exit_code(status))
+        let code = exit_code(status);
+        self.exit = Some(code);
+        Ok(code)
+    }
+
+    /// Non-blocking liveness check. `Ok(None)` means still running;
+    /// `Ok(Some(code))` means it has exited (or just did), decoded via
+    /// the same shell convention as [`Child::wait`].
+    ///
+    /// Once reaped, subsequent calls return the cached code without
+    /// issuing another `waitpid` — the pid may have since been recycled.
+    pub fn try_wait(&mut self) -> Result<Option<i32>, ProximaError> {
+        if let Some(code) = self.exit {
+            return Ok(Some(code));
+        }
+
+        let mut status: libc::c_int = 0;
+
+        // SAFETY: waitpid is a kernel call taking our own child's pid and a
+        // pointer to a stack int; WNOHANG makes this a non-blocking poll
+        // rather than a wait. self.exit is still None here, so this pid has
+        // not yet been reaped and cannot have been recycled by the OS.
+        let waited = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+
+        if waited == 0 {
+            Ok(None)
+        } else if waited == self.pid {
+            let code = exit_code(status);
+            self.exit = Some(code);
+            Ok(Some(code))
+        } else {
+            Err(ProximaError::Body(format!(
+                "waitpid returned {waited}, expected {}",
+                self.pid
+            )))
+        }
+    }
+
+    /// Send `SIGKILL`. A no-op if the child has already been reaped —
+    /// never signals a pid the OS may have since recycled.
+    pub fn kill(&mut self) -> Result<(), ProximaError> {
+        if self.exit.is_some() {
+            return Ok(());
+        }
+
+        // SAFETY: pid is our own spawned child and self.exit is still None,
+        // so it has not been reaped and cannot have been recycled by the OS;
+        // SIGKILL against our own live child is always a valid operation.
+        let result = unsafe { libc::kill(self.pid, libc::SIGKILL) };
+
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            // ESRCH means the process is already gone (e.g. raced with an
+            // external reaper) — not a failure for a kill-if-alive call.
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(ProximaError::Body(format!(
+                "kill pid {}: {error}",
+                self.pid
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -247,6 +338,7 @@ fn allocate_piped_pair(slot: Slot) -> Result<PipedPair, ProximaError> {
 fn parent_after_fork(pid: libc::pid_t, piped_pairs: Vec<PipedPair>) -> Child {
     let mut child = Child {
         pid,
+        exit: None,
         stdin: None,
         stdout: None,
         stderr: None,
@@ -425,6 +517,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::thread;
 
     fn cstr(text: &str) -> CString {
         CString::new(text).expect("test literal contains no interior NUL")
@@ -436,6 +529,22 @@ mod tests {
         let mut buffer = String::new();
         file.read_to_string(&mut buffer).expect("read child output");
         buffer
+    }
+
+    /// Poll `try_wait` until it observes the reap, yielding between
+    /// attempts instead of sleeping. Needed because a child's fds close
+    /// (unblocking a pipe-EOF read) a moment before the kernel finishes
+    /// the zombie transition that `waitpid` observes — the gap is real
+    /// but not time-bounded, so we poll a live condition rather than
+    /// guess a duration.
+    fn poll_until_reaped(child: &mut Child) -> i32 {
+        for _ in 0..100_000 {
+            if let Some(code) = child.try_wait().expect("try_wait") {
+                return code;
+            }
+            thread::yield_now();
+        }
+        panic!("child did not reach a reapable state after stdout EOF");
     }
 
     fn wait_child(pid: libc::pid_t) -> libc::c_int {
@@ -579,7 +688,7 @@ mod tests {
     #[test]
     fn spawn_inherit_default_leaves_stdio_alone() {
         let spawned = spawn(
-            CommandDescriptor::new(cstr("/bin/true")).inherit_current_env(),
+            CommandDescriptor::new(cstr("/usr/bin/true")).inherit_current_env(),
             SpawnOptions::default(),
         )
         .expect("spawn /bin/true");
@@ -587,5 +696,106 @@ mod tests {
         assert!(spawned.stdout.is_none());
         assert!(spawned.stderr.is_none());
         wait_child(spawned.pid);
+    }
+
+    #[test]
+    fn try_wait_reports_running_then_exited() {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line; exit 0"))
+            .stdin(Stdio::Piped)
+            .stdout(Stdio::Piped);
+
+        let mut spawned = spawn(&command, SpawnOptions::default()).expect("spawn");
+        assert_eq!(
+            spawned.try_wait().expect("try_wait while running"),
+            None,
+            "child is blocked on read and has not been given any input yet"
+        );
+
+        let input_fd = spawned.stdin.take().expect("piped stdin");
+        let raw = input_fd.into_raw_fd();
+        let mut writer = unsafe { std::fs::File::from_raw_fd(raw) };
+        writer.write_all(b"go\n").expect("write to shell stdin");
+        drop(writer);
+
+        let output_fd = spawned.stdout.take().expect("piped stdout");
+        let _ = drain_to_string(output_fd); // blocks until the shell exits and closes stdout
+
+        let exit_code = poll_until_reaped(&mut spawned);
+        assert_eq!(exit_code, 0, "shell should exit 0 after reading its line");
+    }
+
+    #[test]
+    fn kill_terminates_indefinitely_blocked_child_and_try_wait_reports_signal_death() {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line"))
+            .stdin(Stdio::Piped);
+
+        let mut spawned = spawn(&command, SpawnOptions::default()).expect("spawn");
+        assert_eq!(
+            spawned.try_wait().expect("try_wait while running"),
+            None,
+            "child is blocked reading stdin that nothing ever writes to"
+        );
+
+        spawned.kill().expect("kill");
+        let waited_code = spawned.wait().expect("wait after kill");
+        assert_eq!(
+            waited_code,
+            128 + libc::SIGKILL,
+            "SIGKILL death reported via shell 128+signal convention"
+        );
+
+        assert_eq!(
+            spawned.try_wait().expect("try_wait after kill"),
+            Some(waited_code),
+            "try_wait must report the cached signal-death code once reaped"
+        );
+    }
+
+    #[test]
+    fn try_wait_after_exit_is_cached_and_idempotent() {
+        let mut command = CommandDescriptor::new(cstr("/usr/bin/true"));
+        command.stdout(Stdio::Piped);
+        let mut spawned = spawn(&command, SpawnOptions::default()).expect("spawn");
+
+        let output_fd = spawned.stdout.take().expect("piped stdout");
+        let _ = drain_to_string(output_fd); // blocks until the child exits and closes stdout
+
+        let first = poll_until_reaped(&mut spawned);
+        let second = spawned
+            .try_wait()
+            .expect("second try_wait")
+            .expect("second try_wait must still report Some after reap");
+        assert_eq!(first, 0);
+        assert_eq!(
+            second, first,
+            "second call must return the identical cached code, not re-issue waitpid"
+        );
+    }
+
+    #[test]
+    fn kill_after_reap_is_a_safe_no_op() {
+        let mut command = CommandDescriptor::new(cstr("/usr/bin/true"));
+        command.stdout(Stdio::Piped);
+        let mut spawned = spawn(&command, SpawnOptions::default()).expect("spawn");
+
+        let output_fd = spawned.stdout.take().expect("piped stdout");
+        let _ = drain_to_string(output_fd);
+        let reaped_code = poll_until_reaped(&mut spawned);
+
+        spawned
+            .kill()
+            .expect("kill after reap must be Ok, never signal a recycled pid");
+
+        assert_eq!(
+            spawned.try_wait().expect("try_wait after no-op kill"),
+            Some(reaped_code),
+            "kill after reap must not disturb the cached exit code"
+        );
     }
 }
