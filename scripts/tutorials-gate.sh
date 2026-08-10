@@ -506,7 +506,33 @@ fi
 # `228-232`; `App::builder()`: `src/app.rs:637` -> real `882`; `AppBuilder`'s
 # own struct: `src/app_builder.rs:48` -> real `56`; `with_defaults()`: `96`
 # -> real `106`; `build()`: `259` -> real `330`).
-FLOOR=102
+# Raised to 105 after build-a-record-replay-harness.md's own rewrite: all 4
+# of its original blocks were previously FAILED — every block was an
+# excerpt referencing `sink`/`request`/`terminal`/`cassette_path`/`runtime`/
+# `replay`/`unrecorded`, none of them bound anywhere in that block or any
+# earlier one this generator could see, plus zero `use` imports for
+# `RecordUpstream`/`ReplayUpstream`/`AccumulatingSink`/`LazyFanOut`/
+# `TerminalSignal`/etc, none of which live in `tutorial_gate_prelude`.
+# Rebuilt as 3 real, self-contained blocks against `examples/record/main.rs`
+# and `examples/replay/main.rs` (both confirmed still current and running
+# clean via `cargo run --example record` / `--example replay`): block 1
+# builds the full record flow (`SynthUpstream` -> `RecordUpstream` ->
+# `SendPipe::call`), block 2 awaits `TerminalSignal::drained` and reads the
+# cassette back (forwards block 1's context — the same pass-2 accumulation
+# 00-foundations.md's own multi-block sections rely on), block 3 merges the
+# replay-serves-cassette flow AND the typed-`ReplayMiss` match into one
+# fence (the same "make each block stand on its own" precedent
+# build-a-plugin.md's `StampHeader` rewrite set) rather than splitting them
+# across two forwarding-dependent blocks — splitting them hit a genuine
+# forwarding conflict pass-1-isolated compilation never surfaces until
+# tried: block 3 needs its own `HttpEvent`/`ProtocolEvent`/`RecordingEvent`
+# imports to pass standalone (required for pass 2 to forward it into a
+# would-be block 4), but block 1 is ALSO forwarded into block 3 in pass 2
+# (pass 2 accumulates every earlier standalone-good block, not just the
+# nearest one) and already imports those same names, so the two collide
+# (E0252) the moment both are live in one generated file — merging removes
+# the need for block 3 to donate context to anything after it.
+FLOOR=105
 if [ "$tutorial_ok" -lt "$FLOOR" ]; then
   echo "tutorials-gate: FAIL — $tutorial_ok compiling blocks, below the floor of $FLOOR"
   exit 1
