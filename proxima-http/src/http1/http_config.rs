@@ -54,6 +54,19 @@ pub struct HttpUpstreamConfig {
     /// typical < 20 headers. `None` = forward every header.
     pub forward_request_headers: Option<Arc<Vec<bytes::Bytes>>>,
     pub injected_request_headers: BTreeMap<String, String>,
+    /// Path prefix parsed off the base url's authority (e.g. `/v1` out of
+    /// `https://api.openai.com/v1`), prepended to every request path by the
+    /// prime h1 client's `apply_config` (`client.rs`). Empty when the base
+    /// url carries no path — the default, and byte-identical to the client
+    /// never having known about a prefix at all. `into_runtime_config`
+    /// below leaves this empty (this module has no `url` dependency, by
+    /// design — see the module doc); `build_prime_upstream`
+    /// (`prime_upstream.rs`, the only writer) fills it in from the parsed
+    /// url after `into_runtime_config` returns. The hyper-backed
+    /// `HttpUpstream` doesn't need this field: it concatenates the whole
+    /// base-url string with the request path directly
+    /// (`upstream.rs::build_uri`), path and all.
+    pub base_path: String,
 }
 
 /// Typed config surface for the `http` upstream — a proxy to a base URL with
@@ -154,6 +167,7 @@ impl HttpConfig {
             timeout,
             forward_request_headers,
             injected_request_headers: self.headers.request.clone(),
+            base_path: String::new(),
         })
     }
 }
