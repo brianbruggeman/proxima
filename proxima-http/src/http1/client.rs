@@ -863,12 +863,33 @@ fn fail<C: StreamConnection>(
 
 // ── config application ────────────────────────────────────────────────────────
 
+/// Prepend the base url's path prefix (already trailing-slash-stripped by
+/// `build_prime_upstream`'s `base_path_prefix`) to a request path, with
+/// exactly one slash between them. Mirrors what the hyper-backed
+/// `HttpUpstream` gets for free by concatenating the whole base-url string
+/// with the request path (`upstream.rs::build_uri`) — this is the same
+/// join, done here because the prime client only ever kept the authority.
+fn prefixed_path(base_path: &str, request_path: &Bytes) -> Bytes {
+    let mut merged = Vec::with_capacity(base_path.len() + request_path.len() + 1);
+    merged.extend_from_slice(base_path.as_bytes());
+    if !request_path.starts_with(b"/") {
+        merged.push(b'/');
+    }
+    merged.extend_from_slice(request_path);
+    Bytes::from(merged)
+}
+
 /// Apply the [`HttpUpstreamConfig`] to the outbound request, mirroring
 /// the hyper-backed `HttpUpstream::call` exactly: method override, then
 /// the `forward_request_headers` allow-list (case-insensitive linear
 /// scan), then the template-expanded injected headers. `None` allow-list
-/// forwards every header.
+/// forwards every header. The base-url path prefix (if any) is stacked
+/// onto the request path first — an empty prefix is a no-op, so a base
+/// url with no path never touches `request.path` at all.
 fn apply_config(request: &mut Request<Bytes>, config: &HttpUpstreamConfig) {
+    if !config.base_path.is_empty() {
+        request.path = prefixed_path(&config.base_path, &request.path);
+    }
     if let Some(override_method) = &config.method_override {
         request.method = proxima_primitives::pipe::Method::from_bytes(override_method.as_bytes());
     }
@@ -1205,6 +1226,8 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use futures::StreamExt as _;
     use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
@@ -1742,6 +1765,65 @@ mod tests {
         );
         let back: ResponseHandlingConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(back, cfg);
+    }
+
+    /// The bug-fix headline, proven on the assembled bytes rather than just
+    /// the parse: `request_target` (what actually lands on the request
+    /// line) after `apply_config` has stacked the base url's path prefix
+    /// onto the request path. `base_path` empty is the regression that
+    /// matters most — it must leave `request.path` untouched, byte for
+    /// byte, so a base url with no path is unaffected by this change.
+    #[rstest]
+    #[case::no_base_path("", "/chat", &[], "/chat")]
+    #[case::single_segment_base("/v1", "/chat", &[], "/v1/chat")]
+    #[case::nested_base("/llm/openai/v1", "/generate", &[], "/llm/openai/v1/generate")]
+    #[case::query_string_preserved("/v1", "/chat", &[("stream", "true")], "/v1/chat?stream=true")]
+    fn prefixed_path_produces_the_wire_target(
+        #[case] base_path: &str,
+        #[case] request_path: &str,
+        #[case] query: &[(&str, &str)],
+        #[case] expected_target: &str,
+    ) {
+        let config = HttpUpstreamConfig {
+            base_path: base_path.to_string(),
+            ..HttpUpstreamConfig::default()
+        };
+        let mut builder = Request::builder().method("GET").path(request_path);
+        for (name, value) in query {
+            builder = builder.query_param(*name, *value);
+        }
+        let mut request = builder.build().expect("request");
+
+        apply_config(&mut request, &config);
+
+        assert_eq!(request_target(&request), expected_target);
+    }
+
+    /// A trailing slash on the base url has already been stripped by
+    /// `build_prime_upstream::base_path_prefix` before it reaches
+    /// `HttpUpstreamConfig`, so `apply_config` only ever sees a
+    /// pre-normalized prefix — this asserts the composed byte count has
+    /// exactly one slash at the join, not two.
+    #[test]
+    fn prefixed_path_never_doubles_the_join_slash() {
+        let config = HttpUpstreamConfig {
+            base_path: "/v1".to_string(),
+            ..HttpUpstreamConfig::default()
+        };
+        let mut request = Request::builder()
+            .method("GET")
+            .path("/chat")
+            .build()
+            .expect("request");
+
+        apply_config(&mut request, &config);
+
+        assert_eq!(&request.path[..], b"/v1/chat");
+        assert!(
+            !request.path.windows(2).any(|pair| pair == b"//"),
+            "got: {:?}",
+            request.path
+        );
     }
 }
 

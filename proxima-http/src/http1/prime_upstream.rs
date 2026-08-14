@@ -91,8 +91,11 @@ impl PipeFactory for PrimeHttpPipeFactory {
 }
 
 /// Parse the base url and stack the prime upstream for it. The base url
-/// gives scheme/host/port; the per-request path + query ride through the
-/// `H1ClientUpstream` from `Request`, so only the authority matters here.
+/// gives scheme/host/port, AND any path (`/v1`, `/llm/openai/v1`, ...),
+/// which is stacked onto `config.base_path` and prepended to every
+/// request's path by the `H1ClientUpstream`'s `apply_config`. That path is
+/// what used to be dropped silently: only the authority was ever read off
+/// the parsed url, and the path component was discarded.
 ///
 /// DNS is NOT resolved here — the host + port are handed to a lazy-resolve
 /// `PrimeTcpUpstream` that calls `getaddrinfo` at CONNECT time. This keeps
@@ -102,13 +105,20 @@ impl PipeFactory for PrimeHttpPipeFactory {
 fn build_prime_upstream(
     url: &str,
     label: &str,
-    config: crate::http1::http_config::HttpUpstreamConfig,
+    mut config: crate::http1::http_config::HttpUpstreamConfig,
     response: crate::http1::response_config::ResponseHandlingConfig,
     proxy: Option<&str>,
     transport: Option<&str>,
 ) -> Result<PipeHandle, ProximaError> {
+    // a bare `host:port` with no `http://`/`https://` scheme (e.g. the
+    // common Ollama-style `"127.0.0.1:11434"`) is a config error, not a
+    // silent normalization to `http://` — `url::Url::parse` already
+    // refuses it ("relative URL without a base"), so this is the existing
+    // behavior, asserted by `build_rejects_bare_host_without_scheme` rather
+    // than left as an accident of the error message.
     let parsed =
         Url::parse(url).map_err(|err| ProximaError::Config(format!("parse url `{url}`: {err}")))?;
+    config.base_path = base_path_prefix(parsed.path());
     let secure = match parsed.scheme() {
         "https" => true,
         "http" => false,
@@ -188,6 +198,15 @@ fn build_prime_upstream(
     Ok(handle)
 }
 
+/// Normalize a parsed url's path into the prefix `apply_config` prepends to
+/// every request path: strip the trailing slash, so `"/v1"` and `"/v1/"`
+/// compose onto a request path with exactly one slash between them, and a
+/// bare host's path (`url::Url` always parses that as `"/"`) normalizes to
+/// `""` — no prefix, byte-identical to a base url with no path at all.
+fn base_path_prefix(path: &str) -> String {
+    path.trim_end_matches('/').to_string()
+}
+
 /// Parse a proxy url (`http://host:port`) into the host + port the tunnel
 /// dials. Only the authority matters; the CONNECT target is the origin.
 fn parse_proxy(proxy_url: &str) -> Result<(String, u16), ProximaError> {
@@ -217,6 +236,8 @@ fn authority(host: &str, port: u16, secure: bool) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -361,5 +382,47 @@ mod tests {
             "build must not resolve DNS; got error: {:?}",
             outcome.err()
         );
+    }
+
+    #[rstest]
+    #[case::no_path("/", "")]
+    #[case::single_segment("/v1", "/v1")]
+    #[case::trailing_slash("/v1/", "/v1")]
+    #[case::nested("/llm/openai/v1", "/llm/openai/v1")]
+    #[case::nested_trailing_slash("/llm/openai/v1/", "/llm/openai/v1")]
+    fn base_path_prefix_normalizes_trailing_slash(#[case] path: &str, #[case] expected: &str) {
+        assert_eq!(base_path_prefix(path), expected);
+    }
+
+    /// A bare `host:port` with no `http://`/`https://` scheme (the common
+    /// Ollama-style `"127.0.0.1:11434"`) is a config error: `url::Url`
+    /// parses it as a relative-url-without-a-base failure, and this
+    /// factory never normalizes it to `http://` on the caller's behalf.
+    /// Asserted here so the decision is a test, not an accident of the
+    /// error message.
+    #[test]
+    fn build_rejects_bare_host_without_scheme() {
+        let factory = PrimeHttpPipeFactory::new();
+        let outcome = futures::executor::block_on(
+            factory.build(&serde_json::json!({"url": "127.0.0.1:11434"}), None),
+        );
+        assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+
+    /// The nested-path headline case end to end through the factory: a
+    /// base url with a multi-segment path builds without error, proving
+    /// `build_prime_upstream` accepts (rather than rejects) a path
+    /// component instead of silently discarding it. The per-request byte
+    /// assembly is proven in `client.rs`'s
+    /// `prefixed_path_produces_the_wire_target` — `PipeHandle` is opaque
+    /// past this point, so this test stops at "it builds".
+    #[test]
+    fn build_succeeds_for_nested_base_path() {
+        let factory = PrimeHttpPipeFactory::new();
+        let outcome = futures::executor::block_on(factory.build(
+            &serde_json::json!({"url": "http://gw.example.test/llm/openai/v1"}),
+            None,
+        ));
+        assert!(outcome.is_ok(), "got: {:?}", outcome.err());
     }
 }
