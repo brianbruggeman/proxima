@@ -52,8 +52,22 @@ pub fn generate_constrained_ca(permitted_dns_names: &[&str]) -> Result<CaKeyPair
 }
 
 fn build_ca(name_constraints: Option<NameConstraints>) -> Result<CaKeyPair, ProximaError> {
+    // every CA must carry a DISTINCT subject DN: path builders select trust
+    // anchors by name, and two CAs sharing a DN with different keys makes a
+    // verifier chain a leaf to the wrong (differently-constrained) anchor —
+    // measured live as node rejecting a conforming leaf with "permitted
+    // subtree violation" when several same-named constrained CAs shared a
+    // trust store. constrained CAs are therefore named by their first
+    // permitted subtree; the unconstrained CA keeps the legacy name.
+    let common_name = match &name_constraints {
+        Some(constraints) => match constraints.permitted_subtrees.first() {
+            Some(GeneralSubtree::DnsName(name)) => format!("proxima intercept ca ({name})"),
+            _ => "proxima intercept ca (constrained)".to_string(),
+        },
+        None => "proxima intercept ca".to_string(),
+    };
     let mut distinguished_name = DistinguishedName::new();
-    distinguished_name.push(DnType::CommonName, "proxima intercept ca");
+    distinguished_name.push(DnType::CommonName, common_name);
     distinguished_name.push(DnType::OrganizationName, "proxima");
 
     let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
@@ -422,6 +436,28 @@ mod tests {
             Some(&webpki::Error::NameConstraintViolation),
             "must fail specifically due to the name-constraint violation"
         );
+    }
+
+    #[test]
+    fn constrained_cas_for_different_subtrees_carry_distinct_subjects() {
+        let anthropic = generate_constrained_ca(&["api.anthropic.com"]).expect("anthropic ca");
+        let openai = generate_constrained_ca(&["api.openai.com"]).expect("openai ca");
+        let unconstrained = generate_ca().expect("unconstrained ca");
+
+        let subject_of = |ca: &CaKeyPair| {
+            let pem = ca_cert_pem(ca).expect("render ca pem");
+            let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+                .expect("parse pem");
+            let cert = parsed.parse_x509().expect("parse x509");
+            cert.subject().to_string()
+        };
+
+        let subjects = [subject_of(&anthropic), subject_of(&openai), subject_of(&unconstrained)];
+        // a path builder selects trust anchors by subject DN; same-named CAs
+        // with different keys chain leaves to the wrong constrained anchor.
+        assert_ne!(subjects[0], subjects[1], "service cas must not share a subject");
+        assert_ne!(subjects[0], subjects[2], "constrained ca must not shadow the legacy name");
+        assert_ne!(subjects[1], subjects[2], "constrained ca must not shadow the legacy name");
     }
 
     #[test]
