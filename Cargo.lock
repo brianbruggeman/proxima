@@ -4001,6 +4001,7 @@ dependencies = [
  "rcgen",
  "rstest",
  "rustls",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "tempfile",
@@ -4011,6 +4012,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots",
+ "x509-parser",
  "zstd",
 ]
 

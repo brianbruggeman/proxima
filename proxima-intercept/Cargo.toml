@@ -49,6 +49,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 toml.workspace = true
 proxima-protocols = { workspace = true, default-features = false, features = ["http2_codec-alloc"] }
 rand.workspace = true
+x509-parser = "0.18"
+rustls-webpki = "0.103"
 
 [lints]
 workspace = true
