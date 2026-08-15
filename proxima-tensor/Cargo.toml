@@ -1,0 +1,32 @@
+[package]
+name = "proxima-tensor"
+description = "Tensor vocabulary as a reified pipe graph: three generators (zip/fold/block) over an index-addressed arena, with an affine index-map grammar and structural validation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+std = ["alloc", "thiserror/std"]
+alloc = []
+# Std composition boundary for graph specs (guiding-principle 4): bon builder +
+# conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
+# AffineMap/validate) never sees this feature.
+config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+
+[dependencies]
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true, default-features = false }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+toml.workspace = true
