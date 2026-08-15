@@ -1,0 +1,967 @@
+//! A CPU interpreter for [`Nest`]s: strided, f32-only, streaming its buffers.
+//!
+//! This module owns none of the stride arithmetic — that lives in
+//! [`nest`](crate::nest), shared with any other backend. What is CPU-specific
+//! and lives here: the f32-only restriction (a v1 limitation — [`ScalarOp`]'s
+//! transcendental bodies need `libm`-grade math this crate does not depend
+//! on, so a GPU backend targeting f16/bf16 natively is unaffected by this
+//! choice), the loop nests that walk a `Nest`'s iteration space, and buffer
+//! lifetime.
+//!
+//! The inner loop of every walk below is a straight loop with a per-operand
+//! running offset incremented by a precomputed stride each step — never a
+//! per-element recomputation of the full coordinate — so the shape an
+//! optimizing compiler needs to autovectorize is actually on the page.
+//! [`nest::Nest`] documents the one fusion decided ahead of execution
+//! (`Fold(Zip)` skipping the zip's O(iteration space) intermediate); this
+//! module additionally drops each node's buffer the moment nothing in the
+//! emitted nest sequence reads it again, which is the other half of not
+//! paying for what a program does not keep — see
+//! [`Evaluated::peak_live_buffers`].
+
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::dtype::DType;
+use crate::error::TensorError;
+use crate::expr::{Expr, FoldInit, Keep, NodeId, ScalarOp};
+use crate::nest::{self, Nest, Reduction};
+use crate::shape;
+
+/// The result of [`evaluate`]: every requested output's data and shape, plus
+/// the peak number of live intermediate buffers the run held at once.
+#[derive(Debug)]
+pub struct Evaluated {
+    root: NodeId,
+    results: Vec<(NodeId, Vec<u64>, Vec<f32>)>,
+    peak_live_buffers: usize,
+}
+
+impl Evaluated {
+    #[must_use]
+    pub fn root(&self) -> &[f32] {
+        self.get(self.root).map_or(&[], |(data, _)| data)
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> &[u64] {
+        self.get(self.root).map_or(&[], |(_, shape)| shape)
+    }
+
+    /// The data and shape of a specific requested output, or `None` if
+    /// `node` was not in the `outputs` passed to [`evaluate`].
+    #[must_use]
+    pub fn get(&self, node: NodeId) -> Option<(&[f32], &[u64])> {
+        self.results
+            .iter()
+            .find(|(candidate, _, _)| *candidate == node)
+            .map(|(_, shape, data)| (data.as_slice(), shape.as_slice()))
+    }
+
+    /// The most buffers ([`Expr::Block`] inputs and computed intermediates)
+    /// held live at any one point during the run. The one number that proves
+    /// streaming buffer lifetime is doing something: a long unary chain
+    /// should hold a small constant, not one buffer per expression.
+    #[must_use]
+    pub const fn peak_live_buffers(&self) -> usize {
+        self.peak_live_buffers
+    }
+}
+
+/// Run a tensor program to f32 data.
+///
+/// `blocks` binds [`Expr::Block`] inputs positionally, in the order they
+/// appear in `program` — the local, single-partition case; a distributed
+/// evaluator would instead resolve blocks by
+/// [`name`](Expr::name). `outputs` selects which nodes to return data for;
+/// an empty slice means the root (the program's last expression) only.
+pub fn evaluate(
+    program: &[Expr],
+    symbols: &[u64],
+    blocks: &[&[f32]],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let shapes = shape::infer(program, symbols)?;
+    reject_non_float32(program)?;
+
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+
+    let block_nodes = block_node_ids(program);
+    if blocks.len() != block_nodes.len() {
+        return Err(TensorError::BlockCountMismatch {
+            expected: block_nodes.len(),
+            found: blocks.len(),
+        });
+    }
+
+    let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+    for (node, data) in block_nodes.iter().zip(blocks.iter()) {
+        let expected = element_count(shapes.of(*node));
+        if data.len() != expected {
+            return Err(TensorError::BlockSizeMismatch {
+                node: *node,
+                expected,
+                found: data.len(),
+            });
+        }
+        buffers[node.0 as usize] = Some((*data).to_vec());
+    }
+
+    // lowering (and the fusion it decides) runs over the whole program at
+    // once — see `nest::lower`'s docs. buffer retirement below is a separate,
+    // finer-grained liveness question over the *emitted* nest sequence: a
+    // held zip's own consumption is deferred to whenever its consumer
+    // materializes it, which can be well after the expression position
+    // `live::annotate` reasons about, so retirement here is computed fresh
+    // over `nests`, not reused from the fusion pass's liveness.
+    let nests = nest::lower(program, &shapes, &effective_outputs)?;
+    let retires = nest_retirement(&nests, &effective_outputs);
+    let mut peak_live_buffers = live_count(&buffers);
+
+    for (position, computed) in nests.iter().enumerate() {
+        let output = run_nest(computed, &buffers)?;
+        buffers[computed.node.0 as usize] = Some(output);
+        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        for retired in &retires[position] {
+            buffers[retired.0 as usize] = None;
+        }
+    }
+
+    let results = effective_outputs
+        .iter()
+        .map(|node| {
+            let shape = shapes.of(*node).to_vec();
+            let data = buffers[node.0 as usize].clone().unwrap_or_default();
+            (*node, shape, data)
+        })
+        .collect();
+
+    Ok(Evaluated {
+        root,
+        results,
+        peak_live_buffers,
+    })
+}
+
+fn live_count(buffers: &[Option<Vec<f32>>]) -> usize {
+    buffers.iter().filter(|entry| entry.is_some()).count()
+}
+
+/// Per-nest retire sets over the *emitted* nest sequence: `result[p]` is
+/// every node whose last read is `nests[p]`. This mirrors
+/// [`live::annotate`](crate::live::annotate) in shape but is a different
+/// computation over a different timeline — the nest sequence, after fusion
+/// has already decided which zips never materialize at all.
+fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
+    let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
+    let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for (position, nest) in nests.iter().enumerate() {
+        for (source, _) in &nest.operands {
+            last_use.insert(*source, position);
+        }
+    }
+
+    let mut retires = vec![Vec::new(); nests.len()];
+    for (node, position) in last_use {
+        if !outputs.contains(&node) {
+            retires[position].push(node);
+        }
+    }
+    retires
+}
+
+fn block_node_ids(program: &[Expr]) -> Vec<NodeId> {
+    program
+        .iter()
+        .enumerate()
+        .filter(|(_, expr)| matches!(expr, Expr::Block { .. }))
+        .map(|(position, _)| NodeId(position as u32))
+        .collect()
+}
+
+// `shape::infer` (called before this) already rejects every `Computed`
+// (data-dependent) index map anywhere in the program, so the only CPU-tier
+// restriction left to enforce here is the element type.
+fn reject_non_float32(program: &[Expr]) -> Result<(), TensorError> {
+    for (position, expr) in program.iter().enumerate() {
+        if expr.dtype() != DType::Float32 {
+            return Err(TensorError::NotLowerable {
+                node: NodeId(position as u32),
+                reason: "cpu evaluation is f32-only in v1",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn buffer_of(buffers: &[Option<Vec<f32>>], node: NodeId) -> Result<&[f32], TensorError> {
+    buffers[node.0 as usize]
+        .as_deref()
+        .ok_or(TensorError::NotLowerable {
+            node,
+            reason: "operand buffer missing at evaluation time",
+        })
+}
+
+fn element_count(shape: &[u64]) -> usize {
+    shape.iter().product::<u64>() as usize
+}
+
+fn split_innermost(extents: &[u64]) -> (&[u64], usize) {
+    match extents.split_last() {
+        Some((last, rest)) => (rest, *last as usize),
+        None => (extents, 1),
+    }
+}
+
+fn odometer(shape: &[u64]) -> impl Iterator<Item = Vec<u64>> + '_ {
+    let total: u64 = shape.iter().product();
+    (0..total).map(move |flat| unflatten(flat, shape))
+}
+
+fn unflatten(mut flat: u64, shape: &[u64]) -> Vec<u64> {
+    let mut coordinate = vec![0u64; shape.len()];
+    for (dim, extent) in shape.iter().enumerate().rev() {
+        coordinate[dim] = flat % extent;
+        flat /= extent;
+    }
+    coordinate
+}
+
+fn merge_coordinates(
+    rank: usize,
+    leading_dims: &[u16],
+    leading_coordinate: &[u64],
+    reduction_dims: &[u16],
+    reduction_coordinate: &[u64],
+) -> Vec<u64> {
+    let mut coordinate = vec![0u64; rank];
+    for (dim, value) in leading_dims.iter().zip(leading_coordinate) {
+        coordinate[*dim as usize] = *value;
+    }
+    for (dim, value) in reduction_dims.iter().zip(reduction_coordinate) {
+        coordinate[*dim as usize] = *value;
+    }
+    coordinate
+}
+
+fn initial_value(init: FoldInit) -> Option<f32> {
+    match init {
+        FoldInit::Zero => Some(0.0),
+        FoldInit::One => Some(1.0),
+        FoldInit::NegativeInfinity => Some(f32::NEG_INFINITY),
+        FoldInit::PositiveInfinity => Some(f32::INFINITY),
+        FoldInit::FirstElement => None,
+    }
+}
+
+fn run_nest(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
+    match &nest.reduction {
+        None => run_elementwise(nest, buffers),
+        Some(reduction) => match reduction.keep {
+            Keep::Last => run_reduce(nest, reduction, buffers),
+            Keep::All => run_scan(nest, reduction, buffers),
+        },
+    }
+}
+
+fn operand_buffers<'a>(
+    nest: &Nest,
+    buffers: &'a [Option<Vec<f32>>],
+) -> Result<Vec<&'a [f32]>, TensorError> {
+    nest.operands
+        .iter()
+        .map(|(source, _)| buffer_of(buffers, *source))
+        .collect()
+}
+
+fn run_elementwise(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
+    let total = element_count(&nest.extents);
+    let mut output = vec![0.0f32; total];
+    let (outer_extents, inner_len) = split_innermost(&nest.extents);
+    let innermost_dim = outer_extents.len() as u16;
+    let raw = operand_buffers(nest, buffers)?;
+
+    for (outer_position, outer_coordinate) in odometer(outer_extents).enumerate() {
+        let mut running: Vec<i64> = nest
+            .operands
+            .iter()
+            .map(|(_, view)| view.offset_of(&outer_coordinate))
+            .collect();
+        let strides: Vec<i64> = nest
+            .operands
+            .iter()
+            .map(|(_, view)| view.stride(innermost_dim))
+            .collect();
+        let out_base = outer_position * inner_len;
+
+        for step in 0..inner_len {
+            let mut scratch = [0.0f32; 3];
+            for (index, data) in raw.iter().enumerate() {
+                scratch[index] = data[running[index] as usize];
+                running[index] += strides[index];
+            }
+            output[out_base + step] = apply_scalar_op(nest.body, &scratch[..raw.len()]);
+        }
+    }
+    Ok(output)
+}
+
+fn run_reduce(
+    nest: &Nest,
+    reduction: &Reduction,
+    buffers: &[Option<Vec<f32>>],
+) -> Result<Vec<f32>, TensorError> {
+    let raw = operand_buffers(nest, buffers)?;
+
+    let reduction_dims: Vec<u16> = (0..nest.extents.len() as u16)
+        .filter(|dim| !reduction.output_dims.contains(dim))
+        .collect();
+    let (leading_output_dims, last_output_dim): (&[u16], Option<u16>) =
+        match reduction.output_dims.split_last() {
+            Some((last, leading)) => (leading, Some(*last)),
+            None => (&[], None),
+        };
+
+    let leading_extents: Vec<u64> = leading_output_dims
+        .iter()
+        .map(|dim| nest.extents[*dim as usize])
+        .collect();
+    let reduction_extents: Vec<u64> = reduction_dims
+        .iter()
+        .map(|dim| nest.extents[*dim as usize])
+        .collect();
+    let width = last_output_dim.map_or(1, |dim| nest.extents[dim as usize] as usize);
+
+    let output_len = leading_extents.iter().product::<u64>() as usize * width;
+    let mut output = vec![0.0f32; output_len];
+
+    for leading_coordinate in odometer(&leading_extents) {
+        let mut accumulator = vec![initial_value(reduction.init).unwrap_or(0.0); width];
+        let mut seeded = !matches!(reduction.init, FoldInit::FirstElement);
+
+        for reduction_coordinate in odometer(&reduction_extents) {
+            let full_coordinate = merge_coordinates(
+                nest.extents.len(),
+                leading_output_dims,
+                &leading_coordinate,
+                &reduction_dims,
+                &reduction_coordinate,
+            );
+            let mut running: Vec<i64> = nest
+                .operands
+                .iter()
+                .map(|(_, view)| view.offset_of(&full_coordinate))
+                .collect();
+            let strides: Vec<i64> = nest
+                .operands
+                .iter()
+                .map(|(_, view)| last_output_dim.map_or(0, |dim| view.stride(dim)))
+                .collect();
+
+            for slot in &mut accumulator {
+                let mut scratch = [0.0f32; 3];
+                for (index, data) in raw.iter().enumerate() {
+                    scratch[index] = data[running[index] as usize];
+                    running[index] += strides[index];
+                }
+                let value = apply_scalar_op(nest.body, &scratch[..raw.len()]);
+                *slot = if seeded {
+                    apply_scalar_op(reduction.body, &[*slot, value])
+                } else {
+                    value
+                };
+            }
+            seeded = true;
+        }
+
+        let out_full_coordinate = merge_coordinates(
+            nest.extents.len(),
+            leading_output_dims,
+            &leading_coordinate,
+            &[],
+            &[],
+        );
+        let out_prefix = reduction.out_view.offset_of(&out_full_coordinate);
+        let out_stride = last_output_dim.map_or(0, |dim| reduction.out_view.stride(dim));
+        for (slot, value) in accumulator.iter().enumerate() {
+            output[(out_prefix + out_stride * slot as i64) as usize] = *value;
+        }
+    }
+    Ok(output)
+}
+
+fn run_scan(
+    nest: &Nest,
+    reduction: &Reduction,
+    buffers: &[Option<Vec<f32>>],
+) -> Result<Vec<f32>, TensorError> {
+    let raw = operand_buffers(nest, buffers)?;
+    let (outer_extents, inner_len) = split_innermost(&nest.extents);
+    let innermost_dim = outer_extents.len() as u16;
+
+    let total = element_count(&nest.extents);
+    let mut output = vec![0.0f32; total];
+    let mut accumulator = initial_value(reduction.init).unwrap_or(0.0);
+    let mut seeded = !matches!(reduction.init, FoldInit::FirstElement);
+
+    for outer_coordinate in odometer(outer_extents) {
+        let mut running: Vec<i64> = nest
+            .operands
+            .iter()
+            .map(|(_, view)| view.offset_of(&outer_coordinate))
+            .collect();
+        let strides: Vec<i64> = nest
+            .operands
+            .iter()
+            .map(|(_, view)| view.stride(innermost_dim))
+            .collect();
+        let mut out_running = reduction.out_view.offset_of(&outer_coordinate);
+        let out_stride = reduction.out_view.stride(innermost_dim);
+
+        for _ in 0..inner_len {
+            let mut scratch = [0.0f32; 3];
+            for (index, data) in raw.iter().enumerate() {
+                scratch[index] = data[running[index] as usize];
+                running[index] += strides[index];
+            }
+            let value = apply_scalar_op(nest.body, &scratch[..raw.len()]);
+            accumulator = if seeded {
+                apply_scalar_op(reduction.body, &[accumulator, value])
+            } else {
+                value
+            };
+            seeded = true;
+            output[out_running as usize] = accumulator;
+            out_running += out_stride;
+        }
+    }
+    Ok(output)
+}
+
+fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
+    match op {
+        ScalarOp::Identity => operands[0],
+        ScalarOp::Add => operands[0] + operands[1],
+        ScalarOp::Subtract => operands[0] - operands[1],
+        ScalarOp::Multiply => operands[0] * operands[1],
+        ScalarOp::Divide => operands[0] / operands[1],
+        ScalarOp::Maximum => operands[0].max(operands[1]),
+        ScalarOp::Minimum => operands[0].min(operands[1]),
+        ScalarOp::Negate => -operands[0],
+        ScalarOp::Reciprocal => 1.0 / operands[0],
+        ScalarOp::Exponential => operands[0].exp(),
+        ScalarOp::Logarithm => operands[0].ln(),
+        ScalarOp::SquareRoot => operands[0].sqrt(),
+        ScalarOp::Tanh => operands[0].tanh(),
+        ScalarOp::Greater => f32::from(u8::from(operands[0] > operands[1])),
+        ScalarOp::Equal => f32::from(u8::from((operands[0] - operands[1]).abs() == 0.0)),
+        ScalarOp::Select => {
+            if operands[0] != 0.0 {
+                operands[1]
+            } else {
+                operands[2]
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::expr::{Extent, Fold, append};
+    use crate::map::{self, AffineTerm, IndexMap};
+
+    fn block(program: &mut Vec<Expr>, dtype: DType, shape: &[Extent]) -> NodeId {
+        append(
+            program,
+            Expr::Block {
+                dtype,
+                shape: shape.to_vec(),
+                name: None,
+            },
+        )
+    }
+
+    fn f32_block(program: &mut Vec<Expr>, shape: &[Extent]) -> NodeId {
+        block(program, DType::Float32, shape)
+    }
+
+    fn naive_matmul(lhs: &[f32], rhs: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                let mut sum = 0.0f32;
+                for inner in 0..k {
+                    sum += lhs[row * k + inner] * rhs[inner * n + col];
+                }
+                out[row * n + col] = sum;
+            }
+        }
+        out
+    }
+
+    fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Expr>, NodeId) {
+        let mut program = Vec::new();
+        let lhs_shape = if symbolic {
+            alloc::vec![Extent::Symbolic(0), Extent::Static(k)]
+        } else {
+            alloc::vec![Extent::Static(m), Extent::Static(k)]
+        };
+        let lhs = f32_block(&mut program, &lhs_shape);
+        let rhs = f32_block(&mut program, &[Extent::Static(k), Extent::Static(n)]);
+        let product = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Last,
+                name: Some("matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    #[test]
+    fn fused_matmul_matches_a_naive_triple_loop() {
+        let (m, k, n) = (4usize, 3usize, 5usize);
+        let (program, sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("matmul evaluates");
+        assert_eq!(evaluated.shape(), &[m as u64, n as u64]);
+        assert_eq!(
+            evaluated.root(),
+            naive_matmul(&lhs, &rhs, m, k, n).as_slice()
+        );
+        let _ = sum;
+    }
+
+    #[test]
+    fn matmul_binds_a_symbolic_sequence_length_at_eval_time() {
+        let (m, k, n) = (4usize, 3usize, 5usize);
+        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, true);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
+
+        let evaluated =
+            evaluate(&program, &[m as u64], &[&lhs, &rhs], &[]).expect("symbolic matmul evaluates");
+        assert_eq!(
+            evaluated.root(),
+            naive_matmul(&lhs, &rhs, m, k, n).as_slice()
+        );
+    }
+
+    #[test]
+    fn fused_contraction_skips_the_product_tensor() {
+        let (m, k, n) = (64usize, 64usize, 64usize);
+        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| (value % 7) as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
+
+        let evaluated =
+            evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("64x64x64 matmul evaluates");
+        let reference = naive_matmul(&lhs, &rhs, m, k, n);
+        for (row, col) in [(0, 0), (0, n - 1), (m - 1, 0), (m - 1, n - 1)] {
+            let index = row * n + col;
+            assert_eq!(
+                evaluated.root()[index],
+                reference[index],
+                "corner ({row}, {col})"
+            );
+        }
+    }
+
+    #[test]
+    fn bias_add_via_broadcast() {
+        let mut program = Vec::new();
+        let matrix = f32_block(&mut program, &[Extent::Static(2), Extent::Static(3)]);
+        let bias = f32_block(&mut program, &[Extent::Static(3)]);
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (matrix, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (bias, IndexMap::Affine(map::projection(2, &[1]))),
+                ],
+                name: None,
+            },
+        );
+
+        let matrix_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0f32];
+        let bias_data = [10.0, 20.0, 30.0f32];
+        let evaluated =
+            evaluate(&program, &[], &[&matrix_data, &bias_data], &[]).expect("bias add evaluates");
+        assert_eq!(evaluated.root(), &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+    }
+
+    #[test]
+    fn transpose_via_permuted_map() {
+        let mut program = Vec::new();
+        let matrix = f32_block(&mut program, &[Extent::Static(2), Extent::Static(3)]);
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(matrix, IndexMap::Affine(map::projection(2, &[1, 0])))],
+                name: None,
+            },
+        );
+
+        let matrix_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0f32];
+        let evaluated = evaluate(&program, &[], &[&matrix_data], &[]).expect("transpose evaluates");
+        assert_eq!(evaluated.shape(), &[3, 2]);
+        assert_eq!(evaluated.root(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn one_dimensional_convolution_via_a_two_term_window_map() {
+        // a per-position ("locally connected") kernel: kernel[h, r] pins both
+        // iteration dims via pure projection, while signal[h + r] is the
+        // two-term windowed access under test.
+        let mut program = Vec::new();
+        let kernel = f32_block(&mut program, &[Extent::Static(6), Extent::Static(3)]);
+        let signal = f32_block(&mut program, &[Extent::Static(8)]);
+        let window = IndexMap::Affine(map::affine(
+            2,
+            &[(&[AffineTerm::scaled(0, 1), AffineTerm::scaled(1, 1)], 0)],
+        ));
+        let product = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (kernel, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (signal, window)
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+
+        let kernel_data: Vec<f32> = (0..18).map(|value| value as f32).collect();
+        let signal_data: Vec<f32> = (0..8).map(|value| value as f32).collect();
+        let evaluated =
+            evaluate(&program, &[], &[&kernel_data, &signal_data], &[]).expect("conv evaluates");
+
+        let mut reference = vec![0.0f32; 6];
+        for (h, slot) in reference.iter_mut().enumerate() {
+            for r in 0..3 {
+                *slot += kernel_data[h * 3 + r] * signal_data[h + r];
+            }
+        }
+        assert_eq!(evaluated.root(), reference.as_slice());
+    }
+
+    #[test]
+    fn softmax_end_to_end_matches_a_reference_within_epsilon() {
+        let mut program = Vec::new();
+        let (n, d) = (2usize, 4usize);
+        let input = f32_block(
+            &mut program,
+            &[Extent::Static(n as u32), Extent::Static(d as u32)],
+        );
+
+        let row_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        let broadcast_map = IndexMap::Affine(map::projection(2, &[0]));
+
+        let max = append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Maximum,
+                init: FoldInit::NegativeInfinity,
+                operand: input,
+                in_map: row_map.clone(),
+                out_map: broadcast_map.clone(),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+        let shifted = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Subtract,
+                operands: alloc::vec![(input, row_map.clone()), (max, broadcast_map.clone())],
+                name: None,
+            },
+        );
+        let exponentiated = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Exponential,
+                operands: alloc::vec![(shifted, row_map.clone())],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: exponentiated,
+                in_map: row_map.clone(),
+                out_map: broadcast_map.clone(),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Divide,
+                operands: alloc::vec![(exponentiated, row_map), (sum, broadcast_map)],
+                name: None,
+            },
+        );
+
+        let input_data = [1.0, 2.0, 3.0, 4.0, -1.0, 0.0, 1.0, 2.0f32];
+        let evaluated = evaluate(&program, &[], &[&input_data], &[]).expect("softmax evaluates");
+
+        let mut reference = vec![0.0f32; n * d];
+        for row in 0..n {
+            let slice = &input_data[row * d..row * d + d];
+            let row_max = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = slice.iter().map(|value| (value - row_max).exp()).collect();
+            let total: f32 = exps.iter().sum();
+            for (col, value) in exps.iter().enumerate() {
+                reference[row * d + col] = value / total;
+            }
+        }
+
+        for (found, expected) in evaluated.root().iter().zip(reference.iter()) {
+            assert!((found - expected).abs() < 1e-6, "{found} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn cumsum_matches_a_running_sum_reference() {
+        let mut program = Vec::new();
+        let source = f32_block(&mut program, &[Extent::Static(6)]);
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[0])),
+                keep: Keep::All,
+                name: None,
+            }),
+        );
+
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0f32];
+        let evaluated = evaluate(&program, &[], &[&data], &[]).expect("cumsum evaluates");
+
+        let mut running = 0.0f32;
+        let reference: Vec<f32> = data
+            .iter()
+            .map(|value| {
+                running += value;
+                running
+            })
+            .collect();
+        assert_eq!(evaluated.root(), reference.as_slice());
+    }
+
+    #[test]
+    fn a_chain_of_unary_zips_keeps_peak_live_buffers_small() {
+        let mut program = Vec::new();
+        let mut current = f32_block(&mut program, &[Extent::Static(4)]);
+        for _ in 0..8 {
+            current = append(
+                &mut program,
+                Expr::Zip {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
+                    name: None,
+                },
+            );
+        }
+
+        let input = [0.1, 0.2, 0.3, 0.4f32];
+        let evaluated = evaluate(&program, &[], &[&input], &[]).expect("tanh chain evaluates");
+
+        let mut reference = input;
+        for value in &mut reference {
+            for _ in 0..8 {
+                *value = value.tanh();
+            }
+        }
+        for (found, expected) in evaluated.root().iter().zip(reference.iter()) {
+            assert!((found - expected).abs() < 1e-6, "{found} vs {expected}");
+        }
+        assert!(
+            evaluated.peak_live_buffers() <= 3,
+            "streaming a chain of 8 unary zips should not hold one buffer per zip, got {}",
+            evaluated.peak_live_buffers()
+        );
+        let _ = current;
+    }
+
+    #[test]
+    fn a_requested_intermediate_survives_alongside_the_root() {
+        let mut program = Vec::new();
+        let source = f32_block(&mut program, &[Extent::Static(4)]);
+        let mut current = source;
+        let mut nodes = alloc::vec![source];
+        for _ in 0..4 {
+            current = append(
+                &mut program,
+                Expr::Zip {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
+                    name: None,
+                },
+            );
+            nodes.push(current);
+        }
+        let midpoint = nodes[2];
+        let root = current;
+
+        let input = [0.1, 0.2, 0.3, 0.4f32];
+        let evaluated = evaluate(&program, &[], &[&input], &[midpoint, root])
+            .expect("chain with an output request evaluates");
+
+        let (midpoint_data, _) = evaluated
+            .get(midpoint)
+            .expect("midpoint survives to the end");
+        let mut reference = input;
+        for value in &mut reference {
+            for _ in 0..2 {
+                *value = value.tanh();
+            }
+        }
+        for (found, expected) in midpoint_data.iter().zip(reference.iter()) {
+            assert!((found - expected).abs() < 1e-6, "{found} vs {expected}");
+        }
+
+        let (root_data, _) = evaluated.get(root).expect("root also present");
+        let mut full_reference = input;
+        for value in &mut full_reference {
+            for _ in 0..4 {
+                *value = value.tanh();
+            }
+        }
+        for (found, expected) in root_data.iter().zip(full_reference.iter()) {
+            assert!((found - expected).abs() < 1e-6, "{found} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn wrong_block_count_is_rejected() {
+        let mut program = Vec::new();
+        f32_block(&mut program, &[Extent::Static(4)]);
+
+        let error = evaluate(&program, &[], &[], &[]).expect_err("one block is required");
+        assert!(
+            matches!(error, TensorError::BlockCountMismatch { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn wrong_block_size_is_rejected() {
+        let mut program = Vec::new();
+        f32_block(&mut program, &[Extent::Static(4)]);
+
+        let too_short = [1.0, 2.0f32];
+        let error =
+            evaluate(&program, &[], &[&too_short], &[]).expect_err("block is the wrong size");
+        assert!(
+            matches!(error, TensorError::BlockSizeMismatch { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_non_float32_program_is_rejected() {
+        let mut program = Vec::new();
+        block(&mut program, DType::Int32, &[Extent::Static(4)]);
+
+        let data = [1i32; 0]; // never read: rejected before blocks are consulted
+        let _ = data;
+        let error = evaluate(&program, &[], &[], &[]).expect_err("int32 is not f32");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_computed_map_is_rejected() {
+        let mut program = Vec::new();
+        let table = f32_block(&mut program, &[Extent::Static(4), Extent::Static(2)]);
+        let ids = block(&mut program, DType::Int32, &[Extent::Static(3)]);
+        let gathered = IndexMap::Computed {
+            indices: ids,
+            base: map::projection(2, &[0, 1]),
+        };
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered)],
+                name: None,
+            },
+        );
+
+        let error = evaluate(&program, &[3], &[], &[]).expect_err("gather is not lowerable in v1");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+}
