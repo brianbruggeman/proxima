@@ -150,7 +150,7 @@ pub mod shape;
 pub mod spec;
 
 #[cfg(feature = "std")]
-pub use cpu::{Evaluated, evaluate};
+pub use cpu::{Evaluated, evaluate, evaluate_parallel};
 pub use dtype::DType;
 pub use error::TensorError;
 pub use expr::{Expr, Extent, Fold, FoldInit, Keep, NodeId, ScalarOp, append};
