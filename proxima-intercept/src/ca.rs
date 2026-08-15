@@ -4,7 +4,8 @@ use std::sync::Arc;
 use proxima_core::ProximaError;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+    NameConstraints, PKCS_ECDSA_P256_SHA256,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use time::{Duration, OffsetDateTime};
@@ -32,6 +33,25 @@ pub enum CaKeyPair {
 }
 
 pub fn generate_ca() -> Result<CaKeyPair, ProximaError> {
+    build_ca(None)
+}
+
+/// Same as [`generate_ca`], but the minted CA carries an RFC 5280 4.2.1.10
+/// NameConstraints extension restricting which DNS names it may sign for.
+/// rcgen always writes this extension critical, so a verifier that doesn't
+/// understand it must reject the whole chain rather than silently ignore it.
+pub fn generate_constrained_ca(permitted_dns_names: &[&str]) -> Result<CaKeyPair, ProximaError> {
+    let permitted_subtrees = permitted_dns_names
+        .iter()
+        .map(|name| GeneralSubtree::DnsName((*name).to_string()))
+        .collect();
+    build_ca(Some(NameConstraints {
+        permitted_subtrees,
+        excluded_subtrees: Vec::new(),
+    }))
+}
+
+fn build_ca(name_constraints: Option<NameConstraints>) -> Result<CaKeyPair, ProximaError> {
     let mut distinguished_name = DistinguishedName::new();
     distinguished_name.push(DnType::CommonName, "proxima intercept ca");
     distinguished_name.push(DnType::OrganizationName, "proxima");
@@ -45,6 +65,7 @@ pub fn generate_ca() -> Result<CaKeyPair, ProximaError> {
     params.distinguished_name = distinguished_name;
     params.key_usages.push(KeyUsagePurpose::KeyCertSign);
     params.key_usages.push(KeyUsagePurpose::CrlSign);
+    params.name_constraints = name_constraints;
     let (not_before, not_after) = cert_validity(3650);
     params.not_before = not_before;
     params.not_after = not_after;
@@ -241,7 +262,29 @@ pub fn build_tls_acceptor(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use rustls::RootCertStore;
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{ServerName, UnixTime};
+    use x509_parser::extensions::GeneralName;
+
     use super::*;
+
+    /// A `WebPkiServerVerifier` trusting only `ca_der`, built with an explicit
+    /// crypto provider (never `install_default`, which is process-global and
+    /// would race across parallel tests).
+    fn webpki_verifier_for(ca_der: &CertificateDer<'static>) -> Arc<WebPkiServerVerifier> {
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(ca_der.clone())
+            .expect("ca der is a valid trust anchor");
+        WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .build()
+        .expect("build webpki verifier")
+    }
 
     #[test]
     fn generate_ca_succeeds() {
@@ -281,5 +324,124 @@ mod tests {
             !Arc::ptr_eq(&first, &other),
             "a distinct sni mints a distinct cert"
         );
+    }
+
+    #[test]
+    fn unconstrained_ca_has_no_name_constraints_extension() {
+        let ca = generate_ca().expect("generate ca");
+        let pem = ca_cert_pem(&ca).expect("ca pem");
+        let der = pem::parse(&pem).expect("parse ca pem");
+        let (_remainder, x509) =
+            x509_parser::parse_x509_certificate(der.contents()).expect("parse ca der");
+
+        assert!(
+            x509
+                .name_constraints()
+                .expect("name constraints extension parses")
+                .is_none(),
+            "unconstrained ca must not carry a name constraints extension"
+        );
+    }
+
+    #[test]
+    fn generate_constrained_ca_carries_critical_permitted_subtree() {
+        let ca =
+            generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
+        let pem = ca_cert_pem(&ca).expect("ca pem");
+        let der = pem::parse(&pem).expect("parse ca pem");
+        let (_remainder, x509) =
+            x509_parser::parse_x509_certificate(der.contents()).expect("parse ca der");
+
+        let constraints = x509
+            .name_constraints()
+            .expect("name constraints extension parses")
+            .expect("name constraints extension present");
+        assert!(
+            constraints.critical,
+            "name constraints extension must be critical"
+        );
+
+        let permitted = constraints
+            .value
+            .permitted_subtrees
+            .as_ref()
+            .expect("permitted subtrees present");
+        assert_eq!(permitted.len(), 1, "exactly one permitted subtree");
+        match permitted[0].base {
+            GeneralName::DNSName(name) => assert_eq!(name, "api.anthropic.com"),
+            ref other => panic!("expected a dns name subtree, got {other:?}"),
+        }
+        assert!(
+            constraints.value.excluded_subtrees.is_none(),
+            "no excluded subtrees were requested"
+        );
+    }
+
+    #[test]
+    fn constrained_ca_verifies_conforming_leaf_and_rejects_violating_leaf() {
+        let ca =
+            generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
+
+        let (conforming_chain, _key) =
+            generate_domain_cert(&ca, "api.anthropic.com").expect("conforming domain cert");
+        let (violating_chain, _key) =
+            generate_domain_cert(&ca, "api.openai.com").expect("violating domain cert");
+
+        let verifier = webpki_verifier_for(&conforming_chain[1]);
+
+        let conforming_name = ServerName::try_from("api.anthropic.com").expect("server name");
+        verifier
+            .verify_server_cert(
+                &conforming_chain[0],
+                &[],
+                &conforming_name,
+                &[],
+                UnixTime::now(),
+            )
+            .expect("conforming leaf verifies under the permitted subtree");
+
+        let violating_name = ServerName::try_from("api.openai.com").expect("server name");
+        let error = verifier
+            .verify_server_cert(
+                &violating_chain[0],
+                &[],
+                &violating_name,
+                &[],
+                UnixTime::now(),
+            )
+            .expect_err("leaf outside the permitted subtree must fail closed");
+
+        let rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
+            rustls::OtherError(inner),
+        )) = error
+        else {
+            panic!("expected an InvalidCertificate(Other) error, got: {error:?}");
+        };
+        assert_eq!(
+            inner.downcast_ref::<webpki::Error>(),
+            Some(&webpki::Error::NameConstraintViolation),
+            "must fail specifically due to the name-constraint violation"
+        );
+    }
+
+    #[test]
+    fn round_trip_constrained_ca_through_disk_still_signs_and_verifies() {
+        let ca =
+            generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("ca.pem");
+        let key_path = dir.path().join("ca-key.pem");
+        std::fs::write(&cert_path, ca_cert_pem(&ca).expect("ca pem")).expect("write ca cert");
+        std::fs::write(&key_path, ca_key_pem(&ca)).expect("write ca key");
+
+        let loaded = load_ca(&cert_path, &key_path).expect("load ca");
+        let (chain, _key) =
+            generate_domain_cert(&loaded, "api.anthropic.com").expect("sign conforming leaf");
+
+        let verifier = webpki_verifier_for(&chain[1]);
+        let server_name = ServerName::try_from("api.anthropic.com").expect("server name");
+        verifier
+            .verify_server_cert(&chain[0], &[], &server_name, &[], UnixTime::now())
+            .expect("leaf signed by the loaded ca chains and verifies");
     }
 }
