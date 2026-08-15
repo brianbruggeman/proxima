@@ -87,6 +87,131 @@ pub struct Nest {
     pub reduction: Option<Reduction>,
 }
 
+impl Nest {
+    /// Splits this nest along its outermost output-iteration dim into
+    /// `parts` contiguous chunks so each chunk can execute independently:
+    /// for an elementwise nest that dim is `extents[0]`; for a `Keep::Last`
+    /// fold it is the first entry of `reduction.output_dims` (the fold's
+    /// outermost surviving dim, per that field's own doc). This split is
+    /// backend-neutral on purpose: a CPU driver runs chunks on worker
+    /// threads, a GPU backend would tile the identical dim into
+    /// threadgroups — neither belongs in this module, only the geometry
+    /// does.
+    ///
+    /// Returns `None` when splitting is not sound or not useful:
+    /// - a scalar reduction (`reduction.output_dims` is empty — nothing to
+    ///   split, the whole nest is one accumulator),
+    /// - a `Keep::All` scan (each step reads the previous step's output, so
+    ///   the extent is a sequential dependency, not parallel work),
+    /// - the split dim's extent is smaller than `parts` (some chunk would be
+    ///   empty),
+    /// - `parts < 2` (nothing to split into).
+    ///
+    /// Chunk `k`'s output occupies the contiguous range
+    /// `[chunk_start * inner_size, chunk_start * inner_size + chunk_len *
+    /// inner_size)` of the parent output buffer, where `inner_size` is the
+    /// product of the extents after the split dim (one step along the split
+    /// dim's worth of flat output elements). A caller relies on this to hand
+    /// each chunk its own disjoint `&mut` sub-slice — via successive
+    /// `split_at_mut` of one parent buffer — and run every chunk
+    /// concurrently with no further coordination: chunk `k` never has to be
+    /// told its own `chunk_start`, because each chunk's write path already
+    /// starts counting from 0 (see below), matching the 0-based sub-slice
+    /// `split_at_mut` hands it.
+    ///
+    /// The two view kinds are rebased differently, which is *why* that
+    /// works:
+    /// - every **operand** view's base is shifted by
+    ///   `chunk_start * stride(split_dim)`, because operands are read from
+    ///   the one full, unsplit source buffer shared by every chunk — a
+    ///   chunk's local coordinate 0 is the source buffer's global element
+    ///   `chunk_start`, so the read address needs that offset added back in.
+    /// - a fold's `out_view` is **not** shifted at all: the interpreter
+    ///   already derives every write offset from a loop that iterates the
+    ///   split dim's *own* (already-shrunk) extent starting at 0, for every
+    ///   chunk alike, so an out_view carrying the parent's unmodified base
+    ///   already produces exactly the 0-based offsets a `split_at_mut`
+    ///   sub-slice expects. Rebasing it too would double-count the offset.
+    #[must_use]
+    pub fn split(&self, parts: usize) -> Option<Vec<Nest>> {
+        if parts < 2 {
+            return None;
+        }
+        let split_dim = self.split_dim()?;
+        let extent = self.extents[split_dim as usize];
+        if extent < parts as u64 {
+            return None;
+        }
+
+        Some(
+            chunk_ranges(extent, parts)
+                .map(|(chunk_start, chunk_len)| {
+                    self.rebase_chunk(split_dim, chunk_start, chunk_len)
+                })
+                .collect(),
+        )
+    }
+
+    fn split_dim(&self) -> Option<u16> {
+        match &self.reduction {
+            None => (!self.extents.is_empty()).then_some(0),
+            Some(reduction) => match reduction.keep {
+                Keep::All => None,
+                Keep::Last => reduction.output_dims.first().copied(),
+            },
+        }
+    }
+
+    fn rebase_chunk(&self, split_dim: u16, chunk_start: u64, chunk_len: u64) -> Nest {
+        let mut extents = self.extents.clone();
+        extents[split_dim as usize] = chunk_len;
+
+        let operands = self
+            .operands
+            .iter()
+            .map(|(node, view)| (*node, rebase_view(view, split_dim, chunk_start)))
+            .collect();
+        // every field, including out_view, is unchanged from the parent:
+        // see the `split` doc for why an unshifted out_view is what makes
+        // 0-based write offsets fall out of the interpreter's per-chunk
+        // loop automatically — only extents (above) and operand reads
+        // differ per chunk.
+        let reduction = self.reduction.clone();
+
+        Nest {
+            node: self.node,
+            extents,
+            body: self.body,
+            operands,
+            reduction,
+        }
+    }
+}
+
+/// `parts` contiguous `(start, len)` ranges covering `0..extent`: the first
+/// `parts - 1` ranges are `extent / parts` wide, the last absorbs whatever
+/// remains, so it is the only one that can be a different (ragged) size.
+fn chunk_ranges(extent: u64, parts: usize) -> impl Iterator<Item = (u64, u64)> {
+    let chunk_len = extent / parts as u64;
+    (0..parts).scan(0u64, move |start, index| {
+        let chunk_start = *start;
+        let len = if index + 1 == parts {
+            extent - chunk_start
+        } else {
+            chunk_len
+        };
+        *start += len;
+        Some((chunk_start, len))
+    })
+}
+
+fn rebase_view(view: &StridedView, split_dim: u16, chunk_start: u64) -> StridedView {
+    StridedView {
+        base: view.base + view.stride(split_dim) * chunk_start as i64,
+        strides: view.strides.clone(),
+    }
+}
+
 struct HeldZip {
     body: ScalarOp,
     operands: Vec<(NodeId, IndexMap)>,
@@ -338,6 +463,7 @@ mod tests {
     use crate::dtype::DType;
     use crate::expr::{Extent, append};
     use crate::map;
+    use rstest::rstest;
 
     fn matmul_program() -> (Vec<Expr>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
@@ -563,5 +689,174 @@ mod tests {
         // iter_dim 0, so the strides land permuted relative to iteration order.
         assert_eq!(view.stride(0), 1);
         assert_eq!(view.stride(1), 5);
+    }
+
+    fn elementwise_nest() -> Nest {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(10), Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(source, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+        let shapes = shape::infer(&program, &[]).expect("elementwise infers");
+        lower(&program, &shapes, &[])
+            .expect("elementwise lowers")
+            .into_iter()
+            .next()
+            .expect("one nest emitted")
+    }
+
+    fn scalar_reduction_nest() -> Nest {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(8)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+        let shapes = shape::infer(&program, &[]).expect("scalar reduction infers");
+        lower(&program, &shapes, &[])
+            .expect("scalar reduction lowers")
+            .into_iter()
+            .next()
+            .expect("one nest emitted")
+    }
+
+    fn scan_nest() -> Nest {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(8)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[0])),
+                keep: Keep::All,
+                name: None,
+            }),
+        );
+        let shapes = shape::infer(&program, &[]).expect("scan infers");
+        lower(&program, &shapes, &[])
+            .expect("scan lowers")
+            .into_iter()
+            .next()
+            .expect("one nest emitted")
+    }
+
+    #[test]
+    fn split_of_an_elementwise_nest_yields_contiguous_chunks_with_a_ragged_last() {
+        let nest = elementwise_nest();
+
+        let chunks = nest.split(3).expect("extent 10 over 3 parts splits");
+        assert_eq!(chunks.len(), 3, "one chunk per part");
+
+        let lengths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
+        assert_eq!(
+            lengths,
+            alloc::vec![3, 3, 4],
+            "only the last chunk is ragged"
+        );
+
+        // dim0's stride is 4 (row-major over [10, 4]): chunk k's operand view
+        // is rebased by chunk_start * stride(0), which is exactly what lets a
+        // caller treat each chunk's output as a disjoint sub-slice.
+        let stride = nest.operands[0].1.stride(0);
+        assert_eq!(chunks[0].operands[0].1.base, nest.operands[0].1.base);
+        assert_eq!(
+            chunks[1].operands[0].1.base,
+            nest.operands[0].1.base + stride * 3
+        );
+        assert_eq!(
+            chunks[2].operands[0].1.base,
+            nest.operands[0].1.base + stride * 6
+        );
+    }
+
+    #[test]
+    fn split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_view() {
+        let (program, _product, sum, _lhs) = matmul_program();
+        let shapes = shape::infer(&program, &[512]).expect("matmul infers");
+        let nest = lower(&program, &shapes, &[])
+            .expect("matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused nest emitted");
+        assert_eq!(nest.node, sum);
+        assert!(nest.reduction.is_some(), "the reduction fused with its zip");
+
+        let chunks = nest.split(2).expect("512 rows over 2 parts splits");
+        assert_eq!(chunks.len(), 2, "one chunk per part");
+        for chunk in &chunks {
+            assert!(chunk.reduction.is_some(), "each chunk is still a fold");
+            // the contracted dim (k) is untouched by a split on the output
+            // row dim: every chunk still walks the full contraction.
+            assert_eq!(chunk.extents[2], nest.extents[2]);
+        }
+        assert_eq!(chunks[0].extents[0], 256, "rows split evenly in half");
+        assert_eq!(chunks[1].extents[0], 256);
+
+        // the fused zip's lhs/rhs operand reads are rebased: chunk 1 starts
+        // reading lhs at row 256 (row stride = k = 768).
+        let lhs_row_stride = nest.operands[0].1.stride(0);
+        assert_eq!(
+            chunks[1].operands[0].1.base,
+            nest.operands[0].1.base + lhs_row_stride * 256
+        );
+
+        // out_view stays exactly as the parent's: the interpreter's own
+        // per-chunk loop already starts each chunk's leading coordinate at
+        // 0, so an unshifted out_view already yields the 0-based write
+        // offsets a `split_at_mut` sub-slice expects (see the `split` doc).
+        let parent_out = &nest.reduction.as_ref().expect("fused reduction").out_view;
+        for chunk in &chunks {
+            let chunk_out = &chunk.reduction.as_ref().expect("chunk reduction").out_view;
+            assert_eq!(chunk_out, parent_out);
+        }
+    }
+
+    #[rstest]
+    #[case::scalar_reduction(scalar_reduction_nest(), 2)]
+    #[case::keep_all_scan(scan_nest(), 2)]
+    #[case::too_few_parts(elementwise_nest(), 1)]
+    #[case::extent_smaller_than_parts(elementwise_nest(), 999)]
+    fn split_returns_none_when_unsound_or_unhelpful(#[case] nest: Nest, #[case] parts: usize) {
+        assert!(nest.split(parts).is_none());
     }
 }

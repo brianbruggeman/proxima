@@ -22,6 +22,9 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
+use std::panic;
+use std::thread;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
@@ -69,19 +72,35 @@ impl Evaluated {
     }
 }
 
-/// Run a tensor program to f32 data.
+/// Everything [`evaluate`] and [`evaluate_parallel`] must agree on before
+/// either one is free to choose how a single nest actually runs.
+struct Prepared {
+    root: NodeId,
+    shapes: shape::Shapes,
+    effective_outputs: Vec<NodeId>,
+    buffers: Vec<Option<Vec<f32>>>,
+    nests: Vec<Nest>,
+    retires: Vec<Vec<NodeId>>,
+}
+
+/// The preamble [`evaluate`] and [`evaluate_parallel`] share: shape
+/// inference, output resolution, block binding, lowering, and per-nest
+/// buffer retirement. Neither evaluator's own body decides any of this —
+/// the two diverge only in how one already-lowered [`Nest`] gets executed.
 ///
-/// `blocks` binds [`Expr::Block`] inputs positionally, in the order they
-/// appear in `program` — the local, single-partition case; a distributed
-/// evaluator would instead resolve blocks by
-/// [`name`](Expr::name). `outputs` selects which nodes to return data for;
-/// an empty slice means the root (the program's last expression) only.
-pub fn evaluate(
+/// Lowering (and the fusion it decides) runs over the whole program at
+/// once — see `nest::lower`'s docs. Buffer retirement below is a separate,
+/// finer-grained liveness question over the *emitted* nest sequence: a
+/// held zip's own consumption is deferred to whenever its consumer
+/// materializes it, which can be well after the expression position
+/// `live::annotate` reasons about, so retirement here is computed fresh
+/// over `nests`, not reused from the fusion pass's liveness.
+fn prepare(
     program: &[Expr],
     symbols: &[u64],
     blocks: &[&[f32]],
     outputs: &[NodeId],
-) -> Result<Evaluated, TensorError> {
+) -> Result<Prepared, TensorError> {
     let shapes = shape::infer(program, symbols)?;
     reject_non_float32(program)?;
 
@@ -122,26 +141,29 @@ pub fn evaluate(
         buffers[node.0 as usize] = Some((*data).to_vec());
     }
 
-    // lowering (and the fusion it decides) runs over the whole program at
-    // once — see `nest::lower`'s docs. buffer retirement below is a separate,
-    // finer-grained liveness question over the *emitted* nest sequence: a
-    // held zip's own consumption is deferred to whenever its consumer
-    // materializes it, which can be well after the expression position
-    // `live::annotate` reasons about, so retirement here is computed fresh
-    // over `nests`, not reused from the fusion pass's liveness.
     let nests = nest::lower(program, &shapes, &effective_outputs)?;
     let retires = nest_retirement(&nests, &effective_outputs);
-    let mut peak_live_buffers = live_count(&buffers);
 
-    for (position, computed) in nests.iter().enumerate() {
-        let output = run_nest(computed, &buffers)?;
-        buffers[computed.node.0 as usize] = Some(output);
-        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
-        for retired in &retires[position] {
-            buffers[retired.0 as usize] = None;
-        }
-    }
+    Ok(Prepared {
+        root,
+        shapes,
+        effective_outputs,
+        buffers,
+        nests,
+        retires,
+    })
+}
 
+/// Both evaluators reach the same [`Evaluated`] the same way once their
+/// execution loop is done: read each requested output's shape and data
+/// back out of the (by-then-retired-down) buffer table.
+fn finish(
+    shapes: &shape::Shapes,
+    effective_outputs: &[NodeId],
+    buffers: &[Option<Vec<f32>>],
+    root: NodeId,
+    peak_live_buffers: usize,
+) -> Evaluated {
     let results = effective_outputs
         .iter()
         .map(|node| {
@@ -151,10 +173,154 @@ pub fn evaluate(
         })
         .collect();
 
-    Ok(Evaluated {
+    Evaluated {
         root,
         results,
         peak_live_buffers,
+    }
+}
+
+/// Run a tensor program to f32 data.
+///
+/// `blocks` binds [`Expr::Block`] inputs positionally, in the order they
+/// appear in `program` — the local, single-partition case; a distributed
+/// evaluator would instead resolve blocks by
+/// [`name`](Expr::name). `outputs` selects which nodes to return data for;
+/// an empty slice means the root (the program's last expression) only.
+pub fn evaluate(
+    program: &[Expr],
+    symbols: &[u64],
+    blocks: &[&[f32]],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let Prepared {
+        root,
+        shapes,
+        effective_outputs,
+        mut buffers,
+        nests,
+        retires,
+    } = prepare(program, symbols, blocks, outputs)?;
+
+    let mut peak_live_buffers = live_count(&buffers);
+    for (position, computed) in nests.iter().enumerate() {
+        let output = run_nest(computed, &buffers)?;
+        buffers[computed.node.0 as usize] = Some(output);
+        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        for retired in &retires[position] {
+            buffers[retired.0 as usize] = None;
+        }
+    }
+
+    Ok(finish(
+        &shapes,
+        &effective_outputs,
+        &buffers,
+        root,
+        peak_live_buffers,
+    ))
+}
+
+/// Below this many iteration-space elements, a nest runs the plain
+/// sequential path even when `workers > 1`: `std::thread::scope`'s spawn
+/// and join overhead outweighs the work for a small nest.
+const PARALLEL_THRESHOLD: usize = 4096;
+
+/// Same contract as [`evaluate`], including the exact same [`Evaluated`]
+/// and error variants — the only difference is that each large-enough nest
+/// runs its chunks across `workers` OS threads via [`std::thread::scope`],
+/// each writing a disjoint sub-slice of that nest's own output buffer (see
+/// [`Nest::split`]). The preamble is [`prepare`], the same one [`evaluate`]
+/// runs — the two functions diverge only in the loop below.
+pub fn evaluate_parallel(
+    program: &[Expr],
+    symbols: &[u64],
+    blocks: &[&[f32]],
+    outputs: &[NodeId],
+    workers: NonZeroUsize,
+) -> Result<Evaluated, TensorError> {
+    let Prepared {
+        root,
+        shapes,
+        effective_outputs,
+        mut buffers,
+        nests,
+        retires,
+    } = prepare(program, symbols, blocks, outputs)?;
+
+    let mut peak_live_buffers = live_count(&buffers);
+    for (position, computed) in nests.iter().enumerate() {
+        let output = evaluate_nest_parallel(computed, &buffers, workers)?;
+        buffers[computed.node.0 as usize] = Some(output);
+        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        for retired in &retires[position] {
+            buffers[retired.0 as usize] = None;
+        }
+    }
+
+    Ok(finish(
+        &shapes,
+        &effective_outputs,
+        &buffers,
+        root,
+        peak_live_buffers,
+    ))
+}
+
+/// Runs one nest, threaded across `workers` when [`Nest::split`] finds it
+/// sound and it clears [`PARALLEL_THRESHOLD`]; otherwise the plain
+/// sequential path via [`run_nest_into`].
+fn evaluate_nest_parallel(
+    nest: &Nest,
+    buffers: &[Option<Vec<f32>>],
+    workers: NonZeroUsize,
+) -> Result<Vec<f32>, TensorError> {
+    let mut output = vec![0.0f32; nest_output_len(nest)];
+
+    let chunks = (element_count(&nest.extents) >= PARALLEL_THRESHOLD)
+        .then(|| nest.split(workers.get()))
+        .flatten();
+
+    match chunks {
+        Some(chunks) => run_chunks_threaded(&chunks, buffers, &mut output)?,
+        None => run_nest_into(nest, buffers, &mut output)?,
+    }
+    Ok(output)
+}
+
+/// Runs each of `chunks` on its own OS thread, writing into the matching
+/// disjoint sub-slice of `output` — sound because [`Nest::split`] documents
+/// (and this function relies on) chunk `k`'s output occupying a contiguous,
+/// non-overlapping range of the parent buffer.
+fn run_chunks_threaded(
+    chunks: &[Nest],
+    buffers: &[Option<Vec<f32>>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let mut slices = Vec::with_capacity(chunks.len());
+    let mut remaining = output;
+    for chunk in chunks {
+        let (this_chunk, rest) = remaining.split_at_mut(nest_output_len(chunk));
+        slices.push(this_chunk);
+        remaining = rest;
+    }
+
+    thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .zip(slices)
+            .map(|(chunk, slice)| scope.spawn(move || run_nest_into(chunk, buffers, slice)))
+            .collect();
+        for handle in handles {
+            // a worker panicking is a bug, not a new failure mode this
+            // module introduces: resuming it on the joining thread matches
+            // what would already happen if the same code path panicked
+            // inside the sequential `evaluate`.
+            handle
+                .join()
+                .unwrap_or_else(|panic_payload| panic::resume_unwind(panic_payload))?;
+        }
+        Ok(())
     })
 }
 
@@ -271,12 +437,56 @@ fn initial_value(init: FoldInit) -> Option<f32> {
 }
 
 fn run_nest(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
+    let mut output = vec![0.0f32; nest_output_len(nest)];
+    run_nest_into(nest, buffers, &mut output)?;
+    Ok(output)
+}
+
+/// Runs `nest`, writing its output into a caller-provided slice instead of
+/// allocating one. This is the primitive [`run_nest`] (sequential) and
+/// [`evaluate_parallel`] (one call per chunk, each writing a disjoint
+/// sub-slice of the same parent buffer) both drive — the loop nests below
+/// are written once, here.
+fn run_nest_into(
+    nest: &Nest,
+    buffers: &[Option<Vec<f32>>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
     match &nest.reduction {
-        None => run_elementwise(nest, buffers),
+        None => run_elementwise(nest, buffers, output),
         Some(reduction) => match reduction.keep {
-            Keep::Last => run_reduce(nest, reduction, buffers),
-            Keep::All => run_scan(nest, reduction, buffers),
+            Keep::Last => run_reduce(nest, reduction, buffers, output),
+            Keep::All => run_scan(nest, reduction, buffers, output),
         },
+    }
+}
+
+/// The output length [`run_nest_into`] expects from `nest`: the full
+/// iteration space for an elementwise nest or a `Keep::All` scan (neither
+/// drops any dim), or the reduced (leading dims x width) shape for a
+/// `Keep::Last` fold.
+fn nest_output_len(nest: &Nest) -> usize {
+    match &nest.reduction {
+        Some(reduction) if reduction.keep == Keep::Last => {
+            let (leading_output_dims, last_output_dim) = output_dims_split(reduction);
+            let leading_product: u64 = leading_output_dims
+                .iter()
+                .map(|dim| nest.extents[*dim as usize])
+                .product();
+            let width = last_output_dim.map_or(1, |dim| nest.extents[dim as usize] as usize);
+            leading_product as usize * width
+        }
+        _ => element_count(&nest.extents),
+    }
+}
+
+/// `reduction.output_dims`, split into the leading (outer) dims and the
+/// innermost one (if any) — shared by [`run_reduce`] and [`nest_output_len`]
+/// so the two agree on shape by construction.
+fn output_dims_split(reduction: &Reduction) -> (&[u16], Option<u16>) {
+    match reduction.output_dims.split_last() {
+        Some((last, leading)) => (leading, Some(*last)),
+        None => (&[], None),
     }
 }
 
@@ -290,9 +500,11 @@ fn operand_buffers<'a>(
         .collect()
 }
 
-fn run_elementwise(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
-    let total = element_count(&nest.extents);
-    let mut output = vec![0.0f32; total];
+fn run_elementwise(
+    nest: &Nest,
+    buffers: &[Option<Vec<f32>>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
     let (outer_extents, inner_len) = split_innermost(&nest.extents);
     let innermost_dim = outer_extents.len() as u16;
     let raw = operand_buffers(nest, buffers)?;
@@ -319,24 +531,21 @@ fn run_elementwise(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>
             output[out_base + step] = apply_scalar_op(nest.body, &scratch[..raw.len()]);
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 fn run_reduce(
     nest: &Nest,
     reduction: &Reduction,
     buffers: &[Option<Vec<f32>>],
-) -> Result<Vec<f32>, TensorError> {
+    output: &mut [f32],
+) -> Result<(), TensorError> {
     let raw = operand_buffers(nest, buffers)?;
 
     let reduction_dims: Vec<u16> = (0..nest.extents.len() as u16)
         .filter(|dim| !reduction.output_dims.contains(dim))
         .collect();
-    let (leading_output_dims, last_output_dim): (&[u16], Option<u16>) =
-        match reduction.output_dims.split_last() {
-            Some((last, leading)) => (leading, Some(*last)),
-            None => (&[], None),
-        };
+    let (leading_output_dims, last_output_dim) = output_dims_split(reduction);
 
     let leading_extents: Vec<u64> = leading_output_dims
         .iter()
@@ -347,9 +556,6 @@ fn run_reduce(
         .map(|dim| nest.extents[*dim as usize])
         .collect();
     let width = last_output_dim.map_or(1, |dim| nest.extents[dim as usize] as usize);
-
-    let output_len = leading_extents.iter().product::<u64>() as usize * width;
-    let mut output = vec![0.0f32; output_len];
 
     for leading_coordinate in odometer(&leading_extents) {
         let mut accumulator = vec![initial_value(reduction.init).unwrap_or(0.0); width];
@@ -403,20 +609,19 @@ fn run_reduce(
             output[(out_prefix + out_stride * slot as i64) as usize] = *value;
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 fn run_scan(
     nest: &Nest,
     reduction: &Reduction,
     buffers: &[Option<Vec<f32>>],
-) -> Result<Vec<f32>, TensorError> {
+    output: &mut [f32],
+) -> Result<(), TensorError> {
     let raw = operand_buffers(nest, buffers)?;
     let (outer_extents, inner_len) = split_innermost(&nest.extents);
     let innermost_dim = outer_extents.len() as u16;
 
-    let total = element_count(&nest.extents);
-    let mut output = vec![0.0f32; total];
     let mut accumulator = initial_value(reduction.init).unwrap_or(0.0);
     let mut seeded = !matches!(reduction.init, FoldInit::FirstElement);
 
@@ -451,7 +656,7 @@ fn run_scan(
             out_running += out_stride;
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
@@ -487,6 +692,7 @@ mod tests {
     use super::*;
     use crate::expr::{Extent, Fold, append};
     use crate::map::{self, AffineTerm, IndexMap};
+    use rstest::rstest;
 
     fn block(program: &mut Vec<Expr>, dtype: DType, shape: &[Extent]) -> NodeId {
         append(
@@ -963,5 +1169,374 @@ mod tests {
 
         let error = evaluate(&program, &[3], &[], &[]).expect_err("gather is not lowerable in v1");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    // -- Nest::split proof: chunks executed by hand, one buffer, equal the
+    // -- unsplit result. `nest.rs` owns the split's geometry; the interpreter
+    // -- that can actually run a chunk lives only here, std-gated.
+
+    #[test]
+    fn splitting_an_elementwise_nest_and_running_its_chunks_matches_the_unsplit_result() {
+        let mut program = Vec::new();
+        let source = f32_block(&mut program, &[Extent::Static(10), Extent::Static(4)]);
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: alloc::vec![(source, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("elementwise infers");
+        let nests = nest::lower(&program, &shapes, &[]).expect("elementwise lowers");
+        let nest = &nests[0];
+
+        let data: Vec<f32> = (0..40).map(|value| value as f32 * 0.01).collect();
+        let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+        buffers[0] = Some(data);
+
+        let unsplit = run_nest(nest, &buffers).expect("unsplit runs");
+
+        let chunks = nest.split(3).expect("extent 10 over 3 parts splits");
+        let mut split_output = vec![0.0f32; unsplit.len()];
+        let mut remaining = split_output.as_mut_slice();
+        for chunk in &chunks {
+            let (this_chunk, rest) = remaining.split_at_mut(nest_output_len(chunk));
+            run_nest_into(chunk, &buffers, this_chunk).expect("chunk runs");
+            remaining = rest;
+        }
+
+        assert_eq!(split_output, unsplit);
+    }
+
+    #[test]
+    fn splitting_a_fused_matmul_reduction_and_running_its_chunks_matches_the_unsplit_result() {
+        let (m, k, n) = (8usize, 3usize, 5usize);
+        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
+
+        let shapes = shape::infer(&program, &[]).expect("matmul infers");
+        let nests = nest::lower(&program, &shapes, &[]).expect("matmul lowers");
+        assert_eq!(nests.len(), 1, "fused into one reduction nest");
+        let nest = &nests[0];
+
+        let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+        buffers[0] = Some(lhs);
+        buffers[1] = Some(rhs);
+
+        let unsplit = run_nest(nest, &buffers).expect("unsplit runs");
+
+        let chunks = nest.split(2).expect("8 rows over 2 parts splits");
+        let mut split_output = vec![0.0f32; unsplit.len()];
+        let mut remaining = split_output.as_mut_slice();
+        for chunk in &chunks {
+            let (this_chunk, rest) = remaining.split_at_mut(nest_output_len(chunk));
+            run_nest_into(chunk, &buffers, this_chunk).expect("chunk runs");
+            remaining = rest;
+        }
+
+        assert_eq!(split_output, unsplit);
+    }
+
+    // -- evaluate_parallel proof tests: same programs, workers in {1, 2, 3, 8},
+    // -- bitwise-equal to `evaluate`.
+
+    fn assert_parallel_matches_sequential(
+        program: &[Expr],
+        symbols: &[u64],
+        blocks: &[&[f32]],
+        outputs: &[NodeId],
+        workers: usize,
+    ) {
+        let workers = NonZeroUsize::new(workers).expect("every case here uses a nonzero count");
+        let sequential = evaluate(program, symbols, blocks, outputs).expect("sequential evaluates");
+        let parallel = evaluate_parallel(program, symbols, blocks, outputs, workers)
+            .expect("parallel evaluates");
+
+        assert_eq!(parallel.shape(), sequential.shape());
+        assert_eq!(parallel.root(), sequential.root());
+        for &node in outputs {
+            assert_eq!(
+                parallel.get(node),
+                sequential.get(node),
+                "node {node} output diverges"
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::one_worker(1)]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_parallel_matches_evaluate_for_a_matmul(#[case] workers: usize) {
+        let (m, k, n) = (4usize, 3usize, 5usize);
+        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
+
+        assert_parallel_matches_sequential(&program, &[], &[&lhs, &rhs], &[], workers);
+    }
+
+    #[rstest]
+    #[case::one_worker(1)]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_parallel_matches_evaluate_for_a_tanh_chain(#[case] workers: usize) {
+        let mut program = Vec::new();
+        let mut current = f32_block(&mut program, &[Extent::Static(4)]);
+        for _ in 0..8 {
+            current = append(
+                &mut program,
+                Expr::Zip {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
+                    name: None,
+                },
+            );
+        }
+        let _ = current;
+
+        let input = [0.1, 0.2, 0.3, 0.4f32];
+        assert_parallel_matches_sequential(&program, &[], &[&input], &[], workers);
+    }
+
+    #[rstest]
+    #[case::one_worker(1)]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) {
+        let mut program = Vec::new();
+        let (n, d) = (2usize, 4usize);
+        let input = f32_block(
+            &mut program,
+            &[Extent::Static(n as u32), Extent::Static(d as u32)],
+        );
+
+        let row_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        let broadcast_map = IndexMap::Affine(map::projection(2, &[0]));
+
+        let max = append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Maximum,
+                init: FoldInit::NegativeInfinity,
+                operand: input,
+                in_map: row_map.clone(),
+                out_map: broadcast_map.clone(),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+        let shifted = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Subtract,
+                operands: alloc::vec![(input, row_map.clone()), (max, broadcast_map.clone())],
+                name: None,
+            },
+        );
+        let exponentiated = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Exponential,
+                operands: alloc::vec![(shifted, row_map.clone())],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: exponentiated,
+                in_map: row_map.clone(),
+                out_map: broadcast_map.clone(),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Divide,
+                operands: alloc::vec![(exponentiated, row_map), (sum, broadcast_map)],
+                name: None,
+            },
+        );
+
+        let input_data = [1.0, 2.0, 3.0, 4.0, -1.0, 0.0, 1.0, 2.0f32];
+        assert_parallel_matches_sequential(&program, &[], &[&input_data], &[], workers);
+    }
+
+    #[rstest]
+    #[case::one_worker(1)]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_parallel_matches_evaluate_for_cumsum(#[case] workers: usize) {
+        let mut program = Vec::new();
+        let source = f32_block(&mut program, &[Extent::Static(6)]);
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[0])),
+                keep: Keep::All,
+                name: None,
+            }),
+        );
+
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0f32];
+        assert_parallel_matches_sequential(&program, &[], &[&data], &[], workers);
+    }
+
+    #[rstest]
+    #[case::one_worker(1)]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_parallel_matches_evaluate_for_multiple_requested_outputs(#[case] workers: usize) {
+        let mut program = Vec::new();
+        let source = f32_block(&mut program, &[Extent::Static(4)]);
+        let mut current = source;
+        let mut nodes = alloc::vec![source];
+        for _ in 0..4 {
+            current = append(
+                &mut program,
+                Expr::Zip {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
+                    name: None,
+                },
+            );
+            nodes.push(current);
+        }
+        let midpoint = nodes[2];
+        let root = current;
+
+        let input = [0.1, 0.2, 0.3, 0.4f32];
+        assert_parallel_matches_sequential(&program, &[], &[&input], &[midpoint, root], workers);
+    }
+
+    #[test]
+    fn a_matmul_past_the_parallel_threshold_actually_splits_and_still_matches_sequential() {
+        let (m, k, n) = (64usize, 64usize, 64usize);
+        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| (value % 7) as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
+
+        let shapes = shape::infer(&program, &[]).expect("64x64x64 matmul infers");
+        let nests = nest::lower(&program, &shapes, &[]).expect("64x64x64 matmul lowers");
+        assert_eq!(nests.len(), 1, "fused into one reduction nest");
+        assert!(
+            element_count(&nests[0].extents) >= PARALLEL_THRESHOLD,
+            "this size must clear the threshold or this test proves nothing about the \
+             threaded path"
+        );
+        assert!(
+            nests[0].split(4).is_some(),
+            "the nest must actually be splittable for the threaded path to run"
+        );
+
+        let workers = NonZeroUsize::new(4).expect("4 is nonzero");
+        assert_parallel_matches_sequential(&program, &[], &[&lhs, &rhs], &[], workers.get());
+    }
+
+    #[test]
+    fn evaluate_parallel_raises_the_same_errors_as_evaluate_on_every_existing_sad_path() {
+        let workers = NonZeroUsize::new(2).expect("2 is nonzero");
+
+        let mut count_program = Vec::new();
+        f32_block(&mut count_program, &[Extent::Static(4)]);
+        let sequential_error =
+            evaluate(&count_program, &[], &[], &[]).expect_err("one block is required");
+        let parallel_error = evaluate_parallel(&count_program, &[], &[], &[], workers)
+            .expect_err("one block is required");
+        assert_eq!(sequential_error, parallel_error);
+
+        let mut size_program = Vec::new();
+        f32_block(&mut size_program, &[Extent::Static(4)]);
+        let too_short = [1.0, 2.0f32];
+        let sequential_error =
+            evaluate(&size_program, &[], &[&too_short], &[]).expect_err("block is wrong size");
+        let parallel_error = evaluate_parallel(&size_program, &[], &[&too_short], &[], workers)
+            .expect_err("block is wrong size");
+        assert_eq!(sequential_error, parallel_error);
+
+        let mut dtype_program = Vec::new();
+        block(&mut dtype_program, DType::Int32, &[Extent::Static(4)]);
+        let sequential_error =
+            evaluate(&dtype_program, &[], &[], &[]).expect_err("int32 is not f32");
+        let parallel_error = evaluate_parallel(&dtype_program, &[], &[], &[], workers)
+            .expect_err("int32 is not f32");
+        assert_eq!(sequential_error, parallel_error);
+
+        let mut gather_program = Vec::new();
+        let table = f32_block(&mut gather_program, &[Extent::Static(4), Extent::Static(2)]);
+        let ids = block(&mut gather_program, DType::Int32, &[Extent::Static(3)]);
+        let gathered = IndexMap::Computed {
+            indices: ids,
+            base: map::projection(2, &[0, 1]),
+        };
+        append(
+            &mut gather_program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered)],
+                name: None,
+            },
+        );
+        let sequential_error =
+            evaluate(&gather_program, &[3], &[], &[]).expect_err("gather is not lowerable in v1");
+        let parallel_error = evaluate_parallel(&gather_program, &[3], &[], &[], workers)
+            .expect_err("gather is not lowerable in v1");
+        assert_eq!(sequential_error, parallel_error);
+    }
+
+    #[test]
+    fn peak_live_buffers_on_a_tanh_chain_stays_small_under_evaluate_parallel() {
+        let mut program = Vec::new();
+        let mut current = f32_block(&mut program, &[Extent::Static(4)]);
+        for _ in 0..8 {
+            current = append(
+                &mut program,
+                Expr::Zip {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
+                    name: None,
+                },
+            );
+        }
+        let _ = current;
+
+        let input = [0.1, 0.2, 0.3, 0.4f32];
+        let workers = NonZeroUsize::new(4).expect("4 is nonzero");
+        let evaluated = evaluate_parallel(&program, &[], &[&input], &[], workers)
+            .expect("tanh chain evaluates in parallel");
+
+        assert!(
+            evaluated.peak_live_buffers() <= 3,
+            "streaming a chain of 8 unary zips should not hold one buffer per zip, got {}",
+            evaluated.peak_live_buffers()
+        );
     }
 }
