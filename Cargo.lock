@@ -4547,6 +4547,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-tensor"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "conflaguration",
+ "rstest",
+ "serde",
+ "thiserror 2.0.19",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "proxima-test"
 version = "0.1.0"
 dependencies = [
