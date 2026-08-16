@@ -1,7 +1,7 @@
 //! A CPU interpreter for [`Nest`]s: strided, f32-only, streaming its buffers.
 //!
 //! This module owns none of the stride arithmetic — that lives in
-//! [`nest`](crate::nest), shared with any other backend. What is CPU-specific
+//! [`nest`], shared with any other backend. What is CPU-specific
 //! and lives here: the f32-only restriction (a v1 limitation — [`ScalarOp`]'s
 //! transcendental bodies need `libm`-grade math this crate does not depend
 //! on, so a GPU backend targeting f16/bf16 natively is unaffected by this
@@ -25,13 +25,26 @@
 //! emitted nest sequence reads it again, which is the other half of not
 //! paying for what a program does not keep — see
 //! [`Evaluated::peak_live_buffers`].
+//!
+//! [`Nest`] itself implements [`Pipe`] here
+//! (`In = Out = Vec<Option<Vec<f32>>>`, the buffer table threaded through) —
+//! the existing type this module already interprets, not a wrapper minted to
+//! host the impl. It is a pure functional pipe rather than an interior-
+//! mutable one like [`shape::Infer`] or
+//! [`crate::nest::Lower`]: a `Nest` carries no state of its own between
+//! calls (unlike a running shape/lowering judgment), so the buffer table
+//! travels as the value itself, `&self` never needing interior mutability at
+//! all.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::future::Future;
 use core::num::NonZeroUsize;
 use std::panic;
 use std::thread;
+
+use proxima_primitives::pipe::Pipe;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
@@ -238,7 +251,7 @@ const PARALLEL_THRESHOLD: usize = 4096;
 /// and error variants — the only difference is that each large-enough nest
 /// runs its chunks across `workers` OS threads via [`std::thread::scope`],
 /// each writing a disjoint sub-slice of that nest's own output buffer (see
-/// [`Nest::split`]). The preamble is [`prepare`], the same one [`evaluate`]
+/// [`Nest::split`]). The preamble is `prepare`, the same one [`evaluate`]
 /// runs — the two functions diverge only in the loop below.
 pub fn evaluate_parallel(
     program: &[Expr],
@@ -486,6 +499,38 @@ fn run_nest(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, Tenso
     let mut output = vec![0.0f32; nest_output_len(nest)];
     run_nest_into(nest, buffers, &mut output)?;
     Ok(output)
+}
+
+/// Runs one `Nest` against a buffer table, writing this nest's own output
+/// into it — the same per-nest step [`evaluate`]'s own loop already drives
+/// (`run_nest` + `buffers[computed.node.0 as usize] = Some(output)`), now
+/// reachable through the algebra: a caller with a ready `Vec<Nest>` (what
+/// [`crate::nest::Lower`]'s `Pipe` impl emits per push) drives it with
+/// `for nest in ready { buffers = nest.call(buffers).await?; }` — a plain
+/// fold over individually-`Pipe`-shaped nests, not a further `.and_then()`
+/// link (`AndThen` composes exactly one `Pipe` after another; a stage whose
+/// `Out` is a runtime-sized batch needs an external loop to drive the next
+/// per-item `Pipe`, which is a genuine boundary of this algebra, not a gap in
+/// this crate's use of it).
+///
+/// Buffer retirement (freeing a dead node's `Vec<f32>` — see [`evaluate`]'s
+/// own loop) is not reproduced here: it is a whole-sequence liveness
+/// computation over the emitted `Nest`s, and this pipe only ever sees one
+/// nest at a time. A caller driving many nests through this pipe keeps every
+/// buffer alive — correct, not peak-memory-optimal; [`evaluate`] and
+/// [`evaluate_parallel`] remain the memory-disciplined path.
+impl Pipe for Nest {
+    type In = Vec<Option<Vec<f32>>>;
+    type Out = Vec<Option<Vec<f32>>>;
+    type Err = TensorError;
+
+    fn call(&self, mut buffers: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> {
+        async move {
+            let output = run_nest(self, &buffers)?;
+            buffers[self.node.0 as usize] = Some(output);
+            Ok(buffers)
+        }
+    }
 }
 
 /// Runs `nest`, writing its output into a caller-provided slice instead of
@@ -1908,5 +1953,52 @@ mod tests {
             "streaming a chain of 8 unary zips should not hold one buffer per zip, got {}",
             evaluated.peak_live_buffers()
         );
+    }
+
+    // THE PROOF: the full compiler chain — shape inference, lowering, and
+    // CPU execution — driven entirely through the real `Pipe` algebra
+    // (`Infer.and_then(Lower)` via `PipeExt`, then `Nest::call` threading the
+    // buffer table), matches what `evaluate` (the free-function path every
+    // other test in this crate trusts) produces for the identical matmul
+    // program.
+    #[test]
+    fn composed_pipe_chain_matches_the_free_function_matmul() {
+        use crate::live;
+        use crate::shape::Infer;
+        use proxima_primitives::block_on;
+        use proxima_primitives::pipe::PipeExt;
+
+        let (m, k, n) = (4usize, 3usize, 5usize);
+        let (program, sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
+
+        let outputs: Vec<NodeId> = Vec::new();
+        let retires = live::annotate(&program, &outputs);
+        let inference = Infer::new(&[]);
+        let lowering = nest::Lower::new(retires);
+        let chain = inference.and_then(lowering);
+
+        // `matmul_program` always appends `lhs` then `rhs` first.
+        let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+        buffers[0] = Some(lhs.clone());
+        buffers[1] = Some(rhs.clone());
+
+        for expr in &program {
+            let ready_nests =
+                block_on(Pipe::call(&chain, expr.clone())).expect("infer+lower pipe step succeeds");
+            for computed in &ready_nests {
+                buffers = block_on(Pipe::call(computed, buffers)).expect("nest pipe step succeeds");
+            }
+        }
+
+        let chain_result = buffers[sum.0 as usize]
+            .clone()
+            .expect("the matmul nest was executed through the composed chain");
+
+        let evaluated =
+            evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("free-function matmul evaluates");
+
+        assert_eq!(chain_result, evaluated.root());
     }
 }
