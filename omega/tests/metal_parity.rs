@@ -11,8 +11,8 @@
 
 use omega::MetalError;
 use proxima_tensor::{
-    AffineTerm, DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, NodeId, ScalarOp, affine,
-    append, evaluate, projection,
+    AffineMap, AffineTerm, DType, DimExpr, Expr, Extent, Fold, FoldInit, IndexMap, Keep, NodeId,
+    ScalarOp, TensorError, affine, append, evaluate, projection,
 };
 
 /// Asserts `cpu` and `metal` agree within `1e-6`, refusing a vacuous
@@ -272,6 +272,125 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Expr> {
     program
 }
 
+/// `table[ids[s], d]` over iteration space `(s, d)`: the same worked example
+/// `map.rs`'s docs use.
+fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Expr> {
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(vocab), Extent::Static(dim)],
+            name: None,
+        },
+    );
+    let ids = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(seq)],
+            name: None,
+        },
+    );
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: projection(2, &[0]),
+        base: AffineMap {
+            iter_rank: 2,
+            dims: vec![
+                DimExpr::default(),
+                DimExpr {
+                    terms: vec![AffineTerm::projection(1)],
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    append(
+        &mut program,
+        Expr::Zip {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(table, gathered_map)],
+            name: None,
+        },
+    );
+    program
+}
+
+/// `sum_k table[ids[i], k] * weight[k, j]` — an embedding lookup fused
+/// straight into a contraction, mirroring [`matmul_program`] with `lhs`
+/// replaced by a gather.
+fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) -> Vec<Expr> {
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(vocab), Extent::Static(embed_dim)],
+            name: None,
+        },
+    );
+    let ids = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(seq)],
+            name: None,
+        },
+    );
+    let weight = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(embed_dim), Extent::Static(out_dim)],
+            name: None,
+        },
+    );
+
+    let gather_map = IndexMap::Computed {
+        indices: ids,
+        index_map: projection(3, &[0]),
+        base: AffineMap {
+            iter_rank: 3,
+            dims: vec![
+                DimExpr::default(),
+                DimExpr {
+                    terms: vec![AffineTerm::projection(2)],
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let weight_map = IndexMap::Affine(projection(3, &[2, 1]));
+
+    let product = append(
+        &mut program,
+        Expr::Zip {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(table, gather_map), (weight, weight_map)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Expr::Fold(Fold {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: FoldInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Last,
+            name: Some("embedding_matmul".into()),
+        }),
+    );
+    program
+}
+
 #[test]
 fn matmul_parity_is_exact_for_integer_valued_inputs() {
     let (m, k, n) = (4usize, 3usize, 5usize);
@@ -339,6 +458,76 @@ fn conv_window_parity_matches_within_epsilon() {
         .expect("metal conv executes on a real device");
 
     assert_parity("conv_window", cpu.root(), metal.root());
+}
+
+#[test]
+fn embedding_lookup_parity_is_exact_for_integer_valued_inputs() {
+    let (vocab, dim, seq) = (50_000usize, 8usize, 4usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
+    let ids_data = [3.0f32, 49_999.0, 12_345.0, 0.0];
+
+    let cpu = evaluate(&program, &[], &[&table_data, &ids_data], &[])
+        .expect("cpu embedding lookup evaluates");
+    let metal = omega::execute(&program, &[], &[&table_data, &ids_data], &[])
+        .expect("metal embedding lookup executes on a real device");
+
+    let max_abs_diff = assert_parity("embedding_lookup", cpu.root(), metal.root());
+    assert_eq!(
+        max_abs_diff, 0.0,
+        "gathering integer-valued table rows must round-trip exactly (max abs diff was \
+         {max_abs_diff})"
+    );
+}
+
+#[test]
+fn embedding_matmul_parity_matches_within_epsilon() {
+    let (vocab, embed_dim, seq, out_dim) = (100usize, 6usize, 4usize, 3usize);
+    let program =
+        embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
+    let table_data: Vec<f32> = (0..vocab * embed_dim)
+        .map(|value| (value % 13) as f32)
+        .collect();
+    let ids_data = [3.0f32, 99.0, 50.0, 0.0];
+    let weight_data: Vec<f32> = (0..embed_dim * out_dim)
+        .map(|value| (value % 5) as f32)
+        .collect();
+
+    let cpu = evaluate(&program, &[], &[&table_data, &ids_data, &weight_data], &[])
+        .expect("cpu embedding matmul evaluates");
+    let metal = omega::execute(&program, &[], &[&table_data, &ids_data, &weight_data], &[])
+        .expect("metal embedding matmul executes on a real device");
+
+    assert_parity("embedding_matmul", cpu.root(), metal.root());
+}
+
+#[test]
+fn out_of_range_gather_index_produces_the_same_error_on_cpu_and_metal() {
+    let (vocab, dim, seq) = (4usize, 2usize, 3usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
+    // every fetched index is the same out-of-range value: which thread's
+    // atomic_fetch_max "wins" on the metal side then cannot change what gets
+    // reported, so the two backends' field values are directly comparable
+    // rather than merely both-erroring.
+    let ids_data = [vocab as f32, vocab as f32, vocab as f32];
+
+    let cpu_error = evaluate(&program, &[], &[&table_data, &ids_data], &[])
+        .expect_err("cpu rejects the out-of-range gather");
+    let metal_error = omega::execute(&program, &[], &[&table_data, &ids_data], &[])
+        .expect_err("metal rejects the out-of-range gather too, not clamping it away");
+
+    assert!(
+        matches!(cpu_error, TensorError::GatherIndexOutOfRange { .. }),
+        "{cpu_error}"
+    );
+    match metal_error {
+        MetalError::Tensor(tensor_error) => assert_eq!(
+            tensor_error, cpu_error,
+            "cpu and metal must report the identical TensorError fields"
+        ),
+        other => panic!("expected MetalError::Tensor, got {other:?}"),
+    }
 }
 
 #[test]

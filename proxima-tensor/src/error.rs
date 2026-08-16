@@ -94,4 +94,31 @@ pub enum TensorError {
 
     #[error("extent `{0}` is not a number or a `?n` symbol")]
     MalformedExtent(alloc::string::String),
+
+    #[error(
+        "node {node} gathers indices from a node with dtype {dtype:?}, which is not an integer type"
+    )]
+    NonIntegerIndices { node: NodeId, dtype: DType },
+
+    #[error("node {node} gathered_dim {dim} is out of range for the operand's rank")]
+    GatheredDimOutOfRange { node: NodeId, dim: u16 },
+
+    #[error("node {node} gather fetched index {index}, which is out of range for extent {extent}")]
+    GatherIndexOutOfRange {
+        node: NodeId,
+        index: i64,
+        extent: u64,
+    },
+
+    /// Gather indices ride in f32 buffers (see [`crate::map::IndexMap::Computed`]
+    /// and `cpu.rs`'s module docs for why), and f32's 24-bit mantissa cannot
+    /// represent every integer above `2^24` (16,777,216) exactly — a gathered
+    /// dim wider than that could silently address the wrong row. Lifting this
+    /// ceiling means adding a separate integer-buffer path; until then, this
+    /// is a loud rejection instead of a silent wrong answer.
+    #[error(
+        "node {node} gathers a dim with extent {extent}, past 2^24 (16777216), the largest \
+         integer an f32 index can represent exactly"
+    )]
+    GatherExtentExceedsExactFloat { node: NodeId, extent: u64 },
 }
