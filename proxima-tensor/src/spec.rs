@@ -14,6 +14,13 @@
 //! dims. A convolution's `h*stride + r*dilation` has no einsum spelling, so
 //! it is built with [`map::affine`](crate::map::affine) and stays out of the
 //! string grammar rather than growing it a syntax.
+//!
+//! A [`NodeSpec::Zip`] operand map may instead be a [`MapSpec::Gather`]
+//! table: `{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }`.
+//! `index_map` addresses the `gather` node the same einsum way; `map`
+//! addresses the operand's *non-gathered* dims only, in operand-dim order,
+//! skipping the position `dim` names — [`build_base_map`] splices an empty
+//! (gathered) entry back in at that position.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -26,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::expr::{self, Expr, Extent, Fold, FoldInit, Keep, NodeId, ScalarOp};
-use crate::map::{self, IndexMap};
+use crate::map::{self, AffineMap, AffineTerm, DimExpr, IndexMap};
 
 /// A declarative tensor program. Nodes are order-dependent: a node may only
 /// reference ids defined above it, which mirrors the program's
@@ -63,6 +70,26 @@ impl ExtentSpec {
     }
 }
 
+/// One [`NodeSpec::Zip`] operand map: the existing bare `operand->iteration`
+/// string, or a table describing a gather. `#[serde(untagged)]` picks the
+/// variant from shape alone — a string is `Projection`, a table is `Gather`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MapSpec {
+    Projection(String),
+    Gather {
+        /// The id of the node supplying fetched index values.
+        gather: String,
+        /// How the iteration space addresses the `gather` node.
+        index_map: String,
+        /// How the iteration space addresses the operand's non-gathered
+        /// dims, in operand-dim order, skipping `dim`'s position.
+        map: String,
+        /// Which operand dimension the fetched index selects.
+        dim: u16,
+    },
+}
+
 /// One node, discriminated by `op` so TOML reads as `op = "zip"`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -79,7 +106,7 @@ pub enum NodeSpec {
         dtype: DType,
         body: ScalarOp,
         inputs: Vec<String>,
-        maps: Vec<String>,
+        maps: Vec<MapSpec>,
         #[serde(default)]
         name: Option<String>,
     },
@@ -155,6 +182,16 @@ impl Validate for ProgramSpec {
                                 .push(ValidationMessage::new(id, "input is not defined above it"));
                         }
                     }
+                    for map in maps {
+                        if let MapSpec::Gather { gather, .. } = map
+                            && !defined.contains_key(gather.as_str())
+                        {
+                            errors.push(ValidationMessage::new(
+                                id,
+                                "gather references a node not defined above it",
+                            ));
+                        }
+                    }
                 }
                 NodeSpec::Fold { id, input, .. } => {
                     if !defined.contains_key(input.as_str()) {
@@ -215,10 +252,10 @@ impl TryFrom<&ProgramSpec> for Vec<Expr> {
                     let operands = inputs
                         .iter()
                         .zip(maps)
-                        .map(|(reference, notation)| {
+                        .map(|(reference, map_spec)| {
                             let node = lookup(&resolved, reference)?;
-                            let (rank, projected) = parse_projection(notation)?;
-                            Ok((node, IndexMap::Affine(map::projection(rank, &projected))))
+                            let index_map = resolve_map_spec(&resolved, map_spec)?;
+                            Ok((node, index_map))
                         })
                         .collect::<Result<Vec<(NodeId, IndexMap)>, TensorError>>()?;
                     expr::append(
@@ -264,6 +301,61 @@ impl TryFrom<&ProgramSpec> for Vec<Expr> {
         }
 
         Ok(program)
+    }
+}
+
+/// Builds an [`IndexMap`] from one [`MapSpec`] entry, resolving a `Gather`'s
+/// `gather` node id the same way an `inputs` entry resolves.
+fn resolve_map_spec(
+    resolved: &BTreeMap<String, NodeId>,
+    map_spec: &MapSpec,
+) -> Result<IndexMap, TensorError> {
+    match map_spec {
+        MapSpec::Projection(notation) => {
+            let (rank, projected) = parse_projection(notation)?;
+            Ok(IndexMap::Affine(map::projection(rank, &projected)))
+        }
+        MapSpec::Gather {
+            gather,
+            index_map,
+            map: base_notation,
+            dim,
+        } => {
+            let indices = lookup(resolved, gather)?;
+            let (index_rank, index_projected) = parse_projection(index_map)?;
+            let (base_rank, base_projected) = parse_projection(base_notation)?;
+            Ok(IndexMap::Computed {
+                indices,
+                index_map: map::projection(index_rank, &index_projected),
+                base: build_base_map(base_rank, &base_projected, *dim),
+                gathered_dim: *dim,
+            })
+        }
+    }
+}
+
+/// Builds a gather's `base` map from its non-gathered projected dims (in
+/// operand-dim order) plus the gathered dim's position: an empty
+/// [`DimExpr`] is spliced in at `gathered_dim`, since that dim's address
+/// comes from the fetch, not from `dims`' own terms. `gathered_dim` past the
+/// operand's rank is clamped rather than panicking — an out-of-range value
+/// is a well-formed but invalid `AffineMap` that
+/// [`shape::infer`](crate::shape::infer) rejects downstream with
+/// [`TensorError::GatheredDimOutOfRange`], the same as it would for one
+/// built directly in Rust.
+fn build_base_map(rank: u16, projected: &[u16], gathered_dim: u16) -> AffineMap {
+    let mut dims: Vec<DimExpr> = projected
+        .iter()
+        .map(|iter_dim| DimExpr {
+            terms: alloc::vec![AffineTerm::projection(*iter_dim)],
+            offset: 0,
+        })
+        .collect();
+    let insert_at = (gathered_dim as usize).min(dims.len());
+    dims.insert(insert_at, DimExpr::default());
+    AffineMap {
+        iter_rank: rank,
+        dims,
     }
 }
 
@@ -373,6 +465,90 @@ name = "matmul"
             "config and code must produce the same program"
         );
         crate::shape::infer(&from_config, &[512]).expect("the parsed program also infers");
+    }
+
+    const EMBEDDING_TOML: &str = r#"
+[[node]]
+op = "block"
+id = "table"
+dtype = "float32"
+shape = [50000, 8]
+
+[[node]]
+op = "block"
+id = "ids"
+dtype = "int32"
+shape = [4]
+
+[[node]]
+op = "zip"
+id = "gathered"
+dtype = "float32"
+body = "identity"
+inputs = ["table"]
+maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
+"#;
+
+    fn embedding_lookup_in_rust() -> Vec<Expr> {
+        let mut program = Vec::new();
+        let table = expr::append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(50_000), Extent::Static(8)],
+                name: None,
+            },
+        );
+        let ids = expr::append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Int32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: AffineMap {
+                iter_rank: 2,
+                dims: alloc::vec![
+                    DimExpr::default(),
+                    DimExpr {
+                        terms: alloc::vec![AffineTerm::projection(1)],
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        expr::append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        program
+    }
+
+    /// The gather analogue of
+    /// [`a_program_written_as_toml_equals_the_same_program_written_in_rust`]:
+    /// an embedding lookup written as TOML must equal the same program built
+    /// directly, and the parsed program must still pass shape inference.
+    #[test]
+    fn an_embedding_lookup_written_as_toml_equals_the_same_program_written_in_rust() {
+        let spec: ProgramSpec = toml::from_str(EMBEDDING_TOML).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let from_config = Vec::<Expr>::try_from(&spec).expect("spec lowers to a program");
+        assert_eq!(
+            from_config,
+            embedding_lookup_in_rust(),
+            "config and code must produce the same gather program"
+        );
+        crate::shape::infer(&from_config, &[]).expect("the parsed gather program also infers");
     }
 
     #[test]

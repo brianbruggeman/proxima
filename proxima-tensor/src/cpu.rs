@@ -8,6 +8,13 @@
 //! choice), the loop nests that walk a `Nest`'s iteration space, and buffer
 //! lifetime.
 //!
+//! `reject_non_float32`'s one exception is a gather's `indices` buffer: it
+//! carries integer index values, but as f32 like everything else here, since
+//! no separate integer-buffer kind exists yet. f32 represents every integer
+//! up to `2^24` (16,777,216) exactly, so [`shape::infer`] rejects any
+//! gathered dim wider than that before this module ever sees the program —
+//! see [`crate::map::IndexMap::Computed`]'s docs for the full accounting.
+//!
 //! The inner loop of every walk below is a straight loop with a per-operand
 //! running offset incremented by a precomputed stride each step — never a
 //! per-element recomputation of the full coordinate — so the shape an
@@ -29,6 +36,7 @@ use std::thread;
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::expr::{Expr, FoldInit, Keep, NodeId, ScalarOp};
+use crate::map::IndexMap;
 use crate::nest::{self, Nest, Reduction};
 use crate::shape;
 
@@ -337,8 +345,11 @@ fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
     let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
     for (position, nest) in nests.iter().enumerate() {
-        for (source, _) in &nest.operands {
+        for (source, _, gather) in &nest.operands {
             last_use.insert(*source, position);
+            if let Some(gather_access) = gather {
+                last_use.insert(gather_access.indices, position);
+            }
         }
     }
 
@@ -360,19 +371,54 @@ fn block_node_ids(program: &[Expr]) -> Vec<NodeId> {
         .collect()
 }
 
-// `shape::infer` (called before this) already rejects every `Computed`
-// (data-dependent) index map anywhere in the program, so the only CPU-tier
-// restriction left to enforce here is the element type.
+// `shape::infer` (called before this) already rejects a scatter (a
+// data-dependent fold output), any gather whose indices are not an integer
+// dtype, and any gathered dim past 2^24 (an f32 index cannot represent a
+// larger extent's values exactly), so the only restriction left to enforce
+// here is that every OTHER node — every node not itself a gather's
+// `indices` — is f32: this interpreter's buffers are `Vec<f32>` throughout,
+// indices included (an index value is an exact integer carried as f32, per
+// the module doc), so a gather's `indices` node is the one deliberate
+// exception to the f32 rule rather than a second buffer kind.
 fn reject_non_float32(program: &[Expr]) -> Result<(), TensorError> {
+    let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
-        if expr.dtype() != DType::Float32 {
+        let node = NodeId(position as u32);
+        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) {
             return Err(TensorError::NotLowerable {
-                node: NodeId(position as u32),
-                reason: "cpu evaluation is f32-only in v1",
+                node,
+                reason: "cpu evaluation is f32-only in v1, except for a gather's indices",
             });
         }
     }
     Ok(())
+}
+
+/// Every node referenced as a gather's `indices` anywhere in `program` —
+/// the one class of non-float32 node [`reject_non_float32`] tolerates.
+fn index_node_ids(program: &[Expr]) -> BTreeSet<NodeId> {
+    let mut nodes = BTreeSet::new();
+    for expr in program {
+        match expr {
+            Expr::Block { .. } => {}
+            Expr::Zip { operands, .. } => {
+                for (_, map) in operands {
+                    push_indices_node(map, &mut nodes);
+                }
+            }
+            Expr::Fold(fold) => {
+                push_indices_node(&fold.in_map, &mut nodes);
+                push_indices_node(&fold.out_map, &mut nodes);
+            }
+        }
+    }
+    nodes
+}
+
+fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
+    if let IndexMap::Computed { indices, .. } = map {
+        nodes.insert(*indices);
+    }
 }
 
 fn buffer_of(buffers: &[Option<Vec<f32>>], node: NodeId) -> Result<&[f32], TensorError> {
@@ -496,7 +542,69 @@ fn operand_buffers<'a>(
 ) -> Result<Vec<&'a [f32]>, TensorError> {
     nest.operands
         .iter()
-        .map(|(source, _)| buffer_of(buffers, *source))
+        .map(|(source, _, _)| buffer_of(buffers, *source))
+        .collect()
+}
+
+/// Per-step gather state for one operand: an incrementally-advanced offset
+/// into the `indices` buffer (mirroring how a normal operand's own running
+/// offset advances by a precomputed stride each step), plus what to do with
+/// a fetched value once read.
+struct GatherCursor<'a> {
+    buffer: &'a [f32],
+    offset: i64,
+    stride: i64,
+    element_stride: i64,
+    extent: u64,
+}
+
+impl GatherCursor<'_> {
+    /// Reads the next index, advances the cursor, and returns the offset
+    /// contribution that index adds to the operand's own running offset — a
+    /// real error, not a clamp or a wraparound, when the fetched index falls
+    /// outside the gathered dim's extent.
+    fn fetch_and_advance(&mut self, node: NodeId) -> Result<i64, TensorError> {
+        let raw = self.buffer[self.offset as usize];
+        self.offset += self.stride;
+        let index = raw as i64;
+        if index < 0 || index as u64 >= self.extent {
+            return Err(TensorError::GatherIndexOutOfRange {
+                node,
+                index,
+                extent: self.extent,
+            });
+        }
+        Ok(index * self.element_stride)
+    }
+}
+
+/// Builds one [`GatherCursor`] per operand that gathers (`None` for the
+/// rest), each initialized at `coordinate` and advancing by `stride_dim`'s
+/// stride per step — `stride_dim` is `None` where there is no per-step
+/// dimension at all (a scalar reduction's single accumulator).
+fn build_gather_cursors<'a>(
+    nest: &Nest,
+    buffers: &'a [Option<Vec<f32>>],
+    coordinate: &[u64],
+    stride_dim: Option<u16>,
+) -> Result<Vec<Option<GatherCursor<'a>>>, TensorError> {
+    nest.operands
+        .iter()
+        .map(|(_, _, gather)| {
+            gather
+                .as_ref()
+                .map(|gather_access| {
+                    let buffer = buffer_of(buffers, gather_access.indices)?;
+                    Ok(GatherCursor {
+                        buffer,
+                        offset: gather_access.index_view.offset_of(coordinate),
+                        stride: stride_dim.map_or(0, |dim| gather_access.index_view.stride(dim)),
+                        element_stride: gather_access.element_stride,
+                        extent: gather_access.extent,
+                    })
+                })
+                .transpose()
+        })
         .collect()
 }
 
@@ -513,19 +621,25 @@ fn run_elementwise(
         let mut running: Vec<i64> = nest
             .operands
             .iter()
-            .map(|(_, view)| view.offset_of(&outer_coordinate))
+            .map(|(_, view, _)| view.offset_of(&outer_coordinate))
             .collect();
         let strides: Vec<i64> = nest
             .operands
             .iter()
-            .map(|(_, view)| view.stride(innermost_dim))
+            .map(|(_, view, _)| view.stride(innermost_dim))
             .collect();
+        let mut gather_cursors =
+            build_gather_cursors(nest, buffers, &outer_coordinate, Some(innermost_dim))?;
         let out_base = outer_position * inner_len;
 
         for step in 0..inner_len {
             let mut scratch = [0.0f32; 3];
             for (index, data) in raw.iter().enumerate() {
-                scratch[index] = data[running[index] as usize];
+                let mut offset = running[index];
+                if let Some(cursor) = gather_cursors[index].as_mut() {
+                    offset += cursor.fetch_and_advance(nest.node)?;
+                }
+                scratch[index] = data[offset as usize];
                 running[index] += strides[index];
             }
             output[out_base + step] = apply_scalar_op(nest.body, &scratch[..raw.len()]);
@@ -572,18 +686,24 @@ fn run_reduce(
             let mut running: Vec<i64> = nest
                 .operands
                 .iter()
-                .map(|(_, view)| view.offset_of(&full_coordinate))
+                .map(|(_, view, _)| view.offset_of(&full_coordinate))
                 .collect();
             let strides: Vec<i64> = nest
                 .operands
                 .iter()
-                .map(|(_, view)| last_output_dim.map_or(0, |dim| view.stride(dim)))
+                .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
                 .collect();
+            let mut gather_cursors =
+                build_gather_cursors(nest, buffers, &full_coordinate, last_output_dim)?;
 
             for slot in &mut accumulator {
                 let mut scratch = [0.0f32; 3];
                 for (index, data) in raw.iter().enumerate() {
-                    scratch[index] = data[running[index] as usize];
+                    let mut offset = running[index];
+                    if let Some(cursor) = gather_cursors[index].as_mut() {
+                        offset += cursor.fetch_and_advance(nest.node)?;
+                    }
+                    scratch[index] = data[offset as usize];
                     running[index] += strides[index];
                 }
                 let value = apply_scalar_op(nest.body, &scratch[..raw.len()]);
@@ -629,20 +749,26 @@ fn run_scan(
         let mut running: Vec<i64> = nest
             .operands
             .iter()
-            .map(|(_, view)| view.offset_of(&outer_coordinate))
+            .map(|(_, view, _)| view.offset_of(&outer_coordinate))
             .collect();
         let strides: Vec<i64> = nest
             .operands
             .iter()
-            .map(|(_, view)| view.stride(innermost_dim))
+            .map(|(_, view, _)| view.stride(innermost_dim))
             .collect();
+        let mut gather_cursors =
+            build_gather_cursors(nest, buffers, &outer_coordinate, Some(innermost_dim))?;
         let mut out_running = reduction.out_view.offset_of(&outer_coordinate);
         let out_stride = reduction.out_view.stride(innermost_dim);
 
         for _ in 0..inner_len {
             let mut scratch = [0.0f32; 3];
             for (index, data) in raw.iter().enumerate() {
-                scratch[index] = data[running[index] as usize];
+                let mut offset = running[index];
+                if let Some(cursor) = gather_cursors[index].as_mut() {
+                    offset += cursor.fetch_and_advance(nest.node)?;
+                }
+                scratch[index] = data[offset as usize];
                 running[index] += strides[index];
             }
             let value = apply_scalar_op(nest.body, &scratch[..raw.len()]);
@@ -758,6 +884,232 @@ mod tests {
             }),
         );
         (program, sum)
+    }
+
+    /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
+    /// gathered by `ids`, dim 1 (feature) is a plain projection.
+    fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Expr>, NodeId) {
+        let mut program = Vec::new();
+        let table = f32_block(&mut program, &[Extent::Static(vocab), Extent::Static(dim)]);
+        let ids = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: map::AffineMap {
+                iter_rank: 2,
+                dims: alloc::vec![
+                    map::DimExpr::default(),
+                    map::DimExpr {
+                        terms: alloc::vec![AffineTerm::projection(1)],
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let gathered = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        (program, gathered)
+    }
+
+    /// `sum_k table[ids[i], k] * weight[k, j]` — an embedding lookup fused
+    /// straight into a contraction, mirroring [`matmul_program`] with `lhs`
+    /// replaced by a gather.
+    fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) -> Vec<Expr> {
+        let mut program = Vec::new();
+        let table = f32_block(
+            &mut program,
+            &[Extent::Static(vocab), Extent::Static(embed_dim)],
+        );
+        let ids = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
+        let weight = f32_block(
+            &mut program,
+            &[Extent::Static(embed_dim), Extent::Static(out_dim)],
+        );
+
+        let gather_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(3, &[0]),
+            base: map::AffineMap {
+                iter_rank: 3,
+                dims: alloc::vec![
+                    map::DimExpr::default(),
+                    map::DimExpr {
+                        terms: alloc::vec![AffineTerm::projection(2)],
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let weight_map = IndexMap::Affine(map::projection(3, &[2, 1]));
+
+        let product = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(table, gather_map), (weight, weight_map)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Last,
+                name: Some("embedding_matmul".into()),
+            }),
+        );
+        program
+    }
+
+    #[test]
+    fn embedding_lookup_matches_a_hand_written_reference() {
+        let (vocab, dim, seq) = (50_000usize, 8usize, 4usize);
+        let (program, gathered) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+
+        let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
+        let ids_data = [3.0f32, 49_999.0, 12_345.0, 0.0];
+        let evaluated = evaluate(&program, &[], &[&table_data, &ids_data], &[])
+            .expect("embedding lookup evaluates");
+
+        let mut reference = vec![0.0f32; seq * dim];
+        for (row, &id) in ids_data.iter().enumerate() {
+            let vocab_index = id as usize;
+            reference[row * dim..(row + 1) * dim]
+                .copy_from_slice(&table_data[vocab_index * dim..(vocab_index + 1) * dim]);
+        }
+        assert_eq!(evaluated.shape(), &[seq as u64, dim as u64]);
+        assert_eq!(evaluated.root(), reference.as_slice());
+        let _ = gathered;
+    }
+
+    #[test]
+    fn a_fetched_index_past_the_extent_is_a_real_error_not_ub() {
+        let (program, _gathered) = embedding_lookup_program(4, 2, 1);
+        let table_data: Vec<f32> = (0..8).map(|value| value as f32).collect();
+        let ids_data = [4.0f32]; // extent is 4: 0..=3 are valid, 4 is not
+        let error = evaluate(&program, &[], &[&table_data, &ids_data], &[])
+            .expect_err("out-of-range fetched index is rejected");
+        assert!(
+            matches!(error, TensorError::GatherIndexOutOfRange { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_gather_fused_into_a_fold_matches_a_hand_written_embedding_matmul_reference() {
+        let (vocab, embed_dim, seq, out_dim) = (100usize, 6usize, 4usize, 3usize);
+        let program =
+            embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
+
+        let shapes = shape::infer(&program, &[]).expect("embedding matmul infers");
+        let nests = nest::lower(&program, &shapes, &[]).expect("embedding matmul lowers");
+        assert_eq!(
+            nests.len(),
+            1,
+            "the gather zip must fuse into the fold, not materialize separately"
+        );
+        assert!(nests[0].reduction.is_some());
+
+        let table_data: Vec<f32> = (0..vocab * embed_dim)
+            .map(|value| (value % 13) as f32)
+            .collect();
+        let ids_data = [3.0f32, 99.0, 50.0, 0.0];
+        let weight_data: Vec<f32> = (0..embed_dim * out_dim)
+            .map(|value| (value % 5) as f32)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&table_data, &ids_data, &weight_data], &[])
+            .expect("embedding matmul evaluates");
+
+        let mut reference = vec![0.0f32; seq * out_dim];
+        for (row, &id) in ids_data.iter().enumerate() {
+            let vocab_index = id as usize;
+            for col in 0..out_dim {
+                let mut total = 0.0f32;
+                for k in 0..embed_dim {
+                    total +=
+                        table_data[vocab_index * embed_dim + k] * weight_data[k * out_dim + col];
+                }
+                reference[row * out_dim + col] = total;
+            }
+        }
+        assert_eq!(evaluated.root(), reference.as_slice());
+    }
+
+    #[rstest]
+    #[case::one_worker(1)]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    fn evaluate_parallel_matches_evaluate_for_a_gather_program(#[case] workers: usize) {
+        let (vocab, embed_dim, seq, out_dim) = (100usize, 6usize, 4usize, 3usize);
+        let program =
+            embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
+        let table_data: Vec<f32> = (0..vocab * embed_dim)
+            .map(|value| (value % 13) as f32)
+            .collect();
+        let ids_data = [3.0f32, 99.0, 50.0, 0.0];
+        let weight_data: Vec<f32> = (0..embed_dim * out_dim)
+            .map(|value| (value % 5) as f32)
+            .collect();
+
+        assert_parallel_matches_sequential(
+            &program,
+            &[],
+            &[&table_data, &ids_data, &weight_data],
+            &[],
+            workers,
+        );
+    }
+
+    #[test]
+    fn a_gather_program_past_the_parallel_threshold_actually_splits_and_still_matches_sequential() {
+        let (vocab, embed_dim, seq, out_dim) = (200usize, 64usize, 128usize, 64usize);
+        let program =
+            embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
+        let table_data: Vec<f32> = (0..vocab * embed_dim)
+            .map(|value| (value % 13) as f32)
+            .collect();
+        let ids_data: Vec<f32> = (0..seq).map(|value| (value % vocab) as f32).collect();
+        let weight_data: Vec<f32> = (0..embed_dim * out_dim)
+            .map(|value| (value % 5) as f32)
+            .collect();
+
+        let shapes = shape::infer(&program, &[]).expect("infers");
+        let nests = nest::lower(&program, &shapes, &[]).expect("lowers");
+        assert_eq!(nests.len(), 1, "fused into one reduction nest");
+        assert!(
+            element_count(&nests[0].extents) >= PARALLEL_THRESHOLD,
+            "this size must clear the threshold or this test proves nothing about the \
+             threaded path"
+        );
+        assert!(
+            nests[0].split(4).is_some(),
+            "the nest must actually be splittable for the threaded path to run"
+        );
+
+        let workers = NonZeroUsize::new(4).expect("4 is nonzero");
+        assert_parallel_matches_sequential(
+            &program,
+            &[],
+            &[&table_data, &ids_data, &weight_data],
+            &[],
+            workers.get(),
+        );
     }
 
     #[test]
@@ -1149,25 +1501,34 @@ mod tests {
     }
 
     #[test]
-    fn a_computed_map_is_rejected() {
+    fn a_scatter_data_dependent_fold_output_is_still_rejected_by_evaluate() {
         let mut program = Vec::new();
-        let table = f32_block(&mut program, &[Extent::Static(4), Extent::Static(2)]);
-        let ids = block(&mut program, DType::Int32, &[Extent::Static(3)]);
-        let gathered = IndexMap::Computed {
+        let source = f32_block(&mut program, &[Extent::Static(4)]);
+        let ids = block(&mut program, DType::Int32, &[Extent::Static(4)]);
+        let out_map = IndexMap::Computed {
             indices: ids,
-            base: map::projection(2, &[0, 1]),
+            index_map: map::projection(1, &[0]),
+            base: map::AffineMap {
+                iter_rank: 1,
+                dims: alloc::vec![map::DimExpr::default()],
+            },
+            gathered_dim: 0,
         };
         append(
             &mut program,
-            Expr::Zip {
+            Expr::Fold(Fold {
                 dtype: DType::Float32,
-                body: ScalarOp::Identity,
-                operands: alloc::vec![(table, gathered)],
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map,
+                keep: Keep::Last,
                 name: None,
-            },
+            }),
         );
 
-        let error = evaluate(&program, &[3], &[], &[]).expect_err("gather is not lowerable in v1");
+        let error = evaluate(&program, &[], &[], &[]).expect_err("scatter is not lowerable in v1");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
@@ -1488,26 +1849,35 @@ mod tests {
             .expect_err("int32 is not f32");
         assert_eq!(sequential_error, parallel_error);
 
-        let mut gather_program = Vec::new();
-        let table = f32_block(&mut gather_program, &[Extent::Static(4), Extent::Static(2)]);
-        let ids = block(&mut gather_program, DType::Int32, &[Extent::Static(3)]);
-        let gathered = IndexMap::Computed {
+        let mut scatter_program = Vec::new();
+        let source = f32_block(&mut scatter_program, &[Extent::Static(4)]);
+        let ids = block(&mut scatter_program, DType::Int32, &[Extent::Static(4)]);
+        let out_map = IndexMap::Computed {
             indices: ids,
-            base: map::projection(2, &[0, 1]),
+            index_map: map::projection(1, &[0]),
+            base: map::AffineMap {
+                iter_rank: 1,
+                dims: alloc::vec![map::DimExpr::default()],
+            },
+            gathered_dim: 0,
         };
         append(
-            &mut gather_program,
-            Expr::Zip {
+            &mut scatter_program,
+            Expr::Fold(Fold {
                 dtype: DType::Float32,
-                body: ScalarOp::Identity,
-                operands: alloc::vec![(table, gathered)],
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map,
+                keep: Keep::Last,
                 name: None,
-            },
+            }),
         );
         let sequential_error =
-            evaluate(&gather_program, &[3], &[], &[]).expect_err("gather is not lowerable in v1");
-        let parallel_error = evaluate_parallel(&gather_program, &[3], &[], &[], workers)
-            .expect_err("gather is not lowerable in v1");
+            evaluate(&scatter_program, &[], &[], &[]).expect_err("scatter is not lowerable in v1");
+        let parallel_error = evaluate_parallel(&scatter_program, &[], &[], &[], workers)
+            .expect_err("scatter is not lowerable in v1");
         assert_eq!(sequential_error, parallel_error);
     }
 
