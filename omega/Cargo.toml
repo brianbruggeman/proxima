@@ -1,0 +1,25 @@
+[package]
+name = "omega"
+description = "MSL kernel emission from the proxima-tensor Nest descriptor — the emit half of the GPU backend; the device driver composes on top"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+std = ["alloc", "thiserror/std"]
+alloc = []
+
+[dependencies]
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+thiserror = { workspace = true, default-features = false }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
