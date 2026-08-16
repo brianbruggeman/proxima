@@ -55,11 +55,11 @@
 //! also implement [`Pipe`](proxima_primitives::pipe::Pipe) directly (`In =
 //! Expr` on `Infer`, `In = (Expr, Shapes)` on `Lower`) — composable with
 //! `proxima_primitives::pipe::PipeExt::and_then` into one chain, since
-//! `Infer`'s `Out` is exactly `Lower`'s `In`. [`Nest`] gets its own `Pipe`
-//! impl too (`std`-only, in [`cpu`], `In = Out =` the buffer table) — the
-//! execution half, driven by a plain loop over the `Vec<Nest>` a lowering
-//! push readies, since `AndThen` chains one `Pipe` after another and not a
-//! runtime-sized batch into a per-item `Pipe`.
+//! `Infer`'s `Out` is exactly `Lower`'s `In`. [`Nest`] execution is not a
+//! `Pipe`: it writes into a buffer table it does not own, so [`cpu`]'s
+//! `run_nest_into` takes the caller's slice directly instead of moving the
+//! whole table through an `In`/`Out` pair — a plain loop over the `Vec<Nest>`
+//! a lowering push readies, driven by the composed chain's caller.
 //!
 //! # Tiers
 //!
