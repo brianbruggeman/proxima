@@ -26,25 +26,20 @@
 //! paying for what a program does not keep — see
 //! [`Evaluated::peak_live_buffers`].
 //!
-//! [`Nest`] itself implements [`Pipe`] here
-//! (`In = Out = Vec<Option<Vec<f32>>>`, the buffer table threaded through) —
-//! the existing type this module already interprets, not a wrapper minted to
-//! host the impl. It is a pure functional pipe rather than an interior-
-//! mutable one like [`shape::Infer`] or
-//! [`crate::nest::Lower`]: a `Nest` carries no state of its own between
-//! calls (unlike a running shape/lowering judgment), so the buffer table
-//! travels as the value itself, `&self` never needing interior mutability at
-//! all.
+//! [`Nest`] execution is deliberately not a
+//! [`Pipe`](proxima_primitives::pipe::Pipe): a nest writes into a
+//! buffer table it does not own, so [`run_nest_into`] takes the caller's
+//! slice rather than moving a `Vec<Option<Vec<f32>>>` through an `In`/`Out`
+//! pair. [`shape::Infer`] and [`crate::nest::Lower`] compose through the real
+//! `Pipe` algebra; execution stays a plain function the composed chain's
+//! caller drives directly against its own buffer table.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::future::Future;
 use core::num::NonZeroUsize;
 use std::panic;
 use std::thread;
-
-use proxima_primitives::pipe::Pipe;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
@@ -499,38 +494,6 @@ fn run_nest(nest: &Nest, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, Tenso
     let mut output = vec![0.0f32; nest_output_len(nest)];
     run_nest_into(nest, buffers, &mut output)?;
     Ok(output)
-}
-
-/// Runs one `Nest` against a buffer table, writing this nest's own output
-/// into it — the same per-nest step [`evaluate`]'s own loop already drives
-/// (`run_nest` + `buffers[computed.node.0 as usize] = Some(output)`), now
-/// reachable through the algebra: a caller with a ready `Vec<Nest>` (what
-/// [`crate::nest::Lower`]'s `Pipe` impl emits per push) drives it with
-/// `for nest in ready { buffers = nest.call(buffers).await?; }` — a plain
-/// fold over individually-`Pipe`-shaped nests, not a further `.and_then()`
-/// link (`AndThen` composes exactly one `Pipe` after another; a stage whose
-/// `Out` is a runtime-sized batch needs an external loop to drive the next
-/// per-item `Pipe`, which is a genuine boundary of this algebra, not a gap in
-/// this crate's use of it).
-///
-/// Buffer retirement (freeing a dead node's `Vec<f32>` — see [`evaluate`]'s
-/// own loop) is not reproduced here: it is a whole-sequence liveness
-/// computation over the emitted `Nest`s, and this pipe only ever sees one
-/// nest at a time. A caller driving many nests through this pipe keeps every
-/// buffer alive — correct, not peak-memory-optimal; [`evaluate`] and
-/// [`evaluate_parallel`] remain the memory-disciplined path.
-impl Pipe for Nest {
-    type In = Vec<Option<Vec<f32>>>;
-    type Out = Vec<Option<Vec<f32>>>;
-    type Err = TensorError;
-
-    fn call(&self, mut buffers: Self::In) -> impl Future<Output = Result<Self::Out, Self::Err>> {
-        async move {
-            let output = run_nest(self, &buffers)?;
-            buffers[self.node.0 as usize] = Some(output);
-            Ok(buffers)
-        }
-    }
 }
 
 /// Runs `nest`, writing its output into a caller-provided slice instead of
@@ -1966,7 +1929,7 @@ mod tests {
         use crate::live;
         use crate::shape::Infer;
         use proxima_primitives::block_on;
-        use proxima_primitives::pipe::PipeExt;
+        use proxima_primitives::pipe::{Pipe, PipeExt};
 
         let (m, k, n) = (4usize, 3usize, 5usize);
         let (program, sum) = matmul_program(m as u32, k as u32, n as u32, false);
@@ -1984,11 +1947,19 @@ mod tests {
         buffers[0] = Some(lhs.clone());
         buffers[1] = Some(rhs.clone());
 
+        // execution is deliberately NOT a pipe: a nest writes into a buffer
+        // table it does not own, so `run_nest_into` takes the caller's slice
+        // rather than moving a `Vec<Option<Vec<f32>>>` through an `In`/`Out`
+        // pair. wrapping it would have re-allocated per step and dropped the
+        // liveness retirement `evaluate` performs.
         for expr in &program {
             let ready_nests =
                 block_on(Pipe::call(&chain, expr.clone())).expect("infer+lower pipe step succeeds");
             for computed in &ready_nests {
-                buffers = block_on(Pipe::call(computed, buffers)).expect("nest pipe step succeeds");
+                let mut output = vec![0.0f32; nest_output_len(computed)];
+                run_nest_into(computed, &buffers, &mut output)
+                    .expect("nest executes against the caller's buffers");
+                buffers[computed.node.0 as usize] = Some(output);
             }
         }
 
