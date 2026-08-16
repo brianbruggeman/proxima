@@ -51,8 +51,15 @@
 //! append-only stream: every `Expr` is checkable against everything before
 //! it the moment it arrives. [`shape::Infer`] and [`nest::Lower`] are the
 //! sans-IO cores that do that judging one expression at a time; [`infer`] and
-//! [`nest::lower`] are three-line batch drivers over them. An async
-//! `Pipe`-shaped facade belongs on top of these later, not inside them.
+//! [`nest::lower`] are three-line batch drivers over them, and both types
+//! also implement [`Pipe`](proxima_primitives::pipe::Pipe) directly (`In =
+//! Expr` on `Infer`, `In = (Expr, Shapes)` on `Lower`) — composable with
+//! `proxima_primitives::pipe::PipeExt::and_then` into one chain, since
+//! `Infer`'s `Out` is exactly `Lower`'s `In`. [`Nest`] gets its own `Pipe`
+//! impl too (`std`-only, in [`cpu`], `In = Out =` the buffer table) — the
+//! execution half, driven by a plain loop over the `Vec<Nest>` a lowering
+//! push readies, since `AndThen` chains one `Pipe` after another and not a
+//! runtime-sized batch into a per-item `Pipe`.
 //!
 //! # Tiers
 //!

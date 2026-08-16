@@ -8,12 +8,20 @@
 //! nested loops; a GPU backend could instead emit kernel source from the same
 //! descriptor. Neither backend's shape belongs in this module.
 //!
-//! Like [`shape::Infer`](crate::shape::Infer), [`Lower`] is a sans-IO push
+//! Like [`shape::Infer`], [`Lower`] is a sans-IO push
 //! state machine: a program can arrive a step at a time, and lowering must
 //! not require the whole thing in hand. [`lower`] is the batch driver over
 //! it. What *does* require the whole program in hand is liveness
-//! ([`live::annotate`](crate::live::annotate)) — computed once, upstream,
-//! and handed to `Lower` as a plain kill-flag list it never has to guess at.
+//! ([`live::annotate`]) — computed once, upstream,
+//! and handed to `Lower` as a plain kill-flag list it never has to guess at;
+//! `Lower::new` takes that list up front for exactly this reason, streamed
+//! or not.
+//!
+//! `Lower` also implements [`Pipe`] directly
+//! (`In = (Expr, Shapes)`, `Out = Vec<Nest>`) — the same state machine, not a
+//! second type wrapping it. [`Pipe::call`] takes `&self`, so `held` below is
+//! a `RefCell` and the node position a `Cell`, the same interior-mutability
+//! idiom [`shape::Infer`] uses for its own `Pipe` impl.
 //!
 //! The one optimization decided here: when a fold's operand is a zip whose
 //! last use is that fold (exact liveness, from [`live::annotate`]), the zip
@@ -28,6 +36,10 @@
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
+use core::future::Future;
+
+use proxima_primitives::pipe::Pipe;
 
 use crate::error::TensorError;
 use crate::expr::{Expr, Fold, FoldInit, Keep, NodeId, ScalarOp};
@@ -247,21 +259,29 @@ struct HeldZip {
 }
 
 /// The prefix state of lowering: zips seen but not yet materialized.
+///
+/// `retires` and `position` make [`Lower::push`] a single-argument-per-node
+/// step (`expr`, `shapes`) rather than needing `node`/`retires` threaded in
+/// by the caller on every call: `retires[i]` is node `i`'s kill-flag list
+/// (see [`live::annotate`], computed once over the whole program before the
+/// first push, matching the precondition this module already documented),
+/// and `position` is the node id the next push resolves to — both pieces
+/// this type already needed to know, now carried as its own state instead of
+/// repeated arguments.
 pub struct Lower {
-    held: BTreeMap<NodeId, HeldZip>,
-}
-
-impl Default for Lower {
-    fn default() -> Self {
-        Self::new()
-    }
+    held: RefCell<BTreeMap<NodeId, HeldZip>>,
+    retires: Vec<Vec<NodeId>>,
+    position: Cell<u32>,
 }
 
 impl Lower {
+    /// `retires` is normally [`live::annotate`]`(program, outputs)`.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(retires: Vec<Vec<NodeId>>) -> Self {
         Self {
-            held: BTreeMap::new(),
+            held: RefCell::new(BTreeMap::new()),
+            retires,
+            position: Cell::new(0),
         }
     }
 
@@ -271,13 +291,12 @@ impl Lower {
     /// not to fuse must materialize it before the current expression can read
     /// it, so a single push can ready both that standalone nest and the
     /// current expression's own.
-    pub fn push(
-        &mut self,
-        node: NodeId,
-        expr: &Expr,
-        shapes: &Shapes,
-        retires: &[NodeId],
-    ) -> Result<Vec<Nest>, TensorError> {
+    pub fn push(&self, expr: &Expr, shapes: &Shapes) -> Result<Vec<Nest>, TensorError> {
+        let node = NodeId(self.position.get());
+        self.position.set(self.position.get() + 1);
+        let empty = Vec::new();
+        let retires = self.retires.get(node.0 as usize).unwrap_or(&empty);
+
         let mut emitted = Vec::new();
 
         match expr {
@@ -286,7 +305,7 @@ impl Lower {
                 for (operand_node, _) in operands {
                     self.materialize_if_held(*operand_node, shapes, &mut emitted);
                 }
-                self.held.insert(
+                self.held.borrow_mut().insert(
                     node,
                     HeldZip {
                         body: *body,
@@ -297,16 +316,18 @@ impl Lower {
             Expr::Fold(fold) => {
                 let fuses = retires.contains(&fold.operand)
                     && is_identity_projection(&fold.in_map)
-                    && self.held.contains_key(&fold.operand);
+                    && self.held.borrow().contains_key(&fold.operand);
 
-                let (body, operands) =
-                    if let Some(held) = fuses.then(|| self.held.remove(&fold.operand)).flatten() {
-                        compose_fused_operands(shapes, &fold.in_map, held.body, &held.operands)
-                    } else {
-                        self.materialize_if_held(fold.operand, shapes, &mut emitted);
-                        let operand = build_operand(fold.operand, &fold.in_map, shapes);
-                        (ScalarOp::Identity, vec![operand])
-                    };
+                let (body, operands) = if let Some(held) = fuses
+                    .then(|| self.held.borrow_mut().remove(&fold.operand))
+                    .flatten()
+                {
+                    compose_fused_operands(shapes, &fold.in_map, held.body, &held.operands)
+                } else {
+                    self.materialize_if_held(fold.operand, shapes, &mut emitted);
+                    let operand = build_operand(fold.operand, &fold.in_map, shapes);
+                    (ScalarOp::Identity, vec![operand])
+                };
 
                 emitted.push(lower_fold_nest(node, fold, shapes, body, operands));
             }
@@ -320,15 +341,34 @@ impl Lower {
     pub fn finish(self, shapes: &Shapes) -> Result<Vec<Nest>, TensorError> {
         Ok(self
             .held
+            .into_inner()
             .into_iter()
             .map(|(node, held)| lower_zip_nest(node, shapes, held.body, &held.operands))
             .collect())
     }
 
-    fn materialize_if_held(&mut self, node: NodeId, shapes: &Shapes, emitted: &mut Vec<Nest>) {
-        if let Some(held) = self.held.remove(&node) {
+    fn materialize_if_held(&self, node: NodeId, shapes: &Shapes, emitted: &mut Vec<Nest>) {
+        if let Some(held) = self.held.borrow_mut().remove(&node) {
             emitted.push(lower_zip_nest(node, shapes, held.body, &held.operands));
         }
+    }
+}
+
+/// `In = (Expr, Shapes)` matches [`shape::Infer`]'s own
+/// `Pipe::Out` exactly, so `AndThen::new(Infer, Lower)` (or
+/// `infer_instance.and_then(lower_instance)`) composes with no adapter:
+/// shape inference's snapshot travels alongside the `Expr` it was resolved
+/// for, and [`Lower::push`] reads both straight out of `Self::In`.
+impl Pipe for Lower {
+    type In = (Expr, Shapes);
+    type Out = Vec<Nest>;
+    type Err = TensorError;
+
+    fn call(
+        &self,
+        (expr, shapes): Self::In,
+    ) -> impl Future<Output = Result<Vec<Nest>, TensorError>> {
+        async move { self.push(&expr, &shapes) }
     }
 }
 
@@ -512,11 +552,10 @@ pub fn lower(
     outputs: &[NodeId],
 ) -> Result<Vec<Nest>, TensorError> {
     let retires = live::annotate(program, outputs);
-    let mut lowering = Lower::new();
+    let lowering = Lower::new(retires);
     let mut nests = Vec::new();
-    for (position, expr) in program.iter().enumerate() {
-        let node = NodeId(position as u32);
-        nests.extend(lowering.push(node, expr, shapes, &retires[position])?);
+    for expr in program {
+        nests.extend(lowering.push(expr, shapes)?);
     }
     nests.extend(lowering.finish(shapes)?);
     Ok(nests)
@@ -924,5 +963,40 @@ mod tests {
     #[case::extent_smaller_than_parts(elementwise_nest(), 999)]
     fn split_returns_none_when_unsound_or_unhelpful(#[case] nest: Nest, #[case] parts: usize) {
         assert!(nest.split(parts).is_none());
+    }
+
+    // THE PROOF: `Infer` and `Lower` compose through the real `PipeExt`
+    // surface (`.and_then`, not hand-sequenced calls dressed up as
+    // composition), and the nests that composed chain produces for a matmul
+    // program are byte-for-byte the same nests `shape::infer` + `nest::lower`
+    // (the free-function path every other test in this crate trusts)
+    // produce for the identical program.
+    #[test]
+    fn infer_and_then_lower_matches_the_free_function_pipeline() {
+        use crate::shape::Infer;
+        use proxima_primitives::pipe::PipeExt;
+
+        let (program, _product, sum, _lhs) = matmul_program();
+        let outputs: Vec<NodeId> = Vec::new();
+        let retires = live::annotate(&program, &outputs);
+
+        let inference = Infer::new(&[512]);
+        let lowering = Lower::new(retires);
+        let chain = inference.and_then(lowering);
+
+        let mut nests_via_pipe = Vec::new();
+        for expr in &program {
+            let batch = proxima_primitives::block_on(Pipe::call(&chain, expr.clone()))
+                .expect("infer+lower pipe step succeeds");
+            nests_via_pipe.extend(batch);
+        }
+
+        let shapes = shape::infer(&program, &[512]).expect("free-function infer succeeds");
+        let nests_via_free_function =
+            lower(&program, &shapes, &outputs).expect("free-function lower succeeds");
+
+        assert_eq!(nests_via_pipe, nests_via_free_function);
+        assert_eq!(nests_via_pipe.len(), 1, "matmul fuses into one nest");
+        assert_eq!(nests_via_pipe[0].node, sum);
     }
 }
