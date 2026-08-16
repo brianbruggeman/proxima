@@ -25,6 +25,7 @@
 //! # }
 //! ```
 
+pub mod framed;
 pub mod handle;
 pub mod protocol;
 pub mod request;
@@ -32,6 +33,7 @@ pub mod response;
 pub mod security;
 pub mod transport;
 
+pub use framed::FramedClient;
 pub use handle::{Client, ClientBuilder, ClientProtocol};
 pub use protocol::ClientProtocolExt;
 pub use request::RequestBuilder;
