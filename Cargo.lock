@@ -4600,6 +4600,7 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "conflaguration",
+ "proxima-primitives",
  "rstest",
  "serde",
  "thiserror 2.0.19",
