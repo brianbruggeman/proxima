@@ -12,10 +12,21 @@
 //! crossing a wire is a stream of `Expr`s; compiling overlaps transport), and
 //! `Infer` is the core that judges each step against everything before it,
 //! with no I/O of its own. [`infer`] is the batch case, three lines over the
-//! stream — an async `Pipe` facade belongs on top of this later, not in it.
+//! stream; `Infer` also implements
+//! [`Pipe`] directly (`In = Expr`,
+//! `Out = (Expr, Shapes)`) — the same core, not a second type wrapping it.
+//! [`Pipe::call`] takes `&self`, while judging a node is inherently a
+//! mutation, so `dtypes`/`shapes` below are `RefCell`s: the interior-
+//! mutability idiom `proxima_primitives::pipe::isolate`'s module doc names
+//! for runtime-owned `!Send` pipe state, applied to the state that was
+//! already here rather than to a wrapper around it.
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::future::Future;
+
+use proxima_primitives::pipe::Pipe;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
@@ -56,8 +67,8 @@ impl Shapes {
 /// The prefix state of shape inference: every node judged so far.
 pub struct Infer {
     symbols: Vec<u64>,
-    dtypes: Vec<DType>,
-    shapes: Shapes,
+    dtypes: RefCell<Vec<DType>>,
+    shapes: RefCell<Shapes>,
 }
 
 impl Infer {
@@ -65,32 +76,33 @@ impl Infer {
     pub fn new(symbols: &[u64]) -> Self {
         Self {
             symbols: symbols.to_vec(),
-            dtypes: Vec::new(),
-            shapes: Shapes::default(),
+            dtypes: RefCell::new(Vec::new()),
+            shapes: RefCell::new(Shapes::default()),
         }
     }
 
     /// Judge one expression against everything pushed before it.
-    pub fn push(&mut self, expr: &Expr) -> Result<(), TensorError> {
-        let node = NodeId(self.shapes.extents.len() as u32);
+    pub fn push(&self, expr: &Expr) -> Result<(), TensorError> {
+        let node = NodeId(self.shapes.borrow().extents.len() as u32);
         let resolved = match expr {
             Expr::Block { shape, .. } => resolve_block_shape(shape, &self.symbols)?,
             Expr::Zip { body, operands, .. } => self.infer_zip(node, *body, operands)?,
             Expr::Fold(fold) => self.infer_fold(node, fold)?,
         };
-        self.dtypes.push(expr.dtype());
-        self.shapes.push(resolved);
+        self.dtypes.borrow_mut().push(expr.dtype());
+        self.shapes.borrow_mut().push(resolved);
         Ok(())
     }
 
+    /// A snapshot of every shape resolved so far — legal to call mid-stream.
     #[must_use]
-    pub fn shapes(&self) -> &Shapes {
-        &self.shapes
+    pub fn shapes(&self) -> Shapes {
+        self.shapes.borrow().clone()
     }
 
     #[must_use]
     pub fn finish(self) -> Shapes {
-        self.shapes
+        self.shapes.into_inner()
     }
 
     fn infer_zip(
@@ -135,7 +147,7 @@ impl Infer {
         if fold.body.is_associative() && !fold.dtype.accumulates_in_place() {
             return Err(TensorError::NarrowAccumulator {
                 node: here,
-                element: self.dtypes[fold.operand.0 as usize],
+                element: self.dtypes.borrow()[fold.operand.0 as usize],
                 accumulator: fold.dtype,
             });
         }
@@ -165,9 +177,10 @@ impl Infer {
     ) -> Result<Vec<u64>, TensorError> {
         let mut resolved: Vec<Option<u64>> = vec![None; iter_rank as usize];
         let refs = flatten_operand_maps(operands);
+        let shapes = self.shapes.borrow();
 
         for entry in &refs {
-            let operand_shape = self.shapes.of(entry.node);
+            let operand_shape = shapes.of(entry.node);
             for (dim_index, dim) in entry.map.dims.iter().enumerate() {
                 if entry.skip_dim == Some(dim_index as u16) {
                     continue;
@@ -205,7 +218,7 @@ impl Infer {
             .collect::<Result<_, _>>()?;
 
         for entry in &refs {
-            let operand_shape = self.shapes.of(entry.node);
+            let operand_shape = shapes.of(entry.node);
             for (dim_index, dim) in entry.map.dims.iter().enumerate() {
                 if entry.skip_dim == Some(dim_index as u16) {
                     continue;
@@ -231,7 +244,7 @@ impl Infer {
     /// [`DType`] — a float or bool cannot select a dimension.
     fn check_indices_dtype(&self, here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
         if let IndexMap::Computed { indices, .. } = map {
-            let dtype = self.dtypes[indices.0 as usize];
+            let dtype = self.dtypes.borrow()[indices.0 as usize];
             if !dtype.is_integer() {
                 return Err(TensorError::NonIntegerIndices { node: here, dtype });
             }
@@ -250,12 +263,35 @@ impl Infer {
         map: &IndexMap,
     ) -> Result<(), TensorError> {
         if let IndexMap::Computed { gathered_dim, .. } = map {
-            let extent = self.shapes.of(operand)[*gathered_dim as usize];
+            let extent = self.shapes.borrow().of(operand)[*gathered_dim as usize];
             if extent > GATHER_EXTENT_EXACT_FLOAT_LIMIT {
                 return Err(TensorError::GatherExtentExceedsExactFloat { node: here, extent });
             }
         }
         Ok(())
+    }
+}
+
+/// `In = Out = Expr`, the observe form: an expression is fully judged the
+/// moment [`Infer::push`] resolves it, and the same `Expr` is handed back
+/// unchanged, paired with a snapshot of every shape known so far. The pair
+/// (not `Out = ()` or a bare resolved shape) is what lets a downstream stage
+/// ([`crate::nest::Lower`]'s own `Pipe` impl) compose with `.and_then`:
+/// lowering needs both the `Expr` just judged *and* the accumulated
+/// [`Shapes`] to build its `Nest`, and `AndThen` requires `Second::In =
+/// First::Out`, so both travel together in this one `Out` rather than one of
+/// them being reconstructed by a shared handle on the other side.
+impl Pipe for Infer {
+    type In = Expr;
+    type Out = (Expr, Shapes);
+    type Err = TensorError;
+
+    fn call(&self, input: Expr) -> impl Future<Output = Result<(Expr, Shapes), TensorError>> {
+        async move {
+            self.push(&input)?;
+            let shapes = self.shapes();
+            Ok((input, shapes))
+        }
     }
 }
 
@@ -452,7 +488,7 @@ pub(crate) fn fold_iteration_extents(fold: &Fold, shapes: &Shapes) -> Vec<u64> {
 /// Batch driver: `new` / `push` each expression / `finish`, over the whole
 /// program at once.
 pub fn infer(program: &[Expr], symbols: &[u64]) -> Result<Shapes, TensorError> {
-    let mut inference = Infer::new(symbols);
+    let inference = Infer::new(symbols);
     for expr in program {
         inference.push(expr)?;
     }
@@ -759,7 +795,7 @@ mod tests {
             name: None,
         };
 
-        let mut inference = Infer::new(&[]);
+        let inference = Infer::new(&[]);
         inference.push(&program[0]).expect("block pushes cleanly");
         let error = inference
             .push(&bad)
@@ -773,7 +809,7 @@ mod tests {
 
         let batch = infer(&program, &[512]).expect("batch infers");
 
-        let mut streamed = Infer::new(&[512]);
+        let streamed = Infer::new(&[512]);
         for expr in &program {
             streamed.push(expr).expect("streamed push succeeds");
         }
@@ -988,5 +1024,24 @@ mod tests {
 
         let error = infer(&program, &[]).expect_err("scatter is not shape-inferable in v1");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    #[test]
+    fn infer_as_a_pipe_matches_the_free_function() {
+        let (program, _product, sum) = matmul_program();
+
+        let inference = Infer::new(&[512]);
+        let mut last_shapes = None;
+        for expr in &program {
+            let (echoed, shapes) =
+                proxima_primitives::block_on(Pipe::call(&inference, expr.clone()))
+                    .expect("infer pipe step succeeds");
+            assert_eq!(&echoed, expr, "the observe form hands the same Expr back");
+            last_shapes = Some(shapes);
+        }
+
+        let via_pipe = last_shapes.expect("matmul program is non-empty");
+        let via_free_function = infer(&program, &[512]).expect("free-function infer succeeds");
+        assert_eq!(via_pipe.of(sum), via_free_function.of(sum));
     }
 }
