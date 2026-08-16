@@ -13,8 +13,53 @@ readme.workspace = true
 default = ["std"]
 std = ["alloc", "thiserror/std"]
 alloc = []
+# Runtime Metal execution driver (src/metal.rs, macOS-only via
+# `target_os = "macos"` on the module itself). `proxima-tensor/std` is turned
+# on here because the parity test binary links proxima-tensor's
+# `cpu::evaluate` as its oracle — the driver's own prepare pipeline
+# (infer/annotate/lower) is alloc-tier already and needs no such thing.
+metal = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-metal",
+    "dep:objc2-foundation",
+    "proxima-tensor/std",
+]
 
 [dependencies]
+# objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
+# call below goes through. Already in the workspace's transitive graph via
+# objc2-core-foundation/objc2-system-configuration — this stays in-family
+# rather than adding a second FFI story.
+objc2 = { version = "0.6.4", optional = true }
+# objc2-metal: generated MTLDevice/MTLLibrary/MTLBuffer/... bindings, which is
+# what lets `execute` compile MSL source and dispatch a compute pass without
+# shelling out to `xcrun`. Feature list is exactly the protocols the driver
+# calls: device + runtime compile (MTLDevice, MTLLibrary), buffers
+# (MTLBuffer, MTLResource, MTLAllocation), and dispatch (MTLCommandQueue,
+# MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder,
+# MTLComputePipeline, MTLTypes for MTLSize).
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLBuffer",
+    "MTLResource",
+    "MTLAllocation",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLTypes",
+], optional = true }
+# objc2-foundation: NSString (kernel source and entry name go in), NSError
+# (a compile failure's localizedDescription comes out) — the two Foundation
+# types the driver actually touches.
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSString",
+    "NSError",
+    "NSObject",
+], optional = true }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 thiserror = { workspace = true, default-features = false }
 
