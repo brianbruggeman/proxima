@@ -156,5 +156,5 @@ pub use error::TensorError;
 pub use expr::{Expr, Extent, Fold, FoldInit, Keep, NodeId, ScalarOp, append};
 pub use live::annotate;
 pub use map::{AffineMap, AffineTerm, DimExpr, IndexMap, affine, projection};
-pub use nest::{Lower, Nest, Reduction, StridedView, lower};
+pub use nest::{GatherAccess, Lower, Nest, Reduction, StridedView, lower};
 pub use shape::{Infer, Shapes, infer};

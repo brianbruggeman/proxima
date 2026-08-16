@@ -20,7 +20,14 @@ use alloc::vec::Vec;
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::expr::{Expr, Fold, Keep, NodeId, ScalarOp};
-use crate::map::{DimExpr, IndexMap};
+use crate::map::{AffineMap, DimExpr, IndexMap};
+
+/// The largest integer an f32 can represent exactly — its 24-bit mantissa's
+/// width. Gather indices ride in f32 buffers (see
+/// [`IndexMap::Computed`](crate::map::IndexMap::Computed) and `cpu.rs`'s
+/// module docs), so a gathered dim wider than this could silently address
+/// the wrong row once an index value loses precision.
+const GATHER_EXTENT_EXACT_FLOAT_LIMIT: u64 = 1 << 24;
 
 /// Every node's resolved output extents, in `u64` regardless of how the
 /// program spelled them (`Extent::Static` or a bound `Extent::Symbolic`).
@@ -105,10 +112,12 @@ impl Infer {
         for (operand_node, map) in operands {
             check_backward(here, *operand_node)?;
             check_map(here, map)?;
+            self.check_indices_dtype(here, map)?;
+            self.check_gather_extent(here, *operand_node, map)?;
         }
         let iter_rank = operands
             .iter()
-            .map(|(_, map)| map.affine().iter_rank)
+            .map(|(_, map)| combined_iter_rank(map))
             .max()
             .unwrap_or(0);
         let refs: Vec<(NodeId, &IndexMap)> =
@@ -120,6 +129,8 @@ impl Infer {
         check_backward(here, fold.operand)?;
         check_map(here, &fold.in_map)?;
         check_map(here, &fold.out_map)?;
+        self.check_indices_dtype(here, &fold.in_map)?;
+        self.check_gather_extent(here, fold.operand, &fold.in_map)?;
 
         if fold.body.is_associative() && !fold.dtype.accumulates_in_place() {
             return Err(TensorError::NarrowAccumulator {
@@ -129,7 +140,7 @@ impl Infer {
             });
         }
 
-        let iter_rank = fold.in_map.affine().iter_rank;
+        let iter_rank = combined_iter_rank(&fold.in_map);
         let iter_extents =
             self.unify_iteration_space(here, iter_rank, &[(fold.operand, &fold.in_map)])?;
 
@@ -153,17 +164,14 @@ impl Infer {
         operands: &[(NodeId, &IndexMap)],
     ) -> Result<Vec<u64>, TensorError> {
         let mut resolved: Vec<Option<u64>> = vec![None; iter_rank as usize];
+        let refs = flatten_operand_maps(operands);
 
-        for (operand_node, map) in operands {
-            if map.is_data_dependent() {
-                return Err(TensorError::NotLowerable {
-                    node: here,
-                    reason: "computed index maps are not shape-inferable in v1",
-                });
-            }
-            let affine = map.affine();
-            let operand_shape = self.shapes.of(*operand_node);
-            for (dim_index, dim) in affine.dims.iter().enumerate() {
+        for entry in &refs {
+            let operand_shape = self.shapes.of(entry.node);
+            for (dim_index, dim) in entry.map.dims.iter().enumerate() {
+                if entry.skip_dim == Some(dim_index as u16) {
+                    continue;
+                }
                 if let [term] = dim.terms.as_slice()
                     && term.coeff == 1
                 {
@@ -196,10 +204,12 @@ impl Infer {
             })
             .collect::<Result<_, _>>()?;
 
-        for (operand_node, map) in operands {
-            let affine = map.affine();
-            let operand_shape = self.shapes.of(*operand_node);
-            for (dim_index, dim) in affine.dims.iter().enumerate() {
+        for entry in &refs {
+            let operand_shape = self.shapes.of(entry.node);
+            for (dim_index, dim) in entry.map.dims.iter().enumerate() {
+                if entry.skip_dim == Some(dim_index as u16) {
+                    continue;
+                }
                 let is_pure_projection = matches!(dim.terms.as_slice(), [term] if term.coeff == 1);
                 if is_pure_projection {
                     continue;
@@ -216,6 +226,93 @@ impl Infer {
 
         Ok(extents)
     }
+
+    /// A [`IndexMap::Computed`]'s `indices` must resolve to an integer
+    /// [`DType`] — a float or bool cannot select a dimension.
+    fn check_indices_dtype(&self, here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
+        if let IndexMap::Computed { indices, .. } = map {
+            let dtype = self.dtypes[indices.0 as usize];
+            if !dtype.is_integer() {
+                return Err(TensorError::NonIntegerIndices { node: here, dtype });
+            }
+        }
+        Ok(())
+    }
+
+    /// A [`IndexMap::Computed`]'s `gathered_dim` extent, read off `operand`'s
+    /// already-resolved shape, must fit in [`GATHER_EXTENT_EXACT_FLOAT_LIMIT`]
+    /// — see that constant's docs for why. `check_map` has already confirmed
+    /// `gathered_dim` is in range for `operand`'s rank before this runs.
+    fn check_gather_extent(
+        &self,
+        here: NodeId,
+        operand: NodeId,
+        map: &IndexMap,
+    ) -> Result<(), TensorError> {
+        if let IndexMap::Computed { gathered_dim, .. } = map {
+            let extent = self.shapes.of(operand)[*gathered_dim as usize];
+            if extent > GATHER_EXTENT_EXACT_FLOAT_LIMIT {
+                return Err(TensorError::GatherExtentExceedsExactFloat { node: here, extent });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One [`AffineMap`] reference flattened out of an [`IndexMap`]: `Affine`
+/// contributes one, `Computed` contributes two — `index_map` (addressing the
+/// `indices` tensor) and `base` (addressing the operand, with `skip_dim`
+/// marking the dim the fetch supplies instead of iteration). Unifying and
+/// bounds-checking both `Affine` and `Computed` operands is then one loop
+/// over this flat list rather than two special cases.
+struct MapRef<'a> {
+    node: NodeId,
+    map: &'a AffineMap,
+    skip_dim: Option<u16>,
+}
+
+fn flatten_operand_maps<'a>(operands: &[(NodeId, &'a IndexMap)]) -> Vec<MapRef<'a>> {
+    let mut refs = Vec::with_capacity(operands.len());
+    for (node, map) in operands {
+        match map {
+            IndexMap::Affine(affine) => refs.push(MapRef {
+                node: *node,
+                map: affine,
+                skip_dim: None,
+            }),
+            IndexMap::Computed {
+                indices,
+                index_map,
+                base,
+                gathered_dim,
+            } => {
+                refs.push(MapRef {
+                    node: *indices,
+                    map: index_map,
+                    skip_dim: None,
+                });
+                refs.push(MapRef {
+                    node: *node,
+                    map: base,
+                    skip_dim: Some(*gathered_dim),
+                });
+            }
+        }
+    }
+    refs
+}
+
+/// The widest iteration rank a map touches: `Affine` only ever names one
+/// [`AffineMap`], but `Computed` names two (`index_map` and `base`), both
+/// drawn from the same iteration space, so both must be considered when an
+/// iteration space's rank is derived from its operands.
+fn combined_iter_rank(map: &IndexMap) -> u16 {
+    match map {
+        IndexMap::Affine(affine) => affine.iter_rank,
+        IndexMap::Computed {
+            index_map, base, ..
+        } => index_map.iter_rank.max(base.iter_rank),
+    }
 }
 
 fn check_backward(here: NodeId, referenced: NodeId) -> Result<(), TensorError> {
@@ -229,10 +326,29 @@ fn check_backward(here: NodeId, referenced: NodeId) -> Result<(), TensorError> {
 }
 
 fn check_map(here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
-    if let IndexMap::Computed { indices, .. } = map {
-        check_backward(here, *indices)?;
+    match map {
+        IndexMap::Affine(affine) => check_affine_dims(here, affine),
+        IndexMap::Computed {
+            indices,
+            index_map,
+            base,
+            gathered_dim,
+        } => {
+            check_backward(here, *indices)?;
+            check_affine_dims(here, index_map)?;
+            check_affine_dims(here, base)?;
+            if *gathered_dim as usize >= base.dims.len() {
+                return Err(TensorError::GatheredDimOutOfRange {
+                    node: here,
+                    dim: *gathered_dim,
+                });
+            }
+            Ok(())
+        }
     }
-    let affine = map.affine();
+}
+
+fn check_affine_dims(here: NodeId, affine: &AffineMap) -> Result<(), TensorError> {
     for dim in &affine.dims {
         for term in &dim.terms {
             if term.iter_dim >= affine.iter_rank {
@@ -700,40 +816,177 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_gather_is_not_lowerable_in_v1() {
+    /// `table[ids[s], d]` over iteration space `(s, d)`: `ids` selects
+    /// `table`'s dim 0 (vocab), `d` is a plain projection onto `table`'s
+    /// dim 1 (feature). The worked example `map.rs` and this module's own
+    /// docs both describe.
+    fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Expr>, NodeId, NodeId) {
         let mut program = Vec::new();
-        let table = append(
-            &mut program,
-            Expr::Block {
-                dtype: DType::Float32,
-                shape: alloc::vec![Extent::Static(50_000), Extent::Static(768)],
-                name: None,
-            },
-        );
+        let table = block(&mut program, &[Extent::Static(vocab), Extent::Static(dim)]);
         let ids = append(
             &mut program,
             Expr::Block {
                 dtype: DType::Int32,
-                shape: alloc::vec![Extent::Symbolic(0)],
+                shape: alloc::vec![Extent::Static(seq)],
                 name: None,
             },
         );
-        let gathered = IndexMap::Computed {
+        let gathered_map = IndexMap::Computed {
             indices: ids,
-            base: map::projection(2, &[0, 1]),
+            index_map: map::projection(2, &[0]),
+            base: map::AffineMap {
+                iter_rank: 2,
+                dims: alloc::vec![
+                    map::DimExpr::default(),
+                    map::DimExpr {
+                        terms: alloc::vec![AffineTerm::projection(1)],
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
         };
+        let gathered = append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        (program, ids, gathered)
+    }
+
+    /// A minimal, fully-gathered rank-1 map: `table[ids[s]]`, iteration
+    /// space is just `s`. Used by the sad-path tests below where the
+    /// embedding-style 2D shape would only add noise.
+    fn fully_gathered_map(indices: NodeId) -> IndexMap {
+        IndexMap::Computed {
+            indices,
+            index_map: map::projection(1, &[0]),
+            base: map::AffineMap {
+                iter_rank: 1,
+                dims: alloc::vec![map::DimExpr::default()],
+            },
+            gathered_dim: 0,
+        }
+    }
+
+    #[test]
+    fn an_embedding_lookup_infers_without_the_vocab_extent_leaking_into_iteration() {
+        let (program, _ids, gathered) = embedding_lookup_program(50_000, 8, 4);
+        let shapes = infer(&program, &[]).expect("embedding lookup infers");
+        assert_eq!(
+            shapes.of(gathered),
+            &[4, 8],
+            "seq x feature; vocab (50_000) never appears"
+        );
+    }
+
+    #[test]
+    fn a_gathered_extent_at_exactly_two_to_the_24_is_accepted() {
+        let (program, _ids, gathered) = embedding_lookup_program(1 << 24, 2, 1);
+        let shapes = infer(&program, &[]).expect("extent at the exact-float ceiling infers");
+        assert_eq!(shapes.of(gathered), &[1, 2]);
+    }
+
+    #[test]
+    fn a_gathered_extent_past_two_to_the_24_is_rejected() {
+        let (program, _ids, _gathered) = embedding_lookup_program((1 << 24) + 1, 2, 1);
+        let error = infer(&program, &[]).expect_err("extent past 2^24 is rejected");
+        assert!(
+            matches!(
+                error,
+                TensorError::GatherExtentExceedsExactFloat { extent, .. }
+                    if extent == (1 << 24) + 1
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn non_integer_gather_indices_are_rejected() {
+        let mut program = Vec::new();
+        let table = block(&mut program, &[Extent::Static(4)]);
+        let float_ids = block(&mut program, &[Extent::Static(3)]); // float32, not integer
         append(
             &mut program,
             Expr::Zip {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
-                operands: alloc::vec![(table, gathered)],
+                operands: alloc::vec![(table, fully_gathered_map(float_ids))],
                 name: None,
             },
         );
 
-        let error = infer(&program, &[4]).expect_err("gather is not shape-inferable in v1");
+        let error = infer(&program, &[]).expect_err("float32 indices are rejected");
+        assert!(
+            matches!(error, TensorError::NonIntegerIndices { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_gathered_dim_out_of_range_for_the_operand_is_rejected() {
+        let mut program = Vec::new();
+        let table = block(&mut program, &[Extent::Static(4)]);
+        let ids = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Int32,
+                shape: alloc::vec![Extent::Static(3)],
+                name: None,
+            },
+        );
+        let mut map = fully_gathered_map(ids);
+        if let IndexMap::Computed { gathered_dim, .. } = &mut map {
+            *gathered_dim = 5;
+        }
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, map)],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[]).expect_err("gathered_dim 5 exceeds the operand's rank");
+        assert!(
+            matches!(error, TensorError::GatheredDimOutOfRange { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_scatter_data_dependent_fold_output_is_still_rejected_in_v1() {
+        let mut program = Vec::new();
+        let source = block(&mut program, &[Extent::Static(4)]);
+        let ids = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Int32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Expr::Fold(Fold {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: FoldInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: fully_gathered_map(ids),
+                keep: Keep::Last,
+                name: None,
+            }),
+        );
+
+        let error = infer(&program, &[]).expect_err("scatter is not shape-inferable in v1");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 }

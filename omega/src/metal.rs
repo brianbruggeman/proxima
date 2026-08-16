@@ -43,6 +43,20 @@
 //! `MTLCompileOptions::mathMode` is pinned to `Safe`, never the default —
 //! parity against the CPU interpreter demands IEEE behavior, not whatever
 //! Metal's fast-math would substitute.
+//!
+//! # Gather fault reporting
+//!
+//! `cpu::evaluate` returns `TensorError::GatherIndexOutOfRange` when a
+//! fetched index falls outside its dim's extent; a GPU kernel cannot
+//! propagate a `Result`, so `msl.rs` clamps for memory safety but also
+//! `atomic_fetch_max`s the offending index into a per-gather-slot `Fault`
+//! buffer (see that module's doc). [`dispatch_nest`] allocates and
+//! zero-fills that buffer before every dispatch that gathers, and after
+//! `waitUntilCompleted` reads it back and — via [`check_gather_fault`] —
+//! turns any nonzero slot into the identical `TensorError` `cpu.rs` would
+//! report for the same fetched index, wired through [`MetalError`]'s
+//! `#[from]` so [`execute`] and `cpu::evaluate` produce `assert_eq!`-equal
+//! errors.
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {}
@@ -65,11 +79,12 @@ use objc2_metal::{
 };
 
 use proxima_tensor::{
-    DType, Expr, Keep, Nest, NodeId, Reduction, Shapes, TensorError, infer, lower,
+    DType, Expr, GatherAccess, IndexMap, Keep, Nest, NodeId, Reduction, Shapes, TensorError, infer,
+    lower,
 };
 
 use crate::error::EmitError;
-use crate::msl::reduction_dims;
+use crate::msl::{gather_count, reduction_dims};
 use crate::{Binding, Kernel, emit};
 
 /// Everything [`execute`] can fail with: a missing device, any device
@@ -242,16 +257,49 @@ fn prepare(
     })
 }
 
+// mirrors `proxima_tensor::cpu::reject_non_float32`: every device buffer
+// this driver uploads is f32 (see `upload_block`), indices included — an
+// index value is an exact integer carried as f32 — so a gather's `indices`
+// node is the one deliberate exception, exactly as on the CPU path.
 fn reject_non_float32(program: &[Expr]) -> Result<(), TensorError> {
+    let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
-        if expr.dtype() != DType::Float32 {
+        let node = NodeId(position as u32);
+        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) {
             return Err(TensorError::NotLowerable {
-                node: NodeId(position as u32),
-                reason: "metal execution is f32-only in v1",
+                node,
+                reason: "metal execution is f32-only in v1, except for a gather's indices",
             });
         }
     }
     Ok(())
+}
+
+/// Every node referenced as a gather's `indices` anywhere in `program` —
+/// mirrors `proxima_tensor::cpu::index_node_ids`.
+fn index_node_ids(program: &[Expr]) -> BTreeSet<NodeId> {
+    let mut nodes = BTreeSet::new();
+    for expr in program {
+        match expr {
+            Expr::Block { .. } => {}
+            Expr::Zip { operands, .. } => {
+                for (_, map) in operands {
+                    push_indices_node(map, &mut nodes);
+                }
+            }
+            Expr::Fold(fold) => {
+                push_indices_node(&fold.in_map, &mut nodes);
+                push_indices_node(&fold.out_map, &mut nodes);
+            }
+        }
+    }
+    nodes
+}
+
+fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
+    if let IndexMap::Computed { indices, .. } = map {
+        nodes.insert(*indices);
+    }
 }
 
 fn block_node_ids(program: &[Expr]) -> Vec<NodeId> {
@@ -275,8 +323,11 @@ fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
     let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
     for (position, nest) in nests.iter().enumerate() {
-        for (source, _) in &nest.operands {
+        for (source, _, gather) in &nest.operands {
             last_use.insert(*source, position);
+            if let Some(gather_access) = gather {
+                last_use.insert(gather_access.indices, position);
+            }
         }
     }
 
@@ -322,6 +373,40 @@ fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
     }
 }
 
+/// Appends the four gather arrays every `Uniforms` struct declares last (via
+/// `crate::msl::push_gather_uniform_fields`) when `nest` has at least one
+/// gathered operand: `gather_index_base`, `gather_index_strides`,
+/// `gather_element_stride`, `gather_extent` — each one array of length
+/// `gather_count`. `crate::msl::gather_slots` numbers gathered operands by
+/// encounter order over `nest.operands`, so filtering in that same order
+/// (below) reproduces the identical numbering without needing to re-derive
+/// or look up the slot indices themselves. A no-op when `nest` has no
+/// gather, matching `push_gather_uniform_fields`'s own empty-array early
+/// return.
+fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
+    let ordered: Vec<&GatherAccess> = nest
+        .operands
+        .iter()
+        .filter_map(|(_, _, gather)| gather.as_ref())
+        .collect();
+    if ordered.is_empty() {
+        return;
+    }
+
+    for gather in &ordered {
+        push_i64(bytes, gather.index_view.base);
+    }
+    for gather in &ordered {
+        push_i64_row(bytes, &gather.index_view.strides, rank_len);
+    }
+    for gather in &ordered {
+        push_i64(bytes, gather.element_stride);
+    }
+    for gather in &ordered {
+        push_i64(bytes, gather.extent as i64);
+    }
+}
+
 fn pack_uniforms(nest: &Nest) -> Vec<u8> {
     match &nest.reduction {
         None => pack_elementwise_uniforms(nest),
@@ -333,7 +418,9 @@ fn pack_uniforms(nest: &Nest) -> Vec<u8> {
 /// Mirrors the `Uniforms` struct `crate::msl::render_elementwise` declares
 /// at `omega/src/msl.rs:328-335`: `total_elements`, `extents[rank_len]`,
 /// `operand_base[operand_count]`, `operand_strides[operand_count][rank_len]`,
-/// in that order — every field `long`, so a flat `i64` concatenation is the
+/// then — only when `nest` has a gathered operand — the four
+/// `push_gather_uniform_fields` arrays [`push_gather_uniforms`] appends, in
+/// that order — every field `long`, so a flat `i64` concatenation is the
 /// struct's byte layout.
 fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
     let rank_len = nest.extents.len().max(1);
@@ -342,12 +429,13 @@ fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_i64(&mut bytes, extents.iter().product());
     push_i64_row(&mut bytes, &extents, rank_len);
-    for (_, view) in &nest.operands {
+    for (_, view, _) in &nest.operands {
         push_i64(&mut bytes, view.base);
     }
-    for (_, view) in &nest.operands {
+    for (_, view, _) in &nest.operands {
         push_i64_row(&mut bytes, &view.strides, rank_len);
     }
+    push_gather_uniforms(&mut bytes, nest, rank_len);
     bytes
 }
 
@@ -356,7 +444,8 @@ fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
 /// `output_extents[output_rank_len]`, `reduction_extents[reduce_rank_len]`,
 /// `operand_base[operand_count]`,
 /// `operand_strides[operand_count][rank_len]`, `out_base`,
-/// `out_strides[rank_len]`, in that order.
+/// `out_strides[rank_len]`, then the gather arrays (see
+/// [`pack_elementwise_uniforms`]'s doc), in that order.
 fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
     let rank_len = nest.extents.len().max(1);
     let output_dims = &reduction.output_dims;
@@ -378,14 +467,15 @@ fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
     push_i64(&mut bytes, reduction_extents.iter().product());
     push_i64_row(&mut bytes, &output_extents, output_rank_len);
     push_i64_row(&mut bytes, &reduction_extents, reduce_rank_len);
-    for (_, view) in &nest.operands {
+    for (_, view, _) in &nest.operands {
         push_i64(&mut bytes, view.base);
     }
-    for (_, view) in &nest.operands {
+    for (_, view, _) in &nest.operands {
         push_i64_row(&mut bytes, &view.strides, rank_len);
     }
     push_i64(&mut bytes, reduction.out_view.base);
     push_i64_row(&mut bytes, &reduction.out_view.strides, rank_len);
+    push_gather_uniforms(&mut bytes, nest, rank_len);
     bytes
 }
 
@@ -393,9 +483,10 @@ fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
 /// `omega/src/msl.rs:493-503`: `outer_total`, `inner_len`,
 /// `outer_extents[outer_rank_len]`, `operand_base[operand_count]`,
 /// `operand_strides[operand_count][rank_len]`, `out_base`,
-/// `out_strides[rank_len]`, in that order. `crate::msl::validate` already
-/// rejected a rank-0 scan before `emit` (and therefore this) ever runs, so
-/// `nest.extents` is never empty here.
+/// `out_strides[rank_len]`, then the gather arrays (see
+/// [`pack_elementwise_uniforms`]'s doc), in that order. `crate::msl::validate`
+/// already rejected a rank-0 scan before `emit` (and therefore this) ever
+/// runs, so `nest.extents` is never empty here.
 fn pack_scan_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
     let rank = nest.extents.len();
     let rank_len = rank.max(1);
@@ -412,14 +503,15 @@ fn pack_scan_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
     push_i64(&mut bytes, outer_extents.iter().product());
     push_i64(&mut bytes, inner_len);
     push_i64_row(&mut bytes, &outer_extents, outer_rank_len);
-    for (_, view) in &nest.operands {
+    for (_, view, _) in &nest.operands {
         push_i64(&mut bytes, view.base);
     }
-    for (_, view) in &nest.operands {
+    for (_, view, _) in &nest.operands {
         push_i64_row(&mut bytes, &view.strides, rank_len);
     }
     push_i64(&mut bytes, reduction.out_view.base);
     push_i64_row(&mut bytes, &reduction.out_view.strides, rank_len);
+    push_gather_uniforms(&mut bytes, nest, rank_len);
     bytes
 }
 
@@ -509,6 +601,34 @@ fn upload_block(
     })
 }
 
+/// Allocates a `gather_count`-long `uint` buffer for a dispatch's gather
+/// faults and zero-fills it — a freshly allocated `MTLBuffer`'s contents are
+/// undefined, and a slot left as garbage would read as a spurious fault.
+fn allocate_fault_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    gather_count: usize,
+) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    let byte_length = gather_count.max(1) * size_of::<u32>();
+    let buffer = device
+        .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "device refused to allocate the gather fault buffer".to_string(),
+        })?;
+    zero_fault_buffer(&buffer, gather_count);
+    Ok(buffer)
+}
+
+fn zero_fault_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize) {
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` is `storageModeShared` and was sized to at least
+    // `gather_count` `u32`s by `allocate_fault_buffer`, so this is a valid,
+    // CPU-visible, mutable slice for the duration of this call.
+    let slots = unsafe {
+        core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u32>(), gather_count.max(1))
+    };
+    slots.fill(0);
+}
+
 fn upload_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
@@ -548,12 +668,16 @@ fn bind_buffers(
     device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
     output: &Retained<ProtocolObject<dyn MTLBuffer>>,
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<(), MetalError> {
     for (index, binding) in kernel.bindings.iter().enumerate() {
         let buffer = match binding {
-            Binding::Input(node) => buffer_for(device_buffers, *node)?,
+            Binding::Input(node) | Binding::Indices(node) => buffer_for(device_buffers, *node)?,
             Binding::Output(_) => output.clone(),
             Binding::Uniforms => uniforms.clone(),
+            Binding::Fault => fault.cloned().ok_or_else(|| MetalError::CompileFailed {
+                log: "kernel binds a fault buffer but none was allocated".to_string(),
+            })?,
         };
         // SAFETY: `buffer`'s length was sized from the same nest this
         // kernel was emitted from, so every byte the kernel indexes through
@@ -597,6 +721,10 @@ fn dispatch_nest(
     let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
     let output = allocate_buffer(device, nest_output_len(nest))?;
     let uniforms = upload_uniforms(device, &pack_uniforms(nest))?;
+    let gathers = gather_count(nest);
+    let fault = (gathers > 0)
+        .then(|| allocate_fault_buffer(device, gathers))
+        .transpose()?;
 
     let command_buffer = queue
         .commandBuffer()
@@ -611,14 +739,64 @@ fn dispatch_nest(
             })?;
 
     encoder.setComputePipelineState(&pipeline);
-    bind_buffers(&encoder, &kernel, device_buffers, &output, &uniforms)?;
+    bind_buffers(
+        &encoder,
+        &kernel,
+        device_buffers,
+        &output,
+        &uniforms,
+        fault.as_ref(),
+    )?;
     dispatch(&encoder, &pipeline, kernel.grid.threads);
     encoder.endEncoding();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
 
+    if let Some(fault_buffer) = &fault {
+        check_gather_fault(nest, fault_buffer, gathers)?;
+    }
+
     device_buffers.insert(nest.node, output);
     Ok(())
+}
+
+/// Reads back a dispatch's fault buffer and, if any slot recorded a fault,
+/// turns it into the same `TensorError::GatherIndexOutOfRange`
+/// `cpu::evaluate` reports for the identical fetched index. Slot order
+/// matches `nest.operands`' gather order — the same numbering
+/// `crate::msl::gather_slots` and `push_gather_uniforms` both use — so the
+/// first faulted slot's own `GatherAccess` supplies the extent to report.
+fn check_gather_fault(
+    nest: &Nest,
+    fault_buffer: &ProtocolObject<dyn MTLBuffer>,
+    gather_count: usize,
+) -> Result<(), MetalError> {
+    let slots = read_fault_slots(fault_buffer, gather_count);
+    let gathers: Vec<&GatherAccess> = nest
+        .operands
+        .iter()
+        .filter_map(|(_, _, gather)| gather.as_ref())
+        .collect();
+    for (slot, recorded) in slots.iter().enumerate() {
+        if *recorded != 0 {
+            return Err(TensorError::GatherIndexOutOfRange {
+                node: nest.node,
+                index: i64::from(*recorded - 1),
+                extent: gathers[slot].extent,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn read_fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize) -> Vec<u32> {
+    let pointer = buffer.contents();
+    // SAFETY: allocated and sized to at least `gather_count` `u32`s by
+    // `allocate_fault_buffer`, `storageModeShared` so CPU-visible now that
+    // `waitUntilCompleted` has returned.
+    unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<u32>(), gather_count.max(1)) }
+        .to_vec()
 }
 
 fn read_back(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
