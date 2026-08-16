@@ -1,7 +1,9 @@
 //! Proves `App` serves `FramedListenProtocol` end-to-end inside a plain
 //! `#[proxima::test]` — the pattern a downstream consumer's framed serve copies. Registers
 //! the protocol via the builder, mounts an echo pipe, runs on an
-//! ephemeral port, and round-trips length-prefixed frames.
+//! ephemeral port, and round-trips length-prefixed frames — dialed with
+//! `FramedClient`, the client counterpart to `FramedListenProtocol`, rather
+//! than a hand-rolled length-prefix reader/writer.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "tcp")]
@@ -13,12 +15,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use proxima::listeners::FramedListenProtocol;
 use proxima::pipe::into_handle;
 use proxima::request::{Request, Response};
-use proxima::{App, HeaderList, MountTarget, ProximaError, RunConfig, Spec, TokioPerCoreRuntime};
+use proxima::{
+    App, FramedClient, HeaderList, MountTarget, ProximaError, RunConfig, Spec, TokioPerCoreRuntime,
+};
 use proxima_primitives::pipe::SendPipe;
 
 struct UppercasePipe;
@@ -51,22 +54,6 @@ fn find_free_port() -> SocketAddr {
     listener.local_addr().expect("local addr")
 }
 
-async fn send_frame(stream: &mut tokio::net::TcpStream, payload: &[u8]) {
-    let len = u32::try_from(payload.len()).unwrap();
-    stream.write_all(&len.to_be_bytes()).await.unwrap();
-    stream.write_all(payload).await.unwrap();
-    stream.flush().await.unwrap();
-}
-
-async fn recv_frame(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
-    let mut len_buf = [0_u8; 4];
-    stream.read_exact(&mut len_buf).await.unwrap();
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut payload = vec![0_u8; len];
-    stream.read_exact(&mut payload).await.unwrap();
-    payload
-}
-
 #[proxima::test]
 async fn app_serves_framed_listener_round_trip() {
     let addr = find_free_port();
@@ -97,13 +84,30 @@ async fn app_serves_framed_listener_round_trip() {
 
     // guard the whole client interaction so a wiring hang fails fast.
     let outcome = tokio::time::timeout(Duration::from_secs(5), async move {
-        let mut stream = tokio::net::TcpStream::connect(addr)
+        let client = FramedClient::connect(addr)
             .await
             .expect("listener must already be accepting when run_until_signal returns");
-        send_frame(&mut stream, b"hello framed app").await;
-        assert_eq!(recv_frame(&mut stream).await, b"HELLO FRAMED APP");
-        send_frame(&mut stream, b"second").await;
-        assert_eq!(recv_frame(&mut stream).await, b"SECOND");
+
+        // three sequential calls on the SAME FramedClient — proves
+        // multi-round-trip on one held connection, the shape a long-poll
+        // caller needs.
+        let first = client
+            .call(Bytes::from_static(b"hello framed app"))
+            .await
+            .expect("first call");
+        assert_eq!(first, Bytes::from_static(b"HELLO FRAMED APP"));
+
+        let second = client
+            .call(Bytes::from_static(b"second"))
+            .await
+            .expect("second call");
+        assert_eq!(second, Bytes::from_static(b"SECOND"));
+
+        let third = client
+            .call(Bytes::from_static(b"third call same connection"))
+            .await
+            .expect("third call");
+        assert_eq!(third, Bytes::from_static(b"THIRD CALL SAME CONNECTION"));
     })
     .await;
 

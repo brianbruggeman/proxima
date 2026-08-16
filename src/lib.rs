@@ -373,7 +373,8 @@ pub use body::{ChunkStream, RequestStream, ResponseStream};
 pub use buffer_pool::{BufferPool, DEFAULT_BUFFER_BYTES, DEFAULT_POOL_PER_WORKER, PooledBuf};
 pub use client::{
     Client, ClientBuilder, ClientProtocol, ClientProtocolExt, ClientSecurityExt,
-    ClientTransportExt, RequestBuilder as ClientRequestBuilder, Response as ClientResponse,
+    ClientTransportExt, FramedClient, RequestBuilder as ClientRequestBuilder,
+    Response as ClientResponse,
 };
 pub use codec::{BytesPassthrough, FrameCodec, JsonCodec, MessageCodec, StatefulCodec, WireCodec};
 pub use codec_factory::{
