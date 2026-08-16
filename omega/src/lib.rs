@@ -28,7 +28,11 @@
 extern crate alloc;
 
 pub mod error;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod metal;
 pub mod msl;
 
 pub use error::EmitError;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use metal::{Executed, MetalError, execute};
 pub use msl::{Binding, GridSpec, Kernel, emit};

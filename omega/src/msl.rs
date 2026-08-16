@@ -161,7 +161,11 @@ fn validate(nest: &Nest) -> Result<(), EmitError> {
     Ok(())
 }
 
-fn reduction_dims(nest: &Nest, output_dims: &[u16]) -> Vec<u16> {
+/// `pub(crate)`, not private: the Metal driver's uniforms packer
+/// (`crate::metal::pack_reduce_uniforms`) needs the exact same reduce-dim set
+/// this rendering uses, and duplicating the filter would risk the two
+/// drifting apart.
+pub(crate) fn reduction_dims(nest: &Nest, output_dims: &[u16]) -> Vec<u16> {
     (0..nest.extents.len() as u16)
         .filter(|dim| !output_dims.contains(dim))
         .collect()
