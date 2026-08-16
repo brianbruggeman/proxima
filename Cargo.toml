@@ -5,6 +5,7 @@ members = [
     "examples/new-platform",
     "examples/no-std",
     "examples/wasm",
+    "omega",
     "prime",
     "proxima-amqp",
     "proxima-auth",
