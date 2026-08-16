@@ -74,6 +74,22 @@ pub struct Reduction {
     pub out_view: StridedView,
 }
 
+/// The extra addressing a gathered operand needs on top of its
+/// [`StridedView`]: where to fetch the index from, and how to turn a fetched
+/// index into an offset once it lands. `element_stride` is the operand's own
+/// per-element stride along the gathered dim (the table's row stride, for an
+/// embedding lookup) — an executor's runtime read offset is
+/// `view.offset_of(coord) + fetched_index * element_stride`. `extent` is the
+/// gathered dim's size, carried so an executor can reject an out-of-range
+/// fetched index instead of reading past the buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatherAccess {
+    pub indices: NodeId,
+    pub index_view: StridedView,
+    pub element_stride: i64,
+    pub extent: u64,
+}
+
 /// One computed region: a loop nest over `extents`, combining `operands`
 /// through `body`, optionally folded down by `reduction`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +97,10 @@ pub struct Nest {
     pub node: NodeId,
     pub extents: Vec<u64>,
     pub body: ScalarOp,
-    /// Each operand: which node's buffer to read, and at what strides over
-    /// this nest's iteration space.
-    pub operands: Vec<(NodeId, StridedView)>,
+    /// Each operand: which node's buffer to read, at what strides over this
+    /// nest's iteration space, and — for a gather — the extra addressing
+    /// needed to fetch its data-dependent dim.
+    pub operands: Vec<(NodeId, StridedView, Option<GatherAccess>)>,
     pub reduction: Option<Reduction>,
 }
 
@@ -169,7 +186,19 @@ impl Nest {
         let operands = self
             .operands
             .iter()
-            .map(|(node, view)| (*node, rebase_view(view, split_dim, chunk_start)))
+            .map(|(node, view, gather)| {
+                let rebased_gather = gather.as_ref().map(|gather_access| GatherAccess {
+                    indices: gather_access.indices,
+                    index_view: rebase_view(&gather_access.index_view, split_dim, chunk_start),
+                    element_stride: gather_access.element_stride,
+                    extent: gather_access.extent,
+                });
+                (
+                    *node,
+                    rebase_view(view, split_dim, chunk_start),
+                    rebased_gather,
+                )
+            })
             .collect();
         // every field, including out_view, is unchanged from the parent:
         // see the `split` doc for why an unshifted out_view is what makes
@@ -275,8 +304,8 @@ impl Lower {
                         compose_fused_operands(shapes, &fold.in_map, held.body, &held.operands)
                     } else {
                         self.materialize_if_held(fold.operand, shapes, &mut emitted);
-                        let view = strided_view(fold.in_map.affine(), shapes.of(fold.operand));
-                        (ScalarOp::Identity, vec![(fold.operand, view)])
+                        let operand = build_operand(fold.operand, &fold.in_map, shapes);
+                        (ScalarOp::Identity, vec![operand])
                     };
 
                 emitted.push(lower_fold_nest(node, fold, shapes, body, operands));
@@ -312,12 +341,7 @@ fn lower_zip_nest(
     let extents = shapes.of(node).to_vec();
     let built_operands = operands
         .iter()
-        .map(|(operand_node, map)| {
-            (
-                *operand_node,
-                strided_view(map.affine(), shapes.of(*operand_node)),
-            )
-        })
+        .map(|(operand_node, map)| build_operand(*operand_node, map, shapes))
         .collect();
     Nest {
         node,
@@ -328,12 +352,44 @@ fn lower_zip_nest(
     }
 }
 
+/// One operand's [`StridedView`] (and, for a gather, its [`GatherAccess`]),
+/// built directly from its [`IndexMap`] — the one place that decides how an
+/// `Affine` vs a `Computed` map turns into what an executor reads.
+fn build_operand(
+    node: NodeId,
+    map: &IndexMap,
+    shapes: &Shapes,
+) -> (NodeId, StridedView, Option<GatherAccess>) {
+    match map {
+        IndexMap::Affine(affine) => (node, strided_view(affine, shapes.of(node)), None),
+        IndexMap::Computed {
+            indices,
+            index_map,
+            base,
+            gathered_dim,
+        } => {
+            let operand_shape = shapes.of(node);
+            let view = strided_view(base, operand_shape);
+            let index_view = strided_view(index_map, shapes.of(*indices));
+            let element_stride = row_major_strides(operand_shape)[*gathered_dim as usize];
+            let extent = operand_shape[*gathered_dim as usize];
+            let gather = GatherAccess {
+                indices: *indices,
+                index_view,
+                element_stride,
+                extent,
+            };
+            (node, view, Some(gather))
+        }
+    }
+}
+
 fn lower_fold_nest(
     node: NodeId,
     fold: &Fold,
     shapes: &Shapes,
     body: ScalarOp,
-    operands: Vec<(NodeId, StridedView)>,
+    operands: Vec<(NodeId, StridedView, Option<GatherAccess>)>,
 ) -> Nest {
     let out_affine = fold.out_map.affine();
     let out_view = strided_view(out_affine, shapes.of(node));
@@ -382,7 +438,7 @@ fn compose_fused_operands(
     in_map: &IndexMap,
     zip_body: ScalarOp,
     zip_operands: &[(NodeId, IndexMap)],
-) -> (ScalarOp, Vec<(NodeId, StridedView)>) {
+) -> (ScalarOp, Vec<(NodeId, StridedView, Option<GatherAccess>)>) {
     let in_affine = in_map.affine();
     let iter_rank = in_affine.iter_rank;
     let zip_dim_to_fold_dim: Vec<u16> = in_affine
@@ -394,9 +450,19 @@ fn compose_fused_operands(
     let operands = zip_operands
         .iter()
         .map(|(operand_node, map)| {
-            let zip_view = strided_view(map.affine(), shapes.of(*operand_node));
-            let view = remap_strides(&zip_view, &zip_dim_to_fold_dim, iter_rank);
-            (*operand_node, view)
+            let (node, view, gather) = build_operand(*operand_node, map, shapes);
+            let remapped_view = remap_strides(&view, &zip_dim_to_fold_dim, iter_rank);
+            let remapped_gather = gather.map(|gather_access| GatherAccess {
+                indices: gather_access.indices,
+                index_view: remap_strides(
+                    &gather_access.index_view,
+                    &zip_dim_to_fold_dim,
+                    iter_rank,
+                ),
+                element_stride: gather_access.element_stride,
+                extent: gather_access.extent,
+            });
+            (node, remapped_view, remapped_gather)
         })
         .collect();
 

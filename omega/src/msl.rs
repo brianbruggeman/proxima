@@ -35,6 +35,14 @@
 //!   serial along the folded (innermost) dim, writing every prefix through
 //!   the output strides — matching `cpu::run_scan`.
 //!
+//! Parity extends to the sad path: `cpu.rs` returns
+//! `TensorError::GatherIndexOutOfRange` for a fetched index outside
+//! `[0, extent)` rather than clamping it, and a gather kernel here agrees —
+//! it clamps for memory safety (a GPU kernel cannot propagate a `Result`)
+//! but also records the fault into the `Fault` buffer `crate::metal` reads
+//! back after dispatch and turns into the identical error. See
+//! `push_gather_fetch`'s doc for where the check is emitted.
+//!
 //! # dtype
 //!
 //! `Nest` carries no dtype at all (see [`proxima_tensor::nest`]'s
@@ -63,13 +71,25 @@ pub struct Kernel {
 }
 
 /// What buffer index `n` in [`Kernel::bindings`] is for, in dispatch order:
-/// index `0..operands.len()` are inputs, then the output, then the uniforms
-/// blob (extents/strides/bases for this dispatch — see the module doc).
+/// index `0..operands.len()` are inputs, then one `Indices` buffer per
+/// gathered operand (in operand order), then the output, then the uniforms
+/// blob (extents/strides/bases for this dispatch — see the module doc), then
+/// — only when the nest gathers — the fault buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binding {
     Input(NodeId),
+    /// The `indices` buffer a gathered operand fetches from.
+    Indices(NodeId),
     Output(NodeId),
     Uniforms,
+    /// Present only when `gather_count` is nonzero: a `gather_count`-long
+    /// zero-initialized `atomic_uint` array. The kernel `atomic_fetch_max`s
+    /// an out-of-range fetched index (plus one, so zero means "no fault")
+    /// into its gathered operand's slot; the driver reads this back after
+    /// dispatch and turns a nonzero slot into the same
+    /// `TensorError::GatherIndexOutOfRange` `cpu::evaluate` would report —
+    /// see `push_gather_fetch`'s doc for how the check is emitted.
+    Fault,
 }
 
 /// How many threads a driver must dispatch for this `nest` — one per
@@ -175,11 +195,46 @@ fn bindings(nest: &Nest) -> Vec<Binding> {
     let mut bindings: Vec<Binding> = nest
         .operands
         .iter()
-        .map(|(node, _)| Binding::Input(*node))
+        .map(|(node, _, _)| Binding::Input(*node))
         .collect();
+    for (_, _, gather) in &nest.operands {
+        if let Some(gather_access) = gather {
+            bindings.push(Binding::Indices(gather_access.indices));
+        }
+    }
     bindings.push(Binding::Output(nest.node));
     bindings.push(Binding::Uniforms);
+    if gather_count(nest) > 0 {
+        bindings.push(Binding::Fault);
+    }
     bindings
+}
+
+/// For each operand, `Some(slot)` if it gathers — `slot` is its position
+/// among only the gathered operands, 0-based, matching the order
+/// [`bindings`] appends `Indices` buffers and the order the `Uniforms`
+/// gather arrays are packed in. `pub(crate)` for the same reason
+/// [`reduction_dims`] is: the Metal driver's uniforms packer needs the exact
+/// same numbering.
+pub(crate) fn gather_slots(nest: &Nest) -> Vec<Option<usize>> {
+    let mut next = 0usize;
+    nest.operands
+        .iter()
+        .map(|(_, _, gather)| {
+            gather.as_ref().map(|_| {
+                let slot = next;
+                next += 1;
+                slot
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn gather_count(nest: &Nest) -> usize {
+    nest.operands
+        .iter()
+        .filter(|(_, _, gather)| gather.is_some())
+        .count()
 }
 
 /// Total independent units of work `nest` needs — see [`GridSpec`]'s doc for
@@ -241,13 +296,16 @@ fn keep_token(keep: Keep) -> &'static str {
 }
 
 /// A structural fingerprint, not a hash of anything runtime: rank, operand
-/// count, and every `ScalarOp`/`FoldInit`/`Keep` involved, which is exactly
-/// the set of things [`emit`]'s source text depends on.
+/// count, every `ScalarOp`/`FoldInit`/`Keep` involved, and — since a gather
+/// changes the generated source (extra buffer params, extra uniforms, extra
+/// fetch code) — which operands gather. That last part is a suffix appended
+/// only when at least one operand gathers, so a gather-free `Nest`'s name is
+/// unchanged from before this existed.
 fn entry_name(nest: &Nest) -> String {
     let rank = nest.extents.len();
     let operand_count = nest.operands.len();
     let body = op_token(nest.body);
-    match &nest.reduction {
+    let base = match &nest.reduction {
         None => format!("omega_elementwise_r{rank}_n{operand_count}_{body}"),
         Some(reduction) => {
             let kind = keep_token(reduction.keep);
@@ -255,6 +313,16 @@ fn entry_name(nest: &Nest) -> String {
             let init = init_token(reduction.init);
             format!("omega_{kind}_r{rank}_n{operand_count}_{body}_{reduce_body}_{init}")
         }
+    };
+    let gather_bits: String = nest
+        .operands
+        .iter()
+        .map(|(_, _, gather)| if gather.is_some() { '1' } else { '0' })
+        .collect();
+    if gather_bits.contains('1') {
+        format!("{base}_g{gather_bits}")
+    } else {
+        base
     }
 }
 
@@ -299,21 +367,119 @@ fn scratch_args(operand_count: usize) -> Vec<String> {
         .collect()
 }
 
-fn kernel_signature(source: &mut String, operand_count: usize, entry: &str) {
+fn kernel_signature(source: &mut String, operand_count: usize, gather_count: usize, entry: &str) {
     source.push_str(&format!("kernel void {entry}(\n"));
     for index in 0..operand_count {
         source.push_str(&format!(
             "    device const float* in{index} [[buffer({index})]],\n"
         ));
     }
+    for slot in 0..gather_count {
+        source.push_str(&format!(
+            "    device const float* gather_idx{slot} [[buffer({})]],\n",
+            operand_count + slot
+        ));
+    }
     source.push_str(&format!(
-        "    device float* out [[buffer({operand_count})]],\n"
+        "    device float* out [[buffer({})]],\n",
+        operand_count + gather_count
     ));
     source.push_str(&format!(
         "    constant Uniforms& u [[buffer({})]],\n",
-        operand_count + 1
+        operand_count + gather_count + 1
     ));
+    if gather_count > 0 {
+        source.push_str(&format!(
+            "    device atomic_uint* fault [[buffer({})]],\n",
+            operand_count + gather_count + 2
+        ));
+    }
     source.push_str("    uint gid [[thread_position_in_grid]])\n{\n");
+}
+
+/// Declares the `Uniforms` fields a gather needs — `index_base`/`index_strides`
+/// (per-gather addressing into its `indices` buffer, over the *same* rank as
+/// every other operand), `element_stride` (the operand's own stride along
+/// its gathered dim), and `extent` (the gathered dim's size, for the clamp
+/// [`push_gather_fetch`] emits). Declared only when `gather_count > 0`, so a
+/// gather-free kernel's `Uniforms` struct is byte-for-byte what it was
+/// before gather existed.
+fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
+    if gather_count == 0 {
+        return;
+    }
+    source.push_str(&format!("    long gather_index_base[{gather_count}];\n"));
+    source.push_str(&format!(
+        "    long gather_index_strides[{gather_count}][{rank_len}];\n"
+    ));
+    source.push_str(&format!(
+        "    long gather_element_stride[{gather_count}];\n"
+    ));
+    source.push_str(&format!("    long gather_extent[{gather_count}];\n"));
+}
+
+/// Emits the out-of-range check for one just-fetched, not-yet-clamped
+/// `fetched{operand_index}`: when it falls outside
+/// `[0, u.gather_extent[gather_slot])`, records it (plus one, so a slot
+/// left at zero unambiguously means "no fault") into that gathered
+/// operand's slot of the `fault` buffer via `atomic_fetch_max`. A negative
+/// fetched index is reported as `0` (mapped through `max(fetched, 0)`
+/// before the `+1`) rather than reinterpreting a negative `long` as a huge
+/// `uint` — this crate's sad-path tests only exercise the far-more-common
+/// too-large case, so that is the one case whose reported value round-trips
+/// exactly. `atomic_fetch_max` (not a plain write) is what makes this safe
+/// under concurrent threads without a CAS loop: whichever value "wins" the
+/// max is still a genuine fault, and the driver only needs to know that one
+/// occurred and at what value to build a `TensorError`.
+fn push_gather_fault_check(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    indent: &str,
+) {
+    source.push_str(&format!(
+        "{indent}if (fetched{operand_index} < 0 || fetched{operand_index} >= u.gather_extent[{gather_slot}]) {{\n"
+    ));
+    source.push_str(&format!(
+        "{indent}    atomic_fetch_max_explicit(&fault[{gather_slot}], (uint)max(fetched{operand_index}, (long)0) + 1u, memory_order_relaxed);\n"
+    ));
+    source.push_str(&format!("{indent}}}\n"));
+}
+
+/// Emits the fetch for one gathered operand: reads its index from
+/// `gather_idx{slot}` at the same coordinate `coord_var` addresses every
+/// other buffer with, checks it against `[0, extent)` — recording a fault
+/// (see [`push_gather_fault_check`]) since a GPU kernel cannot return a
+/// `Result` the way `cpu::evaluate` does — then clamps it into `[0, extent)`
+/// regardless, so the read this value drives always lands in bounds even
+/// when a fault was just recorded, and adds the resulting offset into
+/// `offset_var`.
+fn push_gather_fetch(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    rank: usize,
+    coord_var: &str,
+    offset_var: &str,
+) {
+    source.push_str(&format!(
+        "    long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+    ));
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "    gather_off{operand_index} += {coord_var}[{dim}] * u.gather_index_strides[{gather_slot}][{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "    long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
+    ));
+    push_gather_fault_check(source, operand_index, gather_slot, "    ");
+    source.push_str(&format!(
+        "    fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
+    ));
+    source.push_str(&format!(
+        "    {offset_var} += fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
+    ));
 }
 
 fn preamble(source: &mut String) {
@@ -325,6 +491,8 @@ fn render_elementwise(nest: &Nest, entry: &str) -> String {
     let rank = nest.extents.len();
     let rank_len = rank.max(1);
     let operand_count = nest.operands.len();
+    let gather_count = gather_count(nest);
+    let gather_slots = gather_slots(nest);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -336,9 +504,10 @@ fn render_elementwise(nest: &Nest, entry: &str) -> String {
     source.push_str(&format!(
         "    long operand_strides[{operand_count}][{rank_len}];\n"
     ));
+    push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, operand_count, entry);
+    kernel_signature(&mut source, operand_count, gather_count, entry);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -351,12 +520,22 @@ fn render_elementwise(nest: &Nest, entry: &str) -> String {
         }
     }
 
-    for index in 0..operand_count {
+    for (index, gather_slot) in gather_slots.iter().enumerate() {
         source.push_str(&format!("    long off{index} = u.operand_base[{index}];\n"));
         for dim in 0..rank {
             source.push_str(&format!(
                 "    off{index} += coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
+        }
+        if let Some(slot) = gather_slot {
+            push_gather_fetch(
+                &mut source,
+                index,
+                *slot,
+                rank,
+                "coord",
+                &format!("off{index}"),
+            );
         }
     }
 
@@ -383,6 +562,8 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     let reduce_dims = reduction_dims(nest, output_dims);
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
+    let gather_count = gather_count(nest);
+    let gather_slots = gather_slots(nest);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -398,9 +579,10 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, operand_count, entry);
+    kernel_signature(&mut source, operand_count, gather_count, entry);
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
@@ -445,7 +627,7 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
         }
     }
 
-    for index in 0..operand_count {
+    for (index, gather_slot) in gather_slots.iter().enumerate() {
         source.push_str(&format!(
             "        long off{index} = u.operand_base[{index}];\n"
         ));
@@ -453,6 +635,16 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
+        }
+        if let Some(slot) = gather_slot {
+            push_gather_fetch(
+                &mut source,
+                index,
+                *slot,
+                rank,
+                "full_coord",
+                &format!("off{index}"),
+            );
         }
     }
     source.push_str("        float scratch[3];\n");
@@ -490,6 +682,8 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     let outer_rank_len = outer_rank.max(1);
     let last_dim = rank.saturating_sub(1);
     let operand_count = nest.operands.len();
+    let gather_count = gather_count(nest);
+    let gather_slots = gather_slots(nest);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -504,9 +698,10 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, operand_count, entry);
+    kernel_signature(&mut source, operand_count, gather_count, entry);
     source.push_str("    if ((long)gid >= u.outer_total) { return; }\n");
 
     if outer_rank > 0 {
@@ -520,7 +715,7 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
         }
     }
 
-    for index in 0..operand_count {
+    for (index, gather_slot) in gather_slots.iter().enumerate() {
         source.push_str(&format!(
             "    long running{index} = u.operand_base[{index}];\n"
         ));
@@ -528,6 +723,16 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
             source.push_str(&format!(
                 "    running{index} += outer_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
+        }
+        if let Some(slot) = gather_slot {
+            source.push_str(&format!(
+                "    long gather_running{index} = u.gather_index_base[{slot}];\n"
+            ));
+            for dim in 0..outer_rank {
+                source.push_str(&format!(
+                    "    gather_running{index} += outer_coord[{dim}] * u.gather_index_strides[{slot}][{dim}];\n"
+                ));
+            }
         }
     }
     source.push_str("    long out_running = u.out_base;\n");
@@ -543,10 +748,34 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
 
     source.push_str("    for (long step = 0; step < u.inner_len; step++) {\n");
     source.push_str("        float scratch[3];\n");
-    for index in 0..operand_count {
-        source.push_str(&format!(
-            "        scratch[{index}] = in{index}[running{index}];\n"
-        ));
+    for (index, gather_slot) in gather_slots.iter().enumerate() {
+        // the gathered dim's contribution is per-step (the fetched index
+        // varies along the scanned dim too, in general), so it is combined
+        // into a fresh `read_off` here rather than folded permanently into
+        // `running{index}`, which must keep advancing by its own stride
+        // alone — see the module doc's Uniforms-packing note for why.
+        if let Some(slot) = gather_slot {
+            source.push_str(&format!(
+                "        long fetched{index} = (long)gather_idx{slot}[gather_running{index}];\n"
+            ));
+            push_gather_fault_check(&mut source, index, *slot, "        ");
+            source.push_str(&format!(
+                "        fetched{index} = max((long)0, min(fetched{index}, u.gather_extent[{slot}] - 1));\n"
+            ));
+            source.push_str(&format!(
+                "        long read_off{index} = running{index} + fetched{index} * u.gather_element_stride[{slot}];\n"
+            ));
+            source.push_str(&format!(
+                "        scratch[{index}] = in{index}[read_off{index}];\n"
+            ));
+            source.push_str(&format!(
+                "        gather_running{index} += u.gather_index_strides[{slot}][{last_dim}];\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "        scratch[{index}] = in{index}[running{index}];\n"
+            ));
+        }
         source.push_str(&format!(
             "        running{index} += u.operand_strides[{index}][{last_dim}];\n"
         ));
@@ -576,7 +805,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use proxima_tensor::{
-        DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp, append, infer, lower, map,
+        AffineTerm, DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp, append, infer,
+        lower, map,
     };
 
     use super::*;
@@ -688,6 +918,138 @@ mod tests {
             .into_iter()
             .next()
             .expect("one nest emitted")
+    }
+
+    /// `table[ids[s], d]` over iteration space `(s, d)`: the same worked
+    /// example `map.rs`'s docs use, as a standalone elementwise gather.
+    fn embedding_lookup_nest(vocab: u32, dim: u32, seq: u32) -> Nest {
+        let mut program = Vec::new();
+        let table = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(vocab), Extent::Static(dim)],
+                name: None,
+            },
+        );
+        let ids = append(
+            &mut program,
+            Expr::Block {
+                dtype: DType::Int32,
+                shape: vec![Extent::Static(seq)],
+                name: None,
+            },
+        );
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: map::AffineMap {
+                iter_rank: 2,
+                dims: vec![
+                    map::DimExpr::default(),
+                    map::DimExpr {
+                        terms: vec![AffineTerm::projection(1)],
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        append(
+            &mut program,
+            Expr::Zip {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("embedding lookup infers");
+        lower(&program, &shapes, &[])
+            .expect("embedding lookup lowers")
+            .into_iter()
+            .next()
+            .expect("one nest emitted")
+    }
+
+    #[test]
+    fn a_gather_nest_emits_an_indices_binding_and_the_fetch_uniforms() {
+        let nest = embedding_lookup_nest(50_000, 8, 4);
+        let kernel = emit(&nest).expect("gather emits");
+
+        assert_eq!(
+            kernel.entry, "omega_elementwise_r2_n1_identity_g1",
+            "the gather bit is part of the structural fingerprint"
+        );
+        assert_eq!(
+            kernel.bindings,
+            vec![
+                Binding::Input(nest.operands[0].0),
+                Binding::Indices(
+                    nest.operands[0]
+                        .2
+                        .as_ref()
+                        .expect("operand 0 gathers")
+                        .indices
+                ),
+                Binding::Output(nest.node),
+                Binding::Uniforms,
+                Binding::Fault,
+            ],
+            "inputs, then indices, then output, then uniforms, then the fault buffer"
+        );
+        assert!(kernel.source.contains("gather_idx0"));
+        assert!(kernel.source.contains("gather_index_base"));
+        assert!(kernel.source.contains("gather_element_stride"));
+        assert!(kernel.source.contains("gather_extent"));
+        assert_eq!(kernel.grid.threads, 4 * 8, "seq x feature, vocab absent");
+    }
+
+    #[test]
+    fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
+        let nest = embedding_lookup_nest(50_000, 8, 4);
+        let kernel = emit(&nest).expect("gather emits");
+
+        assert!(
+            kernel.bindings.contains(&Binding::Fault),
+            "a gather kernel must bind a fault buffer"
+        );
+        assert!(kernel.source.contains("device atomic_uint* fault"));
+        assert!(
+            kernel
+                .source
+                .contains("atomic_fetch_max_explicit(&fault[0]")
+        );
+        assert!(
+            kernel
+                .source
+                .contains("fetched0 < 0 || fetched0 >= u.gather_extent[0]"),
+            "the fault check must run before the clamp, on the unclamped fetched value"
+        );
+    }
+
+    #[test]
+    fn a_gather_free_nest_names_and_binds_exactly_as_before_gather_existed() {
+        let nest = elementwise_tanh_nest(10);
+        let kernel = emit(&nest).expect("gather-free elementwise emits");
+        assert!(
+            !kernel.entry.contains("_g"),
+            "a gather-free kernel's name must not grow a gather suffix"
+        );
+        assert!(!kernel.source.contains("gather_idx"));
+        assert!(
+            !kernel.source.contains("fault") && !kernel.source.contains("atomic_uint"),
+            "a gather-free kernel must not gain any fault-reporting machinery"
+        );
+        assert_eq!(
+            kernel.bindings,
+            vec![
+                Binding::Input(nest.operands[0].0),
+                Binding::Output(nest.node),
+                Binding::Uniforms,
+            ],
+            "gather-free bindings are unchanged: input, output, uniforms — no fault buffer"
+        );
     }
 
     #[test]

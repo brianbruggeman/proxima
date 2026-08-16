@@ -33,6 +33,13 @@ impl DType {
         matches!(self, Self::BFloat16 | Self::Float16 | Self::Float32)
     }
 
+    /// Whether this type is a legal gather index type. Only whole-number
+    /// types can index a dimension; `Bool` and the floats cannot.
+    #[must_use]
+    pub const fn is_integer(self) -> bool {
+        matches!(self, Self::Int8 | Self::UInt8 | Self::Int32 | Self::UInt32)
+    }
+
     /// Whether a fold over this type can accumulate into itself without
     /// widening. Narrow integers cannot: a sum of `i8` overflows almost
     /// immediately, which is why quantized contraction accumulates in `Int32`.
@@ -77,5 +84,16 @@ mod tests {
         assert!(DType::BFloat16.is_float());
         assert!(!DType::Int32.is_float());
         assert!(!DType::Bool.is_float());
+    }
+
+    #[rstest]
+    #[case::int8(DType::Int8, true)]
+    #[case::uint8(DType::UInt8, true)]
+    #[case::int32(DType::Int32, true)]
+    #[case::uint32(DType::UInt32, true)]
+    #[case::bool_is_not_integer(DType::Bool, false)]
+    #[case::float32_is_not_integer(DType::Float32, false)]
+    fn only_whole_number_types_report_integer(#[case] dtype: DType, #[case] integer: bool) {
+        assert_eq!(dtype.is_integer(), integer);
     }
 }

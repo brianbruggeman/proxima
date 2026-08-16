@@ -11,7 +11,7 @@
 //! | slice | a non-zero `offset` |
 //! | stride / dilation | a `coeff` other than 1 |
 //! | convolution | two terms in one dim: `h*stride + r*dilation` |
-//! | gather / scatter | [`IndexMap::Computed`] — indices come from a node |
+//! | gather (read-side) | [`IndexMap::Computed`] — one dim's index comes from a node |
 //!
 //! Convolution is why a dim is a *sum* of terms rather than a single
 //! projection. Without that, windowed access needs its own expression form,
@@ -68,17 +68,52 @@ pub struct AffineMap {
 
 /// How an operand is addressed. `Affine` is statically analysable and is what
 /// shape inference and lowering reason about; `Computed` is a data-dependent
-/// index and is the reason gather and scatter need no expression forms of
-/// their own.
+/// index and is the reason gather needs no expression form of its own.
+///
+/// A gather touches exactly one operand dimension — the one the fetched
+/// index selects (`gathered_dim`) — while the rest stay affine. `index_map`
+/// and `base` are both drawn from the *same* iteration space: `index_map`
+/// says how to read the `indices` tensor from it, `base` says how the
+/// operand's other dims read from it. `base`'s entry at `gathered_dim` is
+/// never consulted (its `terms` are empty by construction) because that
+/// dim's address comes from the fetched index at evaluation time, not from
+/// iteration.
+///
+/// `index_map` is always a plain [`AffineMap`], never another `IndexMap` —
+/// the indices tensor itself must be affinely addressed, so a gather cannot
+/// nest inside another gather. This is enforced by the type, not a runtime
+/// check.
+///
+/// `indices` is an integer [`crate::dtype::DType`] logically, but every
+/// backend this crate ships (`cpu.rs`'s interpreter, `omega`'s Metal driver)
+/// carries every buffer as f32 — including `indices` — rather than plumbing
+/// a second integer-buffer kind through the stack for this one case. f32's
+/// 24-bit mantissa represents every integer up to `2^24` (16,777,216)
+/// exactly, so [`crate::shape::infer`] rejects any gathered dim wider than
+/// that (`TensorError::GatherExtentExceedsExactFloat`) rather than let a
+/// fetched index silently lose precision and select the wrong row. Lifting
+/// the ceiling means adding real integer buffers, not raising a constant.
+///
+/// Scatter — a data-dependent *output* map on a [`crate::expr::Fold`] — is a
+/// different, still-unsupported feature: it needs atomics for colliding
+/// writes and stays out of scope here (see
+/// [`TensorError::NotLowerable`](crate::error::TensorError::NotLowerable)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum IndexMap {
     Affine(AffineMap),
-    /// Indices come from `indices`; `base` addresses that index tensor itself.
     Computed {
+        /// The node supplying fetched index values; must be a backwards
+        /// reference with an integer [`crate::dtype::DType`].
         indices: NodeId,
+        /// How the iteration space addresses the `indices` tensor.
+        index_map: AffineMap,
+        /// How the iteration space addresses the operand's non-gathered
+        /// dims; the entry at `gathered_dim` is unused.
         base: AffineMap,
+        /// Which operand dimension the fetched index selects.
+        gathered_dim: u16,
     },
 }
 
@@ -146,10 +181,13 @@ mod tests {
                 offset: 0,
             }],
         };
+        let index_map = projection(2, &[1]);
         let direct = IndexMap::Affine(base.clone());
         let gathered = IndexMap::Computed {
             indices: NodeId(7),
+            index_map,
             base: base.clone(),
+            gathered_dim: 0,
         };
         assert_eq!(*direct.affine(), base);
         assert_eq!(*gathered.affine(), base);

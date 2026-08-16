@@ -11,7 +11,8 @@
 use std::process::Command;
 
 use proxima_tensor::{
-    DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp, append, infer, lower, map,
+    AffineTerm, DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp, append, infer,
+    lower, map,
 };
 
 fn elementwise_tanh_kernel() -> omega::Kernel {
@@ -114,12 +115,132 @@ fn cumsum_kernel() -> omega::Kernel {
     omega::emit(&nests[0]).expect("cumsum emits")
 }
 
+/// `table[ids[s], d]`: a standalone elementwise gather.
+fn embedding_lookup_kernel() -> omega::Kernel {
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1000), Extent::Static(8)],
+            name: None,
+        },
+    );
+    let ids = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(2, &[0]),
+        base: map::AffineMap {
+            iter_rank: 2,
+            dims: vec![
+                map::DimExpr::default(),
+                map::DimExpr {
+                    terms: vec![AffineTerm::projection(1)],
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    append(
+        &mut program,
+        Expr::Zip {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(table, gathered_map)],
+            name: None,
+        },
+    );
+    let shapes = infer(&program, &[]).expect("embedding lookup infers");
+    let nests = lower(&program, &shapes, &[]).expect("embedding lookup lowers");
+    omega::emit(&nests[0]).expect("embedding lookup emits")
+}
+
+/// `sum_k table[ids[i], k] * weight[k, j]`: a gather fused into a reduction.
+fn embedding_matmul_kernel() -> omega::Kernel {
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1000), Extent::Static(6)],
+            name: None,
+        },
+    );
+    let ids = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let weight = append(
+        &mut program,
+        Expr::Block {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(6), Extent::Static(3)],
+            name: None,
+        },
+    );
+    let gather_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(3, &[0]),
+        base: map::AffineMap {
+            iter_rank: 3,
+            dims: vec![
+                map::DimExpr::default(),
+                map::DimExpr {
+                    terms: vec![AffineTerm::projection(2)],
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let weight_map = IndexMap::Affine(map::projection(3, &[2, 1]));
+    let product = append(
+        &mut program,
+        Expr::Zip {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(table, gather_map), (weight, weight_map)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Expr::Fold(Fold {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: FoldInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Last,
+            name: Some("embedding_matmul".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("embedding matmul infers");
+    let nests = lower(&program, &shapes, &[]).expect("embedding matmul lowers");
+    omega::emit(&nests[0]).expect("embedding matmul emits")
+}
+
 #[test]
 fn emitted_source_compiles_with_the_metal_toolchain() {
     let kernels = [
         elementwise_tanh_kernel(),
         fused_matmul_kernel(),
         cumsum_kernel(),
+        embedding_lookup_kernel(),
+        embedding_matmul_kernel(),
     ];
 
     let mut compiled = 0usize;
@@ -155,7 +276,8 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
     }
 
     assert!(
-        compiled >= 2,
-        "compiled {compiled} kernels — need at least 2 to prove this is not a vacuous pass"
+        compiled >= 4,
+        "compiled {compiled} kernels — need at least 4 (including a gather) to prove this is \
+         not a vacuous pass"
     );
 }
