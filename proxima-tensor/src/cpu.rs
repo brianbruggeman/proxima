@@ -887,53 +887,95 @@ fn run_reduce(
     // non-unit stride or gathered operand fall back to the loop unchanged.
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
 
+    // A matmul with a transposed right-hand operand (ggml's own `mul_mat`
+    // layout) has a bad width-dim stride on one operand (`fast_path` above
+    // is false) but a GOOD stride on the contraction dim `k` — both
+    // operands read `k` contiguously. `reduction_strides` is `strides`'s
+    // sibling table for the single contraction dim, computed once per bound
+    // op the same way; `body_shape_is_affine_fast_path` is reused verbatim,
+    // just handed a different dim's stride table (`scratchpad/opt/discipline.md`
+    // ROW 10). Scoped to exactly one contraction dim — a multi-dim
+    // contraction falls back to the generic loop below unchanged.
+    let reduction_strides: Vec<i64> = if reduction_dims.len() == 1 {
+        let dim = reduction_dims[0];
+        resolved.operands().iter().map(|(_, view, _)| view.stride(dim)).collect()
+    } else {
+        Vec::new()
+    };
+    let reduction_fast_path =
+        !fast_path && reduction_dims.len() == 1 && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
+
     for leading_flat in 0..odometer_len(&leading_extents) {
         unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
         let mut accumulator = vec![initial_value(*init).unwrap_or(0.0); width];
         let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
-        for reduction_flat in 0..reduction_total {
-            unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
-            merge_coordinates_into(
-                leading_output_axes,
-                &leading_coordinate,
-                &reduction_dims,
-                &reduction_coordinate,
-                &mut full_coordinate,
-            );
+        if reduction_fast_path {
+            // Fold along `k` (contiguous on every operand read here) instead
+            // of accumulating across the width dim `n` — one full contraction
+            // per output position, in the same k=0..K sequential order the
+            // generic loop below would visit, so results stay bit-identical.
+            merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+            full_coordinate[reduction_dims[0] as usize] = 0;
+            if let Some(dim) = last_output_dim {
+                full_coordinate[dim as usize] = 0;
+            }
             fill_running_offsets(resolved, &full_coordinate, &mut running);
-
-            if fast_path {
-                reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
-                seeded = true;
-                continue;
-            }
-
-            fill_gather_cursors(
-                resolved,
-                buffers,
-                &full_coordinate,
-                last_output_dim,
-                &mut gather_cursors,
-            )?;
-
+            let fold = DotFold {
+                len: reduction_total as usize,
+                init: initial_value(*init).unwrap_or(0.0),
+                seeded,
+            };
             for slot in &mut accumulator {
-                for (index, data) in raw.iter().enumerate() {
-                    let mut offset = running[index];
-                    if let Some(cursor) = gather_cursors[index].as_mut() {
-                        offset += cursor.fetch_and_advance(resolved.node)?;
-                    }
-                    operand_values[index] = data[offset as usize];
-                    running[index] += strides[index];
+                *slot = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                for (offset, stride) in running.iter_mut().zip(&strides) {
+                    *offset += stride;
                 }
-                let value = eval_body_shape(&shape, &operand_values, &mut step_values);
-                *slot = if seeded {
-                    apply_scalar_op(*reduce_op, &[*slot, value])
-                } else {
-                    value
-                };
             }
-            seeded = true;
+        } else {
+            for reduction_flat in 0..reduction_total {
+                unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
+                merge_coordinates_into(
+                    leading_output_axes,
+                    &leading_coordinate,
+                    &reduction_dims,
+                    &reduction_coordinate,
+                    &mut full_coordinate,
+                );
+                fill_running_offsets(resolved, &full_coordinate, &mut running);
+
+                if fast_path {
+                    reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
+                    seeded = true;
+                    continue;
+                }
+
+                fill_gather_cursors(
+                    resolved,
+                    buffers,
+                    &full_coordinate,
+                    last_output_dim,
+                    &mut gather_cursors,
+                )?;
+
+                for slot in &mut accumulator {
+                    for (index, data) in raw.iter().enumerate() {
+                        let mut offset = running[index];
+                        if let Some(cursor) = gather_cursors[index].as_mut() {
+                            offset += cursor.fetch_and_advance(resolved.node)?;
+                        }
+                        operand_values[index] = data[offset as usize];
+                        running[index] += strides[index];
+                    }
+                    let value = eval_body_shape(&shape, &operand_values, &mut step_values);
+                    *slot = if seeded {
+                        apply_scalar_op(*reduce_op, &[*slot, value])
+                    } else {
+                        value
+                    };
+                }
+                seeded = true;
+            }
         }
 
         merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
@@ -1447,6 +1489,272 @@ fn reduce_width_binary_scalar_dispatch(
             }
         }
     }
+}
+
+/// The reduction-dim fast path's fold state, bundled for the same reason
+/// [`OperandSpan`] and `ScanState` are: keeps `reduce_dot_binary` under
+/// clippy's argument-count lint. `len` is the contraction length (`k`'s
+/// extent), `init` is the reduction's identity/seed value, `seeded` mirrors
+/// [`run_reduce`]'s own `seeded` flag (whether `init` should be combined
+/// into the first term or overwritten by it, per [`ReduceInit::FirstElement`]).
+#[derive(Clone, Copy)]
+struct DotFold {
+    len: usize,
+    init: f32,
+    seeded: bool,
+}
+
+/// The contraction-dim counterpart of [`reduce_width_fast`]: instead of
+/// accumulating one value per width position across many calls (one per `k`),
+/// folds the whole contraction range for ONE output position in a single
+/// call. Used when the width dim's own stride disqualifies
+/// [`reduce_width_fast`] but the contraction dim is affine on every operand
+/// the body shape reads (transposed-B GEMM: `k` is contiguous on both
+/// operands even though `n` is not).
+#[inline(always)]
+fn reduce_dot_fast(
+    shape: &BodyShape,
+    reduce_op: ScalarOp,
+    raw: &[&[f32]],
+    running: &[i64],
+    reduction_strides: &[i64],
+    fold: DotFold,
+) -> f32 {
+    let span_of = |index: u16| {
+        let index = index as usize;
+        OperandSpan {
+            data: raw[index],
+            base: running[index] as usize,
+            contiguous: reduction_strides[index] == 1,
+        }
+    };
+    match *shape {
+        BodyShape::Unary(op, a) => reduce_dot_unary(op, reduce_op, span_of(a), fold),
+        BodyShape::Binary(op, a, b) => reduce_dot_binary(op, reduce_op, span_of(a), span_of(b), fold),
+        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+    }
+}
+
+/// Same op/reduce_op monomorphized-closure dispatch as [`reduce_width_unary`],
+/// folding to one scalar instead of accumulating across a width slice.
+fn reduce_dot_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: DotFold) -> f32 {
+    macro_rules! unary_op_arm {
+        ($f:expr) => {
+            match reduce_op {
+                ScalarOp::Add => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, fold),
+                ScalarOp::Multiply => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, fold),
+                ScalarOp::Maximum => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, fold),
+                ScalarOp::Minimum => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, fold),
+                _ => reduce_dot_unary_scalar_dispatch(op, reduce_op, span, fold),
+            }
+        };
+    }
+    match op {
+        ScalarOp::Identity => unary_op_arm!(|a: f32| a),
+        ScalarOp::Negate => unary_op_arm!(|a: f32| -a),
+        ScalarOp::Reciprocal => unary_op_arm!(|a: f32| 1.0 / a),
+        ScalarOp::Exponential => unary_op_arm!(|a: f32| a.exp()),
+        ScalarOp::Logarithm => unary_op_arm!(|a: f32| a.ln()),
+        ScalarOp::SquareRoot => unary_op_arm!(|a: f32| a.sqrt()),
+        ScalarOp::Tanh => unary_op_arm!(|a: f32| a.tanh()),
+        _ => reduce_dot_unary_scalar_dispatch(op, reduce_op, span, fold),
+    }
+}
+
+/// `seeded` is branched on ONCE, outside the fold loop, same discipline as
+/// [`reduce_width_unary_monomorphic`] — the loop body below contains exactly
+/// one call to `op` and, past the first term, one call to `reduce`, both
+/// inlined non-capturing closures.
+#[inline(always)]
+fn reduce_dot_unary_monomorphic<F, R>(op: F, reduce: R, span: OperandSpan, fold: DotFold) -> f32
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if span.contiguous {
+        let slice = &span.data[span.base..span.base + fold.len];
+        if fold.seeded {
+            let mut acc = fold.init;
+            for &raw_value in slice {
+                acc = reduce(acc, op(raw_value));
+            }
+            acc
+        } else if let [first, rest @ ..] = slice {
+            let mut acc = op(*first);
+            for &raw_value in rest {
+                acc = reduce(acc, op(raw_value));
+            }
+            acc
+        } else {
+            fold.init
+        }
+    } else {
+        let value = op(span.data[span.base]);
+        if fold.seeded {
+            let mut acc = fold.init;
+            for _ in 0..fold.len {
+                acc = reduce(acc, value);
+            }
+            acc
+        } else if fold.len == 0 {
+            fold.init
+        } else {
+            let mut acc = value;
+            for _ in 1..fold.len {
+                acc = reduce(acc, value);
+            }
+            acc
+        }
+    }
+}
+
+/// The unaccelerated fallback for a `reduce_op` outside {Add, Multiply,
+/// Maximum, Minimum} — same numerical result as
+/// [`reduce_dot_unary_monomorphic`], dispatched per term via
+/// [`apply_scalar_op`]/[`combine_reduction`].
+fn reduce_dot_unary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: DotFold) -> f32 {
+    let mut acc = fold.init;
+    let mut seeded = fold.seeded;
+    for step in 0..fold.len {
+        let raw_value = if span.contiguous { span.data[span.base + step] } else { span.data[span.base] };
+        let value = apply_scalar_op(op, &[raw_value]);
+        acc = combine_reduction(reduce_op, acc, value, seeded);
+        seeded = true;
+    }
+    acc
+}
+
+/// Same discipline as [`reduce_dot_unary`], for the two-operand case — the
+/// contraction-dim counterpart of [`reduce_width_binary`].
+fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
+    macro_rules! binary_op_arm {
+        ($f:expr) => {
+            match reduce_op {
+                ScalarOp::Add => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, fold),
+                ScalarOp::Multiply => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, fold),
+                ScalarOp::Maximum => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, fold),
+                ScalarOp::Minimum => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, fold),
+                _ => reduce_dot_binary_scalar_dispatch(op, reduce_op, a, b, fold),
+            }
+        };
+    }
+    match op {
+        ScalarOp::Add => binary_op_arm!(|x: f32, y: f32| x + y),
+        ScalarOp::Subtract => binary_op_arm!(|x: f32, y: f32| x - y),
+        ScalarOp::Multiply => binary_op_arm!(|x: f32, y: f32| x * y),
+        ScalarOp::Divide => binary_op_arm!(|x: f32, y: f32| x / y),
+        ScalarOp::Maximum => binary_op_arm!(|x: f32, y: f32| x.max(y)),
+        ScalarOp::Minimum => binary_op_arm!(|x: f32, y: f32| x.min(y)),
+        ScalarOp::Greater => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from(x > y))),
+        ScalarOp::Equal => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0))),
+        _ => reduce_dot_binary_scalar_dispatch(op, reduce_op, a, b, fold),
+    }
+}
+
+/// The fold loop LLVM autovectorizes into a multiply-accumulate-then-
+/// horizontal-sum pattern for the `(true, true)`/`Multiply`/`Add` arm — the
+/// exact shape a transposed-B GEMM's per-output-element dot product takes
+/// (`scratchpad/opt/discipline.md` ROW 10/11).
+#[inline(always)]
+fn reduce_dot_binary_monomorphic<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
+where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    match (a.contiguous, b.contiguous) {
+        (true, true) => {
+            let slice_a = &a.data[a.base..a.base + fold.len];
+            let slice_b = &b.data[b.base..b.base + fold.len];
+            if fold.seeded {
+                let mut acc = fold.init;
+                for (&value_a, &value_b) in slice_a.iter().zip(slice_b) {
+                    acc = reduce(acc, op(value_a, value_b));
+                }
+                acc
+            } else if let ([first_a, rest_a @ ..], [first_b, rest_b @ ..]) = (slice_a, slice_b) {
+                let mut acc = op(*first_a, *first_b);
+                for (&value_a, &value_b) in rest_a.iter().zip(rest_b) {
+                    acc = reduce(acc, op(value_a, value_b));
+                }
+                acc
+            } else {
+                fold.init
+            }
+        }
+        (true, false) => {
+            let slice_a = &a.data[a.base..a.base + fold.len];
+            let value_b = b.data[b.base];
+            if fold.seeded {
+                let mut acc = fold.init;
+                for &value_a in slice_a {
+                    acc = reduce(acc, op(value_a, value_b));
+                }
+                acc
+            } else if let [first_a, rest_a @ ..] = slice_a {
+                let mut acc = op(*first_a, value_b);
+                for &value_a in rest_a {
+                    acc = reduce(acc, op(value_a, value_b));
+                }
+                acc
+            } else {
+                fold.init
+            }
+        }
+        (false, true) => {
+            let value_a = a.data[a.base];
+            let slice_b = &b.data[b.base..b.base + fold.len];
+            if fold.seeded {
+                let mut acc = fold.init;
+                for &value_b in slice_b {
+                    acc = reduce(acc, op(value_a, value_b));
+                }
+                acc
+            } else if let [first_b, rest_b @ ..] = slice_b {
+                let mut acc = op(value_a, *first_b);
+                for &value_b in rest_b {
+                    acc = reduce(acc, op(value_a, value_b));
+                }
+                acc
+            } else {
+                fold.init
+            }
+        }
+        (false, false) => {
+            let value_a = a.data[a.base];
+            let value_b = b.data[b.base];
+            let value = op(value_a, value_b);
+            if fold.seeded {
+                let mut acc = fold.init;
+                for _ in 0..fold.len {
+                    acc = reduce(acc, value);
+                }
+                acc
+            } else if fold.len == 0 {
+                fold.init
+            } else {
+                let mut acc = value;
+                for _ in 1..fold.len {
+                    acc = reduce(acc, value);
+                }
+                acc
+            }
+        }
+    }
+}
+
+/// The unaccelerated fallback for a `reduce_op` outside {Add, Multiply,
+/// Maximum, Minimum}.
+fn reduce_dot_binary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
+    let mut acc = fold.init;
+    let mut seeded = fold.seeded;
+    for step in 0..fold.len {
+        let value_a = if a.contiguous { a.data[a.base + step] } else { a.data[a.base] };
+        let value_b = if b.contiguous { b.data[b.base + step] } else { b.data[b.base] };
+        let value = apply_scalar_op(op, &[value_a, value_b]);
+        acc = combine_reduction(reduce_op, acc, value, seeded);
+        seeded = true;
+    }
+    acc
 }
 
 /// The width-loop fast path for [`run_elementwise`]: no accumulator, no
@@ -1964,6 +2272,43 @@ mod tests {
         (program, sum)
     }
 
+    /// Same contraction as [`matmul_program`], RHS stored `[n, k]` instead
+    /// of `[k, n]` (ggml's own `mul_mat` convention) — exercises
+    /// [`run_reduce`]'s reduction-dim fast path
+    /// (`scratchpad/opt/discipline.md` ROW 10/11): the width dim `n` is not
+    /// contiguous on the RHS operand here, but the contraction dim `k` is.
+    fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(&mut program, &[Extent::Static(m), Extent::Static(k)]);
+        let rhs = f32_block(&mut program, &[Extent::Static(n), Extent::Static(k)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("matmul_rhs_transposed".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -2202,6 +2547,31 @@ mod tests {
         assert_eq!(
             evaluated.root(),
             naive_matmul(&lhs, &rhs, m, k, n).as_slice()
+        );
+        let _ = sum;
+    }
+
+    #[test]
+    fn fused_matmul_with_transposed_rhs_matches_a_naive_triple_loop() {
+        // k=7 (not a multiple of the NEON lane width) exercises the fast
+        // path's remainder handling; the RHS buffer is the same numbers as
+        // `naive_matmul`'s `[k, n]` reference expects, laid out `[n, k]`.
+        let (m, k, n) = (4usize, 7usize, 5usize);
+        let (program, sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
+        let rhs_kn: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
+        let mut rhs_nk = vec![0.0f32; k * n];
+        for row in 0..k {
+            for col in 0..n {
+                rhs_nk[col * k + row] = rhs_kn[row * n + col];
+            }
+        }
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs_nk], &[]).expect("matmul evaluates");
+        assert_eq!(evaluated.shape(), &[m as u64, n as u64]);
+        assert_eq!(
+            evaluated.root(),
+            naive_matmul(&lhs, &rhs_kn, m, k, n).as_slice()
         );
         let _ = sum;
     }
