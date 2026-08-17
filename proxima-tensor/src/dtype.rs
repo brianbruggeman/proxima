@@ -1,6 +1,6 @@
 /// Element type of a tensor operand.
 ///
-/// Carried as a field on every [`Expr`](crate::Expr) rather than as a type
+/// Carried as a field on every [`Op`](crate::Op) rather than as a type
 /// parameter. A single node routinely mixes three of these — quantized matmul
 /// is `i8 x i8 -> i32 -> f32` — so one `T` could not describe it, and a leaf's
 /// element type is not known until the weights are opened anyway.

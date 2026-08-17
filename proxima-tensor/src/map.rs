@@ -1,127 +1,129 @@
-//! The index-map grammar — where this crate's expressiveness actually lives.
+//! The index-pattern grammar — where this crate's expressiveness actually
+//! lives.
 //!
 //! Three expression forms carry the algebra, but they only work because an
 //! operand can be *related* to the iteration space by something richer than a
-//! permutation. Every shape operation is a map, not a variant:
+//! permutation. Every shape operation is an index pattern, not a variant:
 //!
-//! | operation | map |
+//! | operation | pattern |
 //! |---|---|
-//! | transpose | permute the projected iteration dims |
-//! | broadcast | project fewer dims than the iteration space has |
+//! | transpose | permute the projected iteration axes |
+//! | broadcast | project fewer axes than the iteration space has |
 //! | slice | a non-zero `offset` |
 //! | stride / dilation | a `coeff` other than 1 |
-//! | convolution | two terms in one dim: `h*stride + r*dilation` |
-//! | gather (read-side) | [`IndexMap::Computed`] — one dim's index comes from a node |
+//! | convolution | two terms in one axis: `h*stride + r*dilation` |
+//! | gather (read-side) | [`IndexMap::Computed`] — one axis's index comes from a node |
 //!
-//! Convolution is why a dim is a *sum* of terms rather than a single
+//! Convolution is why an axis is a *sum* of terms rather than a single
 //! projection. Without that, windowed access needs its own expression form,
 //! and the three generators become four, then a dozen.
 //!
-//! A map owns its dims and terms directly — there is no interned, span-based
-//! arena here, because [`Expr`](crate::expr::Expr) itself no longer lives in
-//! one: a tensor program is a plain `Vec<Expr>`, and each `Expr` is
-//! self-contained.
+//! A pattern owns its axes and terms directly — there is no interned,
+//! span-based arena here, because [`Op`](crate::op::Op) itself no
+//! longer lives in one: a tensor program is a plain `Vec<Op>`, and each
+//! `Op` is self-contained.
 
 use alloc::vec::Vec;
 
-use crate::expr::NodeId;
+use crate::op::NodeId;
 
-/// One `coeff * iter[iter_dim]` contribution to an operand index.
+/// One `coeff * iter[axis]` contribution to an operand index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-pub struct AffineTerm {
-    pub iter_dim: u16,
+pub struct AxisTerm {
+    pub axis: u16,
     pub coeff: i32,
 }
 
-impl AffineTerm {
+impl AxisTerm {
     #[must_use]
-    pub const fn projection(iter_dim: u16) -> Self {
-        Self { iter_dim, coeff: 1 }
+    pub const fn projection(axis: u16) -> Self {
+        Self { axis, coeff: 1 }
     }
 
     #[must_use]
-    pub const fn scaled(iter_dim: u16, coeff: i32) -> Self {
-        Self { iter_dim, coeff }
+    pub const fn scaled(axis: u16, coeff: i32) -> Self {
+        Self { axis, coeff }
     }
 }
 
-/// One operand dimension, as `sum(terms) + offset` over the iteration space.
+/// One operand axis, as `sum(terms) + offset` over the iteration space.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-pub struct DimExpr {
-    pub terms: Vec<AffineTerm>,
+pub struct AxisIndex {
+    pub terms: Vec<AxisTerm>,
     pub offset: i32,
 }
 
 /// Relates an iteration space of rank `iter_rank` to an operand's index space.
 ///
-/// `dims` holds one [`DimExpr`] per operand dimension, so the operand's rank
-/// is `dims.len()` — which may be lower than `iter_rank` (a broadcast) or
+/// `axes` holds one [`AxisIndex`] per operand axis, so the operand's rank is
+/// `axes.len()` — which may be lower than `iter_rank` (a broadcast) or
 /// reorder it (a transpose).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-pub struct AffineMap {
+pub struct IndexPattern {
     pub iter_rank: u16,
-    pub dims: Vec<DimExpr>,
+    pub axes: Vec<AxisIndex>,
 }
 
 /// How an operand is addressed. `Affine` is statically analysable and is what
-/// shape inference and lowering reason about; `Computed` is a data-dependent
-/// index and is the reason gather needs no expression form of its own.
+/// shape inference and op building reason about; `Computed` is a
+/// data-dependent index and is the reason gather needs no expression form of
+/// its own.
 ///
-/// A gather touches exactly one operand dimension — the one the fetched
-/// index selects (`gathered_dim`) — while the rest stay affine. `index_map`
-/// and `base` are both drawn from the *same* iteration space: `index_map`
-/// says how to read the `indices` tensor from it, `base` says how the
-/// operand's other dims read from it. `base`'s entry at `gathered_dim` is
-/// never consulted (its `terms` are empty by construction) because that
-/// dim's address comes from the fetched index at evaluation time, not from
+/// A gather touches exactly one operand axis — the one the fetched index
+/// selects (`gathered_dim`) — while the rest stay affine. `index_map` and
+/// `base` are both drawn from the *same* iteration space: `index_map` says
+/// how to read the `indices` tensor from it, `base` says how the operand's
+/// other axes read from it. `base`'s entry at `gathered_dim` is never
+/// consulted (its `terms` are empty by construction) because that axis's
+/// address comes from the fetched index at evaluation time, not from
 /// iteration.
 ///
-/// `index_map` is always a plain [`AffineMap`], never another `IndexMap` —
-/// the indices tensor itself must be affinely addressed, so a gather cannot
-/// nest inside another gather. This is enforced by the type, not a runtime
-/// check.
+/// `index_map` is always a plain [`IndexPattern`], never another `IndexMap`
+/// — the indices tensor itself must be affinely addressed, so a gather
+/// cannot nest inside another gather. This is enforced by the type, not a
+/// runtime check.
 ///
 /// `indices` is an integer [`crate::dtype::DType`] logically, but every
 /// backend this crate ships (`cpu.rs`'s interpreter, `omega`'s Metal driver)
 /// carries every buffer as f32 — including `indices` — rather than plumbing
 /// a second integer-buffer kind through the stack for this one case. f32's
 /// 24-bit mantissa represents every integer up to `2^24` (16,777,216)
-/// exactly, so [`crate::shape::infer`] rejects any gathered dim wider than
+/// exactly, so [`crate::shape::infer`] rejects any gathered axis wider than
 /// that (`TensorError::GatherExtentExceedsExactFloat`) rather than let a
 /// fetched index silently lose precision and select the wrong row. Lifting
 /// the ceiling means adding real integer buffers, not raising a constant.
 ///
-/// Scatter — a data-dependent *output* map on a [`crate::expr::Fold`] — is a
-/// different, still-unsupported feature: it needs atomics for colliding
+/// Scatter — a data-dependent *output* map on a [`crate::op::Reduce`] — is
+/// a different, still-unsupported feature: it needs atomics for colliding
 /// writes and stays out of scope here (see
 /// [`TensorError::NotLowerable`](crate::error::TensorError::NotLowerable)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum IndexMap {
-    Affine(AffineMap),
+    Affine(IndexPattern),
     Computed {
         /// The node supplying fetched index values; must be a backwards
         /// reference with an integer [`crate::dtype::DType`].
         indices: NodeId,
         /// How the iteration space addresses the `indices` tensor.
-        index_map: AffineMap,
+        index_map: IndexPattern,
         /// How the iteration space addresses the operand's non-gathered
-        /// dims; the entry at `gathered_dim` is unused.
-        base: AffineMap,
-        /// Which operand dimension the fetched index selects.
+        /// axes; the entry at `gathered_dim` is unused.
+        base: IndexPattern,
+        /// Which operand axis the fetched index selects.
         gathered_dim: u16,
     },
 }
 
 impl IndexMap {
     #[must_use]
-    pub const fn affine(&self) -> &AffineMap {
+    pub const fn affine(&self) -> &IndexPattern {
         match self {
-            Self::Affine(map) | Self::Computed { base: map, .. } => map,
+            Self::Affine(pattern) | Self::Computed { base: pattern, .. } => pattern,
         }
     }
 
@@ -131,33 +133,33 @@ impl IndexMap {
     }
 }
 
-/// A plain projection: operand dim `n` reads iteration dim `projected[n]`.
+/// A plain projection: operand axis `n` reads iteration axis `projected[n]`.
 /// Covers transpose, broadcast, and identity — the overwhelming majority.
 #[must_use]
-pub fn projection(iter_rank: u16, projected: &[u16]) -> AffineMap {
-    let dims = projected
+pub fn projection(iter_rank: u16, projected: &[u16]) -> IndexPattern {
+    let axes = projected
         .iter()
-        .map(|iter_dim| DimExpr {
-            terms: alloc::vec![AffineTerm::projection(*iter_dim)],
+        .map(|axis| AxisIndex {
+            terms: alloc::vec![AxisTerm::projection(*axis)],
             offset: 0,
         })
         .collect();
-    AffineMap { iter_rank, dims }
+    IndexPattern { iter_rank, axes }
 }
 
-/// A general affine map: one `(terms, offset)` pair per operand dimension.
-/// What a projection cannot express — convolution windows, dilation, slices
-/// with a stride — goes through this constructor instead.
+/// A general affine index pattern: one `(terms, offset)` pair per operand
+/// axis. What a projection cannot express — convolution windows, dilation,
+/// slices with a stride — goes through this constructor instead.
 #[must_use]
-pub fn affine(iter_rank: u16, dims: &[(&[AffineTerm], i32)]) -> AffineMap {
-    let dims = dims
+pub fn affine(iter_rank: u16, axes: &[(&[AxisTerm], i32)]) -> IndexPattern {
+    let axes = axes
         .iter()
-        .map(|(terms, offset)| DimExpr {
+        .map(|(terms, offset)| AxisIndex {
             terms: terms.to_vec(),
             offset: *offset,
         })
         .collect();
-    AffineMap { iter_rank, dims }
+    IndexPattern { iter_rank, axes }
 }
 
 #[cfg(test)]
@@ -167,17 +169,17 @@ mod tests {
 
     #[test]
     fn projection_has_unit_coefficient_and_scaled_does_not() {
-        assert_eq!(AffineTerm::projection(2).coeff, 1);
-        assert_eq!(AffineTerm::scaled(2, 3).coeff, 3);
-        assert_eq!(AffineTerm::scaled(2, 3).iter_dim, 2);
+        assert_eq!(AxisTerm::projection(2).coeff, 1);
+        assert_eq!(AxisTerm::scaled(2, 3).coeff, 3);
+        assert_eq!(AxisTerm::scaled(2, 3).axis, 2);
     }
 
     #[test]
-    fn computed_and_affine_both_expose_a_base_map() {
-        let base = AffineMap {
+    fn computed_and_affine_both_expose_a_base_pattern() {
+        let base = IndexPattern {
             iter_rank: 2,
-            dims: alloc::vec![DimExpr {
-                terms: alloc::vec![AffineTerm::projection(0)],
+            axes: alloc::vec![AxisIndex {
+                terms: alloc::vec![AxisTerm::projection(0)],
                 offset: 0,
             }],
         };
@@ -196,16 +198,16 @@ mod tests {
     }
 
     #[test]
-    fn a_convolution_dim_is_two_terms() {
-        // h*stride + r*dilation is the whole reason DimExpr sums terms.
+    fn a_convolution_axis_is_two_terms() {
+        // h*stride + r*dilation is the whole reason AxisIndex sums terms.
         let window = affine(
             2,
-            &[(&[AffineTerm::scaled(0, 2), AffineTerm::scaled(1, 1)], -1)],
+            &[(&[AxisTerm::scaled(0, 2), AxisTerm::scaled(1, 1)], -1)],
         );
-        assert_eq!(window.dims[0].terms.len(), 2);
-        assert_eq!(window.dims[0].terms[0].coeff, 2, "stride");
-        assert_eq!(window.dims[0].terms[1].coeff, 1, "dilation");
-        assert_eq!(window.dims[0].offset, -1, "padding is the offset");
+        assert_eq!(window.axes[0].terms.len(), 2);
+        assert_eq!(window.axes[0].terms[0].coeff, 2, "stride");
+        assert_eq!(window.axes[0].terms[1].coeff, 1, "dilation");
+        assert_eq!(window.axes[0].offset, -1, "padding is the offset");
     }
 
     #[test]
@@ -213,12 +215,12 @@ mod tests {
         let identity = projection(2, &[0, 1]);
         let transpose = projection(2, &[1, 0]);
         let broadcast = projection(2, &[1]);
-        assert_eq!(identity.dims.len(), 2);
-        assert_eq!(transpose.dims[0].terms[0].iter_dim, 1);
+        assert_eq!(identity.axes.len(), 2);
+        assert_eq!(transpose.axes[0].terms[0].axis, 1);
         assert_eq!(
-            broadcast.dims.len(),
+            broadcast.axes.len(),
             1,
-            "broadcast projects fewer dims than iter_rank"
+            "broadcast projects fewer axes than iter_rank"
         );
     }
 }

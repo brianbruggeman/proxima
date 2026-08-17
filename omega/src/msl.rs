@@ -1,22 +1,22 @@
 //! Metal Shading Language kernel emission.
 //!
-//! [`emit`] turns one lowered [`Nest`] into one [`Kernel`]: MSL source text,
+//! [`emit`] turns one lowered [`BoundOp`] into one [`Kernel`]: MSL source text,
 //! an entry name, the buffer-index -> data [`Binding`] list a driver needs to
 //! set up a dispatch, and the thread-count [`GridSpec`] for this invocation.
 //!
 //! # Runtime uniforms, not baked constants
 //!
-//! A `Nest`'s extents and strides are read out of a `constant Uniforms&`
-//! buffer at kernel runtime — never spliced into the source text as literal
-//! numbers. What *does* vary the source is `nest`'s STRUCTURE: rank (operand
-//! and output coordinate arity), operand count, which [`ScalarOp`]s the body
-//! and (if present) the reduction use, and whether a reduction is present at
-//! all and which [`Keep`] it is. Two `Nest`s that agree on structure but
-//! differ in concrete extents, strides, or which buffers they bind therefore
-//! emit byte-identical source — see
+//! A `BoundOp` node's extents and strides are read out of a `constant
+//! Uniforms&` buffer at kernel runtime — never spliced into the source text
+//! as literal numbers. What *does* vary the source is the node's STRUCTURE:
+//! rank (operand and output coordinate arity), operand count, which
+//! [`ScalarOp`]s the body and (if present) the reduction use, and whether a
+//! reduction is present at all and which [`Keep`] it is. Two `BoundOp`
+//! nodes that agree on structure but differ in concrete extents, strides, or
+//! which buffers they bind therefore emit byte-identical source — see
 //! `same_structure_different_extents_yield_identical_source` below for the
 //! proof. This is what makes a kernel cacheable (and an `MTLLibrary`
-//! reusable) by structure rather than by nest.
+//! reusable) by structure rather than by node identity.
 //!
 //! # Execution model (v1: correctness parity with `cpu.rs`, not peak speed)
 //!
@@ -25,13 +25,13 @@
 //!   div/mod chain `cpu::unflatten` uses, each operand's read offset is
 //!   `base + sum(coord[d] * stride[d])`, and the body writes directly to the
 //!   dense output at its own linear id — matching `cpu::run_elementwise`.
-//! - **Fused fold, `Keep::Last`** (reduce): one thread per OUTPUT element
+//! - **Fused fold, `Keep::Reduce`** (reduce): one thread per OUTPUT element
 //!   (matmul is one thread per `(i, j)`), with a serial loop over the
-//!   reduction dims inside the kernel. `FoldInit` seeding — including
+//!   reduction dims inside the kernel. `ReduceInit` seeding — including
 //!   `FirstElement`'s seed-on-first-step behavior — matches
 //!   `cpu::run_reduce` exactly: the accumulator is seeded from the *first*
 //!   reduction step's value rather than combined into an `init` constant.
-//! - **`Keep::All`** (scan): one thread per non-folded coordinate line,
+//! - **`Keep::Scan`** (scan): one thread per non-folded coordinate line,
 //!   serial along the folded (innermost) dim, writing every prefix through
 //!   the output strides — matching `cpu::run_scan`.
 //!
@@ -45,8 +45,8 @@
 //!
 //! # dtype
 //!
-//! `Nest` carries no dtype at all (see [`proxima_tensor::nest`]'s
-//! documentation) — by the time a program reaches a `Nest` it has already
+//! `BoundOp` carries no dtype at all (see [`proxima_tensor::bind`]'s
+//! documentation) — by the time a program reaches a `BoundOp` it has already
 //! passed `cpu::reject_non_float32` upstream in every path this crate is
 //! meant to consume, so every kernel here is generated in `float`
 //! unconditionally, matching `cpu.rs`'s own f32-only v1 stance.
@@ -55,13 +55,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{FoldInit, Keep, Nest, NodeId, Reduction, ScalarOp};
+use proxima_tensor::{BoundOp, BoundOpKind, Keep, NodeId, ReduceInit, ScalarOp};
 
 use crate::error::EmitError;
 
 /// One compiled kernel: MSL source, its entry point, the buffer-index ->
 /// data mapping a driver needs to bind before dispatch, and the thread count
-/// this particular `nest` needs.
+/// this particular op needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kernel {
     pub source: String,
@@ -74,7 +74,7 @@ pub struct Kernel {
 /// index `0..operands.len()` are inputs, then one `Indices` buffer per
 /// gathered operand (in operand order), then the output, then the uniforms
 /// blob (extents/strides/bases for this dispatch — see the module doc), then
-/// — only when the nest gathers — the fault buffer.
+/// — only when the op gathers — the fault buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binding {
     Input(NodeId),
@@ -92,29 +92,30 @@ pub enum Binding {
     Fault,
 }
 
-/// How many threads a driver must dispatch for this `nest` — one per
+/// How many threads a driver must dispatch for this op — one per
 /// independent unit of work (output element for elementwise/reduce, output
 /// line for a scan). Unlike [`Kernel::source`], this genuinely is a function
-/// of `nest`'s concrete extents, not just its structure: it is per-dispatch
+/// of the op's concrete extents, not just its structure: it is per-dispatch
 /// data, the same way an argument to a function call is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridSpec {
     pub threads: u64,
 }
 
-/// Emits an MSL kernel from a lowered [`Nest`] — the GPU-emission half of the
-/// same descriptor [`proxima_tensor::cpu`] interprets on CPU. See the module
-/// doc for the runtime-uniforms stance and the per-[`Keep`] execution model.
+/// Emits an MSL kernel from a bound [`BoundOp`] — the GPU-emission half of
+/// the same descriptor [`proxima_tensor::cpu`] interprets on CPU. See the
+/// module doc for the runtime-uniforms stance and the per-[`Keep`]
+/// execution model.
 ///
 /// # Examples
 ///
 /// ```
-/// use proxima_tensor::{DType, Expr, Extent, IndexMap, ScalarOp, append, map};
+/// use proxima_tensor::{DType, Extent, IndexMap, Op, ScalarOp, append, map};
 ///
 /// let mut program = Vec::new();
 /// let source = append(
 ///     &mut program,
-///     Expr::Block {
+///     Op::Input {
 ///         dtype: DType::Float32,
 ///         shape: vec![Extent::Static(4)],
 ///         name: None,
@@ -122,7 +123,7 @@ pub struct GridSpec {
 /// );
 /// append(
 ///     &mut program,
-///     Expr::Zip {
+///     Op::Elementwise {
 ///         dtype: DType::Float32,
 ///         body: ScalarOp::Tanh,
 ///         operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
@@ -131,51 +132,60 @@ pub struct GridSpec {
 /// );
 ///
 /// let shapes = proxima_tensor::infer(&program, &[])?;
-/// let nests = proxima_tensor::lower(&program, &shapes, &[])?;
+/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[])?;
 ///
-/// let kernel = omega::emit(&nests[0])?;
+/// let kernel = omega::emit(&bound_ops[0])?;
 /// assert!(kernel.source.contains("kernel void"));
 /// assert!(kernel.source.contains("tanh("));
 /// assert_eq!(kernel.bindings.len(), 3); // one input, one output, uniforms
 /// assert_eq!(kernel.grid.threads, 4);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub fn emit(nest: &Nest) -> Result<Kernel, EmitError> {
-    validate(nest)?;
-    let entry = entry_name(nest);
-    let source = match &nest.reduction {
-        None => render_elementwise(nest, &entry),
-        Some(reduction) => match reduction.keep {
-            Keep::Last => render_reduce(nest, reduction, &entry),
-            Keep::All => render_scan(nest, reduction, &entry),
-        },
+pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
+    validate(resolved)?;
+    let entry = entry_name(resolved);
+    let source = match &resolved.kind {
+        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry),
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => render_reduce(resolved, &entry),
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => render_scan(resolved, &entry),
     };
     Ok(Kernel {
         source,
         entry,
-        bindings: bindings(nest),
+        bindings: bindings(resolved),
         grid: GridSpec {
-            threads: grid_threads(nest),
+            threads: grid_threads(resolved),
         },
     })
 }
 
-fn validate(nest: &Nest) -> Result<(), EmitError> {
-    let expected = nest.body.arity();
-    let found = nest.operands.len();
+fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
+    let expected = resolved.element_op().arity();
+    let found = resolved.operands().len();
     if expected != found {
         return Err(EmitError::ArityMismatch {
-            node: nest.node,
+            node: resolved.node,
             expected,
             found,
         });
     }
-    if let Some(reduction) = &nest.reduction {
-        if matches!(reduction.body, ScalarOp::Select) {
-            return Err(EmitError::ReductionBodyIsSelect { node: nest.node });
+    if let BoundOpKind::Reduce {
+        reduce_op, keep, ..
+    } = &resolved.kind
+    {
+        if matches!(reduce_op, ScalarOp::Select) {
+            return Err(EmitError::ReductionBodyIsSelect {
+                node: resolved.node,
+            });
         }
-        if reduction.keep == Keep::All && nest.extents.is_empty() {
-            return Err(EmitError::EmptyScan { node: nest.node });
+        if *keep == Keep::Scan && resolved.extents.is_empty() {
+            return Err(EmitError::EmptyScan {
+                node: resolved.node,
+            });
         }
     }
     Ok(())
@@ -185,26 +195,26 @@ fn validate(nest: &Nest) -> Result<(), EmitError> {
 /// (`crate::metal::pack_reduce_uniforms`) needs the exact same reduce-dim set
 /// this rendering uses, and duplicating the filter would risk the two
 /// drifting apart.
-pub(crate) fn reduction_dims(nest: &Nest, output_dims: &[u16]) -> Vec<u16> {
-    (0..nest.extents.len() as u16)
-        .filter(|dim| !output_dims.contains(dim))
+pub(crate) fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
+    (0..resolved.extents.len() as u16)
+        .filter(|dim| !output_axes.contains(dim))
         .collect()
 }
 
-fn bindings(nest: &Nest) -> Vec<Binding> {
-    let mut bindings: Vec<Binding> = nest
-        .operands
+fn bindings(resolved: &BoundOp) -> Vec<Binding> {
+    let mut bindings: Vec<Binding> = resolved
+        .operands()
         .iter()
         .map(|(node, _, _)| Binding::Input(*node))
         .collect();
-    for (_, _, gather) in &nest.operands {
+    for (_, _, gather) in resolved.operands() {
         if let Some(gather_access) = gather {
             bindings.push(Binding::Indices(gather_access.indices));
         }
     }
-    bindings.push(Binding::Output(nest.node));
+    bindings.push(Binding::Output(resolved.node));
     bindings.push(Binding::Uniforms);
-    if gather_count(nest) > 0 {
+    if gather_count(resolved) > 0 {
         bindings.push(Binding::Fault);
     }
     bindings
@@ -216,9 +226,10 @@ fn bindings(nest: &Nest) -> Vec<Binding> {
 /// gather arrays are packed in. `pub(crate)` for the same reason
 /// [`reduction_dims`] is: the Metal driver's uniforms packer needs the exact
 /// same numbering.
-pub(crate) fn gather_slots(nest: &Nest) -> Vec<Option<usize>> {
+pub(crate) fn gather_slots(resolved: &BoundOp) -> Vec<Option<usize>> {
     let mut next = 0usize;
-    nest.operands
+    resolved
+        .operands()
         .iter()
         .map(|(_, _, gather)| {
             gather.as_ref().map(|_| {
@@ -230,30 +241,34 @@ pub(crate) fn gather_slots(nest: &Nest) -> Vec<Option<usize>> {
         .collect()
 }
 
-pub(crate) fn gather_count(nest: &Nest) -> usize {
-    nest.operands
+pub(crate) fn gather_count(resolved: &BoundOp) -> usize {
+    resolved
+        .operands()
         .iter()
         .filter(|(_, _, gather)| gather.is_some())
         .count()
 }
 
-/// Total independent units of work `nest` needs — see [`GridSpec`]'s doc for
-/// why this, unlike [`Kernel::source`], is genuinely a function of `nest`'s
-/// concrete extents.
-fn grid_threads(nest: &Nest) -> u64 {
-    match &nest.reduction {
-        None => nest.extents.iter().product(),
-        Some(reduction) => match reduction.keep {
-            Keep::Last => reduction
-                .output_dims
-                .iter()
-                .map(|dim| nest.extents[*dim as usize])
-                .product(),
-            Keep::All => {
-                let rank = nest.extents.len();
-                nest.extents[..rank.saturating_sub(1)].iter().product()
-            }
-        },
+/// Total independent units of work `resolved` needs — see [`GridSpec`]'s doc
+/// for why this, unlike [`Kernel::source`], is genuinely a function of
+/// `resolved`'s concrete extents.
+fn grid_threads(resolved: &BoundOp) -> u64 {
+    match &resolved.kind {
+        BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            ..
+        } => output_axes
+            .iter()
+            .map(|dim| resolved.extents[*dim as usize])
+            .product(),
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => {
+            let rank = resolved.extents.len();
+            resolved.extents[..rank.saturating_sub(1)].iter().product()
+        }
     }
 }
 
@@ -278,44 +293,51 @@ fn op_token(op: ScalarOp) -> &'static str {
     }
 }
 
-fn init_token(init: FoldInit) -> &'static str {
+fn init_token(init: ReduceInit) -> &'static str {
     match init {
-        FoldInit::Zero => "zero",
-        FoldInit::One => "one",
-        FoldInit::NegativeInfinity => "negative_infinity",
-        FoldInit::PositiveInfinity => "positive_infinity",
-        FoldInit::FirstElement => "first_element",
+        ReduceInit::Zero => "zero",
+        ReduceInit::One => "one",
+        ReduceInit::NegativeInfinity => "negative_infinity",
+        ReduceInit::PositiveInfinity => "positive_infinity",
+        ReduceInit::FirstElement => "first_element",
     }
 }
 
 fn keep_token(keep: Keep) -> &'static str {
     match keep {
-        Keep::Last => "reduce",
-        Keep::All => "scan",
+        Keep::Reduce => "reduce",
+        Keep::Scan => "scan",
     }
 }
 
 /// A structural fingerprint, not a hash of anything runtime: rank, operand
-/// count, every `ScalarOp`/`FoldInit`/`Keep` involved, and — since a gather
+/// count, every `ScalarOp`/`ReduceInit`/`Keep` involved, and — since a gather
 /// changes the generated source (extra buffer params, extra uniforms, extra
 /// fetch code) — which operands gather. That last part is a suffix appended
-/// only when at least one operand gathers, so a gather-free `Nest`'s name is
+/// only when at least one operand gathers, so a gather-free `BoundOp`'s name is
 /// unchanged from before this existed.
-fn entry_name(nest: &Nest) -> String {
-    let rank = nest.extents.len();
-    let operand_count = nest.operands.len();
-    let body = op_token(nest.body);
-    let base = match &nest.reduction {
-        None => format!("omega_elementwise_r{rank}_n{operand_count}_{body}"),
-        Some(reduction) => {
-            let kind = keep_token(reduction.keep);
-            let reduce_body = op_token(reduction.body);
-            let init = init_token(reduction.init);
+fn entry_name(resolved: &BoundOp) -> String {
+    let rank = resolved.extents.len();
+    let operand_count = resolved.operands().len();
+    let body = op_token(resolved.element_op());
+    let base = match &resolved.kind {
+        BoundOpKind::Elementwise { .. } => {
+            format!("omega_elementwise_r{rank}_n{operand_count}_{body}")
+        }
+        BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            keep,
+            ..
+        } => {
+            let kind = keep_token(*keep);
+            let reduce_body = op_token(*reduce_op);
+            let init = init_token(*init);
             format!("omega_{kind}_r{rank}_n{operand_count}_{body}_{reduce_body}_{init}")
         }
     };
-    let gather_bits: String = nest
-        .operands
+    let gather_bits: String = resolved
+        .operands()
         .iter()
         .map(|(_, _, gather)| if gather.is_some() { '1' } else { '0' })
         .collect();
@@ -351,13 +373,13 @@ fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
 /// `cpu::initial_value`/`cpu::run_reduce`'s `seeded` flag: the accumulator
 /// starts unseeded and is instead set from the first reduction step's value —
 /// the init expression here is never actually read in that case.
-fn fold_init_tokens(init: FoldInit) -> (&'static str, &'static str) {
+fn fold_init_tokens(init: ReduceInit) -> (&'static str, &'static str) {
     match init {
-        FoldInit::Zero => ("0.0f", "true"),
-        FoldInit::One => ("1.0f", "true"),
-        FoldInit::NegativeInfinity => ("-INFINITY", "true"),
-        FoldInit::PositiveInfinity => ("INFINITY", "true"),
-        FoldInit::FirstElement => ("0.0f", "false"),
+        ReduceInit::Zero => ("0.0f", "true"),
+        ReduceInit::One => ("1.0f", "true"),
+        ReduceInit::NegativeInfinity => ("-INFINITY", "true"),
+        ReduceInit::PositiveInfinity => ("INFINITY", "true"),
+        ReduceInit::FirstElement => ("0.0f", "false"),
     }
 }
 
@@ -487,12 +509,12 @@ fn preamble(source: &mut String) {
     source.push_str("using namespace metal;\n\n");
 }
 
-fn render_elementwise(nest: &Nest, entry: &str) -> String {
-    let rank = nest.extents.len();
+fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
+    let rank = resolved.extents.len();
     let rank_len = rank.max(1);
-    let operand_count = nest.operands.len();
-    let gather_count = gather_count(nest);
-    let gather_slots = gather_slots(nest);
+    let operand_count = resolved.operands().len();
+    let gather_count = gather_count(resolved);
+    let gather_slots = gather_slots(resolved);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -546,24 +568,32 @@ fn render_elementwise(nest: &Nest, entry: &str) -> String {
 
     let args = scratch_args(operand_count);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let expr = scalar_op_expr(nest.body, &arg_refs);
+    let expr = scalar_op_expr(resolved.element_op(), &arg_refs);
     source.push_str(&format!("    out[gid] = {expr};\n"));
     source.push_str("}\n");
     source
 }
 
-fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
-    let rank = nest.extents.len();
+fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("render_reduce is only called for a Keep::Reduce fold")
+    };
+    let rank = resolved.extents.len();
     let rank_len = rank.max(1);
-    let operand_count = nest.operands.len();
-    let output_dims = &reduction.output_dims;
-    let output_rank = output_dims.len();
+    let operand_count = resolved.operands().len();
+    let output_rank = output_axes.len();
     let output_rank_len = output_rank.max(1);
-    let reduce_dims = reduction_dims(nest, output_dims);
+    let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
-    let gather_count = gather_count(nest);
-    let gather_slots = gather_slots(nest);
+    let gather_count = gather_count(resolved);
+    let gather_slots = gather_slots(resolved);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -599,12 +629,12 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
                  remaining /= u.output_extents[{index}];\n"
             ));
         }
-        for (index, dim) in output_dims.iter().enumerate() {
+        for (index, dim) in output_axes.iter().enumerate() {
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
         }
     }
 
-    let (init_expr, seeded_init) = fold_init_tokens(reduction.init);
+    let (init_expr, seeded_init) = fold_init_tokens(*init);
     source.push_str(&format!("    float accumulator = {init_expr};\n"));
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
@@ -655,9 +685,9 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     }
     let args = scratch_args(operand_count);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let value_expr = scalar_op_expr(nest.body, &arg_refs);
+    let value_expr = scalar_op_expr(resolved.element_op(), &arg_refs);
     source.push_str(&format!("        float value = {value_expr};\n"));
-    let combine_expr = scalar_op_expr(reduction.body, &["accumulator", "value"]);
+    let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
         "        accumulator = seeded ? {combine_expr} : value;\n"
     ));
@@ -675,15 +705,21 @@ fn render_reduce(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     source
 }
 
-fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
-    let rank = nest.extents.len();
+fn render_scan(resolved: &BoundOp, entry: &str) -> String {
+    let BoundOpKind::Reduce {
+        reduce_op, init, ..
+    } = &resolved.kind
+    else {
+        unreachable!("render_scan is only called for a Keep::Scan fold")
+    };
+    let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let outer_rank = rank.saturating_sub(1);
     let outer_rank_len = outer_rank.max(1);
     let last_dim = rank.saturating_sub(1);
-    let operand_count = nest.operands.len();
-    let gather_count = gather_count(nest);
-    let gather_slots = gather_slots(nest);
+    let operand_count = resolved.operands().len();
+    let gather_count = gather_count(resolved);
+    let gather_slots = gather_slots(resolved);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -742,7 +778,7 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
         ));
     }
 
-    let (init_expr, seeded_init) = fold_init_tokens(reduction.init);
+    let (init_expr, seeded_init) = fold_init_tokens(*init);
     source.push_str(&format!("    float accumulator = {init_expr};\n"));
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
@@ -782,9 +818,9 @@ fn render_scan(nest: &Nest, reduction: &Reduction, entry: &str) -> String {
     }
     let args = scratch_args(operand_count);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let value_expr = scalar_op_expr(nest.body, &arg_refs);
+    let value_expr = scalar_op_expr(resolved.element_op(), &arg_refs);
     source.push_str(&format!("        float value = {value_expr};\n"));
-    let combine_expr = scalar_op_expr(reduction.body, &["accumulator", "value"]);
+    let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
         "        accumulator = seeded ? {combine_expr} : value;\n"
     ));
@@ -805,17 +841,17 @@ mod tests {
     use alloc::vec::Vec;
 
     use proxima_tensor::{
-        AffineTerm, DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp, append, infer,
-        lower, map,
+        AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind,
+        infer, map,
     };
 
     use super::*;
 
-    fn elementwise_tanh_nest(extent: u32) -> Nest {
+    fn elementwise_tanh_op(extent: u32) -> BoundOp {
         let mut program = Vec::new();
         let source = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
@@ -823,7 +859,7 @@ mod tests {
         );
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Tanh,
                 operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
@@ -831,18 +867,18 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        lower(&program, &shapes, &[])
+        bind(&program, &shapes, &[])
             .expect("elementwise lowers")
             .into_iter()
             .next()
-            .expect("one nest emitted")
+            .expect("one bound emitted")
     }
 
-    fn matmul_nest(m: u32, k: u32, n: u32) -> Nest {
+    fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
         let mut program = Vec::new();
         let lhs = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: vec![Extent::Static(m), Extent::Static(k)],
                 name: None,
@@ -850,7 +886,7 @@ mod tests {
         );
         let rhs = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: vec![Extent::Static(k), Extent::Static(n)],
                 name: None,
@@ -858,7 +894,7 @@ mod tests {
         );
         let product = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
                 operands: vec![
@@ -870,30 +906,30 @@ mod tests {
         );
         append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: product,
                 in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
                 out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: Some("matmul".into()),
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        lower(&program, &shapes, &[])
+        bind(&program, &shapes, &[])
             .expect("matmul lowers")
             .into_iter()
             .next()
-            .expect("one fused nest emitted")
+            .expect("one fused bound emitted")
     }
 
-    fn cumsum_nest(extent: u32) -> Nest {
+    fn cumsum_op(extent: u32) -> BoundOp {
         let mut program = Vec::new();
         let source = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: vec![Extent::Static(extent)],
                 name: None,
@@ -901,32 +937,32 @@ mod tests {
         );
         append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: source,
                 in_map: IndexMap::Affine(map::projection(1, &[0])),
                 out_map: IndexMap::Affine(map::projection(1, &[0])),
-                keep: Keep::All,
+                keep: Keep::Scan,
                 name: None,
             }),
         );
         let shapes = infer(&program, &[]).expect("cumsum infers");
-        lower(&program, &shapes, &[])
+        bind(&program, &shapes, &[])
             .expect("cumsum lowers")
             .into_iter()
             .next()
-            .expect("one nest emitted")
+            .expect("one bound emitted")
     }
 
     /// `table[ids[s], d]` over iteration space `(s, d)`: the same worked
     /// example `map.rs`'s docs use, as a standalone elementwise gather.
-    fn embedding_lookup_nest(vocab: u32, dim: u32, seq: u32) -> Nest {
+    fn embedding_lookup_op(vocab: u32, dim: u32, seq: u32) -> BoundOp {
         let mut program = Vec::new();
         let table = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: vec![Extent::Static(vocab), Extent::Static(dim)],
                 name: None,
@@ -934,7 +970,7 @@ mod tests {
         );
         let ids = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Int32,
                 shape: vec![Extent::Static(seq)],
                 name: None,
@@ -943,12 +979,12 @@ mod tests {
         let gathered_map = IndexMap::Computed {
             indices: ids,
             index_map: map::projection(2, &[0]),
-            base: map::AffineMap {
+            base: map::IndexPattern {
                 iter_rank: 2,
-                dims: vec![
-                    map::DimExpr::default(),
-                    map::DimExpr {
-                        terms: vec![AffineTerm::projection(1)],
+                axes: vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: vec![AxisTerm::projection(1)],
                         offset: 0,
                     },
                 ],
@@ -957,7 +993,7 @@ mod tests {
         };
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: vec![(table, gathered_map)],
@@ -965,17 +1001,17 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("embedding lookup infers");
-        lower(&program, &shapes, &[])
+        bind(&program, &shapes, &[])
             .expect("embedding lookup lowers")
             .into_iter()
             .next()
-            .expect("one nest emitted")
+            .expect("one bound emitted")
     }
 
     #[test]
-    fn a_gather_nest_emits_an_indices_binding_and_the_fetch_uniforms() {
-        let nest = embedding_lookup_nest(50_000, 8, 4);
-        let kernel = emit(&nest).expect("gather emits");
+    fn a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms() {
+        let bound = embedding_lookup_op(50_000, 8, 4);
+        let kernel = emit(&bound).expect("gather emits");
 
         assert_eq!(
             kernel.entry, "omega_elementwise_r2_n1_identity_g1",
@@ -984,15 +1020,15 @@ mod tests {
         assert_eq!(
             kernel.bindings,
             vec![
-                Binding::Input(nest.operands[0].0),
+                Binding::Input(bound.operands()[0].0),
                 Binding::Indices(
-                    nest.operands[0]
+                    bound.operands()[0]
                         .2
                         .as_ref()
                         .expect("operand 0 gathers")
                         .indices
                 ),
-                Binding::Output(nest.node),
+                Binding::Output(bound.node),
                 Binding::Uniforms,
                 Binding::Fault,
             ],
@@ -1007,8 +1043,8 @@ mod tests {
 
     #[test]
     fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
-        let nest = embedding_lookup_nest(50_000, 8, 4);
-        let kernel = emit(&nest).expect("gather emits");
+        let bound = embedding_lookup_op(50_000, 8, 4);
+        let kernel = emit(&bound).expect("gather emits");
 
         assert!(
             kernel.bindings.contains(&Binding::Fault),
@@ -1029,9 +1065,9 @@ mod tests {
     }
 
     #[test]
-    fn a_gather_free_nest_names_and_binds_exactly_as_before_gather_existed() {
-        let nest = elementwise_tanh_nest(10);
-        let kernel = emit(&nest).expect("gather-free elementwise emits");
+    fn a_gather_free_op_names_and_binds_exactly_as_before_gather_existed() {
+        let bound = elementwise_tanh_op(10);
+        let kernel = emit(&bound).expect("gather-free elementwise emits");
         assert!(
             !kernel.entry.contains("_g"),
             "a gather-free kernel's name must not grow a gather suffix"
@@ -1044,8 +1080,8 @@ mod tests {
         assert_eq!(
             kernel.bindings,
             vec![
-                Binding::Input(nest.operands[0].0),
-                Binding::Output(nest.node),
+                Binding::Input(bound.operands()[0].0),
+                Binding::Output(bound.node),
                 Binding::Uniforms,
             ],
             "gather-free bindings are unchanged: input, output, uniforms — no fault buffer"
@@ -1053,16 +1089,16 @@ mod tests {
     }
 
     #[test]
-    fn elementwise_nest_emits_one_input_one_output_and_a_matching_grid() {
-        let nest = elementwise_tanh_nest(10);
-        let kernel = emit(&nest).expect("elementwise emits");
+    fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
+        let bound = elementwise_tanh_op(10);
+        let kernel = emit(&bound).expect("elementwise emits");
 
         assert_eq!(kernel.entry, "omega_elementwise_r1_n1_tanh");
         assert_eq!(
             kernel.bindings,
             vec![
-                Binding::Input(nest.operands[0].0),
-                Binding::Output(nest.node),
+                Binding::Input(bound.operands()[0].0),
+                Binding::Output(bound.node),
                 Binding::Uniforms
             ]
         );
@@ -1076,13 +1112,13 @@ mod tests {
     }
 
     #[test]
-    fn fused_matmul_nest_emits_two_inputs_a_reduction_loop_and_a_row_by_col_grid() {
-        let nest = matmul_nest(4, 3, 5);
+    fn fused_matmul_op_emits_two_inputs_a_reduction_loop_and_a_row_by_col_grid() {
+        let bound = matmul_op(4, 3, 5);
         assert!(
-            nest.reduction.is_some(),
-            "zip must have fused into the fold"
+            matches!(bound.kind, BoundOpKind::Reduce { .. }),
+            "the elementwise op must have fused into the reduce"
         );
-        let kernel = emit(&nest).expect("matmul emits");
+        let kernel = emit(&bound).expect("matmul emits");
 
         assert_eq!(kernel.entry, "omega_reduce_r3_n2_multiply_add_zero");
         assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
@@ -1100,9 +1136,9 @@ mod tests {
     }
 
     #[test]
-    fn cumsum_nest_emits_a_scan_kernel_with_one_thread_per_line() {
-        let nest = cumsum_nest(8);
-        let kernel = emit(&nest).expect("cumsum emits");
+    fn cumsum_op_emits_a_scan_kernel_with_one_thread_per_line() {
+        let bound = cumsum_op(8);
+        let kernel = emit(&bound).expect("cumsum emits");
 
         assert_eq!(kernel.entry, "omega_scan_r1_n1_identity_add_zero");
         assert!(kernel.source.contains("inner_len"));
@@ -1115,16 +1151,16 @@ mod tests {
 
     #[test]
     fn emit_is_deterministic_byte_equal() {
-        let nest = matmul_nest(4, 3, 5);
-        let first = emit(&nest).expect("first emit succeeds");
-        let second = emit(&nest).expect("second emit succeeds");
+        let bound = matmul_op(4, 3, 5);
+        let first = emit(&bound).expect("first emit succeeds");
+        let second = emit(&bound).expect("second emit succeeds");
         assert_eq!(first, second);
     }
 
     #[test]
     fn same_structure_different_extents_yield_identical_source_but_different_grid() {
-        let small = elementwise_tanh_nest(4);
-        let large = elementwise_tanh_nest(4096);
+        let small = elementwise_tanh_op(4);
+        let large = elementwise_tanh_op(4096);
 
         let small_kernel = emit(&small).expect("small emits");
         let large_kernel = emit(&large).expect("large emits");
@@ -1135,22 +1171,24 @@ mod tests {
     }
 
     #[test]
-    fn an_arity_mismatched_nest_is_rejected() {
-        let mut nest = elementwise_tanh_nest(4);
-        nest.body = ScalarOp::Add; // arity 2, but the nest still carries 1 operand
+    fn an_arity_mismatched_op_is_rejected() {
+        let mut bound = elementwise_tanh_op(4);
+        if let BoundOpKind::Elementwise { op, .. } = &mut bound.kind {
+            *op = ScalarOp::Add; // arity 2, but the op still carries 1 operand
+        }
 
-        let error = emit(&nest).expect_err("mismatched arity is rejected");
+        let error = emit(&bound).expect_err("mismatched arity is rejected");
         assert!(matches!(error, EmitError::ArityMismatch { .. }), "{error}");
     }
 
     #[test]
     fn a_select_reduction_body_is_rejected() {
-        let mut nest = matmul_nest(4, 3, 5);
-        if let Some(reduction) = nest.reduction.as_mut() {
-            reduction.body = ScalarOp::Select;
+        let mut bound = matmul_op(4, 3, 5);
+        if let BoundOpKind::Reduce { reduce_op, .. } = &mut bound.kind {
+            *reduce_op = ScalarOp::Select;
         }
 
-        let error = emit(&nest).expect_err("select reduction body is rejected");
+        let error = emit(&bound).expect_err("select reduction body is rejected");
         assert!(
             matches!(error, EmitError::ReductionBodyIsSelect { .. }),
             "{error}"
@@ -1158,14 +1196,14 @@ mod tests {
     }
 
     #[test]
-    fn a_keep_all_scan_over_zero_dims_is_rejected() {
-        let mut nest = cumsum_nest(8);
-        nest.extents.clear();
-        if let Some(reduction) = nest.reduction.as_mut() {
-            reduction.output_dims.clear();
+    fn a_keep_scan_over_zero_axes_is_rejected() {
+        let mut bound = cumsum_op(8);
+        bound.extents.clear();
+        if let BoundOpKind::Reduce { output_axes, .. } = &mut bound.kind {
+            output_axes.clear();
         }
 
-        let error = emit(&nest).expect_err("an empty scan is rejected");
+        let error = emit(&bound).expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
     }
 }

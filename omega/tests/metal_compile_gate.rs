@@ -11,15 +11,15 @@
 use std::process::Command;
 
 use proxima_tensor::{
-    AffineTerm, DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp, append, infer,
-    lower, map,
+    AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
+    map,
 };
 
 fn elementwise_tanh_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let source = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(64)],
             name: None,
@@ -27,7 +27,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     );
     append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Tanh,
             operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
@@ -35,7 +35,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
-    let nests = lower(&program, &shapes, &[]).expect("elementwise lowers");
+    let nests = bind(&program, &shapes, &[]).expect("elementwise lowers");
     omega::emit(&nests[0]).expect("elementwise emits")
 }
 
@@ -43,7 +43,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let lhs = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(4), Extent::Static(3)],
             name: None,
@@ -51,7 +51,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     );
     let rhs = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(3), Extent::Static(5)],
             name: None,
@@ -59,7 +59,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     );
     let product = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: vec![
@@ -71,19 +71,19 @@ fn fused_matmul_kernel() -> omega::Kernel {
     );
     append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: product,
             in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
             out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: Some("matmul".into()),
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    let nests = lower(&program, &shapes, &[]).expect("matmul lowers");
+    let nests = bind(&program, &shapes, &[]).expect("matmul lowers");
     omega::emit(&nests[0]).expect("matmul emits")
 }
 
@@ -91,7 +91,7 @@ fn cumsum_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let source = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(16)],
             name: None,
@@ -99,19 +99,19 @@ fn cumsum_kernel() -> omega::Kernel {
     );
     append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: source,
             in_map: IndexMap::Affine(map::projection(1, &[0])),
             out_map: IndexMap::Affine(map::projection(1, &[0])),
-            keep: Keep::All,
+            keep: Keep::Scan,
             name: None,
         }),
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
-    let nests = lower(&program, &shapes, &[]).expect("cumsum lowers");
+    let nests = bind(&program, &shapes, &[]).expect("cumsum lowers");
     omega::emit(&nests[0]).expect("cumsum emits")
 }
 
@@ -120,7 +120,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let table = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(1000), Extent::Static(8)],
             name: None,
@@ -128,7 +128,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     );
     let ids = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Int32,
             shape: vec![Extent::Static(4)],
             name: None,
@@ -137,12 +137,12 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     let gathered_map = IndexMap::Computed {
         indices: ids,
         index_map: map::projection(2, &[0]),
-        base: map::AffineMap {
+        base: map::IndexPattern {
             iter_rank: 2,
-            dims: vec![
-                map::DimExpr::default(),
-                map::DimExpr {
-                    terms: vec![AffineTerm::projection(1)],
+            axes: vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: vec![AxisTerm::projection(1)],
                     offset: 0,
                 },
             ],
@@ -151,7 +151,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     };
     append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
@@ -159,7 +159,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
-    let nests = lower(&program, &shapes, &[]).expect("embedding lookup lowers");
+    let nests = bind(&program, &shapes, &[]).expect("embedding lookup lowers");
     omega::emit(&nests[0]).expect("embedding lookup emits")
 }
 
@@ -168,7 +168,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let table = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(1000), Extent::Static(6)],
             name: None,
@@ -176,7 +176,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     );
     let ids = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Int32,
             shape: vec![Extent::Static(4)],
             name: None,
@@ -184,7 +184,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     );
     let weight = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(6), Extent::Static(3)],
             name: None,
@@ -193,12 +193,12 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let gather_map = IndexMap::Computed {
         indices: ids,
         index_map: map::projection(3, &[0]),
-        base: map::AffineMap {
+        base: map::IndexPattern {
             iter_rank: 3,
-            dims: vec![
-                map::DimExpr::default(),
-                map::DimExpr {
-                    terms: vec![AffineTerm::projection(2)],
+            axes: vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: vec![AxisTerm::projection(2)],
                     offset: 0,
                 },
             ],
@@ -208,7 +208,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     let weight_map = IndexMap::Affine(map::projection(3, &[2, 1]));
     let product = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: vec![(table, gather_map), (weight, weight_map)],
@@ -217,19 +217,19 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     );
     append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: product,
             in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
             out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: Some("embedding_matmul".into()),
         }),
     );
     let shapes = infer(&program, &[]).expect("embedding matmul infers");
-    let nests = lower(&program, &shapes, &[]).expect("embedding matmul lowers");
+    let nests = bind(&program, &shapes, &[]).expect("embedding matmul lowers");
     omega::emit(&nests[0]).expect("embedding matmul emits")
 }
 

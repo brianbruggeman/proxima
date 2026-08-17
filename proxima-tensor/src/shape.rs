@@ -2,24 +2,25 @@
 //! only structural validation a program gets.
 //!
 //! A tensor program is not validated on construction the way the old arena
-//! was: [`Expr`] is just data. [`Infer`] is where "well-formed" is actually
-//! checked — backwards references, zip arity, the accumulator-widening rule,
-//! iteration-dim range, and the affine unification that resolves every
-//! extent. An `Expr` is fully judged the moment it is pushed.
+//! was: [`Op`] is just data. [`ShapeTable`] is where "well-formed" is
+//! actually checked — backwards references, elementwise arity, the
+//! accumulator-widening rule, iteration-axis range, and the affine
+//! unification that resolves every extent. An `Op` is fully judged the
+//! moment it is pushed.
 //!
-//! [`Infer`] is also this crate's sans-IO stance made concrete: a tensor
-//! program is something that can arrive a step at a time (a partition
-//! crossing a wire is a stream of `Expr`s; compiling overlaps transport), and
-//! `Infer` is the core that judges each step against everything before it,
-//! with no I/O of its own. [`infer`] is the batch case, three lines over the
-//! stream; `Infer` also implements
-//! [`Pipe`] directly (`In = Expr`,
-//! `Out = (Expr, Shapes)`) — the same core, not a second type wrapping it.
-//! [`Pipe::call`] takes `&self`, while judging a node is inherently a
-//! mutation, so `dtypes`/`shapes` below are `RefCell`s: the interior-
-//! mutability idiom `proxima_primitives::pipe::isolate`'s module doc names
-//! for runtime-owned `!Send` pipe state, applied to the state that was
-//! already here rather than to a wrapper around it.
+//! [`ShapeTable`] is also this crate's sans-IO stance made concrete: a
+//! tensor program is something that can arrive a step at a time (a
+//! partition crossing a wire is a stream of `Op`s; compiling overlaps
+//! transport), and `ShapeTable` is the core that judges each step against
+//! everything before it, with no I/O of its own. [`infer`] is the batch
+//! case, three lines over the stream; `ShapeTable` also implements [`Pipe`]
+//! directly (`In = Op`, `Out = (Op, Shapes)`) — the same core, not a
+//! second type wrapping it. [`Pipe::call`] takes `&self`, while judging a
+//! node is inherently a mutation, so `dtypes`/`shapes` below are
+//! `RefCell`s: the interior-mutability idiom
+//! `proxima_primitives::pipe::isolate`'s module doc names for runtime-owned
+//! `!Send` pipe state, applied to the state that was already here rather
+//! than to a wrapper around it.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -30,13 +31,13 @@ use proxima_primitives::pipe::Pipe;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
-use crate::expr::{Expr, Fold, Keep, NodeId, ScalarOp};
-use crate::map::{AffineMap, DimExpr, IndexMap};
+use crate::map::{AxisIndex, IndexMap, IndexPattern};
+use crate::op::{Keep, NodeId, Op, Reduce, ScalarOp};
 
 /// The largest integer an f32 can represent exactly — its 24-bit mantissa's
 /// width. Gather indices ride in f32 buffers (see
 /// [`IndexMap::Computed`](crate::map::IndexMap::Computed) and `cpu.rs`'s
-/// module docs), so a gathered dim wider than this could silently address
+/// module docs), so a gathered axis wider than this could silently address
 /// the wrong row once an index value loses precision.
 const GATHER_EXTENT_EXACT_FLOAT_LIMIT: u64 = 1 << 24;
 
@@ -50,10 +51,10 @@ pub struct Shapes {
 impl Shapes {
     /// The resolved output shape of `node`.
     ///
-    /// Panics if `node` was never pushed to the [`Infer`] that built this
-    /// `Shapes` — every valid `NodeId` a program can produce was, by the
-    /// backwards-reference rule, resolved before anything that could ask for
-    /// it.
+    /// Panics if `node` was never pushed to the [`ShapeTable`] that built
+    /// this `Shapes` — every valid `NodeId` a program can produce was, by
+    /// the backwards-reference rule, resolved before anything that could
+    /// ask for it.
     #[must_use]
     pub fn of(&self, node: NodeId) -> &[u64] {
         &self.extents[node.0 as usize]
@@ -65,13 +66,13 @@ impl Shapes {
 }
 
 /// The prefix state of shape inference: every node judged so far.
-pub struct Infer {
+pub struct ShapeTable {
     symbols: Vec<u64>,
     dtypes: RefCell<Vec<DType>>,
     shapes: RefCell<Shapes>,
 }
 
-impl Infer {
+impl ShapeTable {
     #[must_use]
     pub fn new(symbols: &[u64]) -> Self {
         Self {
@@ -82,12 +83,14 @@ impl Infer {
     }
 
     /// Judge one expression against everything pushed before it.
-    pub fn push(&self, expr: &Expr) -> Result<(), TensorError> {
+    pub fn push(&self, expr: &Op) -> Result<(), TensorError> {
         let node = NodeId(self.shapes.borrow().extents.len() as u32);
         let resolved = match expr {
-            Expr::Block { shape, .. } => resolve_block_shape(shape, &self.symbols)?,
-            Expr::Zip { body, operands, .. } => self.infer_zip(node, *body, operands)?,
-            Expr::Fold(fold) => self.infer_fold(node, fold)?,
+            Op::Input { shape, .. } => resolve_leaf_shape(shape, &self.symbols)?,
+            Op::Elementwise { body, operands, .. } => {
+                self.infer_elementwise(node, *body, operands)?
+            }
+            Op::Reduce(reduce) => self.infer_reduce(node, reduce)?,
         };
         self.dtypes.borrow_mut().push(expr.dtype());
         self.shapes.borrow_mut().push(resolved);
@@ -105,14 +108,14 @@ impl Infer {
         self.shapes.into_inner()
     }
 
-    fn infer_zip(
+    fn infer_elementwise(
         &self,
         here: NodeId,
         body: ScalarOp,
         operands: &[(NodeId, IndexMap)],
     ) -> Result<Vec<u64>, TensorError> {
         if operands.is_empty() {
-            return Err(TensorError::EmptyZip(here));
+            return Err(TensorError::EmptyElementwise(here));
         }
         if operands.len() != body.arity() {
             return Err(TensorError::ArityMismatch {
@@ -137,35 +140,35 @@ impl Infer {
         self.unify_iteration_space(here, iter_rank, &refs)
     }
 
-    fn infer_fold(&self, here: NodeId, fold: &Fold) -> Result<Vec<u64>, TensorError> {
-        check_backward(here, fold.operand)?;
-        check_map(here, &fold.in_map)?;
-        check_map(here, &fold.out_map)?;
-        self.check_indices_dtype(here, &fold.in_map)?;
-        self.check_gather_extent(here, fold.operand, &fold.in_map)?;
+    fn infer_reduce(&self, here: NodeId, reduce: &Reduce) -> Result<Vec<u64>, TensorError> {
+        check_backward(here, reduce.operand)?;
+        check_map(here, &reduce.in_map)?;
+        check_map(here, &reduce.out_map)?;
+        self.check_indices_dtype(here, &reduce.in_map)?;
+        self.check_gather_extent(here, reduce.operand, &reduce.in_map)?;
 
-        if fold.body.is_associative() && !fold.dtype.accumulates_in_place() {
+        if reduce.body.is_associative() && !reduce.dtype.accumulates_in_place() {
             return Err(TensorError::NarrowAccumulator {
                 node: here,
-                element: self.dtypes.borrow()[fold.operand.0 as usize],
-                accumulator: fold.dtype,
+                element: self.dtypes.borrow()[reduce.operand.0 as usize],
+                accumulator: reduce.dtype,
             });
         }
 
-        let iter_rank = combined_iter_rank(&fold.in_map);
+        let iter_rank = combined_iter_rank(&reduce.in_map);
         let iter_extents =
-            self.unify_iteration_space(here, iter_rank, &[(fold.operand, &fold.in_map)])?;
+            self.unify_iteration_space(here, iter_rank, &[(reduce.operand, &reduce.in_map)])?;
 
-        if fold.out_map.is_data_dependent() {
+        if reduce.out_map.is_data_dependent() {
             return Err(TensorError::NotLowerable {
                 node: here,
-                reason: "scatter (a data-dependent fold output) is not shape-inferable in v1",
+                reason: "scatter (a data-dependent reduce output) is not shape-inferable in v1",
             });
         }
 
-        match fold.keep {
-            Keep::All => Ok(iter_extents),
-            Keep::Last => project_output_shape(here, &fold.out_map, &iter_extents),
+        match reduce.keep {
+            Keep::Scan => Ok(iter_extents),
+            Keep::Reduce => project_output_shape(here, &reduce.out_map, &iter_extents),
         }
     }
 
@@ -181,22 +184,22 @@ impl Infer {
 
         for entry in &refs {
             let operand_shape = shapes.of(entry.node);
-            for (dim_index, dim) in entry.map.dims.iter().enumerate() {
-                if entry.skip_dim == Some(dim_index as u16) {
+            for (axis_index, axis) in entry.pattern.axes.iter().enumerate() {
+                if entry.skip_axis == Some(axis_index as u16) {
                     continue;
                 }
-                if let [term] = dim.terms.as_slice()
+                if let [term] = axis.terms.as_slice()
                     && term.coeff == 1
                 {
-                    let extent = operand_shape[dim_index];
-                    let slot = &mut resolved[term.iter_dim as usize];
+                    let extent = operand_shape[axis_index];
+                    let slot = &mut resolved[term.axis as usize];
                     match *slot {
                         None => *slot = Some(extent),
                         Some(existing) if existing == extent => {}
                         Some(existing) => {
                             return Err(TensorError::ExtentMismatch {
                                 node: here,
-                                dim: term.iter_dim,
+                                dim: term.axis,
                                 left: existing,
                                 right: extent,
                             });
@@ -209,30 +212,30 @@ impl Infer {
         let extents: Vec<u64> = resolved
             .into_iter()
             .enumerate()
-            .map(|(dim, extent)| {
+            .map(|(axis, extent)| {
                 extent.ok_or(TensorError::UnconstrainedDim {
                     node: here,
-                    dim: dim as u16,
+                    dim: axis as u16,
                 })
             })
             .collect::<Result<_, _>>()?;
 
         for entry in &refs {
             let operand_shape = shapes.of(entry.node);
-            for (dim_index, dim) in entry.map.dims.iter().enumerate() {
-                if entry.skip_dim == Some(dim_index as u16) {
+            for (axis_index, axis) in entry.pattern.axes.iter().enumerate() {
+                if entry.skip_axis == Some(axis_index as u16) {
                     continue;
                 }
-                let is_pure_projection = matches!(dim.terms.as_slice(), [term] if term.coeff == 1);
+                let is_pure_projection = matches!(axis.terms.as_slice(), [term] if term.coeff == 1);
                 if is_pure_projection {
                     continue;
                 }
                 bounds_check(
                     here,
-                    dim_index as u16,
-                    dim,
+                    axis_index as u16,
+                    axis,
                     &extents,
-                    operand_shape[dim_index],
+                    operand_shape[axis_index],
                 )?;
             }
         }
@@ -272,21 +275,22 @@ impl Infer {
     }
 }
 
-/// `In = Out = Expr`, the observe form: an expression is fully judged the
-/// moment [`Infer::push`] resolves it, and the same `Expr` is handed back
-/// unchanged, paired with a snapshot of every shape known so far. The pair
-/// (not `Out = ()` or a bare resolved shape) is what lets a downstream stage
-/// ([`crate::nest::Lower`]'s own `Pipe` impl) compose with `.and_then`:
-/// lowering needs both the `Expr` just judged *and* the accumulated
-/// [`Shapes`] to build its `Nest`, and `AndThen` requires `Second::In =
-/// First::Out`, so both travel together in this one `Out` rather than one of
-/// them being reconstructed by a shared handle on the other side.
-impl Pipe for Infer {
-    type In = Expr;
-    type Out = (Expr, Shapes);
+/// `In = Out = Op`, the observe form: an expression is fully judged the
+/// moment [`ShapeTable::push`] resolves it, and the same `Op` is handed
+/// back unchanged, paired with a snapshot of every shape known so far. The
+/// pair (not `Out = ()` or a bare resolved shape) is what lets a downstream
+/// stage ([`crate::bind::BoundOpBuilder`]'s own `Pipe` impl) compose with
+/// `.and_then`: op building needs both the `Op` just judged *and* the
+/// accumulated [`Shapes`] to build its [`crate::bind::BoundOp`], and `AndThen`
+/// requires `Second::In = First::Out`, so both travel together in this one
+/// `Out` rather than one of them being reconstructed by a shared handle on
+/// the other side.
+impl Pipe for ShapeTable {
+    type In = Op;
+    type Out = (Op, Shapes);
     type Err = TensorError;
 
-    fn call(&self, input: Expr) -> impl Future<Output = Result<(Expr, Shapes), TensorError>> {
+    fn call(&self, input: Op) -> impl Future<Output = Result<(Op, Shapes), TensorError>> {
         async move {
             self.push(&input)?;
             let shapes = self.shapes();
@@ -295,26 +299,26 @@ impl Pipe for Infer {
     }
 }
 
-/// One [`AffineMap`] reference flattened out of an [`IndexMap`]: `Affine`
+/// One [`IndexPattern`] reference flattened out of an [`IndexMap`]: `Affine`
 /// contributes one, `Computed` contributes two — `index_map` (addressing the
-/// `indices` tensor) and `base` (addressing the operand, with `skip_dim`
-/// marking the dim the fetch supplies instead of iteration). Unifying and
+/// `indices` tensor) and `base` (addressing the operand, with `skip_axis`
+/// marking the axis the fetch supplies instead of iteration). Unifying and
 /// bounds-checking both `Affine` and `Computed` operands is then one loop
 /// over this flat list rather than two special cases.
 struct MapRef<'a> {
     node: NodeId,
-    map: &'a AffineMap,
-    skip_dim: Option<u16>,
+    pattern: &'a IndexPattern,
+    skip_axis: Option<u16>,
 }
 
 fn flatten_operand_maps<'a>(operands: &[(NodeId, &'a IndexMap)]) -> Vec<MapRef<'a>> {
     let mut refs = Vec::with_capacity(operands.len());
     for (node, map) in operands {
         match map {
-            IndexMap::Affine(affine) => refs.push(MapRef {
+            IndexMap::Affine(pattern) => refs.push(MapRef {
                 node: *node,
-                map: affine,
-                skip_dim: None,
+                pattern,
+                skip_axis: None,
             }),
             IndexMap::Computed {
                 indices,
@@ -324,13 +328,13 @@ fn flatten_operand_maps<'a>(operands: &[(NodeId, &'a IndexMap)]) -> Vec<MapRef<'
             } => {
                 refs.push(MapRef {
                     node: *indices,
-                    map: index_map,
-                    skip_dim: None,
+                    pattern: index_map,
+                    skip_axis: None,
                 });
                 refs.push(MapRef {
                     node: *node,
-                    map: base,
-                    skip_dim: Some(*gathered_dim),
+                    pattern: base,
+                    skip_axis: Some(*gathered_dim),
                 });
             }
         }
@@ -339,12 +343,12 @@ fn flatten_operand_maps<'a>(operands: &[(NodeId, &'a IndexMap)]) -> Vec<MapRef<'
 }
 
 /// The widest iteration rank a map touches: `Affine` only ever names one
-/// [`AffineMap`], but `Computed` names two (`index_map` and `base`), both
+/// [`IndexPattern`], but `Computed` names two (`index_map` and `base`), both
 /// drawn from the same iteration space, so both must be considered when an
 /// iteration space's rank is derived from its operands.
 fn combined_iter_rank(map: &IndexMap) -> u16 {
     match map {
-        IndexMap::Affine(affine) => affine.iter_rank,
+        IndexMap::Affine(pattern) => pattern.iter_rank,
         IndexMap::Computed {
             index_map, base, ..
         } => index_map.iter_rank.max(base.iter_rank),
@@ -363,7 +367,7 @@ fn check_backward(here: NodeId, referenced: NodeId) -> Result<(), TensorError> {
 
 fn check_map(here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
     match map {
-        IndexMap::Affine(affine) => check_affine_dims(here, affine),
+        IndexMap::Affine(pattern) => check_pattern_axes(here, pattern),
         IndexMap::Computed {
             indices,
             index_map,
@@ -371,9 +375,9 @@ fn check_map(here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
             gathered_dim,
         } => {
             check_backward(here, *indices)?;
-            check_affine_dims(here, index_map)?;
-            check_affine_dims(here, base)?;
-            if *gathered_dim as usize >= base.dims.len() {
+            check_pattern_axes(here, index_map)?;
+            check_pattern_axes(here, base)?;
+            if *gathered_dim as usize >= base.axes.len() {
                 return Err(TensorError::GatheredDimOutOfRange {
                     node: here,
                     dim: *gathered_dim,
@@ -384,13 +388,13 @@ fn check_map(here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
     }
 }
 
-fn check_affine_dims(here: NodeId, affine: &AffineMap) -> Result<(), TensorError> {
-    for dim in &affine.dims {
-        for term in &dim.terms {
-            if term.iter_dim >= affine.iter_rank {
+fn check_pattern_axes(here: NodeId, pattern: &IndexPattern) -> Result<(), TensorError> {
+    for axis in &pattern.axes {
+        for term in &axis.terms {
+            if term.axis >= pattern.iter_rank {
                 return Err(TensorError::IterDimOutOfRange {
                     node: here,
-                    dim: term.iter_dim,
+                    dim: term.axis,
                 });
             }
         }
@@ -400,15 +404,15 @@ fn check_affine_dims(here: NodeId, affine: &AffineMap) -> Result<(), TensorError
 
 fn bounds_check(
     here: NodeId,
-    dim_index: u16,
-    dim: &DimExpr,
+    axis_index: u16,
+    axis: &AxisIndex,
     extents: &[u64],
     operand_extent: u64,
 ) -> Result<(), TensorError> {
-    let mut max_index = i64::from(dim.offset);
-    let mut min_index = i64::from(dim.offset);
-    for term in &dim.terms {
-        let extent = extents[term.iter_dim as usize];
+    let mut max_index = i64::from(axis.offset);
+    let mut min_index = i64::from(axis.offset);
+    for term in &axis.terms {
+        let extent = extents[term.axis as usize];
         let max_step = extent.saturating_sub(1) as i64;
         let coeff = i64::from(term.coeff);
         if coeff >= 0 {
@@ -420,7 +424,7 @@ fn bounds_check(
     if min_index < 0 || max_index >= operand_extent as i64 {
         return Err(TensorError::IndexOutOfBounds {
             node: here,
-            dim: dim_index,
+            dim: axis_index,
         });
     }
     Ok(())
@@ -433,27 +437,27 @@ fn project_output_shape(
 ) -> Result<Vec<u64>, TensorError> {
     out_map
         .affine()
-        .dims
+        .axes
         .iter()
-        .map(|dim| match dim.terms.as_slice() {
-            [term] if term.coeff == 1 => Ok(iter_extents[term.iter_dim as usize]),
+        .map(|axis| match axis.terms.as_slice() {
+            [term] if term.coeff == 1 => Ok(iter_extents[term.axis as usize]),
             _ => Err(TensorError::NotLowerable {
                 node: here,
-                reason: "fold output maps must be pure projections in v1",
+                reason: "reduce output maps must be pure projections in v1",
             }),
         })
         .collect()
 }
 
-fn resolve_block_shape(
-    shape: &[crate::expr::Extent],
+fn resolve_leaf_shape(
+    shape: &[crate::op::Extent],
     symbols: &[u64],
 ) -> Result<Vec<u64>, TensorError> {
     shape
         .iter()
         .map(|extent| match extent {
-            crate::expr::Extent::Static(size) => Ok(u64::from(*size)),
-            crate::expr::Extent::Symbolic(symbol) => symbols
+            crate::op::Extent::Static(size) => Ok(u64::from(*size)),
+            crate::op::Extent::Symbolic(symbol) => symbols
                 .get(*symbol as usize)
                 .copied()
                 .ok_or(TensorError::UnboundSymbol { symbol: *symbol }),
@@ -461,25 +465,25 @@ fn resolve_block_shape(
         .collect()
 }
 
-/// The full iteration-space extents a [`Fold`] walks, re-derived from an
+/// The full iteration-space extents a [`Reduce`] walks, re-derived from an
 /// already-resolved [`Shapes`].
 ///
-/// [`Infer`] discards this once it has projected a fold's *output* shape
-/// (smaller than the iteration space for `Keep::Last`), but
-/// [`nest::lower`](crate::nest::lower) needs the full space back to size its
-/// loop nest. Re-deriving is a handful of lines over data [`Infer`] already
-/// proved valid, versus a second parallel store on [`Shapes`] whose only
-/// consumer is lowering.
+/// [`ShapeTable`] discards this once it has projected a reduce's *output*
+/// shape (smaller than the iteration space for `Keep::Reduce`), but
+/// [`bind::bind`](crate::bind::bind) needs the full space back to size its loop.
+/// Re-deriving is a handful of lines over data [`ShapeTable`] already proved
+/// valid, versus a second parallel store on [`Shapes`] whose only consumer
+/// is op building.
 #[must_use]
-pub(crate) fn fold_iteration_extents(fold: &Fold, shapes: &Shapes) -> Vec<u64> {
-    let affine = fold.in_map.affine();
-    let mut resolved = vec![0u64; affine.iter_rank as usize];
-    let operand_shape = shapes.of(fold.operand);
-    for (dim_index, dim) in affine.dims.iter().enumerate() {
-        if let [term] = dim.terms.as_slice()
+pub(crate) fn fold_iteration_extents(reduce: &Reduce, shapes: &Shapes) -> Vec<u64> {
+    let pattern = reduce.in_map.affine();
+    let mut resolved = vec![0u64; pattern.iter_rank as usize];
+    let operand_shape = shapes.of(reduce.operand);
+    for (axis_index, axis) in pattern.axes.iter().enumerate() {
+        if let [term] = axis.terms.as_slice()
             && term.coeff == 1
         {
-            resolved[term.iter_dim as usize] = operand_shape[dim_index];
+            resolved[term.axis as usize] = operand_shape[axis_index];
         }
     }
     resolved
@@ -487,8 +491,8 @@ pub(crate) fn fold_iteration_extents(fold: &Fold, shapes: &Shapes) -> Vec<u64> {
 
 /// Batch driver: `new` / `push` each expression / `finish`, over the whole
 /// program at once.
-pub fn infer(program: &[Expr], symbols: &[u64]) -> Result<Shapes, TensorError> {
-    let inference = Infer::new(symbols);
+pub fn infer(program: &[Op], symbols: &[u64]) -> Result<Shapes, TensorError> {
+    let inference = ShapeTable::new(symbols);
     for expr in program {
         inference.push(expr)?;
     }
@@ -500,14 +504,14 @@ pub fn infer(program: &[Expr], symbols: &[u64]) -> Result<Shapes, TensorError> {
 mod tests {
     use super::*;
     use crate::dtype::DType;
-    use crate::expr::{Extent, FoldInit, ScalarOp, append};
-    use crate::map::{self, AffineTerm};
+    use crate::map::{self, AxisTerm};
+    use crate::op::{Extent, ReduceInit, ScalarOp, append};
     use rstest::rstest;
 
-    fn block(program: &mut Vec<Expr>, shape: &[Extent]) -> NodeId {
+    fn leaf(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
         append(
             program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: shape.to_vec(),
                 name: None,
@@ -515,16 +519,16 @@ mod tests {
         )
     }
 
-    fn matmul_program() -> (Vec<Expr>, NodeId, NodeId) {
+    fn matmul_program() -> (Vec<Op>, NodeId, NodeId) {
         let mut program = Vec::new();
-        let lhs = block(&mut program, &[Extent::Symbolic(0), Extent::Static(768)]);
-        let rhs = block(&mut program, &[Extent::Static(768), Extent::Static(3072)]);
+        let lhs = leaf(&mut program, &[Extent::Symbolic(0), Extent::Static(768)]);
+        let rhs = leaf(&mut program, &[Extent::Static(768), Extent::Static(3072)]);
 
         let lhs_map = IndexMap::Affine(map::projection(3, &[0, 2]));
         let rhs_map = IndexMap::Affine(map::projection(3, &[2, 1]));
         let product = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![(lhs, lhs_map), (rhs, rhs_map)],
@@ -534,14 +538,14 @@ mod tests {
 
         let sum = append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: product,
                 in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
                 out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: Some("matmul".into()),
             }),
         );
@@ -558,13 +562,13 @@ mod tests {
     #[test]
     fn a_broadcast_bias_add_resolves_the_wider_shape() {
         let mut program = Vec::new();
-        let matrix = block(&mut program, &[Extent::Static(4), Extent::Static(8)]);
-        let bias = block(&mut program, &[Extent::Static(8)]);
+        let matrix = leaf(&mut program, &[Extent::Static(4), Extent::Static(8)]);
+        let bias = leaf(&mut program, &[Extent::Static(8)]);
         let matrix_map = IndexMap::Affine(map::projection(2, &[0, 1]));
         let bias_map = IndexMap::Affine(map::projection(2, &[1]));
         let sum = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![(matrix, matrix_map), (bias, bias_map)],
@@ -579,11 +583,11 @@ mod tests {
     #[test]
     fn transpose_reads_the_permuted_shape() {
         let mut program = Vec::new();
-        let matrix = block(&mut program, &[Extent::Static(3), Extent::Static(5)]);
+        let matrix = leaf(&mut program, &[Extent::Static(3), Extent::Static(5)]);
         let transposed_map = IndexMap::Affine(map::projection(2, &[1, 0]));
         let transposed = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(matrix, transposed_map)],
@@ -598,17 +602,17 @@ mod tests {
     #[test]
     fn a_conv_window_within_bounds_infers() {
         let mut program = Vec::new();
-        let anchor = block(&mut program, &[Extent::Static(4), Extent::Static(2)]);
-        let signal = block(&mut program, &[Extent::Static(8)]);
+        let anchor = leaf(&mut program, &[Extent::Static(4), Extent::Static(2)]);
+        let signal = leaf(&mut program, &[Extent::Static(8)]);
         let anchor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
         // out[h, r] reads in[h*2 + r], h in 0..4, r in 0..2: max index 3*2+1=7 < 8.
         let window = IndexMap::Affine(map::affine(
             2,
-            &[(&[AffineTerm::scaled(0, 2), AffineTerm::scaled(1, 1)], 0)],
+            &[(&[AxisTerm::scaled(0, 2), AxisTerm::scaled(1, 1)], 0)],
         ));
         let touched = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![(anchor, anchor_map), (signal, window)],
@@ -623,18 +627,18 @@ mod tests {
     #[test]
     fn a_conv_window_that_exceeds_bounds_is_rejected() {
         let mut program = Vec::new();
-        let signal = block(&mut program, &[Extent::Static(8)]);
-        let anchor = block(&mut program, &[Extent::Static(4), Extent::Static(2)]);
+        let signal = leaf(&mut program, &[Extent::Static(8)]);
+        let anchor = leaf(&mut program, &[Extent::Static(4), Extent::Static(2)]);
         let anchor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
         // out[h] reads in[h*2 + r], h in 0..4, r in 0..2: max index 3*2+1=7,
         // but a +2 offset pushes the top read to 9, past the extent of 8.
         let window = IndexMap::Affine(map::affine(
             2,
-            &[(&[AffineTerm::scaled(0, 2), AffineTerm::scaled(1, 1)], 2)],
+            &[(&[AxisTerm::scaled(0, 2), AxisTerm::scaled(1, 1)], 2)],
         ));
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![(anchor, anchor_map), (signal, window)],
@@ -652,13 +656,13 @@ mod tests {
     #[test]
     fn disagreeing_operand_extents_are_rejected() {
         let mut program = Vec::new();
-        let left = block(&mut program, &[Extent::Static(4)]);
-        let right = block(&mut program, &[Extent::Static(5)]);
+        let left = leaf(&mut program, &[Extent::Static(4)]);
+        let right = leaf(&mut program, &[Extent::Static(5)]);
         let left_map = IndexMap::Affine(map::projection(1, &[0]));
         let right_map = IndexMap::Affine(map::projection(1, &[0]));
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![(left, left_map), (right, right_map)],
@@ -676,7 +680,7 @@ mod tests {
     #[test]
     fn an_unbound_symbol_is_rejected() {
         let mut program = Vec::new();
-        block(&mut program, &[Extent::Symbolic(0)]);
+        leaf(&mut program, &[Extent::Symbolic(0)]);
 
         let error = infer(&program, &[]).expect_err("no symbols supplied");
         assert!(
@@ -688,12 +692,12 @@ mod tests {
     #[test]
     fn an_unconstrained_iteration_dim_is_rejected() {
         let mut program = Vec::new();
-        let source = block(&mut program, &[Extent::Static(4)]);
-        // iter_rank 2, but only dim 0 is ever addressed by a pure projection.
+        let source = leaf(&mut program, &[Extent::Static(4)]);
+        // iter_rank 2, but only axis 0 is ever addressed by a pure projection.
         let map = IndexMap::Affine(map::projection(2, &[0]));
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(source, map)],
@@ -701,7 +705,7 @@ mod tests {
             },
         );
 
-        let error = infer(&program, &[]).expect_err("dim 1 is never constrained");
+        let error = infer(&program, &[]).expect_err("axis 1 is never constrained");
         assert!(
             matches!(error, TensorError::UnconstrainedDim { .. }),
             "{error}"
@@ -711,19 +715,19 @@ mod tests {
     #[test]
     fn scan_output_shape_equals_the_input_shape() {
         let mut program = Vec::new();
-        let source = block(&mut program, &[Extent::Static(16)]);
+        let source = leaf(&mut program, &[Extent::Static(16)]);
         let in_map = IndexMap::Affine(map::projection(1, &[0]));
         let out_map = IndexMap::Affine(map::projection(1, &[0]));
         let scanned = append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: source,
                 in_map,
                 out_map,
-                keep: Keep::All,
+                keep: Keep::Scan,
                 name: None,
             }),
         );
@@ -735,19 +739,19 @@ mod tests {
     #[test]
     fn reduce_output_shape_drops_the_contracted_dim() {
         let mut program = Vec::new();
-        let source = block(&mut program, &[Extent::Static(4), Extent::Static(16)]);
+        let source = leaf(&mut program, &[Extent::Static(4), Extent::Static(16)]);
         let in_map = IndexMap::Affine(map::projection(2, &[0, 1]));
         let out_map = IndexMap::Affine(map::projection(2, &[0]));
         let reduced = append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: source,
                 in_map,
                 out_map,
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: None,
             }),
         );
@@ -761,11 +765,11 @@ mod tests {
     #[case::self_reference(NodeId(1))]
     fn a_non_backward_reference_is_rejected(#[case] referenced: NodeId) {
         let mut program = Vec::new();
-        block(&mut program, &[Extent::Static(4)]);
+        leaf(&mut program, &[Extent::Static(4)]);
         let map = IndexMap::Affine(map::projection(1, &[0]));
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(referenced, map)],
@@ -786,21 +790,21 @@ mod tests {
     #[test]
     fn a_bad_expr_is_rejected_at_push_time_not_at_finish() {
         let mut program = Vec::new();
-        block(&mut program, &[Extent::Static(4)]);
-        // an empty zip is malformed the instant it is pushed.
-        let bad = Expr::Zip {
+        leaf(&mut program, &[Extent::Static(4)]);
+        // an empty elementwise expression is malformed the instant it is pushed.
+        let bad = Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Add,
             operands: Vec::new(),
             name: None,
         };
 
-        let inference = Infer::new(&[]);
-        inference.push(&program[0]).expect("block pushes cleanly");
+        let inference = ShapeTable::new(&[]);
+        inference.push(&program[0]).expect("leaf pushes cleanly");
         let error = inference
             .push(&bad)
-            .expect_err("empty zip rejected at push");
-        assert!(matches!(error, TensorError::EmptyZip(_)), "{error}");
+            .expect_err("empty elementwise expression rejected at push");
+        assert!(matches!(error, TensorError::EmptyElementwise(_)), "{error}");
     }
 
     #[test]
@@ -809,7 +813,7 @@ mod tests {
 
         let batch = infer(&program, &[512]).expect("batch infers");
 
-        let streamed = Infer::new(&[512]);
+        let streamed = ShapeTable::new(&[512]);
         for expr in &program {
             streamed.push(expr).expect("streamed push succeeds");
         }
@@ -823,7 +827,7 @@ mod tests {
         let mut program = Vec::new();
         let quantized = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Int8,
                 shape: alloc::vec![Extent::Static(64)],
                 name: None,
@@ -833,14 +837,14 @@ mod tests {
         let out_map = IndexMap::Affine(map::projection(1, &[]));
         append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Int8,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: quantized,
                 in_map,
                 out_map,
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: None,
             }),
         );
@@ -853,15 +857,15 @@ mod tests {
     }
 
     /// `table[ids[s], d]` over iteration space `(s, d)`: `ids` selects
-    /// `table`'s dim 0 (vocab), `d` is a plain projection onto `table`'s
-    /// dim 1 (feature). The worked example `map.rs` and this module's own
+    /// `table`'s axis 0 (vocab), `d` is a plain projection onto `table`'s
+    /// axis 1 (feature). The worked example `map.rs` and this module's own
     /// docs both describe.
-    fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Expr>, NodeId, NodeId) {
+    fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId, NodeId) {
         let mut program = Vec::new();
-        let table = block(&mut program, &[Extent::Static(vocab), Extent::Static(dim)]);
+        let table = leaf(&mut program, &[Extent::Static(vocab), Extent::Static(dim)]);
         let ids = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Int32,
                 shape: alloc::vec![Extent::Static(seq)],
                 name: None,
@@ -870,12 +874,12 @@ mod tests {
         let gathered_map = IndexMap::Computed {
             indices: ids,
             index_map: map::projection(2, &[0]),
-            base: map::AffineMap {
+            base: map::IndexPattern {
                 iter_rank: 2,
-                dims: alloc::vec![
-                    map::DimExpr::default(),
-                    map::DimExpr {
-                        terms: alloc::vec![AffineTerm::projection(1)],
+                axes: alloc::vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: alloc::vec![AxisTerm::projection(1)],
                         offset: 0,
                     },
                 ],
@@ -884,7 +888,7 @@ mod tests {
         };
         let gathered = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(table, gathered_map)],
@@ -901,9 +905,9 @@ mod tests {
         IndexMap::Computed {
             indices,
             index_map: map::projection(1, &[0]),
-            base: map::AffineMap {
+            base: map::IndexPattern {
                 iter_rank: 1,
-                dims: alloc::vec![map::DimExpr::default()],
+                axes: alloc::vec![map::AxisIndex::default()],
             },
             gathered_dim: 0,
         }
@@ -944,11 +948,11 @@ mod tests {
     #[test]
     fn non_integer_gather_indices_are_rejected() {
         let mut program = Vec::new();
-        let table = block(&mut program, &[Extent::Static(4)]);
-        let float_ids = block(&mut program, &[Extent::Static(3)]); // float32, not integer
+        let table = leaf(&mut program, &[Extent::Static(4)]);
+        let float_ids = leaf(&mut program, &[Extent::Static(3)]); // float32, not integer
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(table, fully_gathered_map(float_ids))],
@@ -966,10 +970,10 @@ mod tests {
     #[test]
     fn a_gathered_dim_out_of_range_for_the_operand_is_rejected() {
         let mut program = Vec::new();
-        let table = block(&mut program, &[Extent::Static(4)]);
+        let table = leaf(&mut program, &[Extent::Static(4)]);
         let ids = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Int32,
                 shape: alloc::vec![Extent::Static(3)],
                 name: None,
@@ -981,7 +985,7 @@ mod tests {
         }
         append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(table, map)],
@@ -999,10 +1003,10 @@ mod tests {
     #[test]
     fn a_scatter_data_dependent_fold_output_is_still_rejected_in_v1() {
         let mut program = Vec::new();
-        let source = block(&mut program, &[Extent::Static(4)]);
+        let source = leaf(&mut program, &[Extent::Static(4)]);
         let ids = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Int32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
@@ -1010,14 +1014,14 @@ mod tests {
         );
         append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: source,
                 in_map: IndexMap::Affine(map::projection(1, &[0])),
                 out_map: fully_gathered_map(ids),
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: None,
             }),
         );
@@ -1030,13 +1034,13 @@ mod tests {
     fn infer_as_a_pipe_matches_the_free_function() {
         let (program, _product, sum) = matmul_program();
 
-        let inference = Infer::new(&[512]);
+        let inference = ShapeTable::new(&[512]);
         let mut last_shapes = None;
         for expr in &program {
             let (echoed, shapes) =
                 proxima_primitives::block_on(Pipe::call(&inference, expr.clone()))
                     .expect("infer pipe step succeeds");
-            assert_eq!(&echoed, expr, "the observe form hands the same Expr back");
+            assert_eq!(&echoed, expr, "the observe form hands the same Op back");
             last_shapes = Some(shapes);
         }
 
