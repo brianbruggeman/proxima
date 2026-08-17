@@ -500,35 +500,45 @@ fn split_innermost(extents: &[u64]) -> (&[u64], usize) {
     }
 }
 
-fn odometer(shape: &[u64]) -> impl Iterator<Item = Vec<u64>> + '_ {
-    let total: u64 = shape.iter().product();
-    (0..total).map(move |flat| unflatten(flat, shape))
+/// Total element count of an odometer over `shape` — `0..odometer_len(shape)`
+/// is the flat-index range [`unflatten_into`] walks.
+fn odometer_len(shape: &[u64]) -> u64 {
+    shape.iter().product()
 }
 
-fn unflatten(mut flat: u64, shape: &[u64]) -> Vec<u64> {
-    let mut coordinate = vec![0u64; shape.len()];
+/// Writes flat index `flat`'s mixed-radix coordinate into the caller's
+/// reused `coordinate` buffer instead of allocating a fresh `Vec` per call —
+/// this runs once per (leading, reduction) coordinate pair in [`run_reduce`],
+/// up to ~1e6 times for a 1024^3 GEMM. The allocating former version
+/// (`odometer`/`unflatten`, returning `impl Iterator<Item = Vec<u64>>`)
+/// accounted for roughly half of the 2.1M allocations measured after ROW 2's
+/// `running`/`gather_cursors` hoist — the other half was
+/// [`merge_coordinates_into`]'s former per-call `Vec` (`scratchpad/opt/discipline.md` ROW 2b).
+fn unflatten_into(mut flat: u64, shape: &[u64], coordinate: &mut [u64]) {
     for (dim, extent) in shape.iter().enumerate().rev() {
         coordinate[dim] = flat % extent;
         flat /= extent;
     }
-    coordinate
 }
 
-fn merge_coordinates(
-    rank: usize,
+/// Writes the union of a leading coordinate and a reduction coordinate into
+/// the caller's reused `out` buffer, zeroing any dim neither side supplies
+/// (there are none in practice — every dim is either leading or reduction —
+/// but the zero-fill keeps the contract obvious without relying on that).
+fn merge_coordinates_into(
     leading_dims: &[u16],
     leading_coordinate: &[u64],
     reduction_dims: &[u16],
     reduction_coordinate: &[u64],
-) -> Vec<u64> {
-    let mut coordinate = vec![0u64; rank];
+    out: &mut [u64],
+) {
+    out.fill(0);
     for (dim, value) in leading_dims.iter().zip(leading_coordinate) {
-        coordinate[*dim as usize] = *value;
+        out[*dim as usize] = *value;
     }
     for (dim, value) in reduction_dims.iter().zip(reduction_coordinate) {
-        coordinate[*dim as usize] = *value;
+        out[*dim as usize] = *value;
     }
-    coordinate
 }
 
 fn initial_value(init: ReduceInit) -> Option<f32> {
@@ -700,35 +710,48 @@ impl GatherCursor<'_> {
     }
 }
 
-/// Builds one [`GatherCursor`] per operand that gathers (`None` for the
-/// rest), each initialized at `coordinate` and advancing by `stride_dim`'s
-/// stride per step — `stride_dim` is `None` where there is no per-step
-/// dimension at all (a scalar reduction's single accumulator).
-fn build_gather_cursors<'a>(
+/// Fills one [`GatherCursor`] per operand that gathers (`None` for the
+/// rest) into a caller-owned buffer, each initialized at `coordinate` and
+/// advancing by `stride_dim`'s stride per step — `stride_dim` is `None`
+/// where there is no per-step dimension at all (a scalar reduction's single
+/// accumulator).
+///
+/// Writes into `cursors` in place rather than returning a fresh `Vec`: this
+/// runs once per reduction step (up to ~1e6 times for a 1024^3 GEMM), and
+/// `cursors` is the caller's reused scratch buffer, sized once to operand
+/// count outside the hot loop (`scratchpad/opt/discipline.md` ROW 2).
+fn fill_gather_cursors<'a>(
     resolved: &BoundOp,
     buffers: &'a [Option<Vec<f32>>],
     coordinate: &[u64],
     stride_dim: Option<u16>,
-) -> Result<Vec<Option<GatherCursor<'a>>>, TensorError> {
-    resolved
-        .operands()
-        .iter()
-        .map(|(_, _, gather)| {
-            gather
-                .as_ref()
-                .map(|gather_access| {
-                    let buffer = buffer_of(buffers, gather_access.indices)?;
-                    Ok(GatherCursor {
-                        buffer,
-                        offset: gather_access.index_layout.offset_of(coordinate),
-                        stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
-                        element_stride: gather_access.element_stride,
-                        extent: gather_access.extent,
-                    })
+    cursors: &mut [Option<GatherCursor<'a>>],
+) -> Result<(), TensorError> {
+    for (slot, (_, _, gather)) in cursors.iter_mut().zip(resolved.operands()) {
+        *slot = gather
+            .as_ref()
+            .map(|gather_access| {
+                let buffer = buffer_of(buffers, gather_access.indices)?;
+                Ok(GatherCursor {
+                    buffer,
+                    offset: gather_access.index_layout.offset_of(coordinate),
+                    stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
+                    element_stride: gather_access.element_stride,
+                    extent: gather_access.extent,
                 })
-                .transpose()
-        })
-        .collect()
+            })
+            .transpose()?;
+    }
+    Ok(())
+}
+
+/// Recomputes each operand's running byte offset for a fresh coordinate,
+/// writing into the caller's reused `running` buffer instead of collecting a
+/// new `Vec` — the per-position counterpart of [`fill_gather_cursors`].
+fn fill_running_offsets(resolved: &BoundOp, coordinate: &[u64], running: &mut [i64]) {
+    for (slot, (_, view, _)) in running.iter_mut().zip(resolved.operands()) {
+        *slot = view.offset_of(coordinate);
+    }
 }
 
 fn run_elementwise(
@@ -743,20 +766,28 @@ fn run_elementwise(
     let shape = body_shape(body);
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
+    // loop-invariant: the innermost dim's stride never depends on the outer
+    // coordinate, so it is computed once for the whole node, not once per
+    // outer position (`scratchpad/opt/discipline.md` ROW 2).
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| view.stride(innermost_dim))
+        .collect();
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
+    let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
-    for (outer_position, outer_coordinate) in odometer(outer_extents).enumerate() {
-        let mut running: Vec<i64> = resolved
-            .operands()
-            .iter()
-            .map(|(_, view, _)| view.offset_of(&outer_coordinate))
-            .collect();
-        let strides: Vec<i64> = resolved
-            .operands()
-            .iter()
-            .map(|(_, view, _)| view.stride(innermost_dim))
-            .collect();
-        let mut gather_cursors =
-            build_gather_cursors(resolved, buffers, &outer_coordinate, Some(innermost_dim))?;
+    for outer_position in 0..odometer_len(outer_extents) as usize {
+        unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
+        fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        fill_gather_cursors(
+            resolved,
+            buffers,
+            &outer_coordinate,
+            Some(innermost_dim),
+            &mut gather_cursors,
+        )?;
         let out_base = outer_position * inner_len;
 
         for step in 0..inner_len {
@@ -810,30 +841,61 @@ fn run_reduce(
         .collect();
     let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
 
-    for leading_coordinate in odometer(&leading_extents) {
+    // loop-invariant: neither `last_output_dim` nor the operand views change
+    // across the whole node, so this stride table is built once instead of
+    // once per (leading, reduction) coordinate pair — up to ~1e6 times for a
+    // 1024^3 GEMM (`scratchpad/opt/discipline.md` ROW 2).
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
+        .collect();
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
+    let mut leading_coordinate = vec![0u64; leading_extents.len()];
+    let mut reduction_coordinate = vec![0u64; reduction_extents.len()];
+    let mut full_coordinate = vec![0u64; resolved.extents.len()];
+    let reduction_total = odometer_len(&reduction_extents);
+
+    // Resolved ONCE per bound op, never per element: whether every physical
+    // operand the body shape actually reads is gather-free and affine with
+    // a width-dim stride of 0 (broadcast) or 1 (contiguous). When it holds,
+    // the width loop below skips `gather_cursors`'s per-element `Option`
+    // check and `operand_values`'s per-element copy entirely, reading
+    // straight-line out of `raw`'s own contiguous subslices instead
+    // (`scratchpad/opt/discipline.md` ROW 3). `Generic` bodies and any
+    // non-unit stride or gathered operand fall back to the loop unchanged.
+    let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
+
+    for leading_flat in 0..odometer_len(&leading_extents) {
+        unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
         let mut accumulator = vec![initial_value(*init).unwrap_or(0.0); width];
         let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
-        for reduction_coordinate in odometer(&reduction_extents) {
-            let full_coordinate = merge_coordinates(
-                resolved.extents.len(),
+        for reduction_flat in 0..reduction_total {
+            unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
+            merge_coordinates_into(
                 leading_output_axes,
                 &leading_coordinate,
                 &reduction_dims,
                 &reduction_coordinate,
+                &mut full_coordinate,
             );
-            let mut running: Vec<i64> = resolved
-                .operands()
-                .iter()
-                .map(|(_, view, _)| view.offset_of(&full_coordinate))
-                .collect();
-            let strides: Vec<i64> = resolved
-                .operands()
-                .iter()
-                .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
-                .collect();
-            let mut gather_cursors =
-                build_gather_cursors(resolved, buffers, &full_coordinate, last_output_dim)?;
+            fill_running_offsets(resolved, &full_coordinate, &mut running);
+
+            if fast_path {
+                reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
+                seeded = true;
+                continue;
+            }
+
+            fill_gather_cursors(
+                resolved,
+                buffers,
+                &full_coordinate,
+                last_output_dim,
+                &mut gather_cursors,
+            )?;
 
             for slot in &mut accumulator {
                 for (index, data) in raw.iter().enumerate() {
@@ -854,14 +916,8 @@ fn run_reduce(
             seeded = true;
         }
 
-        let out_full_coordinate = merge_coordinates(
-            resolved.extents.len(),
-            leading_output_axes,
-            &leading_coordinate,
-            &[],
-            &[],
-        );
-        let out_prefix = out_layout.offset_of(&out_full_coordinate);
+        merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+        let out_prefix = out_layout.offset_of(&full_coordinate);
         let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
         for (slot, value) in accumulator.iter().enumerate() {
             output[(out_prefix + out_stride * slot as i64) as usize] = *value;
@@ -891,23 +947,30 @@ fn run_scan(
     let shape = body_shape(body);
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
+    // loop-invariant: see the identical hoist in `run_elementwise`
+    // (`scratchpad/opt/discipline.md` ROW 2).
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| view.stride(innermost_dim))
+        .collect();
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
+    let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
     let mut accumulator = initial_value(*init).unwrap_or(0.0);
     let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
-    for outer_coordinate in odometer(outer_extents) {
-        let mut running: Vec<i64> = resolved
-            .operands()
-            .iter()
-            .map(|(_, view, _)| view.offset_of(&outer_coordinate))
-            .collect();
-        let strides: Vec<i64> = resolved
-            .operands()
-            .iter()
-            .map(|(_, view, _)| view.stride(innermost_dim))
-            .collect();
-        let mut gather_cursors =
-            build_gather_cursors(resolved, buffers, &outer_coordinate, Some(innermost_dim))?;
+    for outer_flat in 0..odometer_len(outer_extents) {
+        unflatten_into(outer_flat, outer_extents, &mut outer_coordinate);
+        fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        fill_gather_cursors(
+            resolved,
+            buffers,
+            &outer_coordinate,
+            Some(innermost_dim),
+            &mut gather_cursors,
+        )?;
         let mut out_running = out_layout.offset_of(&outer_coordinate);
         let out_stride = out_layout.stride(innermost_dim);
 
@@ -982,6 +1045,151 @@ fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut 
             apply_scalar_op(op, &[operand_values[a as usize], operand_values[b as usize]])
         }
         BodyShape::Generic(body) => apply_body(body, operand_values, step_values),
+    }
+}
+
+/// True when every physical operand [`BodyShape`] actually reads (one for
+/// `Unary`, up to two for `Binary` — `Generic` never qualifies) is both
+/// gather-free and affine with a width-dim stride of 0 (broadcast) or 1
+/// (contiguous). Checked once per bound op, never per element — the same
+/// discipline [`body_shape`] already applies to the op/arity decision, now
+/// extended to the gather-vs-affine and stride-shape decision
+/// [`reduce_width_fast`]'s straight-line arms depend on.
+fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides: &[i64]) -> bool {
+    let operand_qualifies = |index: u16| {
+        let (_, _, gather) = &resolved.operands()[index as usize];
+        gather.is_none() && matches!(strides[index as usize], 0 | 1)
+    };
+    match *shape {
+        BodyShape::Unary(_, a) => operand_qualifies(a),
+        BodyShape::Binary(_, a, b) => operand_qualifies(a) && operand_qualifies(b),
+        BodyShape::Generic(_) => false,
+    }
+}
+
+/// The width loop's straight-line fast path: reads each physical operand's
+/// value for the whole width span at once (a contiguous `&[f32]` subslice
+/// when its stride is 1, a single hoisted scalar read when its stride is 0),
+/// with no `operand_values` scratch copy, no `gather_cursors` `Option`
+/// check, and no per-element `running`/`strides` bookkeeping — `running`
+/// gives each operand's width span its starting offset, and
+/// [`body_shape_is_affine_fast_path`]'s precondition guarantees every
+/// operand here has stride 0 or 1, so `stride == 1` is the only branch left
+/// to make (once, not per element) between a slice read and a scalar
+/// broadcast. Iterates `accumulator` in the same slot order the generic path
+/// does, combining via the same `apply_scalar_op` calls in the same order,
+/// so output is bit-identical (`scratchpad/opt/discipline.md` ROW 3).
+/// One operand's width-span read shape for [`reduce_width_fast`]'s
+/// straight-line arms: `contiguous` means `stride == 1` (read
+/// `data[base..base+width]` as a real subslice), otherwise `stride == 0`
+/// (read `data[base]` once and broadcast) — [`body_shape_is_affine_fast_path`]
+/// already proved no other stride reaches here. Bundling the three fields
+/// keeps `reduce_width_binary` under clippy's argument-count lint without
+/// reaching for `#[allow]`.
+struct OperandSpan<'a> {
+    data: &'a [f32],
+    base: usize,
+    contiguous: bool,
+}
+
+#[inline(always)]
+fn reduce_width_fast(
+    shape: &BodyShape,
+    reduce_op: ScalarOp,
+    raw: &[&[f32]],
+    running: &[i64],
+    strides: &[i64],
+    accumulator: &mut [f32],
+    seeded: bool,
+) {
+    let span_of = |index: u16| {
+        let index = index as usize;
+        OperandSpan {
+            data: raw[index],
+            base: running[index] as usize,
+            contiguous: strides[index] == 1,
+        }
+    };
+    match *shape {
+        BodyShape::Unary(op, a) => {
+            reduce_width_unary(op, reduce_op, span_of(a), accumulator, seeded);
+        }
+        BodyShape::Binary(op, a, b) => {
+            reduce_width_binary(op, reduce_op, span_of(a), span_of(b), accumulator, seeded);
+        }
+        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+    }
+}
+
+#[inline(always)]
+fn combine_reduction(reduce_op: ScalarOp, previous: f32, value: f32, seeded: bool) -> f32 {
+    if seeded {
+        apply_scalar_op(reduce_op, &[previous, value])
+    } else {
+        value
+    }
+}
+
+#[inline(always)]
+fn reduce_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, accumulator: &mut [f32], seeded: bool) {
+    if span.contiguous {
+        let slice = &span.data[span.base..span.base + accumulator.len()];
+        for (slot, &raw_value) in accumulator.iter_mut().zip(slice) {
+            let value = apply_scalar_op(op, &[raw_value]);
+            *slot = combine_reduction(reduce_op, *slot, value, seeded);
+        }
+    } else {
+        let raw_value = span.data[span.base];
+        let value = apply_scalar_op(op, &[raw_value]);
+        for slot in accumulator.iter_mut() {
+            *slot = combine_reduction(reduce_op, *slot, value, seeded);
+        }
+    }
+}
+
+#[inline(always)]
+fn reduce_width_binary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) {
+    let width = accumulator.len();
+    match (a.contiguous, b.contiguous) {
+        (true, true) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let slice_b = &b.data[b.base..b.base + width];
+            for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                let value = apply_scalar_op(op, &[value_a, value_b]);
+                *slot = combine_reduction(reduce_op, *slot, value, seeded);
+            }
+        }
+        (true, false) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let value_b = b.data[b.base];
+            for (slot, &value_a) in accumulator.iter_mut().zip(slice_a) {
+                let value = apply_scalar_op(op, &[value_a, value_b]);
+                *slot = combine_reduction(reduce_op, *slot, value, seeded);
+            }
+        }
+        (false, true) => {
+            let value_a = a.data[a.base];
+            let slice_b = &b.data[b.base..b.base + width];
+            for (slot, &value_b) in accumulator.iter_mut().zip(slice_b) {
+                let value = apply_scalar_op(op, &[value_a, value_b]);
+                *slot = combine_reduction(reduce_op, *slot, value, seeded);
+            }
+        }
+        (false, false) => {
+            let value_a = a.data[a.base];
+            let value_b = b.data[b.base];
+            let value = apply_scalar_op(op, &[value_a, value_b]);
+            for slot in accumulator.iter_mut() {
+                *slot = combine_reduction(reduce_op, *slot, value, seeded);
+            }
+        }
     }
 }
 
