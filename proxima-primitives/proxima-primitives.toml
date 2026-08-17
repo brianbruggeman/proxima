@@ -8,3 +8,10 @@
 # (heapless::Vec, sorted). Bounds how many distinct retryable HTTP statuses a
 # no-alloc tier can carry; the alloc tier uses an unbounded BTreeSet instead.
 status_cap = 8
+
+[fan_in]
+# Const capacity of FanInVec's runtime-arity source set (heapless::Vec).
+# Bounds how many sources a CLI/config-driven fan-in can hold at the no-alloc
+# floor; read unconditionally (FanInVec never switches to an alloc backing
+# store, unlike RetryRules.retry_on_status).
+source_cap = 32
