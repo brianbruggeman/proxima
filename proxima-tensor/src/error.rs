@@ -1,13 +1,13 @@
 use crate::dtype::DType;
-use crate::expr::NodeId;
+use crate::op::NodeId;
 
 /// Every fault [`shape::infer`](crate::shape::infer) and the rest of the
 /// crate can raise, from a malformed program to a spec that will not parse.
 ///
 /// Every structural variant names the node it was found at. A program that
 /// infers has in-range backwards references, consistent arity, an
-/// accumulator wide enough for its fold, and resolvable shapes — which is
-/// what lets [`nest::lower`](crate::nest::lower) and
+/// accumulator wide enough for its reduce, and resolvable shapes — which is
+/// what lets [`bind::bind`](crate::bind::bind) and
 /// [`cpu::evaluate`](crate::cpu::evaluate) walk it without re-checking.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TensorError {
@@ -24,10 +24,10 @@ pub enum TensorError {
         expected: usize,
     },
 
-    #[error("node {0} is a zip with no operands")]
-    EmptyZip(NodeId),
+    #[error("node {0} is an elementwise op with no operands")]
+    EmptyElementwise(NodeId),
 
-    #[error("node {node} folds {element:?} into {accumulator:?}, which overflows")]
+    #[error("node {node} reduces {element:?} into {accumulator:?}, which overflows")]
     NarrowAccumulator {
         node: NodeId,
         element: DType,
@@ -57,17 +57,17 @@ pub enum TensorError {
     #[error("node {node} dim {dim} reaches an index outside the operand's extent")]
     IndexOutOfBounds { node: NodeId, dim: u16 },
 
-    #[error("node {node} cannot be lowered: {reason}")]
+    #[error("node {node} cannot be bound to an executable op: {reason}")]
     NotLowerable { node: NodeId, reason: &'static str },
 
     #[error("output {0} does not name a node in the program")]
     UnknownOutput(NodeId),
 
-    #[error("expected {expected} block operands but got {found}")]
-    BlockCountMismatch { expected: usize, found: usize },
+    #[error("expected {expected} input operands but got {found}")]
+    InputCountMismatch { expected: usize, found: usize },
 
-    #[error("node {node} block has {found} elements but its shape needs {expected}")]
-    BlockSizeMismatch {
+    #[error("node {node} input has {found} elements but its shape needs {expected}")]
+    InputSizeMismatch {
         node: NodeId,
         expected: usize,
         found: usize,

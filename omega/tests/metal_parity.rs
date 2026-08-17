@@ -11,8 +11,8 @@
 
 use omega::MetalError;
 use proxima_tensor::{
-    AffineMap, AffineTerm, DType, DimExpr, Expr, Extent, Fold, FoldInit, IndexMap, Keep, NodeId,
-    ScalarOp, TensorError, affine, append, evaluate, projection,
+    AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, Reduce,
+    ReduceInit, ScalarOp, TensorError, affine, append, evaluate, projection,
 };
 
 /// Asserts `cpu` and `metal` agree within `1e-6`, refusing a vacuous
@@ -48,11 +48,11 @@ fn assert_parity(case: &str, cpu: &[f32], metal: &[f32]) -> f32 {
     max_abs_diff
 }
 
-fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Expr> {
+fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Op> {
     let mut program = Vec::new();
     let mut current = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(extent)],
             name: None,
@@ -61,7 +61,7 @@ fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Expr> {
     for _ in 0..depth {
         current = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Tanh,
                 operands: vec![(current, IndexMap::Affine(projection(1, &[0])))],
@@ -73,7 +73,7 @@ fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Expr> {
     program
 }
 
-fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Expr>, NodeId) {
+fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let lhs_shape = if symbolic {
         vec![Extent::Symbolic(0), Extent::Static(k)]
@@ -82,7 +82,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Expr>, NodeId)
     };
     let lhs = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: lhs_shape,
             name: None,
@@ -90,7 +90,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Expr>, NodeId)
     );
     let rhs = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(k), Extent::Static(n)],
             name: None,
@@ -98,7 +98,7 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Expr>, NodeId)
     );
     let product = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: vec![
@@ -110,25 +110,25 @@ fn matmul_program(m: u32, k: u32, n: u32, symbolic: bool) -> (Vec<Expr>, NodeId)
     );
     let sum = append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: product,
             in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
             out_map: IndexMap::Affine(projection(3, &[0, 1])),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: Some("matmul".into()),
         }),
     );
     (program, sum)
 }
 
-fn softmax_program(n: u32, d: u32) -> Vec<Expr> {
+fn softmax_program(n: u32, d: u32) -> Vec<Op> {
     let mut program = Vec::new();
     let input = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(n), Extent::Static(d)],
             name: None,
@@ -139,20 +139,20 @@ fn softmax_program(n: u32, d: u32) -> Vec<Expr> {
 
     let max = append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Maximum,
-            init: FoldInit::NegativeInfinity,
+            init: ReduceInit::NegativeInfinity,
             operand: input,
             in_map: row_map.clone(),
             out_map: broadcast_map.clone(),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: None,
         }),
     );
     let shifted = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Subtract,
             operands: vec![(input, row_map.clone()), (max, broadcast_map.clone())],
@@ -161,7 +161,7 @@ fn softmax_program(n: u32, d: u32) -> Vec<Expr> {
     );
     let exponentiated = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Exponential,
             operands: vec![(shifted, row_map.clone())],
@@ -170,20 +170,20 @@ fn softmax_program(n: u32, d: u32) -> Vec<Expr> {
     );
     let sum = append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: exponentiated,
             in_map: row_map.clone(),
             out_map: broadcast_map.clone(),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: None,
         }),
     );
     append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Divide,
             operands: vec![(exponentiated, row_map), (sum, broadcast_map)],
@@ -193,11 +193,11 @@ fn softmax_program(n: u32, d: u32) -> Vec<Expr> {
     program
 }
 
-fn cumsum_program(extent: u32) -> Vec<Expr> {
+fn cumsum_program(extent: u32) -> Vec<Op> {
     let mut program = Vec::new();
     let source = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(extent)],
             name: None,
@@ -205,14 +205,14 @@ fn cumsum_program(extent: u32) -> Vec<Expr> {
     );
     append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: source,
             in_map: IndexMap::Affine(projection(1, &[0])),
             out_map: IndexMap::Affine(projection(1, &[0])),
-            keep: Keep::All,
+            keep: Keep::Scan,
             name: None,
         }),
     );
@@ -222,11 +222,11 @@ fn cumsum_program(extent: u32) -> Vec<Expr> {
 /// A per-position ("locally connected") kernel: `kernel[h, r]` pins both
 /// iteration dims via pure projection, while `signal[h + r]` is the
 /// two-term windowed access under test.
-fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Expr> {
+fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Op> {
     let mut program = Vec::new();
     let kernel = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(taps), Extent::Static(width)],
             name: None,
@@ -234,7 +234,7 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Expr> {
     );
     let signal = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(signal_len)],
             name: None,
@@ -242,11 +242,11 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Expr> {
     );
     let window = IndexMap::Affine(affine(
         2,
-        &[(&[AffineTerm::scaled(0, 1), AffineTerm::scaled(1, 1)], 0)],
+        &[(&[AxisTerm::scaled(0, 1), AxisTerm::scaled(1, 1)], 0)],
     ));
     let product = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: vec![
@@ -258,14 +258,14 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Expr> {
     );
     append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: product,
             in_map: IndexMap::Affine(projection(2, &[0, 1])),
             out_map: IndexMap::Affine(projection(2, &[0])),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: None,
         }),
     );
@@ -274,11 +274,11 @@ fn conv_window_program(taps: u32, width: u32, signal_len: u32) -> Vec<Expr> {
 
 /// `table[ids[s], d]` over iteration space `(s, d)`: the same worked example
 /// `map.rs`'s docs use.
-fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Expr> {
+fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
     let mut program = Vec::new();
     let table = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(vocab), Extent::Static(dim)],
             name: None,
@@ -286,7 +286,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Expr> {
     );
     let ids = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Int32,
             shape: vec![Extent::Static(seq)],
             name: None,
@@ -295,12 +295,12 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Expr> {
     let gathered_map = IndexMap::Computed {
         indices: ids,
         index_map: projection(2, &[0]),
-        base: AffineMap {
+        base: IndexPattern {
             iter_rank: 2,
-            dims: vec![
-                DimExpr::default(),
-                DimExpr {
-                    terms: vec![AffineTerm::projection(1)],
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(1)],
                     offset: 0,
                 },
             ],
@@ -309,7 +309,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Expr> {
     };
     append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Identity,
             operands: vec![(table, gathered_map)],
@@ -322,11 +322,11 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Expr> {
 /// `sum_k table[ids[i], k] * weight[k, j]` — an embedding lookup fused
 /// straight into a contraction, mirroring [`matmul_program`] with `lhs`
 /// replaced by a gather.
-fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) -> Vec<Expr> {
+fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) -> Vec<Op> {
     let mut program = Vec::new();
     let table = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(vocab), Extent::Static(embed_dim)],
             name: None,
@@ -334,7 +334,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     );
     let ids = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Int32,
             shape: vec![Extent::Static(seq)],
             name: None,
@@ -342,7 +342,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     );
     let weight = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(embed_dim), Extent::Static(out_dim)],
             name: None,
@@ -352,12 +352,12 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     let gather_map = IndexMap::Computed {
         indices: ids,
         index_map: projection(3, &[0]),
-        base: AffineMap {
+        base: IndexPattern {
             iter_rank: 3,
-            dims: vec![
-                DimExpr::default(),
-                DimExpr {
-                    terms: vec![AffineTerm::projection(2)],
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(2)],
                     offset: 0,
                 },
             ],
@@ -368,7 +368,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
 
     let product = append(
         &mut program,
-        Expr::Zip {
+        Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: vec![(table, gather_map), (weight, weight_map)],
@@ -377,14 +377,14 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
     );
     append(
         &mut program,
-        Expr::Fold(Fold {
+        Op::Reduce(Reduce {
             dtype: DType::Float32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: product,
             in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
             out_map: IndexMap::Affine(projection(3, &[0, 1])),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: Some("embedding_matmul".into()),
         }),
     );
@@ -535,7 +535,7 @@ fn multi_output_parity_covers_both_an_intermediate_and_the_root() {
     let mut program = Vec::new();
     let source = append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(4)],
             name: None,
@@ -546,7 +546,7 @@ fn multi_output_parity_covers_both_an_intermediate_and_the_root() {
     for _ in 0..4 {
         current = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Tanh,
                 operands: vec![(current, IndexMap::Affine(projection(1, &[0])))],
@@ -595,7 +595,7 @@ fn block_count_mismatch_produces_the_same_tensor_error_as_cpu() {
     let mut program = Vec::new();
     append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(4)],
             name: None,
@@ -617,7 +617,7 @@ fn block_size_mismatch_produces_the_same_tensor_error_as_cpu() {
     let mut program = Vec::new();
     append(
         &mut program,
-        Expr::Block {
+        Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(4)],
             name: None,

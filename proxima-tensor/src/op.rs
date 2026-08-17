@@ -1,20 +1,20 @@
 //! A tensor program: a flat, self-contained sequence of expressions.
 //!
 //! There is no arena, no builder, no interning — a program is a plain
-//! `Vec<Expr>`, and every `Expr` owns its own data. That is deliberate: a
+//! `Vec<Op>`, and every `Op` owns its own data. That is deliberate: a
 //! partition pass that ships part of a program across a wire is then just a
 //! sub-slice plus renumbering, not a walk of a separate side-table. Two rules
 //! make a slice safe to consume without a validation pass of its own:
 //!
 //! - **References point backwards only.** A [`NodeId`] is a position in the
-//!   slice; an `Expr` may only name positions built before it. That makes
+//!   slice; an `Op` may only name positions built before it. That makes
 //!   acyclicity an O(1) comparison per reference instead of a traversal.
 //! - **The last element is the root**, by the same rule — nothing later can
 //!   exist to consume it.
 //!
 //! Together these mean a linear scan of the slice is always a valid
 //! topological order, which is what [`shape::infer`](crate::shape::infer) and
-//! [`nest::lower`](crate::nest::lower) both rely on.
+//! [`bind::bind`](crate::bind::bind) both rely on.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use crate::dtype::DType;
 use crate::map::IndexMap;
 
-/// Index of an [`Expr`] in the program slice.
+/// Index of an [`Op`] in the program slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeId(pub u32);
@@ -47,13 +47,13 @@ pub enum Extent {
     Symbolic(u16),
 }
 
-/// Scalar body of a [`Expr::Zip`] or a [`Fold`].
+/// Scalar body of an [`Op::Elementwise`] or a [`Reduce`].
 ///
 /// Closed on purpose, and it is the one closed set in this crate that stays
 /// closed: these are scalar machine primitives, not an extension point.
 /// Composite activations desugar into several expressions — `gelu` is a
-/// handful of zips, not a variant here — which costs expressions and buys a
-/// vocabulary that never grows.
+/// handful of elementwise expressions, not a variant here — which costs
+/// expressions and buys a vocabulary that never grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
@@ -77,9 +77,9 @@ pub enum ScalarOp {
 }
 
 impl ScalarOp {
-    /// Operand count the body consumes. A zip whose operand count disagrees
-    /// with this is malformed, and [`shape::infer`](crate::shape::infer) says
-    /// so.
+    /// Operand count the body consumes. An elementwise expression whose
+    /// operand count disagrees with this is malformed, and
+    /// [`shape::infer`](crate::shape::infer) says so.
     #[must_use]
     pub const fn arity(self) -> usize {
         match self {
@@ -102,9 +102,10 @@ impl ScalarOp {
         }
     }
 
-    /// Whether folding with this body is order-independent. Only associative
-    /// bodies may be reassociated into a tree or a parallel scan, so a
-    /// scheduler reads this before choosing a reduction strategy.
+    /// Whether reducing with this body is order-independent. Only
+    /// associative bodies may be reassociated into a tree or a parallel
+    /// scan, so a scheduler reads this before choosing a reduction
+    /// strategy.
     #[must_use]
     pub const fn is_associative(self) -> bool {
         matches!(
@@ -114,11 +115,11 @@ impl ScalarOp {
     }
 }
 
-/// Seed value for a fold.
+/// Seed value for a reduce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
-pub enum FoldInit {
+pub enum ReduceInit {
     Zero,
     One,
     NegativeInfinity,
@@ -128,29 +129,29 @@ pub enum FoldInit {
     FirstElement,
 }
 
-/// Which prefixes of a fold survive.
+/// Which prefixes of a reduce survive.
 ///
 /// The only thing separating a reduction from a scan. Log-depth prefix sum is
-/// a *scheduling* decision about a `Keep::All` fold, not a different
+/// a *scheduling* decision about a `Keep::Scan` reduce, not a different
 /// operation, which is why there is no separate `Scan` expression form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum Keep {
     /// Reduce: only the final accumulator.
-    Last,
-    /// Scan: every prefix, preserving the folded extent.
-    All,
+    Reduce,
+    /// Scan: every prefix, preserving the reduced axis.
+    Scan,
 }
 
-/// A fold's parameters, named because eight of them travel together through
-/// every pass and every backend.
+/// A reduce's parameters, named because eight of them travel together
+/// through every pass and every backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-pub struct Fold {
+pub struct Reduce {
     pub dtype: DType,
     pub body: ScalarOp,
-    pub init: FoldInit,
+    pub init: ReduceInit,
     pub operand: NodeId,
     /// Addresses the operand from the iteration space.
     pub in_map: IndexMap,
@@ -163,26 +164,26 @@ pub struct Fold {
 /// The three generators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
-pub enum Expr {
+pub enum Op {
     /// A leaf. Where data enters.
     ///
     /// `name` is identity, not decoration: positional binding does not
     /// survive a partition pass that renumbers the slice, and a cut edge in a
-    /// distributed program delivers a tensor to a `Block` over a wire keyed
+    /// distributed program delivers a tensor to an `Input` over a wire keyed
     /// by name, not by index. It is also how weights load by name. Local,
     /// single-partition evaluation still binds `blocks` positionally in
     /// [`cpu::evaluate`](crate::cpu::evaluate) — the name is what survives a
     /// partition that positional binding does not.
-    Block {
+    Input {
         dtype: DType,
         shape: Vec<Extent>,
         name: Option<String>,
     },
 
-    /// N-ary elementwise. Each operand carries its own index map, so arity 1
-    /// with a permuting map is a transpose and an operand with a computed map
-    /// is a gather.
-    Zip {
+    /// N-ary elementwise. Each operand carries its own index pattern, so
+    /// arity 1 with a permuting pattern is a transpose and an operand with a
+    /// computed pattern is a gather.
+    Elementwise {
         dtype: DType,
         body: ScalarOp,
         operands: Vec<(NodeId, IndexMap)>,
@@ -190,24 +191,25 @@ pub enum Expr {
     },
 
     /// Reduce, scan, scatter, contraction and argmax, distinguished by
-    /// [`Fold::keep`] and by whether [`Fold::out_map`] is data-dependent.
-    Fold(Fold),
+    /// [`Reduce::keep`] and by whether [`Reduce::out_map`] is
+    /// data-dependent.
+    Reduce(Reduce),
 }
 
-impl Expr {
+impl Op {
     #[must_use]
     pub const fn dtype(&self) -> DType {
         match self {
-            Self::Block { dtype, .. } | Self::Zip { dtype, .. } => *dtype,
-            Self::Fold(fold) => fold.dtype,
+            Self::Input { dtype, .. } | Self::Elementwise { dtype, .. } => *dtype,
+            Self::Reduce(reduce) => reduce.dtype,
         }
     }
 
     #[must_use]
     pub fn name(&self) -> Option<&str> {
         match self {
-            Self::Block { name, .. } | Self::Zip { name, .. } => name.as_deref(),
-            Self::Fold(fold) => fold.name.as_deref(),
+            Self::Input { name, .. } | Self::Elementwise { name, .. } => name.as_deref(),
+            Self::Reduce(reduce) => reduce.name.as_deref(),
         }
     }
 }
@@ -216,7 +218,7 @@ impl Expr {
 /// The id-is-index idiom in one place: every push returns an id greater than
 /// any the program already contains, which is what keeps references
 /// backwards-only by construction rather than by a check.
-pub fn append(program: &mut Vec<Expr>, expr: Expr) -> NodeId {
+pub fn append(program: &mut Vec<Op>, expr: Op) -> NodeId {
     let id = NodeId(program.len() as u32);
     program.push(expr);
     id
@@ -263,7 +265,7 @@ mod tests {
         let mut program = Vec::new();
         let first = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
@@ -271,7 +273,7 @@ mod tests {
         );
         let second = append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
@@ -287,25 +289,25 @@ mod tests {
 
     #[test]
     fn dtype_and_name_read_through_every_variant() {
-        let block = Expr::Block {
+        let leaf = Op::Input {
             dtype: DType::Float32,
             shape: alloc::vec![Extent::Static(4)],
             name: Some("x".into()),
         };
-        assert_eq!(block.dtype(), DType::Float32);
-        assert_eq!(block.name(), Some("x"));
+        assert_eq!(leaf.dtype(), DType::Float32);
+        assert_eq!(leaf.name(), Some("x"));
 
-        let fold = Expr::Fold(Fold {
+        let reduce = Op::Reduce(Reduce {
             dtype: DType::Int32,
             body: ScalarOp::Add,
-            init: FoldInit::Zero,
+            init: ReduceInit::Zero,
             operand: NodeId(0),
             in_map: IndexMap::Affine(crate::map::projection(1, &[0])),
             out_map: IndexMap::Affine(crate::map::projection(1, &[])),
-            keep: Keep::Last,
+            keep: Keep::Reduce,
             name: None,
         });
-        assert_eq!(fold.dtype(), DType::Int32);
-        assert_eq!(fold.name(), None);
+        assert_eq!(reduce.dtype(), DType::Int32);
+        assert_eq!(reduce.name(), None);
     }
 }

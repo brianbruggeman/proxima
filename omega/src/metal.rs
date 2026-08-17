@@ -7,18 +7,18 @@
 //!
 //! [`execute`] mirrors [`proxima_tensor::cpu::evaluate`]'s semantics
 //! exactly, over the same public API that function itself is built from:
-//! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::lower`]
-//! produces the flat [`Nest`] sequence (with `Fold(Zip)` fusion already
+//! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::bind`]
+//! produces the flat [`BoundOp`] sequence (with `Reduce(Elementwise)` fusion already
 //! decided), and per-nest buffer retirement is recomputed from that sequence
-//! the same way `cpu::evaluate`'s own `nest_retirement` does — a node's
+//! the same way `cpu::evaluate`'s own `bound_op_retirement` does — a node's
 //! device buffer is freed the moment nothing later in the sequence reads it.
-//! What differs is only the last mile: instead of interpreting a `Nest` with
+//! What differs is only the last mile: instead of interpreting a `BoundOp` with
 //! nested loops, each one is emitted to MSL, compiled (or reused from cache),
 //! and dispatched.
 //!
 //! # Uniforms packing
 //!
-//! `msl.rs` never bakes a `Nest`'s concrete extents/strides/bases into
+//! `msl.rs` never bakes a `BoundOp`'s concrete extents/strides/bases into
 //! source text — they are read at kernel runtime out of a `constant
 //! Uniforms&` buffer whose MSL struct layout is rendered field-by-field in
 //! [`crate::msl::render_elementwise`], [`render_reduce`](crate::msl::render_reduce)
@@ -39,7 +39,7 @@
 //! reading a result back a plain pointer read, no blit pass. Compiled
 //! `MTLLibrary`/`MTLComputePipelineState` pairs are cached by kernel source
 //! text within one [`execute`] call, since `msl.rs`'s own module doc proves
-//! two structurally-identical `Nest`s emit byte-identical source.
+//! two structurally-identical `BoundOp`s emit byte-identical source.
 //! `MTLCompileOptions::mathMode` is pinned to `Safe`, never the default —
 //! parity against the CPU interpreter demands IEEE behavior, not whatever
 //! Metal's fast-math would substitute.
@@ -50,7 +50,7 @@
 //! fetched index falls outside its dim's extent; a GPU kernel cannot
 //! propagate a `Result`, so `msl.rs` clamps for memory safety but also
 //! `atomic_fetch_max`s the offending index into a per-gather-slot `Fault`
-//! buffer (see that module's doc). [`dispatch_nest`] allocates and
+//! buffer (see that module's doc). [`dispatch_op`] allocates and
 //! zero-fills that buffer before every dispatch that gathers, and after
 //! `waitUntilCompleted` reads it back and — via [`check_gather_fault`] —
 //! turns any nonzero slot into the identical `TensorError` `cpu.rs` would
@@ -79,8 +79,8 @@ use objc2_metal::{
 };
 
 use proxima_tensor::{
-    DType, Expr, GatherAccess, IndexMap, Keep, Nest, NodeId, Reduction, Shapes, TensorError, infer,
-    lower,
+    BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, Shapes,
+    TensorError, bind, infer,
 };
 
 use crate::error::EmitError;
@@ -90,7 +90,7 @@ use crate::{Binding, Kernel, emit};
 /// Everything [`execute`] can fail with: a missing device, any device
 /// operation that returned a Metal-side failure (compiling source, creating
 /// a pipeline, or one of the handful of `Option`-returning calls that are
-/// only ever `None` on a broken host), or a `Nest`/program-shaped fault
+/// only ever `None` on a broken host), or a `BoundOp`/program-shaped fault
 /// [`proxima_tensor`] or [`crate::msl`] already have a name for.
 #[derive(Debug, thiserror::Error)]
 pub enum MetalError {
@@ -104,49 +104,20 @@ pub enum MetalError {
     Emit(#[from] EmitError),
 }
 
-/// The result of [`execute`]: every requested output's data and shape,
-/// already read back from device memory. Same shape as
-/// [`proxima_tensor::cpu::Evaluated`], on purpose — a parity test diffs the
-/// two directly.
-#[derive(Debug)]
-pub struct Executed {
-    root: NodeId,
-    results: Vec<(NodeId, Vec<u64>, Vec<f32>)>,
-}
-
-impl Executed {
-    #[must_use]
-    pub fn root(&self) -> &[f32] {
-        self.get(self.root).map_or(&[], |(data, _)| data)
-    }
-
-    #[must_use]
-    pub fn shape(&self) -> &[u64] {
-        self.get(self.root).map_or(&[], |(_, shape)| shape)
-    }
-
-    /// The data and shape of a specific requested output, or `None` if
-    /// `node` was not in the `outputs` passed to [`execute`].
-    #[must_use]
-    pub fn get(&self, node: NodeId) -> Option<(&[f32], &[u64])> {
-        self.results
-            .iter()
-            .find(|(candidate, _, _)| *candidate == node)
-            .map(|(_, shape, data)| (data.as_slice(), shape.as_slice()))
-    }
-}
-
 /// Runs a tensor program on the system's default Metal device.
 ///
-/// Same contract as [`proxima_tensor::cpu::evaluate`]: `blocks` binds
-/// [`Expr::Block`] inputs positionally, `outputs` selects which nodes to
-/// return data for (the root only, if empty).
+/// Same contract as [`proxima_tensor::cpu::evaluate`], and returns the same
+/// [`Evaluated`] type — a CPU run and a Metal run report the identical
+/// shape, so a parity test compares them directly with no adapter on either
+/// side (see `Evaluated`'s own doc). `blocks` binds [`Op::Input`] inputs
+/// positionally, `outputs` selects which nodes to return data for (the root
+/// only, if empty).
 pub fn execute(
-    program: &[Expr],
+    program: &[Op],
     symbols: &[u64],
     blocks: &[&[f32]],
     outputs: &[NodeId],
-) -> Result<Executed, MetalError> {
+) -> Result<Evaluated, MetalError> {
     let prepared = prepare(program, symbols, blocks, outputs)?;
 
     let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
@@ -166,13 +137,13 @@ pub fn execute(
         String,
         Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     > = BTreeMap::new();
-    for (position, nest) in prepared.nests.iter().enumerate() {
-        dispatch_nest(
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        dispatch_op(
             &device,
             &queue,
             &mut pipeline_cache,
             &mut device_buffers,
-            nest,
+            bound,
         )?;
         for retired in &prepared.retires[position] {
             device_buffers.remove(retired);
@@ -195,12 +166,12 @@ struct Prepared {
     shapes: Shapes,
     effective_outputs: Vec<NodeId>,
     block_nodes: Vec<NodeId>,
-    nests: Vec<Nest>,
+    resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
 }
 
 fn prepare(
-    program: &[Expr],
+    program: &[Op],
     symbols: &[u64],
     blocks: &[&[f32]],
     outputs: &[NodeId],
@@ -226,7 +197,7 @@ fn prepare(
 
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
-        return Err(TensorError::BlockCountMismatch {
+        return Err(TensorError::InputCountMismatch {
             expected: block_nodes.len(),
             found: blocks.len(),
         }
@@ -235,7 +206,7 @@ fn prepare(
     for (node, data) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
         if data.len() != expected {
-            return Err(TensorError::BlockSizeMismatch {
+            return Err(TensorError::InputSizeMismatch {
                 node: *node,
                 expected,
                 found: data.len(),
@@ -244,15 +215,15 @@ fn prepare(
         }
     }
 
-    let nests = lower(program, &shapes, &effective_outputs)?;
-    let retires = nest_retirement(&nests, &effective_outputs);
+    let resolved = bind(program, &shapes, &effective_outputs)?;
+    let retires = bound_op_retirement(&resolved, &effective_outputs);
 
     Ok(Prepared {
         root,
         shapes,
         effective_outputs,
         block_nodes,
-        nests,
+        resolved,
         retires,
     })
 }
@@ -261,7 +232,7 @@ fn prepare(
 // this driver uploads is f32 (see `upload_block`), indices included — an
 // index value is an exact integer carried as f32 — so a gather's `indices`
 // node is the one deliberate exception, exactly as on the CPU path.
-fn reject_non_float32(program: &[Expr]) -> Result<(), TensorError> {
+fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
@@ -277,19 +248,19 @@ fn reject_non_float32(program: &[Expr]) -> Result<(), TensorError> {
 
 /// Every node referenced as a gather's `indices` anywhere in `program` —
 /// mirrors `proxima_tensor::cpu::index_node_ids`.
-fn index_node_ids(program: &[Expr]) -> BTreeSet<NodeId> {
+fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
     let mut nodes = BTreeSet::new();
     for expr in program {
         match expr {
-            Expr::Block { .. } => {}
-            Expr::Zip { operands, .. } => {
+            Op::Input { .. } => {}
+            Op::Elementwise { operands, .. } => {
                 for (_, map) in operands {
                     push_indices_node(map, &mut nodes);
                 }
             }
-            Expr::Fold(fold) => {
-                push_indices_node(&fold.in_map, &mut nodes);
-                push_indices_node(&fold.out_map, &mut nodes);
+            Op::Reduce(reduce) => {
+                push_indices_node(&reduce.in_map, &mut nodes);
+                push_indices_node(&reduce.out_map, &mut nodes);
             }
         }
     }
@@ -302,11 +273,11 @@ fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
     }
 }
 
-fn block_node_ids(program: &[Expr]) -> Vec<NodeId> {
+fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
     program
         .iter()
         .enumerate()
-        .filter(|(_, expr)| matches!(expr, Expr::Block { .. }))
+        .filter(|(_, expr)| matches!(expr, Op::Input { .. }))
         .map(|(position, _)| NodeId(position as u32))
         .collect()
 }
@@ -315,23 +286,23 @@ fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
 }
 
-/// Per-nest retire sets over the emitted nest sequence: `result[p]` is every
-/// node whose last read is `nests[p]`. Mirrors `cpu::evaluate`'s own
-/// (private) `nest_retirement` exactly, over the same public `Nest.operands`
-/// field.
-fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
+/// Per-op retire sets over the emitted op sequence: `result[p]` is every
+/// node whose last read is `resolved[p]`. Mirrors `cpu::evaluate`'s own
+/// (private) `bound_op_retirement` exactly, over the same public
+/// `BoundOp::operands` accessor.
+fn bound_op_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
     let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
-    for (position, nest) in nests.iter().enumerate() {
-        for (source, _, gather) in &nest.operands {
+    for (position, bound) in resolved.iter().enumerate() {
+        for (source, _, gather) in bound.operands() {
             last_use.insert(*source, position);
-            if let Some(gather_access) = gather {
-                last_use.insert(gather_access.indices, position);
+            if let Some(lookup) = gather {
+                last_use.insert(lookup.indices, position);
             }
         }
     }
 
-    let mut retires = alloc::vec![Vec::new(); nests.len()];
+    let mut retires = alloc::vec![Vec::new(); resolved.len()];
     for (node, position) in last_use {
         if !outputs.contains(&node) {
             retires[position].push(node);
@@ -340,21 +311,28 @@ fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     retires
 }
 
-/// The output length a nest needs allocated: the reduced (product of
-/// surviving dims) length for a `Keep::Last` fold, or the full iteration
-/// space otherwise (elementwise and `Keep::All` both write one value per
-/// coordinate). Deliberately independent of [`Kernel::grid`]'s thread count —
-/// a `Keep::All` scan dispatches one thread per *line* but writes
-/// `inner_len` values per thread, so grid threads and output length diverge
-/// there.
-fn nest_output_len(nest: &Nest) -> usize {
-    match &nest.reduction {
-        Some(reduction) if reduction.keep == Keep::Last => reduction
-            .output_dims
+/// The output length an op needs allocated: the reduced (product of
+/// surviving axes) length for a `Keep::Reduce` reduce, or the full
+/// iteration space otherwise (elementwise and `Keep::Scan` both write one
+/// value per coordinate). Deliberately independent of [`Kernel::grid`]'s
+/// thread count — a `Keep::Scan` scan dispatches one thread per *line* but
+/// writes `inner_len` values per thread, so grid threads and output length
+/// diverge there.
+fn bound_output_len(bound: &BoundOp) -> usize {
+    match &bound.kind {
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            ..
+        } => output_axes
             .iter()
-            .map(|dim| nest.extents[*dim as usize] as usize)
+            .map(|axis| bound.extents[*axis as usize] as usize)
             .product(),
-        _ => nest.extents.iter().map(|extent| *extent as usize).product(),
+        _ => bound
+            .extents
+            .iter()
+            .map(|extent| *extent as usize)
+            .product(),
     }
 }
 
@@ -363,9 +341,9 @@ fn push_i64(bytes: &mut Vec<u8>, value: i64) {
 }
 
 /// Pushes `values` as a fixed-`width` MSL array, zero-padding any slot
-/// `values` does not fill — the only case that happens is a rank-0 nest,
+/// `values` does not fill — the only case that happens is a rank-0 op,
 /// where the declared array width is `max(rank, 1)` but there is no real
-/// dim to supply, and that padding slot is never read by the generated
+/// axis to supply, and that padding slot is never read by the generated
 /// source (see each `render_*`'s `if rank > 0` / `.saturating_sub(1)` guards).
 fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
     for slot in 0..width {
@@ -374,18 +352,18 @@ fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
 }
 
 /// Appends the four gather arrays every `Uniforms` struct declares last (via
-/// `crate::msl::push_gather_uniform_fields`) when `nest` has at least one
+/// `crate::msl::push_gather_uniform_fields`) when `bound` has at least one
 /// gathered operand: `gather_index_base`, `gather_index_strides`,
 /// `gather_element_stride`, `gather_extent` — each one array of length
 /// `gather_count`. `crate::msl::gather_slots` numbers gathered operands by
-/// encounter order over `nest.operands`, so filtering in that same order
+/// encounter order over `bound.operands()`, so filtering in that same order
 /// (below) reproduces the identical numbering without needing to re-derive
-/// or look up the slot indices themselves. A no-op when `nest` has no
+/// or look up the slot indices themselves. A no-op when `bound` has no
 /// gather, matching `push_gather_uniform_fields`'s own empty-array early
 /// return.
-fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
-    let ordered: Vec<&GatherAccess> = nest
-        .operands
+fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
+    let ordered: Vec<&Lookup> = bound
+        .operands()
         .iter()
         .filter_map(|(_, _, gather)| gather.as_ref())
         .collect();
@@ -394,10 +372,10 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
     }
 
     for gather in &ordered {
-        push_i64(bytes, gather.index_view.base);
+        push_i64(bytes, gather.index_layout.base);
     }
     for gather in &ordered {
-        push_i64_row(bytes, &gather.index_view.strides, rank_len);
+        push_i64_row(bytes, &gather.index_layout.strides, rank_len);
     }
     for gather in &ordered {
         push_i64(bytes, gather.element_stride);
@@ -407,35 +385,39 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
     }
 }
 
-fn pack_uniforms(nest: &Nest) -> Vec<u8> {
-    match &nest.reduction {
-        None => pack_elementwise_uniforms(nest),
-        Some(reduction) if reduction.keep == Keep::Last => pack_reduce_uniforms(nest, reduction),
-        Some(reduction) => pack_scan_uniforms(nest, reduction),
+fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
+    match &bound.kind {
+        BoundOpKind::Elementwise { .. } => pack_elementwise_uniforms(bound),
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => pack_reduce_uniforms(bound),
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => pack_scan_uniforms(bound),
     }
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_elementwise` declares
 /// at `omega/src/msl.rs:328-335`: `total_elements`, `extents[rank_len]`,
 /// `operand_base[operand_count]`, `operand_strides[operand_count][rank_len]`,
-/// then — only when `nest` has a gathered operand — the four
+/// then — only when `bound` has a gathered operand — the four
 /// `push_gather_uniform_fields` arrays [`push_gather_uniforms`] appends, in
 /// that order — every field `long`, so a flat `i64` concatenation is the
 /// struct's byte layout.
-fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
-    let rank_len = nest.extents.len().max(1);
-    let extents: Vec<i64> = nest.extents.iter().map(|extent| *extent as i64).collect();
+fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let rank_len = bound.extents.len().max(1);
+    let extents: Vec<i64> = bound.extents.iter().map(|extent| *extent as i64).collect();
 
     let mut bytes = Vec::new();
     push_i64(&mut bytes, extents.iter().product());
     push_i64_row(&mut bytes, &extents, rank_len);
-    for (_, view, _) in &nest.operands {
-        push_i64(&mut bytes, view.base);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
     }
-    for (_, view, _) in &nest.operands {
-        push_i64_row(&mut bytes, &view.strides, rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
     }
-    push_gather_uniforms(&mut bytes, nest, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -446,20 +428,27 @@ fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
 /// `operand_strides[operand_count][rank_len]`, `out_base`,
 /// `out_strides[rank_len]`, then the gather arrays (see
 /// [`pack_elementwise_uniforms`]'s doc), in that order.
-fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
-    let rank_len = nest.extents.len().max(1);
-    let output_dims = &reduction.output_dims;
-    let output_rank_len = output_dims.len().max(1);
-    let reduce_dims = reduction_dims(nest, output_dims);
-    let reduce_rank_len = reduce_dims.len().max(1);
+fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        out_layout,
+        ..
+    } = &bound.kind
+    else {
+        unreachable!("pack_reduce_uniforms is only called for a Keep::Reduce reduce")
+    };
+    let rank_len = bound.extents.len().max(1);
+    let output_rank_len = output_axes.len().max(1);
+    let reduce_axes = reduction_dims(bound, output_axes);
+    let reduce_rank_len = reduce_axes.len().max(1);
 
-    let output_extents: Vec<i64> = output_dims
+    let output_extents: Vec<i64> = output_axes
         .iter()
-        .map(|dim| nest.extents[*dim as usize] as i64)
+        .map(|axis| bound.extents[*axis as usize] as i64)
         .collect();
-    let reduction_extents: Vec<i64> = reduce_dims
+    let reduction_extents: Vec<i64> = reduce_axes
         .iter()
-        .map(|dim| nest.extents[*dim as usize] as i64)
+        .map(|axis| bound.extents[*axis as usize] as i64)
         .collect();
 
     let mut bytes = Vec::new();
@@ -467,15 +456,15 @@ fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
     push_i64(&mut bytes, reduction_extents.iter().product());
     push_i64_row(&mut bytes, &output_extents, output_rank_len);
     push_i64_row(&mut bytes, &reduction_extents, reduce_rank_len);
-    for (_, view, _) in &nest.operands {
-        push_i64(&mut bytes, view.base);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
     }
-    for (_, view, _) in &nest.operands {
-        push_i64_row(&mut bytes, &view.strides, rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
     }
-    push_i64(&mut bytes, reduction.out_view.base);
-    push_i64_row(&mut bytes, &reduction.out_view.strides, rank_len);
-    push_gather_uniforms(&mut bytes, nest, rank_len);
+    push_i64(&mut bytes, out_layout.base);
+    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -486,32 +475,35 @@ fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
 /// `out_strides[rank_len]`, then the gather arrays (see
 /// [`pack_elementwise_uniforms`]'s doc), in that order. `crate::msl::validate`
 /// already rejected a rank-0 scan before `emit` (and therefore this) ever
-/// runs, so `nest.extents` is never empty here.
-fn pack_scan_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
-    let rank = nest.extents.len();
+/// runs, so `bound.extents` is never empty here.
+fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let BoundOpKind::Reduce { out_layout, .. } = &bound.kind else {
+        unreachable!("pack_scan_uniforms is only called for a Keep::Scan reduce")
+    };
+    let rank = bound.extents.len();
     let rank_len = rank.max(1);
     let outer_rank = rank.saturating_sub(1);
     let outer_rank_len = outer_rank.max(1);
 
-    let outer_extents: Vec<i64> = nest.extents[..outer_rank]
+    let outer_extents: Vec<i64> = bound.extents[..outer_rank]
         .iter()
         .map(|extent| *extent as i64)
         .collect();
-    let inner_len = nest.extents.last().copied().unwrap_or(1) as i64;
+    let inner_len = bound.extents.last().copied().unwrap_or(1) as i64;
 
     let mut bytes = Vec::new();
     push_i64(&mut bytes, outer_extents.iter().product());
     push_i64(&mut bytes, inner_len);
     push_i64_row(&mut bytes, &outer_extents, outer_rank_len);
-    for (_, view, _) in &nest.operands {
-        push_i64(&mut bytes, view.base);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
     }
-    for (_, view, _) in &nest.operands {
-        push_i64_row(&mut bytes, &view.strides, rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
     }
-    push_i64(&mut bytes, reduction.out_view.base);
-    push_i64_row(&mut bytes, &reduction.out_view.strides, rank_len);
-    push_gather_uniforms(&mut bytes, nest, rank_len);
+    push_i64(&mut bytes, out_layout.base);
+    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -679,7 +671,7 @@ fn bind_buffers(
                 log: "kernel binds a fault buffer but none was allocated".to_string(),
             })?,
         };
-        // SAFETY: `buffer`'s length was sized from the same nest this
+        // SAFETY: `buffer`'s length was sized from the same op this
         // kernel was emitted from, so every byte the kernel indexes through
         // this binding is in bounds.
         unsafe { encoder.setBuffer_offset_atIndex(Some(&buffer), 0, index) };
@@ -710,18 +702,18 @@ fn dispatch(
     encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
 }
 
-fn dispatch_nest(
+fn dispatch_op(
     device: &ProtocolObject<dyn MTLDevice>,
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     device_buffers: &mut BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
-    nest: &Nest,
+    bound: &BoundOp,
 ) -> Result<(), MetalError> {
-    let kernel = emit(nest)?;
+    let kernel = emit(bound)?;
     let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
-    let output = allocate_buffer(device, nest_output_len(nest))?;
-    let uniforms = upload_uniforms(device, &pack_uniforms(nest))?;
-    let gathers = gather_count(nest);
+    let output = allocate_buffer(device, bound_output_len(bound))?;
+    let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
+    let gathers = gather_count(bound);
     let fault = (gathers > 0)
         .then(|| allocate_fault_buffer(device, gathers))
         .transpose()?;
@@ -753,34 +745,34 @@ fn dispatch_nest(
     command_buffer.waitUntilCompleted();
 
     if let Some(fault_buffer) = &fault {
-        check_gather_fault(nest, fault_buffer, gathers)?;
+        check_gather_fault(bound, fault_buffer, gathers)?;
     }
 
-    device_buffers.insert(nest.node, output);
+    device_buffers.insert(bound.node, output);
     Ok(())
 }
 
 /// Reads back a dispatch's fault buffer and, if any slot recorded a fault,
 /// turns it into the same `TensorError::GatherIndexOutOfRange`
 /// `cpu::evaluate` reports for the identical fetched index. Slot order
-/// matches `nest.operands`' gather order — the same numbering
+/// matches `bound.operands()`' gather order — the same numbering
 /// `crate::msl::gather_slots` and `push_gather_uniforms` both use — so the
-/// first faulted slot's own `GatherAccess` supplies the extent to report.
+/// first faulted slot's own `Lookup` supplies the extent to report.
 fn check_gather_fault(
-    nest: &Nest,
+    bound: &BoundOp,
     fault_buffer: &ProtocolObject<dyn MTLBuffer>,
     gather_count: usize,
 ) -> Result<(), MetalError> {
     let slots = read_fault_slots(fault_buffer, gather_count);
-    let gathers: Vec<&GatherAccess> = nest
-        .operands
+    let gathers: Vec<&Lookup> = bound
+        .operands()
         .iter()
         .filter_map(|(_, _, gather)| gather.as_ref())
         .collect();
     for (slot, recorded) in slots.iter().enumerate() {
         if *recorded != 0 {
             return Err(TensorError::GatherIndexOutOfRange {
-                node: nest.node,
+                node: bound.node,
                 index: i64::from(*recorded - 1),
                 extent: gathers[slot].extent,
             }
@@ -807,7 +799,7 @@ fn read_back(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Ve
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
     // CPU-visible pointer to at least `element_count` initialized `f32`s —
     // every output buffer this driver allocates is sized to at least that
-    // many elements (see `allocate_buffer`'s caller, `dispatch_nest`) before
+    // many elements (see `allocate_buffer`'s caller, `dispatch_op`) before
     // this point is reached.
     unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), element_count) }.to_vec()
 }
@@ -817,7 +809,7 @@ fn finish(
     effective_outputs: &[NodeId],
     device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
     root: NodeId,
-) -> Result<Executed, MetalError> {
+) -> Result<Evaluated, MetalError> {
     let mut results = Vec::with_capacity(effective_outputs.len());
     for node in effective_outputs {
         let shape = shapes.of(*node).to_vec();
@@ -827,5 +819,10 @@ fn finish(
         };
         results.push((*node, shape, data));
     }
-    Ok(Executed { root, results })
+    // this backend's buffer lifetime is managed by Metal's own
+    // retain/release, not counted the way `cpu::evaluate` counts its
+    // `Vec<Option<Vec<f32>>>` table, so peak_live_buffers is not tracked
+    // here — see `Evaluated`'s own doc for why `None` is the honest answer
+    // rather than a number that would not mean the same thing.
+    Ok(Evaluated::from_parts(root, results, None))
 }

@@ -2,12 +2,13 @@
 //!
 //! There is no `Tensor` type here, the same way there is no `Http` type in
 //! `proxima-http`. "Tensor" names the domain; what writing it produces is a
-//! program — a plain, self-contained `Vec<`[`Expr`]`>` that a backend lowers.
-//! "Graph" is not a construct in this crate: it is a *projection* — shapes
-//! ([`shape::infer`]) and loop nests ([`nest::lower`]) are read off a program,
-//! never built into a separate arena a program has to agree with.
+//! program — a plain, self-contained `Vec<`[`Op`]`>` that an executor runs
+//! against a call's symbol bindings. "Graph" is not a construct in this
+//! crate: it is a *projection* — shapes ([`shape::infer`]) and bound
+//! addressing ([`bind::bind`]) are read off a program, never built into a
+//! separate arena a program has to agree with.
 //!
-//! # Three expression forms
+//! # Three op forms
 //!
 //! A composed [`Pipe`](proxima_primitives::pipe::Pipe) chain is already a
 //! tree, but it lives in the type system: `AndThen<A, B>` cannot be walked,
@@ -15,57 +16,81 @@
 //! same algebra reified, so fusion and placement can rewrite it after the
 //! shapes are known.
 //!
-//! Everything reduces to three expression forms:
+//! Everything reduces to three op forms:
 //!
-//! - [`Expr::Block`] — a leaf. Where data enters.
-//! - [`Expr::Zip`] — n-ary elementwise. Arity 1 with a permuting map is
-//!   transpose/slice/broadcast; an input whose map is data-dependent is a
-//!   gather.
-//! - [`Expr::Fold`] — reduce, scan, scatter, contraction, and argmax, split by
-//!   [`Keep`] and by whether the output map is data-dependent.
+//! - [`Op::Input`] — a leaf. Where data enters.
+//! - [`Op::Elementwise`] — n-ary elementwise. Arity 1 with a permuting index
+//!   pattern is transpose/slice/broadcast; an operand whose index pattern is
+//!   data-dependent is a gather.
+//! - [`Op::Reduce`] — reduce, scan, scatter, contraction, and argmax, split
+//!   by [`Keep`] and by whether the output index pattern is data-dependent.
 //!
-//! `matmul` is a `Fold(+)` over a `Zip(*)`; `softmax` is two folds and three
-//! zips. Named operations are an *attribute* (`Expr::name`), never a variant —
-//! adding `flash_attention` is a table entry in a backend, not a change here.
+//! `matmul` is a `Reduce(+)` over an `Elementwise(*)`; `softmax` is two
+//! reduces and three elementwise ops. Named operations are an *attribute*
+//! (`Op::name`), never a variant — adding `flash_attention` is a table entry
+//! in a backend, not a change here.
 //!
 //! # Where the expressiveness actually lives
 //!
-//! Not in the three variants — in [`map`]. An [`AffineMap`] relates an
-//! iteration space to an operand's index space, and stride/dilation/offset in
-//! that grammar is what makes convolution and windowing expressible without
-//! new expression forms. Read that module first.
+//! Not in the three variants — in [`map`]. An [`IndexPattern`] relates an
+//! iteration space to an operand's index space, and stride/dilation/offset
+//! in that einsum-style grammar is what makes convolution and windowing
+//! expressible without new op forms. Read that module first.
 //!
 //! # Distribution stance
 //!
 //! No partition machinery is built yet, but the representation is shaped for
-//! it: a partition is a projection of `&[Expr]` (a contiguous or renumbered
-//! sub-slice), a cut edge becomes a named [`Expr::Block`] on the consuming
+//! it: a partition is a projection of `&[Op]` (a contiguous or renumbered
+//! sub-slice), a cut edge becomes a named [`Op::Input`] on the consuming
 //! side, [`NodeId`] is a position and is *not* stable across a partitioning
-//! pass while a `Block`'s `name` is, and the wire payload of a cut edge is
+//! pass while an `Input`'s `name` is, and the wire payload of a cut edge is
 //! `dtype + shape + bytes` — exactly what [`cpu::Evaluated::get`] already
 //! hands back per requested output.
 //!
 //! # Stream stance
 //!
 //! Because references point backwards only, a program is a valid
-//! append-only stream: every `Expr` is checkable against everything before
-//! it the moment it arrives. [`shape::Infer`] and [`nest::Lower`] are the
-//! sans-IO cores that do that judging one expression at a time; [`infer`] and
-//! [`nest::lower`] are three-line batch drivers over them, and both types
+//! append-only stream: every `Op` is checkable against everything before it
+//! the moment it arrives. [`shape::ShapeTable`] and [`bind::BoundOpBuilder`]
+//! are the sans-IO cores that do that judging one op at a time; [`infer`]
+//! and [`bind::bind`] are three-line batch drivers over them, and both types
 //! also implement [`Pipe`](proxima_primitives::pipe::Pipe) directly (`In =
-//! Expr` on `Infer`, `In = (Expr, Shapes)` on `Lower`) — composable with
-//! `proxima_primitives::pipe::PipeExt::and_then` into one chain, since
-//! `Infer`'s `Out` is exactly `Lower`'s `In`. [`Nest`] execution is not a
-//! `Pipe`: it writes into a buffer table it does not own, so [`cpu`]'s
-//! `run_nest_into` takes the caller's slice directly instead of moving the
-//! whole table through an `In`/`Out` pair — a plain loop over the `Vec<Nest>`
-//! a lowering push readies, driven by the composed chain's caller.
+//! Op` on `ShapeTable`, `In = (Op, Shapes)` on `BoundOpBuilder`) —
+//! composable with `proxima_primitives::pipe::PipeExt::and_then` into one
+//! chain, since `ShapeTable`'s `Out` is exactly `BoundOpBuilder`'s `In`.
+//! [`cpu::Interpreter`] is the third stage, a SINK (`In = BoundOp`, `Out =
+//! ()`) over a caller-provided buffer table it borrows rather than owns —
+//! the same interior-state discipline `ShapeTable` and `BoundOpBuilder`
+//! already apply to their own per-record state, not a carve-out for
+//! execution. `BoundOpBuilder::Out` is `Vec<BoundOp>` because one pushed
+//! `Op` can ready zero, one, or two `BoundOp`s (fusion's own lookahead), so
+//! a single `shapes.and_then(bind).and_then(run)` does not typecheck —
+//! `Second::In = First::Out` fails as `BoundOp` vs `Vec<BoundOp>` — and the
+//! caller drives `Interpreter::call` once per record a `BoundOpBuilder` push
+//! readies instead; see `cpu`'s test module for the exact compiler error and
+//! the reasoning.
+//!
+//! # One record kind, not two
+//!
+//! A [`bind::BoundOp`] is not a second intermediate representation: it is an
+//! [`Op`] whose addressing has been bound against one call's symbol
+//! bindings — the same `Elementwise`/`Reduce` shape, with a
+//! [`bind::Layout`] standing in for a symbolic [`IndexMap`] and bound
+//! iteration extents standing in for a symbolic [`Extent`] list.
+//! [`shape::ShapeTable`] resolves shape; [`bind::BoundOpBuilder`] binds
+//! layout *and* decides fusion in the same pass, because whether an
+//! operand's layout is worth binding on its own depends entirely on whether
+//! a consuming reduce can absorb it — splitting that into two stages would
+//! mean binding layout for elementwise ops that are about to be thrown away.
+//! The stored program (`Vec<Op>`) stays symbolic; layout is an annotation on
+//! the in-flight record produced for one call, never part of what gets
+//! stored.
 //!
 //! # Tiers
 //!
 //! - `alloc` (no_std + alloc): the program representation, [`shape`], and
-//!   [`nest`] — everything an out-of-process backend (a GPU kernel emitter,
-//!   say) needs to consume a lowered program.
+//!   [`bind`] — everything an out-of-process backend (a GPU kernel emitter,
+//!   say) needs to consume a program with bound addressing.
 //! - `std` (default): forwards `alloc`, adds `std::error::Error` and the CPU
 //!   interpreter ([`cpu`]), which needs floating-point transcendentals.
 //! - `config`: the TOML/serde face, std-only, per the layering caveat in
@@ -73,20 +98,21 @@
 //!
 //! # Building `matmul`
 //!
-//! There is no `matmul` constructor, because `matmul` is not an operation. It
-//! is a `Fold(+)` over a `Zip(*)` whose index maps contract a shared
-//! dimension, optionally labelled so a backend can reach a tuned kernel:
+//! There is no `matmul` constructor, because `matmul` is not an operation.
+//! It is a `Reduce(+)` over an `Elementwise(*)` whose index patterns
+//! contract a shared axis, optionally labelled so a backend can reach a
+//! tuned kernel:
 //!
 //! ```
 //! use proxima_tensor::{
-//!     append, map, DType, Expr, Extent, Fold, FoldInit, IndexMap, Keep, ScalarOp,
+//!     append, map, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp,
 //! };
 //!
 //! let mut program = Vec::new();
 //! // sequence length is symbolic: it is not known until a request arrives.
 //! let lhs = append(
 //!     &mut program,
-//!     Expr::Block {
+//!     Op::Input {
 //!         dtype: DType::Float32,
 //!         shape: vec![Extent::Symbolic(0), Extent::Static(768)],
 //!         name: None,
@@ -94,17 +120,17 @@
 //! );
 //! let rhs = append(
 //!     &mut program,
-//!     Expr::Block {
+//!     Op::Input {
 //!         dtype: DType::Float32,
 //!         shape: vec![Extent::Static(768), Extent::Static(3072)],
 //!         name: None,
 //!     },
 //! );
 //!
-//! // iteration space (i, j, k). k is shared, so it is the contracted dim.
+//! // iteration space (i, j, k). k is shared, so it is the contracted axis.
 //! let product = append(
 //!     &mut program,
-//!     Expr::Zip {
+//!     Op::Elementwise {
 //!         dtype: DType::Float32,
 //!         body: ScalarOp::Multiply,
 //!         operands: vec![
@@ -117,15 +143,15 @@
 //!
 //! let sum = append(
 //!     &mut program,
-//!     Expr::Fold(Fold {
+//!     Op::Reduce(Reduce {
 //!         dtype: DType::Float32,
 //!         body: ScalarOp::Add,
-//!         init: FoldInit::Zero,
+//!         init: ReduceInit::Zero,
 //!         operand: product,
 //!         in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
 //!         // dropping k is the reduction.
 //!         out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-//!         keep: Keep::Last,
+//!         keep: Keep::Reduce,
 //!         name: Some("matmul".into()),
 //!     }),
 //! );
@@ -136,32 +162,32 @@
 //! # Ok::<(), proxima_tensor::TensorError>(())
 //! ```
 //!
-//! Change `keep` to [`Keep::All`] and the same fold is a scan. Make `out_map`
-//! data-dependent and it is a scatter. Neither needs an expression form.
+//! Change `keep` to [`Keep::Scan`] and the same reduce is a scan. Make
+//! `out_map` data-dependent and it is a scatter. Neither needs a new op form.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod bind;
 #[cfg(feature = "std")]
 pub mod cpu;
 pub mod dtype;
 pub mod error;
-pub mod expr;
 pub mod live;
 pub mod map;
-pub mod nest;
+pub mod op;
 pub mod shape;
 #[cfg(feature = "config")]
 pub mod spec;
 
+pub use bind::{BoundOp, BoundOpBuilder, BoundOpKind, Layout, Lookup, bind};
 #[cfg(feature = "std")]
-pub use cpu::{Evaluated, evaluate, evaluate_parallel};
+pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel};
 pub use dtype::DType;
 pub use error::TensorError;
-pub use expr::{Expr, Extent, Fold, FoldInit, Keep, NodeId, ScalarOp, append};
 pub use live::annotate;
-pub use map::{AffineMap, AffineTerm, DimExpr, IndexMap, affine, projection};
-pub use nest::{GatherAccess, Lower, Nest, Reduction, StridedView, lower};
-pub use shape::{Infer, Shapes, infer};
+pub use map::{AxisIndex, AxisTerm, IndexMap, IndexPattern, affine, projection};
+pub use op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
+pub use shape::{ShapeTable, Shapes, infer};

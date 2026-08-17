@@ -1,26 +1,27 @@
 //! The configuration face: a tensor program as TOML, and the conversion into
-//! a `Vec<Expr>`.
+//! a `Vec<Op>`.
 //!
 //! This module exists to *force* a property rather than to claim one. If a
 //! program can be written as data, adding an operation to a model is a
 //! config edit; if it cannot, the claim that this algebra is describable was
 //! never tested. The round-trip test at the bottom is that test — the same
-//! matmul built in Rust and parsed from TOML must produce an equal `Vec<Expr>`.
+//! matmul built in Rust and parsed from TOML must produce an equal `Vec<Op>`.
 //!
-//! Index maps are written in `operand->iteration` notation, which reads like
-//! einsum: `ik->ijk` says the operand has dims `i,k` drawn from an iteration
-//! space of `i,j,k`. That covers projection, transpose, and broadcast — the
-//! overwhelming majority — and deliberately does **not** cover multi-term
-//! dims. A convolution's `h*stride + r*dilation` has no einsum spelling, so
-//! it is built with [`map::affine`](crate::map::affine) and stays out of the
-//! string grammar rather than growing it a syntax.
+//! Index patterns are written in `operand->iteration` notation, which reads
+//! like einsum: `ik->ijk` says the operand has axes `i,k` drawn from an
+//! iteration space of `i,j,k`. That covers projection, transpose, and
+//! broadcast — the overwhelming majority — and deliberately does **not**
+//! cover multi-term axes. A convolution's `h*stride + r*dilation` has no
+//! einsum spelling, so it is built with [`map::affine`](crate::map::affine)
+//! and stays out of the string grammar rather than growing it a syntax.
 //!
-//! A [`NodeSpec::Zip`] operand map may instead be a [`MapSpec::Gather`]
-//! table: `{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }`.
-//! `index_map` addresses the `gather` node the same einsum way; `map`
-//! addresses the operand's *non-gathered* dims only, in operand-dim order,
-//! skipping the position `dim` names — [`build_base_map`] splices an empty
-//! (gathered) entry back in at that position.
+//! A [`NodeSpec::Elementwise`] operand map may instead be a
+//! [`MapSpec::Gather`] table: `{ gather = "ids", index_map = "s->sd", map =
+//! "d->sd", dim = 0 }`. `index_map` addresses the `gather` node the same
+//! einsum way; `map` addresses the operand's *non-gathered* axes only, in
+//! operand-axis order, skipping the position `dim` names —
+//! [`build_base_pattern`] splices an empty (gathered) entry back in at that
+//! position.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -32,8 +33,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dtype::DType;
 use crate::error::TensorError;
-use crate::expr::{self, Expr, Extent, Fold, FoldInit, Keep, NodeId, ScalarOp};
-use crate::map::{self, AffineMap, AffineTerm, DimExpr, IndexMap};
+use crate::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
+use crate::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 
 /// A declarative tensor program. Nodes are order-dependent: a node may only
 /// reference ids defined above it, which mirrors the program's
@@ -70,9 +71,10 @@ impl ExtentSpec {
     }
 }
 
-/// One [`NodeSpec::Zip`] operand map: the existing bare `operand->iteration`
-/// string, or a table describing a gather. `#[serde(untagged)]` picks the
-/// variant from shape alone — a string is `Projection`, a table is `Gather`.
+/// One [`NodeSpec::Elementwise`] operand map: the existing bare
+/// `operand->iteration` string, or a table describing a gather.
+/// `#[serde(untagged)]` picks the variant from shape alone — a string is
+/// `Projection`, a table is `Gather`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum MapSpec {
@@ -83,25 +85,25 @@ pub enum MapSpec {
         /// How the iteration space addresses the `gather` node.
         index_map: String,
         /// How the iteration space addresses the operand's non-gathered
-        /// dims, in operand-dim order, skipping `dim`'s position.
+        /// axes, in operand-axis order, skipping `dim`'s position.
         map: String,
-        /// Which operand dimension the fetched index selects.
+        /// Which operand axis the fetched index selects.
         dim: u16,
     },
 }
 
-/// One node, discriminated by `op` so TOML reads as `op = "zip"`.
+/// One node, discriminated by `op` so TOML reads as `op = "elementwise"`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum NodeSpec {
-    Block {
+    Input {
         id: String,
         dtype: DType,
         shape: Vec<ExtentSpec>,
         #[serde(default)]
         name: Option<String>,
     },
-    Zip {
+    Elementwise {
         id: String,
         dtype: DType,
         body: ScalarOp,
@@ -110,11 +112,11 @@ pub enum NodeSpec {
         #[serde(default)]
         name: Option<String>,
     },
-    Fold {
+    Reduce {
         id: String,
         dtype: DType,
         body: ScalarOp,
-        init: FoldInit,
+        init: ReduceInit,
         input: String,
         in_map: String,
         out_map: String,
@@ -128,13 +130,13 @@ impl NodeSpec {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            Self::Block { id, .. } | Self::Zip { id, .. } | Self::Fold { id, .. } => id,
+            Self::Input { id, .. } | Self::Elementwise { id, .. } | Self::Reduce { id, .. } => id,
         }
     }
 }
 
 /// Parse `operand->iteration` into an iteration rank and one projected
-/// iteration dim per operand dim.
+/// iteration axis per operand axis.
 fn parse_projection(notation: &str) -> Result<(u16, Vec<u16>), TensorError> {
     let (operand, iteration) = notation
         .split_once("->")
@@ -166,8 +168,8 @@ impl Validate for ProgramSpec {
                 errors.push(ValidationMessage::new(entry.id(), "defined twice"));
             }
             match entry {
-                NodeSpec::Block { .. } => {}
-                NodeSpec::Zip {
+                NodeSpec::Input { .. } => {}
+                NodeSpec::Elementwise {
                     id, inputs, maps, ..
                 } => {
                     if inputs.len() != maps.len() {
@@ -193,7 +195,7 @@ impl Validate for ProgramSpec {
                         }
                     }
                 }
-                NodeSpec::Fold { id, input, .. } => {
+                NodeSpec::Reduce { id, input, .. } => {
                     if !defined.contains_key(input.as_str()) {
                         errors.push(ValidationMessage::new(id, "input is not defined above it"));
                     }
@@ -209,7 +211,7 @@ impl Validate for ProgramSpec {
     }
 }
 
-impl TryFrom<&ProgramSpec> for Vec<Expr> {
+impl TryFrom<&ProgramSpec> for Vec<Op> {
     type Error = TensorError;
 
     fn try_from(spec: &ProgramSpec) -> Result<Self, Self::Error> {
@@ -218,23 +220,23 @@ impl TryFrom<&ProgramSpec> for Vec<Expr> {
 
         for entry in &spec.node {
             let built = match entry {
-                NodeSpec::Block {
+                NodeSpec::Input {
                     dtype, shape, name, ..
                 } => {
                     let extents = shape
                         .iter()
                         .map(ExtentSpec::resolve)
                         .collect::<Result<Vec<Extent>, TensorError>>()?;
-                    expr::append(
+                    op::append(
                         &mut program,
-                        Expr::Block {
+                        Op::Input {
                             dtype: *dtype,
                             shape: extents,
                             name: name.clone(),
                         },
                     )
                 }
-                NodeSpec::Zip {
+                NodeSpec::Elementwise {
                     id,
                     dtype,
                     body,
@@ -258,9 +260,9 @@ impl TryFrom<&ProgramSpec> for Vec<Expr> {
                             Ok((node, index_map))
                         })
                         .collect::<Result<Vec<(NodeId, IndexMap)>, TensorError>>()?;
-                    expr::append(
+                    op::append(
                         &mut program,
-                        Expr::Zip {
+                        Op::Elementwise {
                             dtype: *dtype,
                             body: *body,
                             operands,
@@ -268,7 +270,7 @@ impl TryFrom<&ProgramSpec> for Vec<Expr> {
                         },
                     )
                 }
-                NodeSpec::Fold {
+                NodeSpec::Reduce {
                     dtype,
                     body,
                     init,
@@ -282,9 +284,9 @@ impl TryFrom<&ProgramSpec> for Vec<Expr> {
                     let operand = lookup(&resolved, input)?;
                     let (in_rank, in_projected) = parse_projection(in_map)?;
                     let (out_rank, out_projected) = parse_projection(out_map)?;
-                    expr::append(
+                    op::append(
                         &mut program,
-                        Expr::Fold(Fold {
+                        Op::Reduce(Reduce {
                             dtype: *dtype,
                             body: *body,
                             init: *init,
@@ -327,35 +329,35 @@ fn resolve_map_spec(
             Ok(IndexMap::Computed {
                 indices,
                 index_map: map::projection(index_rank, &index_projected),
-                base: build_base_map(base_rank, &base_projected, *dim),
+                base: build_base_pattern(base_rank, &base_projected, *dim),
                 gathered_dim: *dim,
             })
         }
     }
 }
 
-/// Builds a gather's `base` map from its non-gathered projected dims (in
-/// operand-dim order) plus the gathered dim's position: an empty
-/// [`DimExpr`] is spliced in at `gathered_dim`, since that dim's address
-/// comes from the fetch, not from `dims`' own terms. `gathered_dim` past the
+/// Builds a gather's `base` index pattern from its non-gathered projected
+/// axes (in operand-axis order) plus the gathered axis's position: an empty
+/// [`AxisIndex`] is spliced in at `gathered_dim`, since that axis's address
+/// comes from the fetch, not from `axes`' own terms. `gathered_dim` past the
 /// operand's rank is clamped rather than panicking — an out-of-range value
-/// is a well-formed but invalid `AffineMap` that
+/// is a well-formed but invalid `IndexPattern` that
 /// [`shape::infer`](crate::shape::infer) rejects downstream with
 /// [`TensorError::GatheredDimOutOfRange`], the same as it would for one
 /// built directly in Rust.
-fn build_base_map(rank: u16, projected: &[u16], gathered_dim: u16) -> AffineMap {
-    let mut dims: Vec<DimExpr> = projected
+fn build_base_pattern(rank: u16, projected: &[u16], gathered_dim: u16) -> IndexPattern {
+    let mut axes: Vec<AxisIndex> = projected
         .iter()
-        .map(|iter_dim| DimExpr {
-            terms: alloc::vec![AffineTerm::projection(*iter_dim)],
+        .map(|axis| AxisIndex {
+            terms: alloc::vec![AxisTerm::projection(*axis)],
             offset: 0,
         })
         .collect();
-    let insert_at = (gathered_dim as usize).min(dims.len());
-    dims.insert(insert_at, DimExpr::default());
-    AffineMap {
+    let insert_at = (gathered_dim as usize).min(axes.len());
+    axes.insert(insert_at, AxisIndex::default());
+    IndexPattern {
         iter_rank: rank,
-        dims,
+        axes,
     }
 }
 
@@ -374,19 +376,19 @@ mod tests {
 
     const MATMUL_TOML: &str = r#"
 [[node]]
-op = "block"
+op = "input"
 id = "lhs"
 dtype = "float32"
 shape = ["?0", 768]
 
 [[node]]
-op = "block"
+op = "input"
 id = "rhs"
 dtype = "float32"
 shape = [768, 3072]
 
 [[node]]
-op = "zip"
+op = "elementwise"
 id = "product"
 dtype = "float32"
 body = "multiply"
@@ -394,7 +396,7 @@ inputs = ["lhs", "rhs"]
 maps = ["ik->ijk", "kj->ijk"]
 
 [[node]]
-op = "fold"
+op = "reduce"
 id = "sum"
 dtype = "float32"
 body = "add"
@@ -402,31 +404,31 @@ init = "zero"
 input = "product"
 in_map = "ijk->ijk"
 out_map = "ij->ijk"
-keep = "last"
+keep = "reduce"
 name = "matmul"
 "#;
 
-    fn matmul_in_rust() -> Vec<Expr> {
+    fn matmul_in_rust() -> Vec<Op> {
         let mut program = Vec::new();
-        let lhs = expr::append(
+        let lhs = op::append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: alloc::vec![Extent::Symbolic(0), Extent::Static(768)],
                 name: None,
             },
         );
-        let rhs = expr::append(
+        let rhs = op::append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: alloc::vec![Extent::Static(768), Extent::Static(3072)],
                 name: None,
             },
         );
-        let product = expr::append(
+        let product = op::append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
@@ -436,16 +438,16 @@ name = "matmul"
                 name: None,
             },
         );
-        expr::append(
+        op::append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: product,
                 in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
                 out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: Some("matmul".into()),
             }),
         );
@@ -458,7 +460,7 @@ name = "matmul"
     fn a_program_written_as_toml_equals_the_same_program_written_in_rust() {
         let spec: ProgramSpec = toml::from_str(MATMUL_TOML).expect("spec parses");
         spec.validate().expect("spec is structurally sound");
-        let from_config = Vec::<Expr>::try_from(&spec).expect("spec lowers to a program");
+        let from_config = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
         assert_eq!(
             from_config,
             matmul_in_rust(),
@@ -469,19 +471,19 @@ name = "matmul"
 
     const EMBEDDING_TOML: &str = r#"
 [[node]]
-op = "block"
+op = "input"
 id = "table"
 dtype = "float32"
 shape = [50000, 8]
 
 [[node]]
-op = "block"
+op = "input"
 id = "ids"
 dtype = "int32"
 shape = [4]
 
 [[node]]
-op = "zip"
+op = "elementwise"
 id = "gathered"
 dtype = "float32"
 body = "identity"
@@ -489,19 +491,19 @@ inputs = ["table"]
 maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
 "#;
 
-    fn embedding_lookup_in_rust() -> Vec<Expr> {
+    fn embedding_lookup_in_rust() -> Vec<Op> {
         let mut program = Vec::new();
-        let table = expr::append(
+        let table = op::append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: alloc::vec![Extent::Static(50_000), Extent::Static(8)],
                 name: None,
             },
         );
-        let ids = expr::append(
+        let ids = op::append(
             &mut program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Int32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
@@ -510,21 +512,21 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
         let gathered_map = IndexMap::Computed {
             indices: ids,
             index_map: map::projection(2, &[0]),
-            base: AffineMap {
+            base: IndexPattern {
                 iter_rank: 2,
-                dims: alloc::vec![
-                    DimExpr::default(),
-                    DimExpr {
-                        terms: alloc::vec![AffineTerm::projection(1)],
+                axes: alloc::vec![
+                    AxisIndex::default(),
+                    AxisIndex {
+                        terms: alloc::vec![AxisTerm::projection(1)],
                         offset: 0,
                     },
                 ],
             },
             gathered_dim: 0,
         };
-        expr::append(
+        op::append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Identity,
                 operands: alloc::vec![(table, gathered_map)],
@@ -542,7 +544,7 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
     fn an_embedding_lookup_written_as_toml_equals_the_same_program_written_in_rust() {
         let spec: ProgramSpec = toml::from_str(EMBEDDING_TOML).expect("spec parses");
         spec.validate().expect("spec is structurally sound");
-        let from_config = Vec::<Expr>::try_from(&spec).expect("spec lowers to a program");
+        let from_config = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
         assert_eq!(
             from_config,
             embedding_lookup_in_rust(),
@@ -554,7 +556,7 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
     #[test]
     fn the_name_survives_the_config_round_trip() {
         let spec: ProgramSpec = toml::from_str(MATMUL_TOML).expect("spec parses");
-        let program = Vec::<Expr>::try_from(&spec).expect("lowers");
+        let program = Vec::<Op>::try_from(&spec).expect("lowers");
         let root = program.last().expect("root");
         assert_eq!(root.name(), Some("matmul"));
     }
@@ -562,8 +564,8 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
     #[test]
     fn a_symbolic_extent_survives_as_a_symbol() {
         let spec: ProgramSpec = toml::from_str(MATMUL_TOML).expect("spec parses");
-        let program = Vec::<Expr>::try_from(&spec).expect("lowers");
-        let Expr::Block { shape, .. } = &program[0] else {
+        let program = Vec::<Op>::try_from(&spec).expect("lowers");
+        let Op::Input { shape, .. } = &program[0] else {
             panic!("first node is a leaf");
         };
         assert_eq!(
@@ -574,17 +576,17 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
     }
 
     #[test]
-    fn a_block_name_survives_the_config_round_trip() {
+    fn an_input_name_survives_the_config_round_trip() {
         let named = r#"
 [[node]]
-op = "block"
+op = "input"
 id = "x"
 dtype = "float32"
 shape = [4]
 name = "weights.embedding"
 "#;
         let spec: ProgramSpec = toml::from_str(named).expect("spec parses");
-        let program = Vec::<Expr>::try_from(&spec).expect("lowers");
+        let program = Vec::<Op>::try_from(&spec).expect("lowers");
         assert_eq!(program[0].name(), Some("weights.embedding"));
     }
 
@@ -625,7 +627,7 @@ name = "weights.embedding"
     fn a_forward_reference_in_config_is_rejected() {
         let forward = r#"
 [[node]]
-op = "zip"
+op = "elementwise"
 id = "early"
 dtype = "float32"
 body = "identity"
@@ -633,7 +635,7 @@ inputs = ["later"]
 maps = ["i->i"]
 
 [[node]]
-op = "block"
+op = "input"
 id = "later"
 dtype = "float32"
 shape = [4]
@@ -644,7 +646,7 @@ shape = [4]
             "config order mirrors the program's backwards-reference rule"
         );
         assert!(matches!(
-            Vec::<Expr>::try_from(&spec).expect_err("cannot lower"),
+            Vec::<Op>::try_from(&spec).expect_err("cannot lower"),
             TensorError::UnknownNode(_)
         ));
     }
@@ -653,13 +655,13 @@ shape = [4]
     fn a_duplicate_id_is_rejected() {
         let duplicate = r#"
 [[node]]
-op = "block"
+op = "input"
 id = "same"
 dtype = "float32"
 shape = [4]
 
 [[node]]
-op = "block"
+op = "input"
 id = "same"
 dtype = "float32"
 shape = [8]
@@ -672,13 +674,13 @@ shape = [8]
     fn inputs_and_maps_must_agree_in_count() {
         let lopsided = r#"
 [[node]]
-op = "block"
+op = "input"
 id = "source"
 dtype = "float32"
 shape = [4]
 
 [[node]]
-op = "zip"
+op = "elementwise"
 id = "bad"
 dtype = "float32"
 body = "add"
@@ -688,7 +690,7 @@ maps = ["i->i"]
         let spec: ProgramSpec = toml::from_str(lopsided).expect("parses");
         assert!(spec.validate().is_err());
         assert!(matches!(
-            Vec::<Expr>::try_from(&spec).expect_err("cannot lower"),
+            Vec::<Op>::try_from(&spec).expect_err("cannot lower"),
             TensorError::SpecArityMismatch { .. }
         ));
     }
@@ -697,14 +699,14 @@ maps = ["i->i"]
     fn a_malformed_extent_is_rejected() {
         let bad = r#"
 [[node]]
-op = "block"
+op = "input"
 id = "source"
 dtype = "float32"
 shape = ["seq"]
 "#;
         let spec: ProgramSpec = toml::from_str(bad).expect("parses");
         assert!(matches!(
-            Vec::<Expr>::try_from(&spec).expect_err("`seq` is not `?n`"),
+            Vec::<Op>::try_from(&spec).expect_err("`seq` is not `?n`"),
             TensorError::MalformedExtent(_)
         ));
     }
