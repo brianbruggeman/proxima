@@ -22,10 +22,13 @@
 //! merge shape (\*DK: merge N fixed NIC/NVMe queues with zero allocation), and
 //! it tiers all the way down to bare metal.
 //!
-//! A runtime-arity no-alloc variant would back the sources with a
-//! `heapless::Vec<S, CAP>` whose `CAP` is a build.rs/conflaguration sizing const
-//! (the existing `RETRY_STATUS_CAP` pattern) — not built here; the const-`N`
-//! form needs no build-time axis (the caller names the arity).
+//! [`FanInVec`] is the runtime-arity no-alloc variant: sources live in a
+//! `heapless::Vec<S, FAN_IN_SOURCE_CAP>` whose cap is a build.rs/conflaguration
+//! sizing const (the `RETRY_STATUS_CAP` pattern in `retry_rules.rs`, mirrored
+//! here). The const-`N` form above needs no build-time axis (the caller names
+//! the arity at the type level); `FanInVec` is for the case where the arity is
+//! only known at runtime (a CLI/config-driven source count) and still must not
+//! allocate.
 //!
 //! `Item` (`S::Out`) is owned. The GAT lending form that makes the merge
 //! zero-copy — the merged item borrowing into the producing source's ring
@@ -56,6 +59,7 @@ use core::task::{Context, Poll};
 
 use proxima_core::markers::DropSafe;
 
+use crate::pipe::fan_in_sized::FAN_IN_SOURCE_CAP;
 use crate::pipe::primitives::{Pipe, UnpinPipe, UnpinSendPipe};
 
 /// A source's `call` will never produce again — the merge's termination
@@ -318,6 +322,227 @@ where
 // which is what lets one nest inside an outer `FanIn` (the outer's `S` bound
 // demands it).
 impl<S: DropSafe, Strategy, const N: usize> DropSafe for FanIn<S, Strategy, N> {}
+
+/// `FanInVec::new` rejected a source count over `FAN_IN_SOURCE_CAP`. Reported,
+/// never silently truncated — a dropped source would be a silently lost stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("source count {attempted} exceeds fan-in capacity {capacity}")]
+pub struct CapacityExceeded {
+    /// How many sources the caller tried to merge.
+    pub attempted: usize,
+    /// `FAN_IN_SOURCE_CAP`, the ceiling that was exceeded.
+    pub capacity: usize,
+}
+
+/// Runtime-arity N→1 merge — the variant this module's doc names as missing.
+/// [`FanIn`] fixes arity at the type level (`[S; N]`); this backs the sources
+/// with `heapless::Vec<S, FAN_IN_SOURCE_CAP>` so the caller names the count at
+/// construction (a CLI/config-driven source set) instead of at compile time.
+/// Still no_std + no-alloc: no heap, no spawn, no channel. Same contract as
+/// `FanIn` — `Pipe`/`UnpinPipe`/`UnpinSendPipe` with `In = ()`, `Out = S::Out`,
+/// `Err = Exhausted` — and the same scan-don't-race fairness (see the module
+/// doc's "Scan, don't race" section; the algorithm is identical, only the
+/// backing store and the runtime length differ).
+pub struct FanInVec<S, Strategy> {
+    sources: heapless::Vec<S, FAN_IN_SOURCE_CAP>,
+    live: heapless::Vec<AtomicBool, FAN_IN_SOURCE_CAP>,
+    remaining: AtomicUsize,
+    cursor: AtomicUsize,
+    strategy: Strategy,
+}
+
+impl<S, Strategy> FanInVec<S, Strategy> {
+    /// Merge `sources`, choosing among the ready ones by `strategy`. All start
+    /// live; the merge ends when all have drained. `sources` must know its own
+    /// length ([`ExactSizeIterator`]) so an over-capacity count is caught
+    /// before anything is pushed — an array, `Vec`, or `heapless::Vec` all
+    /// qualify. More than `FAN_IN_SOURCE_CAP` sources is [`CapacityExceeded`],
+    /// not truncation: zero sources is valid and resolves [`Exhausted`] on the
+    /// first call.
+    pub fn new<I>(sources: I, strategy: Strategy) -> Result<Self, CapacityExceeded>
+    where
+        I: IntoIterator<Item = S>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let iter = sources.into_iter();
+        let attempted = iter.len();
+        if attempted > FAN_IN_SOURCE_CAP {
+            return Err(CapacityExceeded {
+                attempted,
+                capacity: FAN_IN_SOURCE_CAP,
+            });
+        }
+        let mut backing: heapless::Vec<S, FAN_IN_SOURCE_CAP> = heapless::Vec::new();
+        let mut live: heapless::Vec<AtomicBool, FAN_IN_SOURCE_CAP> = heapless::Vec::new();
+        for source in iter {
+            backing.push(source).map_err(|_| CapacityExceeded {
+                attempted,
+                capacity: FAN_IN_SOURCE_CAP,
+            })?;
+            live.push(AtomicBool::new(true)).map_err(|_| CapacityExceeded {
+                attempted,
+                capacity: FAN_IN_SOURCE_CAP,
+            })?;
+        }
+        let count = backing.len();
+        Ok(Self {
+            sources: backing,
+            live,
+            remaining: AtomicUsize::new(count),
+            cursor: AtomicUsize::new(0),
+            strategy,
+        })
+    }
+
+    /// The strategy this merge was built with.
+    #[must_use]
+    pub fn strategy(&self) -> &Strategy {
+        &self.strategy
+    }
+
+    /// Sources not yet drained.
+    #[must_use]
+    pub fn live_count(&self) -> usize {
+        self.remaining.load(Ordering::Relaxed)
+    }
+}
+
+/// The future behind `FanInVec::call` — same one-scan-pass algorithm as
+/// [`FanInCall`], over `fan.sources.len()` instead of a const `N`.
+struct FanInVecCall<'fan, S, Strategy> {
+    fan: &'fan FanInVec<S, Strategy>,
+}
+
+impl<S, Strategy> Future for FanInVecCall<'_, S, Strategy>
+where
+    S: UnpinPipe<In = (), Err = Exhausted>,
+    Strategy: FanInStrategy,
+{
+    type Output = Result<S::Out, Exhausted>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let fan = self.fan;
+        if fan.remaining.load(Ordering::Relaxed) == 0 {
+            return Poll::Ready(Err(Exhausted));
+        }
+        let n = fan.sources.len();
+        let cursor = fan.cursor.load(Ordering::Relaxed);
+        for step in 0..n {
+            let index = fan.strategy.index(step, cursor, n);
+            if !fan.live[index].load(Ordering::Relaxed) {
+                continue;
+            }
+            let mut call = fan.sources[index].call(());
+            match Pin::new(&mut call).poll(cx) {
+                Poll::Ready(Ok(item)) => {
+                    fan.cursor.store((index + 1) % n, Ordering::Relaxed);
+                    return Poll::Ready(Ok(item));
+                }
+                Poll::Ready(Err(Exhausted)) => {
+                    fan.live[index].store(false, Ordering::Relaxed);
+                    let remaining = fan.remaining.fetch_sub(1, Ordering::Relaxed) - 1;
+                    if remaining == 0 {
+                        return Poll::Ready(Err(Exhausted));
+                    }
+                }
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    }
+}
+
+/// The `UnpinSendPipe`-tier mirror of [`FanInVecCall`], same relationship as
+/// [`FanInSendCall`] to [`FanInCall`].
+struct FanInVecSendCall<'fan, S, Strategy> {
+    fan: &'fan FanInVec<S, Strategy>,
+}
+
+impl<S, Strategy> Future for FanInVecSendCall<'_, S, Strategy>
+where
+    S: UnpinSendPipe<In = (), Err = Exhausted>,
+    Strategy: FanInStrategy,
+{
+    type Output = Result<S::Out, Exhausted>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let fan = self.fan;
+        if fan.remaining.load(Ordering::Relaxed) == 0 {
+            return Poll::Ready(Err(Exhausted));
+        }
+        let n = fan.sources.len();
+        let cursor = fan.cursor.load(Ordering::Relaxed);
+        for step in 0..n {
+            let index = fan.strategy.index(step, cursor, n);
+            if !fan.live[index].load(Ordering::Relaxed) {
+                continue;
+            }
+            let mut call = UnpinSendPipe::call(&fan.sources[index], ());
+            match Pin::new(&mut call).poll(cx) {
+                Poll::Ready(Ok(item)) => {
+                    fan.cursor.store((index + 1) % n, Ordering::Relaxed);
+                    return Poll::Ready(Ok(item));
+                }
+                Poll::Ready(Err(Exhausted)) => {
+                    fan.live[index].store(false, Ordering::Relaxed);
+                    let remaining = fan.remaining.fetch_sub(1, Ordering::Relaxed) - 1;
+                    if remaining == 0 {
+                        return Poll::Ready(Err(Exhausted));
+                    }
+                }
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl<S, Strategy> Pipe for FanInVec<S, Strategy>
+where
+    S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
+    Strategy: FanInStrategy,
+{
+    type In = ();
+    type Out = S::Out;
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> {
+        FanInVecCall { fan: self }
+    }
+}
+
+impl<S, Strategy> UnpinPipe for FanInVec<S, Strategy>
+where
+    S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
+    Strategy: FanInStrategy,
+{
+    type In = ();
+    type Out = S::Out;
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Unpin {
+        FanInVecCall { fan: self }
+    }
+}
+
+impl<S, Strategy> UnpinSendPipe for FanInVec<S, Strategy>
+where
+    S: UnpinSendPipe<In = (), Err = Exhausted> + DropSafe,
+    Strategy: FanInStrategy + Send + Sync + 'static,
+{
+    type In = ();
+    type Out = S::Out;
+    type Err = Exhausted;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Self::Out, Exhausted>> + Send + Unpin {
+        FanInVecSendCall { fan: self }
+    }
+}
+
+// same reasoning as `FanIn`'s `DropSafe` impl: dropping an in-flight
+// `FanInVecCall` mid-scan leaves no observable partial state, so a `FanInVec`
+// of `DropSafe` sources is itself `DropSafe`.
+impl<S: DropSafe, Strategy> DropSafe for FanInVec<S, Strategy> {}
 
 #[cfg(test)]
 mod tests {
@@ -646,6 +871,239 @@ mod tests {
     fn unpin_send_pipe_future_is_send_and_unpin() {
         fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
         let fan = FanIn::new([Script::new([Step::Yield(1), Step::Done])], Select::Fifo);
+        let call = UnpinSendPipe::call(&fan, ());
+        needs_send_unpin(&call);
+    }
+
+    // ── FanInVec: runtime-arity variant ─────────────────────────────────────
+
+    // drive a runtime-arity fan-in to completion into a fixed buffer; returns count.
+    fn drain_vec<S, Strategy>(fan: &FanInVec<S, Strategy>, out: &mut [u32]) -> usize
+    where
+        S: UnpinPipe<In = (), Out = u32, Err = Exhausted> + DropSafe,
+        Strategy: FanInStrategy,
+    {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut count = 0;
+        for _ in 0..10_000 {
+            let mut call = Pipe::call(fan, ());
+            match Pin::new(&mut call).poll(&mut cx) {
+                Poll::Ready(Ok(value)) => {
+                    out[count] = value;
+                    count += 1;
+                }
+                Poll::Ready(Err(Exhausted)) => break,
+                Poll::Pending => {}
+            }
+        }
+        count
+    }
+
+    // like `drain_vec`, but stops after `target` items instead of draining —
+    // for checking fairness ordering while a hot source is still live.
+    fn take_vec<S, Strategy>(fan: &FanInVec<S, Strategy>, out: &mut [u32], target: usize) -> usize
+    where
+        S: UnpinPipe<In = (), Out = u32, Err = Exhausted> + DropSafe,
+        Strategy: FanInStrategy,
+    {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut count = 0;
+        while count < target {
+            let mut call = Pipe::call(fan, ());
+            match Pin::new(&mut call).poll(&mut cx) {
+                Poll::Ready(Ok(value)) => {
+                    out[count] = value;
+                    count += 1;
+                }
+                Poll::Ready(Err(Exhausted)) => break,
+                Poll::Pending => {}
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn vec_merges_all_sources_in_round_robin_order() {
+        let fan = FanInVec::new(
+            [
+                Script::new([Step::Yield(0), Step::Yield(1), Step::Done]),
+                Script::new([Step::Yield(10), Step::Yield(11), Step::Done]),
+                Script::new([Step::Yield(20), Step::Yield(21), Step::Done]),
+            ],
+            Select::RoundRobin,
+        )
+        .expect("3 sources fit the default cap");
+        let mut buf = [0u32; 16];
+        let count = drain_vec(&fan, &mut buf);
+        assert_eq!(
+            &buf[..count],
+            &[0, 10, 20, 1, 11, 21],
+            "round-robin fairness, same as the fixed-arity form"
+        );
+    }
+
+    #[test]
+    fn vec_a_hot_source_does_not_starve_the_others() {
+        // source #0 has a long backlog (always ready for many calls); sources
+        // #1 and #2 have exactly one item, then pad with `Done` to match the
+        // array's fixed width. Round-robin fairness means the hot source does
+        // not get a second turn before the other two are served.
+        let fan = FanInVec::new(
+            [
+                Script::new([Step::Yield(0), Step::Yield(1), Step::Yield(2), Step::Yield(3)]),
+                Script::new([Step::Yield(100), Step::Done, Step::Done, Step::Done]),
+                Script::new([Step::Yield(200), Step::Done, Step::Done, Step::Done]),
+            ],
+            Select::RoundRobin,
+        )
+        .expect("3 sources fit the default cap");
+        let mut buf = [0u32; 8];
+        let count = take_vec(&fan, &mut buf, 3);
+        assert_eq!(
+            &buf[..count],
+            &[0, 100, 200],
+            "every source is visited once before the hot source's second item"
+        );
+    }
+
+    #[test]
+    fn vec_drained_source_is_dropped_and_merge_continues() {
+        let fan = FanInVec::new(
+            [
+                Script::new([Step::Done, Step::Done, Step::Done]),
+                Script::new([Step::Yield(1), Step::Yield(2), Step::Done]),
+                Script::new([Step::Yield(3), Step::Done, Step::Done]),
+            ],
+            Select::RoundRobin,
+        )
+        .expect("3 sources fit the default cap");
+        let mut buf = [0u32; 16];
+        let count = drain_vec(&fan, &mut buf);
+        let got = &mut buf[..count];
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            &[1, 2, 3],
+            "items from live sources, drained one skipped, merge keeps going"
+        );
+    }
+
+    #[test]
+    fn vec_all_sources_exhausted_resolves_exhausted() {
+        let fan = FanInVec::new(
+            [Script::new([Step::Done]), Script::new([Step::Done])],
+            Select::RoundRobin,
+        )
+        .expect("2 sources fit the default cap");
+        let mut buf = [0u32; 4];
+        assert_eq!(
+            drain_vec(&fan, &mut buf),
+            0,
+            "every source starts exhausted, so the merge resolves Exhausted immediately"
+        );
+        assert_eq!(fan.live_count(), 0);
+    }
+
+    #[test]
+    fn vec_exceeding_cap_is_reported_not_truncated() {
+        // exclusive range, not `0..=CAP`: `RangeInclusive<usize>` does not
+        // implement `ExactSizeIterator` (it cannot always represent its own
+        // length in a `usize`); `Range<usize>` does.
+        let too_many = (0..(FAN_IN_SOURCE_CAP + 1))
+            .map(|index| Script::new([Step::Yield(index as u32), Step::Done]));
+        let result = FanInVec::new(too_many, Select::RoundRobin);
+        let err = match result {
+            Ok(_) => panic!("CAP + 1 sources must be rejected, not truncated"),
+            Err(err) => err,
+        };
+        assert_eq!(err.attempted, FAN_IN_SOURCE_CAP + 1);
+        assert_eq!(err.capacity, FAN_IN_SOURCE_CAP);
+    }
+
+    #[test]
+    fn vec_arity_of_zero_resolves_exhausted_immediately() {
+        let fan = FanInVec::<Script<1>, Select>::new(core::iter::empty(), Select::RoundRobin)
+            .expect("zero sources is within capacity");
+        assert_eq!(fan.live_count(), 0);
+        let mut buf = [0u32; 1];
+        assert_eq!(
+            drain_vec(&fan, &mut buf),
+            0,
+            "0 sources => immediately Exhausted"
+        );
+    }
+
+    #[test]
+    fn vec_arity_of_one_drains_correctly() {
+        let fan = FanInVec::new([Script::new([Step::Yield(42), Step::Done])], Select::RoundRobin)
+            .expect("1 source fits the default cap");
+        let mut buf = [0u32; 4];
+        let count = drain_vec(&fan, &mut buf);
+        assert_eq!(&buf[..count], &[42]);
+    }
+
+    #[test]
+    fn vec_live_count_tracks_draining() {
+        let fan = FanInVec::new(
+            [Script::new([Step::Yield(1)]), Script::new([Step::Yield(2)])],
+            Select::RoundRobin,
+        )
+        .expect("2 sources fit the default cap");
+        assert_eq!(fan.live_count(), 2);
+    }
+
+    // `UnpinSendPipe::call`'s merge loop is `FanInVecSendCall` — drive it
+    // through the `Send` entry point specifically, mirroring the fixed-arity
+    // form's `drain_send`/`unpin_send_pipe_*` tests.
+    fn drain_vec_send<S, Strategy>(fan: &FanInVec<S, Strategy>, out: &mut [u32]) -> usize
+    where
+        S: UnpinSendPipe<In = (), Out = u32, Err = Exhausted> + DropSafe,
+        Strategy: FanInStrategy + Send + Sync + 'static,
+    {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut count = 0;
+        for _ in 0..10_000 {
+            let mut call = UnpinSendPipe::call(fan, ());
+            match Pin::new(&mut call).poll(&mut cx) {
+                Poll::Ready(Ok(value)) => {
+                    out[count] = value;
+                    count += 1;
+                }
+                Poll::Ready(Err(Exhausted)) => break,
+                Poll::Pending => {}
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn vec_unpin_send_pipe_merges_all_sources_in_round_robin_order() {
+        let fan = FanInVec::new(
+            [
+                Script::new([Step::Yield(0), Step::Yield(1), Step::Done]),
+                Script::new([Step::Yield(10), Step::Yield(11), Step::Done]),
+                Script::new([Step::Yield(20), Step::Yield(21), Step::Done]),
+            ],
+            Select::RoundRobin,
+        )
+        .expect("3 sources fit the default cap");
+        let mut buf = [0u32; 16];
+        let count = drain_vec_send(&fan, &mut buf);
+        assert_eq!(
+            &buf[..count],
+            &[0, 10, 20, 1, 11, 21],
+            "same round-robin fairness as the UnpinPipe tier"
+        );
+    }
+
+    #[test]
+    fn vec_unpin_send_pipe_future_is_send_and_unpin() {
+        fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
+        let fan = FanInVec::new([Script::new([Step::Yield(1), Step::Done])], Select::Fifo)
+            .expect("1 source fits the default cap");
         let call = UnpinSendPipe::call(&fan, ());
         needs_send_unpin(&call);
     }

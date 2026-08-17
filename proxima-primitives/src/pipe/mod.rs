@@ -12,7 +12,7 @@
 //! dashmap+hdrhistogram, the per-core runtime) live downstream in
 //! `proxima-telemetry`, `proxima-recording`, `proxima-runtime*`, etc.
 
-/// Build-time sizing consts (heapless caps) baked from `proxima-primitives.toml`
+/// Build-time sizing const (heapless cap) baked from `proxima-primitives.toml`
 /// by `build.rs`. Only the no-alloc tier reads `RETRY_STATUS_CAP`; under
 /// `proxima_alloc` the unbounded `BTreeSet` form needs no cap.
 #[cfg(not(proxima_alloc))]
@@ -20,6 +20,17 @@ mod sized {
     include!(concat!(
         env!("OUT_DIR"),
         "/proxima_primitives_pipe_sized.rs"
+    ));
+}
+
+/// Build-time sizing const for [`fan_in::FanInVec`], baked the same way.
+/// Unconditional (no `proxima_alloc` gate): `FanInVec` never switches to an
+/// alloc backing store, so it stays no-alloc regardless of the `alloc`
+/// feature, and `FAN_IN_SOURCE_CAP` must be reachable in every build.
+mod fan_in_sized {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/proxima_primitives_pipe_fan_in_sized.rs"
     ));
 }
 
@@ -199,7 +210,7 @@ pub use capabilities::{Idempotent, Replayable, Retryable};
 pub use drain_sink::RingSinkWriteError;
 pub use drain_sink::{DrainFanOut, DrainSink, RingSink};
 pub use drain_source::{DrainFanIn, DrainSource, DrainState, RingSource};
-pub use fan_in::{Exhausted, FanIn, FanInStrategy, Select};
+pub use fan_in::{CapacityExceeded, Exhausted, FanIn, FanInStrategy, FanInVec, Select};
 #[cfg(feature = "std")]
 pub use fanout_registry::{KeyedFanOut, SubscriptionId};
 #[cfg(feature = "std")]
@@ -330,5 +341,16 @@ mod algebra_claims {
         Strategy: super::fan_in::FanInStrategy,
     {
         assert_pipe::<super::fan_in::FanIn<S, Strategy, N>>();
+    }
+
+    // the runtime-arity fan-in IS a pipe too — same contract as the fixed-arity
+    // form, just backed by heapless::Vec instead of [S; N].
+    fn _fan_in_vec_is_a_pipe<S, Strategy>()
+    where
+        S: super::primitives::UnpinPipe<In = (), Err = super::fan_in::Exhausted>
+            + proxima_core::markers::DropSafe,
+        Strategy: super::fan_in::FanInStrategy,
+    {
+        assert_pipe::<super::fan_in::FanInVec<S, Strategy>>();
     }
 }
