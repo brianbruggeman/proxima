@@ -58,17 +58,17 @@
 //! Op` on `ShapeTable`, `In = (Op, Shapes)` on `BoundOpBuilder`) —
 //! composable with `proxima_primitives::pipe::PipeExt::and_then` into one
 //! chain, since `ShapeTable`'s `Out` is exactly `BoundOpBuilder`'s `In`.
-//! [`cpu::Interpreter`] is the third stage, a SINK (`In = BoundOp`, `Out =
-//! ()`) over a caller-provided buffer table it borrows rather than owns —
-//! the same interior-state discipline `ShapeTable` and `BoundOpBuilder`
-//! already apply to their own per-record state, not a carve-out for
-//! execution. `BoundOpBuilder::Out` is `Vec<BoundOp>` because one pushed
-//! `Op` can ready zero, one, or two `BoundOp`s (fusion's own lookahead), so
-//! a single `shapes.and_then(bind).and_then(run)` does not typecheck —
-//! `Second::In = First::Out` fails as `BoundOp` vs `Vec<BoundOp>` — and the
-//! caller drives `Interpreter::call` once per record a `BoundOpBuilder` push
-//! readies instead; see `cpu`'s test module for the exact compiler error and
-//! the reasoning.
+//! [`cpu::Interpreter`] is the third stage: `In = Vec<BoundOp>`, `Out = ()`,
+//! over a caller-provided buffer table it borrows rather than owns — the
+//! same interior-state discipline `ShapeTable` and `BoundOpBuilder` already
+//! apply to their own per-record state, not a carve-out for execution.
+//! `BoundOpBuilder::Out` is `Vec<BoundOp>` because one pushed `Op` can ready
+//! zero, one, or two `BoundOp`s (fusion's own lookahead); `Interpreter::In`
+//! matches that batch exactly, so the full
+//! `shapes.and_then(bind).and_then(run)` composes into one chain —
+//! `Second::In = First::Out` holds at both joins — and the caller drives
+//! that one chain once per `Op` record; see `cpu`'s test module for the
+//! composed chain and the reasoning.
 //!
 //! # One record kind, not two
 //!

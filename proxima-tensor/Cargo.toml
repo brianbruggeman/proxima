@@ -17,6 +17,17 @@ alloc = []
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
 config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+# gates the ggml FFI comparison bench: default-off so a normal build never
+# needs a statically-linked ggml checkout on disk. build.rs is a no-op
+# unless this feature is enabled.
+ggml-bench = ["std"]
+# real execution-witness counters (elements/bytes/gather-vs-affine) plus
+# per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
+# surface — default-off, no effect on the default build or the no_std+alloc
+# tier. Counters are incremented in a local accumulator inside the loop and
+# committed ONCE per bound-op call (never per element), so the feature does
+# not perturb the thing it measures at any tier that has it off.
+instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros"]
 
 [dependencies]
 bon = { workspace = true, optional = true }
@@ -25,6 +36,7 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
 # reaches them at every tier this crate has, alloc included.
 proxima-primitives = { workspace = true }
+proxima-telemetry = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true, default-features = false }
 
@@ -32,5 +44,11 @@ thiserror = { workspace = true, default-features = false }
 workspace = true
 
 [dev-dependencies]
+criterion = { workspace = true }
 rstest.workspace = true
 toml.workspace = true
+
+[[bench]]
+name = "bench_vs_ggml"
+harness = false
+required-features = ["ggml-bench"]

@@ -275,7 +275,7 @@ impl ShapeTable {
     }
 }
 
-/// `In = Out = Op`, the observe form: an expression is fully judged the
+/// `In = Op`, `Out = (Op, Shapes)`: an expression is fully judged the
 /// moment [`ShapeTable::push`] resolves it, and the same `Op` is handed
 /// back unchanged, paired with a snapshot of every shape known so far. The
 /// pair (not `Out = ()` or a bare resolved shape) is what lets a downstream
