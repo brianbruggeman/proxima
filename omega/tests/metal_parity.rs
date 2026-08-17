@@ -11,8 +11,8 @@
 
 use omega::MetalError;
 use proxima_tensor::{
-    AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, Reduce,
-    ReduceInit, ScalarOp, TensorError, affine, append, evaluate, projection,
+    AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op,
+    Reduce, ReduceInit, ScalarOp, TensorError, affine, append, bind, evaluate, infer, projection,
 };
 
 /// Asserts `cpu` and `metal` agree within `1e-6`, refusing a vacuous
@@ -420,6 +420,89 @@ fn tanh_chain_parity_matches_within_epsilon() {
         .expect("metal tanh chain executes on a real device");
 
     assert_parity("tanh_chain", cpu.root(), metal.root());
+}
+
+/// `b = a * scale; c = b + bias; d = c * c` — a multi-operand
+/// elementwise-into-elementwise fusion chain (as opposed to
+/// `tanh_chain_program`'s single-operand unary chain), asserted to bind to
+/// one `BoundOp` before it is even handed to the Metal driver, so a failure
+/// here can only be the fused MSL kernel disagreeing with the CPU
+/// interpreter, not some other op in the program.
+#[test]
+fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
+    let mut program = Vec::new();
+    let identity = || IndexMap::Affine(projection(1, &[0]));
+    let a = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let scale = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let bias = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let b = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(a, identity()), (scale, identity())],
+            name: None,
+        },
+    );
+    let c = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![(b, identity()), (bias, identity())],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(c, identity()), (c, identity())],
+            name: None,
+        },
+    );
+
+    let shapes = infer(&program, &[]).expect("elementwise chain infers");
+    let resolved = bind(&program, &shapes, &[]).expect("elementwise chain resolves");
+    assert_eq!(
+        resolved.len(),
+        1,
+        "b and c must fuse into d's own BoundOp before this ever reaches the Metal driver"
+    );
+    assert!(matches!(resolved[0].kind, BoundOpKind::Elementwise { .. }));
+
+    let a_data = [1.0, 2.0, 3.0, 4.0f32];
+    let scale_data = [2.0, 0.5, -1.0, 3.0f32];
+    let bias_data = [1.0, 1.0, 1.0, 1.0f32];
+
+    let cpu = evaluate(&program, &[], &[&a_data, &scale_data, &bias_data], &[])
+        .expect("cpu elementwise chain evaluates");
+    let metal = omega::execute(&program, &[], &[&a_data, &scale_data, &bias_data], &[])
+        .expect("metal elementwise chain executes on a real device");
+
+    assert_parity("elementwise_fusion_chain", cpu.root(), metal.root());
 }
 
 #[test]

@@ -182,7 +182,9 @@ pub mod shape;
 #[cfg(feature = "config")]
 pub mod spec;
 
-pub use bind::{BoundOp, BoundOpBuilder, BoundOpKind, Layout, Lookup, bind};
+pub use bind::{
+    BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
+};
 #[cfg(feature = "std")]
 pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel};
 pub use dtype::DType;

@@ -66,7 +66,7 @@ use std::thread;
 
 use proxima_primitives::pipe::Pipe;
 
-use crate::bind::{self, BoundOp, BoundOpKind};
+use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, StepArg};
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::map::IndexMap;
@@ -739,7 +739,9 @@ fn run_elementwise(
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
     let innermost_dim = outer_extents.len() as u16;
     let raw = operand_buffers(resolved, buffers)?;
-    let element_op = resolved.element_op();
+    let body = resolved.element_body();
+    let mut operand_values = vec![0.0f32; raw.len()];
+    let mut step_values = vec![0.0f32; body.steps.len()];
 
     for (outer_position, outer_coordinate) in odometer(outer_extents).enumerate() {
         let mut running: Vec<i64> = resolved
@@ -757,16 +759,15 @@ fn run_elementwise(
         let out_base = outer_position * inner_len;
 
         for step in 0..inner_len {
-            let mut scratch = [0.0f32; 3];
             for (index, data) in raw.iter().enumerate() {
                 let mut offset = running[index];
                 if let Some(cursor) = gather_cursors[index].as_mut() {
                     offset += cursor.fetch_and_advance(resolved.node)?;
                 }
-                scratch[index] = data[offset as usize];
+                operand_values[index] = data[offset as usize];
                 running[index] += strides[index];
             }
-            output[out_base + step] = apply_scalar_op(element_op, &scratch[..raw.len()]);
+            output[out_base + step] = apply_body(body, &operand_values, &mut step_values);
         }
     }
     Ok(())
@@ -788,7 +789,9 @@ fn run_reduce(
         unreachable!("run_reduce is only called for a Keep::Reduce fold")
     };
     let raw = operand_buffers(resolved, buffers)?;
-    let element_op = resolved.element_op();
+    let body = resolved.element_body();
+    let mut operand_values = vec![0.0f32; raw.len()];
+    let mut step_values = vec![0.0f32; body.steps.len()];
 
     let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
@@ -831,16 +834,15 @@ fn run_reduce(
                 build_gather_cursors(resolved, buffers, &full_coordinate, last_output_dim)?;
 
             for slot in &mut accumulator {
-                let mut scratch = [0.0f32; 3];
                 for (index, data) in raw.iter().enumerate() {
                     let mut offset = running[index];
                     if let Some(cursor) = gather_cursors[index].as_mut() {
                         offset += cursor.fetch_and_advance(resolved.node)?;
                     }
-                    scratch[index] = data[offset as usize];
+                    operand_values[index] = data[offset as usize];
                     running[index] += strides[index];
                 }
-                let value = apply_scalar_op(element_op, &scratch[..raw.len()]);
+                let value = apply_body(body, &operand_values, &mut step_values);
                 *slot = if seeded {
                     apply_scalar_op(*reduce_op, &[*slot, value])
                 } else {
@@ -883,7 +885,9 @@ fn run_scan(
     let raw = operand_buffers(resolved, buffers)?;
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
     let innermost_dim = outer_extents.len() as u16;
-    let element_op = resolved.element_op();
+    let body = resolved.element_body();
+    let mut operand_values = vec![0.0f32; raw.len()];
+    let mut step_values = vec![0.0f32; body.steps.len()];
 
     let mut accumulator = initial_value(*init).unwrap_or(0.0);
     let mut seeded = !matches!(init, ReduceInit::FirstElement);
@@ -905,16 +909,15 @@ fn run_scan(
         let out_stride = out_layout.stride(innermost_dim);
 
         for _ in 0..inner_len {
-            let mut scratch = [0.0f32; 3];
             for (index, data) in raw.iter().enumerate() {
                 let mut offset = running[index];
                 if let Some(cursor) = gather_cursors[index].as_mut() {
                     offset += cursor.fetch_and_advance(resolved.node)?;
                 }
-                scratch[index] = data[offset as usize];
+                operand_values[index] = data[offset as usize];
                 running[index] += strides[index];
             }
-            let value = apply_scalar_op(element_op, &scratch[..raw.len()]);
+            let value = apply_body(body, &operand_values, &mut step_values);
             accumulator = if seeded {
                 apply_scalar_op(*reduce_op, &[accumulator, value])
             } else {
@@ -926,6 +929,27 @@ fn run_scan(
         }
     }
     Ok(())
+}
+
+/// Evaluates a (possibly fused) [`ComposedBody`] for one iteration step:
+/// `operand_values[i]` is the freshly-read value of physical operand `i`,
+/// `step_values` is scratch sized `body.steps.len()` the caller reuses
+/// across every step of a run rather than allocating it per element — each
+/// step's own value lands in `step_values[index]` as it is computed, so a
+/// later step's `StepArg::Step` reference always reads an already-written
+/// slot (steps only ever reference earlier steps).
+fn apply_body(body: &ComposedBody, operand_values: &[f32], step_values: &mut [f32]) -> f32 {
+    for (index, step) in body.steps.iter().enumerate() {
+        let mut args = [0.0f32; 3];
+        for (slot, arg) in step.args.iter().enumerate() {
+            args[slot] = match arg {
+                StepArg::Operand(operand_index) => operand_values[*operand_index as usize],
+                StepArg::Step(step_index) => step_values[*step_index as usize],
+            };
+        }
+        step_values[index] = apply_scalar_op(step.op, &args[..step.args.len()]);
+    }
+    step_values[body.steps.len() - 1]
 }
 
 fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
@@ -1556,6 +1580,226 @@ mod tests {
             "streaming a chain of 8 unary elementwise ops should not hold one buffer per op, got {peak}"
         );
         let _ = current;
+    }
+
+    #[test]
+    fn a_chain_of_8_unary_ops_binds_to_one_bound_op_and_the_result_is_unchanged() {
+        let mut program = Vec::new();
+        let mut current = f32_block(&mut program, &[Extent::Static(4)]);
+        for _ in 0..8 {
+            current = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(1, &[0])))],
+                    name: None,
+                },
+            );
+        }
+        let _ = current;
+
+        let shapes = shape::infer(&program, &[]).expect("tanh chain infers");
+        let resolved = bind::bind(&program, &shapes, &[]).expect("tanh chain resolves");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "8 chained unary elementwise ops must fuse into one BoundOp"
+        );
+
+        let input = [0.1, 0.2, 0.3, 0.4f32];
+        let evaluated = evaluate(&program, &[], &[&input], &[]).expect("tanh chain evaluates");
+        let mut reference = input;
+        for value in &mut reference {
+            for _ in 0..8 {
+                *value = value.tanh();
+            }
+        }
+        for (found, expected) in evaluated.root().iter().zip(reference.iter()) {
+            assert!((found - expected).abs() < 1e-6, "{found} vs {expected}");
+        }
+    }
+
+    /// `b = a * scale; c = b + bias; d = c * c` — the elementwise-into-
+    /// elementwise fusion case, not the reduce-over-elementwise one every
+    /// other fusion test in this crate already covers.
+    #[test]
+    fn a_chain_of_elementwise_ops_binds_to_one_bound_op_and_matches_a_hand_reference() {
+        let mut program = Vec::new();
+        let a = f32_block(&mut program, &[Extent::Static(4)]);
+        let scale = f32_block(&mut program, &[Extent::Static(4)]);
+        let bias = f32_block(&mut program, &[Extent::Static(4)]);
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(a, identity()), (scale, identity())],
+                name: None,
+            },
+        );
+        let c = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(b, identity()), (bias, identity())],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(c, identity()), (c, identity())],
+                name: None,
+            },
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
+        let resolved = bind::bind(&program, &shapes, &[]).expect("elementwise chain resolves");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "b and c must fuse into d's own BoundOp instead of three separate ones"
+        );
+
+        let a_data = [1.0, 2.0, 3.0, 4.0f32];
+        let scale_data = [2.0, 0.5, -1.0, 3.0f32];
+        let bias_data = [1.0, 1.0, 1.0, 1.0f32];
+        let evaluated = evaluate(&program, &[], &[&a_data, &scale_data, &bias_data], &[])
+            .expect("elementwise chain evaluates");
+
+        let reference: Vec<f32> = a_data
+            .iter()
+            .zip(scale_data.iter())
+            .zip(bias_data.iter())
+            .map(|((a_value, scale_value), bias_value)| {
+                let b_value = a_value * scale_value;
+                let c_value = b_value + bias_value;
+                c_value * c_value
+            })
+            .collect();
+        assert_eq!(evaluated.root(), reference.as_slice());
+    }
+
+    /// `b` feeds two different consumers (`c1` and `c2`), so it must
+    /// materialize once on its own rather than fuse into either — the
+    /// multi-use case that forces materialization even though every map
+    /// involved is a plain identity projection.
+    #[test]
+    fn an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly() {
+        let mut program = Vec::new();
+        let a = f32_block(&mut program, &[Extent::Static(4)]);
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: alloc::vec![(a, identity())],
+                name: None,
+            },
+        );
+        let c1 = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(b, identity())],
+                name: None,
+            },
+        );
+        let c2 = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Reciprocal,
+                operands: alloc::vec![(b, identity())],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(c1, identity()), (c2, identity())],
+                name: None,
+            },
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
+        let resolved = bind::bind(&program, &shapes, &[]).expect("diamond chain resolves");
+        assert_eq!(
+            resolved.len(),
+            2,
+            "b must materialize standalone since it has two distinct consumers"
+        );
+
+        let a_data = [0.1, 0.2, 0.3, 0.4f32];
+        let evaluated = evaluate(&program, &[], &[&a_data], &[]).expect("diamond chain evaluates");
+        let reference: Vec<f32> = a_data
+            .iter()
+            .map(|value| {
+                let b_value = value.tanh();
+                -b_value + (1.0 / b_value)
+            })
+            .collect();
+        for (found, expected) in evaluated.root().iter().zip(reference.iter()) {
+            assert!((found - expected).abs() < 1e-6, "{found} vs {expected}");
+        }
+    }
+
+    /// `b` is requested as an output alongside the root `c`: it must stay
+    /// separately readable and correct rather than disappear into `c`'s
+    /// fused body.
+    #[test]
+    fn a_requested_elementwise_intermediate_stays_readable_and_correct() {
+        let mut program = Vec::new();
+        let a = f32_block(&mut program, &[Extent::Static(4)]);
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: alloc::vec![(a, identity())],
+                name: None,
+            },
+        );
+        let c = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(b, identity())],
+                name: None,
+            },
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("requested-output chain infers");
+        let resolved =
+            bind::bind(&program, &shapes, &[b, c]).expect("requested-output chain resolves");
+        assert_eq!(
+            resolved.len(),
+            2,
+            "requesting b as an output must force it to materialize on its own"
+        );
+
+        let a_data = [0.1, 0.2, 0.3, 0.4f32];
+        let evaluated =
+            evaluate(&program, &[], &[&a_data], &[b, c]).expect("requested-output chain evaluates");
+
+        let (b_data, _) = evaluated.get(b).expect("b was requested as an output");
+        let b_reference: Vec<f32> = a_data.iter().map(|value| value.tanh()).collect();
+        assert_eq!(b_data, b_reference.as_slice());
+
+        let (c_data, _) = evaluated.get(c).expect("c was requested as an output");
+        let c_reference: Vec<f32> = b_reference.iter().map(|value| -value).collect();
+        assert_eq!(c_data, c_reference.as_slice());
     }
 
     #[test]
