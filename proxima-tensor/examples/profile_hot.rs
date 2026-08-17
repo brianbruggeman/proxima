@@ -78,6 +78,56 @@ fn matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     (program, sum)
 }
 
+/// Same GEMM, RHS stored transposed (`[n, k]`, ggml's own `mul_mat`
+/// layout) instead of `[k, n]` — the width dim `n` is no longer contiguous
+/// on the RHS operand (stride `k`), but the contraction dim `k` is
+/// (`scratchpad/opt/discipline.md` ROW 10).
+fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(n), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: proxima_tensor::DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(proxima_tensor::Reduce {
+            dtype: proxima_tensor::DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: proxima_tensor::Keep::Reduce,
+            name: Some("matmul_rhs_transposed".into()),
+        }),
+    );
+    (program, sum)
+}
+
 /// Single Binary-shaped elementwise op (a * b) over `len` elements — the
 /// case ROW 5's `elementwise_width_fast` actually accelerates.
 fn elementwise_binary_program(len: u32) -> (Vec<Op>, NodeId) {
@@ -198,6 +248,28 @@ fn main() {
     println!("gemm {m}x{k}x{n}: {:.3}s", elapsed.as_secs_f64());
     println!("root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
     println!("allocations during evaluate(): {}", alloc_after - alloc_before);
+
+    {
+        // Same LHS, RHS transposed into ggml's `mul_mat` layout (`[n, k]`
+        // instead of `[k, n]`) — the pair this task's fast-path coverage
+        // targets (`scratchpad/opt/discipline.md` ROW 10).
+        let (program, _sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
+        let mut rhs_t = vec![0.0f32; k * n];
+        for ki in 0..k {
+            for ni in 0..n {
+                rhs_t[ni * k + ki] = rhs[ki * n + ni];
+            }
+        }
+        let start = Instant::now();
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs_t], &[]).expect("transposed-rhs gemm evaluates");
+        let elapsed = start.elapsed();
+        println!("gemm_rhs_transposed {m}x{k}x{n}: {:.3}s", elapsed.as_secs_f64());
+        println!(
+            "gemm_rhs_transposed root[0]={} root_len={}",
+            evaluated.root()[0],
+            evaluated.root().len()
+        );
+    }
 
     #[cfg(feature = "instrument")]
     {
