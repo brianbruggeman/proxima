@@ -740,6 +740,7 @@ fn run_elementwise(
     let innermost_dim = outer_extents.len() as u16;
     let raw = operand_buffers(resolved, buffers)?;
     let body = resolved.element_body();
+    let shape = body_shape(body);
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
 
@@ -767,7 +768,7 @@ fn run_elementwise(
                 operand_values[index] = data[offset as usize];
                 running[index] += strides[index];
             }
-            output[out_base + step] = apply_body(body, &operand_values, &mut step_values);
+            output[out_base + step] = eval_body_shape(&shape, &operand_values, &mut step_values);
         }
     }
     Ok(())
@@ -790,6 +791,7 @@ fn run_reduce(
     };
     let raw = operand_buffers(resolved, buffers)?;
     let body = resolved.element_body();
+    let shape = body_shape(body);
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
 
@@ -842,7 +844,7 @@ fn run_reduce(
                     operand_values[index] = data[offset as usize];
                     running[index] += strides[index];
                 }
-                let value = apply_body(body, &operand_values, &mut step_values);
+                let value = eval_body_shape(&shape, &operand_values, &mut step_values);
                 *slot = if seeded {
                     apply_scalar_op(*reduce_op, &[*slot, value])
                 } else {
@@ -886,6 +888,7 @@ fn run_scan(
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
     let innermost_dim = outer_extents.len() as u16;
     let body = resolved.element_body();
+    let shape = body_shape(body);
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
 
@@ -917,7 +920,7 @@ fn run_scan(
                 operand_values[index] = data[offset as usize];
                 running[index] += strides[index];
             }
-            let value = apply_body(body, &operand_values, &mut step_values);
+            let value = eval_body_shape(&shape, &operand_values, &mut step_values);
             accumulator = if seeded {
                 apply_scalar_op(*reduce_op, &[accumulator, value])
             } else {
@@ -931,6 +934,57 @@ fn run_scan(
     Ok(())
 }
 
+/// A [`ComposedBody`] classified once per node, outside the per-element
+/// loop, into the shape its evaluation actually needs. `Unary`/`Binary` are
+/// the overwhelmingly common post-fusion case (a single [`ScalarOp`] over
+/// one or two freshly-read operands — a bare elementwise op, or the product
+/// step a `Reduce(Elementwise(Multiply))` fusion folds straight into the
+/// accumulator) and skip `apply_body`'s per-element step loop and its
+/// dynamic `StepArg` dispatch entirely. `Generic` is the fallback for a
+/// deeper fused chain (multiple `BodyStep`s referencing earlier steps).
+///
+/// Classifying here — once, before any element is visited — is what lets
+/// [`eval_body_shape`] avoid re-deciding "is this one step or several" on
+/// every one of a node's iteration-space elements; profiling
+/// (`scratchpad/opt/discipline.md` ROW 0) found that per-element redecision,
+/// via an out-of-line `apply_body` call and its computed jump table, was
+/// 51.9% of self-time on a 1024^3 GEMM.
+enum BodyShape<'a> {
+    Unary(ScalarOp, u16),
+    Binary(ScalarOp, u16, u16),
+    Generic(&'a ComposedBody),
+}
+
+fn body_shape(body: &ComposedBody) -> BodyShape<'_> {
+    if let [step] = body.steps.as_slice() {
+        match step.args.as_slice() {
+            [StepArg::Operand(a)] => return BodyShape::Unary(step.op, *a),
+            [StepArg::Operand(a), StepArg::Operand(b)] => {
+                return BodyShape::Binary(step.op, *a, *b);
+            }
+            _ => {}
+        }
+    }
+    BodyShape::Generic(body)
+}
+
+/// Evaluates one iteration step against a pre-classified [`BodyShape`].
+/// `#[inline(always)]` plus a `shape` that never changes across a node's own
+/// loop nest is what lets LLVM hoist the shape match itself out of the hot
+/// loop (loop-invariant code motion over a value that provably doesn't
+/// change), rather than re-running it every element the way a direct
+/// `apply_body` call forced.
+#[inline(always)]
+fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut [f32]) -> f32 {
+    match *shape {
+        BodyShape::Unary(op, a) => apply_scalar_op(op, &[operand_values[a as usize]]),
+        BodyShape::Binary(op, a, b) => {
+            apply_scalar_op(op, &[operand_values[a as usize], operand_values[b as usize]])
+        }
+        BodyShape::Generic(body) => apply_body(body, operand_values, step_values),
+    }
+}
+
 /// Evaluates a (possibly fused) [`ComposedBody`] for one iteration step:
 /// `operand_values[i]` is the freshly-read value of physical operand `i`,
 /// `step_values` is scratch sized `body.steps.len()` the caller reuses
@@ -938,6 +992,10 @@ fn run_scan(
 /// step's own value lands in `step_values[index]` as it is computed, so a
 /// later step's `StepArg::Step` reference always reads an already-written
 /// slot (steps only ever reference earlier steps).
+///
+/// Only reached through [`BodyShape::Generic`] now — [`eval_body_shape`]'s
+/// `Unary`/`Binary` arms bypass this entirely for the common single-step
+/// case, so this stays the slow-but-general path for real fused chains.
 fn apply_body(body: &ComposedBody, operand_values: &[f32], step_values: &mut [f32]) -> f32 {
     for (index, step) in body.steps.iter().enumerate() {
         let mut args = [0.0f32; 3];
@@ -952,6 +1010,7 @@ fn apply_body(body: &ComposedBody, operand_values: &[f32], step_values: &mut [f3
     step_values[body.steps.len() - 1]
 }
 
+#[inline(always)]
 fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
     match op {
         ScalarOp::Identity => operands[0],
