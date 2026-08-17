@@ -28,32 +28,27 @@
 //! keep — see [`Evaluated::peak_live_buffers`].
 //!
 //! [`Interpreter`] is this module's [`Pipe`](proxima_primitives::pipe::Pipe)
-//! impl: a SINK (`In = BoundOp`, `Out = ()`) whose interior state is the
-//! buffer table — caller-provided scratch borrowed for the sink's lifetime,
+//! impl: `In = Vec<BoundOp>`, `Out = ()`. Its interior state is the buffer
+//! table — caller-provided scratch borrowed for `Interpreter`'s lifetime,
 //! exactly the same interior-mutability idiom [`shape::ShapeTable`] applies
 //! to its resolved shapes and [`crate::bind::BoundOpBuilder`] applies to its
-//! held elementwise ops. `In` is one `BoundOp` (a single record), matching
-//! `ShapeTable`/`BoundOpBuilder`'s own one-record-at-a-time discipline: a
-//! *ready* node, not a batch, is what an executor consumes.
+//! held elementwise ops. `In` is a batch because
+//! [`crate::bind::BoundOpBuilder::push`] can ready zero, one, or two
+//! [`BoundOp`] nodes per `Op` it is handed (its own doc: "may return more
+//! than one" — flushing a previously-held elementwise op that turns out not
+//! to fuse, alongside the current op's own node): `Interpreter` absorbing
+//! that batch in one `call`, rather than the caller unpacking it into a
+//! loop of single-record calls, is what lets the full three-stage chain
+//! `shapes.and_then(builder).and_then(interpreter)` compose through
+//! `AndThen` directly — `Second::In = First::Out` holds by construction
+//! (`BoundOpBuilder::Out = Vec<BoundOp> = Interpreter::In`), no adapter, no
+//! new type. `Interpreter::call` folds the batch internally the same way
+//! the buffer table itself already folds per-node writes; a zero-element
+//! batch is a no-op call, not a special case.
 //! [`run_node_into`] is the primitive `Interpreter::call` (and
 //! [`evaluate`]/[`evaluate_parallel`]'s own loops) all drive — it writes
 //! into a caller-provided slice instead of allocating one, which is what
 //! lets `Interpreter` reach into a no-alloc-at-the-write-site tier.
-//!
-//! [`crate::bind::BoundOpBuilder::push`] can ready zero, one, or two
-//! [`BoundOp`] nodes per `Op` it is handed (its own doc: "may return more
-//! than one" — flushing a previously-held elementwise op that turns out not
-//! to fuse, alongside the current op's own node). That is a genuine
-//! multiplicity boundary of push-based fusion, not a container:
-//! `BoundOpBuilder`'s `Pipe::Out` is `Vec<BoundOp>` because one input record
-//! can legitimately ready a variable number of output records, the same way
-//! a regex match can consume one input byte and emit zero or more tokens.
-//! `AndThen` requires `Second::In = First::Out` exactly, so a direct
-//! three-stage `shapes.and_then(bind).and_then(run)` does not typecheck —
-//! `BoundOpBuilder::Out = Vec<BoundOp>` against `Interpreter::In = BoundOp`
-//! — see `execute_composes_through_pipe_ext_matching_the_free_function` for
-//! the two-stage chain that DOES compose, plus the exact rejection this
-//! module's tests captured for the naive three-stage attempt.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
@@ -601,25 +596,32 @@ fn node_output_len(resolved: &BoundOp) -> usize {
     }
 }
 
-/// The execution stage: a [`Pipe`] SINK over one ready [`BoundOp`] node at a
-/// time.
+/// The execution stage: a [`Pipe`] over a batch of ready [`BoundOp`]
+/// nodes — exactly the batch one upstream [`crate::bind::BoundOpBuilder`]
+/// push readies.
 ///
-/// `In = BoundOp`, `Out = ()` — a real sink, not a transform wearing a mutation:
-/// the buffer table this stage writes into is interior state, borrowed from
-/// the caller at construction rather than allocated here or threaded through
-/// `In`/`Out`. That borrow is what lets a caller run this against its own
+/// `In = Vec<BoundOp>`, `Out = ()`: the buffer table this stage writes into
+/// is interior state, borrowed from the caller at construction rather than
+/// allocated here or threaded through `In`/`Out` — `Out = ()` is literal,
+/// not a value smuggled through mutation and reported via a nonempty `Out`.
+/// That borrow is what lets a caller run this against its own
 /// no-alloc scratch. `RefCell` is the same interior-mutability idiom
 /// [`shape::ShapeTable`] and [`crate::bind::BoundOpBuilder`] already use for
 /// their own per-record state, applied to the buffer table that already
-/// existed here rather than to a wrapper minted to host the impl.
+/// existed here rather than to a wrapper minted to host the impl. Taking
+/// the batch as `In` (rather than one `BoundOp` at a time) is what makes
+/// `Second::In = First::Out` hold against `BoundOpBuilder::Out =
+/// Vec<BoundOp>`, so this stage composes into the full
+/// `shapes.and_then(builder).and_then(interpreter)` chain with no adapter.
 pub struct Interpreter<'buffers> {
     buffers: RefCell<&'buffers mut [Option<Vec<f32>>]>,
 }
 
 impl<'buffers> Interpreter<'buffers> {
     /// `buffers` is caller-owned scratch, one slot per program node — the
-    /// same shape [`prepare`] already builds locally for [`evaluate`]. This
-    /// sink never allocates it, resizes it, or takes ownership of it.
+    /// same shape [`prepare`] already builds locally for [`evaluate`].
+    /// `Interpreter` never allocates it, resizes it, or takes ownership of
+    /// it.
     #[must_use]
     pub fn new(buffers: &'buffers mut [Option<Vec<f32>>]) -> Self {
         Self {
@@ -628,7 +630,7 @@ impl<'buffers> Interpreter<'buffers> {
     }
 
     /// Reads a node's computed data back out of the buffer table. Separate
-    /// from `Pipe::Out` on purpose: what a sink produced for the algebra
+    /// from `Pipe::Out` on purpose: what this stage produced for the algebra
     /// (nothing — `Out = ()`) and what a caller later wants to read out of
     /// its own state are different questions, and this crate's algebra only
     /// answers the first one through `Pipe::call`.
@@ -639,19 +641,25 @@ impl<'buffers> Interpreter<'buffers> {
 }
 
 impl Pipe for Interpreter<'_> {
-    type In = BoundOp;
+    type In = Vec<BoundOp>;
     type Out = ();
     type Err = TensorError;
 
-    fn call(&self, resolved: BoundOp) -> impl Future<Output = Result<(), TensorError>> {
+    /// Folds a batch of ready nodes into the buffer table, in order — the
+    /// same fold the buffer table already does one write at a time, just
+    /// driven for every element of `ready` inside one call instead of one
+    /// call per element. An empty `ready` is a no-op, not a special case.
+    fn call(&self, ready: Vec<BoundOp>) -> impl Future<Output = Result<(), TensorError>> {
         async move {
-            let mut output = vec![0.0f32; node_output_len(&resolved)];
-            {
-                let buffers = self.buffers.borrow();
-                run_node_into(&resolved, *buffers, &mut output)?;
+            for resolved in ready {
+                let mut output = vec![0.0f32; node_output_len(&resolved)];
+                {
+                    let buffers = self.buffers.borrow();
+                    run_node_into(&resolved, *buffers, &mut output)?;
+                }
+                let mut buffers = self.buffers.borrow_mut();
+                (*buffers)[resolved.node.0 as usize] = Some(output);
             }
-            let mut buffers = self.buffers.borrow_mut();
-            (*buffers)[resolved.node.0 as usize] = Some(output);
             Ok(())
         }
     }
@@ -778,9 +786,22 @@ fn run_elementwise(
     let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
+    // Same fast-path gate `run_reduce` uses (ROW 3), reused verbatim here:
+    // every operand the body shape reads is gather-free and affine with a
+    // width-dim stride of 0 or 1 (`scratchpad/opt/discipline.md` ROW 5).
+    let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
+
     for outer_position in 0..odometer_len(outer_extents) as usize {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        let out_base = outer_position * inner_len;
+
+        if fast_path {
+            let out_slice = &mut output[out_base..out_base + inner_len];
+            elementwise_width_fast(&shape, &raw, &running, &strides, out_slice);
+            continue;
+        }
+
         fill_gather_cursors(
             resolved,
             buffers,
@@ -788,7 +809,6 @@ fn run_elementwise(
             Some(innermost_dim),
             &mut gather_cursors,
         )?;
-        let out_base = outer_position * inner_len;
 
         for step in 0..inner_len {
             for (index, data) in raw.iter().enumerate() {
@@ -961,9 +981,36 @@ fn run_scan(
     let mut accumulator = initial_value(*init).unwrap_or(0.0);
     let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
+    // Same operand-side gate as `run_elementwise`/`run_reduce`, plus one
+    // scan-specific condition: the fast path writes into a contiguous
+    // `&mut [f32]` output slice, so it additionally requires the output's
+    // own width-dim stride to be 1 (`scratchpad/opt/discipline.md` ROW 5).
+    // A strided output (real but rarer) falls back to the per-element loop
+    // unchanged, named rather than silently narrowed.
+    let operand_fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
+
     for outer_flat in 0..odometer_len(outer_extents) {
         unflatten_into(outer_flat, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        let out_running = out_layout.offset_of(&outer_coordinate);
+        let out_stride = out_layout.stride(innermost_dim);
+
+        if operand_fast_path && out_stride == 1 {
+            let out_base = out_running as usize;
+            let out_slice = &mut output[out_base..out_base + inner_len];
+            accumulator = scan_width_fast(
+                &shape,
+                *reduce_op,
+                &raw,
+                &running,
+                &strides,
+                out_slice,
+                ScanState { seeded, accumulator },
+            );
+            seeded = true;
+            continue;
+        }
+
         fill_gather_cursors(
             resolved,
             buffers,
@@ -971,8 +1018,7 @@ fn run_scan(
             Some(innermost_dim),
             &mut gather_cursors,
         )?;
-        let mut out_running = out_layout.offset_of(&outer_coordinate);
-        let out_stride = out_layout.stride(innermost_dim);
+        let mut out_running = out_running;
 
         for _ in 0..inner_len {
             for (index, data) in raw.iter().enumerate() {
@@ -1130,8 +1176,102 @@ fn combine_reduction(reduce_op: ScalarOp, previous: f32, value: f32, seeded: boo
     }
 }
 
-#[inline(always)]
+/// Dispatches once per call (never per element) on `op`, then on
+/// `reduce_op` — but only when `reduce_op` is one of the four ops a fold
+/// realistically combines with (`Add`/`Multiply`/`Maximum`/`Minimum`: sum,
+/// product, max-pool, min-pool). Each of the 28 (7 unary op x 4 reduce op)
+/// arms hands two concrete, non-capturing closures to
+/// [`reduce_width_unary_monomorphic`] — a distinct generic instantiation
+/// per pair, so the width loop inside contains the literal arithmetic
+/// (`-a`, `a.sqrt()`, `acc.max(v)`, ...) inlined straight into the loop
+/// body, with no runtime branch and no indirect call
+/// (`scratchpad/opt/discipline.md` ROW 4). `seeded` is also resolved here,
+/// not per element — [`reduce_width_unary_monomorphic`] branches on it
+/// once, outside its loops, rather than once per element the way
+/// [`combine_reduction`] used to. A `reduce_op` outside that set of four
+/// (`Subtract`/`Divide`/`Greater`/`Equal` as a fold combiner — legal by
+/// the type system since both have arity 2, not a real reduction any
+/// current caller constructs) falls back to
+/// [`reduce_width_unary_scalar_dispatch`], the ROW 3 implementation:
+/// correct, not accelerated, named rather than silently narrowed away.
 fn reduce_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, accumulator: &mut [f32], seeded: bool) {
+    macro_rules! unary_op_arm {
+        ($f:expr) => {
+            match reduce_op {
+                ScalarOp::Add => reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, accumulator, seeded),
+                ScalarOp::Multiply => {
+                    reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, accumulator, seeded)
+                }
+                ScalarOp::Maximum => {
+                    reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, accumulator, seeded)
+                }
+                ScalarOp::Minimum => {
+                    reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, accumulator, seeded)
+                }
+                _ => reduce_width_unary_scalar_dispatch(op, reduce_op, span, accumulator, seeded),
+            }
+        };
+    }
+    match op {
+        ScalarOp::Identity => unary_op_arm!(|a: f32| a),
+        ScalarOp::Negate => unary_op_arm!(|a: f32| -a),
+        ScalarOp::Reciprocal => unary_op_arm!(|a: f32| 1.0 / a),
+        ScalarOp::Exponential => unary_op_arm!(|a: f32| a.exp()),
+        ScalarOp::Logarithm => unary_op_arm!(|a: f32| a.ln()),
+        ScalarOp::SquareRoot => unary_op_arm!(|a: f32| a.sqrt()),
+        ScalarOp::Tanh => unary_op_arm!(|a: f32| a.tanh()),
+        _ => reduce_width_unary_scalar_dispatch(op, reduce_op, span, accumulator, seeded),
+    }
+}
+
+/// One monomorphized instantiation per (op, reduce_op) pair `reduce_width_unary`
+/// selects. `seeded` is branched on ONCE, outside both loops (not per
+/// element) — the loop bodies below each contain exactly one call to `op`
+/// and, in the seeded case, one call to `reduce`, both of which are
+/// non-capturing closures the compiler inlines directly into the loop,
+/// leaving a single concrete arithmetic operation per element.
+#[inline(always)]
+fn reduce_width_unary_monomorphic<F, R>(op: F, reduce: R, span: OperandSpan, accumulator: &mut [f32], seeded: bool)
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if span.contiguous {
+        let slice = &span.data[span.base..span.base + accumulator.len()];
+        if seeded {
+            for (slot, &raw_value) in accumulator.iter_mut().zip(slice) {
+                *slot = reduce(*slot, op(raw_value));
+            }
+        } else {
+            for (slot, &raw_value) in accumulator.iter_mut().zip(slice) {
+                *slot = op(raw_value);
+            }
+        }
+    } else {
+        let value = op(span.data[span.base]);
+        if seeded {
+            for slot in accumulator.iter_mut() {
+                *slot = reduce(*slot, value);
+            }
+        } else {
+            for slot in accumulator.iter_mut() {
+                *slot = value;
+            }
+        }
+    }
+}
+
+/// The pre-ROW-4 (ROW 3) implementation, kept as the fallback for a
+/// `reduce_op` outside {Add, Multiply, Maximum, Minimum} — same numerical
+/// result as [`reduce_width_unary_monomorphic`], dispatched per element via
+/// [`apply_scalar_op`]/[`combine_reduction`] instead of an inlined closure.
+fn reduce_width_unary_scalar_dispatch(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    span: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) {
     if span.contiguous {
         let slice = &span.data[span.base..span.base + accumulator.len()];
         for (slot, &raw_value) in accumulator.iter_mut().zip(slice) {
@@ -1147,8 +1287,124 @@ fn reduce_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, accu
     }
 }
 
-#[inline(always)]
+/// Same discipline as [`reduce_width_unary`], for the two-operand case: 8
+/// binary-arity body ops x 4 accelerated reduce ops = 32 monomorphized
+/// instantiations of [`reduce_width_binary_monomorphic`], selected by one
+/// nested match evaluated once per call. A `reduce_op` outside the
+/// accelerated four falls back to [`reduce_width_binary_scalar_dispatch`].
 fn reduce_width_binary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) {
+    macro_rules! binary_op_arm {
+        ($f:expr) => {
+            match reduce_op {
+                ScalarOp::Add => {
+                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, accumulator, seeded)
+                }
+                ScalarOp::Multiply => {
+                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, accumulator, seeded)
+                }
+                ScalarOp::Maximum => {
+                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, accumulator, seeded)
+                }
+                ScalarOp::Minimum => {
+                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, accumulator, seeded)
+                }
+                _ => reduce_width_binary_scalar_dispatch(op, reduce_op, a, b, accumulator, seeded),
+            }
+        };
+    }
+    match op {
+        ScalarOp::Add => binary_op_arm!(|x: f32, y: f32| x + y),
+        ScalarOp::Subtract => binary_op_arm!(|x: f32, y: f32| x - y),
+        ScalarOp::Multiply => binary_op_arm!(|x: f32, y: f32| x * y),
+        ScalarOp::Divide => binary_op_arm!(|x: f32, y: f32| x / y),
+        ScalarOp::Maximum => binary_op_arm!(|x: f32, y: f32| x.max(y)),
+        ScalarOp::Minimum => binary_op_arm!(|x: f32, y: f32| x.min(y)),
+        ScalarOp::Greater => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from(x > y))),
+        ScalarOp::Equal => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0))),
+        _ => reduce_width_binary_scalar_dispatch(op, reduce_op, a, b, accumulator, seeded),
+    }
+}
+
+#[inline(always)]
+fn reduce_width_binary_monomorphic<F, R>(
+    op: F,
+    reduce: R,
+    a: OperandSpan,
+    b: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    let width = accumulator.len();
+    match (a.contiguous, b.contiguous) {
+        (true, true) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let slice_b = &b.data[b.base..b.base + width];
+            if seeded {
+                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                    *slot = reduce(*slot, op(value_a, value_b));
+                }
+            } else {
+                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                    *slot = op(value_a, value_b);
+                }
+            }
+        }
+        (true, false) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let value_b = b.data[b.base];
+            if seeded {
+                for (slot, &value_a) in accumulator.iter_mut().zip(slice_a) {
+                    *slot = reduce(*slot, op(value_a, value_b));
+                }
+            } else {
+                for (slot, &value_a) in accumulator.iter_mut().zip(slice_a) {
+                    *slot = op(value_a, value_b);
+                }
+            }
+        }
+        (false, true) => {
+            let value_a = a.data[a.base];
+            let slice_b = &b.data[b.base..b.base + width];
+            if seeded {
+                for (slot, &value_b) in accumulator.iter_mut().zip(slice_b) {
+                    *slot = reduce(*slot, op(value_a, value_b));
+                }
+            } else {
+                for (slot, &value_b) in accumulator.iter_mut().zip(slice_b) {
+                    *slot = op(value_a, value_b);
+                }
+            }
+        }
+        (false, false) => {
+            let value_a = a.data[a.base];
+            let value_b = b.data[b.base];
+            let value = op(value_a, value_b);
+            if seeded {
+                for slot in accumulator.iter_mut() {
+                    *slot = reduce(*slot, value);
+                }
+            } else {
+                for slot in accumulator.iter_mut() {
+                    *slot = value;
+                }
+            }
+        }
+    }
+}
+
+/// The pre-ROW-4 (ROW 3) implementation, kept as the fallback for a
+/// `reduce_op` outside {Add, Multiply, Maximum, Minimum}.
+fn reduce_width_binary_scalar_dispatch(
     op: ScalarOp,
     reduce_op: ScalarOp,
     a: OperandSpan,
@@ -1191,6 +1447,394 @@ fn reduce_width_binary(
             }
         }
     }
+}
+
+/// The width-loop fast path for [`run_elementwise`]: no accumulator, no
+/// `reduce_op` — every position gets a fresh value written straight to
+/// `out`. Same eligibility gate as `run_reduce`
+/// ([`body_shape_is_affine_fast_path`]), same [`OperandSpan`] reads, same
+/// monomorphized-closure-per-op dispatch technique as ROW 4
+/// (`scratchpad/opt/discipline.md` ROW 5).
+#[inline(always)]
+fn elementwise_width_fast(shape: &BodyShape, raw: &[&[f32]], running: &[i64], strides: &[i64], out: &mut [f32]) {
+    let span_of = |index: u16| {
+        let index = index as usize;
+        OperandSpan {
+            data: raw[index],
+            base: running[index] as usize,
+            contiguous: strides[index] == 1,
+        }
+    };
+    match *shape {
+        BodyShape::Unary(op, a) => elementwise_width_unary(op, span_of(a), out),
+        BodyShape::Binary(op, a, b) => elementwise_width_binary(op, span_of(a), span_of(b), out),
+        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+    }
+}
+
+fn elementwise_width_unary(op: ScalarOp, span: OperandSpan, out: &mut [f32]) {
+    match op {
+        ScalarOp::Identity => elementwise_width_unary_monomorphic(|a: f32| a, span, out),
+        ScalarOp::Negate => elementwise_width_unary_monomorphic(|a: f32| -a, span, out),
+        ScalarOp::Reciprocal => elementwise_width_unary_monomorphic(|a: f32| 1.0 / a, span, out),
+        ScalarOp::Exponential => elementwise_width_unary_monomorphic(|a: f32| a.exp(), span, out),
+        ScalarOp::Logarithm => elementwise_width_unary_monomorphic(|a: f32| a.ln(), span, out),
+        ScalarOp::SquareRoot => elementwise_width_unary_monomorphic(|a: f32| a.sqrt(), span, out),
+        ScalarOp::Tanh => elementwise_width_unary_monomorphic(|a: f32| a.tanh(), span, out),
+        _ => unreachable!("BodyShape::Unary only ever carries an arity-1 ScalarOp"),
+    }
+}
+
+#[inline(always)]
+fn elementwise_width_unary_monomorphic<F>(op: F, span: OperandSpan, out: &mut [f32])
+where
+    F: Fn(f32) -> f32,
+{
+    if span.contiguous {
+        let slice = &span.data[span.base..span.base + out.len()];
+        for (slot, &raw_value) in out.iter_mut().zip(slice) {
+            *slot = op(raw_value);
+        }
+    } else {
+        let value = op(span.data[span.base]);
+        for slot in out.iter_mut() {
+            *slot = value;
+        }
+    }
+}
+
+fn elementwise_width_binary(op: ScalarOp, a: OperandSpan, b: OperandSpan, out: &mut [f32]) {
+    match op {
+        ScalarOp::Add => elementwise_width_binary_monomorphic(|x: f32, y: f32| x + y, a, b, out),
+        ScalarOp::Subtract => elementwise_width_binary_monomorphic(|x: f32, y: f32| x - y, a, b, out),
+        ScalarOp::Multiply => elementwise_width_binary_monomorphic(|x: f32, y: f32| x * y, a, b, out),
+        ScalarOp::Divide => elementwise_width_binary_monomorphic(|x: f32, y: f32| x / y, a, b, out),
+        ScalarOp::Maximum => elementwise_width_binary_monomorphic(|x: f32, y: f32| x.max(y), a, b, out),
+        ScalarOp::Minimum => elementwise_width_binary_monomorphic(|x: f32, y: f32| x.min(y), a, b, out),
+        ScalarOp::Greater => {
+            elementwise_width_binary_monomorphic(|x: f32, y: f32| f32::from(u8::from(x > y)), a, b, out)
+        }
+        ScalarOp::Equal => elementwise_width_binary_monomorphic(
+            |x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0)),
+            a,
+            b,
+            out,
+        ),
+        _ => unreachable!("BodyShape::Binary only ever carries an arity-2 ScalarOp"),
+    }
+}
+
+#[inline(always)]
+fn elementwise_width_binary_monomorphic<F>(op: F, a: OperandSpan, b: OperandSpan, out: &mut [f32])
+where
+    F: Fn(f32, f32) -> f32,
+{
+    let width = out.len();
+    match (a.contiguous, b.contiguous) {
+        (true, true) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let slice_b = &b.data[b.base..b.base + width];
+            for ((slot, &value_a), &value_b) in out.iter_mut().zip(slice_a).zip(slice_b) {
+                *slot = op(value_a, value_b);
+            }
+        }
+        (true, false) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let value_b = b.data[b.base];
+            for (slot, &value_a) in out.iter_mut().zip(slice_a) {
+                *slot = op(value_a, value_b);
+            }
+        }
+        (false, true) => {
+            let value_a = a.data[a.base];
+            let slice_b = &b.data[b.base..b.base + width];
+            for (slot, &value_b) in out.iter_mut().zip(slice_b) {
+                *slot = op(value_a, value_b);
+            }
+        }
+        (false, false) => {
+            let value = op(a.data[a.base], b.data[b.base]);
+            for slot in out.iter_mut() {
+                *slot = value;
+            }
+        }
+    }
+}
+
+/// The width-loop fast path for [`run_scan`]: unlike `run_elementwise`,
+/// output at each position depends on the previous position's accumulated
+/// value (`accumulator = reduce_op(accumulator, value)`), a genuine
+/// sequential dependency the fold cannot be vectorized around without a
+/// parallel-scan restructuring this row does not attempt. What IS removed,
+/// same as `run_elementwise`/`run_reduce`: the per-element gather
+/// `Option` check, the `operand_values` scratch copy, and the per-element
+/// `op`/`reduce_op` dispatch — all replaced by [`OperandSpan`] reads and a
+/// once-per-call monomorphized closure pair, restricted to the same four
+/// accelerated `reduce_op`s ROW 4 used (`Add`/`Multiply`/`Maximum`/
+/// `Minimum`). The `!seeded` special case for the very first element of
+/// the very first call (across the whole scan, `seeded` is never reset
+/// mid-run) is resolved ONCE before the loop, not re-checked per element.
+///
+/// `state` bundles `seeded`/`accumulator` — they always travel together —
+/// keeping this under clippy's argument-count lint the same way
+/// [`OperandSpan`] does for `reduce_width_binary` (ROW 3 addendum).
+struct ScanState {
+    seeded: bool,
+    accumulator: f32,
+}
+
+#[inline(always)]
+fn scan_width_fast(
+    shape: &BodyShape,
+    reduce_op: ScalarOp,
+    raw: &[&[f32]],
+    running: &[i64],
+    strides: &[i64],
+    out: &mut [f32],
+    state: ScanState,
+) -> f32 {
+    let ScanState { seeded, accumulator } = state;
+    let span_of = |index: u16| {
+        let index = index as usize;
+        OperandSpan {
+            data: raw[index],
+            base: running[index] as usize,
+            contiguous: strides[index] == 1,
+        }
+    };
+    match *shape {
+        BodyShape::Unary(op, a) => scan_width_unary(op, reduce_op, span_of(a), out, seeded, accumulator),
+        BodyShape::Binary(op, a, b) => {
+            scan_width_binary(op, reduce_op, span_of(a), span_of(b), out, seeded, accumulator)
+        }
+        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+    }
+}
+
+fn scan_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, out: &mut [f32], seeded: bool, accumulator: f32) -> f32 {
+    macro_rules! unary_op_arm {
+        ($f:expr) => {
+            match reduce_op {
+                ScalarOp::Add => {
+                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, out, seeded, accumulator)
+                }
+                ScalarOp::Multiply => {
+                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, out, seeded, accumulator)
+                }
+                ScalarOp::Maximum => {
+                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, out, seeded, accumulator)
+                }
+                ScalarOp::Minimum => {
+                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, out, seeded, accumulator)
+                }
+                _ => scan_width_unary_scalar_dispatch(op, reduce_op, span, out, seeded, accumulator),
+            }
+        };
+    }
+    match op {
+        ScalarOp::Identity => unary_op_arm!(|a: f32| a),
+        ScalarOp::Negate => unary_op_arm!(|a: f32| -a),
+        ScalarOp::Reciprocal => unary_op_arm!(|a: f32| 1.0 / a),
+        ScalarOp::Exponential => unary_op_arm!(|a: f32| a.exp()),
+        ScalarOp::Logarithm => unary_op_arm!(|a: f32| a.ln()),
+        ScalarOp::SquareRoot => unary_op_arm!(|a: f32| a.sqrt()),
+        ScalarOp::Tanh => unary_op_arm!(|a: f32| a.tanh()),
+        _ => scan_width_unary_scalar_dispatch(op, reduce_op, span, out, seeded, accumulator),
+    }
+}
+
+#[inline(always)]
+fn scan_width_unary_monomorphic<F, R>(
+    op: F,
+    reduce: R,
+    span: OperandSpan,
+    out: &mut [f32],
+    seeded: bool,
+    accumulator: f32,
+) -> f32
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    let width = out.len();
+    let mut acc = accumulator;
+    let mut start = 0usize;
+    if !seeded && width > 0 {
+        // position 0 reads `data[base]` whether the span is contiguous or
+        // broadcast -- the two shapes only diverge starting at position 1.
+        acc = op(span.data[span.base]);
+        out[0] = acc;
+        start = 1;
+    }
+    if span.contiguous {
+        let slice = &span.data[span.base..span.base + width];
+        for (slot, &raw_value) in out[start..].iter_mut().zip(&slice[start..]) {
+            acc = reduce(acc, op(raw_value));
+            *slot = acc;
+        }
+    } else {
+        let value = op(span.data[span.base]);
+        for slot in out[start..].iter_mut() {
+            acc = reduce(acc, value);
+            *slot = acc;
+        }
+    }
+    acc
+}
+
+fn scan_width_unary_scalar_dispatch(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    span: OperandSpan,
+    out: &mut [f32],
+    seeded: bool,
+    accumulator: f32,
+) -> f32 {
+    let width = out.len();
+    let mut acc = accumulator;
+    let mut seeded = seeded;
+    for (index, slot) in out.iter_mut().enumerate().take(width) {
+        let raw_value = if span.contiguous {
+            span.data[span.base + index]
+        } else {
+            span.data[span.base]
+        };
+        let value = apply_scalar_op(op, &[raw_value]);
+        acc = combine_reduction(reduce_op, acc, value, seeded);
+        seeded = true;
+        *slot = acc;
+    }
+    acc
+}
+
+fn scan_width_binary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+    seeded: bool,
+    accumulator: f32,
+) -> f32 {
+    macro_rules! binary_op_arm {
+        ($f:expr) => {
+            match reduce_op {
+                ScalarOp::Add => {
+                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, out, seeded, accumulator)
+                }
+                ScalarOp::Multiply => {
+                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, out, seeded, accumulator)
+                }
+                ScalarOp::Maximum => {
+                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, out, seeded, accumulator)
+                }
+                ScalarOp::Minimum => {
+                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, out, seeded, accumulator)
+                }
+                _ => scan_width_binary_scalar_dispatch(op, reduce_op, a, b, out, seeded, accumulator),
+            }
+        };
+    }
+    match op {
+        ScalarOp::Add => binary_op_arm!(|x: f32, y: f32| x + y),
+        ScalarOp::Subtract => binary_op_arm!(|x: f32, y: f32| x - y),
+        ScalarOp::Multiply => binary_op_arm!(|x: f32, y: f32| x * y),
+        ScalarOp::Divide => binary_op_arm!(|x: f32, y: f32| x / y),
+        ScalarOp::Maximum => binary_op_arm!(|x: f32, y: f32| x.max(y)),
+        ScalarOp::Minimum => binary_op_arm!(|x: f32, y: f32| x.min(y)),
+        ScalarOp::Greater => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from(x > y))),
+        ScalarOp::Equal => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0))),
+        _ => scan_width_binary_scalar_dispatch(op, reduce_op, a, b, out, seeded, accumulator),
+    }
+}
+
+#[inline(always)]
+fn scan_width_binary_monomorphic<F, R>(
+    op: F,
+    reduce: R,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+    seeded: bool,
+    accumulator: f32,
+) -> f32
+where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    let width = out.len();
+    let mut acc = accumulator;
+    let mut start = 0usize;
+    let read = |span: &OperandSpan, index: usize| {
+        if span.contiguous {
+            span.data[span.base + index]
+        } else {
+            span.data[span.base]
+        }
+    };
+    if !seeded && width > 0 {
+        acc = op(read(&a, 0), read(&b, 0));
+        out[0] = acc;
+        start = 1;
+    }
+    match (a.contiguous, b.contiguous) {
+        (true, true) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let slice_b = &b.data[b.base..b.base + width];
+            for ((slot, &value_a), &value_b) in out[start..].iter_mut().zip(&slice_a[start..]).zip(&slice_b[start..]) {
+                acc = reduce(acc, op(value_a, value_b));
+                *slot = acc;
+            }
+        }
+        (true, false) => {
+            let slice_a = &a.data[a.base..a.base + width];
+            let value_b = b.data[b.base];
+            for (slot, &value_a) in out[start..].iter_mut().zip(&slice_a[start..]) {
+                acc = reduce(acc, op(value_a, value_b));
+                *slot = acc;
+            }
+        }
+        (false, true) => {
+            let value_a = a.data[a.base];
+            let slice_b = &b.data[b.base..b.base + width];
+            for (slot, &value_b) in out[start..].iter_mut().zip(&slice_b[start..]) {
+                acc = reduce(acc, op(value_a, value_b));
+                *slot = acc;
+            }
+        }
+        (false, false) => {
+            let value_a = a.data[a.base];
+            let value_b = b.data[b.base];
+            for slot in out[start..].iter_mut() {
+                acc = reduce(acc, op(value_a, value_b));
+                *slot = acc;
+            }
+        }
+    }
+    acc
+}
+
+fn scan_width_binary_scalar_dispatch(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+    seeded: bool,
+    accumulator: f32,
+) -> f32 {
+    let width = out.len();
+    let mut acc = accumulator;
+    let mut seeded = seeded;
+    for (index, slot) in out.iter_mut().enumerate().take(width) {
+        let value_a = if a.contiguous { a.data[a.base + index] } else { a.data[a.base] };
+        let value_b = if b.contiguous { b.data[b.base + index] } else { b.data[b.base] };
+        let value = apply_scalar_op(op, &[value_a, value_b]);
+        acc = combine_reduction(reduce_op, acc, value, seeded);
+        seeded = true;
+        *slot = acc;
+    }
+    acc
 }
 
 /// Evaluates a (possibly fused) [`ComposedBody`] for one iteration step:
@@ -2569,38 +3213,20 @@ mod tests {
     }
 
     // THE PROOF: the full pipeline — shape inference, layout binding, and
-    // CPU execution — driven entirely through the real `Pipe` algebra
-    // (`ShapeTable.and_then(BoundOpBuilder)` via `PipeExt` for the two
-    // transform stages, then `Interpreter::call` for every node a push
-    // readies) matches what `evaluate` (the free-function path every other
-    // test in this crate trusts) produces for the identical matmul program.
+    // CPU execution — driven entirely through the real `Pipe` algebra, as
+    // one composed chain (`shapes.and_then(builder).and_then(interpreter)`
+    // via `PipeExt`), matches what `evaluate` (the free-function path every
+    // other test in this crate trusts) produces for the identical matmul
+    // program.
     //
-    // A single `shapes.and_then(bind).and_then(run)` three-stage `AndThen`
-    // does NOT typecheck: `BoundOpBuilder::Out = Vec<BoundOp>` (a push can
-    // ready 0, 1, or 2 records — see `bind::BoundOpBuilder::push`'s own
-    // doc) while `Interpreter::In = BoundOp` (one record, matching
-    // `ShapeTable`/`BoundOpBuilder`'s own per-record discipline). `AndThen`
-    // requires `Second::In = First::Out` exactly, so building
-    // `shapes.and_then(builder).and_then(executor)` is rejected with the
-    // REAL, compiled error:
-    //
-    //   error[E0271]: type mismatch resolving `<Interpreter<'_> as Pipe>::In == Vec<BoundOp>`
-    //      note: expected this to be `std::vec::Vec<bind::BoundOp>`
-    //         --> `type In = BoundOp;`
-    //      note: expected struct `std::vec::Vec<bind::BoundOp>`
-    //               found struct `bind::BoundOp`
-    //      note: required by a bound in `and_then`
-    //
-    // The fix that would make it typecheck is not a different `Interpreter`
-    // signature — `In = BoundOp` is correct, matching
-    // `ShapeTable`/`BoundOpBuilder`'s own one-record contract — it is
-    // accepting that `BoundOpBuilder`'s emission is genuinely 0..n records
-    // per input record and driving `Interpreter::call` once per ready
-    // record, exactly as the loop below does. This is a push-based fusion
-    // (a variable number of output records per input record), not a gap in
-    // this crate's use of the algebra: every ready node still reaches its
-    // sink exclusively through `Interpreter::call`, so the loop below is
-    // what drives `Pipe`s, not a hand interpretation standing in for one.
+    // The three-stage `AndThen` typechecks because `Second::In = First::Out`
+    // holds at both joins: `ShapeTable::Out = (Op, Shapes) = BoundOpBuilder::In`,
+    // and `BoundOpBuilder::Out = Vec<BoundOp> = Interpreter::In` — `Interpreter`
+    // takes the batch a push readies (0, 1, or 2 records — see
+    // `bind::BoundOpBuilder::push`'s own doc) directly, so no per-node
+    // driving loop is needed at the call site; `Pipe::call` on the full
+    // chain is called once per `Op` record, exactly as `ShapeTable`'s own
+    // one-record-at-a-time contract expects.
     #[test]
     fn execute_composes_through_pipe_ext_matching_the_free_function() {
         use crate::bind::BoundOpBuilder;
@@ -2618,25 +3244,25 @@ mod tests {
         let retires = live::annotate(&program, &outputs);
         let shapes = ShapeTable::new(&[]);
         let builder = BoundOpBuilder::new(retires);
-        let chain = shapes.and_then(builder);
 
         // `matmul_program` always appends `lhs` then `rhs` first.
         let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
         buffers[0] = Some(lhs.clone());
         buffers[1] = Some(rhs.clone());
-        let executor = Interpreter::new(&mut buffers);
+        let chain = shapes.and_then(builder).and_then(Interpreter::new(&mut buffers));
 
         for expr in &program {
-            let ready_nodes = block_on(Pipe::call(&chain, expr.clone()))
-                .expect("infer+resolve pipe step succeeds");
-            for computed in ready_nodes {
-                block_on(Pipe::call(&executor, computed)).expect("node executes as a pipe sink");
-            }
+            block_on(Pipe::call(&chain, expr.clone())).expect("shape+bind+execute pipe step succeeds");
         }
+        // Release the chain's mutable borrow of `buffers` before reading the
+        // result back out of it — the interpreter stage was moved into
+        // `chain`, so its `get()` is unreachable here, but its buffer table
+        // IS `buffers`: reading `buffers[sum.0]` directly is the same read
+        // `Interpreter::get` performs, once the borrow is free to take back.
+        drop(chain);
 
-        let chain_result = executor
-            .get(sum)
-            .expect("the matmul node was executed through the composed chain");
+        let chain_result =
+            buffers[sum.0 as usize].clone().expect("the matmul node was executed through the composed chain");
 
         let evaluated =
             evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("free-function matmul evaluates");
