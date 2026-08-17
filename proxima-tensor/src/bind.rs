@@ -58,7 +58,7 @@ use proxima_primitives::pipe::Pipe;
 
 use crate::error::TensorError;
 use crate::live;
-use crate::map::{IndexMap, IndexPattern};
+use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use crate::shape::{self, Shapes};
 
@@ -114,6 +114,47 @@ pub struct Lookup {
 
 type BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>;
 
+/// One argument to a [`BodyStep`]: a fresh read of one of the [`BoundOp`]'s
+/// own physical operands, or the result of an earlier step in the same
+/// body. Backwards-only, the same rule [`crate::op::Op`]'s own module doc
+/// states for a whole program's [`NodeId`] references, recreated here at the
+/// scalar granularity a fused body composes at — a plain index into a side
+/// table (`ComposedBody::steps`), never a `Box<dyn>` recursive tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepArg {
+    Operand(u16),
+    Step(u16),
+}
+
+/// One scalar computation inside a [`ComposedBody`]: apply `op` to `args`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyStep {
+    pub op: ScalarOp,
+    pub args: Vec<StepArg>,
+}
+
+/// A fused elementwise body: an ordered sequence of [`BodyStep`]s whose last
+/// entry is the body's result. An unfused op is the one-step case
+/// ([`ComposedBody::leaf`]), so every `BoundOp` carries exactly one
+/// `ComposedBody` whether or not it absorbed anything — an executor has one
+/// shape to walk regardless of how many elementwise ops a chain fused away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedBody {
+    pub steps: Vec<BodyStep>,
+}
+
+impl ComposedBody {
+    /// One scalar op applied directly to consecutive operand slots — the
+    /// shape every body had before fusion existed.
+    #[must_use]
+    pub fn leaf(op: ScalarOp) -> Self {
+        let args = (0..op.arity() as u16).map(StepArg::Operand).collect();
+        Self {
+            steps: vec![BodyStep { op, args }],
+        }
+    }
+}
+
 /// One tensor op with its addressing resolved: which buffers to read, at
 /// what layout, combined by which scalar op — and, for a reduce, how the
 /// reduction is shaped. Carries only what an executor needs, nothing about
@@ -137,15 +178,15 @@ pub struct BoundOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundOpKind {
     Elementwise {
-        op: ScalarOp,
+        body: ComposedBody,
         operands: BoundOperands,
     },
     Reduce {
         /// The per-step combine of `operands` before reducing: the fused
-        /// elementwise op's own body when one was absorbed,
-        /// [`ScalarOp::Identity`] otherwise. Distinct from `reduce_op`,
-        /// which is the reduce's own accumulation.
-        element_op: ScalarOp,
+        /// elementwise chain's own body when one or more were absorbed, a
+        /// one-step [`ScalarOp::Identity`] body otherwise. Distinct from
+        /// `reduce_op`, which is the reduce's own accumulation.
+        element_body: ComposedBody,
         reduce_op: ScalarOp,
         init: ReduceInit,
         keep: Keep,
@@ -168,14 +209,15 @@ impl BoundOp {
         }
     }
 
-    /// The scalar op applied per step to build one combined value from
-    /// `operands()`, before any reduction: an elementwise op's own body, or
-    /// a fused reduce's absorbed body (`Identity` if nothing fused).
+    /// The composed body applied per step to build one combined value from
+    /// `operands()`, before any reduction: an elementwise op's own
+    /// (possibly fused) body, or a fused reduce's absorbed body (a one-step
+    /// `Identity` body if nothing fused).
     #[must_use]
-    pub fn element_op(&self) -> ScalarOp {
+    pub fn element_body(&self) -> &ComposedBody {
         match &self.kind {
-            BoundOpKind::Elementwise { op, .. } => *op,
-            BoundOpKind::Reduce { element_op, .. } => *element_op,
+            BoundOpKind::Elementwise { body, .. } => body,
+            BoundOpKind::Reduce { element_body, .. } => element_body,
         }
     }
 
@@ -254,12 +296,12 @@ impl BoundOp {
         extents[split_axis as usize] = chunk_len;
 
         let kind = match &self.kind {
-            BoundOpKind::Elementwise { op, operands } => BoundOpKind::Elementwise {
-                op: *op,
+            BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
+                body: body.clone(),
                 operands: rebase_operands(operands, split_axis, chunk_start),
             },
             BoundOpKind::Reduce {
-                element_op,
+                element_body,
                 reduce_op,
                 init,
                 keep,
@@ -267,7 +309,7 @@ impl BoundOp {
                 output_axes,
                 out_layout,
             } => BoundOpKind::Reduce {
-                element_op: *element_op,
+                element_body: element_body.clone(),
                 reduce_op: *reduce_op,
                 init: *init,
                 keep: *keep,
@@ -381,8 +423,13 @@ impl BoundOpBuilder {
         match expr {
             Op::Input { .. } => {}
             Op::Elementwise { body, operands, .. } => {
-                for (operand_node, _) in operands {
-                    self.materialize_if_held(*operand_node, shapes, &mut emitted);
+                for (operand_node, map) in operands {
+                    let fuses = retires.contains(operand_node)
+                        && is_identity_projection(map)
+                        && self.held.borrow().contains_key(operand_node);
+                    if !fuses {
+                        self.materialize_if_held(*operand_node, shapes, &mut emitted);
+                    }
                 }
                 self.held.borrow_mut().insert(
                     node,
@@ -397,40 +444,70 @@ impl BoundOpBuilder {
                     && is_identity_projection(&reduce.in_map)
                     && self.held.borrow().contains_key(&reduce.operand);
 
-                let (element_op, operands) = if let Some(held) = fuses
-                    .then(|| self.held.borrow_mut().remove(&reduce.operand))
-                    .flatten()
-                {
-                    compose_fused_operands(shapes, &reduce.in_map, held.body, &held.operands)
+                let (element_body, operands) = if fuses {
+                    compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map)
                 } else {
                     self.materialize_if_held(reduce.operand, shapes, &mut emitted);
                     let operand = build_operand(reduce.operand, &reduce.in_map, shapes);
-                    (ScalarOp::Identity, vec![operand])
+                    (ComposedBody::leaf(ScalarOp::Identity), vec![operand])
                 };
 
-                emitted.push(build_reduce_op(node, reduce, shapes, element_op, operands));
+                emitted.push(build_reduce_op(
+                    node,
+                    reduce,
+                    shapes,
+                    element_body,
+                    operands,
+                ));
             }
         }
 
         Ok(emitted)
     }
 
-    /// Flush every elementwise op still held: it was either a requested
+    /// Flush every elementwise op still held: each was either a requested
     /// output or dead code, and either way it materializes as its own op.
+    /// Processed from the highest [`NodeId`] down: a still-held node can
+    /// only ever be fused into a consumer with a *greater* id (references
+    /// point backwards only), so visiting consumers first lets
+    /// [`build_elementwise_op`] absorb whatever it still can before an
+    /// earlier, now-absorbed node would otherwise be flushed standalone.
     pub fn finish(self, shapes: &Shapes) -> Result<Vec<BoundOp>, TensorError> {
-        Ok(self
-            .held
-            .into_inner()
-            .into_iter()
-            .map(|(node, held)| build_elementwise_op(node, shapes, held.body, &held.operands))
-            .collect())
+        let mut remaining: Vec<NodeId> = self.held.borrow().keys().copied().collect();
+        remaining.sort_unstable_by(|left, right| right.cmp(left));
+
+        let mut built = Vec::new();
+        for node in remaining {
+            // NOT `if let Some(x) = self.held.borrow_mut()....` — that
+            // temporary's `RefMut` lives to the end of the `if let` body
+            // under Rust's temporary-lifetime-extension rule, and
+            // `build_elementwise_op` below borrows `self.held` itself, so
+            // the two would collide. Ending the borrow at this statement's
+            // semicolon first avoids the re-entrant panic.
+            let removed = self.held.borrow_mut().remove(&node);
+            if let Some(held) = removed {
+                built.push(build_elementwise_op(
+                    node,
+                    shapes,
+                    &self.held,
+                    held.body,
+                    &held.operands,
+                ));
+            }
+        }
+        built.reverse();
+        Ok(built)
     }
 
     fn materialize_if_held(&self, node: NodeId, shapes: &Shapes, emitted: &mut Vec<BoundOp>) {
-        if let Some(held) = self.held.borrow_mut().remove(&node) {
+        // see `finish`'s comment: the borrow must end before this `if let`
+        // body runs, since `build_elementwise_op` borrows `self.held` too.
+        let removed = self.held.borrow_mut().remove(&node);
+        if let Some(held) = removed {
             emitted.push(build_elementwise_op(
                 node,
                 shapes,
+                &self.held,
                 held.body,
                 &held.operands,
             ));
@@ -459,19 +536,17 @@ impl Pipe for BoundOpBuilder {
 fn build_elementwise_op(
     node: NodeId,
     shapes: &Shapes,
-    op: ScalarOp,
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
 ) -> BoundOp {
     let extents = shapes.of(node).to_vec();
-    let built_operands = operands
-        .iter()
-        .map(|(operand_node, map)| build_operand(*operand_node, map, shapes))
-        .collect();
+    let (composed_body, built_operands) = compose(shapes, held, body, operands);
     BoundOp {
         node,
         extents,
         kind: BoundOpKind::Elementwise {
-            op,
+            body: composed_body,
             operands: built_operands,
         },
     }
@@ -513,7 +588,7 @@ fn build_reduce_op(
     node: NodeId,
     reduce: &Reduce,
     shapes: &Shapes,
-    element_op: ScalarOp,
+    element_body: ComposedBody,
     operands: BoundOperands,
 ) -> BoundOp {
     let out_pattern = reduce.out_map.affine();
@@ -523,7 +598,7 @@ fn build_reduce_op(
         node,
         extents: shape::fold_iteration_extents(reduce, shapes),
         kind: BoundOpKind::Reduce {
-            element_op,
+            element_body,
             reduce_op: reduce.body,
             init: reduce.init,
             keep: reduce.keep,
@@ -558,41 +633,191 @@ fn is_identity_projection(map: &IndexMap) -> bool {
         .all(|axis| axis.offset == 0 && matches!(axis.terms.as_slice(), [term] if term.coeff == 1))
 }
 
+/// Composes the single still-held node `node` — reached from its consumer
+/// through `map` — into a [`ComposedBody`] plus the flat, fully-addressed
+/// operand list an executor reads from: the reduce-fusion entry point.
+/// `node` is guaranteed present in `held` by every caller's own `fuses`
+/// check, so this always absorbs at least one op; [`compose_operand`]
+/// recurses through however many more are held beneath it.
 fn compose_fused_operands(
     shapes: &Shapes,
-    in_map: &IndexMap,
-    elementwise_body: ScalarOp,
-    elementwise_operands: &[(NodeId, IndexMap)],
-) -> (ScalarOp, BoundOperands) {
-    let in_pattern = in_map.affine();
-    let iter_rank = in_pattern.iter_rank;
-    let elementwise_axis_to_reduce_axis: Vec<u16> = in_pattern
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    node: NodeId,
+    map: &IndexMap,
+) -> (ComposedBody, BoundOperands) {
+    let mut steps = Vec::new();
+    let mut operands = Vec::new();
+    let mut absorbed = Vec::new();
+    compose_operand(
+        shapes,
+        held,
+        &mut steps,
+        &mut operands,
+        &mut absorbed,
+        node,
+        map,
+    );
+    drop_absorbed(held, absorbed);
+    (ComposedBody { steps }, operands)
+}
+
+/// Composes an explicit `body` applied over `operands` — the
+/// materialize-a-chain entry point [`build_elementwise_op`] uses, where the
+/// top body and its immediate operand list are already in hand (the node
+/// itself has already been removed from `held` by its caller).
+fn compose(
+    shapes: &Shapes,
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    body: ScalarOp,
+    operands: &[(NodeId, IndexMap)],
+) -> (ComposedBody, BoundOperands) {
+    let mut steps = Vec::new();
+    let mut resolved_operands = Vec::new();
+    let mut absorbed = Vec::new();
+    compose_body(
+        shapes,
+        held,
+        &mut steps,
+        &mut resolved_operands,
+        &mut absorbed,
+        body,
+        operands,
+    );
+    drop_absorbed(held, absorbed);
+    (ComposedBody { steps }, resolved_operands)
+}
+
+fn drop_absorbed(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, absorbed: Vec<NodeId>) {
+    let mut held_mut = held.borrow_mut();
+    for node in absorbed {
+        held_mut.remove(&node);
+    }
+}
+
+/// Appends one [`BodyStep`] for `body` applied over `body_operands`
+/// (expressed in the caller's own iteration space), recursively composing
+/// each operand through [`compose_operand`] first. Returns the new step's
+/// index — the value a caller reads back via `StepArg::Step`.
+fn compose_body(
+    shapes: &Shapes,
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    steps: &mut Vec<BodyStep>,
+    operands: &mut BoundOperands,
+    absorbed: &mut Vec<NodeId>,
+    body: ScalarOp,
+    body_operands: &[(NodeId, IndexMap)],
+) -> u16 {
+    let args = body_operands
+        .iter()
+        .map(|(node, map)| compose_operand(shapes, held, steps, operands, absorbed, *node, map))
+        .collect();
+    steps.push(BodyStep { op: body, args });
+    (steps.len() - 1) as u16
+}
+
+/// Composes one operand reference `(node, map)` into `steps`/`operands`:
+/// reads it directly from its own buffer when `node` is not (or is no
+/// longer) held, or — when it is still held, meaning it satisfied the
+/// fusion condition at the exact position that made this its last use —
+/// absorbs its own body as one more [`BodyStep`], recursing through
+/// however many further levels are held beneath it. `map`'s axes are
+/// remapped through [`remap_sub_operands`] before recursing, since a held
+/// node's own operand maps are expressed in *its* iteration space, not the
+/// caller's.
+fn compose_operand(
+    shapes: &Shapes,
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    steps: &mut Vec<BodyStep>,
+    operands: &mut BoundOperands,
+    absorbed: &mut Vec<NodeId>,
+    node: NodeId,
+    map: &IndexMap,
+) -> StepArg {
+    let entry = held
+        .borrow()
+        .get(&node)
+        .map(|held_elementwise| (held_elementwise.body, held_elementwise.operands.clone()));
+
+    let Some((body, sub_operands)) = entry else {
+        operands.push(build_operand(node, map, shapes));
+        return StepArg::Operand((operands.len() - 1) as u16);
+    };
+
+    absorbed.push(node);
+    let remapped = remap_sub_operands(&sub_operands, map);
+    StepArg::Step(compose_body(
+        shapes, held, steps, operands, absorbed, body, &remapped,
+    ))
+}
+
+/// The outer iteration axis each of `map`'s own axes corresponds to — sound
+/// only when `map` is [`is_identity_projection`], which every caller here
+/// already checked before fusing through it.
+fn axis_correspondence(map: &IndexMap) -> Vec<u16> {
+    map.affine()
         .axes
         .iter()
         .map(|axis| axis.terms[0].axis)
-        .collect();
+        .collect()
+}
 
-    let operands = elementwise_operands
+fn remap_pattern(pattern: &IndexPattern, axis_map: &[u16], outer_iter_rank: u16) -> IndexPattern {
+    let axes = pattern
+        .axes
         .iter()
-        .map(|(operand_node, map)| {
-            let (node, layout, lookup) = build_operand(*operand_node, map, shapes);
-            let remapped_layout =
-                remap_strides(&layout, &elementwise_axis_to_reduce_axis, iter_rank);
-            let remapped_lookup = lookup.map(|lookup| Lookup {
-                indices: lookup.indices,
-                index_layout: remap_strides(
-                    &lookup.index_layout,
-                    &elementwise_axis_to_reduce_axis,
-                    iter_rank,
-                ),
-                element_stride: lookup.element_stride,
-                extent: lookup.extent,
-            });
-            (node, remapped_layout, remapped_lookup)
+        .map(|axis_index| AxisIndex {
+            terms: axis_index
+                .terms
+                .iter()
+                .map(|term| AxisTerm {
+                    axis: axis_map[term.axis as usize],
+                    coeff: term.coeff,
+                })
+                .collect(),
+            offset: axis_index.offset,
         })
         .collect();
+    IndexPattern {
+        iter_rank: outer_iter_rank,
+        axes,
+    }
+}
 
-    (elementwise_body, operands)
+fn remap_index_map(map: &IndexMap, axis_map: &[u16], outer_iter_rank: u16) -> IndexMap {
+    match map {
+        IndexMap::Affine(pattern) => {
+            IndexMap::Affine(remap_pattern(pattern, axis_map, outer_iter_rank))
+        }
+        IndexMap::Computed {
+            indices,
+            index_map,
+            base,
+            gathered_dim,
+        } => IndexMap::Computed {
+            indices: *indices,
+            index_map: remap_pattern(index_map, axis_map, outer_iter_rank),
+            base: remap_pattern(base, axis_map, outer_iter_rank),
+            gathered_dim: *gathered_dim,
+        },
+    }
+}
+
+/// Composes a held op's own operand maps (expressed in its own iteration
+/// space) through `outer_map` — how its consumer reads it, always an
+/// identity projection, the fusion precondition — into the consumer's own
+/// iteration space. The symbolic counterpart of [`Layout`]-level stride
+/// remapping, applied one level per absorbed node so [`compose_operand`]'s
+/// recursion composes through as many levels as a chain has.
+fn remap_sub_operands(
+    sub_operands: &[(NodeId, IndexMap)],
+    outer_map: &IndexMap,
+) -> Vec<(NodeId, IndexMap)> {
+    let axis_map = axis_correspondence(outer_map);
+    let outer_iter_rank = outer_map.affine().iter_rank;
+    sub_operands
+        .iter()
+        .map(|(node, map)| (*node, remap_index_map(map, &axis_map, outer_iter_rank)))
+        .collect()
 }
 
 fn layout_of(pattern: &IndexPattern, operand_shape: &[u64]) -> Layout {
@@ -617,17 +842,6 @@ fn row_major_strides(shape: &[u64]) -> Vec<i64> {
         accumulator *= *extent as i64;
     }
     strides
-}
-
-fn remap_strides(layout: &Layout, axis_map: &[u16], iter_rank: u16) -> Layout {
-    let mut strides = vec![0i64; iter_rank as usize];
-    for (from_axis, to_axis) in axis_map.iter().enumerate() {
-        strides[*to_axis as usize] += layout.stride(from_axis as u16);
-    }
-    Layout {
-        base: layout.base,
-        strides,
-    }
 }
 
 /// Batch driver: computes liveness once, then streams every expression
@@ -715,8 +929,13 @@ mod tests {
         );
         assert_eq!(built[0].node, sum);
         assert!(matches!(built[0].kind, BoundOpKind::Reduce { .. }));
+        assert_eq!(
+            built[0].element_body().steps.len(),
+            1,
+            "one absorbed elementwise op is one composed step"
+        );
         assert_ne!(
-            built[0].element_op(),
+            built[0].element_body().steps[0].op,
             ScalarOp::Identity,
             "the fused body is the elementwise op's multiply"
         );
@@ -744,6 +963,256 @@ mod tests {
             built
                 .iter()
                 .any(|op| op.node == sum && matches!(op.kind, BoundOpKind::Reduce { .. }))
+        );
+    }
+
+    /// `b = a * scale; c = b + bias; d = c * c` — three chained elementwise
+    /// ops, each the sole and last use of the one before it, none of them
+    /// requested as an output. All three must fuse into `d`'s own `BoundOp`
+    /// rather than materializing `b` and `c` along the way.
+    fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let scale = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let bias = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(a, identity()), (scale, identity())],
+                name: None,
+            },
+        );
+        let c = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(b, identity()), (bias, identity())],
+                name: None,
+            },
+        );
+        let d = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(c, identity()), (c, identity())],
+                name: None,
+            },
+        );
+        (program, b, c, d)
+    }
+
+    #[test]
+    fn a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three() {
+        let (program, _b, _c, d) = elementwise_chain_program();
+        let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
+        let built = bind(&program, &shapes, &[]).expect("elementwise chain builds ops");
+
+        assert_eq!(
+            built.len(),
+            1,
+            "b and c must absorb into d's own BoundOp instead of materializing"
+        );
+        assert_eq!(built[0].node, d);
+        assert!(matches!(built[0].kind, BoundOpKind::Elementwise { .. }));
+        assert!(
+            built[0].element_body().steps.len() >= 2,
+            "the composed body must carry more than one absorbed op's step"
+        );
+    }
+
+    #[test]
+    fn an_elementwise_intermediate_requested_as_an_output_prevents_fusion() {
+        let (program, b, _c, d) = elementwise_chain_program();
+        let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
+        let built =
+            bind(&program, &shapes, &[b, d]).expect("elementwise chain builds ops with 2 outputs");
+
+        assert_eq!(
+            built.len(),
+            2,
+            "requesting b as an output must force it to materialize on its own"
+        );
+        assert!(
+            built
+                .iter()
+                .any(|op| op.node == b && matches!(op.kind, BoundOpKind::Elementwise { .. }))
+        );
+        assert!(built.iter().any(|op| op.node == d));
+    }
+
+    #[test]
+    fn an_elementwise_intermediate_consumed_by_two_different_ops_is_not_fused() {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: alloc::vec![(a, identity())],
+                name: None,
+            },
+        );
+        let c1 = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(b, identity())],
+                name: None,
+            },
+        );
+        let c2 = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Reciprocal,
+                operands: alloc::vec![(b, identity())],
+                name: None,
+            },
+        );
+        let d = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(c1, identity()), (c2, identity())],
+                name: None,
+            },
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
+        let built = bind(&program, &shapes, &[]).expect("diamond chain builds ops");
+
+        assert_eq!(
+            built.len(),
+            2,
+            "b feeds two different consumers, so it must materialize once on its own, \
+             and d (absorbing c1 and c2, whose only use each is d) is the other"
+        );
+        assert!(
+            built
+                .iter()
+                .any(|op| op.node == b && matches!(op.kind, BoundOpKind::Elementwise { .. })),
+            "b must materialize standalone rather than fuse into either consumer"
+        );
+        assert!(built.iter().any(|op| op.node == d));
+        let _ = c1;
+        let _ = c2;
+    }
+
+    /// `product = a * b; scaled = product * c; sum = reduce(+, scaled)` — two
+    /// chained elementwise ops feeding a reduce, mirroring `matmul_program`
+    /// but with an extra elementwise hop before the contraction. Both
+    /// elementwise ops must absorb into the reduce's own `BoundOp`.
+    #[test]
+    fn elementwise_into_elementwise_into_reduce_fuses_into_one_bound_op() {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let b = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let c = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(a, identity()), (b, identity())],
+                name: None,
+            },
+        );
+        let scaled = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(product, identity()), (c, identity())],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: scaled,
+                in_map: identity(),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: Some("weighted_dot".into()),
+            }),
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
+        let built = bind(&program, &shapes, &[]).expect("weighted dot builds ops");
+
+        assert_eq!(
+            built.len(),
+            1,
+            "both elementwise hops must absorb into the reduce's own BoundOp"
+        );
+        assert_eq!(built[0].node, sum);
+        assert!(matches!(built[0].kind, BoundOpKind::Reduce { .. }));
+        assert_eq!(
+            built[0].element_body().steps.len(),
+            2,
+            "one step per absorbed elementwise op"
         );
     }
 

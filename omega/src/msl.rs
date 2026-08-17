@@ -55,7 +55,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, Keep, NodeId, ReduceInit, ScalarOp};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ComposedBody, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
+};
 
 use crate::error::EmitError;
 
@@ -163,16 +165,27 @@ pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
     })
 }
 
-fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
-    let expected = resolved.element_op().arity();
-    let found = resolved.operands().len();
-    if expected != found {
-        return Err(EmitError::ArityMismatch {
-            node: resolved.node,
-            expected,
-            found,
-        });
+/// Structural checks over a (possibly fused) [`ComposedBody`]: every step's
+/// own arity matches its arg count — the same check [`validate`] always ran,
+/// now per absorbed step instead of once for a single `ScalarOp`, since a
+/// fused body can carry more than one.
+fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
+    for step in &body.steps {
+        let expected = step.op.arity();
+        let found = step.args.len();
+        if expected != found {
+            return Err(EmitError::ArityMismatch {
+                node,
+                expected,
+                found,
+            });
+        }
     }
+    Ok(())
+}
+
+fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
+    validate_body(resolved.node, resolved.element_body())?;
     if let BoundOpKind::Reduce {
         reduce_op, keep, ..
     } = &resolved.kind
@@ -316,10 +329,51 @@ fn keep_token(keep: Keep) -> &'static str {
 /// fetch code) — which operands gather. That last part is a suffix appended
 /// only when at least one operand gathers, so a gather-free `BoundOp`'s name is
 /// unchanged from before this existed.
+/// Whether `body` is the unfused, one-step, sequential-operand shape every
+/// body had before fusion existed — the case [`body_token`] keeps naming
+/// exactly as it always has, so every kernel name this crate emitted before
+/// fusion existed is unchanged.
+fn is_leaf(body: &ComposedBody) -> bool {
+    body.steps.len() == 1
+        && body.steps[0].args.iter().enumerate().all(
+            |(index, arg)| matches!(arg, StepArg::Operand(operand) if *operand as usize == index),
+        )
+}
+
+/// A valid-MSL-identifier fingerprint of every step in a fused body: which
+/// op, over which operand slots or earlier steps, in order — two bodies with
+/// the same structure (independent of concrete extents/strides/buffers)
+/// must fingerprint identically so the kernel they emit is cacheable by
+/// structure, matching this module's own stance on `entry_name` overall.
+fn body_fingerprint(body: &ComposedBody) -> String {
+    body.steps
+        .iter()
+        .map(|step| {
+            let mut token = String::from(op_token(step.op));
+            for arg in &step.args {
+                match arg {
+                    StepArg::Operand(index) => token.push_str(&format!("_o{index}")),
+                    StepArg::Step(index) => token.push_str(&format!("_s{index}")),
+                }
+            }
+            token
+        })
+        .collect::<Vec<_>>()
+        .join("__")
+}
+
+fn body_token(body: &ComposedBody) -> String {
+    if is_leaf(body) {
+        op_token(body.steps[0].op).into()
+    } else {
+        format!("fused_{}", body_fingerprint(body))
+    }
+}
+
 fn entry_name(resolved: &BoundOp) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
-    let body = op_token(resolved.element_op());
+    let body = body_token(resolved.element_body());
     let base = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => {
             format!("omega_elementwise_r{rank}_n{operand_count}_{body}")
@@ -383,10 +437,28 @@ fn fold_init_tokens(init: ReduceInit) -> (&'static str, &'static str) {
     }
 }
 
-fn scratch_args(operand_count: usize) -> Vec<String> {
-    (0..operand_count)
-        .map(|index| format!("scratch[{index}]"))
-        .collect()
+/// Emits one `float step{n} = ...;` declaration per [`ComposedBody`] step,
+/// each reading `scratch[i]` for an `Operand` arg or an earlier `step{k}`
+/// for a `Step` arg — the MSL counterpart of `cpu::apply_body`'s scratch
+/// walk. Returns the C expression for the body's own result (its last
+/// step), which a caller splices directly into whatever it does with the
+/// value (`out[gid] = ...` for elementwise, `float value = ...` for a
+/// reduce/scan step).
+fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str) -> String {
+    for (index, step) in body.steps.iter().enumerate() {
+        let args: Vec<String> = step
+            .args
+            .iter()
+            .map(|arg| match arg {
+                StepArg::Operand(operand_index) => format!("scratch[{operand_index}]"),
+                StepArg::Step(step_index) => format!("step{step_index}"),
+            })
+            .collect();
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let expr = scalar_op_expr(step.op, &arg_refs);
+        source.push_str(&format!("{indent}float step{index} = {expr};\n"));
+    }
+    format!("step{}", body.steps.len().saturating_sub(1))
 }
 
 fn kernel_signature(source: &mut String, operand_count: usize, gather_count: usize, entry: &str) {
@@ -561,15 +633,13 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
         }
     }
 
-    source.push_str("    float scratch[3];\n");
+    source.push_str(&format!("    float scratch[{}];\n", operand_count.max(1)));
     for index in 0..operand_count {
         source.push_str(&format!("    scratch[{index}] = in{index}[off{index}];\n"));
     }
 
-    let args = scratch_args(operand_count);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let expr = scalar_op_expr(resolved.element_op(), &arg_refs);
-    source.push_str(&format!("    out[gid] = {expr};\n"));
+    let result = push_body_steps(&mut source, resolved.element_body(), "    ");
+    source.push_str(&format!("    out[gid] = {result};\n"));
     source.push_str("}\n");
     source
 }
@@ -677,15 +747,16 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
             );
         }
     }
-    source.push_str("        float scratch[3];\n");
+    source.push_str(&format!(
+        "        float scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for index in 0..operand_count {
         source.push_str(&format!(
             "        scratch[{index}] = in{index}[off{index}];\n"
         ));
     }
-    let args = scratch_args(operand_count);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let value_expr = scalar_op_expr(resolved.element_op(), &arg_refs);
+    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ");
     source.push_str(&format!("        float value = {value_expr};\n"));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
@@ -783,7 +854,10 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
     source.push_str("    for (long step = 0; step < u.inner_len; step++) {\n");
-    source.push_str("        float scratch[3];\n");
+    source.push_str(&format!(
+        "        float scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for (index, gather_slot) in gather_slots.iter().enumerate() {
         // the gathered dim's contribution is per-step (the fetched index
         // varies along the scanned dim too, in general), so it is combined
@@ -816,9 +890,7 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
             "        running{index} += u.operand_strides[{index}][{last_dim}];\n"
         ));
     }
-    let args = scratch_args(operand_count);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let value_expr = scalar_op_expr(resolved.element_op(), &arg_refs);
+    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ");
     source.push_str(&format!("        float value = {value_expr};\n"));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
@@ -1173,8 +1245,8 @@ mod tests {
     #[test]
     fn an_arity_mismatched_op_is_rejected() {
         let mut bound = elementwise_tanh_op(4);
-        if let BoundOpKind::Elementwise { op, .. } = &mut bound.kind {
-            *op = ScalarOp::Add; // arity 2, but the op still carries 1 operand
+        if let BoundOpKind::Elementwise { body, .. } = &mut bound.kind {
+            body.steps[0].op = ScalarOp::Add; // arity 2, but the step still carries 1 arg
         }
 
         let error = emit(&bound).expect_err("mismatched arity is rejected");
