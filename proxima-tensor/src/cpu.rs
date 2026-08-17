@@ -1504,6 +1504,167 @@ struct DotFold {
     seeded: bool,
 }
 
+/// Partial-accumulator count for the contiguous dot fold
+/// ([`dot_fold_multi_accumulator_binary`]/[`dot_fold_multi_accumulator_unary`]).
+/// The strict left-to-right fold (`acc = reduce(acc, op(a, b))` once per
+/// `k`) is a serial dependency chain LLVM cannot widen, because float
+/// `+`/`*` are not associative under IEEE 754 — reordering the sum
+/// changes its bit pattern (`scratchpad/opt/discipline.md` ROW 11).
+/// Splitting the chain into `DOT_LANES` independent partial folds (one
+/// per position in a `DOT_LANES`-wide `chunks_exact` block) breaks that
+/// dependency: each lane's own chain is still strictly sequential (still
+/// no per-lane reassociation), but the lanes run independently, so LLVM
+/// can pack the common case into vector `fmul`/`fadd` and pay the
+/// horizontal combine once per call instead of once per element —
+/// exactly what every BLAS and ggml itself do. 4 and 8 were measured
+/// head-to-head (ROW 12, `scratchpad/opt/discipline.md`): 8 measured
+/// consistently faster (~0.337-0.349s vs ~0.352-0.354s, 1024^3
+/// transposed-RHS GEMM, 5 runs each) — more independent lanes hide more
+/// of the reduce's latency on this core's issue width. 8 was kept.
+const DOT_LANES: usize = 8;
+
+/// The pre-ROW-12 strict left-to-right fold, kept verbatim as the
+/// `len < DOT_LANES` fallback for [`dot_fold_multi_accumulator_binary`] —
+/// too few terms for independent lanes to pay for themselves, and this
+/// keeps tiny-`k` folds byte-for-byte identical to pre-ROW-12 behavior.
+fn dot_fold_scalar_binary<F, R>(op: F, reduce: R, slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32
+where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if fold.seeded {
+        let mut acc = fold.init;
+        for (&value_a, &value_b) in slice_a.iter().zip(slice_b) {
+            acc = reduce(acc, op(value_a, value_b));
+        }
+        acc
+    } else if let ([first_a, rest_a @ ..], [first_b, rest_b @ ..]) = (slice_a, slice_b) {
+        let mut acc = op(*first_a, *first_b);
+        for (&value_a, &value_b) in rest_a.iter().zip(rest_b) {
+            acc = reduce(acc, op(value_a, value_b));
+        }
+        acc
+    } else {
+        fold.init
+    }
+}
+
+/// `DOT_LANES` independent partial accumulators, one per position in each
+/// `DOT_LANES`-wide `chunks_exact` block of `slice_a`/`slice_b`, combined
+/// via `reduce` (associative by construction: `Add`/`Multiply`/`Maximum`/
+/// `Minimum`, the only four reduce ops this fast path ever specializes
+/// for), then folded into one scalar via a single `DOT_LANES`-wide
+/// horizontal combine at the end. Reassociates the sum relative to the
+/// strict left-to-right fold — the numeric result differs from the naive
+/// triple loop by float rounding, same as Accelerate/OpenBLAS/ggml (ROW
+/// 12, `scratchpad/opt/discipline.md`). Operates on matching-length
+/// slices via `chunks_exact` (not manual indexing) so the length relation
+/// LLVM needs to elide bounds checks and vectorize is visible in the
+/// source, the same technique [`reduce_width_binary_monomorphic`] already
+/// relies on. `seeded == false` (the `ReduceInit::FirstElement` case)
+/// seeds each lane with its own first block value instead of `fold.init`,
+/// so no lane ever combines with a non-identity `fold.init` value.
+#[inline(always)]
+fn dot_fold_multi_accumulator_binary<F, R>(op: F, reduce: R, slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32
+where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if fold.len < DOT_LANES {
+        return dot_fold_scalar_binary(op, reduce, slice_a, slice_b, fold);
+    }
+    let mut chunks_a = slice_a.chunks_exact(DOT_LANES);
+    let mut chunks_b = slice_b.chunks_exact(DOT_LANES);
+    let mut lanes = [fold.init; DOT_LANES];
+    let mut seeded = fold.seeded;
+    for (chunk_a, chunk_b) in (&mut chunks_a).zip(&mut chunks_b) {
+        if seeded {
+            for ((lane, &value_a), &value_b) in lanes.iter_mut().zip(chunk_a).zip(chunk_b) {
+                *lane = reduce(*lane, op(value_a, value_b));
+            }
+        } else {
+            for ((lane, &value_a), &value_b) in lanes.iter_mut().zip(chunk_a).zip(chunk_b) {
+                *lane = op(value_a, value_b);
+            }
+            seeded = true;
+        }
+    }
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+    let mut acc = lanes[0];
+    for &lane in &lanes[1..] {
+        acc = reduce(acc, lane);
+    }
+    for (&value_a, &value_b) in remainder_a.iter().zip(remainder_b) {
+        let value = op(value_a, value_b);
+        acc = if seeded { reduce(acc, value) } else { value };
+        seeded = true;
+    }
+    acc
+}
+
+/// The pre-ROW-12 strict left-to-right fold, kept verbatim as the
+/// `len < DOT_LANES` fallback for [`dot_fold_multi_accumulator_unary`].
+fn dot_fold_scalar_unary<F, R>(op: F, reduce: R, slice: &[f32], fold: DotFold) -> f32
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if fold.seeded {
+        let mut acc = fold.init;
+        for &raw_value in slice {
+            acc = reduce(acc, op(raw_value));
+        }
+        acc
+    } else if let [first, rest @ ..] = slice {
+        let mut acc = op(*first);
+        for &raw_value in rest {
+            acc = reduce(acc, op(raw_value));
+        }
+        acc
+    } else {
+        fold.init
+    }
+}
+
+/// Same discipline as [`dot_fold_multi_accumulator_binary`], one operand.
+#[inline(always)]
+fn dot_fold_multi_accumulator_unary<F, R>(op: F, reduce: R, slice: &[f32], fold: DotFold) -> f32
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if fold.len < DOT_LANES {
+        return dot_fold_scalar_unary(op, reduce, slice, fold);
+    }
+    let mut chunks = slice.chunks_exact(DOT_LANES);
+    let mut lanes = [fold.init; DOT_LANES];
+    let mut seeded = fold.seeded;
+    for chunk in &mut chunks {
+        if seeded {
+            for (lane, &value) in lanes.iter_mut().zip(chunk) {
+                *lane = reduce(*lane, op(value));
+            }
+        } else {
+            for (lane, &value) in lanes.iter_mut().zip(chunk) {
+                *lane = op(value);
+            }
+            seeded = true;
+        }
+    }
+    let remainder = chunks.remainder();
+    let mut acc = lanes[0];
+    for &lane in &lanes[1..] {
+        acc = reduce(acc, lane);
+    }
+    for &value in remainder {
+        let mapped = op(value);
+        acc = if seeded { reduce(acc, mapped) } else { mapped };
+        seeded = true;
+    }
+    acc
+}
+
 /// The contraction-dim counterpart of [`reduce_width_fast`]: instead of
 /// accumulating one value per width position across many calls (one per `k`),
 /// folds the whole contraction range for ONE output position in a single
@@ -1573,21 +1734,7 @@ where
 {
     if span.contiguous {
         let slice = &span.data[span.base..span.base + fold.len];
-        if fold.seeded {
-            let mut acc = fold.init;
-            for &raw_value in slice {
-                acc = reduce(acc, op(raw_value));
-            }
-            acc
-        } else if let [first, rest @ ..] = slice {
-            let mut acc = op(*first);
-            for &raw_value in rest {
-                acc = reduce(acc, op(raw_value));
-            }
-            acc
-        } else {
-            fold.init
-        }
+        dot_fold_multi_accumulator_unary(op, reduce, slice, fold)
     } else {
         let value = op(span.data[span.base]);
         if fold.seeded {
@@ -1651,10 +1798,11 @@ fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: Opera
     }
 }
 
-/// The fold loop LLVM autovectorizes into a multiply-accumulate-then-
-/// horizontal-sum pattern for the `(true, true)`/`Multiply`/`Add` arm — the
-/// exact shape a transposed-B GEMM's per-output-element dot product takes
-/// (`scratchpad/opt/discipline.md` ROW 10/11).
+/// The `(true, true)` arm folds via [`dot_fold_multi_accumulator_binary`]
+/// (`DOT_LANES` independent partial sums, reassociated relative to the
+/// naive triple loop — ROW 12) instead of one strict left-to-right chain.
+/// This is the exact shape a transposed-B GEMM's per-output-element dot
+/// product takes (`scratchpad/opt/discipline.md` ROW 10/11/12).
 #[inline(always)]
 fn reduce_dot_binary_monomorphic<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
 where
@@ -1665,21 +1813,7 @@ where
         (true, true) => {
             let slice_a = &a.data[a.base..a.base + fold.len];
             let slice_b = &b.data[b.base..b.base + fold.len];
-            if fold.seeded {
-                let mut acc = fold.init;
-                for (&value_a, &value_b) in slice_a.iter().zip(slice_b) {
-                    acc = reduce(acc, op(value_a, value_b));
-                }
-                acc
-            } else if let ([first_a, rest_a @ ..], [first_b, rest_b @ ..]) = (slice_a, slice_b) {
-                let mut acc = op(*first_a, *first_b);
-                for (&value_a, &value_b) in rest_a.iter().zip(rest_b) {
-                    acc = reduce(acc, op(value_a, value_b));
-                }
-                acc
-            } else {
-                fold.init
-            }
+            dot_fold_multi_accumulator_binary(op, reduce, slice_a, slice_b, fold)
         }
         (true, false) => {
             let slice_a = &a.data[a.base..a.base + fold.len];
@@ -2221,6 +2355,28 @@ mod tests {
         block(program, DType::Float32, shape)
     }
 
+    /// `reduce_dot_binary_monomorphic`'s `(true, true)` arm reassociates the
+    /// sum (`DOT_LANES` independent partial accumulators, ROW 12,
+    /// `scratchpad/opt/discipline.md`) — bit-exactness against
+    /// [`naive_matmul`]'s strict left-to-right fold is no longer the bar for
+    /// the transposed-RHS (reduce_dot) path, same as Accelerate/OpenBLAS/
+    /// ggml. Returns the measured max relative error so callers can log it.
+    fn assert_all_close(actual: &[f32], expected: &[f32], relative_tolerance: f32) -> f32 {
+        assert_eq!(actual.len(), expected.len());
+        let mut max_relative_error = 0.0f32;
+        for (&value, &reference) in actual.iter().zip(expected) {
+            let scale = reference.abs().max(1.0);
+            let relative_error = (value - reference).abs() / scale;
+            max_relative_error = max_relative_error.max(relative_error);
+            assert!(
+                relative_error <= relative_tolerance,
+                "relative error {relative_error} exceeds tolerance {relative_tolerance} \
+                 (actual={value}, expected={reference})"
+            );
+        }
+        max_relative_error
+    }
+
     fn naive_matmul(lhs: &[f32], rhs: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; m * n];
         for row in 0..m {
@@ -2553,9 +2709,20 @@ mod tests {
 
     #[test]
     fn fused_matmul_with_transposed_rhs_matches_a_naive_triple_loop() {
-        // k=7 (not a multiple of the NEON lane width) exercises the fast
-        // path's remainder handling; the RHS buffer is the same numbers as
+        // k=7 (not a multiple of DOT_LANES=4) exercises the fast path's
+        // remainder handling; the RHS buffer is the same numbers as
         // `naive_matmul`'s `[k, n]` reference expects, laid out `[n, k]`.
+        //
+        // WEAKENED (ROW 12, `scratchpad/opt/discipline.md`): was
+        // `assert_eq!` (bit-exact) against `naive_matmul`'s strict
+        // left-to-right fold. `reduce_dot_binary_monomorphic`'s `(true,
+        // true)` arm now folds via `DOT_LANES` independent partial
+        // accumulators (matches Accelerate/OpenBLAS/ggml practice), which
+        // reassociates the sum and can change its bit pattern relative to
+        // the naive loop. Switched to a 1e-5 relative-tolerance check.
+        // Measured max relative error at this k=7, small-integer-input size
+        // was 0.0 (integers this small sum exactly in f32 regardless of
+        // grouping) — logged in ROW 12 rather than assumed.
         let (m, k, n) = (4usize, 7usize, 5usize);
         let (program, sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
         let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
@@ -2569,11 +2736,35 @@ mod tests {
 
         let evaluated = evaluate(&program, &[], &[&lhs, &rhs_nk], &[]).expect("matmul evaluates");
         assert_eq!(evaluated.shape(), &[m as u64, n as u64]);
-        assert_eq!(
-            evaluated.root(),
-            naive_matmul(&lhs, &rhs_kn, m, k, n).as_slice()
-        );
+        let reference = naive_matmul(&lhs, &rhs_kn, m, k, n);
+        let max_relative_error = assert_all_close(evaluated.root(), &reference, 1e-5);
+        println!("k=7 transposed-rhs max_relative_error={max_relative_error}");
         let _ = sum;
+    }
+
+    #[test]
+    fn fused_matmul_with_transposed_rhs_k1024_within_tolerance_of_a_naive_triple_loop() {
+        // k=1024 matches the real GEMM benchmark's contraction length and
+        // uses fractional, non-integer data so the sum actually accumulates
+        // rounding error under either fold order (unlike the k=7 test's
+        // small-integer inputs, whose sums are exact regardless of
+        // grouping) — see ROW 12, `scratchpad/opt/discipline.md`.
+        let (m, k, n) = (8usize, 1024usize, 8usize);
+        let (program, _sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
+        let lhs: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();
+        let rhs_kn: Vec<f32> = (0..k * n).map(|value| (value as f32 * 0.0271).cos()).collect();
+        let mut rhs_nk = vec![0.0f32; k * n];
+        for row in 0..k {
+            for col in 0..n {
+                rhs_nk[col * k + row] = rhs_kn[row * n + col];
+            }
+        }
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs_nk], &[]).expect("matmul evaluates");
+        assert_eq!(evaluated.shape(), &[m as u64, n as u64]);
+        let reference = naive_matmul(&lhs, &rhs_kn, m, k, n);
+        let max_relative_error = assert_all_close(evaluated.root(), &reference, 1e-5);
+        println!("k=1024 transposed-rhs max_relative_error={max_relative_error}");
     }
 
     #[test]
