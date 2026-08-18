@@ -73,18 +73,27 @@ pub enum TensorError {
         found: usize,
     },
 
+    // these five carry free-form parsed text and are only ever constructed
+    // by `spec.rs`, which is itself `config`-only (std+alloc); scoping them
+    // to `config` keeps `TensorError` alloc-free outside that tier instead
+    // of dragging `alloc::string::String` into every build that can never
+    // produce these variants.
+    #[cfg(feature = "config")]
     #[error("map `{0}` is not `operand->iteration` notation")]
     MalformedMap(alloc::string::String),
 
+    #[cfg(feature = "config")]
     #[error("map `{notation}` projects `{letter}`, which the iteration space lacks")]
     UnknownIndexLetter {
         notation: alloc::string::String,
         letter: char,
     },
 
+    #[cfg(feature = "config")]
     #[error("spec references node `{0}` before it is defined")]
     UnknownNode(alloc::string::String),
 
+    #[cfg(feature = "config")]
     #[error("node `{node}` has {inputs} inputs but {maps} maps")]
     SpecArityMismatch {
         node: alloc::string::String,
@@ -92,6 +101,7 @@ pub enum TensorError {
         maps: usize,
     },
 
+    #[cfg(feature = "config")]
     #[error("extent `{0}` is not a number or a `?n` symbol")]
     MalformedExtent(alloc::string::String),
 
@@ -121,4 +131,20 @@ pub enum TensorError {
          integer an f32 index can represent exactly"
     )]
     GatherExtentExceedsExactFloat { node: NodeId, extent: u64 },
+
+    /// A chunk of a threaded nest never completed: the background pool
+    /// caught and discarded a worker panic (see
+    /// `prime::os::background::worker`'s `catch_unwind`) rather than
+    /// resuming it, so this is the closest sound signal a caller gets — a
+    /// scheduling failure, not a fault in the tensor program.
+    #[error("nest chunk {chunk} of a threaded run did not complete: {reason}")]
+    ThreadedChunkFailed {
+        chunk: usize,
+        reason: alloc::string::String,
+    },
+
+    /// The background thread pool backing a threaded nest could not be
+    /// built (OS thread-spawn failure — resource exhaustion).
+    #[error("nest thread pool unavailable: {0}")]
+    ThreadedPoolUnavailable(alloc::string::String),
 }
