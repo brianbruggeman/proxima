@@ -32,8 +32,13 @@
 //! streamed or not.
 //!
 //! `BoundOpBuilder` also implements [`Pipe`]
-//! (`In = (Op, Shapes)`, `Out = Vec<BoundOp>`) — the same state machine, not a
-//! second type wrapping it. [`Pipe::call`] takes `&self`, so `held` below is
+//! (`In = (Op, Shapes)`, `Out = `[`ReadyBatch`]) — the same state machine,
+//! not a second type wrapping it. `ReadyBatch` is a fixed-capacity, no-alloc
+//! batch rather than a `Vec`: a single `push` readies at most
+//! [`READY_BATCH_CAPACITY`] `BoundOp`s (see `push`'s own doc), so the
+//! composition boundary between this stage and [`crate::cpu::Interpreter`]
+//! never pays a heap allocation per `Op` pushed through the chain.
+//! [`Pipe::call`] takes `&self`, so `held` below is
 //! a `RefCell` and the node position a `Cell`, the same interior-mutability
 //! idiom [`shape::ShapeTable`] uses for its own `Pipe` impl.
 //!
@@ -54,13 +59,25 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::Future;
 
+use arrayvec::ArrayVec;
 use proxima_primitives::pipe::Pipe;
+use smallvec::SmallVec;
 
 use crate::error::TensorError;
 use crate::live;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use crate::shape::{self, Shapes};
+
+/// Inline capacity for one bound op's per-iteration-axis buffers (`Layout`
+/// strides, a reduce's surviving `output_axes`). No rank bound is stated or
+/// enforced anywhere in this crate (`iter_rank` is a plain runtime `u16`);
+/// the highest rank this crate's own tests and CPU evaluator exercise today
+/// is 3 (`cpu.rs`'s `matmul_program`-style fixtures). 4 gives one axis of
+/// headroom (e.g. a batch/heads/seq/dim attention iteration space) while
+/// staying inline; `SmallVec` spills to the heap past this instead of
+/// truncating, so a wider program still binds correctly.
+pub const MAX_INLINE_RANK: usize = 4;
 
 /// One operand's address into its own buffer, expressed directly in an
 /// [`BoundOp`]'s iteration-axis space: `strides[axis]` is how far the linear
@@ -75,7 +92,7 @@ use crate::shape::{self, Shapes};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     pub base: i64,
-    pub strides: Vec<i64>,
+    pub strides: SmallVec<[i64; MAX_INLINE_RANK]>,
 }
 
 impl Layout {
@@ -113,6 +130,23 @@ pub struct Lookup {
 }
 
 type BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>;
+
+/// Capacity for one [`BoundOpBuilder::push`] call's ready batch. An
+/// elementwise push materializes at most one [`BoundOp`] per operand that
+/// fails to fuse, bounded by [`ScalarOp::arity`]'s current maximum
+/// (`Select`, 3); a reduce push materializes at most one held predecessor
+/// plus the reduce's own op (2). `push` and `materialize_if_held` return
+/// [`TensorError::NotLowerable`] rather than overflow this if a future
+/// higher-arity `ScalarOp` variant is ever added.
+const READY_BATCH_CAPACITY: usize = 3;
+
+/// The batch [`BoundOpBuilder::push`] readies for one `Op`: [`Pipe::Out`]
+/// for [`BoundOpBuilder`] and, by the composition law, [`Pipe::In`] for
+/// [`crate::cpu::Interpreter`]. Fixed-capacity and stack-resident rather
+/// than heap-backed like [`BoundOperands`] above — one `Vec` allocation per
+/// `Op` pushed through the chain was the actual cost this replaces, for a
+/// container that only ever holds 0 to [`READY_BATCH_CAPACITY`] items.
+pub type ReadyBatch = ArrayVec<BoundOp, READY_BATCH_CAPACITY>;
 
 /// One argument to a [`BodyStep`]: a fresh read of one of the [`BoundOp`]'s
 /// own physical operands, or the result of an earlier step in the same
@@ -194,7 +228,7 @@ pub enum BoundOpKind {
         /// Iteration axes that survive to the output, in the reduce's
         /// `out_map` operand-axis order. The last entry (if any) is the
         /// innermost loop.
-        output_axes: Vec<u16>,
+        output_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
         out_layout: Layout,
     },
 }
@@ -411,14 +445,17 @@ impl BoundOpBuilder {
     /// May return more than one [`BoundOp`]: consuming a held elementwise op
     /// that turns out not to fuse must materialize it before the current
     /// expression can read it, so a single push can ready both that
-    /// standalone op and the current expression's own.
-    pub fn push(&self, expr: &Op, shapes: &Shapes) -> Result<Vec<BoundOp>, TensorError> {
+    /// standalone op and the current expression's own — and, for an
+    /// elementwise expression, one materialization per operand that fails to
+    /// fuse, up to [`ScalarOp::arity`]'s current maximum
+    /// ([`READY_BATCH_CAPACITY`]).
+    pub fn push(&self, expr: &Op, shapes: &Shapes) -> Result<ReadyBatch, TensorError> {
         let node = NodeId(self.position.get());
         self.position.set(self.position.get() + 1);
         let empty = Vec::new();
         let retires = self.retires.get(node.0 as usize).unwrap_or(&empty);
 
-        let mut emitted = Vec::new();
+        let mut emitted = ReadyBatch::new();
 
         match expr {
             Op::Input { .. } => {}
@@ -428,7 +465,7 @@ impl BoundOpBuilder {
                         && is_identity_projection(map)
                         && self.held.borrow().contains_key(operand_node);
                     if !fuses {
-                        self.materialize_if_held(*operand_node, shapes, &mut emitted);
+                        self.materialize_if_held(*operand_node, shapes, &mut emitted)?;
                     }
                 }
                 self.held.borrow_mut().insert(
@@ -447,18 +484,16 @@ impl BoundOpBuilder {
                 let (element_body, operands) = if fuses {
                     compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map)
                 } else {
-                    self.materialize_if_held(reduce.operand, shapes, &mut emitted);
+                    self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
                     let operand = build_operand(reduce.operand, &reduce.in_map, shapes);
                     (ComposedBody::leaf(ScalarOp::Identity), vec![operand])
                 };
 
-                emitted.push(build_reduce_op(
+                push_ready(
+                    &mut emitted,
                     node,
-                    reduce,
-                    shapes,
-                    element_body,
-                    operands,
-                ));
+                    build_reduce_op(node, reduce, shapes, element_body, operands),
+                )?;
             }
         }
 
@@ -499,20 +534,33 @@ impl BoundOpBuilder {
         Ok(built)
     }
 
-    fn materialize_if_held(&self, node: NodeId, shapes: &Shapes, emitted: &mut Vec<BoundOp>) {
+    fn materialize_if_held(
+        &self,
+        node: NodeId,
+        shapes: &Shapes,
+        emitted: &mut ReadyBatch,
+    ) -> Result<(), TensorError> {
         // see `finish`'s comment: the borrow must end before this `if let`
         // body runs, since `build_elementwise_op` borrows `self.held` too.
         let removed = self.held.borrow_mut().remove(&node);
         if let Some(held) = removed {
-            emitted.push(build_elementwise_op(
-                node,
-                shapes,
-                &self.held,
-                held.body,
-                &held.operands,
-            ));
+            let materialized =
+                build_elementwise_op(node, shapes, &self.held, held.body, &held.operands);
+            push_ready(emitted, node, materialized)?;
         }
+        Ok(())
     }
+}
+
+/// Appends one ready [`BoundOp`] to a [`ReadyBatch`], turning an overflow
+/// (never observed for today's `ScalarOp` variants — see
+/// [`READY_BATCH_CAPACITY`]'s own doc) into a [`TensorError`] instead of a
+/// panic.
+fn push_ready(emitted: &mut ReadyBatch, node: NodeId, op: BoundOp) -> Result<(), TensorError> {
+    emitted.try_push(op).map_err(|_| TensorError::NotLowerable {
+        node,
+        reason: "one push readied more BoundOps than the no-alloc batch capacity allows",
+    })
 }
 
 /// `In = (Op, Shapes)` matches [`shape::ShapeTable`]'s own `Pipe::Out`
@@ -522,13 +570,13 @@ impl BoundOpBuilder {
 /// for, and [`BoundOpBuilder::push`] reads both straight out of `Self::In`.
 impl Pipe for BoundOpBuilder {
     type In = (Op, Shapes);
-    type Out = Vec<BoundOp>;
+    type Out = ReadyBatch;
     type Err = TensorError;
 
     fn call(
         &self,
         (expr, shapes): Self::In,
-    ) -> impl Future<Output = Result<Vec<BoundOp>, TensorError>> {
+    ) -> impl Future<Output = Result<ReadyBatch, TensorError>> {
         async move { self.push(&expr, &shapes) }
     }
 }
@@ -609,7 +657,7 @@ fn build_reduce_op(
     }
 }
 
-fn pure_projection_axes(pattern: &IndexPattern) -> Vec<u16> {
+fn pure_projection_axes(pattern: &IndexPattern) -> SmallVec<[u16; MAX_INLINE_RANK]> {
     pattern
         .axes
         .iter()
@@ -822,7 +870,7 @@ fn remap_sub_operands(
 
 fn layout_of(pattern: &IndexPattern, operand_shape: &[u64]) -> Layout {
     let element_strides = row_major_strides(operand_shape);
-    let mut strides = vec![0i64; pattern.iter_rank as usize];
+    let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, pattern.iter_rank as usize);
     let mut base = 0i64;
     for (axis_index, axis) in pattern.axes.iter().enumerate() {
         let stride = element_strides[axis_index];
@@ -1542,6 +1590,97 @@ mod tests {
     #[case::extent_smaller_than_parts(elementwise_op(), 999)]
     fn split_returns_none_when_unsound_or_unhelpful(#[case] op: BoundOp, #[case] parts: usize) {
         assert!(op.split(parts).is_none());
+    }
+
+    /// A ternary `ScalarOp::Select` node (arity 3, the crate's current
+    /// maximum) whose three operands are all held, non-fusing elementwise
+    /// predecessors: a single `push` must materialize all three in one
+    /// call, proving `push` can ready more than the two `BoundOp`s this
+    /// module's docs once claimed as its ceiling — the true bound tracks
+    /// `ScalarOp::arity()`, which is why `READY_BATCH_CAPACITY` is 3, not 2.
+    #[test]
+    fn select_push_emits_three_when_all_three_operands_are_held_and_non_fusing() {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let b = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let c = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let held_a = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(a, identity())],
+                name: None,
+            },
+        );
+        let held_b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(b, identity())],
+                name: None,
+            },
+        );
+        let held_c = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(c, identity())],
+                name: None,
+            },
+        );
+        program.push(Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Select,
+            operands: alloc::vec![
+                (held_a, identity()),
+                (held_b, identity()),
+                (held_c, identity()),
+            ],
+            name: None,
+        });
+
+        let shapes = shape::infer(&program, &[]).expect("select program infers");
+        // an empty retires list (rather than `live::annotate`'s real kill-flags)
+        // makes `retires.contains(operand_node)` false for every node, so
+        // every held predecessor fails the fuse check regardless of its
+        // projection — isolating exactly what a single push can materialize.
+        let building = BoundOpBuilder::new(Vec::new());
+        let mut last_emitted_len = 0;
+        for expr in program.iter() {
+            let emitted = building.push(expr, &shapes).expect("push succeeds");
+            last_emitted_len = emitted.len();
+        }
+        assert_eq!(
+            last_emitted_len, 3,
+            "the select node's push must materialize all three held, \
+             non-fusing predecessors in one call: proves the 0/1/2 bound is \
+             wrong, true bound tracks ScalarOp::arity() (3, Select)"
+        );
     }
 
     // THE PROOF: `ShapeTable` and `BoundOpBuilder` compose through the real

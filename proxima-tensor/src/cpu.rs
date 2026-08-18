@@ -60,16 +60,34 @@ use core::arch::aarch64::{
 use core::cell::RefCell;
 use core::future::Future;
 use core::num::NonZeroUsize;
+use core::ops::Deref;
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::borrow::Cow;
+#[cfg(not(feature = "tensor-bgpool"))]
 use std::panic;
+#[cfg(not(feature = "tensor-bgpool"))]
 use std::thread;
+#[cfg(feature = "instrument")]
+use std::time::Instant;
+#[cfg(feature = "tensor-bgpool")]
+use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "tensor-bgpool")]
+use std::sync::mpsc::{sync_channel, SyncSender};
+#[cfg(feature = "tensor-bgpool")]
+use std::sync::{Arc, OnceLock};
 
 use proxima_primitives::pipe::Pipe;
+#[cfg(feature = "instrument")]
+use proxima_telemetry::counter;
+#[cfg(feature = "tensor-bgpool")]
+use prime::os::background::ProximaBackgroundPool;
 
-use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, StepArg};
+use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
 use crate::dtype::DType;
 use crate::error::TensorError;
+#[cfg(feature = "instrument")]
+use crate::instrument;
 #[cfg(feature = "instrument")]
 use crate::instrument::{KernelCounters, Path};
 use crate::map::IndexMap;
@@ -147,11 +165,19 @@ impl Evaluated {
 
 /// Everything [`evaluate`] and [`evaluate_parallel`] must agree on before
 /// either one is free to choose how a single nest actually runs.
-struct Prepared {
+///
+/// Each buffer-table slot is a [`Cow`]: `Borrowed` for an [`Op::Input`]
+/// slice straight out of the caller's `blocks` (never written, never
+/// retired — see [`prepare`]), `Owned` for a computed intermediate this
+/// evaluator holds. `Cow<[f32]>`'s `Owned` associate is `Vec<f32>` (`[T]:
+/// ToOwned<Owned = Vec<T>>`), so this is exactly the borrowed-or-owned shape
+/// this table needs, with `Clone`/`Deref`/`into_owned` already provided —
+/// no hand-rolled type earns a place next to it.
+struct Prepared<'block> {
     root: NodeId,
     shapes: shape::Shapes,
     effective_outputs: Vec<NodeId>,
-    buffers: Vec<Option<Vec<f32>>>,
+    buffers: Vec<Option<Cow<'block, [f32]>>>,
     resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
 }
@@ -169,12 +195,12 @@ struct Prepared {
 /// consumer materializes it, which can be well after the expression
 /// position `live::annotate` reasons about, so retirement here is computed
 /// fresh over `resolved`, not reused from the fusion pass's liveness.
-fn prepare(
+fn prepare<'block>(
     program: &[Op],
     symbols: &[u64],
-    blocks: &[&[f32]],
+    blocks: &[&'block [f32]],
     outputs: &[NodeId],
-) -> Result<Prepared, TensorError> {
+) -> Result<Prepared<'block>, TensorError> {
     let shapes = shape::infer(program, symbols)?;
     reject_non_float32(program)?;
 
@@ -202,7 +228,7 @@ fn prepare(
         });
     }
 
-    let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+    let mut buffers: Vec<Option<Cow<'block, [f32]>>> = vec![None; program.len()];
     for (node, data) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
         if data.len() != expected {
@@ -212,7 +238,7 @@ fn prepare(
                 found: data.len(),
             });
         }
-        buffers[node.0 as usize] = Some((*data).to_vec());
+        buffers[node.0 as usize] = Some(Cow::Borrowed(data));
     }
 
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
@@ -231,18 +257,35 @@ fn prepare(
 /// Both evaluators reach the same [`Evaluated`] the same way once their
 /// execution loop is done: read each requested output's shape and data
 /// back out of the (by-then-retired-down) buffer table.
+///
+/// Takes `buffers` by value — both callers own the table and drop it right
+/// after this returns — so the common case (each output node named once)
+/// moves its data out instead of cloning it. A node named twice in
+/// `effective_outputs` cannot be moved out twice: `repeats_later` detects
+/// that and puts a clone back for the later occurrence to take instead, so
+/// duplicate outputs still resolve correctly, just without the free move.
 fn finish(
     shapes: &shape::Shapes,
     effective_outputs: &[NodeId],
-    buffers: &[Option<Vec<f32>>],
+    mut buffers: Vec<Option<Cow<'_, [f32]>>>,
     root: NodeId,
     peak_live_buffers: usize,
 ) -> Evaluated {
     let results = effective_outputs
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(position, node)| {
             let shape = shapes.of(*node).to_vec();
-            let data = buffers[node.0 as usize].clone().unwrap_or_default();
+            let repeats_later = effective_outputs[position + 1..].contains(node);
+            let data = match buffers[node.0 as usize].take() {
+                Some(buffer) => {
+                    if repeats_later {
+                        buffers[node.0 as usize] = Some(buffer.clone());
+                    }
+                    buffer.into_owned()
+                }
+                None => Vec::new(),
+            };
             (*node, shape, data)
         })
         .collect();
@@ -272,29 +315,39 @@ pub fn evaluate(
         retires,
     } = prepare(program, symbols, blocks, outputs)?;
 
+    // Drives the same fold `Interpreter::call` implements — one `BoundOp`
+    // per iteration, as a borrowed one-element slice (`core::slice::from_ref`,
+    // no allocation) — rather than reimplementing it via `run_node` directly,
+    // so there is one execution path for a resolved node, not two.
+    // `Interpreter::new` re-borrows `buffers` fresh each iteration: its
+    // exclusive borrow ends (NLL) once `fold` returns, freeing `buffers`
+    // back up for this loop's own retirement write below — a persistent
+    // `Interpreter` held across the whole loop cannot coexist with that
+    // write, since `Interpreter` exposes no `retire`/clear accessor, only
+    // `get`. `fold` is synchronous, so no `block_on` is needed here at all.
     let mut peak_live_buffers = live_count(&buffers);
     for (position, computed) in resolved.iter().enumerate() {
-        let output = run_node(computed, &buffers)?;
-        buffers[computed.node.0 as usize] = Some(output);
+        Interpreter::new(&mut buffers).fold(core::slice::from_ref(computed))?;
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         for retired in &retires[position] {
             buffers[retired.0 as usize] = None;
         }
     }
 
-    Ok(finish(
-        &shapes,
-        &effective_outputs,
-        &buffers,
-        root,
-        peak_live_buffers,
-    ))
+    Ok(finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers))
 }
 
 /// Below this many iteration-space elements, a nest runs the plain
 /// sequential path even when `workers > 1`: `std::thread::scope`'s spawn
 /// and join overhead outweighs the work for a small nest.
 const PARALLEL_THRESHOLD: usize = 4096;
+
+/// chunk count is `workers * OVERSUBSCRIBE`, not `workers`: equal row
+/// counts do not mean equal wall-clock (measured 2.04x spread across 8
+/// equal-row chunks of a 1024^3 GEMM), and one chunk per worker leaves no
+/// spare chunk for a worker that finishes early to pick up — more chunks
+/// than workers lets a fast worker absorb a slow chunk's slack.
+const OVERSUBSCRIBE: usize = 1;
 
 /// Same contract as [`evaluate`], including the exact same [`Evaluated`]
 /// and error variants — the only difference is that each large-enough nest
@@ -309,6 +362,13 @@ pub fn evaluate_parallel(
     outputs: &[NodeId],
     workers: NonZeroUsize,
 ) -> Result<Evaluated, TensorError> {
+    #[cfg(feature = "instrument")]
+    let evaluate_parallel_start = Instant::now();
+
+    #[cfg(feature = "instrument")]
+    let prepare_start = Instant::now();
+    #[cfg(feature = "instrument")]
+    let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
     let Prepared {
         root,
         shapes,
@@ -317,43 +377,103 @@ pub fn evaluate_parallel(
         resolved,
         retires,
     } = prepare(program, symbols, blocks, outputs)?;
+    #[cfg(feature = "instrument")]
+    drop(alloc_site_guard);
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::SERIAL_PREPARE_NANOS,
+        prepare_start.elapsed().as_nanos() as u64
+    );
 
     let mut peak_live_buffers = live_count(&buffers);
     for (position, computed) in resolved.iter().enumerate() {
         let output = evaluate_node_parallel(computed, &buffers, workers)?;
-        buffers[computed.node.0 as usize] = Some(output);
+        #[cfg(feature = "instrument")]
+        let bookkeeping_start = Instant::now();
+        buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         for retired in &retires[position] {
             buffers[retired.0 as usize] = None;
         }
+        #[cfg(feature = "instrument")]
+        counter!(
+            instrument::SERIAL_BOOKKEEPING_NANOS,
+            bookkeeping_start.elapsed().as_nanos() as u64
+        );
     }
 
-    Ok(finish(
-        &shapes,
-        &effective_outputs,
-        &buffers,
-        root,
-        peak_live_buffers,
-    ))
+    #[cfg(feature = "instrument")]
+    let finish_start = Instant::now();
+    let evaluated = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
+    #[cfg(feature = "instrument")]
+    {
+        counter!(
+            instrument::SERIAL_FINISH_NANOS,
+            finish_start.elapsed().as_nanos() as u64
+        );
+        counter!(
+            instrument::SERIAL_EVALUATE_PARALLEL_NANOS,
+            evaluate_parallel_start.elapsed().as_nanos() as u64
+        );
+        counter!(instrument::SERIAL_EVALUATE_PARALLEL_CALLS, 1);
+    }
+
+    Ok(evaluated)
 }
 
 /// Runs one node, threaded across `workers` when [`BoundOp::split`] finds it
 /// sound and it clears [`PARALLEL_THRESHOLD`]; otherwise the plain
 /// sequential path via [`run_node_into`].
-fn evaluate_node_parallel(
+fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
-    buffers: &[Option<Vec<f32>>],
+    buffers: &[Option<B>],
     workers: NonZeroUsize,
 ) -> Result<Vec<f32>, TensorError> {
+    #[cfg(feature = "instrument")]
+    let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
+    #[cfg(feature = "instrument")]
+    let alloc_start = Instant::now();
     let mut output = vec![0.0f32; node_output_len(resolved)];
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::SERIAL_ALLOC_NANOS,
+        alloc_start.elapsed().as_nanos() as u64
+    );
+    #[cfg(feature = "instrument")]
+    drop(alloc_site_guard);
 
-    let chunks = (element_count(&resolved.extents) >= PARALLEL_THRESHOLD)
-        .then(|| resolved.split(workers.get()))
-        .flatten();
+    #[cfg(feature = "instrument")]
+    let split_start = Instant::now();
+    let above_threshold = element_count(&resolved.extents) >= PARALLEL_THRESHOLD;
+    let chunk_count = workers.get() * OVERSUBSCRIBE;
+    let chunks = above_threshold.then(|| resolved.split(chunk_count)).flatten();
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::SERIAL_SPLIT_NANOS,
+        split_start.elapsed().as_nanos() as u64
+    );
 
     match chunks {
         Some(chunks) => run_chunks_threaded(&chunks, buffers, &mut output)?,
-        None => run_node_into(resolved, buffers, &mut output)?,
+        None => {
+            // one node, one dispatch decision — recorded once here, not
+            // re-derived from `above_threshold` after the fact, since the
+            // `chunks` match is the actual arm that ran.
+            #[cfg(feature = "instrument")]
+            if above_threshold {
+                counter!(instrument::DISPATCH_SEQUENTIAL_SPLIT_UNAVAILABLE, 1);
+            } else {
+                counter!(instrument::DISPATCH_SEQUENTIAL_BELOW_THRESHOLD, 1);
+            }
+            #[cfg(feature = "instrument")]
+            let sequential_start = Instant::now();
+            run_node_into(resolved, buffers, &mut output)?;
+            #[cfg(feature = "instrument")]
+            counter!(
+                instrument::SERIAL_SEQUENTIAL_COMPUTE_NANOS,
+                sequential_start.elapsed().as_nanos() as u64
+            );
+        }
     }
     Ok(output)
 }
@@ -362,11 +482,17 @@ fn evaluate_node_parallel(
 /// disjoint sub-slice of `output` — sound because [`BoundOp::split`] documents
 /// (and this function relies on) chunk `k`'s output occupying a contiguous,
 /// non-overlapping range of the parent buffer.
-fn run_chunks_threaded(
+#[cfg(not(feature = "tensor-bgpool"))]
+fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     chunks: &[BoundOp],
-    buffers: &[Option<Vec<f32>>],
+    buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    #[cfg(feature = "instrument")]
+    let slice_carve_start = Instant::now();
+    #[cfg(feature = "instrument")]
+    let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::ChunkSlices);
+
     let mut slices = Vec::with_capacity(chunks.len());
     let mut remaining = output;
     for chunk in chunks {
@@ -374,13 +500,40 @@ fn run_chunks_threaded(
         slices.push(this_chunk);
         remaining = rest;
     }
+    #[cfg(feature = "instrument")]
+    drop(alloc_site_guard);
+
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::SERIAL_SLICE_CARVE_NANOS,
+        slice_carve_start.elapsed().as_nanos() as u64
+    );
+    // scoped to start here, after slice-carving: `PARALLEL_NODE_NANOS` below
+    // is deliberately the thread::scope portion only (spawn + compute +
+    // join), so it composes with `SERIAL_SLICE_CARVE_NANOS` above rather than
+    // double-counting the carving loop inside both.
+    #[cfg(feature = "instrument")]
+    let node_start = Instant::now();
 
     thread::scope(|scope| {
         let handles: Vec<_> = chunks
             .iter()
             .zip(slices)
-            .map(|(chunk, slice)| scope.spawn(move || run_node_into(chunk, buffers, slice)))
+            .map(|(chunk, slice)| {
+                scope.spawn(move || {
+                    #[cfg(feature = "instrument")]
+                    let chunk_start = Instant::now();
+                    let outcome = run_node_into(chunk, buffers, slice);
+                    #[cfg(feature = "instrument")]
+                    instrument::record_chunk_nanos(chunk_start.elapsed().as_nanos() as u64);
+                    outcome
+                })
+            })
             .collect();
+
+        #[cfg(feature = "instrument")]
+        let spawn_elapsed = node_start.elapsed();
+
         for handle in handles {
             // a worker panicking is a bug, not a new failure mode this
             // module introduces: resuming it on the joining thread matches
@@ -390,11 +543,290 @@ fn run_chunks_threaded(
                 .join()
                 .unwrap_or_else(|panic_payload| panic::resume_unwind(panic_payload))?;
         }
+
+        #[cfg(feature = "instrument")]
+        {
+            let total_elapsed = node_start.elapsed();
+            let spawn_nanos = spawn_elapsed.as_nanos() as u64;
+            let total_nanos = total_elapsed.as_nanos() as u64;
+            counter!(instrument::PARALLEL_NODES, 1);
+            counter!(instrument::PARALLEL_NODE_NANOS, total_nanos);
+            counter!(instrument::PARALLEL_SPAWN_NANOS, spawn_nanos);
+            // join/teardown is whatever wall-clock the node spent that
+            // wasn't already charged to spawning the threads.
+            counter!(
+                instrument::PARALLEL_JOIN_NANOS,
+                total_nanos.saturating_sub(spawn_nanos)
+            );
+        }
+
         Ok(())
     })
 }
 
-fn live_count(buffers: &[Option<Vec<f32>>]) -> usize {
+/// Pool-backed sibling of the `thread::scope` implementation above, gated
+/// behind `tensor-bgpool` so the default build never depends on `prime`.
+///
+/// Every chunk, including the caller's own, is pulled off one shared
+/// `next_index` cursor (see [`claim_and_run`]) instead of being statically
+/// assigned: the calling thread and every pool task run the identical pull
+/// loop, so a puller that finishes its chunk early goes straight back to
+/// the cursor for the next available one rather than idling — this is what
+/// lets `OVERSUBSCRIBE > 1` (`chunks.len() > workers`) actually pay off:
+/// with a 1:1 static assignment (the previous shape here), a pool task
+/// finishing early has nothing further to do even when a sibling chunk is
+/// still running long past it. `chunks.len() - 1` pool tasks are spawned
+/// (see [`nest_pool`] for why the pool is built once and reused) — the same
+/// count the old 1:1 mapping used — so the `OVERSUBSCRIBE == 1` case, where
+/// pull count equals chunk count, degenerates back to (statistically) one
+/// chunk per puller. Completion is a real blocking handoff
+/// (`std::sync::mpsc::sync_channel`), not a poll loop: the caller parks in
+/// `Receiver::recv` instead of busy-spinning a `Waker::noop` future the way
+/// `proxima_primitives::block_on` would.
+///
+/// A worker panic cannot be resumed here the way the `thread::scope` sibling
+/// does: `ProximaBackgroundPool`'s worker loop wraps every job in
+/// `catch_unwind` and discards the payload (`prime/src/os/background.rs`,
+/// `worker()`, `let _ = unwind;`), converting a panic into a dropped
+/// closure with no way to recover the original payload. That drop takes our
+/// own `sync_channel` sender clone with it, so a panicking chunk never
+/// reports back; a chunk that never reports is surfaced as
+/// `TensorError::ThreadedChunkFailed` instead.
+#[cfg(feature = "tensor-bgpool")]
+fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
+    chunks: &[BoundOp],
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    #[cfg(feature = "instrument")]
+    let slice_carve_start = Instant::now();
+    #[cfg(feature = "instrument")]
+    let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::ChunkSlices);
+
+    let mut slices = Vec::with_capacity(chunks.len());
+    let mut remaining = output;
+    for chunk in chunks {
+        let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
+        slices.push(this_chunk);
+        remaining = rest;
+    }
+    #[cfg(feature = "instrument")]
+    drop(alloc_site_guard);
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::SERIAL_SLICE_CARVE_NANOS,
+        slice_carve_start.elapsed().as_nanos() as u64
+    );
+
+    if chunks.len() < 2 {
+        return match (chunks.first(), slices.into_iter().next()) {
+            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, slice),
+            _ => Ok(()),
+        };
+    }
+
+    let pool = nest_pool()?;
+
+    // `buffers` is read-only for the whole call and every spawned chunk
+    // needs it; cloning would copy every live intermediate tensor per
+    // chunk. its address crosses the pool's 'static spawn bound the same
+    // way `par_chunks_mut` (prime/src/os/par.rs:1611-1625) already does for
+    // its own slice: cast to usize here, reconstruct unsafely inside the
+    // closure. sound because `buffers` outlives every spawned closure — the
+    // caller thread drains `result_receiver` for every chunk before this
+    // function returns.
+    let buffers_address = buffers.as_ptr() as usize;
+    let buffers_len = buffers.len();
+    // same cast, same soundness argument, for `chunks` itself: every puller
+    // now needs random access to an arbitrary chunk, not just the one it
+    // was statically handed.
+    let chunks_address = chunks.as_ptr() as usize;
+    let chunks_len = chunks.len();
+    // each chunk's own disjoint output sub-slice, addressed by index so any
+    // puller (caller or pool task) can claim any chunk — `Arc` because,
+    // unlike `buffers`/`chunks` above, this vector is allocated fresh here
+    // rather than borrowed from the caller, so it needs its own shared
+    // ownership to reach every spawned closure.
+    let slice_addresses: Arc<Vec<(usize, usize)>> = Arc::new(
+        slices
+            .iter_mut()
+            .map(|slice| (slice.as_mut_ptr() as usize, slice.len()))
+            .collect(),
+    );
+
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let (result_sender, result_receiver) = sync_channel(chunks_len);
+
+    #[cfg(feature = "instrument")]
+    let node_start = Instant::now();
+
+    // `chunks_len - 1` pool tasks, same count the previous 1:1 mapping
+    // spawned — see this function's doc comment for why that keeps
+    // `OVERSUBSCRIBE == 1` behaviorally unchanged.
+    for _ in 0..chunks_len - 1 {
+        let sender = result_sender.clone();
+        let next_index = Arc::clone(&next_index);
+        let slice_addresses = Arc::clone(&slice_addresses);
+        // the pool's own returned future only reports back through its
+        // internal oneshot channel, which nothing here awaits — completion
+        // is reported through `sender` instead, so the future is dropped
+        // deliberately rather than driven.
+        drop(pool.spawn(move || {
+            claim_and_run::<B>(
+                &next_index,
+                chunks_address,
+                chunks_len,
+                buffers_address,
+                buffers_len,
+                &slice_addresses,
+                &sender,
+            );
+            Ok::<(), _>(())
+        }));
+    }
+
+    #[cfg(feature = "instrument")]
+    let spawn_elapsed = node_start.elapsed();
+
+    // the caller pulls from the same shared cursor as every pool task
+    // instead of running one reserved chunk — see this function's doc
+    // comment for why. it never sits idle: finishing a chunk sends it
+    // straight back to `next_index` for another.
+    claim_and_run::<B>(
+        &next_index,
+        chunks_address,
+        chunks_len,
+        buffers_address,
+        buffers_len,
+        &slice_addresses,
+        &result_sender,
+    );
+    drop(result_sender);
+
+    let mut outcomes: Vec<Option<Result<(), TensorError>>> =
+        (0..chunks_len).map(|_| None).collect();
+    for _ in 0..chunks_len {
+        match result_receiver.recv() {
+            Ok((index, outcome)) => outcomes[index] = Some(outcome),
+            // every sender clone is gone (each spawned closure's clone is
+            // dropped whether it sends or panics), so no further chunk will
+            // ever report — stop waiting instead of blocking forever on a
+            // message that cannot arrive. remaining `None` slots below
+            // become `ThreadedChunkFailed`.
+            Err(_) => break,
+        }
+    }
+
+    #[cfg(feature = "instrument")]
+    {
+        let total_elapsed = node_start.elapsed();
+        let spawn_nanos = spawn_elapsed.as_nanos() as u64;
+        let total_nanos = total_elapsed.as_nanos() as u64;
+        counter!(instrument::PARALLEL_NODES, 1);
+        counter!(instrument::PARALLEL_NODE_NANOS, total_nanos);
+        counter!(instrument::PARALLEL_SPAWN_NANOS, spawn_nanos);
+        // join/teardown is whatever wall-clock the node spent that wasn't
+        // already charged to spawning the pool tasks — includes the
+        // caller's own claim_and_run loop, same as the thread::scope
+        // sibling's join/teardown includes its own compute.
+        counter!(
+            instrument::PARALLEL_JOIN_NANOS,
+            total_nanos.saturating_sub(spawn_nanos)
+        );
+    }
+
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        match outcome {
+            Some(result) => result?,
+            None => {
+                return Err(TensorError::ThreadedChunkFailed {
+                    chunk: index + 1,
+                    reason: alloc::string::String::from(
+                        "worker did not report a result; ProximaBackgroundPool \
+                         catches and discards worker panics (see \
+                         prime/src/os/background.rs worker())",
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pulls chunk indices off `next_index` one at a time and runs each to
+/// completion, reporting through `sender` — called by both the calling
+/// thread and every spawned pool task in [`run_chunks_threaded`], so a
+/// puller that finishes early goes straight back for the next available
+/// chunk instead of stopping after whichever one it started with.
+///
+/// # Safety (of the `unsafe` blocks inside)
+/// `chunks_address`/`buffers_address` and every `(pointer, len)` pair in
+/// `slice_addresses` must stay valid, and each slice address must be unique
+/// to its index, for as long as any puller can still observe `next_index`
+/// below `chunks_len` — guaranteed by [`run_chunks_threaded`] draining
+/// `chunks_len` results from `sender`'s channel before `chunks`, `buffers`,
+/// or `output` (the parent of every `slice_addresses` entry) can drop.
+/// `fetch_add` never hands out the same index twice, so no two pullers ever
+/// touch the same slice.
+#[cfg(feature = "tensor-bgpool")]
+fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
+    next_index: &AtomicUsize,
+    chunks_address: usize,
+    chunks_len: usize,
+    buffers_address: usize,
+    buffers_len: usize,
+    slice_addresses: &[(usize, usize)],
+    sender: &SyncSender<(usize, Result<(), TensorError>)>,
+) {
+    loop {
+        let index = next_index.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if index >= chunks_len {
+            return;
+        }
+        // SAFETY: see this function's doc comment.
+        let chunk = unsafe { &*(chunks_address as *const BoundOp).add(index) };
+        let chunk_buffers = unsafe {
+            core::slice::from_raw_parts(buffers_address as *const Option<B>, buffers_len)
+        };
+        let (slice_address, slice_len) = slice_addresses[index];
+        let chunk_output =
+            unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
+
+        #[cfg(feature = "instrument")]
+        let chunk_start = Instant::now();
+        let outcome = run_node_into(chunk, chunk_buffers, chunk_output);
+        #[cfg(feature = "instrument")]
+        instrument::record_chunk_nanos(chunk_start.elapsed().as_nanos() as u64);
+
+        let _ = sender.send((index, outcome));
+    }
+}
+
+/// The pool backing [`run_chunks_threaded`]'s chunk dispatch under
+/// `tensor-bgpool`. Built once, on first use, and reused for every nest in
+/// the process — a fresh `ProximaBackgroundPool` per node would reintroduce
+/// the per-node OS-thread-spawn cost this feature exists to remove.
+/// `OnceLock` only memoizes success: a failed build is not cached, so a
+/// later call (after whatever exhausted OS thread resources clears up) can
+/// retry instead of latching a permanent failure.
+#[cfg(feature = "tensor-bgpool")]
+fn nest_pool() -> Result<Arc<ProximaBackgroundPool>, TensorError> {
+    if let Some(pool) = NEST_POOL.get() {
+        return Ok(Arc::clone(pool));
+    }
+    let built = Arc::new(ProximaBackgroundPool::new().map_err(|error| {
+        TensorError::ThreadedPoolUnavailable(alloc::format!("build nest thread pool: {error}"))
+    })?);
+    // `set` can lose a race to a concurrent first caller; either pool is
+    // equally valid, so use whichever one actually landed.
+    let _ = NEST_POOL.set(Arc::clone(&built));
+    Ok(NEST_POOL.get().cloned().unwrap_or(built))
+}
+
+#[cfg(feature = "tensor-bgpool")]
+static NEST_POOL: OnceLock<Arc<ProximaBackgroundPool>> = OnceLock::new();
+
+fn live_count<B>(buffers: &[Option<B>]) -> usize {
     buffers.iter().filter(|entry| entry.is_some()).count()
 }
 
@@ -438,10 +870,10 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 // dtype, and any gathered dim past 2^24 (an f32 index cannot represent a
 // larger extent's values exactly), so the only restriction left to enforce
 // here is that every OTHER node — every node not itself a gather's
-// `indices` — is f32: this interpreter's buffers are `Vec<f32>` throughout,
-// indices included (an index value is an exact integer carried as f32, per
-// the module doc), so a gather's `indices` node is the one deliberate
-// exception to the f32 rule rather than a second buffer kind.
+// `indices` — is f32: every buffer slot derefs to `[f32]` regardless of which
+// `B` backs it, indices included (an index value is an exact integer carried
+// as f32, per the module doc), so a gather's `indices` node is the one
+// deliberate exception to the f32 rule rather than a second buffer kind.
 fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
@@ -483,7 +915,7 @@ fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
     }
 }
 
-fn buffer_of(buffers: &[Option<Vec<f32>>], node: NodeId) -> Result<&[f32], TensorError> {
+fn buffer_of<B: Deref<Target = [f32]>>(buffers: &[Option<B>], node: NodeId) -> Result<&[f32], TensorError> {
     buffers[node.0 as usize]
         .as_deref()
         .ok_or(TensorError::NotLowerable {
@@ -554,6 +986,10 @@ fn initial_value(init: ReduceInit) -> Option<f32> {
     }
 }
 
+// production callers now drive every node through `Interpreter::call` (see
+// `evaluate`), so this allocate-and-run wrapper only remains for tests that
+// want a whole node's output as a `Vec` to compare against hand-run chunks.
+#[cfg(test)]
 fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
     run_node_into(resolved, buffers, &mut output)?;
@@ -565,19 +1001,31 @@ fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>
 /// [`evaluate_parallel`] (one call per chunk, each writing a disjoint
 /// sub-slice of the same parent buffer) both drive — the loop nests below
 /// are written once, here.
-fn run_node_into(
+fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
-    buffers: &[Option<Vec<f32>>],
+    buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => run_elementwise(resolved, buffers, output),
+        BoundOpKind::Elementwise { .. } => {
+            #[cfg(feature = "instrument")]
+            instrument::record_op_kind(instrument::OpKind::Elementwise);
+            run_elementwise(resolved, buffers, output)
+        }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => run_reduce(resolved, buffers, output),
+        } => {
+            #[cfg(feature = "instrument")]
+            instrument::record_op_kind(instrument::OpKind::Reduce);
+            run_reduce(resolved, buffers, output)
+        }
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
-        } => run_scan(resolved, buffers, output),
+        } => {
+            #[cfg(feature = "instrument")]
+            instrument::record_op_kind(instrument::OpKind::Scan);
+            run_scan(resolved, buffers, output)
+        }
     }
 }
 
@@ -592,7 +1040,7 @@ fn node_output_len(resolved: &BoundOp) -> usize {
             output_axes,
             ..
         } => {
-            let (leading_output_axes, last_output_dim) = output_axes_split(output_axes);
+            let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
             let leading_product: u64 = leading_output_axes
                 .iter()
                 .map(|dim| resolved.extents[*dim as usize])
@@ -621,17 +1069,19 @@ fn node_output_len(resolved: &BoundOp) -> usize {
 /// `Second::In = First::Out` hold against `BoundOpBuilder::Out =
 /// Vec<BoundOp>`, so this stage composes into the full
 /// `shapes.and_then(builder).and_then(interpreter)` chain with no adapter.
-pub struct Interpreter<'buffers> {
-    buffers: RefCell<&'buffers mut [Option<Vec<f32>>]>,
+pub struct Interpreter<'buffers, B: Deref<Target = [f32]> + Sync> {
+    buffers: RefCell<&'buffers mut [Option<B>]>,
 }
 
-impl<'buffers> Interpreter<'buffers> {
+impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'buffers, B> {
     /// `buffers` is caller-owned scratch, one slot per program node — the
     /// same shape [`prepare`] already builds locally for [`evaluate`].
     /// `Interpreter` never allocates it, resizes it, or takes ownership of
-    /// it.
+    /// it. Generic over `B` (matching [`run_node_into`]'s bound) so the same
+    /// interpreter drives both [`evaluate`]'s `Cow`-backed table (no
+    /// redundant copy of an `Op::Input` block) and a plain `Vec<f32>` table.
     #[must_use]
-    pub fn new(buffers: &'buffers mut [Option<Vec<f32>>]) -> Self {
+    pub fn new(buffers: &'buffers mut [Option<B>]) -> Self {
         Self {
             buffers: RefCell::new(buffers),
         }
@@ -644,12 +1094,34 @@ impl<'buffers> Interpreter<'buffers> {
     /// answers the first one through `Pipe::call`.
     #[must_use]
     pub fn get(&self, node: NodeId) -> Option<Vec<f32>> {
-        self.buffers.borrow()[node.0 as usize].clone()
+        self.buffers.borrow()[node.0 as usize].as_deref().map(<[f32]>::to_vec)
+    }
+
+    /// The actual fold: written once, against a borrowed `&[BoundOp]` rather
+    /// than an owned `Vec`, so a caller driving one node at a time (like
+    /// [`evaluate`]) can pass a one-element slice (`core::slice::from_ref`)
+    /// with no batch allocation at all — `Pipe::call` below is the only
+    /// other caller, and it just hands this its owned `Vec` by reference
+    /// (`&ready`), so the streaming chain's batch contract (`In =
+    /// Vec<BoundOp>`, required for `Second::In = First::Out` against
+    /// [`crate::bind::BoundOpBuilder`]'s `Out`) and `evaluate`'s no-alloc
+    /// per-node path both bottom out in this one written-once loop.
+    fn fold(&self, ready: &[BoundOp]) -> Result<(), TensorError> {
+        for resolved in ready {
+            let mut output = vec![0.0f32; node_output_len(resolved)];
+            {
+                let buffers = self.buffers.borrow();
+                run_node_into(resolved, *buffers, &mut output)?;
+            }
+            let mut buffers = self.buffers.borrow_mut();
+            (*buffers)[resolved.node.0 as usize] = Some(B::from(output));
+        }
+        Ok(())
     }
 }
 
-impl Pipe for Interpreter<'_> {
-    type In = Vec<BoundOp>;
+impl<B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Pipe for Interpreter<'_, B> {
+    type In = ReadyBatch;
     type Out = ();
     type Err = TensorError;
 
@@ -657,19 +1129,14 @@ impl Pipe for Interpreter<'_> {
     /// same fold the buffer table already does one write at a time, just
     /// driven for every element of `ready` inside one call instead of one
     /// call per element. An empty `ready` is a no-op, not a special case.
-    fn call(&self, ready: Vec<BoundOp>) -> impl Future<Output = Result<(), TensorError>> {
-        async move {
-            for resolved in ready {
-                let mut output = vec![0.0f32; node_output_len(&resolved)];
-                {
-                    let buffers = self.buffers.borrow();
-                    run_node_into(&resolved, *buffers, &mut output)?;
-                }
-                let mut buffers = self.buffers.borrow_mut();
-                (*buffers)[resolved.node.0 as usize] = Some(output);
-            }
-            Ok(())
-        }
+    ///
+    /// `In` stays `ReadyBatch` (owned) because that is what
+    /// `BoundOpBuilder::Out` already is — changing it would break the
+    /// `Second::In = First::Out` composition law the streaming chain relies
+    /// on — but the owned batch is only ever borrowed from here down; see
+    /// [`Interpreter::fold`].
+    fn call(&self, ready: ReadyBatch) -> impl Future<Output = Result<(), TensorError>> {
+        async move { self.fold(&ready) }
     }
 }
 
@@ -683,9 +1150,9 @@ fn output_axes_split(output_axes: &[u16]) -> (&[u16], Option<u16>) {
     }
 }
 
-fn operand_buffers<'a>(
+fn operand_buffers<'a, B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
-    buffers: &'a [Option<Vec<f32>>],
+    buffers: &'a [Option<B>],
 ) -> Result<Vec<&'a [f32]>, TensorError> {
     resolved
         .operands()
@@ -736,9 +1203,9 @@ impl GatherCursor<'_> {
 /// runs once per reduction step (up to ~1e6 times for a 1024^3 GEMM), and
 /// `cursors` is the caller's reused scratch buffer, sized once to operand
 /// count outside the hot loop (`scratchpad/opt/discipline.md` ROW 2).
-fn fill_gather_cursors<'a>(
+fn fill_gather_cursors<'a, B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
-    buffers: &'a [Option<Vec<f32>>],
+    buffers: &'a [Option<B>],
     coordinate: &[u64],
     stride_dim: Option<u16>,
     cursors: &mut [Option<GatherCursor<'a>>],
@@ -770,9 +1237,9 @@ fn fill_running_offsets(resolved: &BoundOp, coordinate: &[u64], running: &mut [i
     }
 }
 
-fn run_elementwise(
+fn run_elementwise<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
-    buffers: &[Option<Vec<f32>>],
+    buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
@@ -860,9 +1327,9 @@ fn run_elementwise(
     Ok(())
 }
 
-fn run_reduce(
+fn run_reduce<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
-    buffers: &[Option<Vec<f32>>],
+    buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let BoundOpKind::Reduce {
@@ -882,9 +1349,9 @@ fn run_reduce(
     let mut step_values = vec![0.0f32; body.steps.len()];
 
     let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16)
-        .filter(|dim| !output_axes.contains(dim))
+        .filter(|dim| !output_axes.as_slice().contains(dim))
         .collect();
-    let (leading_output_axes, last_output_dim) = output_axes_split(output_axes);
+    let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
 
     let leading_extents: Vec<u64> = leading_output_axes
         .iter()
@@ -1046,6 +1513,18 @@ fn run_reduce(
     // per-element atomic would perturb the throughput it exists to measure.
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let mut neon_tile_fallback_elements = 0u64;
+    // `NEON_TILE_INVOCATIONS`/`NEON_TILE_ROW_REMAINDER_*` used to be a
+    // `fetch_add(1)` per tile call — ~43,520 atomics per 1024^3 GEMM (one
+    // per 6x4 output tile), the same per-call-in-a-hot-loop shape the
+    // per-element counters this module's docs warn about. Tallied locally
+    // and committed once per bound op instead, same as the fallback count
+    // right above.
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let mut neon_tile_invocations = 0u64;
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let mut neon_tile_row_remainder_invocations = 0u64;
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let mut neon_tile_row_remainder_elements = 0u64;
 
     #[cfg(target_arch = "aarch64")]
     if let Some(plan) = &tile_plan {
@@ -1098,7 +1577,7 @@ fn run_reduce(
                 }
                 #[cfg(feature = "instrument")]
                 {
-                    NEON_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+                    neon_tile_invocations += 1;
                     counters.kernel_calls += 1;
                     counters.mac_ops += (TILE_ROWS * TILE_COLS) as u64 * reduction_total;
                     counters.operand_loads += (TILE_ROWS + TILE_COLS) as u64 * reduction_total;
@@ -1208,8 +1687,8 @@ fn run_reduce(
                     }
                     #[cfg(feature = "instrument")]
                     {
-                        NEON_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
-                        NEON_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(($rows * TILE_COLS) as u64, Ordering::Relaxed);
+                        neon_tile_row_remainder_invocations += 1;
+                        neon_tile_row_remainder_elements += ($rows * TILE_COLS) as u64;
                         counters.kernel_calls += 1;
                         counters.mac_ops += ($rows * TILE_COLS) as u64 * reduction_total;
                         counters.operand_loads += ($rows + TILE_COLS) as u64 * reduction_total;
@@ -1396,13 +1875,23 @@ fn run_reduce(
         counters.commit(path, distinct_operand_elements);
     }
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-    NEON_TILE_FALLBACK_ELEMENTS.fetch_add(neon_tile_fallback_elements, Ordering::Relaxed);
+    {
+        NEON_TILE_FALLBACK_ELEMENTS.fetch_add(neon_tile_fallback_elements, Ordering::Relaxed);
+        NEON_TILE_INVOCATIONS.fetch_add(neon_tile_invocations, Ordering::Relaxed);
+        NEON_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(neon_tile_row_remainder_invocations, Ordering::Relaxed);
+        NEON_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(neon_tile_row_remainder_elements, Ordering::Relaxed);
+        // computed once from `width`/`tiled_width_cols`, both already in
+        // scope from earlier in this call — never re-checked per iteration.
+        if tile_plan.is_some() && tiled_width_cols < width {
+            counter!(instrument::NEON_TILE_COLUMN_TAIL_PRESENT, 1);
+        }
+    }
     Ok(())
 }
 
-fn run_scan(
+fn run_scan<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
-    buffers: &[Option<Vec<f32>>],
+    buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let BoundOpKind::Reduce {
@@ -2194,6 +2683,11 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
     // the end, never as a per-element atomic inside the fallback loops.
     #[cfg(feature = "instrument")]
     let mut width_tile_fallback_elements = 0u64;
+    // was a `fetch_add(1)` per tile call (`row_tiles * col_tiles` times,
+    // the same magnitude as `NEON_TILE_INVOCATIONS`'s historical
+    // per-tile atomic) — tallied locally and committed once instead.
+    #[cfg(feature = "instrument")]
+    let mut width_tile_invocations = 0u64;
 
     let data_a = raw[plan.a_operand];
     let data_b = raw[plan.b_operand];
@@ -2224,7 +2718,9 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
                 );
             }
             #[cfg(feature = "instrument")]
-            WIDTH_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+            {
+                width_tile_invocations += 1;
+            }
 
             for (i, row) in tile_out.iter().enumerate() {
                 let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
@@ -2287,7 +2783,15 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
     }
 
     #[cfg(feature = "instrument")]
-    WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(width_tile_fallback_elements, Ordering::Relaxed);
+    {
+        WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(width_tile_fallback_elements, Ordering::Relaxed);
+        WIDTH_TILE_INVOCATIONS.fetch_add(width_tile_invocations, Ordering::Relaxed);
+        // computed once from `plan.width`/`tile_cols`, both already in
+        // scope — never re-checked per iteration.
+        if col_tiles * tile_cols < plan.width {
+            counter!(instrument::WIDTH_TILE_COLUMN_TAIL_PRESENT, 1);
+        }
+    }
 }
 
 /// `run_reduce`'s single entry point into the width tile: resolves the gate
@@ -3559,7 +4063,7 @@ mod tests {
                 axes: alloc::vec![
                     map::AxisIndex::default(),
                     map::AxisIndex {
-                        terms: alloc::vec![AxisTerm::projection(1)].into(),
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
                     },
                 ],
@@ -3601,7 +4105,7 @@ mod tests {
                 axes: alloc::vec![
                     map::AxisIndex::default(),
                     map::AxisIndex {
-                        terms: alloc::vec![AxisTerm::projection(2)].into(),
+                        terms: core::iter::once(AxisTerm::projection(2)).collect(),
                         offset: 0,
                     },
                 ],

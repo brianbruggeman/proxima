@@ -114,7 +114,9 @@ fn time_evaluate_parallel(program: &[Op], lhs: &[f32], rhs_t: &[f32], workers: u
 fn reduce_output_len(chunk: &proxima_tensor::BoundOp) -> usize {
     match &chunk.kind {
         proxima_tensor::BoundOpKind::Reduce { output_axes, .. } => {
-            let (leading, last) = output_axes.split_at(output_axes.len().saturating_sub(1));
+            let (leading, last) = output_axes
+                .as_slice()
+                .split_at(output_axes.len().saturating_sub(1));
             let leading_product: u64 = leading.iter().map(|axis| chunk.extents[*axis as usize]).product();
             let width = last.first().map_or(1, |axis| chunk.extents[*axis as usize]);
             leading_product as usize * width as usize

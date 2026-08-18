@@ -16,7 +16,7 @@ alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
-config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "smallvec/serde"]
 # gates the ggml FFI comparison bench: default-off so a normal build never
 # needs a statically-linked ggml checkout on disk. build.rs is a no-op
 # unless this feature is enabled.
@@ -28,10 +28,18 @@ ggml-bench = ["std"]
 # committed ONCE per bound-op call (never per element), so the feature does
 # not perturb the thing it measures at any tier that has it off.
 instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros"]
+# routes `cpu::run_chunks_threaded` through `prime`'s `ProximaBackgroundPool`
+# (crossbeam-deque work-stealing, built once and reused) instead of spawning
+# fresh `std::thread::scope` threads per nest. Default-off so a normal build
+# never needs the `prime` dependency; the `thread::scope` path stays the
+# default behavior.
+tensor-bgpool = ["std", "dep:prime"]
 
 [dependencies]
+arrayvec.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par"], optional = true }
 # the Pipe algebra: `Pipe`/`PipeExt`/`AndThen` are core-tier (no cfg gate in
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
 # reaches them at every tier this crate has, alloc included.
@@ -53,3 +61,11 @@ toml.workspace = true
 name = "bench_vs_ggml"
 harness = false
 required-features = ["ggml-bench"]
+
+[[example]]
+name = "parallel_breakdown"
+required-features = ["instrument"]
+
+[[example]]
+name = "evaluate_report"
+required-features = ["instrument"]

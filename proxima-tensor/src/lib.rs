@@ -167,31 +167,63 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// `Op` (op.rs), `Shapes` (shape.rs), and `BoundOpBuilder` (bind.rs) are all
+// `alloc::vec::Vec`/`BTreeMap`-backed today, so the `alloc` feature is not
+// yet optional — this is a gap to close, not a permanent boundary. See the
+// itemized no-alloc blocker list carried alongside this change for what a
+// fixed-capacity/caller-provided-storage version of each would need.
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!(
+    "proxima-tensor currently requires the `alloc` feature (or `std`, which implies \
+     it); a no-alloc tier is on the roadmap but not yet implemented"
+);
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+// bind/live/map/op/shape are the `Vec`/`BTreeMap`-backed core (see the
+// blocker list); dtype and error stand alone and would compile with neither
+// `std` nor `alloc`, but there is nothing useful to build without the core,
+// so the whole crate body is gated on the same condition as the
+// `compile_error!` above rather than leaving a half-populated crate root.
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod bind;
 #[cfg(feature = "std")]
 pub mod cpu;
 pub mod dtype;
+// `error::TensorError` names `op::NodeId` on nearly every variant, so it is
+// pulled into the same gate as `op` even though most of its own variants
+// (post `config`-scoping above) carry no alloc-only data themselves — the
+// blocker is the shared module, not the type.
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod error;
 #[cfg(feature = "instrument")]
 pub mod instrument;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod live;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod map;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod op;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod shape;
 #[cfg(feature = "config")]
 pub mod spec;
 
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
 };
 #[cfg(feature = "std")]
 pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel};
 pub use dtype::DType;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use live::annotate;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use map::{AxisIndex, AxisTerm, IndexMap, IndexPattern, affine, projection};
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use shape::{ShapeTable, Shapes, infer};

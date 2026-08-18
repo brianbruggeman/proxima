@@ -474,7 +474,10 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
             iter_rank: 2,
             axes: vec![
                 AxisIndex::default(),
-                AxisIndex { terms: vec![AxisTerm::projection(1)], offset: 0 },
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                    offset: 0,
+                },
             ],
         },
         gathered_dim: 0,
