@@ -282,20 +282,9 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
     );
 }
 
-/// The parity suite in `metal_parity.rs` is `#![cfg(all(feature = "metal",
-/// target_os = "macos"))]`, so without the feature it does not compile and
-/// contributes zero cases — and a run that covers zero reports exactly the
-/// same "N passed, 0 skipped, exit 0" as a run that covered everything. That
-/// is not hypothetical: the suite sat broken (two `SmallVec` conversion
-/// errors) through several green default runs, because nothing default-built
-/// it. This test lives in the default set precisely so the omission is loud.
-#[test]
-#[cfg(target_os = "macos")]
-fn metal_parity_suite_is_actually_built() {
-    assert!(
-        cfg!(feature = "metal"),
-        "on macos the `metal` feature is off, so omega/tests/metal_parity.rs compiled to zero \
-         cases and this run proves nothing about gpu-vs-cpu parity. run \
-         `cargo nextest run -p omega --features metal` (25 cases, vs 12 without)"
-    );
-}
+// a guard test used to live here asserting `cfg!(feature = "metal")`, because
+// the parity suite is `#![cfg(feature = "metal")]` and compiled to zero cases
+// without it — and zero cases reports the same "N passed, 0 skipped, exit 0"
+// as full coverage. Moving the objc2 deps to a macOS target section let
+// `metal` become a default feature instead, so the suite is simply always
+// built here and the guard has nothing left to guard.
