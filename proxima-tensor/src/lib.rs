@@ -175,6 +175,8 @@ pub mod bind;
 pub mod cpu;
 pub mod dtype;
 pub mod error;
+#[cfg(feature = "instrument")]
+pub mod instrument;
 pub mod live;
 pub mod map;
 pub mod op;

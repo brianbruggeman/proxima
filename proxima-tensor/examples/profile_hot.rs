@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 //! Throwaway harness for `scratchpad/opt/discipline.md` — direct `Instant`
 //! timing (no criterion overhead) and a symbol the disassembler can find.
 //! Not part of the crate's public surface; deleted at the end of the
@@ -239,6 +240,8 @@ fn main() {
     let lhs: Vec<f32> = (0..m * k).map(|value| (value % 13) as f32).collect();
     let rhs: Vec<f32> = (0..k * n).map(|value| (value % 7) as f32).collect();
 
+    #[cfg(feature = "instrument")]
+    proxima_tensor::instrument::reset();
     let alloc_before = ALLOC_COUNT.load(Ordering::Relaxed);
     let start = Instant::now();
     let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("gemm evaluates");
@@ -248,6 +251,22 @@ fn main() {
     println!("gemm {m}x{k}x{n}: {:.3}s", elapsed.as_secs_f64());
     println!("root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
     println!("allocations during evaluate(): {}", alloc_after - alloc_before);
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (gate_passes, invocations, fallback_elements) = proxima_tensor::cpu::width_tile_counters();
+        println!(
+            "width_tile gate_passes={gate_passes} invocations={invocations} fallback_elements={fallback_elements}"
+        );
+    }
+    #[cfg(feature = "instrument")]
+    {
+        let totals = proxima_tensor::instrument::totals();
+        let loads_per_mac = totals.operand_loads as f64 / totals.mac_ops.max(1) as f64;
+        println!(
+            "gemm instrument: operand_loads={} mac_ops={} loads_per_mac={loads_per_mac:.4}",
+            totals.operand_loads, totals.mac_ops
+        );
+    }
 
     {
         // Same LHS, RHS transposed into ggml's `mul_mat` layout (`[n, k]`
@@ -260,6 +279,8 @@ fn main() {
                 rhs_t[ni * k + ki] = rhs[ki * n + ni];
             }
         }
+        #[cfg(feature = "instrument")]
+        proxima_tensor::instrument::reset();
         let start = Instant::now();
         let evaluated = evaluate(&program, &[], &[&lhs, &rhs_t], &[]).expect("transposed-rhs gemm evaluates");
         let elapsed = start.elapsed();
@@ -269,13 +290,21 @@ fn main() {
             evaluated.root()[0],
             evaluated.root().len()
         );
-    }
-
-    #[cfg(feature = "instrument")]
-    {
-        let snapshot = proxima_tensor::cpu::telemetry_snapshot();
-        for (name, labels, value) in &snapshot.counters {
-            println!("counter {name}{labels:?} = {value}");
+        #[cfg(target_arch = "aarch64")]
+        {
+            let (gate_passes, invocations, fallback_elements) = proxima_tensor::cpu::neon_tile_counters();
+            println!(
+                "neon_tile gate_passes={gate_passes} invocations={invocations} fallback_elements={fallback_elements}"
+            );
+        }
+        #[cfg(feature = "instrument")]
+        {
+            let totals = proxima_tensor::instrument::totals();
+            let loads_per_mac = totals.operand_loads as f64 / totals.mac_ops.max(1) as f64;
+            println!(
+                "gemm_rhs_transposed instrument: operand_loads={} mac_ops={} loads_per_mac={loads_per_mac:.4}",
+                totals.operand_loads, totals.mac_ops
+            );
         }
     }
 
