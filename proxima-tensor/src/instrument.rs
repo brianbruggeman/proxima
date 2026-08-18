@@ -8,6 +8,8 @@
 //! instrument would perturb the thing it measures.
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::thread::ThreadId;
 
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
@@ -93,6 +95,41 @@ pub fn reset_parallel() {
     let _ = PARALLEL_CHUNK_NANOS_SUM.snapshot_and_reset();
     PARALLEL_CHUNK_NANOS_MIN.store(u64::MAX, Ordering::Relaxed);
     PARALLEL_CHUNK_NANOS_MAX.store(0, Ordering::Relaxed);
+}
+
+// chunk duration (above) scatters by construction as chunk count grows past
+// worker count under oversubscription, so it cannot tell a balanced pool
+// apart from an unbalanced one. what actually decides whether the parallel
+// region is bottlenecked on one straggler is each PULLER's total busy time —
+// summed across every chunk that puller claimed — which is why this is
+// keyed by the calling thread, not by chunk index.
+static WORKER_BUSY_NANOS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
+
+/// Adds `nanos` to the current thread's running total. Called from the same
+/// per-chunk timing site as [`record_chunk_nanos`] — this is a second,
+/// orthogonal aggregation of the identical measurement, grouped by puller
+/// instead of by chunk.
+pub fn record_worker_busy_nanos(nanos: u64) {
+    let thread_id = std::thread::current().id();
+    let mut totals = WORKER_BUSY_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    match totals.iter_mut().find(|(existing, _)| *existing == thread_id) {
+        Some((_, total)) => *total += nanos,
+        None => totals.push((thread_id, nanos)),
+    }
+}
+
+/// Every worker's accumulated busy time from the most recent parallel
+/// region(s) since the last [`reset_worker_busy`] — one entry per distinct
+/// thread that claimed at least one chunk. Order is not meaningful.
+#[must_use]
+pub fn worker_busy_snapshot() -> Vec<u64> {
+    let totals = WORKER_BUSY_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    totals.iter().map(|(_, nanos)| *nanos).collect()
+}
+
+pub fn reset_worker_busy() {
+    let mut totals = WORKER_BUSY_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    totals.clear();
 }
 
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part

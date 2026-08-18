@@ -346,8 +346,81 @@ const PARALLEL_THRESHOLD: usize = 4096;
 /// counts do not mean equal wall-clock (measured 2.04x spread across 8
 /// equal-row chunks of a 1024^3 GEMM), and one chunk per worker leaves no
 /// spare chunk for a worker that finishes early to pick up — more chunks
-/// than workers lets a fast worker absorb a slow chunk's slack.
+/// than workers lets a fast worker absorb a slow chunk's slack. Only pays
+/// off under `tensor-bgpool`'s dynamic claiming (see `claim_and_run`): the
+/// default `thread::scope` sibling spawns one OS thread per chunk, so
+/// raising this on that path spawns more threads for the same work rather
+/// than letting any thread steal another's slack — the puller count that
+/// path uses is fixed at `chunks.len()` by construction, unlike the pool
+/// sibling below, whose puller count [`run_chunks_threaded`] caps at
+/// `workers` regardless of `OVERSUBSCRIBE`.
+///
+/// A `4` was tried on this same mechanism: more chunks than workers gives a
+/// work-stealing pool room for a fast puller to absorb a slow chunk's slack,
+/// which is structural and not in dispute. The comparison that measured it —
+/// 274.75 vs 270.08 mean GFLOPS at 2048^3/4 workers, n=9, 5.9 sigma — never
+/// recorded the ambient load it ran under, and the 8-worker cells it was
+/// meant to help never cleared their own CoV gate at any sample size tried
+/// (n up to 30) under the load present when those cells were measured (5-10,
+/// against a stated 2.2 plateau). That is the same evidence shape that
+/// produced three false readings for `SPLIT_ALIGNMENT` on this same box:
+/// strong sigma inside an unvalidated run does not rule out noise correlated
+/// across that run rather than random within it. Left at `1`, the original
+/// value, until a re-measurement validates its own floor first — a
+/// same-code-path comparison, at a size and load where the two configurations
+/// provably execute identical instructions — and only then shows an
+/// oversubscription effect outside it. Gating to `1` outside `tensor-bgpool`
+/// regardless: the default `thread::scope` sibling spawns one OS thread per
+/// chunk, so raising this there would spawn more threads for the same work
+/// rather than letting any of them steal another's slack (see this
+/// constant's own first paragraph) — that argument does not depend on
+/// whichever value the pool path settles on.
 const OVERSUBSCRIBE: usize = 1;
+
+/// Row-alignment applied to every non-final chunk boundary via
+/// `BoundOp::split_aligned`. `1` is a no-op (see that method's doc): every
+/// chunk boundary lands wherever `extent / chunk_count` puts it, which is
+/// not necessarily a multiple of `TILE_ROWS` — so a chunk pays its own
+/// row-remainder through the kernel's narrower fallback path independently
+/// of every other chunk, and that per-chunk remainder count grows with
+/// chunk count even though the total row count did not change. That
+/// mechanism is structural and not in dispute; whether it moves
+/// busy-per-MAC by a measurable amount is.
+///
+/// Four measurements of this same `1` -> `TILE_ROWS` change exist, all
+/// against the column-panel blocking below (already landed and left on —
+/// see `NEON_COLUMN_PANEL_BUDGET_BYTES`). Three, run at system load
+/// 12-31, read as 3-10% busy-per-MAC improvements. None of the three
+/// established a noise floor before comparing — at that load level a
+/// handful of percent between two configurations is not distinguishable
+/// from scheduler contention, so those figures are retained here only as
+/// unverified prior readings, not as evidence.
+///
+/// The fourth run validated a floor first: at load 2.49-3.07, `neither` vs
+/// `panel` at 512^3 and 1024^3 — sizes where `neon_column_panel_cols`
+/// provably clamps the panel to one, i.e. the two configurations execute
+/// identical code — agreed to within +/-3.5%, sigma up to 3.1. That is the
+/// noise floor any real effect at this load has to clear. Against it,
+/// alignment (`1` -> `TILE_ROWS`) on top of the panel measured
+/// +2.03% / +0.31% / -0.72% at 512^3 / 1024^3 / 2048^3, 8 threads — inside
+/// the floor at every size. No measurable effect anywhere in the one
+/// comparison whose noise floor is known.
+///
+/// Set to `1` on that basis: the only measurement with a validated floor
+/// found nothing outside it, and the three load-12-31 figures were never
+/// shown to clear their own (unmeasured) noise, so they carry no weight
+/// against it. This changes only if a future re-measurement (a) validates
+/// its own floor the same way — a same-code-path comparison at a size
+/// where the panel is a no-op — and (b) then shows an alignment effect
+/// outside that floor.
+///
+/// Provenance: the three load-12-31 figures were not independently dated
+/// or sample-counted in the record available to this pass — treat them as
+/// unverified, not merely old. The load-2.49-3.07 measurement is this
+/// session's own, 2026-08-18; its sample count for the alignment
+/// comparison specifically is not broken out beyond the three-configuration
+/// grid it ran alongside.
+const SPLIT_ALIGNMENT: u64 = 1;
 
 /// Same contract as [`evaluate`], including the exact same [`Evaluated`]
 /// and error variants — the only difference is that each large-enough nest
@@ -445,8 +518,19 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     #[cfg(feature = "instrument")]
     let split_start = Instant::now();
     let above_threshold = element_count(&resolved.extents) >= PARALLEL_THRESHOLD;
-    let chunk_count = workers.get() * OVERSUBSCRIBE;
-    let chunks = above_threshold.then(|| resolved.split(chunk_count)).flatten();
+    // oversubscribing at `workers == 1` would still spawn `OVERSUBSCRIBE - 1`
+    // pool tasks (chunk count alone bounds pool concurrency — see
+    // `run_chunks_threaded`'s doc), silently using more physical threads
+    // than the caller asked for; only multiply once there is more than one
+    // worker to spread chunks across.
+    let chunk_count = if workers.get() > 1 {
+        workers.get() * OVERSUBSCRIBE
+    } else {
+        workers.get()
+    };
+    let chunks = above_threshold
+        .then(|| resolved.split_aligned(chunk_count, SPLIT_ALIGNMENT))
+        .flatten();
     #[cfg(feature = "instrument")]
     counter!(
         instrument::SERIAL_SPLIT_NANOS,
@@ -454,7 +538,7 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     );
 
     match chunks {
-        Some(chunks) => run_chunks_threaded(&chunks, buffers, &mut output)?,
+        Some(chunks) => run_chunks_threaded(&chunks, buffers, &mut output, workers)?,
         None => {
             // one node, one dispatch decision — recorded once here, not
             // re-derived from `above_threshold` after the fact, since the
@@ -487,6 +571,10 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     chunks: &[BoundOp],
     buffers: &[Option<B>],
     output: &mut [f32],
+    // unused here: this path always spawns one OS thread per chunk, so
+    // there is no separate "puller count" to cap — see the `tensor-bgpool`
+    // sibling below, where the two counts genuinely diverge.
+    _workers: NonZeroUsize,
 ) -> Result<(), TensorError> {
     #[cfg(feature = "instrument")]
     let slice_carve_start = Instant::now();
@@ -525,7 +613,11 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
                     let chunk_start = Instant::now();
                     let outcome = run_node_into(chunk, buffers, slice);
                     #[cfg(feature = "instrument")]
-                    instrument::record_chunk_nanos(chunk_start.elapsed().as_nanos() as u64);
+                    {
+                        let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
+                        instrument::record_chunk_nanos(chunk_nanos);
+                        instrument::record_worker_busy_nanos(chunk_nanos);
+                    }
                     outcome
                 })
             })
@@ -575,14 +667,19 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 /// lets `OVERSUBSCRIBE > 1` (`chunks.len() > workers`) actually pay off:
 /// with a 1:1 static assignment (the previous shape here), a pool task
 /// finishing early has nothing further to do even when a sibling chunk is
-/// still running long past it. `chunks.len() - 1` pool tasks are spawned
-/// (see [`nest_pool`] for why the pool is built once and reused) — the same
-/// count the old 1:1 mapping used — so the `OVERSUBSCRIBE == 1` case, where
-/// pull count equals chunk count, degenerates back to (statistically) one
-/// chunk per puller. Completion is a real blocking handoff
-/// (`std::sync::mpsc::sync_channel`), not a poll loop: the caller parks in
-/// `Receiver::recv` instead of busy-spinning a `Waker::noop` future the way
-/// `proxima_primitives::block_on` would.
+/// still running long past it. `workers.get() - 1` pool tasks are spawned —
+/// the caller's requested puller count, not `chunks.len() - 1` — because
+/// [`nest_pool`] is a single process-wide pool sized to `num_cpus`, shared
+/// across every call regardless of its own `workers` argument: spawning one
+/// task per chunk would let oversubscription silently recruit pool threads
+/// past what the caller asked for on any box where `num_cpus > workers`.
+/// Each spawned puller still drains the same shared cursor across every
+/// chunk, so raising `OVERSUBSCRIBE` still grows the number of chunks a
+/// fixed `workers` pullers can steal from, without growing puller count.
+/// Completion is a real blocking handoff (`std::sync::mpsc::sync_channel`),
+/// not a poll loop: the caller parks in `Receiver::recv` instead of
+/// busy-spinning a `Waker::noop` future the way `proxima_primitives::block_on`
+/// would.
 ///
 /// A worker panic cannot be resumed here the way the `thread::scope` sibling
 /// does: `ProximaBackgroundPool`'s worker loop wraps every job in
@@ -597,6 +694,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     chunks: &[BoundOp],
     buffers: &[Option<B>],
     output: &mut [f32],
+    workers: NonZeroUsize,
 ) -> Result<(), TensorError> {
     #[cfg(feature = "instrument")]
     let slice_carve_start = Instant::now();
@@ -660,10 +758,19 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     #[cfg(feature = "instrument")]
     let node_start = Instant::now();
 
-    // `chunks_len - 1` pool tasks, same count the previous 1:1 mapping
-    // spawned — see this function's doc comment for why that keeps
-    // `OVERSUBSCRIBE == 1` behaviorally unchanged.
-    for _ in 0..chunks_len - 1 {
+    // `workers - 1` pool tasks — the puller count the caller actually asked
+    // for, NOT `chunks_len - 1`. `nest_pool` is sized to `num_cpus`, shared
+    // and reused process-wide, independent of any one call's `workers`
+    // argument: spawning one task per CHUNK (as this used to) rather than
+    // one per WORKER let `OVERSUBSCRIBE > 1` silently recruit pool threads
+    // past the caller's requested count — up to `num_cpus`, on a box where
+    // `num_cpus > workers` — since nothing here otherwise bounds how many
+    // of the pool's own threads can be pulling `claim_and_run` at once.
+    // Each spawned puller still drains the shared cursor across every one
+    // of the `chunks_len` chunks, exactly like the caller does below, so
+    // oversubscription still grows the number of *chunks* available to
+    // steal without growing the number of *threads* touching them.
+    for _ in 0..workers.get() - 1 {
         let sender = result_sender.clone();
         let next_index = Arc::clone(&next_index);
         let slice_addresses = Arc::clone(&slice_addresses);
@@ -796,7 +903,11 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
         let chunk_start = Instant::now();
         let outcome = run_node_into(chunk, chunk_buffers, chunk_output);
         #[cfg(feature = "instrument")]
-        instrument::record_chunk_nanos(chunk_start.elapsed().as_nanos() as u64);
+        {
+            let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
+            instrument::record_chunk_nanos(chunk_nanos);
+            instrument::record_worker_busy_nanos(chunk_nanos);
+        }
 
         let _ = sender.send((index, outcome));
     }
@@ -870,10 +981,11 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 // dtype, and any gathered dim past 2^24 (an f32 index cannot represent a
 // larger extent's values exactly), so the only restriction left to enforce
 // here is that every OTHER node — every node not itself a gather's
-// `indices` — is f32: every buffer slot derefs to `[f32]` regardless of which
-// `B` backs it, indices included (an index value is an exact integer carried
-// as f32, per the module doc), so a gather's `indices` node is the one
-// deliberate exception to the f32 rule rather than a second buffer kind.
+// `indices` — is f32: every buffer slot derefs to `[f32]` regardless of
+// which `B: Deref<Target = [f32]>` backs it (owned `Vec<f32>` or borrowed
+// `Cow<[f32]>`), indices included (an index value is an exact integer
+// carried as f32, per the module doc), so a gather's `indices` node is the
+// one deliberate exception to the f32 rule rather than a second buffer kind.
 fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
@@ -1532,104 +1644,133 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         NEON_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
         let leading_axis = leading_output_axes[0] as usize;
         let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
-        let mut leading_flat = 0u64;
-        while leading_flat < tiled_leading_rows {
-            unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
-            merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
-            full_coordinate[reduction_dims[0] as usize] = 0;
-            if let Some(dim) = last_output_dim {
-                full_coordinate[dim as usize] = 0;
-            }
-            fill_running_offsets(resolved, &full_coordinate, &mut running);
-            let base_a = running[plan.index_a] as usize;
-            let base_b0 = running[plan.index_b] as usize;
 
-            let mut out_prefixes = [0i64; TILE_ROWS];
-            for (row, prefix) in out_prefixes.iter_mut().enumerate() {
-                full_coordinate[leading_axis] = leading_flat + row as u64;
-                *prefix = out_layout.offset_of(&full_coordinate);
-            }
+        // Column-panel width: bound the inner sweep to a slice of `b` that
+        // stays resident in L2 across the whole row-strip pass below,
+        // instead of re-streaming all of `b` past L2 once per 6-row strip
+        // (`neon_column_panel_cols`'s doc has the budget arithmetic).
+        let panel_cols = neon_column_panel_cols(reduction_total, tiled_width_cols);
 
-            let mut col = 0usize;
-            while col < tiled_width_cols {
-                let base_b = base_b0 + col * plan.col_stride_b;
-                let mut tile_out = [[seed; TILE_COLS]; TILE_ROWS];
-                // `neon_tile_plan`'s gate already proved: no gathers, both
-                // contraction strides == 1, and `reduction_total` elements
-                // read contiguously from `base_a`/`base_b` on every row and
-                // column this tile visits, so every offset the kernel forms
-                // stays within the source slices.
-                unsafe {
-                    gemm_tile_neon::<TILE_ROWS>(
-                        TileOperand {
-                            data: raw[plan.index_a],
-                            base: base_a,
-                            stride: plan.row_stride_a,
-                        },
-                        TileOperand {
-                            data: raw[plan.index_b],
-                            base: base_b,
-                            stride: plan.col_stride_b,
-                        },
-                        reduction_total as usize,
-                        &mut tile_out,
-                    );
+        let mut panel_start = 0usize;
+        loop {
+            let panel_end = (panel_start + panel_cols).min(tiled_width_cols);
+            let mut leading_flat = 0u64;
+            while leading_flat < tiled_leading_rows {
+                unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
+                merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+                full_coordinate[reduction_dims[0] as usize] = 0;
+                if let Some(dim) = last_output_dim {
+                    full_coordinate[dim as usize] = 0;
                 }
-                #[cfg(feature = "instrument")]
-                {
-                    neon_tile_invocations += 1;
-                    counters.kernel_calls += 1;
-                    counters.mac_ops += (TILE_ROWS * TILE_COLS) as u64 * reduction_total;
-                    counters.operand_loads += (TILE_ROWS + TILE_COLS) as u64 * reduction_total;
-                }
-                for (tile_row, &out_prefix) in tile_out.iter().zip(out_prefixes.iter()) {
-                    for (column, &value) in tile_row.iter().enumerate() {
-                        let position = out_prefix + out_stride * (col + column) as i64;
-                        output[position as usize] = value;
-                    }
-                }
-                col += TILE_COLS;
-            }
+                fill_running_offsets(resolved, &full_coordinate, &mut running);
+                let base_a = running[plan.index_a] as usize;
+                let base_b0 = running[plan.index_b] as usize;
 
-            if tiled_width_cols < width {
-                let fold = DotFold {
-                    len: reduction_total as usize,
-                    init: seed,
-                    seeded: true,
-                };
-                for (row, &out_prefix) in out_prefixes.iter().enumerate() {
+                let mut out_prefixes = [0i64; TILE_ROWS];
+                for (row, prefix) in out_prefixes.iter_mut().enumerate() {
                     full_coordinate[leading_axis] = leading_flat + row as u64;
-                    if let Some(dim) = last_output_dim {
-                        full_coordinate[dim as usize] = tiled_width_cols as u64;
+                    *prefix = out_layout.offset_of(&full_coordinate);
+                }
+
+                let mut col = panel_start;
+                while col < panel_end {
+                    let base_b = base_b0 + col * plan.col_stride_b;
+                    let mut tile_out = [[seed; TILE_COLS]; TILE_ROWS];
+                    // `neon_tile_plan`'s gate already proved: no gathers, both
+                    // contraction strides == 1, and `reduction_total` elements
+                    // read contiguously from `base_a`/`base_b` on every row and
+                    // column this tile visits, so every offset the kernel forms
+                    // stays within the source slices.
+                    unsafe {
+                        gemm_tile_neon::<TILE_ROWS>(
+                            TileOperand {
+                                data: raw[plan.index_a],
+                                base: base_a,
+                                stride: plan.row_stride_a,
+                            },
+                            TileOperand {
+                                data: raw[plan.index_b],
+                                base: base_b,
+                                stride: plan.col_stride_b,
+                            },
+                            reduction_total as usize,
+                            &mut tile_out,
+                        );
                     }
-                    fill_running_offsets(resolved, &full_coordinate, &mut running);
-                    for n in tiled_width_cols..width {
-                        let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
-                        output[(out_prefix + out_stride * n as i64) as usize] = value;
-                        #[cfg(feature = "instrument")]
-                        {
-                            neon_tile_fallback_elements += 1;
-                            counters.kernel_calls += 1;
-                            counters.mac_ops += reduction_total;
-                            for &operand_stride in &reduction_strides {
-                                counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                    #[cfg(feature = "instrument")]
+                    {
+                        neon_tile_invocations += 1;
+                        counters.kernel_calls += 1;
+                        counters.mac_ops += (TILE_ROWS * TILE_COLS) as u64 * reduction_total;
+                        counters.operand_loads += (TILE_ROWS + TILE_COLS) as u64 * reduction_total;
+                    }
+                    for (tile_row, &out_prefix) in tile_out.iter().zip(out_prefixes.iter()) {
+                        for (column, &value) in tile_row.iter().enumerate() {
+                            let position = out_prefix + out_stride * (col + column) as i64;
+                            output[position as usize] = value;
+                        }
+                    }
+                    col += TILE_COLS;
+                }
+
+                // the column tail (`width % TILE_COLS` leftover columns) only
+                // needs computing once per row, not once per panel — run it
+                // on whichever panel reaches the tiled boundary (exactly one
+                // does, including the degenerate single-panel case).
+                if panel_end == tiled_width_cols && tiled_width_cols < width {
+                    let fold = DotFold {
+                        len: reduction_total as usize,
+                        init: seed,
+                        seeded: true,
+                    };
+                    for (row, &out_prefix) in out_prefixes.iter().enumerate() {
+                        full_coordinate[leading_axis] = leading_flat + row as u64;
+                        if let Some(dim) = last_output_dim {
+                            full_coordinate[dim as usize] = tiled_width_cols as u64;
+                        }
+                        fill_running_offsets(resolved, &full_coordinate, &mut running);
+                        for n in tiled_width_cols..width {
+                            let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                            output[(out_prefix + out_stride * n as i64) as usize] = value;
+                            #[cfg(feature = "instrument")]
+                            {
+                                neon_tile_fallback_elements += 1;
+                                counters.kernel_calls += 1;
+                                counters.mac_ops += reduction_total;
+                                for &operand_stride in &reduction_strides {
+                                    counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                                }
+                            }
+                            for (offset, stride) in running.iter_mut().zip(&strides) {
+                                *offset += stride;
                             }
                         }
-                        for (offset, stride) in running.iter_mut().zip(&strides) {
-                            *offset += stride;
-                        }
                     }
                 }
-            }
 
-            #[cfg(feature = "instrument")]
-            {
-                counters.leading_iters += TILE_ROWS as u64;
-                counters.output_writes += (TILE_ROWS * width) as u64;
-            }
+                #[cfg(feature = "instrument")]
+                {
+                    let mut writes = (TILE_ROWS * (panel_end - panel_start)) as u64;
+                    if panel_end == tiled_width_cols && tiled_width_cols < width {
+                        writes += (TILE_ROWS * (width - tiled_width_cols)) as u64;
+                    }
+                    counters.output_writes += writes;
+                    if panel_start == 0 {
+                        counters.leading_iters += TILE_ROWS as u64;
+                    }
+                }
 
-            leading_flat += TILE_ROWS as u64;
+                leading_flat += TILE_ROWS as u64;
+            }
+            if panel_end >= tiled_width_cols {
+                break;
+            }
+            panel_start = panel_end;
         }
+        // every panel-loop exit leaves the row-strip sweep at exactly
+        // `tiled_leading_rows` (each panel processes the same full row
+        // range); the remainder pass below picks up from there.
+        let mut leading_flat = tiled_leading_rows;
 
         // Leftover rows after the 6-row main pass are always in `1..=5`
         // (`leading_total mod TILE_ROWS`, `TILE_ROWS == 6`). Every one of
@@ -2895,17 +3036,46 @@ fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) 
 }
 
 /// Output rows/columns computed per call of [`gemm_tile_neon`] — ggml
-/// tinyBLAS's `RM`/`RN`. Vector width (4) is implied by `float32x4_t`. 6x4
-/// (not the symmetric 4x4 or the same-accumulator-count 4x6) was chosen by
-/// a standalone shape sweep on this box: 24 accumulators, 0.417 loads/MAC,
-/// zero `str q` spills, and the best measured GFMA/s of seven shapes tried
-/// — see `scratchpad/tileprobe/arm_b_6x4.rs`. Orientation matters for
-/// reasons not fully understood; 4x6 measured 42% worse despite identical
-/// accumulator count and loads/MAC.
+/// tinyBLAS's `RM`/`RN`. Vector width (4) is implied by `float32x4_t`. An
+/// iso-accumulator shape sweep at 1024^3, single-thread (CoV 0.2-0.44%, 7
+/// launches each) measured 6x4 at 86.5 GFLOPS against 4x6 at 49.9 and 3x8 at
+/// 48.8 — the row-heavy orientation beats its own transpose by 73% despite
+/// identical accumulator count and loads/MAC. Why orientation dominates is
+/// still unexplained.
 #[cfg(target_arch = "aarch64")]
 const TILE_ROWS: usize = 6;
 #[cfg(target_arch = "aarch64")]
 const TILE_COLS: usize = 4;
+
+/// Bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
+/// pass below. M1 Max: 12 MiB shared L2 per performance cluster. Budgeting
+/// 8 MiB rather than the full 12 MiB leaves headroom for the row-strip's own
+/// `a` tile, the output tile in flight, and set-associativity conflicts —
+/// zero headroom is exactly the margin that turns a near-fit back into a
+/// thrash.
+#[cfg(target_arch = "aarch64")]
+const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+/// Column-panel width for the tiled GEMM pass: the widest multiple of
+/// `TILE_COLS` whose panel of `b` (`panel_cols` columns, each a contiguous
+/// run of `reduction_len` `f32`s along the contraction dim) fits inside
+/// [`NEON_COLUMN_PANEL_BUDGET_BYTES`]. At `reduction_len = 2048` (2048^3's
+/// `k`): `8 MiB / (2048 * 4 bytes) = 1024` columns, half of 2048's tiled
+/// width — two panels. At `reduction_len = 1024` the budget already covers
+/// 2048 columns, wider than any tiled width a 1024^3 or smaller call
+/// produces, so the `clamp` below collapses the result to one panel
+/// spanning `tiled_width_cols` — the panel loop becomes a no-op wrapper
+/// around the original single sweep, unchanged behavior for 1024^3 and
+/// smaller.
+#[cfg(target_arch = "aarch64")]
+fn neon_column_panel_cols(reduction_len: u64, tiled_width_cols: usize) -> usize {
+    let bytes_per_col = reduction_len as usize * 4;
+    let budget_cols = NEON_COLUMN_PANEL_BUDGET_BYTES
+        .checked_div(bytes_per_col)
+        .unwrap_or(tiled_width_cols);
+    let rounded = budget_cols - budget_cols % TILE_COLS;
+    rounded.clamp(TILE_COLS, tiled_width_cols.max(TILE_COLS))
+}
 
 /// One bound op's applicability gate for [`gemm_tile_neon`], resolved once
 /// before [`run_reduce`]'s leading-dimension loop rather than per tile. The
