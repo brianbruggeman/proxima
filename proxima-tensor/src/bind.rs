@@ -295,6 +295,22 @@ impl BoundOp {
     ///   sub-slice expects. Rebasing it too would double-count the offset.
     #[must_use]
     pub fn split(&self, parts: usize) -> Option<Vec<BoundOp>> {
+        self.split_aligned(parts, 1)
+    }
+
+    /// Same contract as [`split`](Self::split), except each of the first
+    /// `parts - 1` chunks is rounded down to a multiple of `alignment` rows
+    /// (the remainder folds into the last, already-ragged chunk) instead of
+    /// always taking `extent / parts` exactly. `alignment == 1` degenerates
+    /// to [`split`](Self::split)'s behavior byte-for-byte.
+    ///
+    /// Exists because equal row counts are not equal wall-clock: a caller
+    /// tiling its kernel in `alignment`-row blocks pays a narrower,
+    /// measurably slower fallback path for every chunk boundary that does
+    /// not land on a tile edge, and that count grows with chunk count (see
+    /// `cpu::TILE_ROWS`'s doc for the measured spread).
+    #[must_use]
+    pub fn split_aligned(&self, parts: usize, alignment: u64) -> Option<Vec<BoundOp>> {
         if parts < 2 {
             return None;
         }
@@ -305,7 +321,7 @@ impl BoundOp {
         }
 
         Some(
-            chunk_ranges(extent, parts)
+            chunk_ranges(extent, parts, alignment)
                 .map(|(chunk_start, chunk_len)| {
                     self.rebase_chunk(split_axis, chunk_start, chunk_len)
                 })
@@ -384,10 +400,18 @@ fn rebase_operands(operands: &BoundOperands, split_axis: u16, chunk_start: u64) 
 }
 
 /// `parts` contiguous `(start, len)` ranges covering `0..extent`: the first
-/// `parts - 1` ranges are `extent / parts` wide, the last absorbs whatever
-/// remains, so it is the only one that can be a different (ragged) size.
-fn chunk_ranges(extent: u64, parts: usize) -> impl Iterator<Item = (u64, u64)> {
-    let chunk_len = extent / parts as u64;
+/// `parts - 1` ranges are `extent / parts` wide, rounded down to a multiple
+/// of `alignment` (unless that would zero them out, in which case the raw
+/// unaligned width is kept), and the last absorbs whatever remains — the
+/// only one that can be a different (ragged) size. `alignment <= 1` is a
+/// no-op: the rounding step is skipped entirely.
+fn chunk_ranges(extent: u64, parts: usize, alignment: u64) -> impl Iterator<Item = (u64, u64)> {
+    let raw_len = extent / parts as u64;
+    let chunk_len = if alignment > 1 && raw_len >= alignment {
+        raw_len - (raw_len % alignment)
+    } else {
+        raw_len
+    };
     (0..parts).scan(0u64, move |start, index| {
         let chunk_start = *start;
         let len = if index + 1 == parts {
@@ -1522,6 +1546,45 @@ mod tests {
             chunks[2].operands()[0].1.base,
             op.operands()[0].1.base + stride * 6
         );
+    }
+
+    #[test]
+    fn split_aligned_rounds_non_final_chunks_down_to_the_alignment() {
+        let op = elementwise_op();
+
+        // extent 10, 3 parts: raw_len = 10 / 3 = 3, rounded down to the
+        // nearest multiple of 2 is 2 — only the final (already-ragged)
+        // chunk absorbs what the rounding shaved off the other two.
+        let chunks = op.split_aligned(3, 2).expect("extent 10 over 3 parts splits");
+        let lengths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
+        assert_eq!(
+            lengths,
+            alloc::vec![2, 2, 6],
+            "non-final chunks round down to the alignment, final absorbs the rest"
+        );
+    }
+
+    #[test]
+    fn split_aligned_below_the_alignment_falls_back_to_unaligned() {
+        let op = elementwise_op();
+
+        // raw_len = 10 / 3 = 3 is already below alignment 4, so rounding
+        // down would zero the chunk out — the doc promises the raw
+        // unaligned width is kept instead.
+        let chunks = op.split_aligned(3, 4).expect("extent 10 over 3 parts splits");
+        let lengths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
+        assert_eq!(lengths, alloc::vec![3, 3, 4], "falls back to split's own behavior");
+    }
+
+    #[test]
+    fn split_aligned_with_alignment_one_matches_split_exactly() {
+        let op = elementwise_op();
+
+        let aligned = op.split_aligned(3, 1).expect("extent 10 over 3 parts splits");
+        let plain = op.split(3).expect("extent 10 over 3 parts splits");
+        let aligned_lengths: Vec<u64> = aligned.iter().map(|chunk| chunk.extents[0]).collect();
+        let plain_lengths: Vec<u64> = plain.iter().map(|chunk| chunk.extents[0]).collect();
+        assert_eq!(aligned_lengths, plain_lengths, "alignment 1 is a no-op");
     }
 
     #[test]
