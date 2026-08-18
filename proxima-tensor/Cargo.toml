@@ -73,3 +73,6 @@ required-features = ["instrument"]
 [[example]]
 name = "busy_per_mac"
 required-features = ["instrument"]
+
+[[example]]
+name = "alloc_itemize"
