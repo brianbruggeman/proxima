@@ -2893,12 +2893,14 @@ dependencies = [
 name = "omega"
 version = "0.1.0"
 dependencies = [
+ "conflaguration",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
  "proxima-tensor",
  "tempfile",
  "thiserror 2.0.19",
+ "toml 0.8.23",
 ]
 
 [[package]]
