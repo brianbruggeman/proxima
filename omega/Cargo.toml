@@ -67,4 +67,7 @@ thiserror = { workspace = true, default-features = false }
 workspace = true
 
 [dev-dependencies]
+conflaguration = { workspace = true, features = ["toml"] }
+proxima-tensor = { path = "../proxima-tensor", features = ["config"] }
 tempfile.workspace = true
+toml.workspace = true

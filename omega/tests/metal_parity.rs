@@ -9,7 +9,9 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use conflaguration::Validate;
 use omega::MetalError;
+use proxima_tensor::spec::ProgramSpec;
 use proxima_tensor::{
     AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op,
     Reduce, ReduceInit, ScalarOp, TensorError, affine, append, bind, evaluate, infer, projection,
@@ -20,6 +22,14 @@ use proxima_tensor::{
 /// the max abs diff observed — the number a report can cite even on a
 /// passing run.
 fn assert_parity(case: &str, cpu: &[f32], metal: &[f32]) -> f32 {
+    assert_parity_within(case, cpu, metal, 1e-6)
+}
+
+/// Same as [`assert_parity`], but with a caller-chosen tolerance instead of
+/// the default `1e-6` — for cases where a longer chain of GPU-vs-CPU
+/// reduction (matmul into softmax into matmul, on non-trivial varied inputs)
+/// legitimately accumulates more float error than a single fused op does.
+fn assert_parity_within(case: &str, cpu: &[f32], metal: &[f32], epsilon: f32) -> f32 {
     assert!(
         !cpu.is_empty(),
         "{case}: cpu produced zero elements, a 0-length comparison proves nothing"
@@ -37,8 +47,8 @@ fn assert_parity(case: &str, cpu: &[f32], metal: &[f32]) -> f32 {
         .map(|(left, right)| (left - right).abs())
         .fold(0.0f32, f32::max);
     assert!(
-        max_abs_diff <= 1e-6,
-        "{case}: max abs diff {max_abs_diff} exceeds 1e-6 tolerance across {} elements",
+        max_abs_diff <= epsilon,
+        "{case}: max abs diff {max_abs_diff} exceeds {epsilon} tolerance across {} elements",
         cpu.len()
     );
     println!(
@@ -70,6 +80,105 @@ fn tanh_chain_program(extent: u32, depth: usize) -> Vec<Op> {
         );
     }
     let _ = current;
+    program
+}
+
+fn reciprocal_program(extent: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(extent)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Reciprocal,
+            operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
+            name: None,
+        },
+    );
+    program
+}
+
+fn square_root_program(extent: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(extent)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::SquareRoot,
+            operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
+            name: None,
+        },
+    );
+    program
+}
+
+/// `multiply -> square_root -> reciprocal` — RMSNorm's own `inv_rms` shape
+/// (`attention_block.toml`'s `mean_square`/`rms`/`inv_rms` nodes), asserted
+/// to fuse into one `BoundOp` the same way
+/// `a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device`
+/// does for multiply/add, so a failure here can only be `square_root` or
+/// `reciprocal` disagreeing inside a fused kernel, not some other op.
+fn multiply_sqrt_reciprocal_chain_program() -> Vec<Op> {
+    let mut program = Vec::new();
+    let identity = || IndexMap::Affine(projection(1, &[0]));
+    let a = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let scale = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4)],
+            name: None,
+        },
+    );
+    let squared = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(a, identity()), (scale, identity())],
+            name: None,
+        },
+    );
+    let rooted = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::SquareRoot,
+            operands: vec![(squared, identity())],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Reciprocal,
+            operands: vec![(rooted, identity())],
+            name: None,
+        },
+    );
     program
 }
 
@@ -420,6 +529,108 @@ fn tanh_chain_parity_matches_within_epsilon() {
         .expect("metal tanh chain executes on a real device");
 
     assert_parity("tanh_chain", cpu.root(), metal.root());
+}
+
+#[test]
+fn reciprocal_parity_matches_within_epsilon() {
+    let program = reciprocal_program(4);
+    let input = [1.0, 2.0, 0.5, -4.0f32];
+
+    let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu reciprocal evaluates");
+    let metal = omega::execute(&program, &[], &[&input], &[])
+        .expect("metal reciprocal executes on a real device");
+
+    assert_parity("reciprocal", cpu.root(), metal.root());
+}
+
+#[test]
+fn square_root_parity_matches_within_epsilon() {
+    let program = square_root_program(4);
+    let input = [1.0, 4.0, 9.0, 0.25f32];
+
+    let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu square_root evaluates");
+    let metal = omega::execute(&program, &[], &[&input], &[])
+        .expect("metal square_root executes on a real device");
+
+    assert_parity("square_root", cpu.root(), metal.root());
+}
+
+#[test]
+fn multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device() {
+    let program = multiply_sqrt_reciprocal_chain_program();
+
+    let shapes = infer(&program, &[]).expect("multiply/sqrt/reciprocal chain infers");
+    let resolved = bind(&program, &shapes, &[]).expect("multiply/sqrt/reciprocal chain resolves");
+    assert_eq!(
+        resolved.len(),
+        1,
+        "multiply, square_root, and reciprocal must fuse into one BoundOp before this ever \
+         reaches the Metal driver"
+    );
+
+    let a_data = [1.0, 2.0, 3.0, 4.0f32];
+    let scale_data = [4.0, 2.0, 1.0, 0.5f32];
+
+    let cpu = evaluate(&program, &[], &[&a_data, &scale_data], &[])
+        .expect("cpu multiply/sqrt/reciprocal chain evaluates");
+    let metal = omega::execute(&program, &[], &[&a_data, &scale_data], &[])
+        .expect("metal multiply/sqrt/reciprocal chain executes on a real device");
+
+    assert_parity("multiply_sqrt_reciprocal_chain", cpu.root(), metal.root());
+}
+
+// deterministic pseudo-random source, recipe shared with
+// proxima-tensor/examples/spec_block.rs and busy_per_mac.rs
+struct Lcg(u64);
+
+impl Lcg {
+    fn next_unit(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let bits = (self.0 >> 33) as u32;
+        (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
+    }
+}
+
+fn random_vec(seed: u64, count: usize) -> Vec<f32> {
+    let mut lcg = Lcg(seed);
+    (0..count).map(|_| lcg.next_unit()).collect()
+}
+
+/// Inputs are LCG-derived rather than uniform constants: uniform q/k/v rows
+/// make every attention score identical, so the softmax collapses to a
+/// uniform `1/SEQUENCE` and the Metal-vs-CPU comparison stays symmetric
+/// under an index-map transpose, a reduction-order bug, or a wrong
+/// broadcast — all invisible when every row is the same value. Varied
+/// inputs make those bugs show up as a real numeric divergence.
+#[test]
+fn attention_block_spec_parity_matches_within_epsilon() {
+    const SEQUENCE: usize = 4;
+    const MODEL: usize = 8;
+
+    let text = include_str!("../../proxima-tensor/specs/attention_block.toml");
+    let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+    spec.validate().expect("spec is structurally sound");
+    let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+    let symbols = [SEQUENCE as u64];
+    infer(&program, &symbols).expect("the block infers");
+
+    let activations = random_vec(1, SEQUENCE * MODEL);
+    let inverse_dim = vec![1.0 / MODEL as f32; SEQUENCE];
+    let wq = random_vec(2, MODEL * MODEL);
+    let wk = random_vec(3, MODEL * MODEL);
+    let wv = random_vec(4, MODEL * MODEL);
+    let blocks: [&[f32]; 5] = [&activations, &inverse_dim, &wq, &wk, &wv];
+
+    let cpu = evaluate(&program, &symbols, &blocks, &[]).expect("cpu attention block evaluates");
+    let metal = omega::execute(&program, &symbols, &blocks, &[])
+        .expect("metal attention block executes on a real device");
+
+    // With uniform inputs every row collapsed and the diff floored at 0e0.
+    // Varied inputs push a real number through rmsnorm -> 3 matmuls -> softmax
+    // -> matmul, so GPU-vs-CPU reduction order legitimately accumulates more
+    // float error than the 1e-6 default; observed max abs diff was ~4.3e-6.
+    assert_parity_within("attention_block", cpu.root(), metal.root(), 1e-5);
 }
 
 /// `b = a * scale; c = b + bias; d = c * c` — a multi-operand
