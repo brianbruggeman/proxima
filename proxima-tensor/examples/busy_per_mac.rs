@@ -5,16 +5,21 @@
 //! `sweep_gemm.rs` so the checksum lines up with that harness's reference
 //! values (512 -> 135.87619, 1024 -> 260.24106, 2048 -> 513.10425).
 //!
-//! `busy_ns` is total CPU time spent inside the compute kernel, summed across
-//! every OS thread that ran a chunk this iteration — not wall-clock. At
-//! `threads=1` `BoundOp::split_aligned(1, _)` returns `None` (a single chunk
-//! is not worth wrapping in `thread::scope`), so dispatch takes the direct
-//! sequential arm and there is no per-worker busy sample to sum; `busy_ns`
-//! falls back to `serial_sequential_compute_nanos`, the same wall-clock
-//! region under a different name. `busy_per_mac = busy_ns / mac_ops` is
-//! deliberately CPU-time, not wall-time — it isolates kernel-level cost per
-//! unit of work from parallel-dispatch overhead (imbalance, spawn/join),
-//! which is why it can be compared directly across thread counts.
+//! `busy_ns` is time spent inside the compute kernel, summed across every OS
+//! thread that ran a chunk this iteration. It is `Instant`-derived, so it
+//! keeps accruing while a worker is descheduled — it is NOT CPU time, and
+//! this doc claimed it was until 2026-08-18. `cpu_ns` is the same measurement
+//! on the thread CPU clock, which stops when the thread does. Compare across
+//! thread counts using `cpu_per_mac`; read `host_steal` (`busy_ns / cpu_ns`)
+//! first, because anything above ~1.02 means the host was competing for cores
+//! and the wall-derived columns are reporting the box, not the kernel.
+//!
+//! At `threads=1` `BoundOp::split_aligned(1, _)` returns `None` (a single
+//! chunk is not worth wrapping in `thread::scope`), so dispatch takes the
+//! direct sequential arm and there is no per-worker sample to sum; both
+//! `busy_ns` and `cpu_ns` fall back to `serial_sequential_compute_nanos`,
+//! a wall-clock region — so `host_steal` reads exactly 1.000 at one thread
+//! by construction, not by measurement.
 
 use std::env;
 use std::num::NonZeroUsize;
@@ -120,6 +125,7 @@ fn main() {
         instrument::reset_parallel();
         instrument::reset_serial();
         instrument::reset_worker_busy();
+        instrument::reset_worker_cpu();
 
         let wall_start = Instant::now();
         let evaluated =
@@ -143,11 +149,24 @@ fn main() {
         };
         let busy_per_mac = busy_ns as f64 / totals.mac_ops.max(1) as f64;
 
+        // busy_ns is Instant-derived and keeps running while a worker is
+        // descheduled; cpu_ns does not. carry both — busy/cpu is this run's
+        // own report of how much the host stole.
+        let cpu_samples = instrument::worker_cpu_snapshot();
+        let cpu_ns: u64 = if cpu_samples.is_empty() {
+            serial.sequential_compute_nanos
+        } else {
+            cpu_samples.iter().sum()
+        };
+        let cpu_per_mac = cpu_ns as f64 / totals.mac_ops.max(1) as f64;
+        let host_steal = busy_ns as f64 / cpu_ns.max(1) as f64;
+
         println!(
             "size={size} threads={threads} iter={iter} checksum={checksum:.5} wall_ns={wall_ns} \
              mac_ops={} operand_loads={} busy_workers={busy_workers} busy_ns={busy_ns} \
              busy_min_ns={busy_min} busy_max_ns={busy_max} busy_mean_ns={busy_mean:.1} \
              busy_stddev_ns={busy_stddev:.1} busy_per_mac={busy_per_mac:.6} \
+             cpu_ns={cpu_ns} cpu_per_mac={cpu_per_mac:.6} host_steal={host_steal:.4} \
              serial_sequential_compute_ns={}",
             totals.mac_ops, totals.operand_loads, serial.sequential_compute_nanos,
         );

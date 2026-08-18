@@ -132,6 +132,66 @@ pub fn reset_worker_busy() {
     totals.clear();
 }
 
+// the busy total above is `Instant`-derived, so a worker the OS descheduled
+// keeps accruing "busy" nanos while off-core. on a box carrying any ambient
+// load that turns the 1->8 scaling read into a measurement of the host: a
+// register-only fma control (zero memory traffic, so no scaling effect is
+// even possible) measured +41.2% wall growth 1->8 against +6.8% cpu growth,
+// n=9, 2026-08-18. every 1->8 figure taken before this existed used the wall
+// form and is not separable from that. the cpu clock below is the same
+// measurement against a clock that stops when the thread does; carry BOTH,
+// because their ratio is the only in-band report of how much the host
+// interfered with the run.
+static WORKER_CPU_NANOS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
+
+#[repr(C)]
+struct Timespec {
+    seconds: i64,
+    nanos: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime(clock_id: i32, out: *mut Timespec) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
+#[cfg(not(target_os = "macos"))]
+const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+
+/// This thread's consumed CPU time. Unlike an [`Instant`](std::time::Instant)
+/// delta, this does not advance while the thread is off-core.
+#[must_use]
+pub fn thread_cpu_nanos() -> u64 {
+    let mut now = Timespec { seconds: 0, nanos: 0 };
+    if unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut now) } != 0 {
+        return 0;
+    }
+    (now.seconds as u64) * 1_000_000_000 + (now.nanos as u64)
+}
+
+/// Adds `nanos` of consumed CPU time to the current thread's running total,
+/// the deschedule-immune peer of [`record_worker_busy_nanos`].
+pub fn record_worker_cpu_nanos(nanos: u64) {
+    let thread_id = std::thread::current().id();
+    let mut totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    match totals.iter_mut().find(|(existing, _)| *existing == thread_id) {
+        Some((_, total)) => *total += nanos,
+        None => totals.push((thread_id, nanos)),
+    }
+}
+
+#[must_use]
+pub fn worker_cpu_snapshot() -> Vec<u64> {
+    let totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    totals.iter().map(|(_, nanos)| *nanos).collect()
+}
+
+pub fn reset_worker_cpu() {
+    let mut totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    totals.clear();
+}
+
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part
 // that is NOT inside `run_chunks_threaded`'s `thread::scope` (which
 // `PARALLEL_NODE_NANOS` above already measures, now scoped to start right
