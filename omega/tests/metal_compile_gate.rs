@@ -142,7 +142,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
             axes: vec![
                 map::AxisIndex::default(),
                 map::AxisIndex {
-                    terms: vec![AxisTerm::projection(1)],
+                    terms: vec![AxisTerm::projection(1)].into(),
                     offset: 0,
                 },
             ],
@@ -198,7 +198,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
             axes: vec![
                 map::AxisIndex::default(),
                 map::AxisIndex {
-                    terms: vec![AxisTerm::projection(2)],
+                    terms: vec![AxisTerm::projection(2)].into(),
                     offset: 0,
                 },
             ],

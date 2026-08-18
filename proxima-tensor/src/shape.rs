@@ -879,7 +879,7 @@ mod tests {
                 axes: alloc::vec![
                     map::AxisIndex::default(),
                     map::AxisIndex {
-                        terms: alloc::vec![AxisTerm::projection(1)],
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
                     },
                 ],

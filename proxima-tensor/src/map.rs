@@ -25,7 +25,17 @@
 
 use alloc::vec::Vec;
 
+use smallvec::SmallVec;
+
 use crate::op::NodeId;
+
+/// Inline capacity for one axis's term list. Every axis this crate builds
+/// today has 1 term (a plain projection) or 2 (convolution's `stride +
+/// dilation`, the doc table above) — no construction site anywhere in the
+/// crate ever exceeds 2. `SmallVec` spills past this on a wider pattern
+/// instead of truncating it, so a caller that legitimately needs more still
+/// gets a correct (just heap-backed) result.
+pub const MAX_INLINE_TERMS: usize = 2;
 
 /// One `coeff * iter[axis]` contribution to an operand index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +61,7 @@ impl AxisTerm {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct AxisIndex {
-    pub terms: Vec<AxisTerm>,
+    pub terms: SmallVec<[AxisTerm; MAX_INLINE_TERMS]>,
     pub offset: i32,
 }
 
@@ -140,7 +150,7 @@ pub fn projection(iter_rank: u16, projected: &[u16]) -> IndexPattern {
     let axes = projected
         .iter()
         .map(|axis| AxisIndex {
-            terms: alloc::vec![AxisTerm::projection(*axis)],
+            terms: core::iter::once(AxisTerm::projection(*axis)).collect(),
             offset: 0,
         })
         .collect();
@@ -155,7 +165,7 @@ pub fn affine(iter_rank: u16, axes: &[(&[AxisTerm], i32)]) -> IndexPattern {
     let axes = axes
         .iter()
         .map(|(terms, offset)| AxisIndex {
-            terms: terms.to_vec(),
+            terms: terms.iter().copied().collect(),
             offset: *offset,
         })
         .collect();
@@ -179,7 +189,7 @@ mod tests {
         let base = IndexPattern {
             iter_rank: 2,
             axes: alloc::vec![AxisIndex {
-                terms: alloc::vec![AxisTerm::projection(0)],
+                terms: core::iter::once(AxisTerm::projection(0)).collect(),
                 offset: 0,
             }],
         };
