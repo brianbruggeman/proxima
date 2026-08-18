@@ -349,7 +349,7 @@ fn build_base_pattern(rank: u16, projected: &[u16], gathered_dim: u16) -> IndexP
     let mut axes: Vec<AxisIndex> = projected
         .iter()
         .map(|axis| AxisIndex {
-            terms: alloc::vec![AxisTerm::projection(*axis)],
+            terms: core::iter::once(AxisTerm::projection(*axis)).collect(),
             offset: 0,
         })
         .collect();
@@ -517,7 +517,7 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
                 axes: alloc::vec![
                     AxisIndex::default(),
                     AxisIndex {
-                        terms: alloc::vec![AxisTerm::projection(1)],
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
                     },
                 ],

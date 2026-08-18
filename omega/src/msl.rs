@@ -1056,7 +1056,7 @@ mod tests {
                 axes: vec![
                     map::AxisIndex::default(),
                     map::AxisIndex {
-                        terms: vec![AxisTerm::projection(1)],
+                        terms: vec![AxisTerm::projection(1)].into(),
                         offset: 0,
                     },
                 ],

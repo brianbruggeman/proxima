@@ -3559,7 +3559,7 @@ mod tests {
                 axes: alloc::vec![
                     map::AxisIndex::default(),
                     map::AxisIndex {
-                        terms: alloc::vec![AxisTerm::projection(1)],
+                        terms: alloc::vec![AxisTerm::projection(1)].into(),
                         offset: 0,
                     },
                 ],
@@ -3601,7 +3601,7 @@ mod tests {
                 axes: alloc::vec![
                     map::AxisIndex::default(),
                     map::AxisIndex {
-                        terms: alloc::vec![AxisTerm::projection(2)],
+                        terms: alloc::vec![AxisTerm::projection(2)].into(),
                         offset: 0,
                     },
                 ],
