@@ -215,7 +215,7 @@ pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
 };
 #[cfg(feature = "std")]
-pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel};
+pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel, evaluate_with_scratch};
 pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;
