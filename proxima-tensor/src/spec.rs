@@ -710,4 +710,64 @@ shape = ["seq"]
             TensorError::MalformedExtent(_)
         ));
     }
+
+    /// The claim "a new architecture is a config file, not a PR" is only
+    /// worth anything if a real architecture fits. A single-head attention
+    /// block with RMSNorm and a full softmax does, and this checks it
+    /// evaluates rather than merely parses — a spec that lowers and then
+    /// produces garbage is still a PR waiting to happen.
+    ///
+    /// The softmax rows are the assertion that matters: finite output only
+    /// proves the pipeline ran, whereas rows summing to one prove it computed
+    /// attention. What the grammar still cannot spell is recorded in the spec
+    /// file itself (rope's multi-term affine, and a mask, which would need an
+    /// index-derived tensor no `Op` produces).
+    #[test]
+    fn an_attention_block_written_as_toml_evaluates() {
+        const SEQUENCE: usize = 4;
+        const MODEL: usize = 8;
+
+        let text = include_str!("../specs/attention_block.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the block infers");
+
+        let weights = alloc::vec![0.125f32; MODEL * MODEL];
+        let activations = alloc::vec![0.5f32; SEQUENCE * MODEL];
+        let inverse_dim = alloc::vec![1.0 / MODEL as f32; SEQUENCE];
+        let blocks: [&[f32]; 5] = [
+            &activations,
+            &inverse_dim,
+            &weights,
+            &weights,
+            &weights,
+        ];
+
+        let probabilities = spec
+            .node
+            .iter()
+            .position(|node| node.id() == "probabilities")
+            .expect("the spec defines a probabilities node");
+        let probabilities = NodeId(probabilities as u32);
+        let root = NodeId(program.len() as u32 - 1);
+
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root, probabilities], workers)
+                .expect("the block evaluates");
+
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * MODEL, "a vacuous output proves nothing");
+        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+
+        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        assert_eq!(rows.len(), SEQUENCE * SEQUENCE);
+        for row in rows.chunks_exact(SEQUENCE) {
+            let total: f32 = row.iter().sum();
+            assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
+        }
+    }
 }
