@@ -721,12 +721,16 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
                 scope.spawn(move || {
                     #[cfg(feature = "instrument")]
                     let chunk_start = Instant::now();
+                    #[cfg(feature = "instrument")]
+                    let cpu_start = instrument::thread_cpu_nanos();
                     let outcome = run_node_into(chunk, buffers, slice);
                     #[cfg(feature = "instrument")]
                     {
                         let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
+                        let cpu_nanos = instrument::thread_cpu_nanos() - cpu_start;
                         instrument::record_chunk_nanos(chunk_nanos);
                         instrument::record_worker_busy_nanos(chunk_nanos);
+                        instrument::record_worker_cpu_nanos(cpu_nanos);
                     }
                     outcome
                 })
@@ -1011,12 +1015,16 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
 
         #[cfg(feature = "instrument")]
         let chunk_start = Instant::now();
+        #[cfg(feature = "instrument")]
+        let cpu_start = instrument::thread_cpu_nanos();
         let outcome = run_node_into(chunk, chunk_buffers, chunk_output);
         #[cfg(feature = "instrument")]
         {
             let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
+            let cpu_nanos = instrument::thread_cpu_nanos() - cpu_start;
             instrument::record_chunk_nanos(chunk_nanos);
             instrument::record_worker_busy_nanos(chunk_nanos);
+            instrument::record_worker_cpu_nanos(cpu_nanos);
         }
 
         let _ = sender.send((index, outcome));
