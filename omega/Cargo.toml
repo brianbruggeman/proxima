@@ -10,7 +10,12 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std"]
+# `metal` is default because the objc2 deps live in a macOS target section, so
+# a non-darwin build never resolves them. It was default-off, which meant the
+# 13 `metal_parity` cases compiled to zero on an ordinary test run — and
+# nextest's "0 skipped" reads exactly like "everything passed". They sat
+# broken and uncompiled behind that flag.
+default = ["std", "metal"]
 std = ["alloc", "thiserror/std"]
 alloc = []
 # Runtime Metal execution driver (src/metal.rs, macOS-only via
@@ -27,6 +32,10 @@ metal = [
 ]
 
 [dependencies]
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+thiserror = { workspace = true, default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
 # call below goes through. Already in the workspace's transitive graph via
 # objc2-core-foundation/objc2-system-configuration — this stays in-family
@@ -60,8 +69,6 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSError",
     "NSObject",
 ], optional = true }
-proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
-thiserror = { workspace = true, default-features = false }
 
 [lints]
 workspace = true
