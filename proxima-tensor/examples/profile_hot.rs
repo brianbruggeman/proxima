@@ -251,7 +251,7 @@ fn main() {
     println!("gemm {m}x{k}x{n}: {:.3}s", elapsed.as_secs_f64());
     println!("root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
     println!("allocations during evaluate(): {}", alloc_after - alloc_before);
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
         let (gate_passes, invocations, fallback_elements) = proxima_tensor::cpu::width_tile_counters();
         println!(
@@ -290,7 +290,7 @@ fn main() {
             evaluated.root()[0],
             evaluated.root().len()
         );
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
         {
             let (gate_passes, invocations, fallback_elements) = proxima_tensor::cpu::neon_tile_counters();
             println!(

@@ -105,9 +105,9 @@ fn check_size(size: usize) {
     let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
     let b_transposed: Vec<f32> = (0..n * k).map(|index| (index as f32 * 0.0271).cos()).collect();
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::neon_tile_counters();
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let row_remainder_elements_before = proxima_tensor::cpu::neon_tile_row_remainder_elements();
 
     let (program, _sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
@@ -166,7 +166,7 @@ fn check_size(size: usize) {
          ({max_absolute_error_bound:e}) at worst_absolute_index={worst_absolute_index}"
     );
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
         let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
         let row_remainder_elements_after = proxima_tensor::cpu::neon_tile_row_remainder_elements();

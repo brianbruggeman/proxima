@@ -60,7 +60,7 @@ use core::arch::aarch64::{
 use core::cell::RefCell;
 use core::future::Future;
 use core::num::NonZeroUsize;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::panic;
 use std::thread;
@@ -1041,8 +1041,15 @@ fn run_reduce(
     #[cfg(target_arch = "aarch64")]
     let mut main_loop_start = tiled_leading_rows;
 
+    // accumulated locally across the whole bound op and committed once
+    // below, never as a per-element atomic inside the tiled loops — a
+    // per-element atomic would perturb the throughput it exists to measure.
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let mut neon_tile_fallback_elements = 0u64;
+
     #[cfg(target_arch = "aarch64")]
     if let Some(plan) = &tile_plan {
+        #[cfg(feature = "instrument")]
         NEON_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
         let leading_axis = leading_output_axes[0] as usize;
         let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
@@ -1089,9 +1096,9 @@ fn run_reduce(
                         &mut tile_out,
                     );
                 }
-                NEON_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
                 #[cfg(feature = "instrument")]
                 {
+                    NEON_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
                     counters.kernel_calls += 1;
                     counters.mac_ops += (TILE_ROWS * TILE_COLS) as u64 * reduction_total;
                     counters.operand_loads += (TILE_ROWS + TILE_COLS) as u64 * reduction_total;
@@ -1120,9 +1127,9 @@ fn run_reduce(
                     for n in tiled_width_cols..width {
                         let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
                         output[(out_prefix + out_stride * n as i64) as usize] = value;
-                        NEON_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
                         #[cfg(feature = "instrument")]
                         {
+                            neon_tile_fallback_elements += 1;
                             counters.kernel_calls += 1;
                             counters.mac_ops += reduction_total;
                             for &operand_stride in &reduction_strides {
@@ -1199,10 +1206,10 @@ fn run_reduce(
                             &mut tile_out,
                         );
                     }
-                    NEON_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
-                    NEON_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(($rows * TILE_COLS) as u64, Ordering::Relaxed);
                     #[cfg(feature = "instrument")]
                     {
+                        NEON_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+                        NEON_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(($rows * TILE_COLS) as u64, Ordering::Relaxed);
                         counters.kernel_calls += 1;
                         counters.mac_ops += ($rows * TILE_COLS) as u64 * reduction_total;
                         counters.operand_loads += ($rows + TILE_COLS) as u64 * reduction_total;
@@ -1231,9 +1238,9 @@ fn run_reduce(
                         for n in tiled_width_cols..width {
                             let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
                             output[(out_prefix + out_stride * n as i64) as usize] = value;
-                            NEON_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
                             #[cfg(feature = "instrument")]
                             {
+                                neon_tile_fallback_elements += 1;
                                 counters.kernel_calls += 1;
                                 counters.mac_ops += reduction_total;
                                 for &operand_stride in &reduction_strides {
@@ -1295,9 +1302,9 @@ fn run_reduce(
             };
             for slot in &mut accumulator {
                 *slot = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
-                #[cfg(target_arch = "aarch64")]
+                #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
                 if tile_plan.is_some() {
-                    NEON_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+                    neon_tile_fallback_elements += 1;
                 }
                 #[cfg(feature = "instrument")]
                 {
@@ -1388,6 +1395,8 @@ fn run_reduce(
         let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
         counters.commit(path, distinct_operand_elements);
     }
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    NEON_TILE_FALLBACK_ELEMENTS.fetch_add(neon_tile_fallback_elements, Ordering::Relaxed);
     Ok(())
 }
 
@@ -1967,17 +1976,17 @@ const WIDTH_TILE_VECS: usize = 4;
 /// account for: `invocations * (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) +
 /// fallback_elements == leading_total * width` for any shape, not only
 /// multiples of the tile.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_GATE_PASSES: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_FALLBACK_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 
 /// Snapshot of the three [`WIDTH_TILE_GATE_PASSES`]-family counters:
 /// (gate passes, tile invocations, fallback elements) — the width tile's
 /// counterpart to [`neon_tile_counters`].
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 pub fn width_tile_counters() -> (u64, u64, u64) {
     (
         WIDTH_TILE_GATE_PASSES.load(Ordering::Relaxed),
@@ -2178,7 +2187,13 @@ fn width_tile_scalar_cell(a: TileOperandA, b: TileOperandB, k: usize, seed: f32)
 /// accounting for the dot-path tile).
 #[cfg(target_arch = "aarch64")]
 fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32]) {
+    #[cfg(feature = "instrument")]
     WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
+
+    // accumulated locally across the whole tile walk and committed once at
+    // the end, never as a per-element atomic inside the fallback loops.
+    #[cfg(feature = "instrument")]
+    let mut width_tile_fallback_elements = 0u64;
 
     let data_a = raw[plan.a_operand];
     let data_b = raw[plan.b_operand];
@@ -2208,6 +2223,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
                     &mut tile_out,
                 );
             }
+            #[cfg(feature = "instrument")]
             WIDTH_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
 
             for (i, row) in tile_out.iter().enumerate() {
@@ -2237,7 +2253,10 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
                 );
                 let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
                 output[position as usize] = value;
-                WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "instrument")]
+                {
+                    width_tile_fallback_elements += 1;
+                }
             }
         }
     }
@@ -2260,9 +2279,15 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
             );
             let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
             output[position as usize] = value;
-            WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "instrument")]
+            {
+                width_tile_fallback_elements += 1;
+            }
         }
     }
+
+    #[cfg(feature = "instrument")]
+    WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(width_tile_fallback_elements, Ordering::Relaxed);
 }
 
 /// `run_reduce`'s single entry point into the width tile: resolves the gate
@@ -2401,16 +2426,16 @@ struct NeonTilePlan {
 /// leftovers past the last full `TILE_ROWS`x`TILE_COLS` block). Plain
 /// process-wide counters, not a telemetry event, because the only consumer
 /// is `profile_hot`'s one-shot report.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static NEON_TILE_GATE_PASSES: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static NEON_TILE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static NEON_TILE_FALLBACK_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 /// Row-remainder tile invocations (any width `1..=5`), tracked apart from
 /// [`NEON_TILE_INVOCATIONS`] since remainder tiles compute a different,
 /// width-dependent number of outputs per call than the fixed-24 main tile.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static NEON_TILE_ROW_REMAINDER_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 /// Output elements actually covered by row-remainder tiles, summed across
 /// every width `1..=5` a run may exercise — `rows * TILE_COLS` added per
@@ -2418,12 +2443,12 @@ static NEON_TILE_ROW_REMAINDER_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 /// counts calls, this is directly usable in the coverage identity
 /// (`main_invocations * 24 + row_remainder_elements + fallback == m*n`)
 /// without knowing which width(s) fired.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static NEON_TILE_ROW_REMAINDER_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 
 /// Snapshot of the three [`NEON_TILE_GATE_PASSES`]-family counters for the
 /// main 6x4 tile: (gate passes, tile invocations, fallback elements).
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 pub fn neon_tile_counters() -> (u64, u64, u64) {
     (
         NEON_TILE_GATE_PASSES.load(Ordering::Relaxed),
@@ -2435,7 +2460,7 @@ pub fn neon_tile_counters() -> (u64, u64, u64) {
 /// [`NEON_TILE_ROW_REMAINDER_INVOCATIONS`] snapshot — the row-remainder
 /// tiles' own invocation count (any width `1..=5`), separate from the main
 /// 6x4 tile's.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 pub fn neon_tile_row_remainder_invocations() -> u64 {
     NEON_TILE_ROW_REMAINDER_INVOCATIONS.load(Ordering::Relaxed)
 }
@@ -2443,7 +2468,7 @@ pub fn neon_tile_row_remainder_invocations() -> u64 {
 /// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`] snapshot — output elements covered
 /// by row-remainder tiles of any width, for the `main*24 + row_remainder +
 /// fallback == m*n` coverage identity.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 pub fn neon_tile_row_remainder_elements() -> u64 {
     NEON_TILE_ROW_REMAINDER_ELEMENTS.load(Ordering::Relaxed)
 }

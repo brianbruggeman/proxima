@@ -136,7 +136,7 @@ fn report_worker_sweep(label: &str, program: &[Op], lhs: &[f32], rhs_t: &[f32]) 
 
     println!("=== {label}: worker sweep (evaluate_parallel) ===");
     let mut workers_one_median = None;
-    for workers in [1usize, 2, 3, 4, 6, 8] {
+    for workers in [1usize, 2, 4, 8, 16] {
         let samples = time_evaluate_parallel(program, lhs, rhs_t, workers, 3);
         for (index, sample) in samples.iter().enumerate() {
             println!(
@@ -198,7 +198,7 @@ fn report_chunk_distribution(m: u32, k: u32, n: u32) {
     println!("  min={min} max={max} spread={}", max - min);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 fn report_tile_fallback(m: u32, k: u32, n: u32) {
     println!("\n=== NEON tile counters (gate passes, invocations, fallback elements): {m}x{k}x{n} ===");
     let (program, _sum) = matmul_program_rhs_transposed(m, k, n);
@@ -233,14 +233,17 @@ fn report_tile_fallback(m: u32, k: u32, n: u32) {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(all(target_arch = "aarch64", feature = "instrument")))]
 fn report_tile_fallback(_m: u32, _k: u32, _n: u32) {
-    println!("\n=== NEON tile counters: skipped, not aarch64 ===");
+    println!("\n=== NEON tile counters: skipped, requires aarch64 + instrument feature ===");
 }
 
 fn main() {
-    // sizing-only run for the row-remainder verification pass: the full
-    // worker sweep (including 2048^3) is orthogonal to what this run needs
-    // and would burn most of the wall-clock ceiling on unrelated timing.
+    let (m, k, n) = (1024u32, 1024u32, 1024u32);
+    let (program, _sum) = matmul_program_rhs_transposed(m, k, n);
+    let lhs: Vec<f32> = (0..(m * k)).map(|value| (value % 13) as f32).collect();
+    let rhs: Vec<f32> = (0..(k * n)).map(|value| (value % 7) as f32).collect();
+    let rhs_t = transpose(&rhs, k as usize, n as usize);
+    report_worker_sweep("gemm_1024x1024x1024", &program, &lhs, &rhs_t);
     report_tile_fallback(1024, 1024, 1024);
 }

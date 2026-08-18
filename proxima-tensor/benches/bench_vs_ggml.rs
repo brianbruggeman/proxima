@@ -822,14 +822,14 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
                     black_box(());
                 })
             });
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             let tile_counters_before = proxima_tensor::cpu::neon_tile_counters();
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             let row_remainder_before = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
             c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate"), |b| {
                 b.iter(|| black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap()))
             });
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             {
                 let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
                 let (gate_before, invocations_before, fallback_before) = tile_counters_before;
@@ -843,9 +843,9 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
                     fallback_after - fallback_before
                 );
             }
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             let tile_counters_before_parallel = proxima_tensor::cpu::neon_tile_counters();
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             let row_remainder_before_parallel = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
             c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate_parallel_w8"), |b| {
                 b.iter(|| {
@@ -854,7 +854,7 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
                     )
                 })
             });
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             {
                 let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
                 let (gate_before, invocations_before, fallback_before) = tile_counters_before_parallel;
