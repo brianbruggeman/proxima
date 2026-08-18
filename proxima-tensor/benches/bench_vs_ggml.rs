@@ -826,22 +826,9 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
             let tile_counters_before = proxima_tensor::cpu::neon_tile_counters();
             #[cfg(target_arch = "aarch64")]
             let row_remainder_before = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
-            if size <= 1024 {
-                c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate"), |b| {
-                    b.iter(|| black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap()))
-                });
-            } else {
-                println!(
-                    "row F size={size}: proxima single-threaded `evaluate` SKIPPED under the \
-                     90-minute measurement budget. The 1024^3 case (see row_f_proxima_gemm_1024_evaluate \
-                     above) already measured ~5s/call single-threaded; 2048^3 is 8x the FLOPs of \
-                     1024^3, so 10 samples would cost several minutes on top of everything else \
-                     still queued. evaluate_parallel and ggml both ran to completion at every \
-                     size including this one — only the single-threaded proxima arm at the \
-                     largest size is missing, and it is missing because of budget, not because \
-                     it could not run."
-                );
-            }
+            c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate"), |b| {
+                b.iter(|| black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap()))
+            });
             #[cfg(target_arch = "aarch64")]
             {
                 let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
