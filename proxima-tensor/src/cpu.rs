@@ -161,6 +161,17 @@ impl Evaluated {
     pub const fn peak_live_buffers(&self) -> Option<usize> {
         self.peak_live_buffers
     }
+
+    /// Surrenders every result's storage into `scratch` instead of letting
+    /// it drop, so a caller done reading this result can hand the same
+    /// memory to [`evaluate_with_scratch`]'s next call — the counterpart to
+    /// that function's pool, letting a caller that already called it once
+    /// avoid that function's per-call output allocation on every call after
+    /// the first. A caller that never calls this just lets `Evaluated` drop
+    /// normally, exactly as today.
+    pub fn into_scratch(self, scratch: &mut Vec<Vec<f32>>) {
+        scratch.extend(self.results.into_iter().map(|(_, _, data)| data));
+    }
 }
 
 /// Everything [`evaluate`] and [`evaluate_parallel`] must agree on before
@@ -300,12 +311,68 @@ fn finish(
 /// evaluator would instead resolve blocks by
 /// [`name`](Op::name). `outputs` selects which nodes to return data for;
 /// an empty slice means the root (the program's last expression) only.
+///
+/// Every call starts and ends with an empty reuse pool — see
+/// [`evaluate_with_scratch`] for the same contract with a caller-carried
+/// pool that survives across calls.
 pub fn evaluate(
     program: &[Op],
     symbols: &[u64],
     blocks: &[&[f32]],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
+    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    evaluate_pooled(program, symbols, blocks, outputs, &mut free_buffers)
+}
+
+/// Same contract as [`evaluate`], plus one capability a caller cannot get
+/// from that function: `scratch` seeds this run's buffer-reuse pool instead
+/// of starting it empty, and receives back whatever the pool held once the
+/// run finished — most usefully, whatever a prior call's
+/// [`Evaluated::into_scratch`] deposited into it. A caller that runs the
+/// same program (or same-shaped programs) repeatedly and feeds each
+/// result's storage back through `into_scratch` skips `evaluate`'s per-call
+/// output allocation on every call after the first, without this crate ever
+/// exposing an allocator or a persistent handle — the caller still decides
+/// `scratch`'s lifetime, this function only ever borrows it. `evaluate`
+/// itself is exactly this function with `scratch` starting, and ending,
+/// empty.
+pub fn evaluate_with_scratch(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[&[f32]],
+    outputs: &[NodeId],
+    scratch: &mut Vec<Vec<f32>>,
+) -> Result<Evaluated, TensorError> {
+    evaluate_pooled(program, symbols, blocks, outputs, scratch)
+}
+
+/// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only
+/// difference between the two public entry points is whether `free_buffers`
+/// arrives pre-seeded and is read back by the caller afterward, so that
+/// decision is made once, here, by each caller passing its own `Vec` (fresh
+/// and discarded, or threaded through `scratch`) rather than by two
+/// divergent copies of this loop.
+///
+/// Drives [`run_node_into`] directly, one node per iteration, rather than
+/// through [`Interpreter::fold`]: `Interpreter` exposes no way to hand a
+/// node its output storage from a pool instead of a fresh `vec![0.0; n]`
+/// (its `Pipe::Out = ()` contract has no room for one), so reusing the same
+/// execution primitive both callers already share (`run_node_into`, also
+/// `evaluate_parallel`'s) is what keeps this a single behavior rather than a
+/// second copy of the per-node dispatch match. `Interpreter` remains exactly
+/// as it was for its own callers (the `shapes.and_then(builder)
+/// .and_then(Interpreter::new(..))` `Pipe` chain a test in this module
+/// exercises directly) — this function simply no longer routes through it.
+fn evaluate_pooled(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[&[f32]],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+) -> Result<Evaluated, TensorError> {
+    #[cfg(feature = "instrument")]
+    let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
     let Prepared {
         root,
         shapes,
@@ -314,27 +381,70 @@ pub fn evaluate(
         resolved,
         retires,
     } = prepare(program, symbols, blocks, outputs)?;
+    #[cfg(feature = "instrument")]
+    drop(alloc_site_guard);
 
-    // Drives the same fold `Interpreter::call` implements — one `BoundOp`
-    // per iteration, as a borrowed one-element slice (`core::slice::from_ref`,
-    // no allocation) — rather than reimplementing it via `run_node` directly,
-    // so there is one execution path for a resolved node, not two.
-    // `Interpreter::new` re-borrows `buffers` fresh each iteration: its
-    // exclusive borrow ends (NLL) once `fold` returns, freeing `buffers`
-    // back up for this loop's own retirement write below — a persistent
-    // `Interpreter` held across the whole loop cannot coexist with that
-    // write, since `Interpreter` exposes no `retire`/clear accessor, only
-    // `get`. `fold` is synchronous, so no `block_on` is needed here at all.
     let mut peak_live_buffers = live_count(&buffers);
     for (position, computed) in resolved.iter().enumerate() {
-        Interpreter::new(&mut buffers).fold(core::slice::from_ref(computed))?;
+        #[cfg(feature = "instrument")]
+        let alloc_site_guard =
+            instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
+        let mut output = take_or_allocate(free_buffers, node_output_len(computed));
+        #[cfg(feature = "instrument")]
+        drop(alloc_site_guard);
+        run_node_into(computed, &buffers, &mut output)?;
+        buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         for retired in &retires[position] {
-            buffers[retired.0 as usize] = None;
+            retire_into(&mut buffers, *retired, free_buffers);
         }
     }
 
     Ok(finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers))
+}
+
+/// Takes the buffer at `node`'s slot (leaving `None` behind, exactly as
+/// before buffer reuse existed) and, if it was this evaluator's own owned
+/// storage rather than a caller-borrowed [`Op::Input`] slice, stashes it in
+/// `pool` for [`take_or_allocate`] to hand to a later node instead of the
+/// allocator. Sound because this only ever runs after the position that
+/// retired `node` has already finished reading every one of its operands
+/// (`node_retirement` records a node's *last* read position, and the caller
+/// only retires after `run_node_into` for that position has returned) — the
+/// buffer is out of `buffers` and not yet read by anything else before it
+/// lands in `pool`, so no live reference to it survives the swap.
+fn retire_into(buffers: &mut [Option<Cow<'_, [f32]>>], node: NodeId, pool: &mut Vec<Vec<f32>>) {
+    if let Some(Cow::Owned(buffer)) = buffers[node.0 as usize].take() {
+        pool.push(buffer);
+    }
+}
+
+/// Hands out `required` elements of storage from `pool` when a sufficiently
+/// large entry exists, or allocates fresh otherwise — the one place
+/// [`evaluate_pooled`] gets a node's output buffer from. Every element
+/// [`run_node_into`]'s callers write is unconditionally overwritten before
+/// any node reads it back (`run_elementwise`, `run_reduce`'s NEON/tile/
+/// fallback paths, and `run_scan` each write every output position once),
+/// so a reused buffer's stale contents never leak into a result;
+/// `Vec::resize`'s growth path only fires, and only fills the delta, when
+/// `pool` had nothing big enough already, so the fill this replaces shrinks
+/// to zero once `pool` reaches its working set's high-water mark.
+fn take_or_allocate(pool: &mut Vec<Vec<f32>>, required: usize) -> Vec<f32> {
+    let best_fit = pool
+        .iter()
+        .enumerate()
+        .filter(|(_, buffer)| buffer.capacity() >= required)
+        .min_by_key(|(_, buffer)| buffer.capacity())
+        .map(|(index, _)| index);
+
+    match best_fit {
+        Some(index) => {
+            let mut buffer = pool.swap_remove(index);
+            buffer.resize(required, 0.0);
+            buffer
+        }
+        None => vec![0.0f32; required],
+    }
 }
 
 /// Below this many iteration-space elements, a nest runs the plain
@@ -1098,9 +1208,10 @@ fn initial_value(init: ReduceInit) -> Option<f32> {
     }
 }
 
-// production callers now drive every node through `Interpreter::call` (see
-// `evaluate`), so this allocate-and-run wrapper only remains for tests that
-// want a whole node's output as a `Vec` to compare against hand-run chunks.
+// `evaluate`/`evaluate_parallel` both drive `run_node_into` directly (see
+// `evaluate_pooled`'s doc for why), so this allocate-and-run wrapper only
+// remains for tests that want a whole node's output as a `Vec` to compare
+// against hand-run chunks.
 #[cfg(test)]
 fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
@@ -1530,11 +1641,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         Path::Generic
     };
 
-    // hoisted: one allocation per bound op, not one per output row. At
-    // 1024^3 the inner form cost 1024 allocations per GEMM inside the loop
-    // it measures.
     let seed = initial_value(*init).unwrap_or(0.0);
-    let mut accumulator = vec![seed; width];
     let leading_total = odometer_len(&leading_extents);
 
     // Ported from `width-wt`: the `[k,n]`-layout twin of the dot-path tile
@@ -1899,115 +2006,126 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     #[cfg(not(target_arch = "aarch64"))]
     let main_loop_start = 0u64;
 
-    for leading_flat in main_loop_start..leading_total {
-        unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
-        accumulator.fill(seed);
-        let mut seeded = !matches!(init, ReduceInit::FirstElement);
+    // guards both the loop AND the allocation below it: a bound op the
+    // width-tile or NEON-tile path fully covers leaves `main_loop_start ==
+    // leading_total` (measured: the 1024^3 contiguous GEMM never reaches
+    // this branch at all), and this fallback loop's own accumulator —
+    // hoisted once per bound op rather than once per output row, same
+    // reasoning as `output`'s own hoist above — has nothing to do in that
+    // case; allocating it anyway would pay for storage this loop then never
+    // touches.
+    if main_loop_start < leading_total {
+        let mut accumulator = vec![seed; width];
+        for leading_flat in main_loop_start..leading_total {
+            unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
+            accumulator.fill(seed);
+            let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
-        if reduction_fast_path {
-            // Fold along `k` (contiguous on every operand read here) instead
-            // of accumulating across the width dim `n` — one full contraction
-            // per output position, in the same k=0..K sequential order the
-            // generic loop below would visit, so results stay bit-identical.
-            merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
-            full_coordinate[reduction_dims[0] as usize] = 0;
-            if let Some(dim) = last_output_dim {
-                full_coordinate[dim as usize] = 0;
-            }
-            fill_running_offsets(resolved, &full_coordinate, &mut running);
-            let fold = DotFold {
-                len: reduction_total as usize,
-                init: initial_value(*init).unwrap_or(0.0),
-                seeded,
-            };
-            for slot in &mut accumulator {
-                *slot = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
-                #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-                if tile_plan.is_some() {
-                    neon_tile_fallback_elements += 1;
+            if reduction_fast_path {
+                // Fold along `k` (contiguous on every operand read here) instead
+                // of accumulating across the width dim `n` — one full contraction
+                // per output position, in the same k=0..K sequential order the
+                // generic loop below would visit, so results stay bit-identical.
+                merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+                full_coordinate[reduction_dims[0] as usize] = 0;
+                if let Some(dim) = last_output_dim {
+                    full_coordinate[dim as usize] = 0;
                 }
-                #[cfg(feature = "instrument")]
-                {
-                    counters.kernel_calls += 1;
-                    counters.mac_ops += reduction_total;
-                    for &operand_stride in &reduction_strides {
-                        counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
-                    }
-                }
-                for (offset, stride) in running.iter_mut().zip(&strides) {
-                    *offset += stride;
-                }
-            }
-        } else {
-            for reduction_flat in 0..reduction_total {
-                unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
-                merge_coordinates_into(
-                    leading_output_axes,
-                    &leading_coordinate,
-                    &reduction_dims,
-                    &reduction_coordinate,
-                    &mut full_coordinate,
-                );
                 fill_running_offsets(resolved, &full_coordinate, &mut running);
-
-                if fast_path {
-                    reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
+                let fold = DotFold {
+                    len: reduction_total as usize,
+                    init: initial_value(*init).unwrap_or(0.0),
+                    seeded,
+                };
+                for slot in &mut accumulator {
+                    *slot = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+                    if tile_plan.is_some() {
+                        neon_tile_fallback_elements += 1;
+                    }
                     #[cfg(feature = "instrument")]
                     {
                         counters.kernel_calls += 1;
-                        counters.mac_ops += width as u64;
-                        for &stride in &strides {
-                            counters.operand_loads += if stride == 1 { width as u64 } else { 1 };
+                        counters.mac_ops += reduction_total;
+                        for &operand_stride in &reduction_strides {
+                            counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                        }
+                    }
+                    for (offset, stride) in running.iter_mut().zip(&strides) {
+                        *offset += stride;
+                    }
+                }
+            } else {
+                for reduction_flat in 0..reduction_total {
+                    unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
+                    merge_coordinates_into(
+                        leading_output_axes,
+                        &leading_coordinate,
+                        &reduction_dims,
+                        &reduction_coordinate,
+                        &mut full_coordinate,
+                    );
+                    fill_running_offsets(resolved, &full_coordinate, &mut running);
+
+                    if fast_path {
+                        reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
+                        #[cfg(feature = "instrument")]
+                        {
+                            counters.kernel_calls += 1;
+                            counters.mac_ops += width as u64;
+                            for &stride in &strides {
+                                counters.operand_loads += if stride == 1 { width as u64 } else { 1 };
+                            }
+                        }
+                        seeded = true;
+                        continue;
+                    }
+
+                    fill_gather_cursors(
+                        resolved,
+                        buffers,
+                        &full_coordinate,
+                        last_output_dim,
+                        &mut gather_cursors,
+                    )?;
+
+                    for slot in &mut accumulator {
+                        for (index, data) in raw.iter().enumerate() {
+                            let mut offset = running[index];
+                            if let Some(cursor) = gather_cursors[index].as_mut() {
+                                offset += cursor.fetch_and_advance(resolved.node)?;
+                            }
+                            operand_values[index] = data[offset as usize];
+                            running[index] += strides[index];
+                        }
+                        let value = eval_body_shape(&shape, &operand_values, &mut step_values);
+                        *slot = if seeded {
+                            apply_scalar_op(*reduce_op, &[*slot, value])
+                        } else {
+                            value
+                        };
+                        #[cfg(feature = "instrument")]
+                        {
+                            counters.kernel_calls += 1;
+                            counters.mac_ops += 1;
+                            counters.operand_loads += raw.len() as u64;
                         }
                     }
                     seeded = true;
-                    continue;
                 }
-
-                fill_gather_cursors(
-                    resolved,
-                    buffers,
-                    &full_coordinate,
-                    last_output_dim,
-                    &mut gather_cursors,
-                )?;
-
-                for slot in &mut accumulator {
-                    for (index, data) in raw.iter().enumerate() {
-                        let mut offset = running[index];
-                        if let Some(cursor) = gather_cursors[index].as_mut() {
-                            offset += cursor.fetch_and_advance(resolved.node)?;
-                        }
-                        operand_values[index] = data[offset as usize];
-                        running[index] += strides[index];
-                    }
-                    let value = eval_body_shape(&shape, &operand_values, &mut step_values);
-                    *slot = if seeded {
-                        apply_scalar_op(*reduce_op, &[*slot, value])
-                    } else {
-                        value
-                    };
-                    #[cfg(feature = "instrument")]
-                    {
-                        counters.kernel_calls += 1;
-                        counters.mac_ops += 1;
-                        counters.operand_loads += raw.len() as u64;
-                    }
-                }
-                seeded = true;
             }
-        }
 
-        merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
-        let out_prefix = out_layout.offset_of(&full_coordinate);
-        let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
-        for (slot, value) in accumulator.iter().enumerate() {
-            output[(out_prefix + out_stride * slot as i64) as usize] = *value;
-        }
-        #[cfg(feature = "instrument")]
-        {
-            counters.leading_iters += 1;
-            counters.output_writes += accumulator.len() as u64;
+            merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+            let out_prefix = out_layout.offset_of(&full_coordinate);
+            let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
+            for (slot, value) in accumulator.iter().enumerate() {
+                output[(out_prefix + out_stride * slot as i64) as usize] = *value;
+            }
+            #[cfg(feature = "instrument")]
+            {
+                counters.leading_iters += 1;
+                counters.output_writes += accumulator.len() as u64;
+            }
         }
     }
     #[cfg(feature = "instrument")]
