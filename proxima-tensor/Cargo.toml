@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "config"]
 std = ["alloc", "thiserror/std"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
@@ -76,3 +76,7 @@ required-features = ["instrument"]
 
 [[example]]
 name = "alloc_itemize"
+
+[[example]]
+name = "spec_block"
+required-features = ["config"]
