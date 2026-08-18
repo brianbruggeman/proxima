@@ -768,6 +768,10 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
 
 fn row_f_control_bare_gemm(c: &mut Criterion) {
     println!("\n=== ROW F (CONTROL): bare GEMM, square, f32, 512/1024/2048 ===");
+    // 2048 included per definitive-measurement run. Single-threaded proxima
+    // `evaluate` at 2048 is skipped below under its own budget guard
+    // (`if size <= 1024`) — ggml (t1/t8) and proxima evaluate_parallel run at
+    // every size including 2048.
     for size in [512u32, 1024, 2048] {
         let (m, k, n) = (size, size, size);
         let lhs_data = random_vec(20 + u64::from(size), (m * k) as usize, 0.05);
@@ -818,6 +822,10 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
                     black_box(());
                 })
             });
+            #[cfg(target_arch = "aarch64")]
+            let tile_counters_before = proxima_tensor::cpu::neon_tile_counters();
+            #[cfg(target_arch = "aarch64")]
+            let row_remainder_before = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
             if size <= 1024 {
                 c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate"), |b| {
                     b.iter(|| black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap()))
@@ -834,6 +842,24 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
                      it could not run."
                 );
             }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
+                let (gate_before, invocations_before, fallback_before) = tile_counters_before;
+                let row_remainder_after = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+                println!(
+                    "row F size={size} neon_tile delta (single-threaded evaluate only): \
+                     gate_passes={} invocations={} row_remainder_invocations={} fallback_elements={}",
+                    gate_after - gate_before,
+                    invocations_after - invocations_before,
+                    row_remainder_after - row_remainder_before,
+                    fallback_after - fallback_before
+                );
+            }
+            #[cfg(target_arch = "aarch64")]
+            let tile_counters_before_parallel = proxima_tensor::cpu::neon_tile_counters();
+            #[cfg(target_arch = "aarch64")]
+            let row_remainder_before_parallel = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
             c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate_parallel_w8"), |b| {
                 b.iter(|| {
                     black_box(
@@ -841,6 +867,20 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
                     )
                 })
             });
+            #[cfg(target_arch = "aarch64")]
+            {
+                let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
+                let (gate_before, invocations_before, fallback_before) = tile_counters_before_parallel;
+                let row_remainder_after = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+                println!(
+                    "row F size={size} neon_tile delta (evaluate_parallel_w8 only): \
+                     gate_passes={} invocations={} row_remainder_invocations={} fallback_elements={}",
+                    gate_after - gate_before,
+                    invocations_after - invocations_before,
+                    row_remainder_after - row_remainder_before_parallel,
+                    fallback_after - fallback_before
+                );
+            }
         }
     }
 }
@@ -1094,24 +1134,23 @@ fn row_h_elementwise_chain(c: &mut Criterion) {
 fn main() {
     let mut criterion = Criterion::default()
         .configure_from_args()
-        // 10 is criterion's minimum sample size. Several arms here (proxima
-        // `evaluate` single-threaded on a multi-billion-FLOP GEMM/MLP chain)
-        // cost several seconds PER SAMPLE, so a larger sample count is not a
-        // time budget this bench can spend; criterion's own reported
-        // [lower estimate upper] confidence interval per bench_function is
-        // the range/CoV signal this run reports, not a rerun of the whole
-        // binary 3-5 times.
-        .sample_size(10)
-        .measurement_time(Duration::from_millis(500));
+        // sample_size(10)/measurement_time(500ms) previously starved the estimator —
+        // a 250ms/iter arm got ~2 iterations for 10 samples, producing >10% CI width
+        // that a ratio should never be computed from. Raised for the row_f head-to-head.
+        .sample_size(50)
+        .measurement_time(Duration::from_secs(10));
 
-    row_a_home_turf_quantized_gemv(&mut criterion);
-    row_b_f32_gemv(&mut criterion);
-    row_c_gather_fused_reduce(&mut criterion);
-    row_d_deep_chain(&mut criterion);
-    row_e_locally_connected_window(&mut criterion);
+    // definitive-measurement run: row_f only, per 75-minute wall-clock ceiling.
+    // other rows left defined (unused) rather than deleted.
+    let _ = row_a_home_turf_quantized_gemv;
+    let _ = row_b_f32_gemv;
+    let _ = row_c_gather_fused_reduce;
+    let _ = row_d_deep_chain;
+    let _ = row_e_locally_connected_window;
+    let _ = row_g_mlp_chain;
+    let _ = row_h_elementwise_chain;
+
     row_f_control_bare_gemm(&mut criterion);
-    row_g_mlp_chain(&mut criterion);
-    row_h_elementwise_chain(&mut criterion);
 
     criterion.final_summary();
 }

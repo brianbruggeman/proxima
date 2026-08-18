@@ -53,9 +53,15 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(target_arch = "aarch64")]
+use core::arch::aarch64::{
+    vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vfmaq_n_f32, vld1q_f32, vst1q_f32,
+};
 use core::cell::RefCell;
 use core::future::Future;
 use core::num::NonZeroUsize;
+#[cfg(target_arch = "aarch64")]
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::panic;
 use std::thread;
 
@@ -64,6 +70,8 @@ use proxima_primitives::pipe::Pipe;
 use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, StepArg};
 use crate::dtype::DType;
 use crate::error::TensorError;
+#[cfg(feature = "instrument")]
+use crate::instrument::{KernelCounters, Path};
 use crate::map::IndexMap;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
@@ -790,15 +798,31 @@ fn run_elementwise(
     // every operand the body shape reads is gather-free and affine with a
     // width-dim stride of 0 or 1 (`scratchpad/opt/discipline.md` ROW 5).
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
+    #[cfg(feature = "instrument")]
+    let mut counters = KernelCounters::default();
+    #[cfg(feature = "instrument")]
+    let path = if fast_path { Path::WidthFast } else { Path::Generic };
 
     for outer_position in 0..odometer_len(outer_extents) as usize {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
         let out_base = outer_position * inner_len;
+        #[cfg(feature = "instrument")]
+        {
+            counters.leading_iters += 1;
+        }
 
         if fast_path {
             let out_slice = &mut output[out_base..out_base + inner_len];
             elementwise_width_fast(&shape, &raw, &running, &strides, out_slice);
+            #[cfg(feature = "instrument")]
+            {
+                counters.kernel_calls += 1;
+                counters.output_writes += inner_len as u64;
+                for &stride in &strides {
+                    counters.operand_loads += if stride == 1 { inner_len as u64 } else { 1 };
+                }
+            }
             continue;
         }
 
@@ -820,7 +844,18 @@ fn run_elementwise(
                 running[index] += strides[index];
             }
             output[out_base + step] = eval_body_shape(&shape, &operand_values, &mut step_values);
+            #[cfg(feature = "instrument")]
+            {
+                counters.kernel_calls += 1;
+                counters.output_writes += 1;
+                counters.operand_loads += raw.len() as u64;
+            }
         }
+    }
+    #[cfg(feature = "instrument")]
+    {
+        let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+        counters.commit(path, distinct_operand_elements);
     }
     Ok(())
 }
@@ -905,9 +940,341 @@ fn run_reduce(
     let reduction_fast_path =
         !fast_path && reduction_dims.len() == 1 && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
 
-    for leading_flat in 0..odometer_len(&leading_extents) {
+    #[cfg(feature = "instrument")]
+    let mut counters = KernelCounters::default();
+    #[cfg(feature = "instrument")]
+    let path = if reduction_fast_path {
+        Path::DotFast
+    } else if fast_path {
+        Path::WidthFast
+    } else {
+        Path::Generic
+    };
+
+    // hoisted: one allocation per bound op, not one per output row. At
+    // 1024^3 the inner form cost 1024 allocations per GEMM inside the loop
+    // it measures.
+    let seed = initial_value(*init).unwrap_or(0.0);
+    let mut accumulator = vec![seed; width];
+    let leading_total = odometer_len(&leading_extents);
+
+    // Ported from `width-wt`: the `[k,n]`-layout twin of the dot-path tile
+    // below. `reduction_fast_path` (dot tile) and `fast_path` (this tile) are
+    // mutually exclusive by construction (`reduction_fast_path = !fast_path
+    // && ..`), so `width_tile_plan`'s own stride gate never fires on a node
+    // the dot tile already claimed — no ordering dependency between the two
+    // blocks, only one of them is ever `Some`.
+    let width_path_context = WidthPathContext {
+        resolved,
+        shape: &shape,
+        strides: &strides,
+        reduce_op: *reduce_op,
+        init: *init,
+        leading_output_axes,
+        reduction_dims: &reduction_dims,
+        last_output_dim,
+        width,
+        out_layout,
+    };
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let width_tile_counters_before = width_tile_counters();
+    if try_run_width_tile(&width_path_context, &raw, output) {
+        // the tile's own early return skips the rest of this function
+        // (including the `counters.commit` call every other path reaches),
+        // so this is instrument's only chance to record the node — read
+        // back the invocation/fallback deltas the tile itself already
+        // counted instead of re-deriving them from `leading_total`/`width`.
+        #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+        {
+            let (_, invocations_after, fallback_after) = width_tile_counters();
+            let (_, invocations_before, fallback_before) = width_tile_counters_before;
+            let invocations_delta = invocations_after - invocations_before;
+            let fallback_delta = fallback_after - fallback_before;
+            let tile_elements = (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) as u64;
+            counters.kernel_calls += invocations_delta + fallback_delta;
+            counters.mac_ops += invocations_delta * tile_elements * reduction_total;
+            counters.operand_loads += invocations_delta * (WIDTH_TILE_ROWS + WIDTH_TILE_VECS) as u64 * reduction_total;
+            counters.mac_ops += fallback_delta * reduction_total;
+            counters.operand_loads += fallback_delta * 2 * reduction_total;
+            counters.leading_iters += leading_total;
+            counters.output_writes += leading_total * width as u64;
+            let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+            counters.commit(path, distinct_operand_elements);
+        }
+        return Ok(());
+    }
+
+    // Resolved ONCE per bound op: an explicit-NEON 6x4 microkernel for the
+    // exact GEMM shape `reduction_fast_path` already isolates. Ported from
+    // ggml tinyBLAS's `gemm_bloc` — see `neon_tile_plan` and
+    // `gemm_tile_neon` docs for the six-condition gate and why the
+    // accumulator type (not the loop shape) is what makes it fit in
+    // registers (`scratchpad/opt/discipline.md`, attempts 1 and 2).
+    #[cfg(target_arch = "aarch64")]
+    let tile_plan = if reduction_fast_path {
+        neon_tile_plan(
+            resolved,
+            &shape,
+            *reduce_op,
+            !matches!(init, ReduceInit::FirstElement),
+            &reduction_strides,
+            &strides,
+            leading_output_axes,
+        )
+    } else {
+        None
+    };
+    #[cfg(target_arch = "aarch64")]
+    let tiled_leading_rows = tile_plan.as_ref().map_or(0, |_| {
+        if leading_total >= TILE_ROWS as u64 {
+            leading_total - leading_total % TILE_ROWS as u64
+        } else {
+            0
+        }
+    });
+    #[cfg(target_arch = "aarch64")]
+    let tiled_width_cols = tile_plan.as_ref().map_or(0, |_| width - width % TILE_COLS);
+
+    // Set to `tiled_leading_rows + rows_remaining` below when the
+    // row-remainder tile pass runs, so the untiled loop after this block
+    // starts past whatever rows the remainder pass already computed.
+    #[cfg(target_arch = "aarch64")]
+    let mut main_loop_start = tiled_leading_rows;
+
+    #[cfg(target_arch = "aarch64")]
+    if let Some(plan) = &tile_plan {
+        NEON_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
+        let leading_axis = leading_output_axes[0] as usize;
+        let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
+        let mut leading_flat = 0u64;
+        while leading_flat < tiled_leading_rows {
+            unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
+            merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+            full_coordinate[reduction_dims[0] as usize] = 0;
+            if let Some(dim) = last_output_dim {
+                full_coordinate[dim as usize] = 0;
+            }
+            fill_running_offsets(resolved, &full_coordinate, &mut running);
+            let base_a = running[plan.index_a] as usize;
+            let base_b0 = running[plan.index_b] as usize;
+
+            let mut out_prefixes = [0i64; TILE_ROWS];
+            for (row, prefix) in out_prefixes.iter_mut().enumerate() {
+                full_coordinate[leading_axis] = leading_flat + row as u64;
+                *prefix = out_layout.offset_of(&full_coordinate);
+            }
+
+            let mut col = 0usize;
+            while col < tiled_width_cols {
+                let base_b = base_b0 + col * plan.col_stride_b;
+                let mut tile_out = [[seed; TILE_COLS]; TILE_ROWS];
+                // `neon_tile_plan`'s gate already proved: no gathers, both
+                // contraction strides == 1, and `reduction_total` elements
+                // read contiguously from `base_a`/`base_b` on every row and
+                // column this tile visits, so every offset the kernel forms
+                // stays within the source slices.
+                unsafe {
+                    gemm_tile_neon::<TILE_ROWS>(
+                        TileOperand {
+                            data: raw[plan.index_a],
+                            base: base_a,
+                            stride: plan.row_stride_a,
+                        },
+                        TileOperand {
+                            data: raw[plan.index_b],
+                            base: base_b,
+                            stride: plan.col_stride_b,
+                        },
+                        reduction_total as usize,
+                        &mut tile_out,
+                    );
+                }
+                NEON_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "instrument")]
+                {
+                    counters.kernel_calls += 1;
+                    counters.mac_ops += (TILE_ROWS * TILE_COLS) as u64 * reduction_total;
+                    counters.operand_loads += (TILE_ROWS + TILE_COLS) as u64 * reduction_total;
+                }
+                for (tile_row, &out_prefix) in tile_out.iter().zip(out_prefixes.iter()) {
+                    for (column, &value) in tile_row.iter().enumerate() {
+                        let position = out_prefix + out_stride * (col + column) as i64;
+                        output[position as usize] = value;
+                    }
+                }
+                col += TILE_COLS;
+            }
+
+            if tiled_width_cols < width {
+                let fold = DotFold {
+                    len: reduction_total as usize,
+                    init: seed,
+                    seeded: true,
+                };
+                for (row, &out_prefix) in out_prefixes.iter().enumerate() {
+                    full_coordinate[leading_axis] = leading_flat + row as u64;
+                    if let Some(dim) = last_output_dim {
+                        full_coordinate[dim as usize] = tiled_width_cols as u64;
+                    }
+                    fill_running_offsets(resolved, &full_coordinate, &mut running);
+                    for n in tiled_width_cols..width {
+                        let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                        output[(out_prefix + out_stride * n as i64) as usize] = value;
+                        NEON_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(feature = "instrument")]
+                        {
+                            counters.kernel_calls += 1;
+                            counters.mac_ops += reduction_total;
+                            for &operand_stride in &reduction_strides {
+                                counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                            }
+                        }
+                        for (offset, stride) in running.iter_mut().zip(&strides) {
+                            *offset += stride;
+                        }
+                    }
+                }
+            }
+
+            #[cfg(feature = "instrument")]
+            {
+                counters.leading_iters += TILE_ROWS as u64;
+                counters.output_writes += (TILE_ROWS * width) as u64;
+            }
+
+            leading_flat += TILE_ROWS as u64;
+        }
+
+        // Leftover rows after the 6-row main pass are always in `1..=5`
+        // (`leading_total mod TILE_ROWS`, `TILE_ROWS == 6`). Every one of
+        // those widths gets its own `gemm_tile_neon` instantiation — same
+        // kernel body as the main loop above, monomorphised at the exact
+        // leftover width instead of testing a single fixed threshold. Zero
+        // leftover rows means the remainder pass is skipped entirely; there
+        // is no scalar fallback left for any `M`.
+        let rows_remaining = leading_total - tiled_leading_rows;
+
+        // one instantiation per possible leftover width; body is identical
+        // across widths so a macro avoids five hand-duplicated copies.
+        macro_rules! row_remainder_tile {
+            ($rows:literal) => {{
+                let leading_axis = leading_output_axes[0] as usize;
+                let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
+                unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
+                merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+                full_coordinate[reduction_dims[0] as usize] = 0;
+                if let Some(dim) = last_output_dim {
+                    full_coordinate[dim as usize] = 0;
+                }
+                fill_running_offsets(resolved, &full_coordinate, &mut running);
+                let base_a = running[plan.index_a] as usize;
+                let base_b0 = running[plan.index_b] as usize;
+
+                let mut out_prefixes = [0i64; $rows];
+                for (row, prefix) in out_prefixes.iter_mut().enumerate() {
+                    full_coordinate[leading_axis] = leading_flat + row as u64;
+                    *prefix = out_layout.offset_of(&full_coordinate);
+                }
+
+                let mut col = 0usize;
+                while col < tiled_width_cols {
+                    let base_b = base_b0 + col * plan.col_stride_b;
+                    let mut tile_out = [[seed; TILE_COLS]; $rows];
+                    // same preconditions `neon_tile_plan`'s gate already
+                    // proved for the main 6-row pass; only the row count
+                    // differs.
+                    unsafe {
+                        gemm_tile_neon::<$rows>(
+                            TileOperand {
+                                data: raw[plan.index_a],
+                                base: base_a,
+                                stride: plan.row_stride_a,
+                            },
+                            TileOperand {
+                                data: raw[plan.index_b],
+                                base: base_b,
+                                stride: plan.col_stride_b,
+                            },
+                            reduction_total as usize,
+                            &mut tile_out,
+                        );
+                    }
+                    NEON_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+                    NEON_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(($rows * TILE_COLS) as u64, Ordering::Relaxed);
+                    #[cfg(feature = "instrument")]
+                    {
+                        counters.kernel_calls += 1;
+                        counters.mac_ops += ($rows * TILE_COLS) as u64 * reduction_total;
+                        counters.operand_loads += ($rows + TILE_COLS) as u64 * reduction_total;
+                    }
+                    for (tile_row, &out_prefix) in tile_out.iter().zip(out_prefixes.iter()) {
+                        for (column, &value) in tile_row.iter().enumerate() {
+                            let position = out_prefix + out_stride * (col + column) as i64;
+                            output[position as usize] = value;
+                        }
+                    }
+                    col += TILE_COLS;
+                }
+
+                if tiled_width_cols < width {
+                    let fold = DotFold {
+                        len: reduction_total as usize,
+                        init: seed,
+                        seeded: true,
+                    };
+                    for (row, &out_prefix) in out_prefixes.iter().enumerate() {
+                        full_coordinate[leading_axis] = leading_flat + row as u64;
+                        if let Some(dim) = last_output_dim {
+                            full_coordinate[dim as usize] = tiled_width_cols as u64;
+                        }
+                        fill_running_offsets(resolved, &full_coordinate, &mut running);
+                        for n in tiled_width_cols..width {
+                            let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                            output[(out_prefix + out_stride * n as i64) as usize] = value;
+                            NEON_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+                            #[cfg(feature = "instrument")]
+                            {
+                                counters.kernel_calls += 1;
+                                counters.mac_ops += reduction_total;
+                                for &operand_stride in &reduction_strides {
+                                    counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                                }
+                            }
+                            for (offset, stride) in running.iter_mut().zip(&strides) {
+                                *offset += stride;
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(feature = "instrument")]
+                {
+                    counters.leading_iters += $rows as u64;
+                    counters.output_writes += ($rows * width) as u64;
+                }
+
+                leading_flat += $rows as u64;
+                main_loop_start = leading_flat;
+            }};
+        }
+
+        match rows_remaining {
+            0 => {}
+            5 => row_remainder_tile!(5),
+            4 => row_remainder_tile!(4),
+            3 => row_remainder_tile!(3),
+            2 => row_remainder_tile!(2),
+            1 => row_remainder_tile!(1),
+            _ => unreachable!("rows_remaining must be < TILE_ROWS (6) after the main tiled pass"),
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    let main_loop_start = 0u64;
+
+    for leading_flat in main_loop_start..leading_total {
         unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
-        let mut accumulator = vec![initial_value(*init).unwrap_or(0.0); width];
+        accumulator.fill(seed);
         let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
         if reduction_fast_path {
@@ -928,6 +1295,18 @@ fn run_reduce(
             };
             for slot in &mut accumulator {
                 *slot = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                #[cfg(target_arch = "aarch64")]
+                if tile_plan.is_some() {
+                    NEON_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+                }
+                #[cfg(feature = "instrument")]
+                {
+                    counters.kernel_calls += 1;
+                    counters.mac_ops += reduction_total;
+                    for &operand_stride in &reduction_strides {
+                        counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                    }
+                }
                 for (offset, stride) in running.iter_mut().zip(&strides) {
                     *offset += stride;
                 }
@@ -946,6 +1325,14 @@ fn run_reduce(
 
                 if fast_path {
                     reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
+                    #[cfg(feature = "instrument")]
+                    {
+                        counters.kernel_calls += 1;
+                        counters.mac_ops += width as u64;
+                        for &stride in &strides {
+                            counters.operand_loads += if stride == 1 { width as u64 } else { 1 };
+                        }
+                    }
                     seeded = true;
                     continue;
                 }
@@ -973,6 +1360,12 @@ fn run_reduce(
                     } else {
                         value
                     };
+                    #[cfg(feature = "instrument")]
+                    {
+                        counters.kernel_calls += 1;
+                        counters.mac_ops += 1;
+                        counters.operand_loads += raw.len() as u64;
+                    }
                 }
                 seeded = true;
             }
@@ -984,6 +1377,16 @@ fn run_reduce(
         for (slot, value) in accumulator.iter().enumerate() {
             output[(out_prefix + out_stride * slot as i64) as usize] = *value;
         }
+        #[cfg(feature = "instrument")]
+        {
+            counters.leading_iters += 1;
+            counters.output_writes += accumulator.len() as u64;
+        }
+    }
+    #[cfg(feature = "instrument")]
+    {
+        let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+        counters.commit(path, distinct_operand_elements);
     }
     Ok(())
 }
@@ -1342,6 +1745,43 @@ fn reduce_width_binary(
     accumulator: &mut [f32],
     seeded: bool,
 ) {
+    // the width-accumulating twin of `reduce_dot_binary`'s multiply-add arm.
+    // For a `[k,n]`-laid-out matmul this is the inner loop: `a` is one scalar
+    // at the current `(m, k)`, `b` is a contiguous row of `n` — an axpy, and
+    // the single densest multiply-accumulate in the crate.
+    if FUSED_MULTIPLY_ADD
+        && seeded
+        && matches!((op, reduce_op), (ScalarOp::Multiply, ScalarOp::Add))
+    {
+        let width = accumulator.len();
+        match (a.contiguous, b.contiguous) {
+            (true, true) => {
+                let slice_a = &a.data[a.base..a.base + width];
+                let slice_b = &b.data[b.base..b.base + width];
+                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                    *slot = value_a.mul_add(value_b, *slot);
+                }
+                return;
+            }
+            (true, false) => {
+                let slice_a = &a.data[a.base..a.base + width];
+                let value_b = b.data[b.base];
+                for (slot, &value_a) in accumulator.iter_mut().zip(slice_a) {
+                    *slot = value_a.mul_add(value_b, *slot);
+                }
+                return;
+            }
+            (false, true) => {
+                let value_a = a.data[a.base];
+                let slice_b = &b.data[b.base..b.base + width];
+                for (slot, &value_b) in accumulator.iter_mut().zip(slice_b) {
+                    *slot = value_a.mul_add(value_b, *slot);
+                }
+                return;
+            }
+            (false, false) => {}
+        }
+    }
     macro_rules! binary_op_arm {
         ($f:expr) => {
             match reduce_op {
@@ -1491,6 +1931,362 @@ fn reduce_width_binary_scalar_dispatch(
     }
 }
 
+// ---- width-dim register-tile GEMM kernel (aarch64) ----
+//
+// `reduce_width_binary`'s FMA axpy path above still round-trips
+// `accumulator` through memory every reduction step (load-fma-store per
+// width chunk), because `accumulator` is a `&mut [f32]` slice spanning the
+// whole output width and can never fit in registers. This tile instead
+// keeps a small (rows x columns) block of partial sums in NEON registers
+// for the WHOLE `k` reduction, spilling nothing until the block is fully
+// accumulated — the same register-budget technique that took the sibling
+// dot-path tile from 0.122s to 0.028s at 1024^3.
+//
+// Applicable to exactly the shape `run_reduce`'s width path already
+// specializes for: `out[m, n] += a[m, k] * b[k, n]`, `a` invariant across
+// `n` (width stride 0), `b` contiguous along `n` (width stride 1), a
+// single leading dim, a single contraction dim.
+
+/// Output rows one call to [`gemm_width_tile_neon`] computes.
+#[cfg(target_arch = "aarch64")]
+const WIDTH_TILE_ROWS: usize = 4;
+
+/// `float32x4_t` vectors of output columns one call to [`gemm_width_tile_neon`]
+/// computes — 4 gives `WIDTH_TILE_ROWS * WIDTH_TILE_VECS` = 16 independent
+/// accumulators, the measured saturation point for this core's NEON FMA
+/// throughput.
+#[cfg(target_arch = "aarch64")]
+const WIDTH_TILE_VECS: usize = 4;
+
+/// Pass/invocation/fallback-element counts for the width tile — mandatory
+/// verification, not a runtime feature: a caller (`profile_hot`) reads
+/// these after a run to prove the tile actually fired, since a silently-zero
+/// invocation count would make any timing number meaningless. Mirrors
+/// [`NEON_TILE_GATE_PASSES`]'s family exactly, including the row-tail and
+/// column-tail coverage the two loops in [`run_width_tile_neon`] below both
+/// account for: `invocations * (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) +
+/// fallback_elements == leading_total * width` for any shape, not only
+/// multiples of the tile.
+#[cfg(target_arch = "aarch64")]
+static WIDTH_TILE_GATE_PASSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "aarch64")]
+static WIDTH_TILE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "aarch64")]
+static WIDTH_TILE_FALLBACK_ELEMENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the three [`WIDTH_TILE_GATE_PASSES`]-family counters:
+/// (gate passes, tile invocations, fallback elements) — the width tile's
+/// counterpart to [`neon_tile_counters`].
+#[cfg(target_arch = "aarch64")]
+pub fn width_tile_counters() -> (u64, u64, u64) {
+    (
+        WIDTH_TILE_GATE_PASSES.load(Ordering::Relaxed),
+        WIDTH_TILE_INVOCATIONS.load(Ordering::Relaxed),
+        WIDTH_TILE_FALLBACK_ELEMENTS.load(Ordering::Relaxed),
+    )
+}
+
+/// Everything [`try_run_width_tile`] needs, bundled the same way
+/// [`OperandSpan`] and [`DotFold`] are — keeps the entry point under
+/// clippy's argument-count lint instead of reaching for `#[allow]`. Not
+/// `cfg`-gated to aarch64: `run_reduce` calls [`try_run_width_tile`] on
+/// every target, and the non-aarch64 stub still needs a type to accept.
+struct WidthPathContext<'a> {
+    resolved: &'a BoundOp,
+    shape: &'a BodyShape<'a>,
+    strides: &'a [i64],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    leading_output_axes: &'a [u16],
+    reduction_dims: &'a [u16],
+    last_output_dim: Option<u16>,
+    width: usize,
+    out_layout: &'a bind::Layout,
+}
+
+/// Everything the tiled loop needs to walk, resolved once per bound op.
+#[cfg(target_arch = "aarch64")]
+struct WidthTilePlan {
+    a_operand: usize,
+    b_operand: usize,
+    row_stride_a: i64,
+    base_a: i64,
+    k_stride_a: i64,
+    base_b: i64,
+    k_stride_b: i64,
+    out_base: i64,
+    out_row_stride: i64,
+    out_col_stride: i64,
+    leading_total: usize,
+    reduction_total: usize,
+    width: usize,
+    seed: f32,
+}
+
+/// Resolves [`WidthTilePlan`] once per bound op, or `None` when this node
+/// does not match the shape the tile is built for. Every condition here is
+/// checked once, never per element.
+#[cfg(target_arch = "aarch64")]
+fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
+    if !FUSED_MULTIPLY_ADD || context.reduce_op != ScalarOp::Add {
+        return None;
+    }
+    let (operand_a, operand_b) = match *context.shape {
+        BodyShape::Binary(ScalarOp::Multiply, operand_a, operand_b) => (operand_a, operand_b),
+        _ => return None,
+    };
+    if matches!(context.init, ReduceInit::FirstElement) {
+        return None;
+    }
+    if context.leading_output_axes.len() != 1 || context.reduction_dims.len() != 1 {
+        return None;
+    }
+    if context.width < WIDTH_TILE_VECS * 4 {
+        return None;
+    }
+    let last_output_dim = context.last_output_dim?;
+
+    let operands = context.resolved.operands();
+    let (_, layout_a_raw, gather_a) = &operands[operand_a as usize];
+    let (_, layout_b_raw, gather_b) = &operands[operand_b as usize];
+    if gather_a.is_some() || gather_b.is_some() {
+        return None;
+    }
+    let (a_operand, layout_a, b_operand, layout_b) =
+        match (context.strides[operand_a as usize], context.strides[operand_b as usize]) {
+            (0, 1) => (operand_a as usize, layout_a_raw, operand_b as usize, layout_b_raw),
+            (1, 0) => (operand_b as usize, layout_b_raw, operand_a as usize, layout_a_raw),
+            _ => return None,
+        };
+
+    let leading_dim = context.leading_output_axes[0];
+    let reduction_dim = context.reduction_dims[0];
+
+    Some(WidthTilePlan {
+        a_operand,
+        b_operand,
+        row_stride_a: layout_a.stride(leading_dim),
+        base_a: layout_a.base,
+        k_stride_a: layout_a.stride(reduction_dim),
+        base_b: layout_b.base,
+        k_stride_b: layout_b.stride(reduction_dim),
+        out_base: context.out_layout.base,
+        out_row_stride: context.out_layout.stride(leading_dim),
+        out_col_stride: context.out_layout.stride(last_output_dim),
+        leading_total: context.resolved.extents[leading_dim as usize] as usize,
+        reduction_total: context.resolved.extents[reduction_dim as usize] as usize,
+        width: context.width,
+        seed: initial_value(context.init).unwrap_or(0.0),
+    })
+}
+
+/// The `a`-side (row-invariant-across-width) operand a tile call reads —
+/// bundled with its `b`-side counterpart below for the same argument-count
+/// reason [`OperandSpan`]/[`DotFold`] already document.
+#[cfg(target_arch = "aarch64")]
+struct TileOperandA<'a> {
+    data: &'a [f32],
+    base: i64,
+    row_stride: i64,
+    k_stride: i64,
+}
+
+/// The `b`-side (width-contiguous) operand a tile call reads.
+#[cfg(target_arch = "aarch64")]
+struct TileOperandB<'a> {
+    data: &'a [f32],
+    base: i64,
+    k_stride: i64,
+}
+
+/// The register-tile microkernel: `WIDTH_TILE_ROWS` output rows x
+/// `WIDTH_TILE_VECS` `float32x4_t` vectors of output columns, folded over
+/// the whole `k` reduction with `acc` living in registers throughout — the
+/// vector *type*, not a plain `[f32; 4]` array, is the entire trick: a
+/// plain array forces LLVM to put it in memory and spill. `out` already
+/// holds the seed value on entry (`vaddq_f32` below folds `acc` into it,
+/// rather than overwriting), so a caller may reuse this for a running total
+/// if that shape is ever needed.
+///
+/// # Safety
+/// Caller guarantees every offset `a.base + i*a.row_stride + step*a.k_stride`
+/// for `i in 0..WIDTH_TILE_ROWS, step in 0..k` lies within `a.data`, and
+/// every offset `b.base + step*b.k_stride + v*4 + lane` for `v in
+/// 0..WIDTH_TILE_VECS, lane in 0..4` lies within `b.data`.
+#[cfg(target_arch = "aarch64")]
+unsafe fn gemm_width_tile_neon(
+    a: TileOperandA,
+    b: TileOperandB,
+    k: usize,
+    out: &mut [[f32; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS],
+) {
+    // caller-checked: every (row, step, vec) offset below is in bounds.
+    unsafe {
+        let mut acc = [[vdupq_n_f32(0.0); WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
+        for step in 0..k {
+            let step = step as i64;
+            let mut bv = [vdupq_n_f32(0.0); WIDTH_TILE_VECS];
+            for (v, lane) in bv.iter_mut().enumerate() {
+                let offset = b.base + step * b.k_stride + v as i64 * 4;
+                *lane = vld1q_f32(b.data.as_ptr().add(offset as usize));
+            }
+            for (i, row_acc) in acc.iter_mut().enumerate() {
+                let offset = a.base + i as i64 * a.row_stride + step * a.k_stride;
+                let value_a = *a.data.get_unchecked(offset as usize);
+                for (slot, &vector_b) in row_acc.iter_mut().zip(&bv) {
+                    *slot = vfmaq_n_f32(*slot, vector_b, value_a);
+                }
+            }
+        }
+        for (i, row_acc) in acc.iter().enumerate() {
+            for (v, &value) in row_acc.iter().enumerate() {
+                let combined = vaddq_f32(vld1q_f32(out[i].as_ptr().add(v * 4)), value);
+                vst1q_f32(out[i].as_mut_ptr().add(v * 4), combined);
+            }
+        }
+    }
+}
+
+/// A single (row, column) partial sum computed the scalar way — the
+/// remainder path for a leading count or width not divisible by the tile
+/// shape. Correctness-only: `profile_hot`'s 1024^3 GEMM divides evenly by
+/// both `WIDTH_TILE_ROWS` and `WIDTH_TILE_VECS * 4`, so this never fires
+/// there (`WIDTH_TILE_FALLBACK_ELEMENTS` proves it), but a caller with an
+/// arbitrary shape still gets a correct answer.
+#[cfg(target_arch = "aarch64")]
+fn width_tile_scalar_cell(a: TileOperandA, b: TileOperandB, k: usize, seed: f32) -> f32 {
+    let mut acc = seed;
+    let mut offset_a = a.base;
+    let mut offset_b = b.base;
+    for _ in 0..k {
+        acc = a.data[offset_a as usize].mul_add(b.data[offset_b as usize], acc);
+        offset_a += a.k_stride;
+        offset_b += b.k_stride;
+    }
+    acc
+}
+
+/// Walks the full leading x width space in `WIDTH_TILE_ROWS x
+/// (WIDTH_TILE_VECS * 4)` blocks via [`gemm_width_tile_neon`], falling back
+/// to [`width_tile_scalar_cell`] for any leftover rows or columns that do
+/// not fill a whole tile. Both remainder loops below increment
+/// [`WIDTH_TILE_FALLBACK_ELEMENTS`] once per scalar element they compute —
+/// the column tail inside the row-tile loop, and the row tail below it —
+/// so `invocations * tile_cols * WIDTH_TILE_ROWS + fallback_elements` always
+/// equals `leading_total * width`, for any shape, not only multiples of
+/// the tile (mirrors [`NEON_TILE_FALLBACK_ELEMENTS`]'s own row+column
+/// accounting for the dot-path tile).
+#[cfg(target_arch = "aarch64")]
+fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32]) {
+    WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
+
+    let data_a = raw[plan.a_operand];
+    let data_b = raw[plan.b_operand];
+    let tile_cols = WIDTH_TILE_VECS * 4;
+    let row_tiles = plan.leading_total / WIDTH_TILE_ROWS;
+    let col_tiles = plan.width / tile_cols;
+
+    for row_tile in 0..row_tiles {
+        let row_start = row_tile * WIDTH_TILE_ROWS;
+        let base_a = plan.base_a + row_start as i64 * plan.row_stride_a;
+        let out_row_prefix = plan.out_base + row_start as i64 * plan.out_row_stride;
+
+        for col_tile in 0..col_tiles {
+            let col_start = col_tile * tile_cols;
+            let base_b = plan.base_b + col_start as i64;
+            let mut tile_out = [[plan.seed; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS];
+
+            // caller-checked: `base_a`/`base_b` plus every stride-scaled
+            // offset the kernel touches stay inside `data_a`/`data_b`,
+            // guaranteed by `row_tiles`/`col_tiles` only covering whole
+            // tiles carved out of `plan.leading_total`/`plan.width`.
+            unsafe {
+                gemm_width_tile_neon(
+                    TileOperandA { data: data_a, base: base_a, row_stride: plan.row_stride_a, k_stride: plan.k_stride_a },
+                    TileOperandB { data: data_b, base: base_b, k_stride: plan.k_stride_b },
+                    plan.reduction_total,
+                    &mut tile_out,
+                );
+            }
+            WIDTH_TILE_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+
+            for (i, row) in tile_out.iter().enumerate() {
+                let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
+                for (v, &value) in row.iter().enumerate() {
+                    let position = row_prefix + (col_start + v) as i64 * plan.out_col_stride;
+                    output[position as usize] = value;
+                }
+            }
+        }
+
+        // column tail for these `WIDTH_TILE_ROWS` rows: columns past the
+        // last full tile, still inside a tiled row-block.
+        for col in col_tiles * tile_cols..plan.width {
+            for i in 0..WIDTH_TILE_ROWS {
+                let row = row_start + i;
+                let value = width_tile_scalar_cell(
+                    TileOperandA {
+                        data: data_a,
+                        base: plan.base_a + row as i64 * plan.row_stride_a,
+                        row_stride: plan.row_stride_a,
+                        k_stride: plan.k_stride_a,
+                    },
+                    TileOperandB { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                    plan.reduction_total,
+                    plan.seed,
+                );
+                let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+                output[position as usize] = value;
+                WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    // row tail: leading rows past the last full row-tile, every column —
+    // these never touch the tiled loop above at all, so every element here
+    // (including what would otherwise be a "tiled" column) is fallback.
+    for row in row_tiles * WIDTH_TILE_ROWS..plan.leading_total {
+        for col in 0..plan.width {
+            let value = width_tile_scalar_cell(
+                TileOperandA {
+                    data: data_a,
+                    base: plan.base_a + row as i64 * plan.row_stride_a,
+                    row_stride: plan.row_stride_a,
+                    k_stride: plan.k_stride_a,
+                },
+                TileOperandB { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                plan.reduction_total,
+                plan.seed,
+            );
+            let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+            output[position as usize] = value;
+            WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// `run_reduce`'s single entry point into the width tile: resolves the gate
+/// once, runs the whole node through [`run_width_tile_neon`] and reports
+/// `true` when it applies, or leaves `output` untouched and reports `false`
+/// so the caller falls back to the existing per-element width path
+/// unchanged. Non-aarch64 always reports `false` — the existing path is the
+/// only one compiled there.
+#[cfg(target_arch = "aarch64")]
+fn try_run_width_tile(context: &WidthPathContext, raw: &[&[f32]], output: &mut [f32]) -> bool {
+    match width_tile_plan(context) {
+        Some(plan) => {
+            run_width_tile_neon(&plan, raw, output);
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn try_run_width_tile(_context: &WidthPathContext, _raw: &[&[f32]], _output: &mut [f32]) -> bool {
+    false
+}
+
 /// The reduction-dim fast path's fold state, bundled for the same reason
 /// [`OperandSpan`] and `ScanState` are: keeps `reduce_dot_binary` under
 /// clippy's argument-count lint. `len` is the contraction length (`k`'s
@@ -1522,6 +2318,251 @@ struct DotFold {
 /// transposed-RHS GEMM, 5 runs each) — more independent lanes hide more
 /// of the reduce's latency on this core's issue width. 8 was kept.
 const DOT_LANES: usize = 8;
+
+/// Whether the target issues a fused multiply-add as one instruction.
+/// aarch64 carries `fmla` in the base ISA; x86-64 needs FMA3. Without it
+/// `f32::mul_add` becomes a libm call and is far slower than the two-op
+/// form, so the specialization below must not fire.
+///
+/// A structural axis, not a tunable: it belongs in the build-time profile
+/// alongside lane width and unroll factor once the microkernel axes land.
+const FUSED_MULTIPLY_ADD: bool = cfg!(target_arch = "aarch64") || cfg!(target_feature = "fma");
+
+/// `DOT_LANES` independent partial accumulators folded with `f32::mul_add`
+/// — the multiply-accumulate specialization of
+/// [`dot_fold_multi_accumulator_binary`].
+///
+/// Rust never contracts `a * b + c` into an FMA on its own, and that is a
+/// guarantee rather than a missed optimization: contraction rounds once
+/// instead of twice, so it changes the result and is not a rewrite the
+/// optimiser may make unasked. Measured on the pre-change binary at 1024^3:
+/// `fmla.4s` = 0, `fmul.4s` = 467, `fadd.4s` = 458 — the loop vectorised
+/// and then issued two instructions per multiply-accumulate. `mul_add` is
+/// the explicit request.
+///
+/// Numerically this moves *toward* the infinitely-precise result (one
+/// rounding per term, not two), so it stays inside the 1e-5 relative
+/// tolerance ROW 12 already established for this fold.
+#[inline(always)]
+fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32 {
+    let mut chunks_a = slice_a.chunks_exact(DOT_LANES);
+    let mut chunks_b = slice_b.chunks_exact(DOT_LANES);
+    let mut lanes = [0.0f32; DOT_LANES];
+    for (chunk_a, chunk_b) in (&mut chunks_a).zip(&mut chunks_b) {
+        for ((lane, &value_a), &value_b) in lanes.iter_mut().zip(chunk_a).zip(chunk_b) {
+            *lane = value_a.mul_add(value_b, *lane);
+        }
+    }
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+    let mut acc = fold.init;
+    for &lane in &lanes {
+        acc += lane;
+    }
+    for (&value_a, &value_b) in remainder_a.iter().zip(remainder_b) {
+        acc = value_a.mul_add(value_b, acc);
+    }
+    acc
+}
+
+/// Output rows/columns computed per call of [`gemm_tile_neon`] — ggml
+/// tinyBLAS's `RM`/`RN`. Vector width (4) is implied by `float32x4_t`. 6x4
+/// (not the symmetric 4x4 or the same-accumulator-count 4x6) was chosen by
+/// a standalone shape sweep on this box: 24 accumulators, 0.417 loads/MAC,
+/// zero `str q` spills, and the best measured GFMA/s of seven shapes tried
+/// — see `scratchpad/tileprobe/arm_b_6x4.rs`. Orientation matters for
+/// reasons not fully understood; 4x6 measured 42% worse despite identical
+/// accumulator count and loads/MAC.
+#[cfg(target_arch = "aarch64")]
+const TILE_ROWS: usize = 6;
+#[cfg(target_arch = "aarch64")]
+const TILE_COLS: usize = 4;
+
+/// One bound op's applicability gate for [`gemm_tile_neon`], resolved once
+/// before [`run_reduce`]'s leading-dimension loop rather than per tile. The
+/// six conditions mirror attempt 2's (`scratchpad/opt/discipline.md`):
+/// FMA available, seeded, the fused body is `Multiply` reduced by `Add`,
+/// both operands gather-free, both contraction-dim strides `== 1`, and
+/// exactly one operand's width-dim stride is `0` (that one is `a`, whose
+/// leading-axis stride becomes `row_stride_a`) while the other is nonzero
+/// (that one is `b`, whose width-dim stride becomes `col_stride_b`).
+#[cfg(target_arch = "aarch64")]
+struct NeonTilePlan {
+    index_a: usize,
+    index_b: usize,
+    row_stride_a: usize,
+    col_stride_b: usize,
+}
+
+/// Runtime evidence the tile path actually ran, not just compiled: how many
+/// bound ops passed [`neon_tile_plan`]'s gate, how many times
+/// [`gemm_tile_neon`] was called, and how many output elements fell through
+/// to the per-slot [`reduce_dot_fast`] remainder instead (row/column
+/// leftovers past the last full `TILE_ROWS`x`TILE_COLS` block). Plain
+/// process-wide counters, not a telemetry event, because the only consumer
+/// is `profile_hot`'s one-shot report.
+#[cfg(target_arch = "aarch64")]
+static NEON_TILE_GATE_PASSES: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "aarch64")]
+static NEON_TILE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "aarch64")]
+static NEON_TILE_FALLBACK_ELEMENTS: AtomicU64 = AtomicU64::new(0);
+/// Row-remainder tile invocations (any width `1..=5`), tracked apart from
+/// [`NEON_TILE_INVOCATIONS`] since remainder tiles compute a different,
+/// width-dependent number of outputs per call than the fixed-24 main tile.
+#[cfg(target_arch = "aarch64")]
+static NEON_TILE_ROW_REMAINDER_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+/// Output elements actually covered by row-remainder tiles, summed across
+/// every width `1..=5` a run may exercise — `rows * TILE_COLS` added per
+/// invocation. Unlike [`NEON_TILE_ROW_REMAINDER_INVOCATIONS`], which just
+/// counts calls, this is directly usable in the coverage identity
+/// (`main_invocations * 24 + row_remainder_elements + fallback == m*n`)
+/// without knowing which width(s) fired.
+#[cfg(target_arch = "aarch64")]
+static NEON_TILE_ROW_REMAINDER_ELEMENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of the three [`NEON_TILE_GATE_PASSES`]-family counters for the
+/// main 6x4 tile: (gate passes, tile invocations, fallback elements).
+#[cfg(target_arch = "aarch64")]
+pub fn neon_tile_counters() -> (u64, u64, u64) {
+    (
+        NEON_TILE_GATE_PASSES.load(Ordering::Relaxed),
+        NEON_TILE_INVOCATIONS.load(Ordering::Relaxed),
+        NEON_TILE_FALLBACK_ELEMENTS.load(Ordering::Relaxed),
+    )
+}
+
+/// [`NEON_TILE_ROW_REMAINDER_INVOCATIONS`] snapshot — the row-remainder
+/// tiles' own invocation count (any width `1..=5`), separate from the main
+/// 6x4 tile's.
+#[cfg(target_arch = "aarch64")]
+pub fn neon_tile_row_remainder_invocations() -> u64 {
+    NEON_TILE_ROW_REMAINDER_INVOCATIONS.load(Ordering::Relaxed)
+}
+
+/// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`] snapshot — output elements covered
+/// by row-remainder tiles of any width, for the `main*24 + row_remainder +
+/// fallback == m*n` coverage identity.
+#[cfg(target_arch = "aarch64")]
+pub fn neon_tile_row_remainder_elements() -> u64 {
+    NEON_TILE_ROW_REMAINDER_ELEMENTS.load(Ordering::Relaxed)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn neon_tile_plan(
+    resolved: &BoundOp,
+    shape: &BodyShape,
+    reduce_op: ScalarOp,
+    seeded_always: bool,
+    reduction_strides: &[i64],
+    strides: &[i64],
+    leading_output_axes: &[u16],
+) -> Option<NeonTilePlan> {
+    if !FUSED_MULTIPLY_ADD || !seeded_always || leading_output_axes.len() != 1 || reduce_op != ScalarOp::Add {
+        return None;
+    }
+    let BodyShape::Binary(op, a, b) = *shape else {
+        return None;
+    };
+    if op != ScalarOp::Multiply {
+        return None;
+    }
+    let index_a = a as usize;
+    let index_b = b as usize;
+    let (_, _, gather_a) = &resolved.operands()[index_a];
+    let (_, _, gather_b) = &resolved.operands()[index_b];
+    if gather_a.is_some() || gather_b.is_some() {
+        return None;
+    }
+    if reduction_strides[index_a] != 1 || reduction_strides[index_b] != 1 {
+        return None;
+    }
+    let (index_a, index_b) = match (strides[index_a], strides[index_b]) {
+        (0, other) if other != 0 => (index_a, index_b),
+        (other, 0) if other != 0 => (index_b, index_a),
+        _ => return None,
+    };
+    let row_stride_a = resolved.operands()[index_a].1.stride(leading_output_axes[0]);
+    if row_stride_a < 0 {
+        return None;
+    }
+    Some(NeonTilePlan {
+        index_a,
+        index_b,
+        row_stride_a: row_stride_a as usize,
+        col_stride_b: strides[index_b] as usize,
+    })
+}
+
+/// One operand's tile-relative addressing for [`gemm_tile_neon`]: `data` is
+/// the physical buffer, `base` the flat offset of this tile's `(row 0, col
+/// 0, k 0)` corner, `stride` the per-row (for `a`) or per-column (for `b`)
+/// step between adjacent tile lanes. Bundled for the same reason
+/// [`OperandSpan`] is — keeps the kernel under clippy's argument-count lint.
+#[cfg(target_arch = "aarch64")]
+struct TileOperand<'a> {
+    data: &'a [f32],
+    base: usize,
+    stride: usize,
+}
+
+/// Ported from ggml tinyBLAS's `gemm_bloc`: `ROWS` x [`TILE_COLS`]
+/// output accumulators declared as `float32x4_t`, a native NEON vector
+/// register type, not an `[f32; 4]` array indexed by a loop variable
+/// (`scratchpad/opt/discipline.md` — attempt 2 spilled 737 `str q`
+/// instructions doing exactly that). `av` holds one `float32x4_t` per tile
+/// row, loaded once per `k`-step and reused across all [`TILE_COLS`]
+/// columns; `bv` is loaded once per column per step and fused against every
+/// row's `av`, giving 0.42 loads per multiply-accumulate the way tinyBLAS's
+/// own microkernel does, versus this crate's un-tiled 2.0.
+///
+/// Generic over the row count (`ROWS`) rather than fixed at [`TILE_ROWS`] so
+/// the row-remainder pass can call the identical kernel body monomorphised
+/// at whichever width `1..=5` the leftover row count needs, instead of a
+/// hand-duplicated copy per width.
+#[cfg(target_arch = "aarch64")]
+unsafe fn gemm_tile_neon<const ROWS: usize>(a: TileOperand, b: TileOperand, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
+    // `vdupq_n_f32` requires the `neon` target feature, unconditionally
+    // present in the aarch64 base ISA this module is gated on.
+    let mut acc = [[unsafe { vdupq_n_f32(0.0) }; TILE_COLS]; ROWS];
+    let steps = k / 4;
+    for step in 0..steps {
+        let l = step * 4;
+        let mut av = [unsafe { vdupq_n_f32(0.0) }; ROWS];
+        for (row, lane) in av.iter_mut().enumerate() {
+            // caller guarantees `a.base + row * a.stride + l + 4 <= a.data.len()`
+            // via the reduction-dim contiguity and row-count checks in
+            // `neon_tile_plan` and its `run_reduce` call site.
+            *lane = unsafe { vld1q_f32(a.data.as_ptr().add(a.base + row * a.stride + l)) };
+        }
+        let mut bv = [unsafe { vdupq_n_f32(0.0) }; TILE_COLS];
+        for (column, lane) in bv.iter_mut().enumerate() {
+            // caller guarantees `b.base + column * b.stride + l + 4 <= b.data.len()`
+            // by the same contiguity and column-count checks.
+            *lane = unsafe { vld1q_f32(b.data.as_ptr().add(b.base + column * b.stride + l)) };
+        }
+        for (row, acc_row) in acc.iter_mut().enumerate() {
+            let row_vector = av[row];
+            for (acc_lane, &bv_lane) in acc_row.iter_mut().zip(bv.iter()) {
+                // both operands are `float32x4_t`; NEON `fmla.4s` has no
+                // aliasing hazard between distinct accumulator lanes.
+                *acc_lane = unsafe { vfmaq_f32(*acc_lane, row_vector, bv_lane) };
+            }
+        }
+    }
+    for (row, (acc_row, out_row)) in acc.iter().zip(out.iter_mut()).enumerate() {
+        for (column, (&acc_lane, out_value)) in acc_row.iter().zip(out_row.iter_mut()).enumerate() {
+            // horizontal combine of one lane-group; sound for any float
+            // values, no aliasing or bounds precondition beyond `acc` being
+            // fully initialized above.
+            let mut total = *out_value + unsafe { vaddvq_f32(acc_lane) };
+            for l in steps * 4..k {
+                total = a.data[a.base + row * a.stride + l].mul_add(b.data[b.base + column * b.stride + l], total);
+            }
+            *out_value = total;
+        }
+    }
+}
 
 /// The pre-ROW-12 strict left-to-right fold, kept verbatim as the
 /// `len < DOT_LANES` fallback for [`dot_fold_multi_accumulator_binary`] —
@@ -1774,6 +2815,20 @@ fn reduce_dot_unary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, span: Ope
 /// Same discipline as [`reduce_dot_unary`], for the two-operand case — the
 /// contraction-dim counterpart of [`reduce_width_binary`].
 fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
+    // the multiply-accumulate case — every contraction in every matmul —
+    // taken before the generic closure dispatch, because `mul_add` has to be
+    // asked for by name (see `dot_fold_fused_multiply_add`).
+    if FUSED_MULTIPLY_ADD
+        && fold.seeded
+        && fold.len >= DOT_LANES
+        && a.contiguous
+        && b.contiguous
+        && matches!((op, reduce_op), (ScalarOp::Multiply, ScalarOp::Add))
+    {
+        let slice_a = &a.data[a.base..a.base + fold.len];
+        let slice_b = &b.data[b.base..b.base + fold.len];
+        return dot_fold_fused_multiply_add(slice_a, slice_b, fold);
+    }
     macro_rules! binary_op_arm {
         ($f:expr) => {
             match reduce_op {
