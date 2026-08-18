@@ -3,13 +3,14 @@
 # cannot be expressed here, "a new architecture is a config file" is a claim
 # with nothing behind it.
 #
-# Deliberately absent, because the grammar cannot spell them:
-#   - RoPE, which needs the multi-term affine `pos*stride + r*dilation`
-#     that `spec.rs` documents as outside the einsum notation on purpose.
+# Deliberately absent:
+#   - RoPE, whose pairwise `2*i` / `2*i+1` addressing the grammar can now
+#     spell (see `specs/rope.toml` and its `spec.rs` test) — left out of
+#     *this* file only to keep the block one architecture at a time.
 #   - causal masking, which needs a tensor derived from iteration indices;
-#     there is no `Op` that produces one.
-# Both are supplied as ordinary inputs here (`inv_dim`, and no mask at all),
-# which is exactly how far the config face reaches today.
+#     there is no `Op` that produces one, and no notation change fixes that.
+# `inv_dim` stands in for the still-absent piece here; there is no mask at
+# all, which is exactly how far the config face reaches for masking today.
 
 # --- inputs -----------------------------------------------------------------
 

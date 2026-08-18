@@ -1,0 +1,506 @@
+# A complete llama-style transformer block, written as data: the attention
+# block from `attention_block.toml` (RMSNorm, Q/K/V, softmax attention),
+# extended with the output projection, a residual around attention, a
+# second RMSNorm, a SwiGLU feed-forward (`down(silu(gate(x)) * up(x))`,
+# `silu(x) = x * sigmoid(x)`, `sigmoid(x) = 1/(1+exp(-x))`), and a residual
+# around the feed-forward.
+#
+# Every one of those additions lowers with the same three node kinds and the
+# same closed `ScalarOp` set the attention block already used — none of it
+# needed a new `Op`:
+#   - the output projection and every FFN projection (gate/up/down) are the
+#     same multiply-then-reduce matmul pattern as Q/K/V;
+#   - both residual adds are a plain `Elementwise` `add` over two identically
+#     shaped operands;
+#   - the second RMSNorm is a byte-for-byte repeat of the first, over
+#     `residual1` instead of `x`, reusing the same `inv_dim` input;
+#   - `sigmoid` needed one thing the attention block never did: a true
+#     constant (`1.0`) added to a computed tensor. It arrives the same way
+#     `inv_dim` already does — an `Input` broadcast in from a lower rank
+#     (`s->sg`, the same shape as `inv_rms`'s own `s->sd`) — not a new node
+#     kind or op.
+#
+# So the grammar does not gain a new gap here. The gaps this file inherits
+# are the same two `attention_block.toml` already named, unchanged by this
+# extension:
+#   - RoPE, which needs the multi-term affine `pos*stride + r*dilation` that
+#     `spec.rs` documents as outside the einsum notation on purpose.
+#   - causal masking, which needs a tensor derived from iteration indices;
+#     there is no `Op` that produces one.
+# Both remain supplied as ordinary inputs (or omitted, for the mask), exactly
+# as in `attention_block.toml`.
+
+# --- inputs -----------------------------------------------------------------
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = ["?0", 8]
+
+[[node]]
+op = "input"
+id = "inv_dim"
+dtype = "float32"
+shape = ["?0"]
+
+[[node]]
+op = "input"
+id = "ones"
+dtype = "float32"
+shape = ["?0"]
+
+[[node]]
+op = "input"
+id = "wq"
+dtype = "float32"
+shape = [8, 8]
+
+[[node]]
+op = "input"
+id = "wk"
+dtype = "float32"
+shape = [8, 8]
+
+[[node]]
+op = "input"
+id = "wv"
+dtype = "float32"
+shape = [8, 8]
+
+[[node]]
+op = "input"
+id = "wo"
+dtype = "float32"
+shape = [8, 8]
+
+[[node]]
+op = "input"
+id = "w_gate"
+dtype = "float32"
+shape = [8, 16]
+
+[[node]]
+op = "input"
+id = "w_up"
+dtype = "float32"
+shape = [8, 16]
+
+[[node]]
+op = "input"
+id = "w_down"
+dtype = "float32"
+shape = [16, 8]
+
+# --- rmsnorm 1 ----------------------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "x_squared"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "x"]
+maps = ["sd->sd", "sd->sd"]
+
+[[node]]
+op = "reduce"
+id = "sum_squares"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "x_squared"
+in_map = "sd->sd"
+out_map = "s->sd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mean_square"
+dtype = "float32"
+body = "multiply"
+inputs = ["sum_squares", "inv_dim"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "rms"
+dtype = "float32"
+body = "square_root"
+inputs = ["mean_square"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "inv_rms"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["rms"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "normed"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "inv_rms"]
+maps = ["sd->sd", "s->sd"]
+
+# --- q / k / v projections --------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "q_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wq"]
+maps = ["sd->shd", "dh->shd"]
+
+[[node]]
+op = "reduce"
+id = "q"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "q_product"
+in_map = "shd->shd"
+out_map = "sh->shd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "k_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wk"]
+maps = ["sd->shd", "dh->shd"]
+
+[[node]]
+op = "reduce"
+id = "k"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "k_product"
+in_map = "shd->shd"
+out_map = "sh->shd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "v_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wv"]
+maps = ["sd->shd", "dh->shd"]
+
+[[node]]
+op = "reduce"
+id = "v"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "v_product"
+in_map = "shd->shd"
+out_map = "sh->shd"
+keep = "reduce"
+
+# --- scores -----------------------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "score_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "k"]
+maps = ["sh->sth", "th->sth"]
+
+[[node]]
+op = "reduce"
+id = "scores"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "score_product"
+in_map = "sth->sth"
+out_map = "st->sth"
+keep = "reduce"
+
+# --- softmax over the key axis ----------------------------------------------
+
+[[node]]
+op = "reduce"
+id = "score_max"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "scores"
+in_map = "st->st"
+out_map = "s->st"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "shifted"
+dtype = "float32"
+body = "subtract"
+inputs = ["scores", "score_max"]
+maps = ["st->st", "s->st"]
+
+[[node]]
+op = "elementwise"
+id = "weights"
+dtype = "float32"
+body = "exponential"
+inputs = ["shifted"]
+maps = ["st->st"]
+
+[[node]]
+op = "reduce"
+id = "weight_sum"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "weights"
+in_map = "st->st"
+out_map = "s->st"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "inv_weight_sum"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["weight_sum"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "probabilities"
+dtype = "float32"
+body = "multiply"
+inputs = ["weights", "inv_weight_sum"]
+maps = ["st->st", "s->st"]
+
+# --- weighted sum of values -------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "attended_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["probabilities", "v"]
+maps = ["st->sth", "th->sth"]
+
+[[node]]
+op = "reduce"
+id = "attended"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "attended_product"
+in_map = "sth->sth"
+out_map = "sh->sth"
+keep = "reduce"
+name = "attention_block"
+
+# --- output projection -------------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "wo_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["attended", "wo"]
+maps = ["sh->sho", "ho->sho"]
+
+[[node]]
+op = "reduce"
+id = "attn_out"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "wo_product"
+in_map = "sho->sho"
+out_map = "so->sho"
+keep = "reduce"
+
+# --- residual around attention ----------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "residual1"
+dtype = "float32"
+body = "add"
+inputs = ["attn_out", "x"]
+maps = ["sd->sd", "sd->sd"]
+
+# --- rmsnorm 2 ----------------------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "residual1_squared"
+dtype = "float32"
+body = "multiply"
+inputs = ["residual1", "residual1"]
+maps = ["sd->sd", "sd->sd"]
+
+[[node]]
+op = "reduce"
+id = "sum_squares2"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "residual1_squared"
+in_map = "sd->sd"
+out_map = "s->sd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mean_square2"
+dtype = "float32"
+body = "multiply"
+inputs = ["sum_squares2", "inv_dim"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "rms2"
+dtype = "float32"
+body = "square_root"
+inputs = ["mean_square2"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "inv_rms2"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["rms2"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "normed2"
+dtype = "float32"
+body = "multiply"
+inputs = ["residual1", "inv_rms2"]
+maps = ["sd->sd", "s->sd"]
+
+# --- swiglu feed-forward -----------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "gate_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed2", "w_gate"]
+maps = ["sd->sdg", "dg->sdg"]
+
+[[node]]
+op = "reduce"
+id = "gate"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "gate_product"
+in_map = "sdg->sdg"
+out_map = "sg->sdg"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "up_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed2", "w_up"]
+maps = ["sd->sdg", "dg->sdg"]
+
+[[node]]
+op = "reduce"
+id = "up"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "up_product"
+in_map = "sdg->sdg"
+out_map = "sg->sdg"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "neg_gate"
+dtype = "float32"
+body = "negate"
+inputs = ["gate"]
+maps = ["sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "exp_neg_gate"
+dtype = "float32"
+body = "exponential"
+inputs = ["neg_gate"]
+maps = ["sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "one_plus_exp"
+dtype = "float32"
+body = "add"
+inputs = ["exp_neg_gate", "ones"]
+maps = ["sg->sg", "s->sg"]
+
+[[node]]
+op = "elementwise"
+id = "sigmoid_gate"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["one_plus_exp"]
+maps = ["sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "silu_gate"
+dtype = "float32"
+body = "multiply"
+inputs = ["gate", "sigmoid_gate"]
+maps = ["sg->sg", "sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "ffn_hidden"
+dtype = "float32"
+body = "multiply"
+inputs = ["silu_gate", "up"]
+maps = ["sg->sg", "sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "down_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["ffn_hidden", "w_down"]
+maps = ["sg->sgd", "gd->sgd"]
+
+[[node]]
+op = "reduce"
+id = "ffn_out"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "down_product"
+in_map = "sgd->sgd"
+out_map = "sd->sgd"
+keep = "reduce"
+
+# --- residual around the feed-forward ---------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "transformer_block"
+dtype = "float32"
+body = "add"
+inputs = ["ffn_out", "residual1"]
+maps = ["sd->sd", "sd->sd"]
+name = "transformer_block"

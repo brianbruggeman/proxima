@@ -10,10 +10,21 @@
 //! Index patterns are written in `operand->iteration` notation, which reads
 //! like einsum: `ik->ijk` says the operand has axes `i,k` drawn from an
 //! iteration space of `i,j,k`. That covers projection, transpose, and
-//! broadcast — the overwhelming majority — and deliberately does **not**
-//! cover multi-term axes. A convolution's `h*stride + r*dilation` has no
-//! einsum spelling, so it is built with [`map::affine`](crate::map::affine)
-//! and stays out of the string grammar rather than growing it a syntax.
+//! broadcast — the overwhelming majority.
+//!
+//! An operand axis may also be a comma-separated *expression*, one term per
+//! axis: `"s,2*i->si"` says axis 0 is plain `s` and axis 1 is `2*i` — the
+//! `AxisTerm { axis, coeff }` sum [`map::affine`](crate::map::affine) already
+//! builds in Rust, spelled as data. A term is `[coeff*]letter` (letters stay
+//! single ASCII characters, the same alphabet the bare-letter grammar uses),
+//! several terms may be summed with `+`/`-`, and a bare integer term
+//! contributes to the offset instead of a coefficient: `"2*h+r-1"` is a
+//! stride-2, dilation-1 convolution window with padding folded into the
+//! offset, `"2*i+1"` is RoPE's odd half of a pair. The comma is the trigger —
+//! without one, the operand is still the old bare letter run (`ik->ijk`), so
+//! no existing spelling changes meaning. This is parsing only: [`AxisIndex`]
+//! and [`AxisTerm`] already expressed every one of these patterns before
+//! this module could spell them.
 //!
 //! A [`NodeSpec::Elementwise`] operand map may instead be a
 //! [`MapSpec::Gather`] table: `{ gather = "ids", index_map = "s->sd", map =
@@ -144,18 +155,115 @@ fn parse_projection(notation: &str) -> Result<(u16, Vec<u16>), TensorError> {
     let space: Vec<char> = iteration.chars().collect();
     let projected = operand
         .chars()
-        .map(|letter| {
-            space
-                .iter()
-                .position(|candidate| *candidate == letter)
-                .map(|found| found as u16)
-                .ok_or_else(|| TensorError::UnknownIndexLetter {
-                    notation: notation.to_string(),
-                    letter,
-                })
-        })
+        .map(|letter| find_axis(&space, letter, notation))
         .collect::<Result<Vec<u16>, TensorError>>()?;
     Ok((space.len() as u16, projected))
+}
+
+/// Position of `letter` in the iteration space, or the same
+/// [`TensorError::UnknownIndexLetter`] every notation parser raises for it.
+fn find_axis(space: &[char], letter: char, notation: &str) -> Result<u16, TensorError> {
+    space
+        .iter()
+        .position(|candidate| *candidate == letter)
+        .map(|found| found as u16)
+        .ok_or_else(|| TensorError::UnknownIndexLetter {
+            notation: notation.to_string(),
+            letter,
+        })
+}
+
+/// Parse `operand->iteration` into a full [`IndexPattern`], where an operand
+/// axis is either the legacy bare letter (`ik->ijk`, one axis per character)
+/// or, once the operand side contains a comma, one axis-expression per
+/// comma-separated term (`"s,2*i->si"`). The comma is what selects the
+/// richer grammar, so a legacy notation with no comma parses identically to
+/// [`parse_projection`] and every existing spelling is unaffected.
+fn parse_operand_pattern(notation: &str) -> Result<IndexPattern, TensorError> {
+    let (operand, iteration) = notation
+        .split_once("->")
+        .ok_or_else(|| TensorError::MalformedMap(notation.to_string()))?;
+    let space: Vec<char> = iteration.chars().collect();
+    let axes = if operand.contains(',') {
+        operand
+            .split(',')
+            .map(|token| parse_axis_expr(token, &space, notation))
+            .collect::<Result<Vec<AxisIndex>, TensorError>>()?
+    } else {
+        operand
+            .chars()
+            .map(|letter| {
+                let axis = find_axis(&space, letter, notation)?;
+                Ok(AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(axis)).collect(),
+                    offset: 0,
+                })
+            })
+            .collect::<Result<Vec<AxisIndex>, TensorError>>()?
+    };
+    Ok(IndexPattern {
+        iter_rank: space.len() as u16,
+        axes,
+    })
+}
+
+/// One comma-separated axis expression: a sum of `[coeff*]letter` terms and
+/// bare-integer constants, e.g. `2*i+1`. Constants fold into `offset` rather
+/// than becoming a term, since [`AxisTerm`] only carries a coefficient over
+/// an iteration axis.
+fn parse_axis_expr(token: &str, space: &[char], notation: &str) -> Result<AxisIndex, TensorError> {
+    let mut terms: Vec<AxisTerm> = Vec::new();
+    let mut offset: i32 = 0;
+    for (sign, part) in split_signed_terms(token) {
+        if let Some((coeff_text, letter_text)) = part.split_once('*') {
+            let coeff: i32 = coeff_text
+                .parse()
+                .map_err(|_| TensorError::MalformedMap(notation.to_string()))?;
+            let axis = find_axis(space, single_letter(letter_text, notation)?, notation)?;
+            terms.push(AxisTerm::scaled(axis, sign * coeff));
+        } else if let Ok(constant) = part.parse::<i32>() {
+            offset += sign * constant;
+        } else {
+            let axis = find_axis(space, single_letter(part, notation)?, notation)?;
+            terms.push(AxisTerm::scaled(axis, sign));
+        }
+    }
+    if terms.is_empty() {
+        return Err(TensorError::MalformedMap(notation.to_string()));
+    }
+    Ok(AxisIndex {
+        terms: terms.into_iter().collect(),
+        offset,
+    })
+}
+
+/// A term's letter, rejecting anything but exactly one ASCII lowercase
+/// character — the same alphabet the legacy bare-letter grammar uses.
+fn single_letter(text: &str, notation: &str) -> Result<char, TensorError> {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), None) if letter.is_ascii_lowercase() => Ok(letter),
+        _ => Err(TensorError::MalformedMap(notation.to_string())),
+    }
+}
+
+/// Splits `2*i+1` into `[(1, "2*i"), (1, "1")]` and `d-1` into
+/// `[(1, "d"), (-1, "1")]` — a `+`/`-` not at position 0 starts a new signed
+/// part. There is no unary-minus support (no term ever starts with `-`)
+/// because nothing built by this module needs a negative coefficient.
+fn split_signed_terms(token: &str) -> Vec<(i32, &str)> {
+    let mut parts = Vec::new();
+    let mut sign = 1;
+    let mut start = 0;
+    for (index, character) in token.char_indices() {
+        if index != 0 && (character == '+' || character == '-') {
+            parts.push((sign, &token[start..index]));
+            sign = if character == '+' { 1 } else { -1 };
+            start = index + character.len_utf8();
+        }
+    }
+    parts.push((sign, &token[start..]));
+    parts
 }
 
 impl Validate for ProgramSpec {
@@ -313,10 +421,7 @@ fn resolve_map_spec(
     map_spec: &MapSpec,
 ) -> Result<IndexMap, TensorError> {
     match map_spec {
-        MapSpec::Projection(notation) => {
-            let (rank, projected) = parse_projection(notation)?;
-            Ok(IndexMap::Affine(map::projection(rank, &projected)))
-        }
+        MapSpec::Projection(notation) => Ok(IndexMap::Affine(parse_operand_pattern(notation)?)),
         MapSpec::Gather {
             gather,
             index_map,
@@ -711,6 +816,23 @@ shape = ["seq"]
         ));
     }
 
+    // deterministic pseudo-random source, recipe shared with
+    // proxima-tensor/examples/spec_block.rs and busy_per_mac.rs
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_unit(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let bits = (self.0 >> 33) as u32;
+            (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
+        }
+    }
+
+    fn random_vec(seed: u64, count: usize) -> Vec<f32> {
+        let mut lcg = Lcg(seed);
+        (0..count).map(|_| lcg.next_unit()).collect()
+    }
+
     /// The claim "a new architecture is a config file, not a PR" is only
     /// worth anything if a real architecture fits. A single-head attention
     /// block with RMSNorm and a full softmax does, and this checks it
@@ -719,9 +841,17 @@ shape = ["seq"]
     ///
     /// The softmax rows are the assertion that matters: finite output only
     /// proves the pipeline ran, whereas rows summing to one prove it computed
-    /// attention. What the grammar still cannot spell is recorded in the spec
-    /// file itself (rope's multi-term affine, and a mask, which would need an
-    /// index-derived tensor no `Op` produces).
+    /// attention. What this file still leaves as a plain input rather than
+    /// deriving is a mask, which would need an index-derived tensor no `Op`
+    /// produces — RoPE's multi-term affine no longer belongs on that list;
+    /// see the pairwise-rotation test below.
+    ///
+    /// Inputs are LCG-derived rather than uniform constants: a uniform row
+    /// makes every q/k/v row identical, so the scores collapse to a uniform
+    /// distribution regardless of whether the index maps, reduction order,
+    /// or broadcast are correct. Varied inputs make the softmax rows genuinely
+    /// non-uniform, so a transposed axis or a wrong reduction actually shows
+    /// up as a numeric difference instead of vanishing by symmetry.
     #[test]
     fn an_attention_block_written_as_toml_evaluates() {
         const SEQUENCE: usize = 4;
@@ -735,16 +865,12 @@ shape = ["seq"]
         let symbols = [SEQUENCE as u64];
         crate::shape::infer(&program, &symbols).expect("the block infers");
 
-        let weights = alloc::vec![0.125f32; MODEL * MODEL];
-        let activations = alloc::vec![0.5f32; SEQUENCE * MODEL];
+        let activations = random_vec(1, SEQUENCE * MODEL);
         let inverse_dim = alloc::vec![1.0 / MODEL as f32; SEQUENCE];
-        let blocks: [&[f32]; 5] = [
-            &activations,
-            &inverse_dim,
-            &weights,
-            &weights,
-            &weights,
-        ];
+        let wq = random_vec(2, MODEL * MODEL);
+        let wk = random_vec(3, MODEL * MODEL);
+        let wv = random_vec(4, MODEL * MODEL);
+        let blocks: [&[f32]; 5] = [&activations, &inverse_dim, &wq, &wk, &wv];
 
         let probabilities = spec
             .node
@@ -768,6 +894,205 @@ shape = ["seq"]
         for row in rows.chunks_exact(SEQUENCE) {
             let total: f32 = row.iter().sum();
             assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
+            let max = row.iter().copied().fold(f32::MIN, f32::max);
+            let min = row.iter().copied().fold(f32::MAX, f32::min);
+            assert!(
+                max - min > 1e-3,
+                "softmax row {row:?} is uniform (max - min = {}); varied inputs should break score ties",
+                max - min
+            );
+        }
+    }
+
+    /// RoPE's whole reason for existing in this module's doc: `2*i` and
+    /// `2*i+1` are the multi-term affine that used to have no string
+    /// spelling. This does not just check the spec parses — a parser that
+    /// silently addressed the wrong elements would still parse — it checks
+    /// the *evaluated* output obeys the one property that only holds if the
+    /// pairwise addressing is right: a rotation preserves each pair's norm.
+    /// `expected` is computed straight off the raw `x` buffer at the literal
+    /// indices `2*i` / `2*i+1`, independently of anything the graph did, so
+    /// an addressing bug (reading `i` instead of `2*i`, or the wrong operand
+    /// axis order) would read a different pair and very likely a different
+    /// norm — `x`'s eight values are pairwise distinct for exactly that
+    /// reason.
+    #[test]
+    fn a_rope_pairwise_rotation_written_as_toml_preserves_pair_norm() {
+        const SEQUENCE: usize = 2;
+        const MODEL: usize = 4;
+        const PAIRS: usize = MODEL / 2;
+
+        let text = include_str!("../specs/rope.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols: [u64; 0] = [];
+        crate::shape::infer(&program, &symbols).expect("the rotation infers");
+
+        let x: [f32; SEQUENCE * MODEL] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        // two exact Pythagorean triples (3-4-5 and 7-24-25 scaled by 1/25),
+        // so cos^2 + sin^2 = 1 exactly and any drift in the assertion below
+        // is evaluation error, not a badly chosen rotation.
+        let cos: [f32; SEQUENCE * PAIRS] = [0.6, 0.28, 0.6, 0.28];
+        let sin: [f32; SEQUENCE * PAIRS] = [0.8, 0.96, 0.8, 0.96];
+        let blocks: [&[f32]; 3] = [&x, &cos, &sin];
+
+        let node_id = |id: &str| {
+            let position = spec
+                .node
+                .iter()
+                .position(|node| node.id() == id)
+                .unwrap_or_else(|| panic!("the spec defines a {id} node"));
+            NodeId(position as u32)
+        };
+        let rotated_even_id = node_id("rotated_even");
+        let root = NodeId(program.len() as u32 - 1);
+        assert_eq!(root, node_id("rotated_odd"), "rotated_odd is the last node");
+
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &blocks,
+            &[root, rotated_even_id],
+            workers,
+        )
+        .expect("the rotation evaluates");
+
+        let rotated_odd = evaluated.root();
+        let (rotated_even, _) = evaluated
+            .get(rotated_even_id)
+            .expect("rotated_even was requested");
+        assert_eq!(rotated_even.len(), SEQUENCE * PAIRS);
+        assert_eq!(rotated_odd.len(), SEQUENCE * PAIRS);
+
+        for sequence in 0..SEQUENCE {
+            for pair in 0..PAIRS {
+                let raw_even = x[sequence * MODEL + 2 * pair];
+                let raw_odd = x[sequence * MODEL + 2 * pair + 1];
+                let expected_norm = raw_even * raw_even + raw_odd * raw_odd;
+
+                let rotated_index = sequence * PAIRS + pair;
+                let found_even = rotated_even[rotated_index];
+                let found_odd = rotated_odd[rotated_index];
+                let found_norm = found_even * found_even + found_odd * found_odd;
+
+                assert!(
+                    (found_norm - expected_norm).abs() < 1e-3,
+                    "pair ({raw_even}, {raw_odd}) has norm {expected_norm} but the rotated \
+                     pair ({found_even}, {found_odd}) has norm {found_norm}"
+                );
+            }
+        }
+    }
+
+    /// A full llama-style block — attention plus its output projection and
+    /// residual, a second RMSNorm, and a SwiGLU feed-forward with its own
+    /// residual — built on top of the attention block above. Every addition
+    /// lowers with the same node kinds and closed `ScalarOp` set the
+    /// attention block already used; `transformer_block.toml`'s header
+    /// records why nothing new was needed.
+    ///
+    /// Two invariants, not just finiteness:
+    /// - the softmax rows inside it still sum to one, the same evidence
+    ///   `an_attention_block_written_as_toml_evaluates` uses;
+    /// - a degenerate control: zero every projection weight (Q/K/V, the
+    ///   output projection, and all three FFN matrices) and the block must
+    ///   return its own input unchanged, because both sub-blocks' nonlinear
+    ///   interior gets multiplied away by a zeroed projection before either
+    ///   residual add — only the residual path survives. If this assertion
+    ///   fails, the residual wiring is broken and weakening it to an
+    ///   approximate check would hide that.
+    #[test]
+    fn a_transformer_block_written_as_toml_evaluates() {
+        const SEQUENCE: usize = 4;
+        const MODEL: usize = 8;
+        const FFN: usize = 16;
+
+        let text = include_str!("../specs/transformer_block.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the block infers");
+
+        let probabilities = spec
+            .node
+            .iter()
+            .position(|node| node.id() == "probabilities")
+            .expect("the spec defines a probabilities node");
+        let probabilities = NodeId(probabilities as u32);
+        let root = NodeId(program.len() as u32 - 1);
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+
+        // --- run 1: real weights, evaluates to something finite and the
+        // softmax invariant still holds inside the larger block.
+        let activations = alloc::vec![0.5f32; SEQUENCE * MODEL];
+        let inverse_dim = alloc::vec![1.0 / MODEL as f32; SEQUENCE];
+        let ones = alloc::vec![1.0f32; SEQUENCE];
+        let square_weights = alloc::vec![0.125f32; MODEL * MODEL];
+        let gate_up_weights = alloc::vec![0.0625f32; MODEL * FFN];
+        let down_weights = alloc::vec![0.0625f32; FFN * MODEL];
+        let real_blocks: [&[f32]; 10] = [
+            &activations,
+            &inverse_dim,
+            &ones,
+            &square_weights,
+            &square_weights,
+            &square_weights,
+            &square_weights,
+            &gate_up_weights,
+            &gate_up_weights,
+            &down_weights,
+        ];
+
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &real_blocks, &[root, probabilities], workers)
+                .expect("the block evaluates");
+
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * MODEL, "a vacuous output proves nothing");
+        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+
+        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        for row in rows.chunks_exact(SEQUENCE) {
+            let total: f32 = row.iter().sum();
+            assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
+        }
+
+        // --- run 2: degenerate control. every projection weight is zero, so
+        // attention's contribution and the feed-forward's contribution are
+        // each multiplied to exactly zero before their residual add — the
+        // block must hand its input straight through.
+        let zero_square = alloc::vec![0.0f32; MODEL * MODEL];
+        let zero_gate_up = alloc::vec![0.0f32; MODEL * FFN];
+        let zero_down = alloc::vec![0.0f32; FFN * MODEL];
+        let zeroed_blocks: [&[f32]; 10] = [
+            &activations,
+            &inverse_dim,
+            &ones,
+            &zero_square,
+            &zero_square,
+            &zero_square,
+            &zero_square,
+            &zero_gate_up,
+            &zero_gate_up,
+            &zero_down,
+        ];
+
+        let evaluated_zeroed =
+            crate::cpu::evaluate_parallel(&program, &symbols, &zeroed_blocks, &[root], workers)
+                .expect("the zeroed block evaluates");
+
+        let residual_output = evaluated_zeroed.root();
+        assert_eq!(residual_output.len(), activations.len());
+        for (result, input) in residual_output.iter().zip(activations.iter()) {
+            assert!(
+                (result - input).abs() < 1e-5,
+                "residual did not carry: got {result}, expected input {input}"
+            );
         }
     }
 }
