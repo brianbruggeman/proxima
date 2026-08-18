@@ -3166,25 +3166,54 @@ const TILE_ROWS: usize = 6;
 const TILE_COLS: usize = 4;
 
 /// Bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
-/// pass below. M1 Max: 12 MiB shared L2 per performance cluster. Budgeting
-/// 8 MiB rather than the full 12 MiB leaves headroom for the row-strip's own
-/// `a` tile, the output tile in flight, and set-associativity conflicts —
-/// zero headroom is exactly the margin that turns a near-fit back into a
-/// thrash.
+/// pass below. M1 Max: 12 MiB shared L2 per performance cluster of 4 cores —
+/// about 3 MiB/core once every worker in the cluster streams its own panel,
+/// not 12 MiB as an 8 MiB budget implicitly assumed (one worker owning the
+/// whole cluster's L2). ggml's own combined panel footprint never exceeds
+/// ~2.5 MiB at any size or thread count, which is also where headroom for
+/// the row-strip's `a` tile, the output tile in flight, and set-associativity
+/// conflicts remains without the near-fit turning into a thrash.
+///
+/// Swept 8/4/3/2.5/2 MiB at 512/1024/2048^3, 1/2/4/8 threads, n=9,
+/// interleaved round-robin per budget, 2026-08-18, system load 1.8-3.4
+/// (mostly under 3.0, one late 8-thread cell drifted to 3.37). Only the
+/// 1-thread cells stayed under the 1.5% CoV resolvability bar; every
+/// 2+-thread cell exceeded it (up to 20% CoV, this session's shared-host
+/// contention) and is not usable for a budget comparison. Within the
+/// resolvable 1-thread cells: 512^3 and 1024^3 measured flat across every
+/// budget from 8 MiB down to 2 MiB (busy-per-MAC within ~1% of each other,
+/// GFLOPS parity vs ggml 89.57-90.17 for 1024^3 across 8/2.5 MiB, no
+/// resolvable win despite the panel becoming numerically "active" at
+/// 1024^3 below ~2.8 MiB) — the hypothesis that a lower budget would help
+/// 1024^3 did NOT hold up. 2048^3/1-thread did show a real, resolvable
+/// effect: busy-per-mac dropped ~1.7-2% for every budget at or below 4 MiB
+/// versus the 8 MiB control (0.02238 -> ~0.0220), and GFLOPS parity vs ggml
+/// rose from 0.999x to 1.026x at 2.5 MiB. 4/3/2.5/2 MiB were statistically
+/// indistinguishable from each other at 2048^3/1-thread (within ~0.5%, same
+/// order as the noise floor) — no single value in that range measured best.
+/// 2.5 MiB is landed here because it matches ggml's own measured combined
+/// footprint and never measured worse than the 8 MiB control in any
+/// resolvable cell; 4 MiB or 3 MiB would be an equally defensible pick on
+/// this data. checksums (135.87619/260.24106/513.10425) and the 1024^3
+/// allocation shape were unchanged across every budget tested.
 #[cfg(target_arch = "aarch64")]
-const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = 2_621_440;
 
 /// Column-panel width for the tiled GEMM pass: the widest multiple of
 /// `TILE_COLS` whose panel of `b` (`panel_cols` columns, each a contiguous
 /// run of `reduction_len` `f32`s along the contraction dim) fits inside
 /// [`NEON_COLUMN_PANEL_BUDGET_BYTES`]. At `reduction_len = 2048` (2048^3's
-/// `k`): `8 MiB / (2048 * 4 bytes) = 1024` columns, half of 2048's tiled
-/// width — two panels. At `reduction_len = 1024` the budget already covers
-/// 2048 columns, wider than any tiled width a 1024^3 or smaller call
-/// produces, so the `clamp` below collapses the result to one panel
-/// spanning `tiled_width_cols` — the panel loop becomes a no-op wrapper
-/// around the original single sweep, unchanged behavior for 1024^3 and
-/// smaller.
+/// `k`): `2.5 MiB / (2048 * 4 bytes) = 640 -> 640` columns (rounds to a
+/// `TILE_COLS` multiple exactly), five-plus panels across 2048's tiled
+/// width — the cell this budget measurably helps. At `reduction_len = 1024`:
+/// `2.5 MiB / 4096 bytes = 640` columns against a 1024-wide tiled output,
+/// so the panel loop is numerically active (two panels, not the pre-2026-08
+/// no-op) but measured flat against every other budget swept, 1-thread,
+/// n=9 (`NEON_COLUMN_PANEL_BUDGET_BYTES`'s doc has the full sweep). At
+/// `reduction_len = 512` the budget covers 1280 columns, wider than any
+/// tiled width a 512^3 call produces, so the `clamp` below still collapses
+/// to one panel spanning `tiled_width_cols` — an unconditional no-op there
+/// at every budget from 8 MiB down to 2 MiB.
 #[cfg(target_arch = "aarch64")]
 fn neon_column_panel_cols(reduction_len: u64, tiled_width_cols: usize) -> usize {
     let bytes_per_col = reduction_len as usize * 4;
