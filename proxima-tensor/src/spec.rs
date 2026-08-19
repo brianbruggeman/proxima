@@ -1290,4 +1290,197 @@ shape = ["seq"]
             );
         }
     }
+
+    /// `row @ matrix`, `row` length `d_in`, `matrix` row-major `[d_in,
+    /// d_out]` — the reference computation `moe_block.toml`'s own test
+    /// checks the graph against, independent of anything the graph did.
+    fn matvec(row: &[f32], matrix: &[f32], d_in: usize, d_out: usize) -> alloc::vec::Vec<f32> {
+        (0..d_out)
+            .map(|out| (0..d_in).map(|inp| row[inp] * matrix[inp * d_out + out]).sum())
+            .collect()
+    }
+
+    /// The whole reason `Op::Iota` plus `IndexMap::Computed` together are
+    /// worth having: a top-1 sparse mixture-of-experts feed-forward, built
+    /// from gate -> argmax route -> gathered expert weights -> the expert's
+    /// own linear layer, with zero new `Op`/`ScalarOp` variants over what
+    /// `causal_attention.toml`'s mask and the embedding-lookup worked
+    /// example already used. `moe_block.toml`'s own header spells out the
+    /// argmax construction (`mask * iota`, no `Select`, no synthetic
+    /// `-infinity`) and why the gather is the same mechanism as an
+    /// embedding lookup with one more non-gathered axis.
+    ///
+    /// Two tokens, two experts, wired so token 0's gate logits favor expert
+    /// 0 (3 vs 1) and token 1's favor expert 1 (4 vs 1). `expected_token0`/
+    /// `expected_token1` are each computed directly from that token's own
+    /// `x` row and its *routed* expert's weight matrix via [`matvec`],
+    /// independently of the graph — if the gather read the wrong expert's
+    /// slab, or the wrong token's `x` row, or `argmax` picked the wrong
+    /// index, this is what would catch it, not a shape or finiteness check.
+    ///
+    /// The degenerate control reruns the identical graph with the gate
+    /// weights swapped, which flips both tokens' routes (token 0 -> expert
+    /// 1, token 1 -> expert 0 now — see the swapped-gate arithmetic in the
+    /// comments below), but both experts' weight slabs set to
+    /// `matrix_a`. If routing still leaked into the result, the output
+    /// would differ from `x @ matrix_a` for one or both tokens; since the
+    /// experts are equal, it must not.
+    #[test]
+    fn a_moe_block_written_as_toml_routes_each_token_to_its_own_experts_weights() {
+        const SEQUENCE: usize = 2;
+        const D_IN: usize = 3;
+        const D_OUT: usize = 2;
+        const N_EXPERTS: usize = 2;
+
+        let text = include_str!("../specs/moe_block.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the moe block infers");
+
+        let root = NodeId(program.len() as u32 - 1);
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+
+        // token 0 = [3, 2, 1]: logits = [x[0], x[2]] = [3, 1] -> expert 0.
+        // token 1 = [1, 2, 4]: logits = [x[0], x[2]] = [1, 4] -> expert 1.
+        let x: [f32; SEQUENCE * D_IN] = [3.0, 2.0, 1.0, 1.0, 2.0, 4.0];
+        let gate_w: [f32; D_IN * N_EXPERTS] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let matrix_a: [f32; D_IN * D_OUT] = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let matrix_b: [f32; D_IN * D_OUT] = [2.0, 0.0, 0.0, 2.0, 1.0, -1.0];
+        let expert_w: [f32; N_EXPERTS * D_IN * D_OUT] = [
+            matrix_a[0], matrix_a[1], matrix_a[2], matrix_a[3], matrix_a[4], matrix_a[5],
+            matrix_b[0], matrix_b[1], matrix_b[2], matrix_b[3], matrix_b[4], matrix_b[5],
+        ];
+        let blocks: [&[f32]; 3] = [&x, &gate_w, &expert_w];
+
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the moe block evaluates");
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * D_OUT, "a vacuous output proves nothing");
+
+        let expected_token0 = matvec(&x[0..D_IN], &matrix_a, D_IN, D_OUT);
+        let expected_token1 = matvec(&x[D_IN..2 * D_IN], &matrix_b, D_IN, D_OUT);
+        for (found, expected) in output[0..D_OUT].iter().zip(&expected_token0) {
+            assert!(
+                (found - expected).abs() < 1e-5,
+                "token 0 (routed to expert 0): got {found}, expected {expected}"
+            );
+        }
+        for (found, expected) in output[D_OUT..2 * D_OUT].iter().zip(&expected_token1) {
+            assert!(
+                (found - expected).abs() < 1e-5,
+                "token 1 (routed to expert 1): got {found}, expected {expected}"
+            );
+        }
+
+        // --- degenerate control: swap the gate so routing flips.
+        // token 0 = [3, 2, 1]: logits = [x[2], x[0]] = [1, 3] -> expert 1.
+        // token 1 = [1, 2, 4]: logits = [x[2], x[0]] = [4, 1] -> expert 0.
+        // Both experts' weights are `matrix_a`, so the flipped route must
+        // not change the answer from `x @ matrix_a`.
+        let swapped_gate_w: [f32; D_IN * N_EXPERTS] = [0.0, 1.0, 0.0, 0.0, 1.0, 0.0];
+        let uniform_expert_w: [f32; N_EXPERTS * D_IN * D_OUT] = [
+            matrix_a[0], matrix_a[1], matrix_a[2], matrix_a[3], matrix_a[4], matrix_a[5],
+            matrix_a[0], matrix_a[1], matrix_a[2], matrix_a[3], matrix_a[4], matrix_a[5],
+        ];
+        let degenerate_blocks: [&[f32]; 3] = [&x, &swapped_gate_w, &uniform_expert_w];
+        let evaluated_degenerate = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &degenerate_blocks,
+            &[root],
+            workers,
+        )
+        .expect("the degenerate moe block evaluates");
+        let degenerate_output = evaluated_degenerate.root();
+
+        let expected_uniform_token0 = matvec(&x[0..D_IN], &matrix_a, D_IN, D_OUT);
+        let expected_uniform_token1 = matvec(&x[D_IN..2 * D_IN], &matrix_a, D_IN, D_OUT);
+        for (found, expected) in degenerate_output[0..D_OUT]
+            .iter()
+            .zip(&expected_uniform_token0)
+        {
+            assert!(
+                (found - expected).abs() < 1e-5,
+                "degenerate control, token 0: got {found}, expected {expected} \
+                 (routing flipped but experts are identical, so output must not move)"
+            );
+        }
+        for (found, expected) in degenerate_output[D_OUT..2 * D_OUT]
+            .iter()
+            .zip(&expected_uniform_token1)
+        {
+            assert!(
+                (found - expected).abs() < 1e-5,
+                "degenerate control, token 1: got {found}, expected {expected} \
+                 (routing flipped but experts are identical, so output must not move)"
+            );
+        }
+    }
+
+    /// Probe for the harder question `a_moe_block_written_as_toml_...` does
+    /// not answer: does a *fixed* k > 1 stay expressible with zero new
+    /// ops, or does top-k genuinely need something this crate lacks
+    /// (`moe_topk2_probe.toml`'s own header names the boundary: a fixed,
+    /// unrolled k is fine, a general variable-k `TopK` op is not)?
+    ///
+    /// Three experts, logits `[2, 5, 3]` by construction (see the spec's
+    /// gate weights): top-2 must select expert 1 (5) then expert 2 (3) and
+    /// exclude expert 0 (2). Expert 0's weight is `[100, 100]` — wildly
+    /// different from experts 1 (`[1, 2]`) and 2 (`[3, 4]`) — so a wrong
+    /// inclusion is not a rounding error, it is off by roughly 30-100x.
+    /// `expected = x . expert1_weight + x . expert2_weight`, computed
+    /// independently of the graph via [`matvec`].
+    #[test]
+    fn a_topk2_probe_unrolls_two_argmax_rounds_with_exclusion() {
+        const D_IN: usize = 2;
+        const D_OUT: usize = 1;
+        const N_EXPERTS: usize = 3;
+
+        let text = include_str!("../specs/moe_topk2_probe.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [1u64];
+        crate::shape::infer(&program, &symbols).expect("the top-2 probe infers");
+
+        let root = NodeId(program.len() as u32 - 1);
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+
+        // logits = x @ gate_w = [1*1+1*1, 1*2+1*3, 1*1+1*2] = [2, 5, 3].
+        let x: [f32; D_IN] = [1.0, 1.0];
+        let gate_w: [f32; D_IN * N_EXPERTS] = [1.0, 2.0, 1.0, 1.0, 3.0, 2.0];
+        let expert0_weight: [f32; D_IN * D_OUT] = [100.0, 100.0];
+        let expert1_weight: [f32; D_IN * D_OUT] = [1.0, 2.0];
+        let expert2_weight: [f32; D_IN * D_OUT] = [3.0, 4.0];
+        let expert_w: [f32; N_EXPERTS * D_IN * D_OUT] = [
+            expert0_weight[0],
+            expert0_weight[1],
+            expert1_weight[0],
+            expert1_weight[1],
+            expert2_weight[0],
+            expert2_weight[1],
+        ];
+        let blocks: [&[f32]; 3] = [&x, &gate_w, &expert_w];
+
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the top-2 probe evaluates");
+        let output = evaluated.root();
+        assert_eq!(output.len(), D_OUT, "a vacuous output proves nothing");
+
+        let expected_expert1 = matvec(&x, &expert1_weight, D_IN, D_OUT);
+        let expected_expert2 = matvec(&x, &expert2_weight, D_IN, D_OUT);
+        let expected = expected_expert1[0] + expected_expert2[0];
+        assert!(
+            (output[0] - expected).abs() < 1e-5,
+            "got {}, expected {expected} (expert 1's {expected_expert1:?} + expert 2's \
+             {expected_expert2:?}); expert 0's [100, 100] weight must never contribute",
+            output[0]
+        );
+    }
 }
