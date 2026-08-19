@@ -15,6 +15,9 @@
 //! original control/hypothesis/elementwise trio. No row is skipped silently
 //! — a row we cannot run is reported as BLOCKED with the reason.
 
+// a bench is test-shaped code; unwrap/expect on setup and ffi calls are allowed here, same as #[cfg(test)] modules
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 #[path = "ggml_ffi.rs"]
 mod ggml_ffi;
 
