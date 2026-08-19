@@ -1,0 +1,35 @@
+name: algebra-lint
+
+# scripts/algebra-lint.sh mechanically enforces proxima's own claims about
+# itself — everything is a Pipe, examples use proxima rather than working
+# around it, no blanket impls over an open foreign set, no type minted only
+# to host an impl. The script predated any workflow and had never executed:
+# it worked, and reported 9 findings, entirely off CI's radar.
+#
+# This job runs it and fails the build on findings — no `continue-on-error`.
+# A red cell reported as a green job is exactly the failure mode no-std.yml's
+# own header warns against. As of the commit that added this job, the script
+# reports 8 findings (7 busy-wait examples, 1 PhantomData-only type with no
+# external caller) that are tracked as separate work, not fixed here — so
+# this job starts RED on main, honestly, until that work lands.
+#
+# Repo-wide, not tensor-scoped: the lint's own checks span examples/,
+# proxima-primitives/, and every library crate, not one crate's surface.
+
+on:
+  push:
+    branches: [main, "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  algebra-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: run algebra-lint
+        run: bash scripts/algebra-lint.sh
