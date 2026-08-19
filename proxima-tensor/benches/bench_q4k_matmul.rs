@@ -26,6 +26,8 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_tensor::cpu::matmul_q4k_f32;
+#[cfg(feature = "q4k-int8-dot")]
+use proxima_tensor::cpu::{matmul_q4k_q8k_f32, matmul_q4k_q8k_portable_f32};
 use proxima_tensor::test_support::Lcg;
 use std::hint::black_box;
 
@@ -223,6 +225,33 @@ fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
     c.bench_function(&format!("{label}_proxima_matmul_q4k_f32_t1"), |b| {
         b.iter(|| black_box(matmul_q4k_f32(&weight_bytes, out_dim, &activation).unwrap()))
     });
+
+    // --- packed int8 arm (feature `q4k-int8-dot`): correctness first,
+    // then two bench points -- whichever arm `q4k_dotprod` dispatches to
+    // on this build (aarch64: `vdotq_s32`), and the always-portable scalar
+    // arm, so the discipline log can report what portable packing alone
+    // buys next to what the intrinsic adds on top (both against the SAME
+    // ggml oracle output computed above).
+    #[cfg(feature = "q4k-int8-dot")]
+    {
+        let ours_packed = matmul_q4k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
+        let diff_packed = max_abs_diff(&ours_packed, &ggml_out);
+        println!("{label} packed-int8 max abs diff (ours vs ggml): {diff_packed:e}");
+        assert!(
+            diff_packed < 0.5,
+            "{label} packed-int8 numerical mismatch: {diff_packed} (fail fast, no timing below this line)"
+        );
+
+        let ours_portable = matmul_q4k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+        assert_eq!(ours_packed, ours_portable, "{label}: dispatched and portable packed-int8 arms diverged");
+
+        c.bench_function(&format!("{label}_proxima_matmul_q4k_q8k_dispatched_t1"), |b| {
+            b.iter(|| black_box(matmul_q4k_q8k_f32(&weight_bytes, out_dim, &activation).unwrap()))
+        });
+        c.bench_function(&format!("{label}_proxima_matmul_q4k_q8k_portable_t1"), |b| {
+            b.iter(|| black_box(matmul_q4k_q8k_portable_f32(&weight_bytes, out_dim, &activation).unwrap()))
+        });
+    }
 
     let macs = (out_dim as u64) * (in_dim as u64);
     println!("{label} macs/call: {macs}");

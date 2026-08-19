@@ -57,6 +57,15 @@ use alloc::vec::Vec;
 use core::arch::aarch64::{
     vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vfmaq_n_f32, vld1q_f32, vst1q_f32,
 };
+// `dot_q4k_q8k_block_neon_dotprod`'s own intrinsics -- a separate `use`
+// block (rather than folded into the one above) so a default build (the
+// `q4k-int8-dot` feature off) never imports symbols nothing references,
+// which `-D unused-imports` (workspace lint) would otherwise reject.
+#[cfg(all(target_arch = "aarch64", feature = "q4k-int8-dot"))]
+use core::arch::aarch64::{
+    vaddvq_s32, vandq_u8, vdupq_n_s32, vdupq_n_u8, vld1q_s8, vld1q_u8, vreinterpretq_s8_u8,
+    vshrq_n_u8,
+};
 use core::any::TypeId;
 use core::cell::RefCell;
 use core::future::Future;
@@ -3862,6 +3871,483 @@ pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
     weights
         .chunks_exact(row_bytes)
         .map(|weight_row| dot_q4k_f32(weight_row, activation))
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// `q4k-int8-dot` (default-off): int8 dot directly on packed `Q4_K`
+// nibbles against a `Q8_K`-quantized activation, skipping `dot_q4k_f32`'s
+// per-superblock `[f32; 256]` dequantize entirely. Behind its own
+// compile-time feature (guiding-principles §3/§11 -- the production
+// default stays `dot_q4k_f32`/`matmul_q4k_f32` above until an e2e bench
+// shows the full stack wins); see `proxima-tensor/docs/discipline.md` for
+// the row this landed under.
+// ---------------------------------------------------------------------
+
+/// Byte offsets into one packed `Q4_K` super-block ([`Q4K_BLOCK_BYTES`]
+/// bytes), mirroring `proxima_gguf::quant::q4_k`'s private layout
+/// constants -- duplicated here (not re-exported from that module) because
+/// [`dot_q4k_q8k`] reads the raw bytes directly rather than calling
+/// `dequantize_block`, which is the entire point: no `[f32; 256]`
+/// intermediate.
+#[cfg(feature = "q4k-int8-dot")]
+const Q4K_D_OFFSET: usize = 0;
+#[cfg(feature = "q4k-int8-dot")]
+const Q4K_DMIN_OFFSET: usize = 2;
+#[cfg(feature = "q4k-int8-dot")]
+const Q4K_SCALES_OFFSET: usize = 4;
+#[cfg(feature = "q4k-int8-dot")]
+const Q4K_SCALE_BYTES: usize = 12;
+#[cfg(feature = "q4k-int8-dot")]
+const Q4K_QS_OFFSET: usize = Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES;
+/// Sub-blocks of 32 elements per `Q4_K` super-block (`QK_K/32` = 8) --
+/// [`Q4K_BLOCK_ELEMENTS`] is `pub(crate)`-visible above; this is the same
+/// number under the name the int8 dot's loop structure uses it by.
+#[cfg(feature = "q4k-int8-dot")]
+const Q4K_SUB_BLOCKS: usize = Q4K_BLOCK_ELEMENTS / 32;
+
+/// Bytes per `Q8_K` super-block: `f32` scale (4 bytes), plus `QK_K` `i8`
+/// quants (256 bytes), plus `QK_K/16` `i16` per-16-element partial sums
+/// (16 times 2 bytes = 32 bytes) -- 292 total. Mirrors ggml's own
+/// `block_q8_K` byte-for-byte (`ggml-common.h:333`,
+/// `static_assert(sizeof(block_q8_K) == sizeof(float) + QK_K +
+/// QK_K/16*sizeof(int16_t), ...)`) -- deliberately: [`dot_q4k_q8k`]
+/// takes `activation_q8k` as raw bytes in that exact layout rather than a
+/// new struct type. Per guiding-principles §1: a byte buffer already in
+/// ggml's own wire shape needs no host type any more than `dot_q4k_f32`'s
+/// `weight_row: &[u8]` does -- a `(d, qs, bsums)` tuple or three parallel
+/// slices would ALSO work, but would require [`quantize_row_q8k`] and
+/// [`dot_q4k_q8k`] to agree on three independent buffer lengths instead of
+/// one, for no capability a caller gains.
+#[cfg(feature = "q4k-int8-dot")]
+const Q8K_BLOCK_BYTES: usize = 4 + Q4K_BLOCK_ELEMENTS + (Q4K_BLOCK_ELEMENTS / 16) * 2;
+#[cfg(feature = "q4k-int8-dot")]
+const Q8K_D_OFFSET: usize = 0;
+#[cfg(feature = "q4k-int8-dot")]
+const Q8K_QS_OFFSET: usize = 4;
+#[cfg(feature = "q4k-int8-dot")]
+const Q8K_BSUMS_OFFSET: usize = Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS;
+#[cfg(feature = "q4k-int8-dot")]
+const Q8K_BSUMS_COUNT: usize = Q4K_BLOCK_ELEMENTS / 16;
+
+#[cfg(feature = "q4k-int8-dot")]
+fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
+    let mut raw = [0u8; 2];
+    raw.copy_from_slice(&bytes[offset..offset + 2]);
+    half::f16::from_le_bytes(raw).to_f32()
+}
+
+/// Quantizes an activation vector into packed `Q8_K` bytes ([`Q8K_BLOCK_BYTES`]
+/// per 256-element super-block) -- the one pass [`dot_q4k_q8k`]'s int8
+/// mechanism needs, hoisted OUT of the per-row loop the same way this
+/// module's docs already measured a conversion pipe at (52 vs 52
+/// instructions, `docs/discipline.md`): paying this per row instead of
+/// once per `matmul_q4k_q8k_f32` call would cost `rows`x -- 4096x at this
+/// crate's real weight-matrix shapes. Ports `quantize_row_q8_K_ref`
+/// (`ggml-quants.c:2471-2505`) bit-for-bit: per super-block, finds the
+/// largest-magnitude element, scales by `-127/max`, rounds every element to
+/// `i8` via [`proxima_gguf::quant::q4_k::nearest_int`] (the same
+/// ties-to-even bit trick `Q4_K`'s own reference quantizer uses -- ggml
+/// calls one `nearest_int` for every k-quant codec, not a `Q8_K`-specific
+/// one), then folds each 16-element run into one `i16` partial sum
+/// (`bsums`) [`dot_q4k_q8k`]'s mins correction consumes without
+/// re-scanning `qs`.
+///
+/// `activation.len()` must be a whole multiple of [`Q4K_BLOCK_ELEMENTS`]
+/// (256); `output.len()` must exactly equal the block count times
+/// [`Q8K_BLOCK_BYTES`]. No allocation: `output` is caller-provided.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if either length requirement
+/// above is not met.
+#[cfg(feature = "q4k-int8-dot")]
+pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), TensorError> {
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    if output.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k output length does not match the activation block count",
+        });
+    }
+    for (chunk, out_block) in activation
+        .chunks_exact(Q4K_BLOCK_ELEMENTS)
+        .zip(output.chunks_exact_mut(Q8K_BLOCK_BYTES))
+    {
+        quantize_q8k_block(chunk, out_block);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "q4k-int8-dot")]
+fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
+    let mut amax = 0.0f32;
+    let mut max = 0.0f32;
+    for &value in chunk {
+        let absolute = value.abs();
+        if absolute > amax {
+            amax = absolute;
+            max = value;
+        }
+    }
+    if amax == 0.0 {
+        out_block.fill(0);
+        return;
+    }
+
+    let iscale = -127.0f32 / max;
+    let mut levels = [0i8; Q4K_BLOCK_ELEMENTS];
+    for (level, &value) in levels.iter_mut().zip(chunk.iter()) {
+        *level = proxima_gguf::quant::q4_k::nearest_int(iscale * value).min(127) as i8;
+    }
+
+    let scale = 1.0 / iscale;
+    out_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4].copy_from_slice(&scale.to_le_bytes());
+
+    let qs = &mut out_block[Q8K_QS_OFFSET..Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS];
+    for (slot, &level) in qs.iter_mut().zip(levels.iter()) {
+        *slot = level.cast_unsigned();
+    }
+
+    let bsums_region = &mut out_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+    for (sixteen, bytes) in levels.chunks_exact(16).zip(bsums_region.chunks_exact_mut(2)) {
+        let sum: i16 = sixteen.iter().map(|&level| i16::from(level)).sum();
+        bytes.copy_from_slice(&sum.to_le_bytes());
+    }
+}
+
+/// One `Q4_K`-weight-row x `Q8_K`-activation int8 dot product --
+/// [`dot_q4k_f32`]'s packed-arithmetic sibling: same `weight_row` shape
+/// (raw `Q4_K` bytes, a whole number of [`Q4K_BLOCK_BYTES`] super-blocks),
+/// but `activation_q8k` is [`quantize_row_q8k`]'s packed `Q8_K` bytes
+/// instead of a plain `f32` slice, and the fold is an integer dot on the
+/// packed 4-bit nibbles rather than an `f32` multiply-add over a
+/// dequantized scratch buffer. `dot_q4k_f32` is left untouched as the
+/// correct codec path for non-matmul consumers (module-level comment
+/// above) -- this is an additional arm, not a replacement.
+///
+/// Dispatches to [`dot_q4k_q8k_block_neon_dotprod`] when built with the
+/// `q4k_dotprod` cfg (`build.rs`: every aarch64 target this workspace
+/// builds for) and to the portable [`dot_q4k_q8k_block_scalar`] everywhere
+/// else. Both compute the identical mechanism -- read 4.5 bits/weight off
+/// `weight_row` and do the multiply-accumulate against `Q8_K` `i8`
+/// activations directly, no `f32` intermediate at all -- the NEON arm is
+/// an acceleration of that mechanism (`vdotq_s32`'s 16-lane int8 dot via
+/// inline `sdot`, `core::arch::aarch64::vdotq_s32` itself being unstable
+/// on this toolchain -- `stdarch_neon_dotprod`), not a different one.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q4K_BLOCK_BYTES`], or `activation_q8k.len()` does
+/// not equal the row's block count times [`Q8K_BLOCK_BYTES`].
+#[cfg(feature = "q4k-int8-dot")]
+pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q4K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q4_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q4K_BLOCK_BYTES;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let mut acc = 0.0f32;
+    for (weight_block, q8k_block) in weight_row
+        .chunks_exact(Q4K_BLOCK_BYTES)
+        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+    {
+        #[cfg(q4k_dotprod)]
+        // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
+        // targets, all of which carry FEAT_DotProd (build.rs's own doc).
+        let block_sum = unsafe { dot_q4k_q8k_block_neon_dotprod(weight_block, q8k_block) };
+        #[cfg(not(q4k_dotprod))]
+        let block_sum = dot_q4k_q8k_block_scalar(weight_block, q8k_block);
+        acc += block_sum;
+    }
+    Ok(acc)
+}
+
+/// [`dot_q4k_q8k`] with the dispatch forced to
+/// [`dot_q4k_q8k_block_scalar`] regardless of `q4k_dotprod` -- the "what
+/// does portable packing alone buy" measurement the discipline log's
+/// packed-kernel row reports standalone, next to the `vdotq_s32`-
+/// accelerated number `dot_q4k_q8k` itself produces on an aarch64 build.
+/// Also what non-aarch64 targets (`cargo check --target
+/// x86_64-unknown-linux-gnu`) actually call, via `dot_q4k_q8k`'s own
+/// `not(q4k_dotprod)` arm -- this function exists so that arm's code path
+/// stays reachable, and separately benchable, from an aarch64 host too.
+///
+/// # Errors
+/// Same as [`dot_q4k_q8k`].
+#[cfg(feature = "q4k-int8-dot")]
+pub fn dot_q4k_q8k_portable(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q4K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q4_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q4K_BLOCK_BYTES;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let mut acc = 0.0f32;
+    for (weight_block, q8k_block) in weight_row
+        .chunks_exact(Q4K_BLOCK_BYTES)
+        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+    {
+        acc += dot_q4k_q8k_block_scalar(weight_block, q8k_block);
+    }
+    Ok(acc)
+}
+
+/// The portable packed-nibble x `Q8_K` int8 dot -- no dequantize pass, no
+/// `f32` intermediate, no architecture intrinsics. This is the mechanism
+/// itself (reading 4.5 bits/weight off `weight_block` instead of the 32
+/// bits/weight a decoded `f32` row costs, 7.11x less traffic than
+/// `dot_q4k_f32`'s scratch buffer); [`dot_q4k_q8k_block_neon_dotprod`]
+/// accelerates this same computation with `vdotq_s32`, it does not replace
+/// it -- every non-aarch64 target this crate builds for (the
+/// `cargo check --target x86_64-unknown-linux-gnu` gate cell) runs this
+/// function, not a stand-in nobody exercises.
+///
+/// Ports the scalar body of `ggml_vec_dot_q4_K_q8_K`
+/// (`ggml-cpu/quants.c:515`, the `#else` arm every architecture file's own
+/// vectorized version specializes): per sub-block of 32, unpack its 6-bit
+/// `(scale, min)` pair via [`proxima_gguf::quant::q4_k::get_scale_min_k4`],
+/// dot the sub-block's 32 nibbles (0..15, an unsigned weight code -- never
+/// sign-extended) against the matching 32 `Q8_K` `i8` activations, scale
+/// by the sub-block's 6-bit scale code; separately, the mins correction
+/// sums each sub-block's `Q8_K` `bsums` pair times its 6-bit min code.
+/// `d`/`dmin` (the super-block's own `f16` scale pair) and the `Q8_K`
+/// block's `f32` scale multiply in only at the very end -- two `f32`
+/// operations total per 256-element super-block, exactly matching this
+/// component's module doc.
+#[cfg(feature = "q4k-int8-dot")]
+fn dot_q4k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q4K_D_OFFSET);
+    let dmin_weight = f16_le_at(weight_block, Q4K_DMIN_OFFSET);
+    let mut scales = [0u8; Q4K_SCALE_BYTES];
+    scales.copy_from_slice(&weight_block[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+    let qs = &weight_block[Q4K_QS_OFFSET..Q4K_QS_OFFSET + Q4K_BLOCK_ELEMENTS / 2];
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+    let activation_qs = &q8k_block[Q8K_QS_OFFSET..Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS];
+    let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+    let mut sumi = 0i32;
+    let mut mins_correction = 0i32;
+    for sub_block in 0..Q4K_SUB_BLOCKS {
+        let (scale_code, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+
+        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+
+        let byte_base = (sub_block / 2) * 32;
+        let is_high_nibble = sub_block % 2 == 1;
+        let activation_base = sub_block * 32;
+        let mut partial = 0i32;
+        for offset in 0..32 {
+            let byte = qs[byte_base + offset];
+            let nibble = i32::from(if is_high_nibble { byte >> 4 } else { byte & 0x0F });
+            let activation_value = i32::from(activation_qs[activation_base + offset].cast_signed());
+            partial += nibble * activation_value;
+        }
+        sumi += partial * i32::from(scale_code);
+    }
+
+    let d = activation_scale * d_weight;
+    let dmin = activation_scale * dmin_weight;
+    d.mul_add(sumi as f32, -(dmin * mins_correction as f32))
+}
+
+/// Issues the ARM `FEAT_DotProd` `sdot` instruction directly via inline
+/// asm rather than `core::arch::aarch64::vdotq_s32` -- that safe intrinsic
+/// is gated behind the unstable `stdarch_neon_dotprod` feature on this
+/// toolchain (probed against `rustc 1.97.1`; ggml's own C `ggml_vdotq_s32`
+/// wrapper is the exact analogue this mirrors, `ggml-cpu-impl.h:312-321`).
+/// `acc + sum over 4 lanes of (a[4i..4i+4] . b[4i..4i+4])` per output lane,
+/// four independent lanes -- the standard armv8.2 `SDOT (vector)` encoding.
+///
+/// # Safety
+/// Caller guarantees `FEAT_DotProd` is available -- this crate's `build.rs`
+/// only ever calls this function under the `q4k_dotprod` cfg, which it
+/// emits solely for aarch64 targets (see that cfg's doc).
+#[cfg(all(target_arch = "aarch64", feature = "q4k-int8-dot"))]
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn sdot_s32(acc: core::arch::aarch64::int32x4_t, a: core::arch::aarch64::int8x16_t, b: core::arch::aarch64::int8x16_t) -> core::arch::aarch64::int32x4_t {
+    // SAFETY: caller-guaranteed FEAT_DotProd (this fn's own doc); operands
+    // are NEON vector registers, `options(pure, nomem, nostack)` matches
+    // that no memory is touched and the instruction has no side effects.
+    unsafe {
+        let result: core::arch::aarch64::int32x4_t;
+        core::arch::asm!(
+            "sdot {result:v}.4s, {a:v}.16b, {b:v}.16b",
+            result = inlateout(vreg) acc => result,
+            a = in(vreg) a,
+            b = in(vreg) b,
+            options(pure, nomem, nostack),
+        );
+        result
+    }
+}
+
+/// [`dot_q4k_q8k_block_scalar`]'s mechanism, `vdotq_s32`-accelerated:
+/// identical per-sub-block structure (unpack scale/min via
+/// `get_scale_min_k4`, dot 32 nibbles against 32 `Q8_K` activations, scale,
+/// accumulate; mins correction identical), but the 32-nibble dot is two
+/// 16-lane `sdot_s32` calls (`ggml_vec_dot_q4_K_q8_K`'s `__ARM_NEON` arm,
+/// `arch/arm/quants.c:2408-2427`) instead of a 32-iteration scalar loop --
+/// low/high nibbles split in-register via `vandq_u8`/`vshrq_n_u8`, never
+/// written to memory.
+///
+/// # Safety
+/// Caller guarantees `FEAT_DotProd`; `weight_block.len() ==
+/// Q4K_BLOCK_BYTES` and `q8k_block.len() == Q8K_BLOCK_BYTES` (both
+/// [`dot_q4k_q8k`]'s own `chunks_exact` calls already guarantee before
+/// calling this).
+#[cfg(all(q4k_dotprod, feature = "q4k-int8-dot"))]
+unsafe fn dot_q4k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q4K_D_OFFSET);
+    let dmin_weight = f16_le_at(weight_block, Q4K_DMIN_OFFSET);
+    let mut scales = [0u8; Q4K_SCALE_BYTES];
+    scales.copy_from_slice(&weight_block[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+    let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+    let mut mins_correction = 0i32;
+    for sub_block in 0..Q4K_SUB_BLOCKS {
+        let (_, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+    }
+
+    // SAFETY: caller-guaranteed FEAT_DotProd; `q4_ptr`/`q8_ptr` each walk
+    // exactly `Q4K_BLOCK_ELEMENTS / 2` / `Q4K_BLOCK_ELEMENTS` bytes across
+    // the 4 loop iterations below, both within the slices' checked bounds.
+    unsafe {
+        let m4b = vdupq_n_u8(0x0f);
+        let mzero = vdupq_n_s32(0);
+        let q4_base = weight_block[Q4K_QS_OFFSET..].as_ptr();
+        let q8_base = q8k_block[Q8K_QS_OFFSET..].as_ptr().cast::<i8>();
+
+        let mut sumi1: i32 = 0;
+        let mut sumi2: i32 = 0;
+        for j in 0..Q4K_SUB_BLOCKS / 2 {
+            let q4bits0 = vld1q_u8(q4_base.add(j * 32));
+            let q4bits1 = vld1q_u8(q4_base.add(j * 32 + 16));
+
+            let lo0 = vreinterpretq_s8_u8(vandq_u8(q4bits0, m4b));
+            let lo1 = vreinterpretq_s8_u8(vandq_u8(q4bits1, m4b));
+            let q8b0 = vld1q_s8(q8_base.add(j * 64));
+            let q8b1 = vld1q_s8(q8_base.add(j * 64 + 16));
+            let partial_lo = sdot_s32(sdot_s32(mzero, lo0, q8b0), lo1, q8b1);
+            let scale_lo = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j, &scales).0;
+            sumi1 += vaddvq_s32(partial_lo) * i32::from(scale_lo);
+
+            let hi0 = vreinterpretq_s8_u8(vshrq_n_u8(q4bits0, 4));
+            let hi1 = vreinterpretq_s8_u8(vshrq_n_u8(q4bits1, 4));
+            let q8b2 = vld1q_s8(q8_base.add(j * 64 + 32));
+            let q8b3 = vld1q_s8(q8_base.add(j * 64 + 48));
+            let partial_hi = sdot_s32(sdot_s32(mzero, hi0, q8b2), hi1, q8b3);
+            let scale_hi = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j + 1, &scales).0;
+            sumi2 += vaddvq_s32(partial_hi) * i32::from(scale_hi);
+        }
+
+        let d = activation_scale * d_weight;
+        let dmin = activation_scale * dmin_weight;
+        d.mul_add((sumi1 + sumi2) as f32, -(dmin * mins_correction as f32))
+    }
+}
+
+/// A full `Q4_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- [`matmul_q4k_f32`]'s packed-arithmetic sibling.
+/// Quantizes `activation` to `Q8_K` exactly once ([`quantize_row_q8k`],
+/// this function's own doc note on why: hoisted out of the row loop), then
+/// calls [`dot_q4k_q8k`] per row against that one shared quantized buffer.
+///
+/// # Errors
+/// Propagates [`quantize_row_q8k`]'s and [`dot_q4k_q8k`]'s
+/// [`TensorError::QuantizedShapeMismatch`], or reports the same error if
+/// `weights.len()` is not a whole multiple of `rows`.
+#[cfg(feature = "q4k-int8-dot")]
+pub fn matmul_q4k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q4k_q8k_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    quantize_row_q8k(activation, &mut activation_q8k)?;
+
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q4k_q8k(weight_row, &activation_q8k))
+        .collect()
+}
+
+/// [`matmul_q4k_q8k_f32`] with every row routed through
+/// [`dot_q4k_q8k_portable`] instead of [`dot_q4k_q8k`] -- the matrix-level
+/// counterpart of that function's own doc: the standalone "portable
+/// packing alone" measurement, callable (and benchable) on any host
+/// regardless of which accelerated arm that host's build would otherwise
+/// pick.
+///
+/// # Errors
+/// Same as [`matmul_q4k_q8k_f32`].
+#[cfg(feature = "q4k-int8-dot")]
+pub fn matmul_q4k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q4k_q8k_portable_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    quantize_row_q8k(activation, &mut activation_q8k)?;
+
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q4k_q8k_portable(weight_row, &activation_q8k))
         .collect()
 }
 
@@ -8177,6 +8663,149 @@ mod tests {
         let weight_blocks = vec![0u8; BLOCK_BYTES];
         let wrong_length_activation = vec![0.0f32; 200];
         let error = matmul_q4k_f32(&weight_blocks, 1, &wrong_length_activation).unwrap_err();
+        assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+    }
+
+    /// [`matmul_q4k_q8k_f32`] against the SAME incumbent
+    /// [`matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`]
+    /// checks against: dequantize the packed `Q4_K` bytes, plain `f32` dot.
+    /// This path never touches `dequantize`/`dot_q4k_f32` at all -- every
+    /// weight byte is read once, as a nibble, straight into an integer
+    /// accumulate -- so a nonzero difference from the `f32` reference is
+    /// expected (Q8_K's own quantization error, `iscale = -127/max`, is a
+    /// second lossy step this path pays that `dot_q4k_f32` does not).
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn matmul_q4k_q8k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+        let rows = 5;
+        let blocks_per_row = 3;
+        let k = QK_K * blocks_per_row;
+
+        let activation: Vec<f32> = random_vec(7, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let weight_f32: Vec<f32> = random_vec(11, rows * k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let mut expected = Vec::with_capacity(rows);
+        for row_blocks in weight_blocks.chunks_exact(blocks_per_row * BLOCK_BYTES) {
+            let mut dequantized = vec![0.0f32; k];
+            dequantize(row_blocks, &mut dequantized).expect("row_blocks is a whole number of q4_k super-blocks");
+            let dot: f32 = dequantized.iter().zip(activation.iter()).map(|(&weight, &value)| weight * value).sum();
+            expected.push(dot);
+        }
+
+        let actual = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed packed int8 matmul");
+
+        assert_eq!(actual.len(), expected.len());
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (&got, &want) in actual.iter().zip(expected.iter()) {
+            assert!(got.is_finite(), "packed int8 matmul row produced a non-finite value: {got}");
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / rows as f64).sqrt();
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative_max_error = max_error / max_magnitude;
+        eprintln!(
+            "matmul_q4k_q8k_f32 vs dequantize-then-matmul: max_error={max_error} rms_error={rms_error} \
+             max_magnitude={max_magnitude} relative_max_error={relative_max_error}"
+        );
+        // Unlike `matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`
+        // above (whose only source of disagreement is accumulation order --
+        // both arms there consume the SAME dequantized bytes, so an
+        // absolute bound near the float noise floor is right), this path
+        // ALSO quantizes the activation to Q8_K, a second real lossy step.
+        // The dot magnitude here runs into the thousands (this fixture's
+        // `random_vec`-derived data is not zero-mean), so an absolute
+        // bound copied from that other test would be meaningless -- this
+        // is RELATIVE error against the signal's own magnitude, still a
+        // loose sanity bound and still not tuned to the measured number.
+        assert!(
+            relative_max_error < 0.01,
+            "relative_max_error={relative_max_error} (max_error={max_error} over magnitude {max_magnitude}) \
+             exceeds loose sanity bound"
+        );
+    }
+
+    /// The whole point of [`dot_q4k_q8k_block_neon_dotprod`]: it is an
+    /// ACCELERATION of [`dot_q4k_q8k_block_scalar`]'s mechanism, not a
+    /// different one. Every intermediate value both paths compute is
+    /// integer (`i32` partial sums, `i32` mins correction) until the very
+    /// last step, and integer addition has no rounding -- so
+    /// [`matmul_q4k_q8k_f32`] (whichever arm `q4k_dotprod` selects) and
+    /// [`matmul_q4k_q8k_portable_f32`] (always the scalar arm) must produce
+    /// BIT-EXACT output on the same input, not merely close. A tolerance
+    /// here would hide a real divergence between the two implementations.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows = 4;
+        let blocks_per_row = 5;
+        let k = QK_K * blocks_per_row;
+
+        let activation: Vec<f32> = random_vec(13, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let weight_f32: Vec<f32> = random_vec(17, rows * k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+
+        let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let dispatched = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed dispatched matmul");
+        let portable = matmul_q4k_q8k_portable_f32(&weight_blocks, rows, &activation).expect("well-formed portable matmul");
+
+        assert_eq!(dispatched, portable, "dispatched and portable arms diverged -- not merely an acceleration");
+    }
+
+    /// [`quantize_row_q8k`]'s all-zero fast path
+    /// (`quantize_row_q8_K_ref`'s `if (!amax) { y[i].d = 0; memset(...); }`
+    /// arm, `ggml-quants.c:2483-2488`): a zero super-block must round-trip
+    /// to an exactly zero packed block, not merely a near-zero one.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn quantize_row_q8k_zero_vector_is_bit_exact_zero() {
+        let activation = vec![0.0f32; Q4K_BLOCK_ELEMENTS];
+        let mut packed = vec![0xFFu8; Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut packed).expect("one well-formed super-block");
+        assert!(packed.iter().all(|&byte| byte == 0), "zero activation must pack to an all-zero Q8_K block");
+    }
+
+    /// [`dot_q4k_q8k`]'s shape-mismatch guard, mirroring
+    /// [`matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count`]
+    /// for the packed-int8 sibling: a `Q8_K` activation buffer sized for
+    /// the wrong block count is rejected, never silently truncated.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn dot_q4k_q8k_rejects_a_q8k_activation_length_mismatch() {
+        let weight_block = vec![0u8; Q4K_BLOCK_BYTES];
+        let wrong_length_q8k = vec![0u8; Q8K_BLOCK_BYTES - 1];
+        let error = dot_q4k_q8k(&weight_block, &wrong_length_q8k).unwrap_err();
+        assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+    }
+
+    /// Same guard, exercised on the always-portable entry point directly
+    /// (bypassing `q4k_dotprod` dispatch entirely).
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn dot_q4k_q8k_portable_rejects_a_weight_row_length_not_a_block_multiple() {
+        let weight_row = vec![0u8; Q4K_BLOCK_BYTES - 1];
+        let q8k = vec![0u8; Q8K_BLOCK_BYTES];
+        let error = dot_q4k_q8k_portable(&weight_row, &q8k).unwrap_err();
         assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
     }
 
