@@ -3254,7 +3254,7 @@ struct RowInvariantTile<'a> {
 /// shape as [`WeightTile`] but a different base type (`i64`, since
 /// `width_tile_plan`'s strides can run negative) and, in general, a
 /// different unit-stride dimension — kept as its own type rather than
-/// forced through `WeightTile<f32>` for a shape match that would not carry
+/// forced through [`WeightTile`] for a shape match that would not carry
 /// the same addressing guarantee.
 #[cfg(target_arch = "aarch64")]
 struct WidthContiguousTile<'a> {
@@ -3743,21 +3743,19 @@ fn neon_tile_plan(
     })
 }
 
-/// A strided view over a borrowed weight buffer: `data` is the physical
-/// buffer, `base` the flat offset of this tile's `(row 0, col 0, k 0)`
-/// corner, `stride` the per-row (for `a`) or per-column (for `b`) step
-/// between adjacent tile lanes. Bundled for the same reason [`OperandSpan`]
-/// is — keeps the kernel under clippy's argument-count lint.
+/// A strided view over a borrowed `f32` weight buffer: `data` is the
+/// physical buffer, `base` the flat offset of this tile's `(row 0, col 0,
+/// k 0)` corner, `stride` the per-row (for `a`) or per-column (for `b`)
+/// step between adjacent tile lanes. Bundled for the same reason
+/// [`OperandSpan`] is — keeps the kernel under clippy's argument-count
+/// lint.
 ///
-/// `cfg`-gated to aarch64: [`gemm_tile_neon`] below is this type's only
-/// constructor and only consumer, and that kernel is itself aarch64-only.
-/// [`dot_q4k_f32`] takes a plain `&[u8]` row today, not a `WeightTile<u8>` —
-/// the `T` parameter stays generic for that eventual second instantiation,
-/// but until it lands there is nowhere non-aarch64 to build or consume this
-/// type from.
+/// `cfg`-gated to aarch64: this is the addressing bundle for
+/// [`gemm_tile_neon`] below, its only constructor and only consumer, and
+/// that kernel is itself aarch64-only.
 #[cfg(target_arch = "aarch64")]
-pub(crate) struct WeightTile<'a, T> {
-    pub(crate) data: &'a [T],
+pub(crate) struct WeightTile<'a> {
+    pub(crate) data: &'a [f32],
     pub(crate) base: usize,
     pub(crate) stride: usize,
 }
@@ -3867,7 +3865,7 @@ pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
 /// at whichever width `1..=5` the leftover row count needs, instead of a
 /// hand-duplicated copy per width.
 #[cfg(target_arch = "aarch64")]
-unsafe fn gemm_tile_neon<const ROWS: usize>(a: WeightTile<f32>, b: WeightTile<f32>, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
+unsafe fn gemm_tile_neon<const ROWS: usize>(a: WeightTile, b: WeightTile, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
     // `vdupq_n_f32` requires the `neon` target feature, unconditionally
     // present in the aarch64 base ISA this module is gated on.
     let mut acc = [[unsafe { vdupq_n_f32(0.0) }; TILE_COLS]; ROWS];
