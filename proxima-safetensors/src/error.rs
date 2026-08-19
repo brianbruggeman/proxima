@@ -64,4 +64,24 @@ pub enum SafetensorsError {
     /// this never happens in a well-formed file.
     #[error("tensors {first:?} and {second:?} have overlapping data_offsets")]
     OverlappingTensors { first: String, second: String },
+
+    /// The writer was given two tensors with the same name — the header
+    /// would silently collapse them into one JSON object key.
+    #[error("duplicate tensor name {name:?}")]
+    DuplicateTensorName { name: String },
+
+    /// The writer was given a tensor literally named `__metadata__` — that
+    /// key is reserved for the free-form string map and would silently
+    /// merge with or shadow it.
+    #[error("tensor name {name:?} is reserved for the __metadata__ map")]
+    ReservedTensorName { name: String },
+
+    /// A tensor's `data` byte length doesn't match what its `shape` and
+    /// `dtype` imply.
+    #[error("tensor {tensor:?} data is {found} bytes, expected {expected} from its shape and dtype")]
+    TensorDataLengthMismatch {
+        tensor: String,
+        expected: u64,
+        found: u64,
+    },
 }

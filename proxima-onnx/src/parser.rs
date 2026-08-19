@@ -51,13 +51,6 @@ use proxima_protocols::protobuf_wire::{
 use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
 
-/// Sanity cap on a length-delimited field's declared length -- not an ONNX
-/// spec limit, just a guard against a corrupt file whose length prefix
-/// claims an absurd size and would otherwise make the FSM buffer forever.
-/// Comfortably above any real model's single embedded field (multi-gigabyte
-/// `raw_data` tensors included).
-const MAX_LEN_DELIMITED_FIELD: u64 = 1 << 40;
-
 /// What [`OnnxParser::poll`] produced.
 #[derive(Debug)]
 pub enum PollOutcome<'a> {
@@ -69,16 +62,42 @@ pub enum PollOutcome<'a> {
 /// The state machine itself. Owns one append-only accumulation buffer;
 /// `cursor` marks how many of its bytes have already been decoded and
 /// handed back to the caller.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct OnnxParser {
     accumulator: Vec<u8>,
     cursor: usize,
+    max_len_delimited_field: u64,
+}
+
+impl Default for OnnxParser {
+    fn default() -> Self {
+        Self {
+            accumulator: Vec::new(),
+            cursor: 0,
+            max_len_delimited_field: crate::sized::MAX_LEN_DELIMITED_FIELD,
+        }
+    }
 }
 
 impl OnnxParser {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a parser using
+    /// [`crate::config::OnnxParserConfig`]'s resolved
+    /// `max_len_delimited_field` instead of the build-time `sized` floor.
+    /// `std`-only: the no_std+alloc floor has no runtime config source, so
+    /// [`Self::new`] is the only constructor there and always uses
+    /// `crate::sized` directly.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_config(config: &crate::config::OnnxParserConfig) -> Self {
+        Self {
+            max_len_delimited_field: config.max_len_delimited_field,
+            ..Self::default()
+        }
     }
 
     /// Append bytes fed by the caller. Never blocks, never inspects the
@@ -100,7 +119,11 @@ impl OnnxParser {
 
     /// Attempt one unit of progress against the currently buffered bytes.
     pub fn poll(&mut self) -> Result<PollOutcome<'_>, OnnxError> {
-        let Some((field, consumed)) = try_read_field(&self.accumulator[self.cursor..])? else {
+        let Some((field, consumed)) = try_read_field(
+            &self.accumulator[self.cursor..],
+            self.max_len_delimited_field,
+        )?
+        else {
             return Ok(PollOutcome::NeedMore);
         };
         let model_field = decode_model_field(field)?;
@@ -117,12 +140,17 @@ impl OnnxParser {
 /// Tag decoding and payload slicing are entirely
 /// `proxima_protocols::protobuf_wire`'s job (`decode_tag`, `parse_field`);
 /// this function's only remaining responsibility is the onnx-specific
-/// [`MAX_LEN_DELIMITED_FIELD`] sanity cap. `parse_field` alone cannot apply
+/// `max_len_delimited_field` sanity cap (build-time default
+/// [`crate::sized::MAX_LEN_DELIMITED_FIELD`], overridable at `std` via
+/// [`crate::config::OnnxParserConfig`]). `parse_field` alone cannot apply
 /// that cap: it has no concept of "too big to ever arrive" versus "still
 /// arriving", so a `Len` field's declared length is peeked first -- before
 /// `parse_field` would otherwise report `Short` and leave the FSM waiting
 /// forever for bytes a corrupt file will never supply.
-fn try_read_field(buf: &[u8]) -> Result<Option<(Field<'_>, usize)>, OnnxError> {
+fn try_read_field(
+    buf: &[u8],
+    max_len_delimited_field: u64,
+) -> Result<Option<(Field<'_>, usize)>, OnnxError> {
     let (field_number, wire_type, tag_used) = match decode_tag(buf) {
         Ok(triple) => triple,
         Err(WireError::Short) => return Ok(None),
@@ -131,11 +159,11 @@ fn try_read_field(buf: &[u8]) -> Result<Option<(Field<'_>, usize)>, OnnxError> {
 
     if wire_type == WireType::Len {
         match decode_varint(&buf[tag_used..]) {
-            Ok((declared_len, _)) if declared_len > MAX_LEN_DELIMITED_FIELD => {
+            Ok((declared_len, _)) if declared_len > max_len_delimited_field => {
                 return Err(OnnxError::DeclaredLengthTooLarge {
                     field: field_number,
                     declared: declared_len,
-                    cap: MAX_LEN_DELIMITED_FIELD,
+                    cap: max_len_delimited_field,
                 });
             }
             Ok(_) => {}

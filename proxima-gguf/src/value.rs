@@ -112,4 +112,25 @@ impl MetadataArray {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// The wire type tag every element of this array carries — the writer
+    /// needs this to emit the element-type field GGUF stores right after
+    /// the outer `Array` tag (`gguf.h:8-16`).
+    #[must_use]
+    pub fn element_metadata_type(&self) -> MetadataType {
+        match self {
+            Self::U8(_) => MetadataType::U8,
+            Self::I8(_) => MetadataType::I8,
+            Self::U16(_) => MetadataType::U16,
+            Self::I16(_) => MetadataType::I16,
+            Self::U32(_) => MetadataType::U32,
+            Self::I32(_) => MetadataType::I32,
+            Self::F32(_) => MetadataType::F32,
+            Self::Bool(_) => MetadataType::Bool,
+            Self::String(_) => MetadataType::String,
+            Self::U64(_) => MetadataType::U64,
+            Self::I64(_) => MetadataType::I64,
+            Self::F64(_) => MetadataType::F64,
+        }
+    }
 }

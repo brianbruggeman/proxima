@@ -19,18 +19,14 @@ use arrayvec::ArrayVec;
 
 use crate::error::GgufError;
 use crate::reader::{Accumulator, Reader, StringError};
-use crate::tensor::{MAX_DIMS, MAX_NAME_LEN, TensorInfo};
+use crate::sized::{MAX_DIMS, MAX_NAME_LEN};
+use crate::tensor::TensorInfo;
 use crate::types::{GgmlType, MetadataType, ScalarType};
 use crate::value::{MetadataArray, MetadataValue};
 
-/// GGUF magic bytes (`gguf.h:41`).
+/// GGUF magic bytes (`gguf.h:41`). Not config -- this is the format's
+/// identity byte pattern, not a policy knob.
 pub const MAGIC: [u8; 4] = *b"GGUF";
-
-/// Newest version this parser understands (`gguf.h:42`).
-pub const MAX_SUPPORTED_VERSION: u32 = 3;
-
-/// Fallback alignment when `general.alignment` is absent (`gguf.h:46`).
-pub const DEFAULT_ALIGNMENT: u32 = 32;
 
 /// One unit of progress the parser can report.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +79,8 @@ pub struct GgufParser {
     seen_tensor_names: Vec<String>,
     resolved_alignment: Option<u32>,
     tensor_size_total: u64,
+    max_supported_version: u32,
+    default_alignment: u32,
 }
 
 impl Default for GgufParser {
@@ -103,6 +101,23 @@ impl GgufParser {
             seen_tensor_names: Vec::new(),
             resolved_alignment: None,
             tensor_size_total: 0,
+            max_supported_version: crate::sized::MAX_SUPPORTED_VERSION,
+            default_alignment: crate::sized::DEFAULT_ALIGNMENT,
+        }
+    }
+
+    /// Construct a parser using [`crate::config::GgufParserConfig`]'s
+    /// resolved `max_supported_version`/`default_alignment` instead of the
+    /// build-time `sized` floor. `std`-only: the no_std+alloc floor has no
+    /// runtime config source, so [`Self::new`] is the only constructor
+    /// there and always uses `crate::sized` directly.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_config(config: &crate::config::GgufParserConfig) -> Self {
+        Self {
+            max_supported_version: config.max_supported_version,
+            default_alignment: config.default_alignment,
+            ..Self::new()
         }
     }
 
@@ -170,7 +185,7 @@ impl GgufParser {
         let Some(version) = reader.u32() else {
             return Ok(PollOutcome::NeedMore);
         };
-        if version == 0 || version == 1 || version > MAX_SUPPORTED_VERSION {
+        if version == 0 || version == 1 || version > self.max_supported_version {
             return Err(GgufError::UnsupportedVersion { version });
         }
         let consumed = reader.consumed();
@@ -217,7 +232,7 @@ impl GgufParser {
 
     fn poll_kv(&mut self, tensor_count: u64, remaining: u64) -> Result<PollOutcome, GgufError> {
         if remaining == 0 {
-            let alignment = self.resolved_alignment.unwrap_or(DEFAULT_ALIGNMENT);
+            let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
             if alignment == 0 || !alignment.is_power_of_two() {
                 return Err(GgufError::InvalidAlignment { value: alignment });
             }
@@ -299,9 +314,7 @@ impl GgufParser {
 
     fn poll_tensor(&mut self, remaining: u64, index: u64) -> Result<PollOutcome, GgufError> {
         if remaining == 0 {
-            let alignment = self
-                .resolved_alignment
-                .unwrap_or(DEFAULT_ALIGNMENT);
+            let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
             let data_offset = pad_to_alignment(self.stream_pos, alignment);
             self.phase = Phase::Done;
             return Ok(PollOutcome::Event(GgufEvent::Complete {
@@ -386,7 +399,7 @@ impl GgufParser {
         let nbytes = tensor.nbytes().ok_or(GgufError::Overflow {
             context: "tensor byte size",
         })?;
-        let alignment = self.resolved_alignment.unwrap_or(DEFAULT_ALIGNMENT);
+        let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
         self.tensor_size_total = self
             .tensor_size_total
             .checked_add(pad_to_alignment(nbytes, alignment))
@@ -403,7 +416,7 @@ impl GgufParser {
     }
 }
 
-fn pad_to_alignment(value: u64, alignment: u32) -> u64 {
+pub(crate) fn pad_to_alignment(value: u64, alignment: u32) -> u64 {
     let alignment = u64::from(alignment);
     if alignment == 0 {
         return value;

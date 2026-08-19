@@ -8,14 +8,9 @@ use arrayvec::ArrayVec;
 
 use crate::types::GgmlType;
 
-/// `ggml_tensor::ne` is a fixed 4-element array (`ggml.h:218`,
-/// `GGML_MAX_DIMS`); trailing unused dimensions read as 1.
-pub const MAX_DIMS: usize = 4;
-
-/// `ggml_tensor::name` is `char[GGML_MAX_NAME]` (`ggml.h:225`, 64 bytes
-/// including the nul terminator llama.cpp's C string carries — the GGUF
-/// wire string itself has no terminator, so the usable length is 63).
-pub const MAX_NAME_LEN: usize = 63;
+/// Build-time floor constants — see `crate::sized` for the source of
+/// truth and why these can never be runtime config.
+pub use crate::sized::{MAX_DIMS, MAX_NAME_LEN};
 
 /// One tensor's directory entry.
 #[derive(Debug, Clone, PartialEq)]
