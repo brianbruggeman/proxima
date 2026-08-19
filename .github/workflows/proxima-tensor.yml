@@ -1,0 +1,80 @@
+name: proxima-tensor
+
+# Measured 2026-08-19: `proxima-tensor` appeared in zero workflows and zero
+# gate scripts while carrying seven features and more `target_arch` branching
+# than any other crate here. Two consequences, both real:
+#
+#   - `tensor-bgpool` was referenced exactly ONCE in the repository, by its own
+#     Cargo.toml definition. A whole alternate execution backend that nothing
+#     ever compiled.
+#   - Nothing cross-compiled. `no-std.yml`'s matrix covers `prime` only, every
+#     dev box here is arm64, and the portable (non-NEON) arm of cpu.rs was
+#     dead-code-broken on `cargo check --target x86_64-*` while the host build
+#     stayed green.
+#
+# Every cell is ENFORCED — no `continue-on-error`. A red cell that reports a
+# green job is the failure mode no-std.yml already documents at its head.
+
+on:
+  push:
+    branches: [main, "feat/tensor-*", "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # The feature/target matrix. Runs each feature ALONE as well as unified, so a
+  # feature that only compiles next to its siblings cannot hide, and asserts a
+  # nonzero doctest count rather than trusting `cargo test --doc`'s exit code.
+  proxima-tensor-gate:
+    name: proxima-tensor-gate.sh
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-tensor-gate.sh
+
+  # The model-format crates. They are sans-IO parsers with a no_std + alloc
+  # floor, so the floor is the thing worth proving — a parser that quietly
+  # needs std is a parser that cannot run at the tier it advertises.
+  model-formats:
+    name: ${{ matrix.crate }} (${{ matrix.tier }})
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [proxima-gguf, proxima-safetensors, proxima-onnx, proxima-model-interop, proxima-tokenizer]
+        tier: [default, alloc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: clippy + tests
+        run: |
+          if [ "${{ matrix.tier }}" = "alloc" ]; then
+            cargo clippy -p ${{ matrix.crate }} --no-default-features --features alloc -- -D warnings
+          else
+            cargo clippy -p ${{ matrix.crate }} --all-targets --all-features -- -D warnings
+            cargo nextest run -p ${{ matrix.crate }} --all-features --no-fail-fast
+          fi
