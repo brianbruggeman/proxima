@@ -1197,7 +1197,7 @@ fn odometer_len(shape: &[u64]) -> u64 {
 /// (`odometer`/`unflatten`, returning `impl Iterator<Item = Vec<u64>>`)
 /// accounted for roughly half of the 2.1M allocations measured after ROW 2's
 /// `running`/`gather_cursors` hoist — the other half was
-/// [`merge_coordinates_into`]'s former per-call `Vec` (`scratchpad/opt/discipline.md` ROW 2b).
+/// [`merge_coordinates_into`]'s former per-call `Vec` (`proxima-tensor/docs/discipline.md` ROW 2b).
 fn unflatten_into(mut flat: u64, shape: &[u64], coordinate: &mut [u64]) {
     for (dim, extent) in shape.iter().enumerate().rev() {
         coordinate[dim] = flat % extent;
@@ -1530,7 +1530,7 @@ impl GatherCursor<'_> {
 /// Writes into `cursors` in place rather than returning a fresh `Vec`: this
 /// runs once per reduction step (up to ~1e6 times for a 1024^3 GEMM), and
 /// `cursors` is the caller's reused scratch buffer, sized once to operand
-/// count outside the hot loop (`scratchpad/opt/discipline.md` ROW 2).
+/// count outside the hot loop (`proxima-tensor/docs/discipline.md` ROW 2).
 ///
 /// Under the `instrument` feature, this is also the row-level witness point
 /// for [`instrument::record_gather_row`]: seeding a cursor already reads
@@ -1597,7 +1597,7 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
     let mut step_values = vec![0.0f32; body.steps.len()];
     // loop-invariant: the innermost dim's stride never depends on the outer
     // coordinate, so it is computed once for the whole node, not once per
-    // outer position (`scratchpad/opt/discipline.md` ROW 2).
+    // outer position (`proxima-tensor/docs/discipline.md` ROW 2).
     let strides: Vec<i64> = resolved
         .operands()
         .iter()
@@ -1609,7 +1609,7 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
 
     // Same fast-path gate `run_reduce` uses (ROW 3), reused verbatim here:
     // every operand the body shape reads is gather-free and affine with a
-    // width-dim stride of 0 or 1 (`scratchpad/opt/discipline.md` ROW 5).
+    // width-dim stride of 0 or 1 (`proxima-tensor/docs/discipline.md` ROW 5).
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
@@ -1712,7 +1712,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // loop-invariant: neither `last_output_dim` nor the operand views change
     // across the whole node, so this stride table is built once instead of
     // once per (leading, reduction) coordinate pair — up to ~1e6 times for a
-    // 1024^3 GEMM (`scratchpad/opt/discipline.md` ROW 2).
+    // 1024^3 GEMM (`proxima-tensor/docs/discipline.md` ROW 2).
     let strides: Vec<i64> = resolved
         .operands()
         .iter()
@@ -1731,7 +1731,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // the width loop below skips `gather_cursors`'s per-element `Option`
     // check and `operand_values`'s per-element copy entirely, reading
     // straight-line out of `raw`'s own contiguous subslices instead
-    // (`scratchpad/opt/discipline.md` ROW 3). `Generic` bodies and any
+    // (`proxima-tensor/docs/discipline.md` ROW 3). `Generic` bodies and any
     // non-unit stride or gathered operand fall back to the loop unchanged.
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
 
@@ -1741,7 +1741,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // operands read `k` contiguously. `reduction_strides` is `strides`'s
     // sibling table for the single contraction dim, computed once per bound
     // op the same way; `body_shape_is_affine_fast_path` is reused verbatim,
-    // just handed a different dim's stride table (`scratchpad/opt/discipline.md`
+    // just handed a different dim's stride table (`proxima-tensor/docs/discipline.md`
     // ROW 10). Scoped to exactly one contraction dim — a multi-dim
     // contraction falls back to the generic loop below unchanged.
     let reduction_strides: Vec<i64> = if reduction_dims.len() == 1 {
@@ -1818,7 +1818,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // ggml tinyBLAS's `gemm_bloc` — see `neon_tile_plan` and
     // `gemm_tile_neon` docs for the six-condition gate and why the
     // accumulator type (not the loop shape) is what makes it fit in
-    // registers (`scratchpad/opt/discipline.md`, attempts 1 and 2).
+    // registers (`proxima-tensor/docs/discipline.md`, attempts 1 and 2).
     #[cfg(target_arch = "aarch64")]
     let tile_plan = if reduction_fast_path {
         neon_tile_plan(
@@ -2293,7 +2293,7 @@ fn run_scan<B: Deref<Target = [f32]>>(
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
     // loop-invariant: see the identical hoist in `run_elementwise`
-    // (`scratchpad/opt/discipline.md` ROW 2).
+    // (`proxima-tensor/docs/discipline.md` ROW 2).
     let strides: Vec<i64> = resolved
         .operands()
         .iter()
@@ -2309,7 +2309,7 @@ fn run_scan<B: Deref<Target = [f32]>>(
     // Same operand-side gate as `run_elementwise`/`run_reduce`, plus one
     // scan-specific condition: the fast path writes into a contiguous
     // `&mut [f32]` output slice, so it additionally requires the output's
-    // own width-dim stride to be 1 (`scratchpad/opt/discipline.md` ROW 5).
+    // own width-dim stride to be 1 (`proxima-tensor/docs/discipline.md` ROW 5).
     // A strided output (real but rarer) falls back to the per-element loop
     // unchanged, named rather than silently narrowed.
     let operand_fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
@@ -2380,7 +2380,7 @@ fn run_scan<B: Deref<Target = [f32]>>(
 /// Classifying here — once, before any element is visited — is what lets
 /// [`eval_body_shape`] avoid re-deciding "is this one step or several" on
 /// every one of a node's iteration-space elements; profiling
-/// (`scratchpad/opt/discipline.md` ROW 0) found that per-element redecision,
+/// (`proxima-tensor/docs/discipline.md` ROW 0) found that per-element redecision,
 /// via an out-of-line `apply_body` call and its computed jump table, was
 /// 51.9% of self-time on a 1024^3 GEMM.
 enum BodyShape<'a> {
@@ -2449,7 +2449,7 @@ fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides
 /// to make (once, not per element) between a slice read and a scalar
 /// broadcast. Iterates `accumulator` in the same slot order the generic path
 /// does, combining via the same `apply_scalar_op` calls in the same order,
-/// so output is bit-identical (`scratchpad/opt/discipline.md` ROW 3).
+/// so output is bit-identical (`proxima-tensor/docs/discipline.md` ROW 3).
 /// One operand's width-span read shape for [`reduce_width_fast`]'s
 /// straight-line arms: `contiguous` means `stride == 1` (read
 /// `data[base..base+width]` as a real subslice), otherwise `stride == 0`
@@ -2510,7 +2510,7 @@ fn combine_reduction(reduce_op: ScalarOp, previous: f32, value: f32, seeded: boo
 /// per pair, so the width loop inside contains the literal arithmetic
 /// (`-a`, `a.sqrt()`, `acc.max(v)`, ...) inlined straight into the loop
 /// body, with no runtime branch and no indirect call
-/// (`scratchpad/opt/discipline.md` ROW 4). `seeded` is also resolved here,
+/// (`proxima-tensor/docs/discipline.md` ROW 4). `seeded` is also resolved here,
 /// not per element — [`reduce_width_unary_monomorphic`] branches on it
 /// once, outside its loops, rather than once per element the way
 /// [`combine_reduction`] used to. A `reduce_op` outside that set of four
@@ -3216,7 +3216,7 @@ struct DotFold {
 /// The strict left-to-right fold (`acc = reduce(acc, op(a, b))` once per
 /// `k`) is a serial dependency chain LLVM cannot widen, because float
 /// `+`/`*` are not associative under IEEE 754 — reordering the sum
-/// changes its bit pattern (`scratchpad/opt/discipline.md` ROW 11).
+/// changes its bit pattern (`proxima-tensor/docs/discipline.md` ROW 11).
 /// Splitting the chain into `DOT_LANES` independent partial folds (one
 /// per position in a `DOT_LANES`-wide `chunks_exact` block) breaks that
 /// dependency: each lane's own chain is still strictly sequential (still
@@ -3224,7 +3224,7 @@ struct DotFold {
 /// can pack the common case into vector `fmul`/`fadd` and pay the
 /// horizontal combine once per call instead of once per element —
 /// exactly what every BLAS and ggml itself do. 4 and 8 were measured
-/// head-to-head (ROW 12, `scratchpad/opt/discipline.md`): 8 measured
+/// head-to-head (ROW 12, `proxima-tensor/docs/discipline.md`): 8 measured
 /// consistently faster (~0.337-0.349s vs ~0.352-0.354s, 1024^3
 /// transposed-RHS GEMM, 5 runs each) — more independent lanes hide more
 /// of the reduce's latency on this core's issue width. 8 was kept.
@@ -3349,7 +3349,7 @@ fn neon_column_panel_cols(reduction_len: u64, tiled_width_cols: usize) -> usize 
 
 /// One bound op's applicability gate for [`gemm_tile_neon`], resolved once
 /// before [`run_reduce`]'s leading-dimension loop rather than per tile. The
-/// six conditions mirror attempt 2's (`scratchpad/opt/discipline.md`):
+/// six conditions mirror attempt 2's (`proxima-tensor/docs/discipline.md`):
 /// FMA available, seeded, the fused body is `Multiply` reduced by `Add`,
 /// both operands gather-free, both contraction-dim strides `== 1`, and
 /// exactly one operand's width-dim stride is `0` (that one is `a`, whose
@@ -3478,7 +3478,7 @@ struct TileOperand<'a> {
 /// Ported from ggml tinyBLAS's `gemm_bloc`: `ROWS` x [`TILE_COLS`]
 /// output accumulators declared as `float32x4_t`, a native NEON vector
 /// register type, not an `[f32; 4]` array indexed by a loop variable
-/// (`scratchpad/opt/discipline.md` — attempt 2 spilled 737 `str q`
+/// (`proxima-tensor/docs/discipline.md` — attempt 2 spilled 737 `str q`
 /// instructions doing exactly that). `av` holds one `float32x4_t` per tile
 /// row, loaded once per `k`-step and reused across all [`TILE_COLS`]
 /// columns; `bv` is loaded once per column per step and fused against every
@@ -3567,7 +3567,7 @@ where
 /// horizontal combine at the end. Reassociates the sum relative to the
 /// strict left-to-right fold — the numeric result differs from the naive
 /// triple loop by float rounding, same as Accelerate/OpenBLAS/ggml (ROW
-/// 12, `scratchpad/opt/discipline.md`). Operates on matching-length
+/// 12, `proxima-tensor/docs/discipline.md`). Operates on matching-length
 /// slices via `chunks_exact` (not manual indexing) so the length relation
 /// LLVM needs to elide bounds checks and vectorize is visible in the
 /// source, the same technique [`reduce_width_binary_monomorphic`] already
@@ -3826,7 +3826,7 @@ fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: Opera
 /// (`DOT_LANES` independent partial sums, reassociated relative to the
 /// naive triple loop — ROW 12) instead of one strict left-to-right chain.
 /// This is the exact shape a transposed-B GEMM's per-output-element dot
-/// product takes (`scratchpad/opt/discipline.md` ROW 10/11/12).
+/// product takes (`proxima-tensor/docs/discipline.md` ROW 10/11/12).
 #[inline(always)]
 fn reduce_dot_binary_monomorphic<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
 where
@@ -3920,7 +3920,7 @@ fn reduce_dot_binary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, a: Opera
 /// `out`. Same eligibility gate as `run_reduce`
 /// ([`body_shape_is_affine_fast_path`]), same [`OperandSpan`] reads, same
 /// monomorphized-closure-per-op dispatch technique as ROW 4
-/// (`scratchpad/opt/discipline.md` ROW 5).
+/// (`proxima-tensor/docs/discipline.md` ROW 5).
 #[inline(always)]
 fn elementwise_width_fast(shape: &BodyShape, raw: &[&[f32]], running: &[i64], strides: &[i64], out: &mut [f32]) {
     let span_of = |index: u16| {
@@ -5370,7 +5370,7 @@ mod tests {
 
     /// `reduce_dot_binary_monomorphic`'s `(true, true)` arm reassociates the
     /// sum (`DOT_LANES` independent partial accumulators, ROW 12,
-    /// `scratchpad/opt/discipline.md`) — bit-exactness against
+    /// `proxima-tensor/docs/discipline.md`) — bit-exactness against
     /// [`naive_matmul`]'s strict left-to-right fold is no longer the bar for
     /// the transposed-RHS (reduce_dot) path, same as Accelerate/OpenBLAS/
     /// ggml. Returns the measured max relative error so callers can log it.
@@ -5444,7 +5444,7 @@ mod tests {
     /// Same contraction as [`matmul_program`], RHS stored `[n, k]` instead
     /// of `[k, n]` (ggml's own `mul_mat` convention) — exercises
     /// [`run_reduce`]'s reduction-dim fast path
-    /// (`scratchpad/opt/discipline.md` ROW 10/11): the width dim `n` is not
+    /// (`proxima-tensor/docs/discipline.md` ROW 10/11): the width dim `n` is not
     /// contiguous on the RHS operand here, but the contraction dim `k` is.
     fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
@@ -5726,7 +5726,7 @@ mod tests {
         // remainder handling; the RHS buffer is the same numbers as
         // `naive_matmul`'s `[k, n]` reference expects, laid out `[n, k]`.
         //
-        // WEAKENED (ROW 12, `scratchpad/opt/discipline.md`): was
+        // WEAKENED (ROW 12, `proxima-tensor/docs/discipline.md`): was
         // `assert_eq!` (bit-exact) against `naive_matmul`'s strict
         // left-to-right fold. `reduce_dot_binary_monomorphic`'s `(true,
         // true)` arm now folds via `DOT_LANES` independent partial
@@ -5761,7 +5761,7 @@ mod tests {
         // uses fractional, non-integer data so the sum actually accumulates
         // rounding error under either fold order (unlike the k=7 test's
         // small-integer inputs, whose sums are exact regardless of
-        // grouping) — see ROW 12, `scratchpad/opt/discipline.md`.
+        // grouping) — see ROW 12, `proxima-tensor/docs/discipline.md`.
         let (m, k, n) = (8usize, 1024usize, 8usize);
         let (program, _sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
         let lhs: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();

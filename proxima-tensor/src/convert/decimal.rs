@@ -9,13 +9,19 @@
 //! holds the scale plus the widening-intermediate boundary a multiply
 //! actually needs.
 //!
-//! Measured (`scratchpad/decimal_probe.rs`, this session): a widening
-//! multiply's intermediate needs twice the mantissa's bits — an `i64`
-//! mantissa at `scale=10^9` already requires an `i128` intermediate before
-//! the rescale divide, and `i128` itself has nothing wider to widen into, so
-//! its own multiply can overflow (observed past magnitude ~1e12 at that
-//! scale) with no silent-wrap escape hatch — [`DecimalMultiply<i128>`]
-//! reports that as [`DecimalError::MultiplyOverflow`] instead of wrapping.
+//! A widening multiply's intermediate needs twice the mantissa's bits — an
+//! `i64` mantissa at `scale=10^9` already requires an `i128` intermediate
+//! before the rescale divide, and `i128` itself has nothing wider to widen
+//! into, so its own multiply can overflow past magnitude ~1e12 at that scale
+//! with no silent-wrap escape hatch — [`DecimalMultiply<i128>`] reports that
+//! as [`DecimalError::MultiplyOverflow`] instead of wrapping.
+//!
+//! Both boundary points are pinned by tests in this module rather than by a
+//! citation: `multiply_i128_stays_exact_below_the_measured_overflow_boundary`
+//! and `multiply_i128_reports_overflow_past_its_own_measured_boundary`. A
+//! measurement that lives only in a scratch file is not reproducible once
+//! that file is cleaned up, which is exactly what happened to the probe this
+//! comment used to cite.
 
 use core::future::Future;
 use core::marker::PhantomData;
@@ -287,8 +293,8 @@ mod tests {
 
     #[test]
     fn multiply_i128_stays_exact_below_the_measured_overflow_boundary() {
-        // scratchpad/decimal_probe.rs measured magnitude=1e9 (scale=10^9)
-        // fitting in an i128 intermediate; this mirrors that headroom point.
+        // magnitude=1e9 at scale=10^9 fits an i128 intermediate; this test IS
+        // the record of that headroom point, not a mirror of one elsewhere.
         let pipe = DecimalMultiply::<i128>::new(9).expect("scale 9 fits i128");
         let one = 10_i128.pow(9);
         let magnitude = 1_000_000_000_i128 * one; // represents 1e9 at scale 1e9
@@ -298,7 +304,7 @@ mod tests {
 
     #[test]
     fn multiply_i128_reports_overflow_past_its_own_measured_boundary() {
-        // scratchpad/decimal_probe.rs: at scale=10^9, magnitude ~1e12 already
+        // at scale=10^9, magnitude ~1e12 already
         // overflows the i128 intermediate — no wider type exists to widen
         // into, so this must surface as an error, never a silent wrap.
         let pipe = DecimalMultiply::<i128>::new(9).expect("scale 9 fits i128");
