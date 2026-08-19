@@ -138,6 +138,7 @@ packages = [
 ]
 paths = [
     "scripts/proxima-tensor-gate.sh",
+    "scripts/proxima-tokenizer-gate.sh",
     ".github/workflows/proxima-tensor.yml",
     "proxima-tensor/specs/**",
 ]

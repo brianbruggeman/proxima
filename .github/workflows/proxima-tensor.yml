@@ -49,6 +49,29 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-tensor-gate.sh
 
+  # proxima-tokenizer's own gate: `default = ["std"]` does not pull in
+  # `gguf`, so the crate's own documented `cargo test -p proxima-tokenizer`
+  # compiles none of gguf.rs's tests and reports GREEN having run zero of
+  # them — including the llama.cpp oracle parity fixtures, `#[ignore]`d
+  # because they read a real GGUF file from disk, which neither this job's
+  # sibling `model-formats` cell (no `-- --ignored`) nor a bare
+  # `--features gguf` run ever reaches. See scripts/proxima-tokenizer-gate.sh
+  # for the full cell list and the nonzero-count assertion.
+  proxima-tokenizer-gate:
+    name: proxima-tokenizer-gate.sh
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-tokenizer-gate.sh
+
   # The model-format crates. They are sans-IO parsers with a no_std + alloc
   # floor, so the floor is the thing worth proving — a parser that quietly
   # needs std is a parser that cannot run at the tier it advertises.

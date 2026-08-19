@@ -8,8 +8,9 @@
 //! greedily merges the highest-scoring adjacent symbol pair until none
 //! resolve -- the same shape as [`crate::bpe::encode_pretoken`]'s rescan
 //! loop, just keyed by a dynamic vocab lookup of the merged text (via
-//! [`crate::vocab::Vocab::token_id`]/[`crate::vocab::Vocab::token_score`])
-//! instead of a precomputed merge-rank table. Literature unigram-Viterbi is
+//! [`crate::vocab::Vocab::token_id`]/`Vocab::token_score`, the latter
+//! crate-private) instead of a precomputed merge-rank table. Literature
+//! unigram-Viterbi is
 //! `LLAMA_VOCAB_TYPE_UGM` (`tokenizer.ggml.model == "t5"`), a different
 //! checkpoint family this crate does not target. Per this workspace's
 //! incumbent-wins-on-correctness rule, the incumbent's actual dispatch is
@@ -33,8 +34,8 @@ const SPACE_MARKER: char = '\u{2581}';
 /// `LLAMA_VOCAB_TYPE_SPM`, `llama-vocab.cpp:1664`, unless overridden by
 /// `tokenizer.ggml.add_space_prefix` -- not read by this crate, matching the
 /// most common checkpoint shape) then substitutes every space for
-/// [`SPACE_MARKER`]. `""` stays `""`: llama.cpp only ever tokenizes a
-/// non-empty fragment (`llama-vocab.cpp:2409`).
+/// `SPACE_MARKER` (crate-private). `""` stays `""`: llama.cpp only ever
+/// tokenizes a non-empty fragment (`llama-vocab.cpp:2409`).
 #[must_use]
 pub fn escape(text: &str) -> String {
     if text.is_empty() {
@@ -48,9 +49,9 @@ pub fn escape(text: &str) -> String {
     escaped
 }
 
-/// Reverses [`escape`]: every [`SPACE_MARKER`] back to a literal space, then
-/// strips exactly the one leading space [`escape`] added (matching
-/// `remove_space`, `llama-vocab.cpp:2684-2685`).
+/// Reverses [`escape`]: every `SPACE_MARKER` (crate-private) back to a
+/// literal space, then strips exactly the one leading space [`escape`]
+/// added (matching `remove_space`, `llama-vocab.cpp:2684-2685`).
 #[must_use]
 pub fn unescape(text: &str) -> String {
     let mut unescaped = String::with_capacity(text.len());
@@ -71,12 +72,13 @@ pub fn unescape(text: &str) -> String {
 ///
 /// Seeds one symbol per `char` (SentencePiece operates on codepoints, not
 /// raw bytes), then repeatedly merges the adjacent pair whose concatenated
-/// text resolves to a vocab token with the highest [`Vocab::token_score`]
-/// (ties keep the leftmost position, matching the priority-queue comparator
-/// at `llama-vocab.cpp:96-100`) until no pair resolves. Any symbol that
-/// still doesn't name a vocab token falls back to one base byte token per
-/// raw byte ([`Vocab::base_byte_token`]) -- the `<0xXX>` alphabet every
-/// byte-fallback SentencePiece vocab carries.
+/// text resolves to a vocab token with the highest `token_score`
+/// (crate-private) (ties keep the leftmost position, matching the
+/// priority-queue comparator at `llama-vocab.cpp:96-100`) until no pair
+/// resolves. Any symbol that still doesn't name a vocab token falls back to
+/// one base byte token per raw byte (`Vocab::base_byte_token`,
+/// crate-private) -- the `<0xXX>` alphabet every byte-fallback SentencePiece
+/// vocab carries.
 ///
 /// # Errors
 ///

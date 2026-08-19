@@ -99,10 +99,10 @@ impl Vocab {
     /// Builds a SentencePiece-unigram vocab (`tokenizer.ggml.model =
     /// "llama"`) from its per-token unigram scores instead of an explicit
     /// merge list -- hands to [`crate::unigram::encode_fragment`], which
-    /// greedily merges the highest-[`Vocab::token_score`] adjacent pair
-    /// (mirroring llama.cpp's `llm_tokenizer_spm_session`) rather than
-    /// walking [`Vocab::merge_rule`]'s precomputed rank table the way
-    /// [`crate::bpe::encode_pretoken`] does.
+    /// greedily merges the highest-`token_score` adjacent pair (both
+    /// crate-private) (mirroring llama.cpp's `llm_tokenizer_spm_session`)
+    /// rather than walking `Vocab::merge_rule`'s precomputed rank table the
+    /// way [`crate::bpe::encode_pretoken`] does.
     ///
     /// # Errors
     ///
@@ -110,7 +110,7 @@ impl Vocab {
     /// tokens.len()`; anything [`Vocab::new`] itself can fail with
     /// otherwise (a missing base byte token, most likely -- SentencePiece
     /// byte-fallback vocabs spell their 256-byte alphabet as `<0xXX>`
-    /// tokens, checked by [`hex_fallback_token`]).
+    /// tokens, checked by `hex_fallback_token`, crate-private).
     pub fn new_unigram(
         tokens: Vec<String>,
         scores: Vec<f32>,

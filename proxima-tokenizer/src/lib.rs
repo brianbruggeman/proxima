@@ -15,9 +15,11 @@
 //!
 //! [`Vocab::new`] takes the token list, merge rules, and special token ids
 //! directly -- the sans-IO core has no opinion on where those came from.
-//! The `gguf` feature adds [`gguf::vocab_from_metadata`], which reads them
-//! out of a [`proxima_gguf::ParsedGguf`]'s metadata (the real key names,
-//! confirmed against a live GGUF fixture, are documented there).
+//! The `gguf` feature adds `gguf::vocab_from_metadata`, which reads them
+//! out of a `proxima_gguf::ParsedGguf`'s metadata (the real key names,
+//! confirmed against a live GGUF fixture, are documented there). Plain code
+//! spans, not links: `gguf` is feature-gated, so a default (no-`gguf`)
+//! rustdoc build never compiles the module the link would resolve into.
 //!
 //! # Two encoders, selected by what the vocab declares
 //!
