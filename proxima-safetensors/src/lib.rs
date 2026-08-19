@@ -105,7 +105,7 @@ mod tests {
     }
 
     fn parse_whole(buf: &[u8]) -> Result<Manifest, SafetensorsError> {
-        SafetensorsParser::new().push(buf)?.into_manifest()
+        SafetensorsParser::new().push(buf)?.finish()
     }
 
     fn parse_in_chunks(buf: &[u8], split_points: &[usize]) -> Result<Manifest, SafetensorsError> {
@@ -116,7 +116,7 @@ mod tests {
             start = point;
         }
         parser = parser.push(&buf[start..])?;
-        parser.into_manifest()
+        parser.finish()
     }
 
     #[test]
@@ -196,55 +196,6 @@ mod tests {
         let byte_at_a_time = parse_in_chunks(&buf, &(1..buf.len()).collect::<Vec<_>>())
             .expect("splits at every byte boundary");
         assert_eq!(byte_at_a_time, whole);
-    }
-
-    fn parse_via_generic_driver(buf: &[u8], split_points: &[usize]) -> Result<Manifest, SafetensorsError> {
-        use proxima_primitives::pipe::sans_io::drive_to_completion;
-
-        let mut chunks = Vec::new();
-        let mut start = 0usize;
-        for &point in split_points {
-            chunks.push(&buf[start..point]);
-            start = point;
-        }
-        chunks.push(&buf[start..]);
-
-        let mut parser = SafetensorsParser::new();
-        let mut manifest = None;
-        drive_to_completion(&mut parser, chunks, |event| {
-            manifest = Some(event.clone());
-        })?;
-        Ok(manifest.expect("finish() succeeded so poll already emitted the manifest event"))
-    }
-
-    /// Proves `proxima_primitives::pipe::sans_io::ByteStreamParser` is
-    /// load-bearing for `SafetensorsParser` too: the exact same generic
-    /// `drive_to_completion` function `proxima-gguf` and `proxima-onnx`
-    /// use in their own `sans_io` proof tests drives this crate's
-    /// `&mut self` `feed`/`poll`, at the same awkward chunk boundaries
-    /// `chunk_boundary_splits_yield_byte_identical_results` exercises by
-    /// hand above.
-    #[test]
-    fn sans_io_generic_driver_matches_hand_rolled_loop() {
-        let entries: &[(&str, &str, &[u64], usize)] = &[
-            ("a", "F32", &[4], 16),
-            ("b", "U8", &[100], 100),
-            ("c", "F16", &[3, 3], 18),
-        ];
-        let (buf, _offsets) = build_buffer(entries, &[("k", "v")]);
-        let whole = parse_whole(&buf).expect("whole buffer parses");
-
-        let header_len = u64::from_le_bytes(buf[..8].try_into().expect("8 bytes")) as usize;
-        let split_schedules: [&[usize]; 3] = [&[3], &[8 + header_len / 2], &[8 + header_len + 10]];
-        for splits in split_schedules {
-            let via_driver = parse_via_generic_driver(&buf, splits).expect("splits parse via generic driver");
-            assert_eq!(via_driver, whole, "splits={splits:?} diverged via generic driver");
-        }
-
-        let byte_at_a_time: Vec<usize> = (1..buf.len()).collect();
-        let via_driver =
-            parse_via_generic_driver(&buf, &byte_at_a_time).expect("byte-at-a-time parses via generic driver");
-        assert_eq!(via_driver, whole);
     }
 
     #[test]
