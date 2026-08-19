@@ -3821,9 +3821,16 @@ fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
         .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
     {
         proxima_gguf::quant::q4_k::dequantize_block(block, &mut scratch);
-        for (&weight, &value) in scratch.iter().zip(activation_chunk) {
-            acc = weight.mul_add(value, acc);
-        }
+        // `DOT_LANES` (8) independent partial sums instead of one serial
+        // mul_add chain -- reuses the same fold `reduce_dot_binary` already
+        // uses for every f32 GEMM contraction (ROW 12, discipline.md);
+        // `Q4K_BLOCK_ELEMENTS` (256) is a whole multiple of `DOT_LANES` so
+        // every block folds with zero remainder.
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold { len: Q4K_BLOCK_ELEMENTS, init: acc, seeded: true },
+        );
     }
     Ok(acc)
 }
