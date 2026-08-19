@@ -93,6 +93,14 @@ packages = [
     "proxima-quic",
     # proxima-test-gate.sh runs the macro smoke through the umbrella itself.
     "proxima",
+    # _floor-crate-matrix.sh's model-stack cells (added 2026-08-19). Same reason
+    # as the block above: editing proxima-gguf left `nostd=false`, so the cliff
+    # cell proving its no_std+alloc floor would never have run.
+    "proxima-tensor",
+    "proxima-gguf",
+    "proxima-safetensors",
+    "proxima-onnx",
+    "proxima-tokenizer",
 ]
 paths = [
     "scripts/nostd-gate.sh",
