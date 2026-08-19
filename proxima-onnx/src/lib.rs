@@ -74,7 +74,7 @@ pub use messages::{
     TypeValue, ValueInfoProto,
 };
 pub use parser::{OnnxParser, PollOutcome};
-pub use pipe::{ParseComplete, parse_complete};
+pub use pipe::parse_complete;
 pub use types::{AttributeType, DataType};
 
 #[cfg(test)]
