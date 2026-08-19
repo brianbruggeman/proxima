@@ -11,11 +11,25 @@
 //! Layout: `gguf.h:1-30` (header + KV + tensor-directory shape),
 //! `gguf.cpp:319-636` (`gguf_init_from_file_impl`, the exact validation
 //! order this mirrors).
+//!
+//! # The shared contract
+//!
+//! [`GgufParser`] implements
+//! [`proxima_primitives::pipe::sans_io::ByteStreamParser`] — the named
+//! version of the `feed`/`poll` shape this module already had by hand
+//! before that trait existed. [`PollOutcome`] is a type alias for that
+//! trait's [`Outcome`](proxima_primitives::pipe::sans_io::Outcome)
+//! instantiated at [`GgufEvent`], not a separate enum: this crate's own
+//! `poll` and the trait's `poll` are the same method, so a generic caller
+//! driving `GgufParser` through the trait (see
+//! `proxima_primitives::pipe::sans_io::drive_to_completion`) sees exactly
+//! what a direct caller of [`GgufParser::poll`] sees.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use arrayvec::ArrayVec;
+use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
 
 use crate::error::GgufError;
 use crate::reader::{Accumulator, Reader, StringError};
@@ -48,13 +62,9 @@ pub enum GgufEvent {
     Complete { data_offset: u64, alignment: u32 },
 }
 
-/// What [`GgufParser::poll`] produced.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PollOutcome {
-    /// Not enough buffered bytes to make progress — call [`GgufParser::feed`].
-    NeedMore,
-    Event(GgufEvent),
-}
+/// What [`GgufParser::poll`] produced. A type alias, not a separate enum —
+/// see the module doc's "The shared contract" section.
+pub type PollOutcome = Outcome<GgufEvent>;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
@@ -413,6 +423,26 @@ impl GgufParser {
             index: index + 1,
         };
         Ok(PollOutcome::Event(GgufEvent::Tensor(tensor)))
+    }
+}
+
+impl ByteStreamParser for GgufParser {
+    type Event<'a>
+        = GgufEvent
+    where
+        Self: 'a;
+    type Error = GgufError;
+
+    fn feed(&mut self, bytes: &[u8]) {
+        Self::feed(self, bytes);
+    }
+
+    fn poll(&mut self) -> Result<Outcome<GgufEvent>, GgufError> {
+        Self::poll(self)
+    }
+
+    fn finish(&self) -> Result<(), GgufError> {
+        Self::finish(self)
     }
 }
 
