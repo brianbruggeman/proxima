@@ -4209,6 +4209,7 @@ dependencies = [
  "proxima-gguf",
  "proxima-safetensors",
  "proxima-tensor",
+ "proxima-tokenizer",
  "thiserror 2.0.19",
 ]
 
