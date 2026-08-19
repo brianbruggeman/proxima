@@ -18,7 +18,7 @@ use proxima_protocols::protobuf_wire::encode_varint;
 use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
 use crate::messages::{DimensionValue, TypeValue};
-use crate::parser::{OnnxParser, PollOutcome};
+use crate::parser::OnnxParser;
 use crate::pipe::{ParseComplete, parse_complete};
 
 // -- wire-format byte builders (hand-rolled, mirrors what a real ONNX
@@ -436,8 +436,8 @@ fn run_parser_and_compare(bytes: &[u8], chunk_bounds: &[usize]) {
         start = end;
         loop {
             match parser.poll().expect("poll well-formed synthetic bytes") {
-                PollOutcome::NeedMore => break,
-                PollOutcome::Event(event) => {
+                None => break,
+                Some(event) => {
                     assert_eq!(
                         event, expected[expected_index],
                         "event {expected_index} mismatched at chunk boundary {end}"
@@ -547,16 +547,16 @@ fn truncation_at_every_prefix_length_never_panics() {
     // a stream that stops early but on a clean boundary (the same
     // limitation any top-level protobuf reader has). What every prefix
     // length must guarantee, and what this sweeps for, is that driving the
-    // parser to `NeedMore`-or-error and then calling `finish()` never
-    // panics and never reads out of bounds.
+    // parser to `None`-or-error and then calling `finish()` never panics
+    // and never reads out of bounds.
     let fixture = build_fixture();
     for offset in 0..fixture.bytes.len() {
         let mut parser = OnnxParser::new();
         parser.feed(&fixture.bytes[..offset]);
         loop {
             match parser.poll() {
-                Ok(PollOutcome::NeedMore) => break,
-                Ok(PollOutcome::Event(_)) => {}
+                Ok(None) => break,
+                Ok(Some(_)) => {}
                 Err(_) => break,
             }
         }
@@ -565,7 +565,7 @@ fn truncation_at_every_prefix_length_never_panics() {
     // the positive control: the full buffer must report a clean finish.
     let mut parser = OnnxParser::new();
     parser.feed(&fixture.bytes);
-    while matches!(parser.poll().expect("full buffer parses"), PollOutcome::Event(_)) {}
+    while parser.poll().expect("full buffer parses").is_some() {}
     parser.finish().expect("full buffer reaches a clean field boundary");
 }
 

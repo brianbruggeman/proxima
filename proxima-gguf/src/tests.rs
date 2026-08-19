@@ -16,7 +16,7 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use proxima_primitives::pipe::primitives::Pipe;
 
 use crate::error::GgufError;
-use crate::parser::{GgufEvent, GgufParser, PollOutcome};
+use crate::parser::{GgufEvent, GgufParser};
 use crate::pipe::{ParseComplete, ParsedGguf};
 use crate::tensor::TensorInfo;
 use crate::types::GgmlType;
@@ -247,17 +247,17 @@ fn parse_via_chunks(bytes: &[u8], chunk_size: usize) -> Result<ParsedGguf, GgufE
         parser.feed(chunk);
         loop {
             match parser.poll()? {
-                PollOutcome::NeedMore => break,
-                PollOutcome::Event(GgufEvent::Header {
+                None => break,
+                Some(GgufEvent::Header {
                     version,
                     tensor_count,
                     kv_count,
                 }) => header = Some((version, tensor_count, kv_count)),
-                PollOutcome::Event(GgufEvent::Metadata { key, value }) => {
+                Some(GgufEvent::Metadata { key, value }) => {
                     metadata.push((key, value));
                 }
-                PollOutcome::Event(GgufEvent::Tensor(tensor)) => tensors.push(tensor),
-                PollOutcome::Event(GgufEvent::Complete {
+                Some(GgufEvent::Tensor(tensor)) => tensors.push(tensor),
+                Some(GgufEvent::Complete {
                     data_offset,
                     alignment,
                 }) => completion = Some((data_offset, alignment)),

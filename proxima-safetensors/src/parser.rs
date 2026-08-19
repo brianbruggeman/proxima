@@ -32,7 +32,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
+use proxima_primitives::pipe::sans_io::ByteStreamParser;
 use proxima_tensor::DType;
 
 use crate::dtype::map_dtype;
@@ -124,11 +124,10 @@ impl SafetensorsParser {
     /// Emits exactly one [`Manifest`] event, the moment the header frame
     /// completes; `TensorData` phase has nothing further to report
     /// incrementally (byte counting alone needs no event) and always
-    /// answers [`Outcome::NeedMore`] until [`Self::finish`] validates the
-    /// total.
-    pub fn poll(&mut self) -> Result<Outcome<&Manifest>, SafetensorsError> {
+    /// answers `None` until [`Self::finish`] validates the total.
+    pub fn poll(&mut self) -> Result<Option<&Manifest>, SafetensorsError> {
         let Self::Header { buf, max_header_bytes } = self else {
-            return Ok(Outcome::NeedMore);
+            return Ok(None);
         };
         match HeaderCodec.parse_frame_with_limit(buf, *max_header_bytes) {
             Ok((header_json, consumed)) => {
@@ -138,9 +137,9 @@ impl SafetensorsParser {
                 let Self::TensorData { manifest, .. } = self else {
                     unreachable!("just assigned TensorData above")
                 };
-                Ok(Outcome::Event(manifest))
+                Ok(Some(manifest))
             }
-            Err(SafetensorsError::TruncatedInput { .. }) => Ok(Outcome::NeedMore),
+            Err(SafetensorsError::TruncatedInput { .. }) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -183,12 +182,7 @@ impl SafetensorsParser {
     /// `proxima_codec::DelimiterFraming::push` uses.
     pub fn push(mut self, chunk: &[u8]) -> Result<Self, SafetensorsError> {
         self.feed(chunk);
-        loop {
-            match self.poll()? {
-                Outcome::NeedMore => break,
-                Outcome::Event(_manifest) => {}
-            }
-        }
+        while self.poll()?.is_some() {}
         Ok(self)
     }
 }
@@ -225,7 +219,7 @@ impl ByteStreamParser for SafetensorsParser {
         Self::feed(self, bytes);
     }
 
-    fn poll(&mut self) -> Result<Outcome<&Manifest>, SafetensorsError> {
+    fn poll(&mut self) -> Result<Option<&Manifest>, SafetensorsError> {
         Self::poll(self)
     }
 

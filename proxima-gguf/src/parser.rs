@@ -18,10 +18,9 @@
 //! [`proxima_primitives::pipe::sans_io::ByteStreamParser`] — the named
 //! version of the `feed`/`poll` shape this module already had by hand
 //! before that trait existed. [`PollOutcome`] is a type alias for that
-//! trait's [`Outcome`](proxima_primitives::pipe::sans_io::Outcome)
-//! instantiated at [`GgufEvent`], not a separate enum: this crate's own
-//! `poll` and the trait's `poll` are the same method, so a generic caller
-//! driving `GgufParser` through the trait (see
+//! trait's `poll` return, `Option<GgufEvent>`, not a separate enum: this
+//! crate's own `poll` and the trait's `poll` are the same method, so a
+//! generic caller driving `GgufParser` through the trait (see
 //! `proxima_primitives::pipe::sans_io::drive_to_completion`) sees exactly
 //! what a direct caller of [`GgufParser::poll`] sees.
 
@@ -29,7 +28,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use arrayvec::ArrayVec;
-use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
+use proxima_primitives::pipe::sans_io::ByteStreamParser;
 
 use crate::error::GgufError;
 use crate::reader::{Accumulator, Reader, StringError};
@@ -64,7 +63,7 @@ pub enum GgufEvent {
 
 /// What [`GgufParser::poll`] produced. A type alias, not a separate enum —
 /// see the module doc's "The shared contract" section.
-pub type PollOutcome = Outcome<GgufEvent>;
+pub type PollOutcome = Option<GgufEvent>;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
@@ -166,7 +165,7 @@ impl GgufParser {
                 remaining,
             } => self.poll_kv(tensor_count, remaining),
             Phase::Tensor { remaining, index } => self.poll_tensor(remaining, index),
-            Phase::Done => Ok(PollOutcome::NeedMore),
+            Phase::Done => Ok(None),
         }
     }
 
@@ -178,7 +177,7 @@ impl GgufParser {
     fn poll_magic(&mut self) -> Result<PollOutcome, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(found) = reader.u32() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let found_bytes = found.to_le_bytes();
         if found_bytes != MAGIC {
@@ -193,7 +192,7 @@ impl GgufParser {
     fn poll_version(&mut self) -> Result<PollOutcome, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(version) = reader.u32() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         if version == 0 || version == 1 || version > self.max_supported_version {
             return Err(GgufError::UnsupportedVersion { version });
@@ -208,7 +207,7 @@ impl GgufParser {
     fn poll_tensor_count(&mut self) -> Result<PollOutcome, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(raw) = reader.i64() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let tensor_count = u64::try_from(raw).map_err(|_| GgufError::Overflow {
             context: "tensor count",
@@ -222,7 +221,7 @@ impl GgufParser {
     fn poll_kv_count(&mut self, tensor_count: u64) -> Result<PollOutcome, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(raw) = reader.i64() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let kv_count = u64::try_from(raw).map_err(|_| GgufError::Overflow {
             context: "kv count",
@@ -233,7 +232,7 @@ impl GgufParser {
             tensor_count,
             remaining: kv_count,
         };
-        Ok(PollOutcome::Event(GgufEvent::Header {
+        Ok(Some(GgufEvent::Header {
             version: self.pending_version,
             tensor_count,
             kv_count,
@@ -256,12 +255,12 @@ impl GgufParser {
 
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(key_result) = reader.string() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let key = key_result.map_err(string_error_into_gguf)?;
 
         let Some(raw_type) = reader.u32() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let metadata_type = MetadataType::from_wire(raw_type).ok_or_else(|| {
             GgufError::InvalidMetadataType {
@@ -272,7 +271,7 @@ impl GgufParser {
 
         let value = if metadata_type == MetadataType::Array {
             let Some(raw_element_type) = reader.u32() else {
-                return Ok(PollOutcome::NeedMore);
+                return Ok(None);
             };
             let element_type = MetadataType::from_wire(raw_element_type).ok_or_else(|| {
                 GgufError::InvalidMetadataType {
@@ -283,20 +282,20 @@ impl GgufParser {
             let scalar_type = ScalarType::from_metadata_type(element_type)
                 .ok_or_else(|| GgufError::NestedArrayNotSupported { key: key.clone() })?;
             let Some(len) = reader.u64() else {
-                return Ok(PollOutcome::NeedMore);
+                return Ok(None);
             };
             let len_usize = usize::try_from(len).map_err(|_| GgufError::Overflow {
                 context: "metadata array length",
             })?;
             let Some(array) = read_array(&mut reader, scalar_type, len_usize)? else {
-                return Ok(PollOutcome::NeedMore);
+                return Ok(None);
             };
             MetadataValue::Array(array)
         } else {
             let scalar_type = ScalarType::from_metadata_type(metadata_type)
                 .ok_or_else(|| GgufError::NestedArrayNotSupported { key: key.clone() })?;
             let Some(value) = read_scalar(&mut reader, scalar_type) else {
-                return Ok(PollOutcome::NeedMore);
+                return Ok(None);
             };
             value.map_err(string_error_into_gguf)?
         };
@@ -319,7 +318,7 @@ impl GgufParser {
             tensor_count,
             remaining: remaining - 1,
         };
-        Ok(PollOutcome::Event(GgufEvent::Metadata { key, value }))
+        Ok(Some(GgufEvent::Metadata { key, value }))
     }
 
     fn poll_tensor(&mut self, remaining: u64, index: u64) -> Result<PollOutcome, GgufError> {
@@ -327,7 +326,7 @@ impl GgufParser {
             let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
             let data_offset = pad_to_alignment(self.stream_pos, alignment);
             self.phase = Phase::Done;
-            return Ok(PollOutcome::Event(GgufEvent::Complete {
+            return Ok(Some(GgufEvent::Complete {
                 data_offset,
                 alignment,
             }));
@@ -335,7 +334,7 @@ impl GgufParser {
 
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(name_result) = reader.string() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let name = name_result.map_err(string_error_into_gguf)?;
         if name.len() > MAX_NAME_LEN {
@@ -346,7 +345,7 @@ impl GgufParser {
         }
 
         let Some(n_dims) = reader.u32() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         if n_dims as usize > MAX_DIMS {
             return Err(GgufError::TooManyDimensions {
@@ -358,14 +357,14 @@ impl GgufParser {
         let mut dims: ArrayVec<u64, MAX_DIMS> = ArrayVec::new();
         for _ in 0..n_dims {
             let Some(dim) = reader.u64() else {
-                return Ok(PollOutcome::NeedMore);
+                return Ok(None);
             };
             // never fails: n_dims <= MAX_DIMS was checked above.
             let _ = dims.try_push(dim);
         }
 
         let Some(raw_type) = reader.i32() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let ggml_type = GgmlType::from_wire(raw_type).ok_or_else(|| GgufError::InvalidGgmlType {
             tensor: name.clone(),
@@ -373,7 +372,7 @@ impl GgufParser {
         })?;
 
         let Some(offset) = reader.u64() else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
 
         let block_size = ggml_type.block_layout().block_elements;
@@ -422,7 +421,7 @@ impl GgufParser {
             remaining: remaining - 1,
             index: index + 1,
         };
-        Ok(PollOutcome::Event(GgufEvent::Tensor(tensor)))
+        Ok(Some(GgufEvent::Tensor(tensor)))
     }
 }
 
@@ -437,7 +436,7 @@ impl ByteStreamParser for GgufParser {
         Self::feed(self, bytes);
     }
 
-    fn poll(&mut self) -> Result<Outcome<GgufEvent>, GgufError> {
+    fn poll(&mut self) -> Result<Option<GgufEvent>, GgufError> {
         Self::poll(self)
     }
 

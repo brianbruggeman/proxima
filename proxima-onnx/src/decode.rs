@@ -27,7 +27,8 @@ use crate::messages::{
 };
 
 /// One decoded top-level [`ModelProto`] field. This is also the FSM's event
-/// type ([`crate::parser::PollOutcome::Event`]) -- see this module's doc.
+/// type, carried as `Some(ModelField)` from [`crate::parser::PollOutcome`]
+/// -- see this module's doc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelField<'a> {
     IrVersion(i64),

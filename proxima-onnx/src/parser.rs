@@ -52,7 +52,7 @@
 
 use alloc::vec::Vec;
 
-use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
+use proxima_primitives::pipe::sans_io::ByteStreamParser;
 use proxima_protocols::protobuf_wire::{
     Field, ParseError as WireError, WireType, decode_tag, decode_varint, parse_field,
 };
@@ -61,11 +61,11 @@ use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
 
 /// What [`OnnxParser::poll`] produced. A type alias for
-/// `proxima_primitives::pipe::sans_io::Outcome<ModelField<'a>>`, not a
-/// separate enum -- see `proxima_primitives::pipe::sans_io`'s module doc
-/// and [`OnnxParser`]'s [`ByteStreamParser`] impl: this crate's own `poll`
-/// and the trait's `poll` are the same method.
-pub type PollOutcome<'a> = Outcome<ModelField<'a>>;
+/// `Option<ModelField<'a>>`, not a separate enum -- see
+/// `proxima_primitives::pipe::sans_io`'s module doc and [`OnnxParser`]'s
+/// [`ByteStreamParser`] impl: this crate's own `poll` and the trait's
+/// `poll` are the same method.
+pub type PollOutcome<'a> = Option<ModelField<'a>>;
 
 /// The state machine itself. Owns one append-only accumulation buffer;
 /// `cursor` marks how many of its bytes have already been decoded and
@@ -132,11 +132,11 @@ impl OnnxParser {
             self.max_len_delimited_field,
         )?
         else {
-            return Ok(PollOutcome::NeedMore);
+            return Ok(None);
         };
         let model_field = decode_model_field(field)?;
         self.cursor += consumed;
-        Ok(PollOutcome::Event(model_field))
+        Ok(Some(model_field))
     }
 }
 
@@ -151,7 +151,7 @@ impl ByteStreamParser for OnnxParser {
         Self::feed(self, bytes);
     }
 
-    fn poll(&mut self) -> Result<Outcome<ModelField<'_>>, OnnxError> {
+    fn poll(&mut self) -> Result<Option<ModelField<'_>>, OnnxError> {
         Self::poll(self)
     }
 

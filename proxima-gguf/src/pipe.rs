@@ -27,7 +27,7 @@ use core::future::Future;
 use proxima_primitives::pipe::primitives::Pipe;
 
 use crate::error::GgufError;
-use crate::parser::{GgufEvent, GgufParser, PollOutcome};
+use crate::parser::{GgufEvent, GgufParser};
 use crate::tensor::TensorInfo;
 use crate::value::MetadataValue;
 
@@ -136,17 +136,17 @@ pub fn parse_complete(input: &[u8]) -> Result<ParsedGguf, GgufError> {
 
     loop {
         match parser.poll()? {
-            PollOutcome::NeedMore => break,
-            PollOutcome::Event(GgufEvent::Header {
+            None => break,
+            Some(GgufEvent::Header {
                 version,
                 tensor_count,
                 kv_count,
             }) => header = Some((version, tensor_count, kv_count)),
-            PollOutcome::Event(GgufEvent::Metadata { key, value }) => {
+            Some(GgufEvent::Metadata { key, value }) => {
                 metadata.push((key, value));
             }
-            PollOutcome::Event(GgufEvent::Tensor(tensor)) => tensors.push(tensor),
-            PollOutcome::Event(GgufEvent::Complete {
+            Some(GgufEvent::Tensor(tensor)) => tensors.push(tensor),
+            Some(GgufEvent::Complete {
                 data_offset,
                 alignment,
             }) => {
