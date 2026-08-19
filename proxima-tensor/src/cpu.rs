@@ -1373,7 +1373,7 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
                     return false;
                 }
             }
-            Op::Input { .. } | Op::Iota { .. } => {}
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
         }
     }
     used_as_matmul_operand
@@ -1385,7 +1385,7 @@ fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
     let mut nodes = BTreeSet::new();
     for expr in program {
         match expr {
-            Op::Input { .. } | Op::Iota { .. } => {}
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
             Op::Elementwise { operands, .. } => {
                 for (_, map) in operands {
                     push_indices_node(map, &mut nodes);
@@ -1525,7 +1525,16 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             run_scan(resolved, buffers, output)
         }
         BoundOpKind::Iota => run_iota(output),
+        BoundOpKind::Constant { value } => run_constant(*value, output),
     }
+}
+
+/// [`BoundOpKind::Constant`]'s whole computation: every element is the same
+/// literal. Even simpler than [`run_iota`] — no operand reads, no body, and
+/// not even a dependence on position.
+fn run_constant(value: f32, output: &mut [f32]) -> Result<(), TensorError> {
+    output.fill(value);
+    Ok(())
 }
 
 /// [`BoundOpKind::Iota`]'s whole computation: `output[i] = i`, exact in f32
@@ -5572,6 +5581,12 @@ trait Element: Copy + Default + 'static {
     /// element's own type — the typed counterpart of [`run_iota`]'s
     /// `index as f32`.
     fn from_index(index: usize) -> Self;
+
+    /// [`BoundOpKind::Constant`]'s literal in this element's own type — the
+    /// typed counterpart of [`run_constant`]'s bare `f32`. An integer
+    /// element truncates toward zero, the same `as` conversion
+    /// [`Element::from_index`] uses in the other direction.
+    fn from_literal(value: f32) -> Self;
 }
 
 macro_rules! impl_element_signed_integer {
@@ -5636,6 +5651,10 @@ macro_rules! impl_element_signed_integer {
 
             fn from_index(index: usize) -> Self {
                 index as $ty
+            }
+
+            fn from_literal(value: f32) -> Self {
+                value as $ty
             }
         }
     };
@@ -5703,6 +5722,10 @@ macro_rules! impl_element_unsigned_integer {
             fn from_index(index: usize) -> Self {
                 index as $ty
             }
+
+            fn from_literal(value: f32) -> Self {
+                value as $ty
+            }
         }
     };
 }
@@ -5739,6 +5762,10 @@ impl Element for f32 {
 
     fn from_index(index: usize) -> Self {
         index as Self
+    }
+
+    fn from_literal(value: f32) -> Self {
+        value as Self
     }
 }
 
@@ -5792,6 +5819,10 @@ impl Element for f64 {
 
     fn from_index(index: usize) -> Self {
         index as Self
+    }
+
+    fn from_literal(value: f32) -> Self {
+        value as Self
     }
 }
 
@@ -6032,6 +6063,7 @@ fn run_typed_program<T: Element>(
                 run_scan_typed(node, &buffers, &mut output)?;
             }
             BoundOpKind::Iota => run_iota_typed(&mut output),
+            BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
         }
         buffers[node.node.0 as usize] = Some(Cow::Owned(output));
         for retired in &retires[position] {
@@ -6108,6 +6140,11 @@ fn run_iota_typed<T: Element>(output: &mut [T]) {
     for (index, slot) in output.iter_mut().enumerate() {
         *slot = T::from_index(index);
     }
+}
+
+/// The typed counterpart of [`run_constant`].
+fn run_constant_typed<T: Element>(value: f32, output: &mut [T]) {
+    output.fill(T::from_literal(value));
 }
 
 /// The typed counterpart of [`run_elementwise`]: same coordinate walk
@@ -6702,6 +6739,84 @@ mod tests {
         let evaluated = evaluate(&program, &[], &[], &[]).expect("a bare iota evaluates");
         assert_eq!(evaluated.root(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
         let _ = iota;
+    }
+
+    /// The counterpart of [`an_iota_evaluates_to_its_own_position`] for the
+    /// other computed leaf: a `Constant` materializes with no external
+    /// `blocks` entry, and every element is the literal it was built with.
+    /// Run through the real `evaluate` entry point so the whole
+    /// bind/schedule path is exercised, not `run_constant` alone.
+    #[test]
+    fn a_constant_evaluates_to_its_literal_at_every_position() {
+        let mut program = Vec::new();
+        append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                value: 0.088_388_35,
+            },
+        );
+
+        let evaluated = evaluate(&program, &[], &[], &[]).expect("a bare constant evaluates");
+        assert_eq!(evaluated.root(), &[0.088_388_35; 4]);
+    }
+
+    /// A rank-0 `Constant` is the shape every scalar literal in
+    /// `spec.rs` uses: one element, and an empty operand side (`"->i"`)
+    /// broadcasts it across any consumer's iteration space.
+    #[test]
+    fn a_rank_zero_constant_broadcasts_into_a_higher_rank_consumer() {
+        let mut program = Vec::new();
+        let scale = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 3.0,
+            },
+        );
+        let iota = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(4),
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (iota, IndexMap::Affine(crate::map::projection(1, &[0]))),
+                    (scale, IndexMap::Affine(crate::map::projection(1, &[]))),
+                ],
+                name: None,
+            },
+        );
+
+        let evaluated = evaluate(&program, &[], &[], &[]).expect("rank-0 constant broadcasts");
+        assert_eq!(evaluated.root(), &[0.0, 3.0, 6.0, 9.0]);
+    }
+
+    /// `-inf` is the literal the causal mask needs and the one an integer
+    /// `Iota` derivation reached only through `Reciprocal(-0.0)`. It must
+    /// survive the leaf verbatim.
+    #[test]
+    fn a_constant_carries_negative_infinity_verbatim() {
+        let mut program = Vec::new();
+        append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(2)],
+                value: f32::NEG_INFINITY,
+            },
+        );
+
+        let evaluated = evaluate(&program, &[], &[], &[]).expect("a -inf constant evaluates");
+        assert!(evaluated.root().iter().all(|value| *value == f32::NEG_INFINITY));
     }
 
     /// `reduce_dot_binary_monomorphic`'s `(true, true)` arm reassociates the

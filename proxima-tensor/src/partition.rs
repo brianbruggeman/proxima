@@ -24,7 +24,7 @@ use crate::shape;
 /// in original numbering.
 fn producer_side_refs(op: &Op, boundary: u32) -> Vec<NodeId> {
     match op {
-        Op::Input { .. } | Op::Iota { .. } => Vec::new(),
+        Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
         Op::Elementwise { operands, .. } => operands
             .iter()
             .map(|(node, _)| *node)
@@ -62,6 +62,15 @@ fn remap(op: &Op, table: &BTreeMap<NodeId, NodeId>, self_id: NodeId) -> Result<O
         Op::Iota { dtype, extent } => Ok(Op::Iota {
             dtype: *dtype,
             extent: *extent,
+        }),
+        Op::Constant {
+            dtype,
+            shape,
+            value,
+        } => Ok(Op::Constant {
+            dtype: *dtype,
+            shape: shape.clone(),
+            value: *value,
         }),
         Op::Elementwise {
             dtype,

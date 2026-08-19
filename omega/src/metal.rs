@@ -402,7 +402,7 @@ fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
     let mut nodes = BTreeSet::new();
     for expr in program {
         match expr {
-            Op::Input { .. } | Op::Iota { .. } => {}
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
             Op::Elementwise { operands, .. } => {
                 for (_, map) in operands {
                     push_indices_node(map, &mut nodes);
@@ -544,14 +544,17 @@ fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
-        BoundOpKind::Iota => pack_iota_uniforms(bound),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
     }
 }
 
-/// Mirrors the `Uniforms` struct `crate::msl::render_iota` declares: just
-/// `total_elements` — an `Iota` has no operands, no per-axis extents array,
-/// and no gather, so there is nothing else this struct needs to carry.
-fn pack_iota_uniforms(bound: &BoundOp) -> Vec<u8> {
+/// Mirrors the `Uniforms` struct `crate::msl::render_iota` and
+/// `crate::msl::render_constant` both declare: just `total_elements` —
+/// neither leaf has operands, a per-axis extents array, or a gather, so
+/// there is nothing else this struct needs to carry. `render_constant`
+/// bakes its literal into the source instead of adding a field here, which
+/// is what lets one packer serve both.
+fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
     let total: i64 = bound.extents.iter().map(|extent| *extent as i64).product();
     let mut bytes = Vec::new();
     push_i64(&mut bytes, total);

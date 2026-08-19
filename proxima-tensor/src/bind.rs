@@ -243,6 +243,10 @@ pub enum BoundOpKind {
     /// in `BoundOp::extents`, which is why this variant carries no fields of
     /// its own.
     Iota,
+    /// The resolved counterpart of [`Op::Constant`]: no operands, no body,
+    /// and unlike [`BoundOpKind::Iota`] not even a dependence on position —
+    /// an executor writes `value` to every element of `BoundOp::extents`.
+    Constant { value: f32 },
 }
 
 /// A fused body with zero steps — [`BoundOp::element_body`]'s answer for
@@ -261,7 +265,7 @@ impl BoundOp {
             BoundOpKind::Elementwise { operands, .. } | BoundOpKind::Reduce { operands, .. } => {
                 operands
             }
-            BoundOpKind::Iota => &[],
+            BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
         }
     }
 
@@ -275,7 +279,7 @@ impl BoundOp {
         match &self.kind {
             BoundOpKind::Elementwise { body, .. } => body,
             BoundOpKind::Reduce { element_body, .. } => element_body,
-            BoundOpKind::Iota => &EMPTY_BODY,
+            BoundOpKind::Iota | BoundOpKind::Constant { .. } => &EMPTY_BODY,
         }
     }
 
@@ -366,7 +370,7 @@ impl BoundOp {
             // reads) that splitting it across workers is not worth the
             // bookkeeping; `None` here just means a caller runs it as one
             // chunk, the same as any other unsplittable op.
-            BoundOpKind::Iota => None,
+            BoundOpKind::Iota | BoundOpKind::Constant { .. } => None,
         }
     }
 
@@ -405,6 +409,9 @@ impl BoundOp {
             // `split_axis` cannot silently start routing `Iota` here with no
             // rebase logic to run.
             BoundOpKind::Iota => BoundOpKind::Iota,
+            // same reasoning as `Iota` above: `split_axis` returns `None`
+            // for a `Constant`, so this arm is never reached in practice.
+            BoundOpKind::Constant { value } => BoundOpKind::Constant { value: *value },
         };
 
         BoundOp {
@@ -530,6 +537,19 @@ impl BoundOpBuilder {
                         dtype: *dtype,
                         extents,
                         kind: BoundOpKind::Iota,
+                    },
+                )?;
+            }
+            Op::Constant { dtype, value, .. } => {
+                let extents = shapes.of(node).to_vec();
+                push_ready(
+                    &mut emitted,
+                    node,
+                    BoundOp {
+                        node,
+                        dtype: *dtype,
+                        extents,
+                        kind: BoundOpKind::Constant { value: *value },
                     },
                 )?;
             }

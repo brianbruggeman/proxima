@@ -94,6 +94,7 @@ impl ShapeTable {
             Op::Iota { extent, .. } => {
                 resolve_leaf_shape(core::slice::from_ref(extent), &self.symbols)?
             }
+            Op::Constant { shape, .. } => resolve_leaf_shape(shape, &self.symbols)?,
         };
         self.dtypes.borrow_mut().push(expr.dtype());
         self.shapes.borrow_mut().push(resolved);

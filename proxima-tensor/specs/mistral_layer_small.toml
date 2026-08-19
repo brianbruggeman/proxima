@@ -42,10 +42,16 @@ dtype = "float32"
 shape = ["?0", 16]
 
 [[node]]
-op = "input"
+# a literal is a node, not a bound input: `op = "constant"` is `Op::Constant`'s
+# config face. `shape = []` is the rank-0 form, which broadcasts into any
+# consumer through an empty operand side (`"->s"`). `eps` stays an input
+# because RMSNorm's epsilon is checkpoint metadata, not a value this spec's
+# own dimensions determine.
+op = "constant"
 id = "inv_dim"
 dtype = "float32"
-shape = ["?0"]
+shape = []
+value = 0.0625
 
 [[node]]
 op = "input"
@@ -54,10 +60,11 @@ dtype = "float32"
 shape = ["?0"]
 
 [[node]]
-op = "input"
+op = "constant"
 id = "ones"
 dtype = "float32"
-shape = ["?0"]
+shape = []
+value = 1.0
 
 [[node]]
 op = "input"
@@ -114,10 +121,14 @@ dtype = "float32"
 shape = ["?0", 2]
 
 [[node]]
-op = "input"
+# the one constant here that is not rank-0: `q_*_grouped`'s `u`/`g`
+# iteration extents have no other operand to come from, so this leaf carries
+# them. Its values are all 1.0 either way.
+op = "constant"
 id = "group_ones"
 dtype = "float32"
 shape = [2, 4]
+value = 1.0
 
 # --- attn_norm (rmsnorm) --------------------------------------------------
 
@@ -146,7 +157,7 @@ id = "mean_square"
 dtype = "float32"
 body = "multiply"
 inputs = ["sum_squares", "inv_dim"]
-maps = ["s->s", "s->s"]
+maps = ["s->s", "->s"]
 
 [[node]]
 op = "elementwise"
@@ -427,29 +438,15 @@ body = "greater"
 inputs = ["key_index", "query_index"]
 maps = ["t->st", "s->st"]
 
+# `-inf` used to be three nodes off `query_index` (subtract for 0.0, negate
+# for -0.0, reciprocal for -inf) and a materialized `[?0]` tensor per call.
+# It is one literal.
 [[node]]
-op = "elementwise"
-id = "zero"
-dtype = "float32"
-body = "subtract"
-inputs = ["query_index", "query_index"]
-maps = ["s->s", "s->s"]
-
-[[node]]
-op = "elementwise"
-id = "neg_zero"
-dtype = "float32"
-body = "negate"
-inputs = ["zero"]
-maps = ["s->s"]
-
-[[node]]
-op = "elementwise"
+op = "constant"
 id = "neg_infinity"
 dtype = "float32"
-body = "reciprocal"
-inputs = ["neg_zero"]
-maps = ["s->s"]
+shape = []
+value = -inf
 
 [[node]]
 op = "elementwise"
@@ -457,7 +454,7 @@ id = "scores_masked"
 dtype = "float32"
 body = "select"
 inputs = ["is_future", "neg_infinity", "scores"]
-maps = ["st->stug", "s->stug", "stug->stug"]
+maps = ["st->stug", "->stug", "stug->stug"]
 
 # --- softmax over the key axis --------------------------------------------
 
@@ -594,7 +591,7 @@ id = "mean_square2"
 dtype = "float32"
 body = "multiply"
 inputs = ["sum_squares2", "inv_dim"]
-maps = ["s->s", "s->s"]
+maps = ["s->s", "->s"]
 
 [[node]]
 op = "elementwise"
@@ -690,7 +687,7 @@ id = "one_plus_exp"
 dtype = "float32"
 body = "add"
 inputs = ["exp_neg_gate", "ones"]
-maps = ["sg->sg", "s->sg"]
+maps = ["sg->sg", "->sg"]
 
 [[node]]
 op = "elementwise"

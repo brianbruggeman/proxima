@@ -163,8 +163,14 @@ pub struct Reduce {
     pub name: Option<String>,
 }
 
-/// The three generators.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The four generators.
+///
+/// `Eq` is deliberately absent: [`Op::Constant`] carries an `f32`, and the
+/// only ways to keep `Eq` were to store the literal as raw bits (unreadable
+/// in the TOML face this enum mirrors) or to wrap it in a newtype whose sole
+/// purpose is hosting a bitwise `Eq` impl. `PartialEq` is what every caller
+/// in this workspace actually uses.
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub enum Op {
     /// A leaf. Where data enters.
@@ -223,15 +229,50 @@ pub enum Op {
     /// multi-axis index tensor is two `Iota`s combined through the existing
     /// elementwise algebra, not a second field here.
     Iota { dtype: DType, extent: Extent },
+
+    /// A leaf like [`Op::Iota`] — computed, not externally supplied — whose
+    /// every element is the same literal: `output[..] = value`.
+    ///
+    /// This is the variant that lets the algebra *say a number*. Without it
+    /// a literal has only two spellings, and this crate shipped both:
+    ///
+    /// - a bound [`Op::Input`] holding a repeated scalar, which turns a
+    ///   number into a name two files must agree on forever (`inv_dim`,
+    ///   `eps`, `ones` and `group_ones` were all this, supplied per call
+    ///   from `proxima-model-interop`'s `bind.rs`);
+    /// - a derivation off [`Op::Iota`]: `Equal(iota, iota)` is `1.0`, a
+    ///   full-reduction `Add` over that is the extent as a scalar, and
+    ///   `Reciprocal`/`SquareRoot` reach a few more values from there. That
+    ///   is 3–5 nodes and an O(extent) materialized tensor per literal, and
+    ///   it only reaches values built from integers by `* / sqrt` — `1e-5`
+    ///   costs an `Iota` of 100000 elements, and an arbitrary `f32` is not
+    ///   reachable at all.
+    ///
+    /// `shape` mirrors [`Op::Input`]'s `Vec<Extent>` rather than collapsing
+    /// to one [`Extent`] the way `Iota` does: a constant is not definitionally
+    /// one axis, and the rank-0 case (`shape: []`) is the common one —
+    /// a rank-0 operand broadcasts into any consumer through an empty
+    /// operand side (`"->stug"`), so one node serves every consumer rank.
+    /// A higher-rank constant is what carries extents a consumer cannot
+    /// otherwise infer, which is why `group_ones` is `[kv_heads, group]` and
+    /// not rank-0.
+    ///
+    /// No `name`: like `Iota`, nothing external binds to it.
+    Constant {
+        dtype: DType,
+        shape: Vec<Extent>,
+        value: f32,
+    },
 }
 
 impl Op {
     #[must_use]
     pub const fn dtype(&self) -> DType {
         match self {
-            Self::Input { dtype, .. } | Self::Elementwise { dtype, .. } | Self::Iota { dtype, .. } => {
-                *dtype
-            }
+            Self::Input { dtype, .. }
+            | Self::Elementwise { dtype, .. }
+            | Self::Iota { dtype, .. }
+            | Self::Constant { dtype, .. } => *dtype,
             Self::Reduce(reduce) => reduce.dtype,
         }
     }
@@ -241,7 +282,7 @@ impl Op {
         match self {
             Self::Input { name, .. } | Self::Elementwise { name, .. } => name.as_deref(),
             Self::Reduce(reduce) => reduce.name.as_deref(),
-            Self::Iota { .. } => None,
+            Self::Iota { .. } | Self::Constant { .. } => None,
         }
     }
 }
