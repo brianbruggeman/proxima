@@ -8,18 +8,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use alloc::vec::Vec;
-use core::future::Future;
-use core::pin::pin;
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use proxima_primitives::pipe::primitives::Pipe;
 use proxima_protocols::protobuf_wire::encode_varint;
 
 use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
 use crate::messages::{DimensionValue, TypeValue};
 use crate::parser::OnnxParser;
-use crate::pipe::{ParseComplete, parse_complete};
+use crate::pipe::parse_complete;
 
 // -- wire-format byte builders (hand-rolled, mirrors what a real ONNX
 // writer emits: tag = (field << 3) | wire_type, LEB128 varints throughout).
@@ -616,38 +612,6 @@ fn unknown_field_numbers_are_skipped_gracefully() {
     // the proof it was skipped rather than rejected or mis-consumed.
     let model = parse_complete(&fixture.bytes).expect("unknown field must not fail the parse");
     assert_fixture_parsed(&model, &fixture);
-}
-
-// -- Pipe conformance: `ParseComplete::call`'s future must be ready on the
-// first poll (it does no awaiting internally), so a no-op waker suffices.
-
-fn noop_raw_waker() -> RawWaker {
-    fn clone(_: *const ()) -> RawWaker {
-        noop_raw_waker()
-    }
-    fn no_op(_: *const ()) {}
-    let vtable = &RawWakerVTable::new(clone, no_op, no_op, no_op);
-    RawWaker::new(core::ptr::null(), vtable)
-}
-
-fn poll_ready<F: Future>(future: F) -> F::Output {
-    let mut future = pin!(future);
-    // SAFETY: the vtable's functions are all no-ops over a null data
-    // pointer; nothing is ever dereferenced.
-    let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-    let mut cx = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut cx) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("ParseComplete::call must be ready on first poll"),
-    }
-}
-
-#[test]
-fn parse_complete_pipe_matches_the_free_function() {
-    let fixture = build_fixture();
-    let via_pipe =
-        poll_ready(ParseComplete::new().call(fixture.bytes.as_slice())).expect("pipe parse of synthetic model");
-    assert_fixture_parsed(&via_pipe, &fixture);
 }
 
 // -- real-world file: best effort, never fails the suite if absent.

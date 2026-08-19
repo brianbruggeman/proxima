@@ -3,7 +3,7 @@
 //! Every function here assumes its whole `buf` argument is present in
 //! memory -- no `NeedMore` concept exists at this layer, unlike
 //! [`crate::parser::OnnxParser`], which buffers a top-level
-//! [`ModelProto`](crate::messages::ModelProto) field until it is fully
+//! [`ModelProto`] field until it is fully
 //! present *before* handing its bytes to [`decode_model_field`]. Any
 //! [`proxima_protocols::protobuf_wire::ParseError`] raised here (a length
 //! prefix claiming more bytes than the slice actually has, an overflowed
