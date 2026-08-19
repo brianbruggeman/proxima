@@ -15,9 +15,11 @@
 //! [`crate::types::GgmlType::Q8_0`]'s already-landed
 //! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
 
-use thiserror::Error;
-
+use crate::quant::QuantError;
 use crate::types::GgmlType;
+
+/// This codec's name as it appears in a rendered [`QuantError`] message.
+const CODEC: &str = "q8_0";
 
 /// Elements per block (`ggml-common.h:209`, `#define QK8_0 32`).
 pub const QK8_0: usize = 32;
@@ -35,21 +37,6 @@ pub const BLOCK_BYTES: usize = {
 
 const D_OFFSET: usize = 0;
 const QS_OFFSET: usize = 2;
-
-/// Everything that can go wrong sizing a `Q8_0` codec call. Never a
-/// panic: a malformed or mis-sized buffer is always an `Err`.
-#[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
-pub enum QuantError {
-    #[error("input length {found} bytes is not a multiple of the q8_0 block size {block_bytes}")]
-    InputNotBlockMultiple { found: usize, block_bytes: usize },
-    #[error("input length {found} elements is not a multiple of the q8_0 block size {block_elements}")]
-    InputNotElementMultiple {
-        found: usize,
-        block_elements: usize,
-    },
-    #[error("output slice has {found} elements, expected {expected}")]
-    OutputSizeMismatch { found: usize, expected: usize },
-}
 
 /// Number of whole `Q8_0` blocks a byte run decodes to, or `None` if
 /// `byte_len` is not an exact multiple of [`BLOCK_BYTES`].
@@ -87,7 +74,7 @@ fn f16_at(block: &[u8], offset: usize) -> half::f16 {
 /// Ports `dequantize_row_q8_0` (`ggml-quants.c:343-357`) exactly: each
 /// signed byte scales by the block's single `f16` delta, no sub-block
 /// structure at all.
-fn dequantize_block(block: &[u8], output: &mut [f32]) {
+pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
     let d = f16_at(block, D_OFFSET).to_f32();
     let qs = &block[QS_OFFSET..QS_OFFSET + QK8_0];
     for (out, &byte) in output.iter_mut().zip(qs.iter()) {
@@ -104,6 +91,7 @@ fn dequantize_block(block: &[u8], output: &mut [f32]) {
 /// `output.len()` does not exactly match the decoded element count.
 pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     let block_count = blocks_for_bytes(data.len()).ok_or(QuantError::InputNotBlockMultiple {
+        codec: CODEC,
         found: data.len(),
         block_bytes: BLOCK_BYTES,
     })?;
@@ -155,6 +143,8 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
     if !input.len().is_multiple_of(QK8_0) {
         return Err(QuantError::InputNotElementMultiple {
+            codec: CODEC,
+            unit: "block",
             found: input.len(),
             block_elements: QK8_0,
         });
@@ -180,7 +170,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{BLOCK_BYTES, QK8_0, QuantError, dequantize, quantize};
+    use super::{BLOCK_BYTES, CODEC, QK8_0, QuantError, dequantize, quantize};
 
     /// One block, hand-packed and hand-decoded, checked against the
     /// `x = q*d` formula computed by hand — not by calling
@@ -267,6 +257,7 @@ mod tests {
         assert_eq!(
             error,
             QuantError::InputNotBlockMultiple {
+                codec: CODEC,
                 found: BLOCK_BYTES - 1,
                 block_bytes: BLOCK_BYTES,
             }
@@ -295,6 +286,8 @@ mod tests {
         assert_eq!(
             error,
             QuantError::InputNotElementMultiple {
+                codec: CODEC,
+                unit: "block",
                 found: QK8_0 - 1,
                 block_elements: QK8_0,
             }
@@ -326,6 +319,7 @@ mod tests {
         assert_eq!(
             error,
             QuantError::InputNotBlockMultiple {
+                codec: CODEC,
                 found: partial_bytes,
                 block_bytes: BLOCK_BYTES,
             }
