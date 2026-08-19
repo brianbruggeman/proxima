@@ -54,11 +54,6 @@ pub enum GgufEvent {
     Complete { data_offset: u64, alignment: u32 },
 }
 
-/// What one internal poll step produces. Private -- [`GgufParser::push`] is
-/// the public boundary; this is just the type the phase-stepping helpers
-/// below share.
-type PollOutcome = Option<GgufEvent>;
-
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
     Magic,
@@ -159,7 +154,7 @@ impl GgufParser {
     }
 
     /// Attempt one unit of progress against the currently buffered bytes.
-    fn poll(&mut self) -> Result<PollOutcome, GgufError> {
+    fn poll(&mut self) -> Result<Option<GgufEvent>, GgufError> {
         match self.phase.clone() {
             Phase::Magic => self.poll_magic(),
             Phase::Version => self.poll_version(),
@@ -179,7 +174,7 @@ impl GgufParser {
         self.stream_pos += consumed as u64;
     }
 
-    fn poll_magic(&mut self) -> Result<PollOutcome, GgufError> {
+    fn poll_magic(&mut self) -> Result<Option<GgufEvent>, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(found) = reader.u32() else {
             return Ok(None);
@@ -194,7 +189,7 @@ impl GgufParser {
         self.poll()
     }
 
-    fn poll_version(&mut self) -> Result<PollOutcome, GgufError> {
+    fn poll_version(&mut self) -> Result<Option<GgufEvent>, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(version) = reader.u32() else {
             return Ok(None);
@@ -209,7 +204,7 @@ impl GgufParser {
         self.poll()
     }
 
-    fn poll_tensor_count(&mut self) -> Result<PollOutcome, GgufError> {
+    fn poll_tensor_count(&mut self) -> Result<Option<GgufEvent>, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(raw) = reader.i64() else {
             return Ok(None);
@@ -223,7 +218,7 @@ impl GgufParser {
         self.poll()
     }
 
-    fn poll_kv_count(&mut self, tensor_count: u64) -> Result<PollOutcome, GgufError> {
+    fn poll_kv_count(&mut self, tensor_count: u64) -> Result<Option<GgufEvent>, GgufError> {
         let mut reader = Reader::new(self.accumulator.as_slice());
         let Some(raw) = reader.i64() else {
             return Ok(None);
@@ -244,7 +239,7 @@ impl GgufParser {
         }))
     }
 
-    fn poll_kv(&mut self, tensor_count: u64, remaining: u64) -> Result<PollOutcome, GgufError> {
+    fn poll_kv(&mut self, tensor_count: u64, remaining: u64) -> Result<Option<GgufEvent>, GgufError> {
         if remaining == 0 {
             let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
             if alignment == 0 || !alignment.is_power_of_two() {
@@ -326,7 +321,7 @@ impl GgufParser {
         Ok(Some(GgufEvent::Metadata { key, value }))
     }
 
-    fn poll_tensor(&mut self, remaining: u64, index: u64) -> Result<PollOutcome, GgufError> {
+    fn poll_tensor(&mut self, remaining: u64, index: u64) -> Result<Option<GgufEvent>, GgufError> {
         if remaining == 0 {
             let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
             let data_offset = pad_to_alignment(self.stream_pos, alignment);
