@@ -39,13 +39,20 @@
 //!
 //! # Distribution stance
 //!
-//! No partition machinery is built yet, but the representation is shaped for
-//! it: a partition is a projection of `&[Op]` (a contiguous or renumbered
-//! sub-slice), a cut edge becomes a named [`Op::Input`] on the consuming
-//! side, [`NodeId`] is a position and is *not* stable across a partitioning
-//! pass while an `Input`'s `name` is, and the wire payload of a cut edge is
-//! `dtype + shape + bytes` — exactly what [`cpu::Evaluated::get`] already
-//! hands back per requested output.
+//! The function [`partition::partition_at`] is the first slice of this. A
+//! partition is a projection of `&[Op]` (a contiguous or renumbered
+//! sub-slice); a cut edge becomes a named [`Op::Input`] on the consuming
+//! side; [`NodeId`] is a position and is *not* stable across a
+//! partitioning pass while an `Input`'s `name` is; and the wire payload of a
+//! cut edge is `dtype + shape + bytes` — exactly what
+//! [`cpu::Evaluated::get`] already hands back per requested output.
+//! [`cpu::evaluate_named`] is the consumer-side counterpart — it binds
+//! `Op::Input`s by name instead of position, which is what a renumbered
+//! consumer program needs.
+//!
+//! Still not built — serializing the cut payload onto an actual wire, and
+//! choosing a cut point automatically. `partition_at` takes the cut point
+//! as an argument and does not choose one itself.
 //!
 //! # Stream stance
 //!
@@ -211,6 +218,11 @@ pub mod live;
 pub mod map;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod op;
+// pure over `&[Op]`/`NodeId`/`shape::infer`, so it lives at the same tier as
+// both — see the module's own doc for what it produces and why no new type
+// hosts it.
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub mod partition;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod shape;
 #[cfg(any(feature = "std", feature = "alloc"))]
