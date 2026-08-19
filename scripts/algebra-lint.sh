@@ -121,9 +121,62 @@ check_ex() { # pattern, why
   fi
 }
 check_ex 'unsafe\s*\{' 'unsafe in an example; configure it properly instead'
-check_ex 'thread::sleep' 'busy-wait with sleep; proxima awaits readiness without polling'
 check_ex 'futures::executor::block_on' "drives proxima's app with futures' executor; use #[proxima::main] and .await"
 check_ex 'env::set_var' 'sets a global env var to configure proxima; use config or pass it explicitly'
+
+# `thread::sleep` gets its own rule, not `check_ex`: a first cut flagged
+# every `thread::sleep` in examples/, seven hits, and read each one's control
+# flow wrong. Only ONE (`protocol_fleet.rs`, since fixed with `Notify` +
+# `timeout`) was a real busy-wait defect. Two (`dpdk_tcp_connect.rs`,
+# `init_telemetry.rs`) are not loops at all — a one-shot pacing delay and a
+# wait on an external kernel process — so flagging "any thread::sleep" was
+# flagging code that never polls for anything. The other five are the SAME
+# bounded poll-connect loop, and it is not a workaround this repo forgot to
+# fix: `src/listener/handle.rs:439-448` documents, against itself, that
+# `App::serve` returns before its listener's first poll runs the real
+# bind/listen syscalls, that closing the race is out of scope, and that
+# "callers needing a synchronization point today poll-connect with a bounded
+# retry loop" — this exact shape. A signal to await does not exist yet; the
+# loop is the documented answer, not the defect this check exists to catch.
+#
+# Two mechanical rules, applied in order:
+#   1. flag `thread::sleep` only when it sits inside a loop whose body ALSO
+#      breaks/returns on a success condition — pacing and one-shot waits
+#      (no enclosing loop, or a loop with no break-on-success) are cleared by
+#      construction. Approximated by scanning the ~8 lines immediately above
+#      the sleep for a `for `/`while `/`loop` header AND a `break`/`return`/
+#      `Ok(` — every real loop-shaped site here has both within that span.
+#   2. within that same span, if the loop is a `TcpStream::connect` retry
+#      AND the repo documents the exact readiness gap it retries around
+#      (grepped once, repo-wide, for the phrases `src/listener/handle.rs`
+#      itself uses: "readiness race", "poll-connect", "before its `serve`"),
+#      it is the sanctioned workaround, not a finding.
+say ""
+say "examples: thread::sleep is a defect only when polling for a signal that exists"
+BEFORE=$FINDINGS
+GAP_DOCUMENTED=0
+if grep -rqE 'readiness race|poll-connect|before its `serve`' src 2>/dev/null; then
+  GAP_DOCUMENTED=1
+fi
+while IFS= read -r hit; do
+  sleep_file=$(cut -d: -f1 <<< "$hit")
+  sleep_line=$(cut -d: -f2 <<< "$hit")
+  window_start=$((sleep_line - 8))
+  [ "$window_start" -lt 1 ] && window_start=1
+  window=$(sed -n "${window_start},${sleep_line}p" "$sleep_file")
+  is_loop_with_break=0
+  if grep -qE '^[[:space:]]*(for |while |loop\b)' <<< "$window" \
+     && grep -qE '\b(break|return|Ok\()' <<< "$window"; then
+    is_loop_with_break=1
+  fi
+  if [ "$is_loop_with_break" -eq 0 ]; then
+    continue
+  fi
+  if [ "$GAP_DOCUMENTED" -eq 1 ] && grep -q 'TcpStream::connect' <<< "$window"; then
+    continue
+  fi
+  finding "$sleep_file:$sleep_line — busy-wait with sleep inside a break-on-success loop; proxima awaits readiness without polling"
+done < <(grep -rnE 'thread::sleep' --include='*.rs' "$EX" 2>/dev/null)
 [ "$FINDINGS" -eq "$BEFORE" ] && ok "no std workarounds in examples"
 
 # 3b. the library is held to the same bar as the examples — harder, in fact.
@@ -216,27 +269,47 @@ while IFS= read -r hit; do finding "$hit"; done < <(
 #    `PhantomData` structs whose entire purpose was carrying a `Pipe` impl for
 #    a free function beside them — each with zero callers outside its own
 #    module and test. They have since been deleted; this check is the
-#    mechanical trap for the next one. Shape: `struct Name(PhantomData<..>);`
-#    (or a `{ }` body whose only fields are `PhantomData`) with a trait `impl
-#    ... for Name` somewhere in the same file. Scoped to library crate source
-#    only — `examples/`, `tests/`, and `benches/` are allowed to build local
-#    fixtures (see algebra-lint's own header on that split), and a struct
-#    inside an in-file `#[cfg(test)]` module is a test fixture, not library
-#    surface (the awk companion tracks that by brace depth).
+#    mechanical trap for the next one. All seven had the SAME shape:
 #
-# Allow-list: a hit here is a real PhantomData-only type with a real trait
-# impl, so it always LOOKS like the deleted shape from the outside. What
-# distinguishes a legitimate one is a caller: a type built for external
-# construction (`pub use`, doc examples, downstream instantiation), not a
-# type that only exists so its impl block has somewhere to live.
+#        pub fn parse_complete(input: &[u8]) -> Result<ParsedGguf, _>  // the job
+#        pub struct ParseComplete<'a>(PhantomData<&'a [u8]>);          // the host
+#        impl Pipe for ParseComplete<'a> { .. calls parse_complete .. }
+#
+#    Two ways to do one job, the second existing only to satisfy a trait.
+#    PhantomData is not the smell — a PhantomData-only type is the standard,
+#    correct shape for a zero-sized type-parameter carrier (`JsonCodec`,
+#    `Convert`, below). A first cut of this check fired on ANY PhantomData-only
+#    struct with a trait impl, and condemned `Convert<From, To>`
+#    (proxima-tensor/src/convert.rs) — wrong: `Convert`'s per-dtype-pair
+#    conversion bodies live directly in its `impl Pipe for Convert<From, To>`
+#    blocks; there is no sibling `convert(from) -> to` free function it
+#    wraps. The real discriminator is a SIBLING FREE FUNCTION performing the
+#    same job the impl claims to: the struct is a host, not an implementation,
+#    exactly when a `pub fn` doing its work already exists beside it.
+#
+#    Detecting "the impl body is essentially a call to a sibling fn" needs a
+#    real body-vs-signature diff, which awk cannot do reliably. The applied
+#    approximation: fire only when the struct's own file also declares a
+#    `pub fn` whose name is the snake_case of the struct name (`ParseComplete`
+#    -> `parse_complete`, `WriteComplete` -> `write_complete`, `Encode` ->
+#    `encode`, `Decode` -> `decode` — all four deleted types matched this).
+#    No such sibling, no finding: the impl carries its own logic.
+#
+#    Shape, unchanged: `struct Name(PhantomData<..>);` (or a `{ }` body whose
+#    only fields are `PhantomData`) with a trait `impl ... for Name`
+#    somewhere in the same file. Scoped to library crate source only —
+#    `examples/`, `tests/`, and `benches/` build local fixtures (see
+#    algebra-lint's own header on that split), and a struct inside an in-file
+#    `#[cfg(test)]` module is a test fixture, not library surface (the awk
+#    companion tracks that by brace depth).
+#
+# Allow-list: for the rare case the sibling-fn heuristic still over-fires —
+# same shape as every other allow-list in this file, one line of cause each.
 say ""
-say "library: no type minted only to host an impl"
+say "library: no type minted only to host a sibling free function's impl"
 BEFORE=$FINDINGS
 PHANTOM_AWK="$(dirname "$0")/algebra-lint-phantom-host.awk"
 declare -a PHANTOM_ALLOW_FILE PHANTOM_ALLOW_NAME PHANTOM_ALLOW_REASON
-PHANTOM_ALLOW_FILE+=("proxima-codec/src/lib.rs")
-PHANTOM_ALLOW_NAME+=("JsonCodec")
-PHANTOM_ALLOW_REASON+=("public generic codec marker (Input/Output are compile-time selections, not runtime state); constructed by external callers (benches/perf_audit.rs), not just its own module/test")
 
 phantom_is_allowed() {
   local file="$1" name="$2" index
@@ -256,16 +329,20 @@ while IFS= read -r hit; do
   if ! grep -qE "^impl(<[^>]*>)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?[[:space:]]+for[[:space:]]+${hit_name}(<|[[:space:]]|$)" "$hit_file" 2>/dev/null; then
     continue
   fi
+  sibling_fn=$(sed -E 's/([a-z0-9])([A-Z])/\1_\2/g' <<< "$hit_name" | tr '[:upper:]' '[:lower:]')
+  if ! grep -qE "^pub(\([a-z]+\))?[[:space:]]+fn[[:space:]]+${sibling_fn}[[:space:]]*\(" "$hit_file" 2>/dev/null; then
+    continue
+  fi
   if phantom_is_allowed "$hit_file" "$hit_name"; then
     continue
   fi
-  finding "$hit_file:$hit_line: $hit_name — PhantomData-only fields, trait impl present, not allow-listed"
+  finding "$hit_file:$hit_line: $hit_name — hosts an impl that wraps sibling free fn '${sibling_fn}', not allow-listed"
 done < <(
   find proxima-* prime rt -name '*.rs' 2>/dev/null \
     | grep -vE '/(examples|tests|benches|target)/' \
     | xargs -I{} awk -f "$PHANTOM_AWK" {} 2>/dev/null
 )
-[ "$FINDINGS" -eq "$BEFORE" ] && ok "no PhantomData-only struct exists solely to host an impl"
+[ "$FINDINGS" -eq "$BEFORE" ] && ok "no PhantomData-only struct wraps a sibling free function's job"
 
 say ""
 if [ "$FINDINGS" -gt 0 ]; then

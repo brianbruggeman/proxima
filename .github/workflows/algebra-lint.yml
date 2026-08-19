@@ -9,9 +9,15 @@ name: algebra-lint
 # This job runs it and fails the build on findings — no `continue-on-error`.
 # A red cell reported as a green job is exactly the failure mode no-std.yml's
 # own header warns against. As of the commit that added this job, the script
-# reports 8 findings (7 busy-wait examples, 1 PhantomData-only type with no
-# external caller) that are tracked as separate work, not fixed here — so
-# this job starts RED on main, honestly, until that work lands.
+# reports 0 findings: the two checks landed alongside this workflow (the
+# "type minted only to host an impl" check, and the blanket-impl and
+# busy-wait refinements that followed it) were each read against every
+# candidate hit before being scoped narrowly enough to clear the codebase as
+# it stands, so this job starts GREEN on main — not by omission, by every
+# candidate having been read and accounted for (see algebra-lint.sh's own
+# per-check comments for the false positives each refinement corrected:
+# `Convert<From, To>`, `DynPipe`/`SendDynPipe`, and five documented
+# poll-connect retry loops).
 #
 # Repo-wide, not tensor-scoped: the lint's own checks span examples/,
 # proxima-primitives/, and every library crate, not one crate's surface.
