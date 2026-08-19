@@ -29,6 +29,9 @@ metal = [
     "dep:objc2-metal",
     "dep:objc2-foundation",
     "dep:half",
+    "dep:proxima-telemetry",
+    "dep:libc",
+    "dep:block2",
     "proxima-tensor/std",
 ]
 
@@ -61,6 +64,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLComputeCommandEncoder",
     "MTLComputePipeline",
     "MTLTypes",
+    "block2",
 ], optional = true }
 # objc2-foundation: NSString (kernel source and entry name go in), NSError
 # (a compile failure's localizedDescription comes out) — the two Foundation
@@ -80,6 +84,23 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 # this macOS-only section because `src/metal.rs`, its only caller, is itself
 # `target_os = "macos"`-gated.
 half = { version = "2.7.1", default-features = false, optional = true }
+# proxima-telemetry: the `Counter` instrument `upload_block` increments to
+# report which real calls took the no-copy path vs the copying one — see
+# the module doc's "Host buffer upload" section. Default features (implies
+# `alloc`) are enough for `metric::Counter`/`counter!`; no OTLP/export
+# machinery is needed since this driver only ever reads the counter back
+# in-process (its own test suite).
+proxima-telemetry = { workspace = true, optional = true }
+# libc: `sysconf(_SC_PAGESIZE)` for `page_size` — the alignment unit
+# `newBufferWithBytesNoCopy` requires, queried from the host rather than
+# hard-coded (macOS's `libc` has no `getpagesize()` binding, unlike Linux's).
+libc = { workspace = true, optional = true }
+# block2: `newBufferWithBytesNoCopy_length_options_deallocator`'s
+# `deallocator` parameter is typed `Option<&block2::DynBlock<..>>` by
+# objc2-metal's own binding (gated behind its `block2` feature above) — this
+# driver always passes `None` (Metal never owns the caller's memory), but
+# the parameter's type still has to resolve.
+block2 = { version = "0.6", default-features = false, optional = true }
 
 [lints]
 workspace = true

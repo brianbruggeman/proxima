@@ -187,6 +187,8 @@ extern crate alloc;
 // so the whole crate body is gated on the same condition as the
 // `compile_error!` above rather than leaving a half-populated crate root.
 #[cfg(any(feature = "std", feature = "alloc"))]
+pub mod align;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod bind;
 // element conversion (`convert::Convert`, a `Pipe`) and decimal-as-conversion
 // (`convert::decimal`) need neither `alloc` nor `std` — slices and core
@@ -220,6 +222,8 @@ pub mod spec;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use align::AlignedBuffer;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
