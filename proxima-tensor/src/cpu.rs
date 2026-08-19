@@ -394,6 +394,8 @@ fn evaluate_pooled(
         #[cfg(feature = "instrument")]
         drop(alloc_site_guard);
         run_node_into(computed, &buffers, &mut output)?;
+        #[cfg(feature = "instrument")]
+        record_bound_op_operand_access(computed, &buffers);
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         for retired in &retires[position] {
@@ -670,6 +672,12 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             );
         }
     }
+    // attributed against the PARENT (unsplit) `resolved`, not any one
+    // spawned chunk above — see `record_bound_op_operand_access`'s doc for
+    // why: a chunk's own shrunk extents would double-count a broadcast
+    // operand's footprint once per chunk instead of once for this node.
+    #[cfg(feature = "instrument")]
+    record_bound_op_operand_access(resolved, buffers);
     Ok(output)
 }
 
@@ -1366,6 +1374,8 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             {
                 let buffers = self.buffers.borrow();
                 run_node_into(resolved, *buffers, &mut output)?;
+                #[cfg(feature = "instrument")]
+                record_bound_op_operand_access(resolved, *buffers);
             }
             let mut buffers = self.buffers.borrow_mut();
             (*buffers)[resolved.node.0 as usize] = Some(B::from(output));
@@ -1401,6 +1411,70 @@ fn output_axes_split(output_axes: &[u16]) -> (&[u16], Option<u16>) {
     match output_axes.split_last() {
         Some((last, leading)) => (leading, Some(*last)),
         None => (&[], None),
+    }
+}
+
+/// Closed-form reads/distinct-touched accounting for one operand across a
+/// bound op's own iteration space, given that operand's per-axis strides
+/// (`Layout::stride` against `resolved.extents`, the same rank both share
+/// throughout this module). An axis this operand broadcasts over
+/// (`stride == 0`) is still visited by every position along it — the loop
+/// nest re-reads the same element — so it contributes its full extent to
+/// `reads` but only `1` (not `extent`) to `distinct`, since the same offset
+/// resolves every time. A non-broadcast axis contributes its full extent to
+/// both. `distinct` is therefore exact for an ordinary (gather-free)
+/// operand, since a real tensor `Layout`'s strides never alias two distinct
+/// coordinates onto the same offset outside of an explicit `stride == 0`
+/// broadcast.
+///
+/// `O(rank)`, never `O(elements)` — every caller invokes this once per
+/// bound-op evaluation (`cpu::record_bound_op_operand_access`), against the
+/// UNSPLIT op's own extents, so a `BoundOp::split` chunk fan-out under
+/// `evaluate_parallel` never re-derives this per chunk (that would double
+/// count a broadcast operand's footprint once per chunk instead of once for
+/// the whole node — see `instrument.rs`'s module comment on
+/// `OperandAccess`).
+#[cfg(any(feature = "instrument", test))]
+fn operand_access_footprint(extents: &[u64], strides: &[i64]) -> (u64, u64) {
+    let mut reads: u64 = 1;
+    let mut distinct: u64 = 1;
+    for (&extent, &stride) in extents.iter().zip(strides) {
+        reads *= extent;
+        if stride != 0 {
+            distinct *= extent;
+        }
+    }
+    (reads, distinct)
+}
+
+/// Attributes one bound op's operand reads to their own source `NodeId`s,
+/// once the op has finished running. Called from `evaluate_pooled`,
+/// `evaluate_node_parallel`, and `Interpreter::fold` — the three places that
+/// hold the UNSPLIT `BoundOp` right after `run_node_into`/`run_chunks_threaded`
+/// returns — never from inside a per-chunk or per-element loop.
+///
+/// A gathered operand (`Some(lookup)`) cannot get its distinct-element count
+/// from `operand_access_footprint`: which table row a gather touches is a
+/// runtime index value, not a function of loop coordinate alone. Its real
+/// count instead comes from the row-level witness `fill_gather_cursors`
+/// already builds during execution (`instrument::commit_gather_operand_access`
+/// reads it back), scaled by the table's own row width
+/// (`Lookup::element_stride`) to report elements rather than rows.
+#[cfg(feature = "instrument")]
+fn record_bound_op_operand_access<B: Deref<Target = [f32]>>(resolved: &BoundOp, buffers: &[Option<B>]) {
+    for (source, layout, gather) in resolved.operands() {
+        let strides: Vec<i64> = (0..resolved.extents.len() as u16).map(|axis| layout.stride(axis)).collect();
+        let (reads, distinct) = operand_access_footprint(&resolved.extents, &strides);
+        let total_elements = buffer_of(buffers, *source).map(<[f32]>::len).unwrap_or(0) as u64;
+        match gather {
+            Some(lookup) => {
+                let row_width = lookup.element_stride.unsigned_abs();
+                instrument::commit_gather_operand_access(*source, reads, row_width, total_elements);
+            }
+            None => {
+                instrument::record_operand_access(*source, reads, distinct, total_elements);
+            }
+        }
     }
 }
 
@@ -1457,6 +1531,14 @@ impl GatherCursor<'_> {
 /// runs once per reduction step (up to ~1e6 times for a 1024^3 GEMM), and
 /// `cursors` is the caller's reused scratch buffer, sized once to operand
 /// count outside the hot loop (`scratchpad/opt/discipline.md` ROW 2).
+///
+/// Under the `instrument` feature, this is also the row-level witness point
+/// for [`instrument::record_gather_row`]: seeding a cursor already reads
+/// this row's index value's OFFSET into the indices tensor
+/// (`gather_access.index_layout.offset_of(coordinate)`) as part of normal,
+/// already-paid-for addressing, so reading the raw index value itself here
+/// too — once per row, never per element `fetch_and_advance` steps through —
+/// piggybacks on that instead of adding a second traversal.
 fn fill_gather_cursors<'a, B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &'a [Option<B>],
@@ -1464,14 +1546,24 @@ fn fill_gather_cursors<'a, B: Deref<Target = [f32]>>(
     stride_dim: Option<u16>,
     cursors: &mut [Option<GatherCursor<'a>>],
 ) -> Result<(), TensorError> {
-    for (slot, (_, _, gather)) in cursors.iter_mut().zip(resolved.operands()) {
+    for (slot, (source, _, gather)) in cursors.iter_mut().zip(resolved.operands()) {
+        #[cfg(not(feature = "instrument"))]
+        let _ = source;
         *slot = gather
             .as_ref()
             .map(|gather_access| {
                 let buffer = buffer_of(buffers, gather_access.indices)?;
+                let offset = gather_access.index_layout.offset_of(coordinate);
+                #[cfg(feature = "instrument")]
+                {
+                    let row_index = buffer[offset as usize] as i64;
+                    if row_index >= 0 {
+                        instrument::record_gather_row(*source, row_index as u64);
+                    }
+                }
                 Ok(GatherCursor {
                     buffer,
-                    offset: gather_access.index_layout.offset_of(coordinate),
+                    offset,
                     stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
                     element_stride: gather_access.element_stride,
                     extent: gather_access.extent,
@@ -7201,6 +7293,140 @@ mod tests {
         let error = evaluate_typed(&program, &[], &blocks, &[])
             .expect_err("Int8 block cannot bind an Int32 program");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    // -- operand_access_footprint: pure, always compiled under `cfg(test)`
+    // regardless of the `instrument` feature, so these run in every default
+    // `cargo nextest run -p proxima-tensor` too, not only `--features
+    // instrument` (see the function's own `#[cfg(any(feature = "instrument",
+    // test))]`).
+
+    #[test]
+    fn operand_access_footprint_is_exact_for_a_dense_operand() {
+        let extents = [4u64, 5, 6];
+        let strides = [30i64, 6, 1];
+        let (reads, distinct) = operand_access_footprint(&extents, &strides);
+        assert_eq!(reads, 4 * 5 * 6);
+        assert_eq!(distinct, reads, "a dense operand's own footprint is read exactly once per position");
+    }
+
+    #[test]
+    fn operand_access_footprint_undercounts_distinct_under_broadcast() {
+        let extents = [4u64, 5, 6];
+        let strides = [30i64, 0, 1]; // broadcast over the middle axis
+        let (reads, distinct) = operand_access_footprint(&extents, &strides);
+        assert_eq!(reads, 4 * 5 * 6, "every iterated position still counts as a read");
+        assert_eq!(distinct, 4 * 6, "the broadcast axis contributes 1, not its extent, to distinct");
+        assert!(reads > distinct);
+    }
+
+    #[test]
+    fn operand_access_footprint_is_one_for_a_scalar_reduction() {
+        assert_eq!(operand_access_footprint(&[], &[]), (1, 1));
+    }
+
+    // -- proof tests: the instrument must measure something real, not just
+    // increment. Each asserts a number known a priori from the program's
+    // own construction, gated behind `instrument` since the API under test
+    // only exists there.
+
+    /// A matmul's RHS is read once per `(m, n, k)` position but only ever
+    /// resolves to `k * n` distinct elements — it never varies along `m`.
+    /// Asserts `reads >> distinct`, the shape a cold-weight quantization
+    /// decision needs.
+    #[test]
+    #[cfg(feature = "instrument")]
+    fn evaluate_records_more_reads_than_distinct_elements_for_a_broadcast_operand() {
+        instrument::reset_operand_access();
+        let (m, k, n) = (4u32, 3u32, 5u32);
+        let (program, sum) = matmul_program(m, k, n, false);
+        let lhs_data = random_vec(1, (m * k) as usize);
+        let rhs_data = random_vec(2, (k * n) as usize);
+        evaluate(&program, &[], &[&lhs_data, &rhs_data], &[sum]).expect("matmul evaluates");
+
+        let lhs_access = instrument::operand_access_of(NodeId(0)).expect("lhs was instrumented");
+        assert_eq!(
+            lhs_access.distinct_elements,
+            u64::from(m) * u64::from(k),
+            "lhs's real footprint excludes the n broadcast axis"
+        );
+        assert!(
+            lhs_access.reads > lhs_access.distinct_elements,
+            "reads={} distinct={}",
+            lhs_access.reads,
+            lhs_access.distinct_elements
+        );
+
+        let rhs_access = instrument::operand_access_of(NodeId(1)).expect("rhs was instrumented");
+        assert_eq!(rhs_access.distinct_elements, u64::from(k) * u64::from(n));
+        assert!(
+            rhs_access.reads > rhs_access.distinct_elements,
+            "reads={} distinct={}",
+            rhs_access.reads,
+            rhs_access.distinct_elements
+        );
+    }
+
+    /// The case that matters most: an embedding lookup into a 1000-row
+    /// table, fetching only 3 distinct rows across 6 positions (each row
+    /// hit twice). A naive "count every read" instrument would report all
+    /// 1000 rows touched (or the raw read count); this must report exactly
+    /// 3 rows' worth of elements.
+    #[test]
+    #[cfg(feature = "instrument")]
+    fn evaluate_records_exactly_the_distinct_rows_a_gather_touches_not_the_whole_table() {
+        instrument::reset_operand_access();
+        let (vocab, dim, seq) = (1_000u32, 8u32, 6u32);
+        let (program, gathered) = embedding_lookup_program(vocab, dim, seq);
+        let table_data: Vec<f32> = (0..(vocab * dim) as usize).map(|value| value as f32).collect();
+        // 6 fetches, 3 distinct rows: 3 and 999 and 500 each hit twice.
+        let ids_data = [3.0f32, 3.0, 999.0, 999.0, 500.0, 500.0];
+        evaluate(&program, &[], &[&table_data, &ids_data], &[gathered]).expect("gather evaluates");
+
+        let table_access = instrument::operand_access_of(NodeId(0)).expect("table was instrumented");
+        assert_eq!(
+            table_access.distinct_elements,
+            3 * u64::from(dim),
+            "only 3 of {vocab} rows were ever fetched, not the whole table"
+        );
+        assert_eq!(table_access.total_elements, u64::from(vocab) * u64::from(dim));
+        assert!(table_access.distinct_elements < table_access.total_elements);
+    }
+
+    /// Degenerate control: an operand the requested outputs never reach
+    /// gets no `BoundOp` at all, so it must read back `None` — absent, not
+    /// a zero-touch row assumed on its behalf. Paired with a direct API
+    /// check that a REAL zero-read record (an operand that was reached, and
+    /// genuinely read zero times) reads back `Some` with every field `0`,
+    /// so the two "zero" cases are distinguishable rather than folded
+    /// together.
+    #[test]
+    #[cfg(feature = "instrument")]
+    fn operand_access_distinguishes_never_read_from_a_recorded_zero() {
+        instrument::reset_operand_access();
+        let (m, k, n) = (2u32, 2u32, 2u32);
+        let (mut program, sum) = matmul_program(m, k, n, false);
+        let unused = f32_block(&mut program, &[Extent::Static(3)]);
+        let lhs_data = random_vec(1, (m * k) as usize);
+        let rhs_data = random_vec(2, (k * n) as usize);
+        let unused_data = alloc::vec![0.0f32; 3];
+        evaluate(&program, &[], &[&lhs_data, &rhs_data, &unused_data], &[sum]).expect("matmul evaluates");
+
+        assert!(instrument::operand_access_of(NodeId(0)).is_some(), "lhs was actually read");
+        assert_eq!(
+            instrument::operand_access_of(unused),
+            None,
+            "an operand the requested outputs never reach is absent, not a recorded zero"
+        );
+
+        instrument::reset_operand_access();
+        let node = NodeId(42);
+        assert_eq!(instrument::operand_access_of(node), None, "nothing recorded yet");
+        instrument::record_operand_access(node, 0, 0, 128);
+        let access = instrument::operand_access_of(node).expect("recording zero reads still creates a row");
+        assert_eq!(access.reads, 0);
+        assert_eq!(access.distinct_elements, 0);
+        assert_eq!(access.total_elements, 128, "total size is known even when nothing was ever read");
     }
 
     /// DLMF 7.2 / Abramowitz & Stegun Table 7.1's published `erf(x)`, to the
