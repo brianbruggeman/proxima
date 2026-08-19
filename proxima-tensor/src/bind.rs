@@ -562,6 +562,14 @@ impl BoundOpBuilder {
                     && self.held.borrow().contains_key(&reduce.operand);
 
                 let (element_body, operands) = if fuses {
+                    let reduce_extent: u64 =
+                        shape::fold_iteration_extents(reduce, shapes).iter().product();
+                    self.quarantine_broadcast_operands(
+                        reduce.operand,
+                        reduce_extent,
+                        shapes,
+                        &mut emitted,
+                    )?;
                     compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map)
                 } else {
                     self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
@@ -634,6 +642,43 @@ impl BoundOpBuilder {
                 &held.operands,
             );
             push_ready(emitted, node, materialized)?;
+        }
+        Ok(())
+    }
+
+    /// Walks `node`'s still-held operands and materializes any whose own
+    /// natural iteration space (`shapes.of(child)`) is smaller than
+    /// `reduce_extent` — composing one through anyway would run its body
+    /// once per `reduce_extent` element instead of once per its own, which
+    /// is exactly the cost [`is_identity_projection`] cannot see: it only
+    /// judges one map's shape, not what fusing recursively absorbs beneath
+    /// it (see `compose_operand`'s own doc — it trusts every map it
+    /// recurses through was already checked, but that check happened at a
+    /// different, earlier `push`, against that op's own — smaller —
+    /// iteration space, not against this reduce's). Safe children (same or
+    /// larger extent) are walked further, since a broadcast can reappear
+    /// several levels down.
+    fn quarantine_broadcast_operands(
+        &self,
+        node: NodeId,
+        reduce_extent: u64,
+        shapes: &Shapes,
+        emitted: &mut ReadyBatch,
+    ) -> Result<(), TensorError> {
+        let children = self.held.borrow().get(&node).map(|held| held.operands.clone());
+        let Some(children) = children else {
+            return Ok(());
+        };
+        for (child, _map) in children {
+            if !self.held.borrow().contains_key(&child) {
+                continue;
+            }
+            let child_extent: u64 = shapes.of(child).iter().product();
+            if child_extent < reduce_extent {
+                self.materialize_if_held(child, shapes, emitted)?;
+            } else {
+                self.quarantine_broadcast_operands(child, reduce_extent, shapes, emitted)?;
+            }
         }
         Ok(())
     }
