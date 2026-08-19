@@ -115,6 +115,18 @@ shape = ["?0", 64]
 
 [[node]]
 op = "input"
+id = "attn_norm_weight"
+dtype = "float32"
+shape = [4096]
+
+[[node]]
+op = "input"
+id = "ffn_norm_weight"
+dtype = "float32"
+shape = [4096]
+
+[[node]]
+op = "input"
 id = "group_ones"
 dtype = "float32"
 shape = [8, 4]
@@ -174,11 +186,19 @@ maps = ["s->s"]
 
 [[node]]
 op = "elementwise"
-id = "normed"
+id = "normed_unscaled"
 dtype = "float32"
 body = "multiply"
 inputs = ["x", "inv_rms"]
 maps = ["sd->sd", "s->sd"]
+
+[[node]]
+op = "elementwise"
+id = "normed"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed_unscaled", "attn_norm_weight"]
+maps = ["sd->sd", "d->sd"]
 
 # --- q / k / v projections, heads kept as their own axis ------------------
 
@@ -622,11 +642,19 @@ maps = ["s->s"]
 
 [[node]]
 op = "elementwise"
-id = "normed2"
+id = "normed2_unscaled"
 dtype = "float32"
 body = "multiply"
 inputs = ["residual1", "inv_rms2"]
 maps = ["sd->sd", "s->sd"]
+
+[[node]]
+op = "elementwise"
+id = "normed2"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed2_unscaled", "ffn_norm_weight"]
+maps = ["sd->sd", "d->sd"]
 
 # --- swiglu feed-forward -----------------------------------------------------
 

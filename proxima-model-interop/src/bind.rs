@@ -287,6 +287,11 @@ mod real_openchat_file {
         named.push(("token_embd.weight".into(), table));
 
         for layer in 0..BLOCK_COUNT {
+            // 1-D `[embedding]` learned RMSNorm scale -- no `[out, in]`
+            // GGUF layout to undo, so it skips `transpose_out_in_to_in_out`
+            // (that helper is for rank-2 projections only).
+            let attn_norm_weight = bind(&alloc::format!("blk.{layer}.attn_norm.weight"));
+            let ffn_norm_weight = bind(&alloc::format!("blk.{layer}.ffn_norm.weight"));
             let wq = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_q.weight")), EMBEDDING, EMBEDDING);
             let wk = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_k.weight")), KV_HEADS * HEAD_DIM, EMBEDDING);
             let wv = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_v.weight")), KV_HEADS * HEAD_DIM, EMBEDDING);
@@ -295,6 +300,8 @@ mod real_openchat_file {
             let w_up = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.ffn_up.weight")), FEED_FORWARD, EMBEDDING);
             let w_down = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.ffn_down.weight")), EMBEDDING, FEED_FORWARD);
 
+            named.push((alloc::format!("blk.{layer}.attn_norm.weight"), attn_norm_weight));
+            named.push((alloc::format!("blk.{layer}.ffn_norm.weight"), ffn_norm_weight));
             named.push((alloc::format!("blk.{layer}.attn_q.weight"), wq));
             named.push((alloc::format!("blk.{layer}.attn_k.weight"), wk));
             named.push((alloc::format!("blk.{layer}.attn_v.weight"), wv));
@@ -303,6 +310,9 @@ mod real_openchat_file {
             named.push((alloc::format!("blk.{layer}.ffn_up.weight"), w_up));
             named.push((alloc::format!("blk.{layer}.ffn_down.weight"), w_down));
         }
+
+        let output_norm_weight = bind("output_norm.weight");
+        named.push(("output_norm.weight".into(), output_norm_weight));
 
         let lm_head = transpose_out_in_to_in_out(&bind("output.weight"), VOCAB, EMBEDDING);
         named.push(("output.weight".into(), lm_head));
