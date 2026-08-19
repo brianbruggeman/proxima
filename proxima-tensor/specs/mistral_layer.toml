@@ -32,6 +32,18 @@
 # `layer_norm_rms_epsilon` is included by the same mechanism
 # `transformer_block.toml` already uses for its SwiGLU `+ 1.0`: an `Input`
 # broadcast in from a lower rank (`s->s`), not a new node kind.
+#
+# `inv_sqrt_head_dim` (1/sqrt(128) = 0.088388) scales `scores` before the
+# causal mask, the same way attention's usual `1/sqrt(d_k)` term does.
+# `head_dim=128` is this file's own model-config constant, not per-request
+# data, so it is derived in-graph rather than bound as a runtime `Input`: a
+# bound name is a value every caller must supply forever, and this one never
+# varies. `head_iota` (`Iota` over the 128-element head axis) compared
+# `Equal` to itself turns every element into `1.0` — the same 0/1-as-float
+# trick `is_future` uses `Greater` for — a full-reduction `Add` sums those
+# 128 ones to the scalar `128.0`, and `SquareRoot`/`Reciprocal` finish it.
+# The result is rank-0 and broadcasts `->stug` into `scores`, the same
+# broadcast role `neg_infinity` plays from its own (rank-1) shape below.
 
 # --- inputs -------------------------------------------------------------
 
@@ -425,6 +437,55 @@ body = "add"
 inputs = ["score_even", "score_odd"]
 maps = ["stug->stug", "stug->stug"]
 
+[[node]]
+op = "iota"
+id = "head_iota"
+dtype = "float32"
+extent = 128
+
+[[node]]
+op = "elementwise"
+id = "head_ones"
+dtype = "float32"
+body = "equal"
+inputs = ["head_iota", "head_iota"]
+maps = ["i->i", "i->i"]
+
+[[node]]
+op = "reduce"
+id = "head_dim_count"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "head_ones"
+in_map = "i->i"
+out_map = "->i"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "head_dim_sqrt"
+dtype = "float32"
+body = "square_root"
+inputs = ["head_dim_count"]
+maps = ["->"]
+
+[[node]]
+op = "elementwise"
+id = "inv_sqrt_head_dim"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["head_dim_sqrt"]
+maps = ["->"]
+
+[[node]]
+op = "elementwise"
+id = "scores_scaled"
+dtype = "float32"
+body = "multiply"
+inputs = ["scores", "inv_sqrt_head_dim"]
+maps = ["stug->stug", "->stug"]
+
 # --- causal mask ------------------------------------------------------------
 
 [[node]]
@@ -476,7 +537,7 @@ op = "elementwise"
 id = "scores_masked"
 dtype = "float32"
 body = "select"
-inputs = ["is_future", "neg_infinity", "scores"]
+inputs = ["is_future", "neg_infinity", "scores_scaled"]
 maps = ["st->stug", "s->stug", "stug->stug"]
 
 # --- softmax over the key axis --------------------------------------------
