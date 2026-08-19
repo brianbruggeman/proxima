@@ -76,4 +76,13 @@ pub enum GgufError {
 
     #[error("arithmetic overflow computing {context}")]
     Overflow { context: &'static str },
+
+    #[error(
+        "tensor '{tensor}' data is {found} bytes, expected {expected} from its dims and ggml type"
+    )]
+    TensorDataLengthMismatch {
+        tensor: String,
+        expected: u64,
+        found: usize,
+    },
 }

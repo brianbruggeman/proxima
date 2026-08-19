@@ -447,3 +447,99 @@ fn parse_complete_pipe_matches_the_free_function() {
     assert_fixture_parsed(&via_pipe, &fixture);
 }
 
+// -- Real Q4_K tensor from a host-local GGUF, not a synthetic fixture.
+// Opportunistic: this model cache is specific to this machine (found via
+// `find` over `~/.lmstudio`), so the test skips cleanly (not a failure)
+// wherever that path is absent. Only a small prefix (metadata + tensor
+// directory) and one sample slice of one tensor's packed bytes are read
+// via direct `seek`+`read` — never the whole multi-GB file.
+#[cfg(feature = "std")]
+mod real_file {
+    use std::io::{Read, Seek, SeekFrom};
+
+    use crate::pipe::parse_complete;
+    use crate::quant::q4_k;
+    use crate::types::GgmlType;
+
+    const FIXTURE_PATH: &str =
+        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+
+    /// Sample cap in bytes, rounded down to a whole number of `Q4_K`
+    /// blocks: 2 MiB gives ~14.5k blocks, ~3.7M weights -- enough for a
+    /// real histogram without reading gigabytes.
+    const SAMPLE_CAP_BYTES: usize = 2 * 1024 * 1024;
+
+    #[test]
+    fn dequantizes_a_real_q4_k_tensor_slice() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
+        let file_len = file.metadata().expect("stat gguf fixture").len();
+
+        // Grow the metadata-region read until parse_complete stops
+        // reporting truncation -- the tensor directory for a ~1000-tensor
+        // model fits well under a few MiB, nowhere near the payload.
+        let mut header_buf = alloc::vec::Vec::new();
+        let parsed = 'grow: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = parse_complete(&header_buf) {
+                    break 'grow parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 64 MiB");
+        };
+
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|tensor| tensor.ggml_type == GgmlType::Q4_K)
+            .expect("fixture model has at least one Q4_K tensor");
+        let range = parsed
+            .tensor_data_range(tensor, file_len)
+            .expect("tensor data range within file bounds");
+
+        let available = (range.end - range.start) as usize;
+        let sample_bytes = available.min(SAMPLE_CAP_BYTES) / q4_k::BLOCK_BYTES * q4_k::BLOCK_BYTES;
+        let block_count = sample_bytes / q4_k::BLOCK_BYTES;
+        assert!(block_count > 0, "tensor '{}' is smaller than one q4_k block", tensor.name);
+
+        let mut packed = alloc::vec![0u8; sample_bytes];
+        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
+        file.read_exact(&mut packed).expect("read sampled tensor bytes");
+
+        let element_count = q4_k::elements_for_blocks(block_count);
+        let mut weights = alloc::vec![0.0f32; element_count];
+        q4_k::dequantize(&packed, &mut weights).expect("dequantize sampled q4_k blocks");
+
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        let mut sum = 0.0f64;
+        let mut buckets = [0u32; 10];
+        for &value in &weights {
+            assert!(value.is_finite(), "dequantized weight must be finite, got {value}");
+            min = min.min(value);
+            max = max.max(value);
+            sum += f64::from(value);
+            let bucket_index = (((value + 1.0) / 2.0 * 10.0) as i32).clamp(0, 9) as usize;
+            buckets[bucket_index] += 1;
+        }
+        let mean = sum / element_count as f64;
+        let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
+
+        eprintln!(
+            "real_q4_k tensor='{}' blocks={block_count} elements={element_count} min={min} max={max} mean={mean:.6} stddev={:.6}",
+            tensor.name,
+            variance.sqrt()
+        );
+        eprintln!("real_q4_k histogram over [-1.0, 1.0] in 10 buckets: {buckets:?}");
+    }
+}
+

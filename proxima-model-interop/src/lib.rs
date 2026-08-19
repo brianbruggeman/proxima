@@ -1,0 +1,28 @@
+//! GGUF <-> safetensors interop: a sans-IO transform over the one thing
+//! both model-weight formats agree on — a named tensor is `(name, dtype,
+//! shape, bytes)`. Everything beyond that (GGUF's typed KV metadata vs.
+//! safetensors' flat string map, GGUF's block-quantized types vs.
+//! safetensors' flat typed arrays) is where the two formats diverge; see
+//! [`transform::gguf_to_safetensors`] and [`transform::safetensors_to_gguf`]
+//! for exactly what each direction preserves and what it doesn't.
+//!
+//! ONNX is out of scope here: it carries a computation graph, not just
+//! named tensors, so an ONNX leg of this transform is a different, larger
+//! job (serializing graph structure) than this crate does.
+//!
+//! Lives as its own crate rather than a feature-gated module on either
+//! `proxima-gguf` or `proxima-safetensors` because the dependency is
+//! inherently bidirectional — either format crate depending on the other
+//! would be an arbitrary direction to pick, and neither reader/writer
+//! needs to know the other format exists to do its own job.
+#![no_std]
+
+extern crate alloc;
+
+mod dtype;
+mod error;
+mod transform;
+
+pub use dtype::{dtype_to_ggml, ggml_to_dtype};
+pub use error::InteropError;
+pub use transform::{gguf_to_safetensors, safetensors_to_gguf};

@@ -51,6 +51,29 @@ pub fn map_dtype(tensor: &str, dtype: &str) -> Result<DType, SafetensorsError> {
     }
 }
 
+/// The writer's half of [`map_dtype`]: `DType` back to the safetensors wire
+/// string. `None` for `Int128`/`UInt128` — safetensors has no 128-bit
+/// integer dtype, so these have no wire representation to write.
+#[must_use]
+pub fn dtype_to_wire(dtype: DType) -> Option<&'static str> {
+    match dtype {
+        DType::Bool => Some("BOOL"),
+        DType::Int8 => Some("I8"),
+        DType::UInt8 => Some("U8"),
+        DType::Int16 => Some("I16"),
+        DType::UInt16 => Some("U16"),
+        DType::Int32 => Some("I32"),
+        DType::UInt32 => Some("U32"),
+        DType::Int64 => Some("I64"),
+        DType::UInt64 => Some("U64"),
+        DType::BFloat16 => Some("BF16"),
+        DType::Float16 => Some("F16"),
+        DType::Float32 => Some("F32"),
+        DType::Float64 => Some("F64"),
+        DType::Int128 | DType::UInt128 => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -101,5 +124,31 @@ mod tests {
     fn unsupported_dtype_strings_return_typed_error(#[case] wire: &str) {
         let error = map_dtype("t", wire).expect_err("dtype has no DType counterpart");
         assert!(matches!(error, SafetensorsError::UnsupportedDtype { .. }));
+    }
+
+    #[rstest]
+    #[case::bool_dtype(DType::Bool)]
+    #[case::int8(DType::Int8)]
+    #[case::uint8(DType::UInt8)]
+    #[case::int16(DType::Int16)]
+    #[case::uint16(DType::UInt16)]
+    #[case::int32(DType::Int32)]
+    #[case::uint32(DType::UInt32)]
+    #[case::int64(DType::Int64)]
+    #[case::uint64(DType::UInt64)]
+    #[case::bfloat16(DType::BFloat16)]
+    #[case::float16(DType::Float16)]
+    #[case::float32(DType::Float32)]
+    #[case::float64(DType::Float64)]
+    fn dtype_to_wire_round_trips_through_map_dtype(#[case] dtype: DType) {
+        let wire = dtype_to_wire(dtype).expect("dtype has a wire representation");
+        assert_eq!(map_dtype("t", wire), Ok(dtype));
+    }
+
+    #[rstest]
+    #[case::int128(DType::Int128)]
+    #[case::uint128(DType::UInt128)]
+    fn dtype_to_wire_returns_none_for_dtypes_safetensors_cannot_represent(#[case] dtype: DType) {
+        assert_eq!(dtype_to_wire(dtype), None);
     }
 }

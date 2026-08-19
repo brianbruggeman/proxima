@@ -12,15 +12,22 @@ readme.workspace = true
 [features]
 default = ["std"]
 alloc = []
-std = ["alloc", "thiserror/std", "proxima-protocols/std"]
+# runtime config surface ([`config::OnnxParserConfig`]): conflaguration is
+# std-only (Settings/env/file), so it rides in only here -- the
+# no_std+alloc floor never sees it and always uses `crate::sized` directly.
+std = ["alloc", "thiserror/std", "proxima-protocols/std", "dep:bon", "dep:conflaguration", "dep:serde"]
 
 [dependencies]
 proxima-primitives = { workspace = true, default-features = false }
 proxima-protocols = { workspace = true, default-features = false, features = ["protobuf_wire"] }
 thiserror.workspace = true
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+temp-env.workspace = true

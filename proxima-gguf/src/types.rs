@@ -196,6 +196,47 @@ impl GgmlType {
         Some(value)
     }
 
+    /// Encode back to the raw `ggml_type` wire tag — the writer's half of
+    /// [`Self::from_wire`]. Kept as an explicit match (not a discriminant
+    /// cast) because the wire values have gaps (4, 5, 31-33, 36-38) that
+    /// don't line up with this enum's declaration order.
+    #[must_use]
+    pub const fn to_wire(self) -> i32 {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::Q4_0 => 2,
+            Self::Q4_1 => 3,
+            Self::Q5_0 => 6,
+            Self::Q5_1 => 7,
+            Self::Q8_0 => 8,
+            Self::Q8_1 => 9,
+            Self::Q2_K => 10,
+            Self::Q3_K => 11,
+            Self::Q4_K => 12,
+            Self::Q5_K => 13,
+            Self::Q6_K => 14,
+            Self::Q8_K => 15,
+            Self::Iq2Xxs => 16,
+            Self::Iq2Xs => 17,
+            Self::Iq3Xxs => 18,
+            Self::Iq1S => 19,
+            Self::Iq4Nl => 20,
+            Self::Iq3S => 21,
+            Self::Iq2S => 22,
+            Self::Iq4Xs => 23,
+            Self::I8 => 24,
+            Self::I16 => 25,
+            Self::I32 => 26,
+            Self::I64 => 27,
+            Self::F64 => 28,
+            Self::Iq1M => 29,
+            Self::Bf16 => 30,
+            Self::Tq10 => 34,
+            Self::Tq20 => 35,
+        }
+    }
+
     /// Block layout used to compute a tensor's exact byte footprint, the
     /// same arithmetic as `ggml_nbytes` (`ggml.c`, via `type_traits`
     /// `blck_size`/`type_size`, `ggml.c:1174,1178`). Dequantizing the
@@ -257,6 +298,14 @@ mod tests {
     fn ggml_type_rejects_retired_gap_values() {
         for raw in [4, 5, 31, 32, 33, 36, 37, 38, 39, -1] {
             assert_eq!(GgmlType::from_wire(raw), None, "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn ggml_type_to_wire_round_trips_through_from_wire() {
+        for raw in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 34, 35] {
+            let decoded = GgmlType::from_wire(raw).unwrap_or_else(|| panic!("raw={raw} should decode"));
+            assert_eq!(decoded.to_wire(), raw, "raw={raw}");
         }
     }
 

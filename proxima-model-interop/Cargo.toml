@@ -1,0 +1,20 @@
+[package]
+name = "proxima-model-interop"
+description = "Sans-IO GGUF <-> safetensors transform over the format's common denominator (named tensors, dtype, shape, bytes); explicit about what each direction loses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+arrayvec.workspace = true
+proxima-gguf = { path = "../proxima-gguf", default-features = false }
+proxima-safetensors = { path = "../proxima-safetensors" }
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true

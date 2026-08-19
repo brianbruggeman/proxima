@@ -12,10 +12,16 @@
 //! # Tier split
 //!
 //! The parser core ([`parser`], [`decode`], [`messages`], [`types`],
-//! [`error`], [`pipe`]) is `no_std + alloc`: it operates on `&[u8]` and
-//! never performs IO. It compiles under `--no-default-features` (`alloc`
-//! is the floor; `std` only adds `thiserror`'s `std::error::Error` impl
-//! and forwards `proxima-protocols/std`).
+//! [`error`], [`pipe`], [`sized`]) is `no_std + alloc`: it operates on
+//! `&[u8]` and never performs IO. It compiles under
+//! `--no-default-features` (`alloc` is the floor; `std` only adds
+//! `thiserror`'s `std::error::Error` impl, forwards
+//! `proxima-protocols/std`, and adds [`config`]). [`sized`] holds the
+//! build-time floor constant ([`sized::MAX_LEN_DELIMITED_FIELD`]) that
+//! [`parser::OnnxParser::new`] always uses; [`config`]'s
+//! `OnnxParserConfig` (std-only, conflaguration-backed) seeds its runtime
+//! default from that same constant and can override it per-process via
+//! [`parser::OnnxParser::with_config`].
 //!
 //! # Layout source
 //!
@@ -50,11 +56,14 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+pub mod config;
 pub mod decode;
 pub mod error;
 pub mod messages;
 pub mod parser;
 pub mod pipe;
+pub mod sized;
 pub mod types;
 
 pub use decode::{ModelField, decode_model_field, decode_model_proto};

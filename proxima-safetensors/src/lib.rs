@@ -13,11 +13,13 @@
 //! reserved key holding a free-form string-to-string map and is never
 //! reported as a tensor.
 //!
-//! Sans-IO: this crate never opens a file, reads, or mmaps. Callers feed
-//! bytes (in any chunking) through [`SafetensorsParser`] and read back
+//! Sans-IO: this crate never opens a file, reads, writes, or mmaps. Callers
+//! feed bytes (in any chunking) through [`SafetensorsParser`] and read back
 //! [`Manifest`]/[`TensorEntry`] records — pure names, dtypes, shapes, and
 //! byte ranges. No tensor byte is ever copied, dequantized, or converted
-//! here.
+//! here. [`writer::write_complete`] is the dual: it takes an in-memory
+//! [`writer::SafetensorsModel`] and returns owned bytes the caller writes
+//! wherever it wants.
 #![no_std]
 
 extern crate alloc;
@@ -27,12 +29,14 @@ mod error;
 mod header_codec;
 mod parser;
 mod pipe;
+mod writer;
 
-pub use dtype::map_dtype;
+pub use dtype::{dtype_to_wire, map_dtype};
 pub use error::SafetensorsError;
 pub use header_codec::{HEADER_LEN_BYTES, HeaderCodec, MAX_HEADER_BYTES};
 pub use parser::{Manifest, SafetensorsParser, TensorEntry};
 pub use pipe::{ParseComplete, parse_complete};
+pub use writer::{SafetensorsModel, TensorPayload, WriteComplete, write_complete};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -48,7 +52,7 @@ mod tests {
     /// len][header JSON][raw tensor bytes, contiguous, in declaration
     /// order]`. `entries` are `(name, dtype_wire, shape, byte_len)`;
     /// `metadata` becomes the `__metadata__` entry if non-empty.
-    fn build_buffer(
+    pub(crate) fn build_buffer(
         entries: &[(&str, &str, &[u64], usize)],
         metadata: &[(&str, &str)],
     ) -> (Vec<u8>, alloc::collections::BTreeMap<String, (u64, u64)>) {
