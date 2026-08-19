@@ -1,27 +1,12 @@
-//! Sans-IO FSM over the whole safetensors byte stream. The cursor (here,
-//! "which phase, and how many data bytes have we counted") lives IN the
-//! discriminated-enum variant, never beside a buffer that could drift out
-//! of sync with it — the same invariant `proxima_codec::DelimiterFraming`
-//! (`proxima-codec/src/lib.rs`) buys with its own self-consuming
-//! `push`/`next_frame`.
-//!
-//! [`SafetensorsParser`] implements
-//! [`proxima_primitives::pipe::sans_io::ByteStreamParser`] — the same
-//! `feed`/`poll`, `&mut self` contract `proxima-gguf::GgufParser` and
-//! `proxima-onnx::OnnxParser` satisfy. `poll` computes the new variant
-//! (`Header` -> `TensorData`) as an owned value first, from data already
-//! read out of the old variant, then assigns `*self` to it in one step —
-//! no `unsafe`, no placeholder, no extra allocation, and the enum-folded
-//! cursor invariant `DelimiterFraming` motivates is unchanged; only the
-//! public boundary moved from self-consuming to `&mut self`.
-//! [`SafetensorsParser::push`] stays as a convenience built on
-//! `feed`/`poll` for callers that prefer threading an owned `Self` through
-//! a fold — it is sugar now, not the primitive.
-//!
-//! Neither shape is a [`Pipe`](proxima_primitives::pipe::Pipe) — see
-//! `crate::header_codec` for why that stateless one-shot step (parsing one
-//! already-complete header frame) is the `Pipe`, and this stateful
-//! multi-chunk accumulation loop is not.
+//! Sans-IO FSM over the whole safetensors byte stream — patterned after
+//! `proxima_codec::DelimiterFraming` (`proxima-codec/src/lib.rs`): the
+//! cursor (here, "which phase, and how many data bytes have we counted")
+//! lives IN the discriminated-enum variant, never beside a buffer that
+//! could drift out of sync with it. [`SafetensorsParser::push`] is a
+//! self-consuming `Self -> Self` transition, not a
+//! [`Pipe`](proxima_primitives::pipe::Pipe) — see `crate::header_codec` for
+//! why that stateless one-shot step is the `Pipe`, and this stateful
+//! accumulation loop is not.
 //!
 //! Only the still-unparsed header bytes are ever buffered. Once the
 //! header is parsed, tensor-data bytes are COUNTED, never buffered or
@@ -32,7 +17,6 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_primitives::pipe::sans_io::ByteStreamParser;
 use proxima_tensor::DType;
 
 use crate::dtype::map_dtype;
@@ -110,80 +94,49 @@ impl SafetensorsParser {
         }
     }
 
-    /// Append bytes fed by the caller. `Header` phase buffers them (the
-    /// still-unparsed length prefix + JSON); `TensorData` phase only
-    /// counts them — never buffered or copied.
-    pub fn feed(&mut self, chunk: &[u8]) {
+    /// Feed the next chunk, however it was split from the whole stream.
+    pub fn push(self, chunk: &[u8]) -> Result<Self, SafetensorsError> {
         match self {
-            Self::Header { buf, .. } => buf.extend_from_slice(chunk),
-            Self::TensorData { seen, .. } => *seen += chunk.len() as u64,
-        }
-    }
-
-    /// Attempt one unit of progress against the currently buffered bytes.
-    /// Emits exactly one [`Manifest`] event, the moment the header frame
-    /// completes; `TensorData` phase has nothing further to report
-    /// incrementally (byte counting alone needs no event) and always
-    /// answers `None` until [`Self::finish`] validates the total.
-    pub fn poll(&mut self) -> Result<Option<&Manifest>, SafetensorsError> {
-        let Self::Header { buf, max_header_bytes } = self else {
-            return Ok(None);
-        };
-        match HeaderCodec.parse_frame_with_limit(buf, *max_header_bytes) {
-            Ok((header_json, consumed)) => {
-                let manifest = parse_manifest(header_json)?;
-                let seen = (buf.len() - consumed) as u64;
-                *self = Self::TensorData { manifest, seen };
-                let Self::TensorData { manifest, .. } = self else {
-                    unreachable!("just assigned TensorData above")
-                };
-                Ok(Some(manifest))
+            Self::Header { mut buf, max_header_bytes } => {
+                buf.extend_from_slice(chunk);
+                match HeaderCodec.parse_frame_with_limit(&buf, max_header_bytes) {
+                    Ok((header_json, consumed)) => {
+                        let manifest = parse_manifest(header_json)?;
+                        let tail_start = consumed;
+                        let mut state = Self::TensorData { manifest, seen: 0 };
+                        if tail_start < buf.len() {
+                            state = state.push(&buf[tail_start..])?;
+                        }
+                        Ok(state)
+                    }
+                    Err(SafetensorsError::TruncatedInput { .. }) => Ok(Self::Header { buf, max_header_bytes }),
+                    Err(error) => Err(error),
+                }
             }
-            Err(SafetensorsError::TruncatedInput { .. }) => Ok(None),
-            Err(error) => Err(error),
+            Self::TensorData { manifest, seen } => {
+                let seen = seen + chunk.len() as u64;
+                Ok(Self::TensorData { manifest, seen })
+            }
         }
     }
 
-    /// The caller has no more bytes to feed. Read-only: validates every
-    /// tensor's `data_offsets` against the bytes actually counted, or
-    /// reports the header as truncated if it never completed. Use
-    /// [`Self::into_manifest`] to consume the parser and get the finished
-    /// [`Manifest`] back once this returns `Ok(())`.
-    pub fn finish(&self) -> Result<(), SafetensorsError> {
+    /// Signal end of input. Validates every tensor's `data_offsets`
+    /// against the bytes actually counted and returns the finished
+    /// [`Manifest`], or the typed error explaining what was wrong.
+    pub fn finish(self) -> Result<Manifest, SafetensorsError> {
         match self {
             Self::Header { buf, .. } => {
-                let needed = declared_total_len(buf).unwrap_or(HEADER_LEN_BYTES as u64);
+                let needed = declared_total_len(&buf).unwrap_or(HEADER_LEN_BYTES as u64);
                 Err(SafetensorsError::TruncatedInput {
                     needed,
                     available: buf.len() as u64,
                 })
             }
-            Self::TensorData { manifest, seen } => validate_offsets_in_bounds(manifest, *seen),
+            Self::TensorData { manifest, seen } => {
+                validate_offsets_in_bounds(&manifest, seen)?;
+                Ok(manifest)
+            }
         }
-    }
-
-    /// Consume the parser and hand back the finished [`Manifest`], or the
-    /// typed error [`Self::finish`] would have reported. The owning
-    /// counterpart to [`Self::finish`]'s read-only check — most callers
-    /// that have already driven the parser to completion want the
-    /// manifest, not just a validity bit.
-    pub fn into_manifest(self) -> Result<Manifest, SafetensorsError> {
-        self.finish()?;
-        match self {
-            Self::TensorData { manifest, .. } => Ok(manifest),
-            Self::Header { .. } => unreachable!("finish() already rejected the Header phase"),
-        }
-    }
-
-    /// Feed the next chunk, however it was split from the whole stream,
-    /// and drain it immediately. Convenience sugar over [`Self::feed`] +
-    /// [`Self::poll`] for callers that prefer threading an owned `Self`
-    /// through a fold instead of holding a `&mut` binding — the shape
-    /// `proxima_codec::DelimiterFraming::push` uses.
-    pub fn push(mut self, chunk: &[u8]) -> Result<Self, SafetensorsError> {
-        self.feed(chunk);
-        while self.poll()?.is_some() {}
-        Ok(self)
     }
 }
 
@@ -205,26 +158,6 @@ impl SafetensorsParser {
 impl Default for SafetensorsParser {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl ByteStreamParser for SafetensorsParser {
-    type Event<'a>
-        = &'a Manifest
-    where
-        Self: 'a;
-    type Error = SafetensorsError;
-
-    fn feed(&mut self, bytes: &[u8]) {
-        Self::feed(self, bytes);
-    }
-
-    fn poll(&mut self) -> Result<Option<&Manifest>, SafetensorsError> {
-        Self::poll(self)
-    }
-
-    fn finish(&self) -> Result<(), SafetensorsError> {
-        Self::finish(self)
     }
 }
 

@@ -133,7 +133,7 @@ mod tests {
     }
 
     fn parse_whole(buf: &[u8]) -> Result<crate::Manifest, SafetensorsError> {
-        SafetensorsParser::new().push(buf)?.into_manifest()
+        SafetensorsParser::new().push(buf)?.finish()
     }
 
     /// Drives `crate::tests::build_buffer` — the reader's own fixture
