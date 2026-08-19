@@ -333,4 +333,47 @@ mod tests {
         );
         assert!(ids.len() < 15, "expected roughly word-scale segmentation, got {} ids: {ids:?}", ids.len());
     }
+
+    include!("../tests/fixtures/llama_cpp_oracle_openchat.rs");
+
+    /// The measurement this fixture exists to make possible: for every one
+    /// of the 10 real-world prompts llama.cpp's own tokenizer + greedy
+    /// decoder were run against (see `llama_cpp_oracle_openchat.rs` for the
+    /// exact commands and provenance), `crate::encode_with_bos_eos` must
+    /// reproduce llama.cpp's own prompt token ids exactly. This is a
+    /// measurement, not a belief -- the parity debugging this fixture
+    /// replaces was asserting a target token from intuition, and it was
+    /// wrong.
+    ///
+    /// Only `prompt_ids` is checked here. `generated_ids`/`generated_pieces`
+    /// on each case are the target for a later forward-pass parity test
+    /// (this crate's own logits-driven decode vs. llama.cpp's), not
+    /// exercised by this test.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn encode_with_bos_eos_matches_llama_cpp_oracle_prompt_ids() {
+        let Some(vocab) = load_real_openchat_vocab() else { return };
+
+        for case in ORACLE_CASES {
+            let ids = crate::encode_with_bos_eos(case.prompt, &vocab, true, false)
+                .unwrap_or_else(|error| panic!("{}: encode_with_bos_eos failed: {error}", case.name));
+            assert_eq!(
+                ids.as_slice(),
+                case.prompt_ids,
+                "{}: our encoder's ids for {:?} must match llama.cpp's own tokenization (got {ids:?})",
+                case.name,
+                case.prompt
+            );
+            // not asserted against our own decode yet (that is the
+            // forward-pass parity test this fixture exists to enable) --
+            // only shape-checked here, so the capture itself is internally
+            // consistent.
+            assert_eq!(
+                case.generated_ids.len(),
+                case.generated_pieces.len(),
+                "{}: captured generated_ids/generated_pieces must be parallel arrays",
+                case.name
+            );
+        }
+    }
 }
