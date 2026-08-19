@@ -52,9 +52,9 @@ impl<'a> Pipe for ParseComplete<'a> {
 ///
 /// # Errors
 ///
-/// Any [`SafetensorsError`] `SafetensorsParser::push`/`finish` surfaces.
+/// Any [`SafetensorsError`] `SafetensorsParser::push`/`into_manifest` surfaces.
 pub fn parse_complete(input: &[u8]) -> Result<Manifest, SafetensorsError> {
-    SafetensorsParser::new().push(input)?.finish()
+    SafetensorsParser::new().push(input)?.into_manifest()
 }
 
 #[cfg(test)]

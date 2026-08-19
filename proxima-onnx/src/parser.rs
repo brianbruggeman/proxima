@@ -41,9 +41,18 @@
 //! (which could reallocate the buffer) until the previous event is
 //! dropped. No unsafe code; this is the same shape as a streaming/lending
 //! iterator.
+//!
+//! # The shared contract
+//!
+//! [`OnnxParser`] implements
+//! [`proxima_primitives::pipe::sans_io::ByteStreamParser`], the named
+//! version of this `feed`/`poll` shape -- the lending `Event<'a>` GAT
+//! exists specifically so this crate's borrowing `PollOutcome<'a>` and
+//! `proxima-gguf`'s owning one satisfy the same trait.
 
 use alloc::vec::Vec;
 
+use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
 use proxima_protocols::protobuf_wire::{
     Field, ParseError as WireError, WireType, decode_tag, decode_varint, parse_field,
 };
@@ -51,13 +60,12 @@ use proxima_protocols::protobuf_wire::{
 use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
 
-/// What [`OnnxParser::poll`] produced.
-#[derive(Debug)]
-pub enum PollOutcome<'a> {
-    /// Not enough buffered bytes to make progress -- call [`OnnxParser::feed`].
-    NeedMore,
-    Event(ModelField<'a>),
-}
+/// What [`OnnxParser::poll`] produced. A type alias for
+/// `proxima_primitives::pipe::sans_io::Outcome<ModelField<'a>>`, not a
+/// separate enum -- see `proxima_primitives::pipe::sans_io`'s module doc
+/// and [`OnnxParser`]'s [`ByteStreamParser`] impl: this crate's own `poll`
+/// and the trait's `poll` are the same method.
+pub type PollOutcome<'a> = Outcome<ModelField<'a>>;
 
 /// The state machine itself. Owns one append-only accumulation buffer;
 /// `cursor` marks how many of its bytes have already been decoded and
@@ -129,6 +137,26 @@ impl OnnxParser {
         let model_field = decode_model_field(field)?;
         self.cursor += consumed;
         Ok(PollOutcome::Event(model_field))
+    }
+}
+
+impl ByteStreamParser for OnnxParser {
+    type Event<'a>
+        = ModelField<'a>
+    where
+        Self: 'a;
+    type Error = OnnxError;
+
+    fn feed(&mut self, bytes: &[u8]) {
+        Self::feed(self, bytes);
+    }
+
+    fn poll(&mut self) -> Result<Outcome<ModelField<'_>>, OnnxError> {
+        Self::poll(self)
+    }
+
+    fn finish(&self) -> Result<(), OnnxError> {
+        Self::finish(self)
     }
 }
 
