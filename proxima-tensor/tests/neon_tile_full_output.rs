@@ -67,6 +67,59 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     (program, sum)
 }
 
+/// Plain (non-transposed) RHS layout, `[k, n]` contiguous in `n` — this is
+/// the layout `run_reduce`'s width-dim fast path (`width_tile_plan`,
+/// `gemm_width_tile_neon`) targets, as opposed to
+/// `matmul_program_rhs_transposed`'s `[n, k]` layout above, which the dot
+/// tile targets instead (`cpu.rs`'s own doc on
+/// `evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile`).
+/// Verbatim copy of `cpu.rs`'s private `#[cfg(test)] matmul_program`.
+fn matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(n)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: proxima_tensor::DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(proxima_tensor::Reduce {
+            dtype: proxima_tensor::DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: proxima_tensor::Keep::Reduce,
+            name: Some("matmul".into()),
+        }),
+    );
+    (program, sum)
+}
+
 fn naive_reference(a: &[f32], b_transposed: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; m * n];
     for row in 0..m {
@@ -98,6 +151,136 @@ fn high_precision_reference(a: &[f32], b_transposed: &[f32], m: usize, k: usize,
         }
     }
     out
+}
+
+/// `naive_reference`'s sibling for the width-tile's plain `[k, n]` RHS
+/// layout: `b[step * n + col]` instead of `b_transposed[col * k + step]`.
+fn naive_reference_plain_rhs(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    for row in 0..m {
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for step in 0..k {
+                acc += a[row * k + step] * b[step * n + col];
+            }
+            out[row * n + col] = acc;
+        }
+    }
+    out
+}
+
+/// `high_precision_reference`'s sibling for the width-tile's plain `[k, n]`
+/// RHS layout — same f64-accumulated ground truth role documented above.
+fn high_precision_reference_plain_rhs(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; m * n];
+    for row in 0..m {
+        for col in 0..n {
+            let mut acc = 0.0f64;
+            for step in 0..k {
+                acc += a[row * k + step] as f64 * b[step * n + col] as f64;
+            }
+            out[row * n + col] = acc;
+        }
+    }
+    out
+}
+
+/// Width-tile counterpart to `check_size` above: same f64-ground-truth
+/// correctness check plus the width-tile's own coverage identity
+/// (`invocations * (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) + fallback_elements
+/// == m*n`, `cpu.rs`'s doc on `WIDTH_TILE_GATE_PASSES`), driven by
+/// `matmul_program`'s plain `[k, n]` RHS layout, which is what actually
+/// selects `width_tile_plan` (`fast_path` in `run_reduce`, not
+/// `reduction_fast_path`) rather than the dot tile `check_size` exercises.
+/// `invocations_delta > 0` is asserted explicitly, not just the coverage
+/// identity — a silent fallthrough to the generic loop would still satisfy
+/// `covered == m*n` (`fallback_delta` alone would cover it), and that is
+/// exactly the failure mode this test exists to catch.
+fn check_width_size(size: usize) {
+    let (m, k, n) = (size, size, size);
+    let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
+    let b: Vec<f32> = (0..k * n).map(|index| (index as f32 * 0.0271).cos()).collect();
+
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::width_tile_counters();
+
+    let (program, _sum) = matmul_program(m as u32, k as u32, n as u32);
+    let evaluated = match evaluate(&program, &[], &[&a, &b], &[]) {
+        Ok(evaluated) => evaluated,
+        Err(error) => panic!("width_tile size={size}: plain-rhs gemm evaluates: {error}"),
+    };
+    let actual = evaluated.root();
+
+    let expected = naive_reference_plain_rhs(&a, &b, m, k, n);
+    let ground_truth = high_precision_reference_plain_rhs(&a, &b, m, k, n);
+
+    assert_eq!(actual.len(), expected.len(), "width_tile size={size}: output length mismatch");
+
+    let mut tile_error_vs_truth = 0.0f64;
+    let mut naive_error_vs_truth = 0.0f64;
+    let mut max_absolute_error_vs_truth = 0.0f64;
+    let mut worst_absolute_index = 0usize;
+    for index in 0..actual.len() {
+        let truth = ground_truth[index];
+        let tile_absolute_error = ((actual[index] as f64) - truth).abs();
+        tile_error_vs_truth += tile_absolute_error.powi(2);
+        naive_error_vs_truth += ((expected[index] as f64) - truth).powi(2);
+        if tile_absolute_error > max_absolute_error_vs_truth {
+            max_absolute_error_vs_truth = tile_absolute_error;
+            worst_absolute_index = index;
+        }
+    }
+    let tile_rms_vs_truth = (tile_error_vs_truth / actual.len() as f64).sqrt();
+    let naive_rms_vs_truth = (naive_error_vs_truth / actual.len() as f64).sqrt();
+    println!(
+        "width_tile size={size}: tile_rms_vs_f64_truth={tile_rms_vs_truth:e} \
+         naive_f32_rms_vs_f64_truth={naive_rms_vs_truth:e} ratio={:.3} \
+         max_absolute_error_vs_f64_truth={max_absolute_error_vs_truth:e} \
+         worst_absolute_index={worst_absolute_index}",
+        tile_rms_vs_truth / naive_rms_vs_truth.max(1e-30)
+    );
+
+    assert!(
+        tile_rms_vs_truth <= naive_rms_vs_truth,
+        "width_tile size={size}: tile kernel RMS error vs f64 truth ({tile_rms_vs_truth:e}) exceeded the naive \
+         f32 loop's own RMS error vs f64 truth ({naive_rms_vs_truth:e}) — the kernel must be no worse than the \
+         obvious implementation"
+    );
+
+    let max_absolute_error_bound = 1e-6 * (k as f64).max(1.0);
+    assert!(
+        max_absolute_error_vs_truth <= max_absolute_error_bound,
+        "width_tile size={size}: max absolute error vs f64 truth ({max_absolute_error_vs_truth:e}) exceeded bound \
+         ({max_absolute_error_bound:e}) at worst_absolute_index={worst_absolute_index}"
+    );
+
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    {
+        let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::width_tile_counters();
+        let gate_delta = gate_after - gate_before;
+        let invocations_delta = invocations_after - invocations_before;
+        let fallback_delta = fallback_after - fallback_before;
+        // WIDTH_TILE_ROWS(4) * WIDTH_TILE_VECS(4) * 4 lanes/vec = 64
+        // outputs/call (`cpu.rs::gemm_width_tile_neon` doc).
+        let covered = invocations_delta * 64 + fallback_delta;
+        println!(
+            "width_tile size={size}: gate_passes={gate_delta} invocations={invocations_delta} \
+             fallback_elements={fallback_delta} covered={covered} m*n={expected_total}",
+            expected_total = m * n
+        );
+        assert!(
+            invocations_delta > 0,
+            "width_tile size={size}: zero tile invocations — the width tile never fired, so the coverage \
+             identity below would pass on the generic fallback alone and prove nothing"
+        );
+        assert_eq!(
+            covered,
+            (m * n) as u64,
+            "width_tile size={size}: invocations*64 + fallback_elements ({covered}) != m*n ({expected})",
+            expected = m * n
+        );
+        assert_eq!(gate_delta, 1, "width_tile size={size}: expected exactly one gate pass for one bound op");
+    }
 }
 
 fn check_size(size: usize) {
@@ -247,4 +430,19 @@ fn neon_tile_full_output_1022_row_remainder_boundary() {
 #[test]
 fn neon_tile_full_output_1026_row_remainder_boundary() {
     check_size(1026);
+}
+
+/// 1023 mod WIDTH_TILE_ROWS(4) == 3, 1023 mod (WIDTH_TILE_VECS(4)*4=16) == 15:
+/// forces both a row tail and a column tail in the width tile's own
+/// remainder loops (`run_width_tile_neon`).
+#[test]
+fn width_tile_full_output_1023_row_and_column_remainder() {
+    check_width_size(1023);
+}
+
+/// 1025 mod WIDTH_TILE_ROWS(4) == 1, 1025 mod 16 == 1: the other tail arm
+/// not covered by 1023 above.
+#[test]
+fn width_tile_full_output_1025_row_and_column_remainder() {
+    check_width_size(1025);
 }
