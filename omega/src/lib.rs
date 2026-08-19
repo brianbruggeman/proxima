@@ -32,6 +32,7 @@ pub mod error;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 pub mod msl;
+pub mod sized;
 
 pub use error::EmitError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
