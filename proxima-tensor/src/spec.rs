@@ -561,14 +561,21 @@ fn reduce(
     ))
 }
 
-fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype, shape, name: None })
+fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str) -> NodeId {
+    op::append(
+        program,
+        Op::Input {
+            dtype,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 /// `[?0]`-shaped leaf: the per-sequence-position broadcast constants
 /// (`inv_dim`/`eps`/`ones`) every `rmsnorm`/SwiGLU call below reads.
-fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType) -> NodeId {
-    input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)])
+fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
+    input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)], name)
 }
 
 /// `table[ids[s], d]`, the exact pattern `shape.rs`'s
@@ -788,41 +795,56 @@ pub fn mistral_forward_program(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)]);
+    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
     let table = input_leaf(
         &mut program,
         DType::Float32,
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+        "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = symbolic_leaf(&mut program, DType::Float32);
-    let eps = symbolic_leaf(&mut program, DType::Float32);
-    let ones = symbolic_leaf(&mut program, DType::Float32);
-    let cos = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)]);
-    let sin = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)]);
+    let inv_dim = symbolic_leaf(&mut program, DType::Float32, "inv_dim");
+    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let ones = symbolic_leaf(&mut program, DType::Float32, "ones");
+    let cos = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_cos",
+    );
+    let sin = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_sin",
+    );
     let group_ones = input_leaf(
         &mut program,
         DType::Float32,
         alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+        "group_ones",
     );
     let (is_future, neg_infinity) = causal_mask(&mut program)?;
 
-    for _layer in 0..block_count {
+    for layer in 0..block_count {
         let wq = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(embedding), Extent::Static(query_heads), Extent::Static(head_dim)],
+            &alloc::format!("blk.{layer}.attn_q.weight"),
         );
         let wk = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            &alloc::format!("blk.{layer}.attn_k.weight"),
         );
         let wv = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            &alloc::format!("blk.{layer}.attn_v.weight"),
         );
         let wo = input_leaf(
             &mut program,
@@ -833,21 +855,25 @@ pub fn mistral_forward_program(
                 Extent::Static(head_dim),
                 Extent::Static(embedding),
             ],
+            &alloc::format!("blk.{layer}.attn_output.weight"),
         );
         let w_gate = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            &alloc::format!("blk.{layer}.ffn_gate.weight"),
         );
         let w_up = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            &alloc::format!("blk.{layer}.ffn_up.weight"),
         );
         let w_down = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_down.weight"),
         );
 
         x = append_mistral_layer(
@@ -878,6 +904,7 @@ pub fn mistral_forward_program(
         &mut program,
         DType::Float32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+        "output.weight",
     );
     let logits_product = elementwise(
         &mut program,
