@@ -95,3 +95,7 @@ name = "alloc_itemize"
 [[example]]
 name = "spec_block"
 required-features = ["config"]
+
+[[example]]
+name = "operand_access_table"
+required-features = ["instrument", "config"]

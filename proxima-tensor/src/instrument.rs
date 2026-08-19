@@ -8,11 +8,14 @@
 //! instrument would perturb the thing it measures.
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 use std::thread::ThreadId;
 
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
+
+use crate::op::NodeId;
 
 pub static BOUND_OPS: Counter = Counter::new("proxima_tensor.bound_ops");
 pub static MAC_OPS: Counter = Counter::new("proxima_tensor.mac_ops");
@@ -518,4 +521,137 @@ pub fn reset() {
     let _ = PATH_GENERIC.snapshot_and_reset();
     let _ = LEADING_ITERS.snapshot_and_reset();
     let _ = KERNEL_CALLS.snapshot_and_reset();
+}
+
+// per-operand-node witness: which weights actually got touched, and how
+// much. Keyed by the operand's own `NodeId` (the tensor being read, e.g. one
+// weight matrix's `Op::Input` node) rather than by the bound op reading it,
+// because the question this answers — "how cold is this weight" — is a
+// property of the tensor, not of any one kernel invocation that touched it.
+//
+// `reads`/`bytes` sum across every bound-op call that reads this node within
+// one process run, because that genuinely accumulates: reading the same
+// weight on every decode step spends bandwidth every time, so the total is
+// the honest answer to "how many bytes moved for this node". `distinct`/
+// `total_elements` instead take the running max/set-union, because a
+// weight's own footprint does not grow just because more calls read it —
+// summing per-call closed-form distinct counts across repeated calls to the
+// SAME node (or across a `BoundOp::split` chunk fan-out of the SAME logical
+// node) would double-count the overlap. Both `record_operand_access` and
+// `commit_gather_operand_access` are called exactly once per (bound-op,
+// operand) pair, from `cpu::record_bound_op_operand_access`, which is itself
+// called once per node evaluation from `evaluate_pooled`/
+// `evaluate_node_parallel`/`Interpreter::fold` — never per element, and
+// always against the UNSPLIT op's own extents/strides, so a parallel
+// chunk fan-out is invisible to this accounting (see that function's doc).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OperandAccess {
+    pub reads: u64,
+    pub bytes: u64,
+    pub distinct_elements: u64,
+    pub total_elements: u64,
+}
+
+static OPERAND_ACCESS: Mutex<BTreeMap<NodeId, OperandAccess>> = Mutex::new(BTreeMap::new());
+
+/// Records one operand's participation in one bound-op call. `reads` and
+/// `distinct_elements` are closed-form counts computed once from the
+/// caller's own extents/strides (`cpu::operand_access_footprint`) — never
+/// derived by walking elements. See the module-level comment above this
+/// struct for why `reads`/`bytes` sum across calls while `distinct_elements`/
+/// `total_elements` take the max.
+pub fn record_operand_access(node: NodeId, reads: u64, distinct_elements: u64, total_elements: u64) {
+    let bytes = reads * size_of::<f32>() as u64;
+    let mut table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = table.entry(node).or_default();
+    entry.reads += reads;
+    entry.bytes += bytes;
+    entry.distinct_elements = entry.distinct_elements.max(distinct_elements);
+    entry.total_elements = entry.total_elements.max(total_elements);
+}
+
+/// Same accounting as [`record_operand_access`], for a gathered (embedding
+/// -lookup-shaped) operand: `distinct_elements` cannot be derived from
+/// strides alone (which row a gather touches is a runtime index value, not
+/// an affine function of the loop coordinate), so it is read back from the
+/// real row-index witness [`record_gather_row`] built up during execution,
+/// then scaled by `row_width` (the table's own row stride) to report
+/// elements rather than rows — matching what [`OperandAccess::distinct_elements`]
+/// means for every other operand.
+pub fn commit_gather_operand_access(node: NodeId, reads: u64, row_width: u64, total_elements: u64) {
+    let distinct_elements = gather_distinct_rows(node) * row_width;
+    record_operand_access(node, reads, distinct_elements, total_elements);
+}
+
+/// One operand node's snapshot row, node-attributed — the shape
+/// [`operand_access_totals`] returns since, unlike every other snapshot in
+/// this file, there is one entry per node rather than one process-wide
+/// total.
+#[derive(Debug, Clone, Copy)]
+pub struct OperandAccessRow {
+    pub node: NodeId,
+    pub access: OperandAccess,
+}
+
+/// Every operand node witnessed so far, in `NodeId` order. Mirrors
+/// [`worker_busy_snapshot`]'s shape (a plain snapshot, not a reset) so a
+/// caller can print an end-of-run table without disturbing counters it
+/// still wants to read again.
+#[must_use]
+pub fn operand_access_totals() -> Vec<OperandAccessRow> {
+    let table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    table
+        .iter()
+        .map(|(&node, &access)| OperandAccessRow { node, access })
+        .collect()
+}
+
+/// This node's own accumulated access, or `None` if it was never handed to
+/// [`record_operand_access`]/[`commit_gather_operand_access`] at all —
+/// distinct from "recorded zero reads", which is a real `Some` row with
+/// every field `0`. A caller that wants to tell "never read" apart from
+/// "not instrumented" needs exactly this distinction; folding both into a
+/// bare `0` would erase it.
+#[must_use]
+pub fn operand_access_of(node: NodeId) -> Option<OperandAccess> {
+    let table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    table.get(&node).copied()
+}
+
+pub fn reset_operand_access() {
+    let mut table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    table.clear();
+    let mut rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    rows.clear();
+}
+
+// distinct-row witness for gathered operands, keyed by the table's own
+// `NodeId` — a real per-run set, not a closed form, because which rows a
+// gather touches depends on the fetched index values, which are only known
+// at runtime. Populated by `cpu::fill_gather_cursors`, which already reads
+// each gathered operand's index once per row (elementwise/scan) or once per
+// leading x reduction step (reduce's generic fallback, which never reaches
+// the ~1e9-iteration fast/tile paths in the first place — see that
+// function's own call sites) to seed its cursor; this instrument piggybacks
+// on that same, already-paid-for read rather than adding a second one.
+static GATHER_ROWS_TOUCHED: Mutex<BTreeMap<NodeId, HashSet<u64>>> = Mutex::new(BTreeMap::new());
+
+/// Marks `row_index` as touched for the gathered table `node`. Called once
+/// per row-level index fetch, from `cpu::fill_gather_cursors` — see the
+/// static above for why that call frequency is cheap.
+pub fn record_gather_row(node: NodeId, row_index: u64) {
+    let mut rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    rows.entry(node).or_default().insert(row_index);
+}
+
+/// How many distinct rows of `node`'s table have been touched so far in
+/// this process run. `0` for a node that was never gathered from at all,
+/// same as an empty set would report — gather rows have no "never
+/// instrumented" case to distinguish, unlike [`operand_access_of`], because
+/// a gathered operand always reaches [`commit_gather_operand_access`] once
+/// its bound op finishes.
+#[must_use]
+pub fn gather_distinct_rows(node: NodeId) -> u64 {
+    let rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    rows.get(&node).map_or(0, HashSet::len) as u64
 }
