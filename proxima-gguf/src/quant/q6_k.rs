@@ -355,6 +355,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use proxima_telemetry::debug;
+
     use super::{BLOCK_BYTES, CODEC, QH_BYTES, QK_K, QL_BYTES, QuantError, SCALES_BYTES, dequantize, quantize};
 
     /// One super-block, hand-packed and hand-decoded, checked against the
@@ -494,7 +496,7 @@ mod tests {
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / elements as f64).sqrt();
-        eprintln!("q6_k_smooth_signal_round_trip max_error={max_error} rms_error={rms_error}");
+        debug!(max_error, rms_error, "quant.q6_k smooth-signal round trip");
         assert!(max_error < 0.15, "max_error={max_error} exceeds loose sanity bound");
         assert!(rms_error < 0.05, "rms_error={rms_error} exceeds loose sanity bound");
     }

@@ -532,6 +532,8 @@ mod tests {
     mod real_mixtral_file {
         use std::io::{Read, Seek, SeekFrom};
 
+        use proxima_telemetry::debug;
+
         use super::*;
         use crate::pipe::parse_complete;
 
@@ -574,9 +576,11 @@ mod tests {
             let experts = discover_experts(&parsed.tensors, layer, projection, expert_count)
                 .expect("discovers all eight real experts for layer 0's ffn_gate projection");
             for expert in &experts {
-                eprintln!(
-                    "found expert tensor: name={} dims={:?} ggml_type={:?}",
-                    expert.name, expert.dims, expert.ggml_type
+                debug!(
+                    name = %expert.name,
+                    dims = ?expert.dims,
+                    ggml_type = ?expert.ggml_type,
+                    "restack.mixtral discovered expert tensor"
                 );
             }
 
@@ -602,11 +606,13 @@ mod tests {
                 8 * plan.per_expert_bytes,
                 "stacked buffer must equal 8 * single_expert_bytes"
             );
-            eprintln!(
-                "restacked layer={layer} projection={projection} expert_count={} per_expert_bytes={} total_stacked_bytes={}",
-                experts.len(),
-                plan.per_expert_bytes,
-                stacked.len()
+            debug!(
+                layer,
+                projection,
+                expert_count = experts.len() as u64,
+                per_expert_bytes = plan.per_expert_bytes,
+                total_stacked_bytes = stacked.len() as u64,
+                "restack.mixtral restacked one layer's experts"
             );
 
             for expert in 0..8u64 {

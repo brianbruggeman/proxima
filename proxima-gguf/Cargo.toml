@@ -33,3 +33,4 @@ workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 temp-env.workspace = true
+proxima-telemetry = { workspace = true, features = ["emit"] }

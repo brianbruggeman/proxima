@@ -351,6 +351,8 @@ mod real_file {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::io::{Read, Seek, SeekFrom};
 
+    use proxima_telemetry::debug;
+
     use crate::pipe::parse_complete;
     use crate::types::GgmlType;
 
@@ -410,7 +412,7 @@ mod real_file {
 
         for (role, total) in &role_total {
             let matched = role_match.get(role).copied().unwrap_or(0);
-            eprintln!("mixtral_policy_coverage role={role:?} matched={matched}/{total}");
+            debug!(?role, matched, total, "quant.policy mixtral coverage");
         }
 
         let uniform_roles = [
@@ -461,7 +463,7 @@ mod real_file {
         }
         for (role, total) in &role_total {
             let matched = role_match.get(role).copied().unwrap_or(0);
-            eprintln!("openchat_policy_coverage role={role:?} matched={matched}/{total}");
+            debug!(?role, matched, total, "quant.policy openchat coverage");
         }
 
         assert_eq!(

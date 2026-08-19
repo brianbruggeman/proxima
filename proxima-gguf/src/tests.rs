@@ -420,6 +420,8 @@ fn non_power_of_two_alignment_is_rejected() {
 mod real_file {
     use std::io::{Read, Seek, SeekFrom};
 
+    use proxima_telemetry::debug;
+
     use crate::pipe::parse_complete;
     use crate::quant::{q4_k, q5_k, q6_k, q8_0};
     use crate::types::GgmlType;
@@ -503,12 +505,17 @@ mod real_file {
         let mean = sum / element_count as f64;
         let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
 
-        eprintln!(
-            "real_q4_k tensor='{}' blocks={block_count} elements={element_count} min={min} max={max} mean={mean:.6} stddev={:.6}",
-            tensor.name,
-            variance.sqrt()
+        debug!(
+            tensor = %tensor.name,
+            blocks = block_count as u64,
+            elements = element_count as u64,
+            min,
+            max,
+            mean,
+            stddev = variance.sqrt(),
+            ?buckets,
+            "quant.q4_k real tensor slice sample stats over [-1.0, 1.0] in 10 buckets"
         );
-        eprintln!("real_q4_k histogram over [-1.0, 1.0] in 10 buckets: {buckets:?}");
     }
 
     /// Sample cap for the `Q8_0` tensor slice, rounded down to a whole
@@ -587,12 +594,17 @@ mod real_file {
         let mean = sum / element_count as f64;
         let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
 
-        eprintln!(
-            "real_q8_0 tensor='{}' blocks={block_count} elements={element_count} min={min} max={max} mean={mean:.6} stddev={:.6}",
-            tensor.name,
-            variance.sqrt()
+        debug!(
+            tensor = %tensor.name,
+            blocks = block_count as u64,
+            elements = element_count as u64,
+            min,
+            max,
+            mean,
+            stddev = variance.sqrt(),
+            ?buckets,
+            "quant.q8_0 real tensor slice sample stats over [-1.0, 1.0] in 10 buckets"
         );
-        eprintln!("real_q8_0 histogram over [-1.0, 1.0] in 10 buckets: {buckets:?}");
     }
 
     /// Sample cap for the `Q6_K` tensor slice, rounded down to a whole
@@ -664,12 +676,17 @@ mod real_file {
         let mean = sum / element_count as f64;
         let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
 
-        eprintln!(
-            "real_q6_k tensor='{}' blocks={block_count} elements={element_count} min={min} max={max} mean={mean:.6} stddev={:.6}",
-            tensor.name,
-            variance.sqrt()
+        debug!(
+            tensor = %tensor.name,
+            blocks = block_count as u64,
+            elements = element_count as u64,
+            min,
+            max,
+            mean,
+            stddev = variance.sqrt(),
+            ?buckets,
+            "quant.q6_k real tensor slice sample stats over [-1.0, 1.0] in 10 buckets"
         );
-        eprintln!("real_q6_k histogram over [-1.0, 1.0] in 10 buckets: {buckets:?}");
     }
 
     /// Sample cap for the `Q5_K` tensor slice, rounded down to a whole
@@ -741,12 +758,17 @@ mod real_file {
         let mean = sum / element_count as f64;
         let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
 
-        eprintln!(
-            "real_q5_k tensor='{}' blocks={block_count} elements={element_count} min={min} max={max} mean={mean:.6} stddev={:.6}",
-            tensor.name,
-            variance.sqrt()
+        debug!(
+            tensor = %tensor.name,
+            blocks = block_count as u64,
+            elements = element_count as u64,
+            min,
+            max,
+            mean,
+            stddev = variance.sqrt(),
+            ?buckets,
+            "quant.q5_k real tensor slice sample stats over [-1.0, 1.0] in 10 buckets"
         );
-        eprintln!("real_q5_k histogram over [-1.0, 1.0] in 10 buckets: {buckets:?}");
     }
 
     /// The payoff this whole codec line of work has been building toward:
@@ -801,7 +823,7 @@ mod real_file {
         }
 
         let total: u32 = histogram.iter().map(|(_, count)| *count).sum();
-        eprintln!("mixtral_tensor_coverage total={total} histogram={histogram:?}");
+        debug!(total, ?histogram, "gguf mixtral tensor codec coverage");
         assert_eq!(total as usize, parsed.tensors.len(), "histogram must account for every tensor exactly once");
         assert!(
             uncovered.is_empty(),
@@ -1018,17 +1040,24 @@ mod real_file {
         for (role, curve) in &report {
             assert_eq!(curve.len(), 4, "role {role}: expected all four levels measured");
             for level in curve {
-                eprintln!(
-                    "precision_curve role={role} level={:?} bytes={} max_error={:.6} rms_error={:.6}",
-                    level.level, level.bytes, level.max_error, level.rms_error
+                debug!(
+                    role = %role,
+                    level = ?level.level,
+                    bytes = level.bytes as u64,
+                    max_error = level.max_error,
+                    rms_error = level.rms_error,
+                    "gguf real-tensor precision-vs-bytes curve point"
                 );
             }
             let q4 = &curve[0];
             let q8 = &curve[3];
             let rms_gain = q4.rms_error - q8.rms_error;
             let byte_cost = q8.bytes as i64 - q4.bytes as i64;
-            eprintln!(
-                "precision_curve_summary role={role} q4k_to_q8_0 rms_error_reduction={rms_gain:.6} extra_bytes={byte_cost}"
+            debug!(
+                role = %role,
+                rms_gain,
+                byte_cost,
+                "gguf real-tensor precision curve q4_k to q8_0 summary"
             );
         }
     }
