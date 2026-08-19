@@ -57,6 +57,26 @@
 //! report for the same fetched index, wired through [`MetalError`]'s
 //! `#[from]` so [`execute`] and `cpu::evaluate` produce `assert_eq!`-equal
 //! errors.
+//!
+//! # dtype and device-buffer marshalling
+//!
+//! `execute`'s own host contract stays f32 in and f32 out — `blocks:
+//! &[&[f32]]`, [`Evaluated`] carries `Vec<f32>` — the same contract
+//! `cpu::evaluate` has, so a caller compares the two directly. What varies
+//! *underneath* that contract is the device buffer each node's own dtype
+//! ([`Op::dtype`]) gets: a `Float32` node uploads/allocates/reads back
+//! 4-byte-per-element buffers exactly as before, but a `Float16` node's
+//! buffer is 2 bytes per element — [`upload_block`] narrows the caller's
+//! `f32` host data to `half::f16` once, at the host/device boundary, and
+//! [`read_back`] widens it back once, at the same boundary, on the way out.
+//! Every byte a dispatch's kernel actually reads or writes in between —
+//! every input, every intermediate `BoundOp` output, the final result
+//! buffer — is genuinely half-width; the narrowing/widening is a one-time
+//! host-boundary conversion, not a disguise for still moving 4 bytes per
+//! element on the GPU-resident path this feature targets. A gather's
+//! `indices` node is the one exemption, exactly as in
+//! [`reject_unsupported_gpu_dtype`]: an index value stays f32-encoded
+//! regardless of its own declared dtype, matching `cpu.rs`'s own stance.
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {}
@@ -69,6 +89,7 @@ use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ptr::NonNull;
 
+use half::f16;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
@@ -85,7 +106,7 @@ use proxima_tensor::{
 
 use crate::error::EmitError;
 use crate::msl::{gather_count, reduction_dims};
-use crate::{Binding, Kernel, emit};
+use crate::{Binding, GridSpec, Kernel, emit};
 
 /// Everything [`execute`] can fail with: a missing device, any device
 /// operation that returned a Metal-side failure (compiling source, creating
@@ -130,7 +151,8 @@ pub fn execute(
     let mut device_buffers: BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>> =
         BTreeMap::new();
     for (node, data) in prepared.block_nodes.iter().zip(blocks.iter()) {
-        device_buffers.insert(*node, upload_block(&device, data)?);
+        let dtype = gpu_dtype(program, &prepared.index_nodes, *node);
+        device_buffers.insert(*node, upload_block(&device, data, dtype)?);
     }
 
     let mut pipeline_cache: BTreeMap<
@@ -151,6 +173,8 @@ pub fn execute(
     }
 
     finish(
+        program,
+        &prepared.index_nodes,
         &prepared.shapes,
         &prepared.effective_outputs,
         &device_buffers,
@@ -168,6 +192,10 @@ struct Prepared {
     block_nodes: Vec<NodeId>,
     resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
+    /// Every node referenced as a gather's `indices` anywhere in the
+    /// program — see [`gpu_dtype`]'s doc for why upload/read-back both
+    /// need this set alongside a node's own declared dtype.
+    index_nodes: BTreeSet<NodeId>,
 }
 
 fn prepare(
@@ -177,7 +205,7 @@ fn prepare(
     outputs: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
-    reject_non_float32(program)?;
+    reject_unsupported_gpu_dtype(program)?;
 
     let root = program
         .len()
@@ -217,6 +245,7 @@ fn prepare(
 
     let resolved = bind(program, &shapes, &effective_outputs)?;
     let retires = bound_op_retirement(&resolved, &effective_outputs);
+    let index_nodes = index_node_ids(program);
 
     Ok(Prepared {
         root,
@@ -225,25 +254,53 @@ fn prepare(
         block_nodes,
         resolved,
         retires,
+        index_nodes,
     })
 }
 
-// mirrors `proxima_tensor::cpu::reject_non_float32`: every device buffer
-// this driver uploads is f32 (see `upload_block`), indices included — an
-// index value is an exact integer carried as f32 — so a gather's `indices`
-// node is the one deliberate exception, exactly as on the CPU path.
-fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
+// mirrors `proxima_tensor::cpu::reject_non_float32`'s exemption (a gather's
+// `indices` node is the one deliberate exception, since an index value is
+// an exact integer carried as f32 regardless of its own declared dtype) but
+// this driver's own dtype ceiling is wider than the CPU oracle's: `Float32`
+// or `Float16` may reach a device buffer, since `msl.rs` now emits a
+// `half`-typed kernel for a `Float16` node instead of assuming `float`
+// unconditionally (see `msl.rs`'s own dtype doc). Any other dtype is still
+// rejected exactly as before.
+fn reject_unsupported_gpu_dtype(program: &[Op]) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) {
+        if index_nodes.contains(&node) {
+            continue;
+        }
+        if !matches!(expr.dtype(), DType::Float32 | DType::Float16) {
             return Err(TensorError::NotLowerable {
                 node,
-                reason: "metal execution is f32-only in v1, except for a gather's indices",
+                reason: "metal execution supports float32 or float16 in v1, \
+                         except for a gather's indices",
             });
         }
     }
     Ok(())
+}
+
+/// The dtype `node`'s own device buffer marshals as: `Float32` when `node`
+/// is a gather's `indices` (an index value is an exact integer carried as
+/// f32 regardless of its own declared dtype — see
+/// [`reject_unsupported_gpu_dtype`]'s doc), otherwise `node`'s own declared
+/// dtype straight off the program. `BoundOp::dtype` already carries this
+/// same value for a computed node (it is built from the identical `Op`),
+/// so callers that already have a `BoundOp` in hand read `bound.dtype`
+/// directly instead of calling this — this exists for the two places that
+/// only have a bare `NodeId`: uploading a block input and reading back a
+/// requested output, either of which may name a plain `Op::Input` node
+/// this driver never resolves into a `BoundOp` at all.
+fn gpu_dtype(program: &[Op], index_nodes: &BTreeSet<NodeId>, node: NodeId) -> DType {
+    if index_nodes.contains(&node) {
+        DType::Float32
+    } else {
+        program[node.0 as usize].dtype()
+    }
 }
 
 /// Every node referenced as a gather's `indices` anywhere in `program` —
@@ -560,8 +617,9 @@ fn pipeline_for(
 fn allocate_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     element_count: usize,
+    dtype: DType,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    let byte_length = element_count.max(1) * size_of::<f32>();
+    let byte_length = element_count.max(1) * dtype.size_bytes();
     device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -569,18 +627,66 @@ fn allocate_buffer(
         })
 }
 
+/// Narrows the caller's f32 host data to `dtype`'s own width before
+/// uploading — see this module's dtype doc for why that narrowing happens
+/// exactly once, here, rather than the device buffer staying 4 bytes per
+/// element regardless of `dtype`.
 fn upload_block(
+    device: &ProtocolObject<dyn MTLDevice>,
+    data: &[f32],
+    dtype: DType,
+) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    match dtype {
+        DType::Float16 => upload_block_as_half(device, data),
+        DType::Float32
+        | DType::BFloat16
+        | DType::Bool
+        | DType::Int8
+        | DType::UInt8
+        | DType::Int32
+        | DType::UInt32 => upload_block_as_float(device, data),
+    }
+}
+
+fn upload_block_as_float(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
     if data.is_empty() {
-        return allocate_buffer(device, 0);
+        return allocate_buffer(device, 0, DType::Float32);
     }
     let byte_length = size_of_val(data);
     // SAFETY: `data` is a live, non-empty `&[f32]` for the duration of this
     // call, so its first element's address is a valid, non-null pointer that
     // stays valid while `newBufferWithBytes_length_options` copies from it.
     let pointer = unsafe { NonNull::new_unchecked(data.as_ptr() as *mut c_void) };
+    unsafe {
+        device.newBufferWithBytes_length_options(
+            pointer,
+            byte_length,
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+    .ok_or_else(|| MetalError::CompileFailed {
+        log: "device refused to allocate a shared buffer for a block input".to_string(),
+    })
+}
+
+fn upload_block_as_half(
+    device: &ProtocolObject<dyn MTLDevice>,
+    data: &[f32],
+) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    if data.is_empty() {
+        return allocate_buffer(device, 0, DType::Float16);
+    }
+    let narrowed: Vec<f16> = data.iter().map(|value| f16::from_f32(*value)).collect();
+    let byte_length = size_of_val(narrowed.as_slice());
+    // SAFETY: `narrowed` is a live, non-empty `Vec<f16>` for the duration of
+    // this call, so its first element's address is a valid, non-null
+    // pointer that stays valid while `newBufferWithBytes_length_options`
+    // copies from it — the same reasoning `upload_block_as_float` uses for
+    // its own `data`, just over the narrowed buffer instead of the host one.
+    let pointer = unsafe { NonNull::new_unchecked(narrowed.as_ptr() as *mut c_void) };
     unsafe {
         device.newBufferWithBytes_length_options(
             pointer,
@@ -679,18 +785,26 @@ fn bind_buffers(
     Ok(())
 }
 
+/// `grid.threadgroup_width`, when present, is not an occupancy hint — it is
+/// a correctness requirement a cooperative-reduce kernel's own coordinate
+/// math depends on (`gid / SIMD_WIDTH` as an output index; see
+/// `crate::msl::push_cooperative_reduce_body`'s doc), so it is honored
+/// exactly rather than folded into the generic `min(threads, max)` pick.
 fn dispatch(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
-    threads: u64,
+    grid: GridSpec,
 ) {
-    if threads == 0 {
+    if grid.threads == 0 {
         return;
     }
     let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-    let threadgroup_width = (threads as usize).min(max_threadgroup).max(1);
-    let grid = MTLSize {
-        width: threads as usize,
+    let threadgroup_width = match grid.threadgroup_width {
+        Some(width) => (width as usize).min(max_threadgroup).max(1),
+        None => (grid.threads as usize).min(max_threadgroup).max(1),
+    };
+    let grid_size = MTLSize {
+        width: grid.threads as usize,
         height: 1,
         depth: 1,
     };
@@ -699,7 +813,7 @@ fn dispatch(
         height: 1,
         depth: 1,
     };
-    encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
 }
 
 fn dispatch_op(
@@ -711,7 +825,7 @@ fn dispatch_op(
 ) -> Result<(), MetalError> {
     let kernel = emit(bound)?;
     let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
-    let output = allocate_buffer(device, bound_output_len(bound))?;
+    let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
     let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
@@ -739,7 +853,7 @@ fn dispatch_op(
         &uniforms,
         fault.as_ref(),
     )?;
-    dispatch(&encoder, &pipeline, kernel.grid.threads);
+    dispatch(&encoder, &pipeline, kernel.grid);
     encoder.endEncoding();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
@@ -791,10 +905,30 @@ fn read_fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize)
         .to_vec()
 }
 
-fn read_back(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
+/// Widens a device buffer back to the host's f32 contract — see this
+/// module's dtype doc for why that widening happens exactly once, here,
+/// mirroring the narrowing [`upload_block`] does on the way in.
+fn read_back(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    element_count: usize,
+    dtype: DType,
+) -> Vec<f32> {
     if element_count == 0 {
         return Vec::new();
     }
+    match dtype {
+        DType::Float16 => read_back_half(buffer, element_count),
+        DType::Float32
+        | DType::BFloat16
+        | DType::Bool
+        | DType::Int8
+        | DType::UInt8
+        | DType::Int32
+        | DType::UInt32 => read_back_float(buffer, element_count),
+    }
+}
+
+fn read_back_float(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
     // CPU-visible pointer to at least `element_count` initialized `f32`s —
@@ -804,7 +938,20 @@ fn read_back(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Ve
     unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), element_count) }.to_vec()
 }
 
+fn read_back_half(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
+    // CPU-visible pointer to at least `element_count` initialized `f16`s —
+    // the same sizing guarantee `read_back_float` relies on, just over the
+    // narrower element width `allocate_buffer` used for a `Float16` node.
+    let narrow =
+        unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f16>(), element_count) };
+    narrow.iter().map(|value| value.to_f32()).collect()
+}
+
 fn finish(
+    program: &[Op],
+    index_nodes: &BTreeSet<NodeId>,
     shapes: &Shapes,
     effective_outputs: &[NodeId],
     device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -813,8 +960,9 @@ fn finish(
     let mut results = Vec::with_capacity(effective_outputs.len());
     for node in effective_outputs {
         let shape = shapes.of(*node).to_vec();
+        let dtype = gpu_dtype(program, index_nodes, *node);
         let data = match device_buffers.get(node) {
-            Some(buffer) => read_back(buffer, element_count(&shape)),
+            Some(buffer) => read_back(buffer, element_count(&shape), dtype),
             None => Vec::new(),
         };
         results.push((*node, shape, data));

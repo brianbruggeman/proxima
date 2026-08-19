@@ -2894,6 +2894,7 @@ name = "omega"
 version = "0.1.0"
 dependencies = [
  "conflaguration",
+ "half",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
