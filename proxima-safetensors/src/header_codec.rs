@@ -32,26 +32,28 @@ use proxima_codec::FrameCodec;
 use proxima_primitives::pipe::Pipe;
 
 use crate::error::SafetensorsError;
+use crate::sized::{HEADER_LEN_BYTES, MAX_HEADER_BYTES};
 
-/// Width of the little-endian header-length prefix (`N` in the spec).
-pub const HEADER_LEN_BYTES: usize = 8;
-
-/// DOS-prevention cap on the declared header length, matching the
-/// reference `huggingface/safetensors` crate's own `MAX_HEADER_SIZE`
-/// (`safetensors/src/tensor.rs` on `main`, checked 2026-08-18): "there's a
-/// limit on the size of the header of 100MB to prevent parsing extremely
-/// large JSON."
-pub const MAX_HEADER_BYTES: u64 = 100_000_000;
-
-/// Stateless header-frame codec. Zero-sized; clone freely.
+/// Stateless header-frame codec. Zero-sized; clone freely. Always applies
+/// [`crate::sized::MAX_HEADER_BYTES`], the build-time floor -- a caller
+/// that needs a per-process override goes through
+/// [`crate::parser::SafetensorsParser::with_config`] instead, which reads
+/// the same header shape via [`HeaderCodec::parse_frame_with_limit`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HeaderCodec;
 
-impl FrameCodec for HeaderCodec {
-    type Frame<'a> = &'a [u8];
-    type Error = SafetensorsError;
-
-    fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(&'a [u8], usize), SafetensorsError> {
+impl HeaderCodec {
+    /// Same wire parsing [`FrameCodec::parse_frame`] does, with the
+    /// declared-header-length cap as an explicit parameter instead of the
+    /// build-time floor. The trait method is a thin wrapper over this with
+    /// `max_header_bytes = crate::sized::MAX_HEADER_BYTES`; this is the
+    /// hook a `std`-tier caller with a [`crate::config::SafetensorsParserConfig`]
+    /// override runs instead.
+    pub fn parse_frame_with_limit<'a>(
+        &self,
+        buf: &'a [u8],
+        max_header_bytes: u64,
+    ) -> Result<(&'a [u8], usize), SafetensorsError> {
         if buf.len() < HEADER_LEN_BYTES {
             return Err(SafetensorsError::TruncatedInput {
                 needed: HEADER_LEN_BYTES as u64,
@@ -61,10 +63,10 @@ impl FrameCodec for HeaderCodec {
         let mut len_bytes = [0_u8; HEADER_LEN_BYTES];
         len_bytes.copy_from_slice(&buf[..HEADER_LEN_BYTES]);
         let header_len = u64::from_le_bytes(len_bytes);
-        if header_len > MAX_HEADER_BYTES {
+        if header_len > max_header_bytes {
             return Err(SafetensorsError::HeaderTooLarge {
                 declared: header_len,
-                max: MAX_HEADER_BYTES,
+                max: max_header_bytes,
             });
         }
         let total = HEADER_LEN_BYTES as u64 + header_len;
@@ -78,6 +80,15 @@ impl FrameCodec for HeaderCodec {
         // already fits `usize` by construction.
         let end = total as usize;
         Ok((&buf[HEADER_LEN_BYTES..end], end))
+    }
+}
+
+impl FrameCodec for HeaderCodec {
+    type Frame<'a> = &'a [u8];
+    type Error = SafetensorsError;
+
+    fn parse_frame<'a>(&self, buf: &'a [u8]) -> Result<(&'a [u8], usize), SafetensorsError> {
+        self.parse_frame_with_limit(buf, MAX_HEADER_BYTES)
     }
 
     fn encode_frame(&self, frame: &&[u8], dest: &mut Vec<u8>) -> Result<(), SafetensorsError> {

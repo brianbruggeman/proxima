@@ -4591,12 +4591,17 @@ dependencies = [
 name = "proxima-safetensors"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "bytes",
+ "conflaguration",
  "proxima-codec",
  "proxima-primitives",
  "proxima-tensor",
  "rstest",
+ "serde",
  "serde_json",
+ "temp-env",
+ "tempfile",
  "thiserror 2.0.19",
 ]
 

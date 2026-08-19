@@ -20,22 +20,26 @@
 //! here. [`writer::write_complete`] is the dual: it takes an in-memory
 //! [`writer::SafetensorsModel`] and returns owned bytes the caller writes
 //! wherever it wants.
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+pub mod config;
 mod dtype;
 mod error;
 mod header_codec;
 mod parser;
 mod pipe;
+pub mod sized;
 mod writer;
 
 pub use dtype::{dtype_to_wire, map_dtype};
 pub use error::SafetensorsError;
-pub use header_codec::{HEADER_LEN_BYTES, HeaderCodec, MAX_HEADER_BYTES};
+pub use header_codec::HeaderCodec;
 pub use parser::{Manifest, SafetensorsParser, TensorEntry};
 pub use pipe::{ParseComplete, parse_complete};
+pub use sized::{HEADER_LEN_BYTES, MAX_HEADER_BYTES};
 pub use writer::{SafetensorsModel, TensorPayload, WriteComplete, write_complete};
 
 #[cfg(test)]
