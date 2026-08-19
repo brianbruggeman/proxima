@@ -68,8 +68,12 @@ declare -a cells=(
     "config alone clippy|cargo clippy -p proxima-tensor --all-targets --no-default-features --features config -- -D warnings"
     "test-support alone clippy|cargo clippy -p proxima-tensor --no-default-features --features std,test-support -- -D warnings"
 
-    # instrument carries four tests the default cell does not run (285 vs 289
-    # measured 2026-08-19), plus the telemetry span wiring.
+    # instrument carries four tests the default cell does not run, plus the
+    # telemetry span wiring. The two cells therefore report DIFFERENT counts —
+    # quoting one as the other's baseline is a real mistake that has been made:
+    # a task brief cited the instrument number as the default expectation, and
+    # the agent had to measure to catch it. Whatever the absolute numbers drift
+    # to, `instrument tests` is always `default tests` plus exactly those four.
     "instrument clippy|cargo clippy -p proxima-tensor --all-targets --features instrument -- -D warnings"
     "instrument tests|cargo nextest run -p proxima-tensor --features instrument --no-fail-fast"
 
