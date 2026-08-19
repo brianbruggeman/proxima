@@ -29,8 +29,9 @@
 //!
 //! # Why `poll` borrows instead of draining
 //!
-//! [`OnnxParser::poll`] returns `PollOutcome<'_>` borrowing from `&mut
-//! self` (a lending-iterator shape): the event's `&str`/`&[u8]` fields
+//! [`OnnxParser::poll`] returns `Result<Option<ModelField<'_>>, OnnxError>`
+//! borrowing from `&mut self` (a lending-iterator shape): the event's
+//! `&str`/`&[u8]` fields
 //! (down to [`crate::messages::TensorProto::raw_data`]) point straight
 //! into this parser's own accumulation buffer, never copied. That is only
 //! sound if the buffer never reallocates or shifts while a borrowed event
@@ -68,10 +69,6 @@ use proxima_protocols::protobuf_wire::{
 
 use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
-
-/// What [`OnnxParser::poll`] produced. A type alias for
-/// `Option<ModelField<'a>>`, not a separate enum.
-pub type PollOutcome<'a> = Option<ModelField<'a>>;
 
 /// The state machine itself. Owns one append-only accumulation buffer;
 /// `cursor` marks how many of its bytes have already been decoded and
@@ -132,7 +129,7 @@ impl OnnxParser {
     }
 
     /// Attempt one unit of progress against the currently buffered bytes.
-    pub fn poll(&mut self) -> Result<PollOutcome<'_>, OnnxError> {
+    pub fn poll(&mut self) -> Result<Option<ModelField<'_>>, OnnxError> {
         let Some((field, consumed)) = try_read_field(
             &self.accumulator[self.cursor..],
             self.max_len_delimited_field,
