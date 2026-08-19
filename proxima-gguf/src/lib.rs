@@ -64,12 +64,12 @@ pub mod edge;
 
 pub use error::GgufError;
 pub use parser::{GgufEvent, GgufParser, PollOutcome};
-pub use pipe::{ParseComplete, ParsedGguf, parse_complete};
+pub use pipe::{ParsedGguf, parse_complete};
 pub use restack::{RestackError, StackPlan, discover_experts, expert_tensor_name, gather_expert, plan_stack, restack_into};
 pub use tensor::TensorInfo;
 pub use types::{GgmlType, MetadataType};
 pub use value::{MetadataArray, MetadataValue};
-pub use writer::{GgufModel, TensorPayload, WriteComplete, write_complete};
+pub use writer::{GgufModel, TensorPayload, write_complete};
 
 #[cfg(test)]
 mod tests;
