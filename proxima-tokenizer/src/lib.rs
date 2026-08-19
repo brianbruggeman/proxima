@@ -39,11 +39,13 @@ pub mod error;
 pub mod gguf;
 pub mod pipe;
 pub mod pretokenize;
+pub mod sample;
 pub mod sized;
 pub mod vocab;
 
 pub use error::TokenizerError;
 pub use pipe::{decode, encode, encode_with_bos_eos};
+pub use sample::greedy_pick;
 pub use vocab::{TokenType, Vocab};
 
 #[cfg(test)]
