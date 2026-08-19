@@ -1,12 +1,15 @@
 //! Element conversion as an ordinary [`Pipe`] — `In` = source scalar, `Out` =
-//! target scalar, no new trait. [`Convert`] is the one type: a `PhantomData`
-//! marker plus a private `Cast` impl per concrete pair, generic over
-//! whichever two of the machine scalar types
+//! target scalar, no new trait. [`Convert`] is the one generic type: a
+//! `PhantomData` marker, monomorphized per pair by one concrete `Pipe` impl
+//! per pair of the machine scalar types
 //! ([`crate::dtype::DType`]'s `Int8`/`UInt8`/`Int32`/`UInt32`/`BFloat16`/
 //! `Float16`/`Float32`, `Bool` as `bool`) the caller names. A pair not wired
 //! directly (say `Int8 -> Float32`) composes for free through
 //! `proxima_primitives::PipeExt::and_then` (`Int8 -> Int32 -> Float32`) —
-//! that is the algebra doing its job, not a gap.
+//! that is the algebra doing its job, not a gap. `SimdConvert`'s scalar
+//! fallback (below) calls straight through this same `Pipe::call` via
+//! `block_on`, so there is exactly one place per pair the conversion body
+//! is written.
 //!
 //! [`SimdConvert::convert_slice`] is the bulk sibling: a register's worth of
 //! elements per step (NEON on `aarch64`, where a lane type exists for the
@@ -34,106 +37,8 @@ use core::future::Future;
 use core::marker::PhantomData;
 
 use half::{bf16, f16};
+use proxima_primitives::block_on;
 use proxima_primitives::pipe::Pipe;
-
-/// Sealed per-pair numeric cast — the thing every [`Convert`] instance
-/// defers to. Not public: callers reach a cast only through the [`Pipe`]
-/// contract, exactly like every other pipe in this algebra.
-trait Cast<To> {
-    fn cast(self) -> To;
-}
-
-macro_rules! impl_cast_as {
-    ($From:ty => $To:ty) => {
-        impl Cast<$To> for $From {
-            #[inline(always)]
-            fn cast(self) -> $To {
-                self as $To
-            }
-        }
-    };
-}
-
-impl_cast_as!(i8 => i16);
-impl_cast_as!(i16 => i32);
-impl_cast_as!(i32 => i64);
-impl_cast_as!(i64 => i128);
-impl_cast_as!(u8 => u16);
-impl_cast_as!(u16 => u32);
-impl_cast_as!(u32 => u64);
-impl_cast_as!(u64 => u128);
-impl_cast_as!(i16 => i8);
-impl_cast_as!(i32 => i16);
-impl_cast_as!(i64 => i32);
-impl_cast_as!(i128 => i64);
-impl_cast_as!(u16 => u8);
-impl_cast_as!(u32 => u16);
-impl_cast_as!(u64 => u32);
-impl_cast_as!(u128 => u64);
-impl_cast_as!(i8 => i32);
-impl_cast_as!(i32 => i8);
-impl_cast_as!(u8 => u32);
-impl_cast_as!(u32 => u8);
-impl_cast_as!(i32 => f32);
-impl_cast_as!(f32 => i32);
-impl_cast_as!(u32 => f32);
-impl_cast_as!(f32 => u32);
-impl_cast_as!(i8 => u8);
-impl_cast_as!(u8 => i8);
-impl_cast_as!(i32 => u32);
-impl_cast_as!(u32 => i32);
-impl_cast_as!(f32 => f64);
-impl_cast_as!(f64 => f32);
-
-impl Cast<u8> for bool {
-    #[inline(always)]
-    fn cast(self) -> u8 {
-        self as u8
-    }
-}
-impl Cast<bool> for u8 {
-    #[inline(always)]
-    fn cast(self) -> bool {
-        self != 0
-    }
-}
-impl Cast<i8> for bool {
-    #[inline(always)]
-    fn cast(self) -> i8 {
-        self as i8
-    }
-}
-impl Cast<bool> for i8 {
-    #[inline(always)]
-    fn cast(self) -> bool {
-        self != 0
-    }
-}
-
-impl Cast<bf16> for f32 {
-    #[inline(always)]
-    fn cast(self) -> bf16 {
-        bf16::from_f32(self)
-    }
-}
-impl Cast<f32> for bf16 {
-    #[inline(always)]
-    fn cast(self) -> f32 {
-        self.to_f32()
-    }
-}
-impl Cast<f16> for f32 {
-    #[inline(always)]
-    fn cast(self) -> f16 {
-        f16::from_f32(self)
-    }
-}
-impl Cast<f32> for f16 {
-    #[inline(always)]
-    fn cast(self) -> f32 {
-        self.to_f32()
-    }
-}
 
 /// A conversion between two scalar element types, as data: `In` = source,
 /// `Out` = target. No state, no allocation — every instance is
@@ -151,17 +56,128 @@ impl<From, To> Convert<From, To> {
     }
 }
 
-impl<From, To> Pipe for Convert<From, To>
-where
-    From: Cast<To>,
-    To: 'static,
-{
-    type In = From;
-    type Out = To;
+// EXPERIMENT (question A): `Cast<To>` deleted. Each pair now carries its
+// conversion directly on a concrete `impl Pipe for Convert<From, To>` —
+// `SimdConvert`'s scalar paths (below) call THROUGH this `Pipe::call`
+// (via `block_on`) instead of a bare `.cast()`, so there is exactly one
+// place per pair the conversion body is written, not two.
+macro_rules! impl_convert_pipe_as {
+    ($From:ty => $To:ty) => {
+        impl Pipe for Convert<$From, $To> {
+            type In = $From;
+            type Out = $To;
+            type Err = Infallible;
+
+            #[inline(always)]
+            fn call(&self, input: $From) -> impl Future<Output = Result<$To, Infallible>> {
+                async move { Ok(input as $To) }
+            }
+        }
+    };
+}
+
+impl_convert_pipe_as!(i8 => i16);
+impl_convert_pipe_as!(i16 => i32);
+impl_convert_pipe_as!(i32 => i64);
+impl_convert_pipe_as!(i64 => i128);
+impl_convert_pipe_as!(u8 => u16);
+impl_convert_pipe_as!(u16 => u32);
+impl_convert_pipe_as!(u32 => u64);
+impl_convert_pipe_as!(u64 => u128);
+impl_convert_pipe_as!(i16 => i8);
+impl_convert_pipe_as!(i32 => i16);
+impl_convert_pipe_as!(i64 => i32);
+impl_convert_pipe_as!(i128 => i64);
+impl_convert_pipe_as!(u16 => u8);
+impl_convert_pipe_as!(u32 => u16);
+impl_convert_pipe_as!(u64 => u32);
+impl_convert_pipe_as!(u128 => u64);
+impl_convert_pipe_as!(i8 => i32);
+impl_convert_pipe_as!(i32 => i8);
+impl_convert_pipe_as!(u8 => u32);
+impl_convert_pipe_as!(u32 => u8);
+impl_convert_pipe_as!(i32 => f32);
+impl_convert_pipe_as!(f32 => i32);
+impl_convert_pipe_as!(u32 => f32);
+impl_convert_pipe_as!(f32 => u32);
+impl_convert_pipe_as!(i8 => u8);
+impl_convert_pipe_as!(u8 => i8);
+impl_convert_pipe_as!(i32 => u32);
+impl_convert_pipe_as!(u32 => i32);
+impl_convert_pipe_as!(f32 => f64);
+impl_convert_pipe_as!(f64 => f32);
+
+impl Pipe for Convert<bool, u8> {
+    type In = bool;
+    type Out = u8;
     type Err = Infallible;
 
-    fn call(&self, input: From) -> impl Future<Output = Result<To, Infallible>> {
-        async move { Ok(input.cast()) }
+    fn call(&self, input: bool) -> impl Future<Output = Result<u8, Infallible>> {
+        async move { Ok(input as u8) }
+    }
+}
+impl Pipe for Convert<u8, bool> {
+    type In = u8;
+    type Out = bool;
+    type Err = Infallible;
+
+    fn call(&self, input: u8) -> impl Future<Output = Result<bool, Infallible>> {
+        async move { Ok(input != 0) }
+    }
+}
+impl Pipe for Convert<bool, i8> {
+    type In = bool;
+    type Out = i8;
+    type Err = Infallible;
+
+    fn call(&self, input: bool) -> impl Future<Output = Result<i8, Infallible>> {
+        async move { Ok(input as i8) }
+    }
+}
+impl Pipe for Convert<i8, bool> {
+    type In = i8;
+    type Out = bool;
+    type Err = Infallible;
+
+    fn call(&self, input: i8) -> impl Future<Output = Result<bool, Infallible>> {
+        async move { Ok(input != 0) }
+    }
+}
+
+impl Pipe for Convert<f32, bf16> {
+    type In = f32;
+    type Out = bf16;
+    type Err = Infallible;
+
+    fn call(&self, input: f32) -> impl Future<Output = Result<bf16, Infallible>> {
+        async move { Ok(bf16::from_f32(input)) }
+    }
+}
+impl Pipe for Convert<bf16, f32> {
+    type In = bf16;
+    type Out = f32;
+    type Err = Infallible;
+
+    fn call(&self, input: bf16) -> impl Future<Output = Result<f32, Infallible>> {
+        async move { Ok(input.to_f32()) }
+    }
+}
+impl Pipe for Convert<f32, f16> {
+    type In = f32;
+    type Out = f16;
+    type Err = Infallible;
+
+    fn call(&self, input: f32) -> impl Future<Output = Result<f16, Infallible>> {
+        async move { Ok(f16::from_f32(input)) }
+    }
+}
+impl Pipe for Convert<f16, f32> {
+    type In = f16;
+    type Out = f32;
+    type Err = Infallible;
+
+    fn call(&self, input: f16) -> impl Future<Output = Result<f32, Infallible>> {
+        async move { Ok(input.to_f32()) }
     }
 }
 
@@ -316,7 +332,7 @@ macro_rules! impl_simd_convert_neon {
                     processed += lanes;
                 }
                 for index in processed..input.len() {
-                    output[index] = input[index].cast();
+                    output[index] = block_on(self.call(input[index])).expect("Convert::call is Infallible");
                 }
             }
 
@@ -324,7 +340,7 @@ macro_rules! impl_simd_convert_neon {
             fn convert_slice(&self, input: &[$From], output: &mut [$To]) {
                 assert_eq!(input.len(), output.len(), "convert_slice: length mismatch");
                 for (source, target) in input.iter().zip(output.iter_mut()) {
-                    *target = (*source).cast();
+                    *target = block_on(self.call(*source)).expect("Convert::call is Infallible");
                 }
             }
         }
@@ -337,7 +353,7 @@ macro_rules! impl_simd_convert_scalar {
             fn convert_slice(&self, input: &[$From], output: &mut [$To]) {
                 assert_eq!(input.len(), output.len(), "convert_slice: length mismatch");
                 for (source, target) in input.iter().zip(output.iter_mut()) {
-                    *target = (*source).cast();
+                    *target = block_on(self.call(*source)).expect("Convert::call is Infallible");
                 }
             }
         }
