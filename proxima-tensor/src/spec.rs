@@ -1769,4 +1769,174 @@ shape = ["seq"]
         };
         run_gqa_case(text, dims, 41);
     }
+
+    /// The milestone this crate has been building toward: one real
+    /// openchat-3.5-1210 / Mistral-7B transformer layer, RoPE + GQA +
+    /// causal mask composed together, at the model's own dimensions
+    /// (`embedding_length=4096`, `head_count=32`, `head_count_kv=8`,
+    /// `head_dim=128`, `feed_forward_length=14336`) — not a toy shrink of
+    /// them. `mistral_layer.toml`'s header records the one addressing
+    /// decision the composition forced: the rotated dot product is
+    /// recovered as even-pairs-plus-odd-pairs rather than re-interleaved,
+    /// because interleaving needs a write-placement op this crate does not
+    /// have. No new `Op` or `ScalarOp` was needed here; if one had been,
+    /// this comment would say so instead.
+    ///
+    /// Shape inference is cheap — symbolic arithmetic over extents, not
+    /// data — and runs here at the model's real context length (8192) and
+    /// again at the small sequence length the evaluation test below uses,
+    /// proving the same graph types at both.
+    ///
+    /// Evaluating this spec at its real embedding/feed-forward dimensions
+    /// was tried and MEASURED, not assumed to be fine: random weight
+    /// generation (~870MB across `wq`/`wk`/`wv`/`wo`/`w_gate`/`w_up`/
+    /// `w_down`) took 2.77s, but `evaluate_parallel` itself did not finish
+    /// inside a 90s budget even at `SEQUENCE=4` — the elementwise nodes
+    /// feeding `gate_product`/`up_product`/`down_product` materialize a
+    /// full `seq * embedding * feed_forward` product ahead of their reduce
+    /// (`seq=4` gives `4 * 4096 * 14336` = 235M elements, ~940MB, per node,
+    /// three of them), independent of how small `seq` is. So the evaluation
+    /// test below runs `mistral_layer_small.toml` instead — node-for-node
+    /// the same file with every non-sequence axis divided down while
+    /// preserving the real ratios (GQA group stays 4, RoPE still rotates
+    /// the full head_dim) — see that file's header for the exact numbers.
+    #[test]
+    fn a_mistral_layer_written_as_toml_infers_at_its_real_dimensions() {
+        const REAL_CONTEXT: u64 = 8192;
+        const SMALL_SEQUENCE: u64 = 4;
+
+        let text = include_str!("../specs/mistral_layer.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        crate::shape::infer(&program, &[REAL_CONTEXT])
+            .expect("the layer infers at its real context length");
+        crate::shape::infer(&program, &[SMALL_SEQUENCE])
+            .expect("the layer infers at a small sequence length too");
+    }
+
+    /// The evaluation half of the milestone above: `mistral_layer_small.toml`
+    /// is the same RoPE+GQA+causal-mask composition, small enough to
+    /// actually run (see the sibling test's doc comment and that file's
+    /// header for why). Two invariants, not just finiteness: the output is
+    /// the right shape and every value is finite, and every softmax row —
+    /// indexed explicitly because `probabilities`'s `(query, key, kv_head,
+    /// group_offset)` layout makes a key-axis row a strided read, not a
+    /// contiguous one, the same way `run_gqa_case` above handles it — sums
+    /// to 1.0.
+    #[test]
+    fn a_mistral_layer_written_as_toml_evaluates() {
+        const SEQUENCE: usize = 4;
+        const EMBEDDING: usize = 16;
+        const QUERY_HEADS: usize = 8;
+        const KV_HEADS: usize = 2;
+        const HEAD_DIM: usize = 4;
+        const PAIRS: usize = HEAD_DIM / 2;
+        const GROUP: usize = QUERY_HEADS / KV_HEADS;
+        const FEED_FORWARD: usize = 32;
+
+        let text = include_str!("../specs/mistral_layer_small.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the small layer infers");
+
+        let activations = random_vec(101, SEQUENCE * EMBEDDING);
+        let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
+        let epsilon = alloc::vec![1e-5f32; SEQUENCE];
+        let ones = alloc::vec![1.0f32; SEQUENCE];
+        let wq = random_vec(102, EMBEDDING * QUERY_HEADS * HEAD_DIM);
+        let wk = random_vec(103, EMBEDDING * KV_HEADS * HEAD_DIM);
+        let wv = random_vec(104, EMBEDDING * KV_HEADS * HEAD_DIM);
+        let wo = random_vec(105, KV_HEADS * GROUP * HEAD_DIM * EMBEDDING);
+        let w_gate = random_vec(106, EMBEDDING * FEED_FORWARD);
+        let w_up = random_vec(107, EMBEDDING * FEED_FORWARD);
+        let w_down = random_vec(108, FEED_FORWARD * EMBEDDING);
+        let cos = random_vec(109, SEQUENCE * PAIRS);
+        let sin = random_vec(110, SEQUENCE * PAIRS);
+        let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
+
+        let blocks: [&[f32]; 14] = [
+            &activations,
+            &inverse_dim,
+            &epsilon,
+            &ones,
+            &wq,
+            &wk,
+            &wv,
+            &wo,
+            &w_gate,
+            &w_up,
+            &w_down,
+            &cos,
+            &sin,
+            &group_ones,
+        ];
+
+        let probabilities = spec
+            .node
+            .iter()
+            .position(|node| node.id() == "probabilities")
+            .expect("the spec defines a probabilities node");
+        let probabilities = NodeId(probabilities as u32);
+        let root = NodeId(program.len() as u32 - 1);
+
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &blocks,
+            &[root, probabilities],
+            workers,
+        )
+        .expect("the small mistral layer evaluates");
+
+        let output = evaluated.root();
+        assert_eq!(
+            output.len(),
+            SEQUENCE * EMBEDDING,
+            "a vacuous output proves nothing"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "output must be finite"
+        );
+
+        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        assert_eq!(rows.len(), SEQUENCE * SEQUENCE * KV_HEADS * GROUP);
+
+        // probabilities is laid out `(query, key, kv_head, group_offset)`
+        // row-major, so a softmax "row" over the key axis is not a
+        // contiguous slice — index it explicitly, the same way
+        // `run_gqa_case` above does for the same `stug` iteration order.
+        let mut checked = 0usize;
+        for query_position in 0..SEQUENCE {
+            for kv_head in 0..KV_HEADS {
+                for offset in 0..GROUP {
+                    let mut total = 0.0f32;
+                    for key_position in 0..SEQUENCE {
+                        let index = ((query_position * SEQUENCE + key_position) * KV_HEADS
+                            + kv_head)
+                            * GROUP
+                            + offset;
+                        total += rows[index];
+                        checked += 1;
+                    }
+                    assert!(
+                        (total - 1.0).abs() < 1e-4,
+                        "query {query_position} kv-head {kv_head} group-offset {offset} \
+                         softmax row sums to {total}, not 1.0"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            SEQUENCE * SEQUENCE * KV_HEADS * GROUP,
+            "every probability cell must be checked, not a subset"
+        );
+    }
 }
