@@ -77,10 +77,15 @@ declare -a cells=(
     "instrument clippy|cargo clippy -p proxima-tensor --all-targets --features instrument -- -D warnings"
     "instrument tests|cargo nextest run -p proxima-tensor --features instrument --no-fail-fast"
 
-    # the default clippy cell above never compiles the ggml-bench bench
-    # target, which is how 38 lint errors sat in benches/bench_vs_ggml.rs
-    # unseen. all-features closes that hole.
-    "all-features clippy|cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings"
+    # the default clippy cell above never compiles the non-default feature
+    # surface (`instrument`, `tensor-bgpool`, `test-support`, `q4k-int8-dot`,
+    # `config`) unified together, which is how lint errors that only surface
+    # under unification would sit unseen. an explicit feature list, NOT
+    # --all-features: --all-features pulls in `ggml-bench`, whose build.rs
+    # wants a statically linked ggml checkout on disk (see the module header
+    # above) -- that feature belongs with the bench harnesses, not this
+    # correctness gate, so it is named here and left out on purpose.
+    "all-non-bench-features clippy|cargo clippy -p proxima-tensor --all-targets --no-default-features --features alloc,std,config,instrument,tensor-bgpool,test-support,q4k-int8-dot -- -D warnings"
 
     # the default rustdoc cell above never compiles q4k-int8-dot's items, which
     # is how ~11 doc errors (private-item intra-doc links, one arch-invisible

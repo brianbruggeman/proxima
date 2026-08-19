@@ -12,14 +12,21 @@ fn main() {
         return;
     }
 
-    let ggml_root = env::var("GGML_BUILD_DIR").unwrap_or_else(|_| {
-        panic!(
-            "the `ggml-bench` feature needs a statically-built ggml checkout on disk; \
-             set GGML_BUILD_DIR to its root (the directory whose `build/src/` holds \
-             libggml*.a) -- there is no session-scoped default, every session's \
-             scratchpad path differs"
-        )
-    });
+    let ggml_root = match env::var("GGML_BUILD_DIR") {
+        Ok(root) => root,
+        Err(_) => {
+            println!(
+                "cargo:warning=`ggml-bench` is enabled but GGML_BUILD_DIR is unset; \
+                 skipping the ggml link directives -- doc/clippy/check builds still \
+                 succeed, but `cargo bench -p proxima-tensor --features ggml-bench` \
+                 will fail at link time. set GGML_BUILD_DIR to a statically-built ggml \
+                 checkout's root (the directory whose `build/src/` holds libggml*.a) \
+                 to run the bench."
+            );
+            println!("cargo:rerun-if-env-changed=GGML_BUILD_DIR");
+            return;
+        }
+    };
     let build_dir = PathBuf::from(&ggml_root).join("build");
 
     println!("cargo:rustc-link-search=native={}", build_dir.join("src").display());
