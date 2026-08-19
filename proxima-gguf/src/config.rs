@@ -196,10 +196,9 @@ mod tests {
         // then tensor remaining == 0 -> Complete.
         let outcome = parser.poll().expect("complete");
         match outcome {
-            crate::parser::PollOutcome::Event(crate::parser::GgufEvent::Complete {
-                alignment,
-                ..
-            }) => assert_eq!(alignment, 64, "fallback alignment came from the config"),
+            Some(crate::parser::GgufEvent::Complete { alignment, .. }) => {
+                assert_eq!(alignment, 64, "fallback alignment came from the config");
+            }
             other => panic!("expected Complete, got {other:?}"),
         }
     }

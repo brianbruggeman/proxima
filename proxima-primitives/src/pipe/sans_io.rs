@@ -51,17 +51,6 @@
 //! already made for their own stateful loops — restated here because it
 //! applies to the whole trait, not just one impl.
 
-/// One [`ByteStreamParser::poll`] outcome: either not enough buffered
-/// bytes to make progress (call [`ByteStreamParser::feed`]), or one unit
-/// of progress in the form of `Event`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome<Event> {
-    /// Not enough buffered bytes yet — the normal partial-input signal,
-    /// never a failure.
-    NeedMore,
-    Event(Event),
-}
-
 /// The sans-IO byte-stream parser contract. Owns its own buffering
 /// strategy entirely; this trait only fixes the shape callers drive it
 /// through.
@@ -70,8 +59,10 @@ pub enum Outcome<Event> {
 /// infallible and cannot fail on malformed input, because malformed input
 /// is only discoverable once `poll` actually looks at the buffered bytes.
 /// `poll` attempts exactly one unit of progress against whatever is
-/// currently buffered and never blocks: [`Outcome::NeedMore`] means "call
-/// `feed` again," not "wait." `finish` is a read-only check — `Ok(())`
+/// currently buffered and never blocks: `None` means "call `feed` again,"
+/// not "wait" and not "done" — those are `finish`'s and `Err`'s jobs, which
+/// is why the three-channel split (`None` / `Some(event)` / `Err`) needs
+/// nothing beyond `Option` in the `Ok` arm. `finish` is a read-only check — `Ok(())`
 /// only if the parser has reached a valid terminal state; otherwise the
 /// byte stream ended mid-item. It never hands back an owned final value:
 /// an impl that has one (e.g. `SafetensorsParser::into_manifest`) surfaces
@@ -94,7 +85,9 @@ pub trait ByteStreamParser {
     fn feed(&mut self, bytes: &[u8]);
 
     /// Attempt one unit of progress against the currently buffered bytes.
-    fn poll(&mut self) -> Result<Outcome<Self::Event<'_>>, Self::Error>;
+    /// `None` means "not enough buffered bytes yet, call `feed` again" —
+    /// the normal partial-input signal, never a failure.
+    fn poll(&mut self) -> Result<Option<Self::Event<'_>>, Self::Error>;
 
     /// The caller has no more bytes to feed. `Ok(())` only if the parser
     /// had already reached a valid terminal state.
@@ -103,7 +96,7 @@ pub trait ByteStreamParser {
 
 /// Drives any [`ByteStreamParser`] to completion from a chunked byte
 /// stream — feeds each chunk, drains every event it produces (looping
-/// `poll` until [`Outcome::NeedMore`]) before asking for the next chunk,
+/// `poll` until it returns `None`) before asking for the next chunk,
 /// then calls [`ByteStreamParser::finish`]. `on_event` runs once per
 /// emitted event, in order.
 ///
@@ -126,11 +119,8 @@ where
 {
     for chunk in chunks {
         parser.feed(chunk.as_ref());
-        loop {
-            match parser.poll()? {
-                Outcome::NeedMore => break,
-                Outcome::Event(event) => on_event(event),
-            }
+        while let Some(event) = parser.poll()? {
+            on_event(event);
         }
     }
     parser.finish()

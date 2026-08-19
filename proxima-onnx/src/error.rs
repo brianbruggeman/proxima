@@ -12,8 +12,8 @@ pub enum OnnxError {
     /// buffer it lives in) surfaced by `proxima_protocols::protobuf_wire`
     /// while decoding an already-complete message slice. Never raised for
     /// "not enough bytes buffered yet" -- the byte-fed [`crate::parser::OnnxParser`]
-    /// handles that as [`crate::parser::PollOutcome::NeedMore`] and only
-    /// calls into a message decoder once a field's bytes are fully present.
+    /// handles that by returning `None` from `poll` and only calls into a
+    /// message decoder once a field's bytes are fully present.
     #[error("field {field}: {source}")]
     Wire {
         field: u32,
