@@ -32,17 +32,46 @@
 //!
 //! # Execution model
 //!
-//! One `MTLCommandBuffer` per nest (correctness first, per the module's v1
-//! stance — batching multiple nests into one command buffer is a later
-//! optimization, not a correctness requirement). Every `MTLBuffer` is
-//! `storageModeShared`: on Apple Silicon's unified memory, that makes
-//! reading a result back a plain pointer read, no blit pass. Compiled
-//! `MTLLibrary`/`MTLComputePipelineState` pairs are cached by kernel source
-//! text within one [`execute`] call, since `msl.rs`'s own module doc proves
-//! two structurally-identical `BoundOp`s emit byte-identical source.
-//! `MTLCompileOptions::mathMode` is pinned to `Safe`, never the default —
-//! parity against the CPU interpreter demands IEEE behavior, not whatever
-//! Metal's fast-math would substitute.
+//! One `MTLCommandBuffer` per [`execute`] call, not per op: every `BoundOp`
+//! in the program is encoded — its own `MTLComputeCommandEncoder`, ended
+//! before the next op's encoder is opened — into that SAME command buffer,
+//! and only then is it `commit()`ted and `waitUntilCompleted()` exactly
+//! once, in [`execute`]. Every expression used to pay a full CPU<->GPU
+//! round trip; batching means only the genuine program outputs
+//! ([`finish`]'s `effective_outputs`) ever cross back to the host, and
+//! intermediates never do (they already didn't — `device_buffers` keeps
+//! them GPU-resident between ops; what changes here is that the CPU no
+//! longer blocks between ops either).
+//!
+//! Ordering is guaranteed, not assumed: a later op reading a buffer an
+//! earlier op wrote is correct because every buffer here comes from
+//! `device.newBuffer*` (see [`allocate_buffer`], [`upload_block`]) with
+//! `MTLResourceOptions::StorageModeShared` only — never
+//! `HazardTrackingModeUntracked` — and a buffer's `hazardTrackingMode` for
+//! any resource created directly from a device (as opposed to a heap)
+//! defaults to tracked (`objc2-metal-0.3.2`'s
+//! `src/generated/MTLResource.rs:326-329`: "Resources created from heaps
+//! are by default untracked, whereas resources created from the device are
+//! by default tracked."). Metal's documented contract for a tracked
+//! resource is that it inserts an implicit execution barrier between two
+//! encoders in the *same* command buffer whenever the later one reads what
+//! the earlier one wrote. That guarantee composes with [`execute`] encoding
+//! `prepared.resolved` strictly in program order (the same order
+//! [`prepare`]'s `bound_op_retirement` already relies on for liveness), so
+//! sequential encode order plus default hazard tracking is the mechanism —
+//! not an assumption that the GPU happens to serialize. This holds equally
+//! for the no-copy buffers [`upload_block`] hands out (see "Host buffer
+//! upload" below): `newBufferWithBytesNoCopy_length_options_deallocator`
+//! takes the same `MTLResourceOptions`, so its hazard mode is identical.
+//!
+//! Every `MTLBuffer` is `storageModeShared`: on Apple Silicon's unified
+//! memory, that makes reading a result back a plain pointer read, no blit
+//! pass. Compiled `MTLLibrary`/`MTLComputePipelineState` pairs are cached
+//! by kernel source text within one [`execute`] call, since `msl.rs`'s own
+//! module doc proves two structurally-identical `BoundOp`s emit
+//! byte-identical source. `MTLCompileOptions::mathMode` is pinned to
+//! `Safe`, never the default — parity against the CPU interpreter demands
+//! IEEE behavior, not whatever Metal's fast-math would substitute.
 //!
 //! # Gather fault reporting
 //!
@@ -50,13 +79,44 @@
 //! fetched index falls outside its dim's extent; a GPU kernel cannot
 //! propagate a `Result`, so `msl.rs` clamps for memory safety but also
 //! `atomic_fetch_max`s the offending index into a per-gather-slot `Fault`
-//! buffer (see that module's doc). [`dispatch_op`] allocates and
-//! zero-fills that buffer before every dispatch that gathers, and after
-//! `waitUntilCompleted` reads it back and — via [`check_gather_fault`] —
-//! turns any nonzero slot into the identical `TensorError` `cpu.rs` would
+//! buffer (see that module's doc). [`encode_op`] allocates and zero-fills
+//! that buffer before every dispatch that gathers, but a fault buffer is
+//! only CPU-visible once the whole command buffer completes, so — unlike a
+//! per-op wait — [`execute`] cannot check it until after its single
+//! end-of-program `waitUntilCompleted`. It then walks every op that
+//! gathered, in program order, and — via [`check_gather_fault`] — turns the
+//! first nonzero slot into the identical `TensorError` `cpu.rs` would
 //! report for the same fetched index, wired through [`MetalError`]'s
 //! `#[from]` so [`execute`] and `cpu::evaluate` produce `assert_eq!`-equal
-//! errors.
+//! errors. Ops after the one that would have faulted still get encoded and
+//! dispatched (clamping keeps that memory-safe) — but the `Err` [`execute`]
+//! returns is unaffected: everything downstream of the fault is discarded
+//! the moment that `Err` propagates, so it is exactly what a fail-fast
+//! per-op wait would have reported.
+//!
+//! # Host buffer upload
+//!
+//! [`upload_block`] is the one call on the copy of a caller-owned `&[f32]`
+//! into device memory ([`upload_uniforms`] copies too, but a *locally
+//! packed* `Vec<u8>`, not caller data, so it is out of scope here). On
+//! unified memory that copy is pointless for the `Float32` path — CPU and
+//! GPU already address the same DRAM — so [`upload_block_as_float`] takes
+//! the zero-copy `newBufferWithBytesNoCopy` path whenever `data`'s pointer
+//! AND byte length are both a multiple of [`page_size`] (that API's hard
+//! requirement), and otherwise falls back to the copying `newBufferWithBytes`
+//! path used everywhere else in this file. A `Float16` node's buffer is
+//! narrowed into a freshly allocated `Vec<f16>` first (see the dtype
+//! section below); that allocation is local to [`upload_block_as_half`] and
+//! drops when it returns, so it can never take the no-copy path — doing so
+//! would hand Metal a dangling pointer the instant the function returns,
+//! since no deallocator callback is wired to keep the `Vec` alive for the
+//! GPU's sake. `Float16` uploads therefore always copy. Which path ran is
+//! never silent: [`NOCOPY_BUFFER_UPLOADS`] / [`COPYING_BUFFER_UPLOADS`]
+//! (`proxima_telemetry::metric::Counter`, the same instrument
+//! `proxima_tensor::instrument` already uses) are incremented on every
+//! real call, so a caller — or this driver's own test suite — can read back
+//! what fraction of real uploads actually took the no-copy path instead of
+//! assuming it from the code alone.
 //!
 //! # dtype and device-buffer marshalling
 //!
@@ -88,6 +148,7 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ptr::NonNull;
+use std::sync::OnceLock;
 
 use half::f16;
 use objc2::rc::Retained;
@@ -98,6 +159,8 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
     MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
 };
+use proxima_telemetry::counter;
+use proxima_telemetry::metric::Counter;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, Shapes,
@@ -107,6 +170,16 @@ use proxima_tensor::{
 use crate::error::EmitError;
 use crate::msl::{gather_count, reduction_dims};
 use crate::{Binding, GridSpec, Kernel, emit};
+
+/// A live Metal buffer handle — the shape every device-buffer table and
+/// return value in this file traffics in.
+type MetalBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+
+/// One gathering op's deferred fault check: the op it came from, its fault
+/// buffer, and how many gather slots that buffer holds. [`encode_op`]
+/// produces these; [`execute`] checks them all after its single
+/// end-of-program wait (see the module doc's "Gather fault reporting").
+type PendingFault<'a> = (&'a BoundOp, MetalBuffer, usize);
 
 /// Everything [`execute`] can fail with: a missing device, any device
 /// operation that returned a Metal-side failure (compiling source, creating
@@ -148,28 +221,48 @@ pub fn execute(
             log: "device refused to create a command queue".to_string(),
         })?;
 
-    let mut device_buffers: BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>> =
-        BTreeMap::new();
+    let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
     for (node, data) in prepared.block_nodes.iter().zip(blocks.iter()) {
         let dtype = gpu_dtype(program, &prepared.index_nodes, *node);
         device_buffers.insert(*node, upload_block(&device, data, *node, dtype)?);
     }
 
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command queue refused to hand out a command buffer".to_string(),
+        })?;
+
     let mut pipeline_cache: BTreeMap<
         String,
         Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     > = BTreeMap::new();
+    // (bound op, its fault buffer, gather count) for every op that gathered —
+    // checked only after the single end-of-program wait below, since a fault
+    // buffer is not CPU-visible until the command buffer it was written in
+    // completes. See the module doc's "Gather fault reporting" section.
+    let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        dispatch_op(
+        let fault = encode_op(
             &device,
-            &queue,
+            &command_buffer,
             &mut pipeline_cache,
             &mut device_buffers,
             bound,
         )?;
+        if let Some((fault_buffer, gathers)) = fault {
+            pending_faults.push((bound, fault_buffer, gathers));
+        }
         for retired in &prepared.retires[position] {
             device_buffers.remove(retired);
         }
+    }
+
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+
+    for (bound, fault_buffer, gathers) in &pending_faults {
+        check_gather_fault(bound, fault_buffer, *gathers)?;
     }
 
     finish(
@@ -638,6 +731,34 @@ fn allocate_buffer(
         })
 }
 
+/// How many real [`upload_block`] calls took each host->device path —
+/// incremented once per call, never per byte, so a caller can read back the
+/// no-copy hit rate after a run without an external profiler. See the
+/// module doc's "Host buffer upload" section.
+pub static NOCOPY_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.nocopy");
+pub static COPYING_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.copy");
+
+/// The host's page size, queried once and cached — the alignment unit
+/// `newBufferWithBytesNoCopy` requires for both the pointer and the length
+/// (16384 on Apple silicon, but this asks the OS rather than hard-coding
+/// that). Public so a caller building block inputs (e.g.
+/// `proxima_tensor::AlignedBuffer::new`) can size an allocation to this
+/// exact host's page size instead of duplicating the sysconf call.
+pub fn page_size() -> usize {
+    static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+    // SAFETY: `sysconf` takes a plain `c_int` name and has no preconditions;
+    // `_SC_PAGESIZE` is POSIX-portable (macOS's `libc` crate has no
+    // `getpagesize()` binding, unlike Linux's).
+    *PAGE_SIZE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize })
+}
+
+/// `newBufferWithBytesNoCopy`'s hard requirement: `pointer` and `length`
+/// must both land on a page boundary.
+fn is_page_aligned(pointer: *const c_void, length: usize) -> bool {
+    let page = page_size();
+    (pointer as usize).is_multiple_of(page) && length.is_multiple_of(page)
+}
+
 /// Narrows the caller's f32 host data to `dtype`'s own width before
 /// uploading — see this module's dtype doc for why that narrowing happens
 /// exactly once, here, rather than the device buffer staying 4 bytes per
@@ -652,7 +773,7 @@ fn upload_block(
     data: &[f32],
     node: NodeId,
     dtype: DType,
-) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+) -> Result<MetalBuffer, MetalError> {
     match dtype {
         DType::Float16 => upload_block_as_half(device, data),
         DType::Float32
@@ -672,18 +793,72 @@ fn upload_block(
     }
 }
 
+/// The only path that can take the no-copy upload: the caller's own
+/// `&[f32]` slice is borrowed for [`execute`]'s entire call, which
+/// `waitUntilCompleted`s its single command buffer (every op's reads
+/// included) before that borrow can end, so handing the GPU the caller's
+/// own pointer is sound whenever it is page-aligned. See the module doc's
+/// "Host buffer upload" section for why [`upload_block_as_half`] can never
+/// take this path.
 fn upload_block_as_float(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
-) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+) -> Result<MetalBuffer, MetalError> {
     if data.is_empty() {
         return allocate_buffer(device, 0, DType::Float32);
     }
     let byte_length = size_of_val(data);
-    // SAFETY: `data` is a live, non-empty `&[f32]` for the duration of this
-    // call, so its first element's address is a valid, non-null pointer that
-    // stays valid while `newBufferWithBytes_length_options` copies from it.
-    let pointer = unsafe { NonNull::new_unchecked(data.as_ptr() as *mut c_void) };
+    let pointer = data.as_ptr().cast::<c_void>();
+    if is_page_aligned(pointer, byte_length) {
+        counter!(NOCOPY_BUFFER_UPLOADS, 1);
+        return upload_block_no_copy(device, pointer, byte_length);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    upload_block_copy(device, pointer, byte_length)
+}
+
+/// The zero-copy path: shares `pointer`'s memory directly with the GPU
+/// instead of duplicating it. Sound only because every caller of
+/// [`upload_block`] binds the returned buffer to a `device const float*`
+/// kernel argument (see `msl::kernel_signature`) — the GPU never writes
+/// through it, matching the `&[f32]` (never `&mut`) the caller handed us —
+/// and because [`execute`] `waitUntilCompleted`s the one command buffer
+/// every op (including this buffer's reads) is encoded into before
+/// [`upload_block_as_float`]'s caller-owned slice's borrow can end.
+fn upload_block_no_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    // SAFETY: `pointer` is non-null (it comes from a non-empty slice) and,
+    // per `is_page_aligned`, page-aligned with a page-aligned `byte_length`
+    // — `newBufferWithBytesNoCopy`'s documented precondition. Passing `None`
+    // as the deallocator tells Metal it never owns this memory, so it is
+    // never freed or written out from under the caller.
+    let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
+    unsafe {
+        device.newBufferWithBytesNoCopy_length_options_deallocator(
+            pointer,
+            byte_length,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        )
+    }
+    .ok_or_else(|| MetalError::CompileFailed {
+        log: "device refused a no-copy shared buffer for a page-aligned block input".to_string(),
+    })
+}
+
+fn upload_block_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    // SAFETY: `pointer` is a live, non-null address for the duration of this
+    // call (borrowed from the caller's own `&[f32]`, or a locally owned
+    // narrowed `Vec<f16>` that outlives this call), so it stays valid while
+    // `newBufferWithBytes_length_options` copies from it.
+    let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
     unsafe {
         device.newBufferWithBytes_length_options(
             pointer,
@@ -696,31 +871,22 @@ fn upload_block_as_float(
     })
 }
 
+/// Always copies — see the module doc's "Host buffer upload" section for
+/// why a freshly narrowed `Vec<f16>` can never take the no-copy path: it
+/// drops the instant this function returns, so no-copy would hand Metal a
+/// dangling pointer.
 fn upload_block_as_half(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
-) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+) -> Result<MetalBuffer, MetalError> {
     if data.is_empty() {
         return allocate_buffer(device, 0, DType::Float16);
     }
     let narrowed: Vec<f16> = data.iter().map(|value| f16::from_f32(*value)).collect();
     let byte_length = size_of_val(narrowed.as_slice());
-    // SAFETY: `narrowed` is a live, non-empty `Vec<f16>` for the duration of
-    // this call, so its first element's address is a valid, non-null
-    // pointer that stays valid while `newBufferWithBytes_length_options`
-    // copies from it — the same reasoning `upload_block_as_float` uses for
-    // its own `data`, just over the narrowed buffer instead of the host one.
-    let pointer = unsafe { NonNull::new_unchecked(narrowed.as_ptr() as *mut c_void) };
-    unsafe {
-        device.newBufferWithBytes_length_options(
-            pointer,
-            byte_length,
-            MTLResourceOptions::StorageModeShared,
-        )
-    }
-    .ok_or_else(|| MetalError::CompileFailed {
-        log: "device refused to allocate a shared buffer for a block input".to_string(),
-    })
+    let pointer = narrowed.as_ptr().cast::<c_void>();
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    upload_block_copy(device, pointer, byte_length)
 }
 
 /// Allocates a `gather_count`-long `uint` buffer for a dispatch's gather
@@ -840,13 +1006,20 @@ fn dispatch(
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
 }
 
-fn dispatch_op(
+/// Encodes one `BoundOp` as a compute pass into `command_buffer` — its own
+/// `MTLComputeCommandEncoder`, opened and `endEncoding()`d here, but neither
+/// committed nor waited on: [`execute`] shares one command buffer across
+/// every op in the program and commits/waits exactly once (see the module
+/// doc's "Execution model"). Returns the op's fault buffer and gather count
+/// when it gathers, so [`execute`] can check it after that single wait
+/// instead of here, where the buffer is not yet CPU-visible.
+fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
-    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
     pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-    device_buffers: &mut BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
+    device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
     bound: &BoundOp,
-) -> Result<(), MetalError> {
+) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     let kernel = emit(bound)?;
     let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
     let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
@@ -856,11 +1029,6 @@ fn dispatch_op(
         .then(|| allocate_fault_buffer(device, gathers))
         .transpose()?;
 
-    let command_buffer = queue
-        .commandBuffer()
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command queue refused to hand out a command buffer".to_string(),
-        })?;
     let encoder =
         command_buffer
             .computeCommandEncoder()
@@ -879,15 +1047,9 @@ fn dispatch_op(
     )?;
     dispatch(&encoder, &pipeline, kernel.grid);
     encoder.endEncoding();
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
-
-    if let Some(fault_buffer) = &fault {
-        check_gather_fault(bound, fault_buffer, gathers)?;
-    }
 
     device_buffers.insert(bound.node, output);
-    Ok(())
+    Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))
 }
 
 /// Reads back a dispatch's fault buffer and, if any slot recorded a fault,

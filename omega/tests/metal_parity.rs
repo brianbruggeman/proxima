@@ -1133,3 +1133,86 @@ fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
         "f16 matmul worst relative error {worst_relative} exceeds the f16 epsilon {EPSILON}"
     );
 }
+
+#[test]
+fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
+    let page_elements = (omega::page_size() / std::mem::size_of::<f32>()) as u32;
+
+    let mut program = Vec::new();
+    let input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(page_elements)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Tanh,
+            operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
+            name: None,
+        },
+    );
+
+    let mut aligned =
+        proxima_tensor::AlignedBuffer::new(page_elements as usize, omega::page_size());
+    for (index, value) in aligned.iter_mut().enumerate() {
+        *value = (index % 7) as f32 * 0.1;
+    }
+    assert_eq!(
+        aligned.len(),
+        page_elements as usize,
+        "an already-page-sized request must round to itself, no padding"
+    );
+
+    let nocopy_before = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
+    let copy_before = omega::metal::COPYING_BUFFER_UPLOADS.get();
+
+    let cpu =
+        evaluate(&program, &[], &[&aligned[..]], &[]).expect("cpu evaluates the page-sized chain");
+    let metal = omega::execute(&program, &[], &[&aligned[..]], &[])
+        .expect("metal executes the page-aligned block on a real device");
+
+    let nocopy_after = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
+    let copy_after = omega::metal::COPYING_BUFFER_UPLOADS.get();
+
+    assert_parity("page_aligned_input", cpu.root(), metal.root());
+
+    println!(
+        "page_aligned_input_takes_the_no_copy_metal_upload_path: nocopy {nocopy_before}->{nocopy_after}, copy {copy_before}->{copy_after}"
+    );
+    assert_eq!(
+        nocopy_after - nocopy_before,
+        1,
+        "a page-aligned {page_elements}-element block must take the zero-copy upload path exactly once"
+    );
+    assert_eq!(
+        copy_after, copy_before,
+        "the page-aligned block must not also count as a copying upload"
+    );
+}
+
+/// Reports the no-copy-vs-copy upload split across every real
+/// [`omega::execute`] call this whole test binary makes — not a
+/// per-program assertion (see the other tests for that), just the number
+/// this task's report is required to cite. Sorts alphabetically last in
+/// this file (`u` after `t`), so a single-process, single-threaded run
+/// (`cargo test -p omega --features metal --test metal_parity --
+/// --test-threads=1`) executes it after every other test in the binary has
+/// already incremented these same process-global counters — printed here,
+/// not asserted to an exact value, since which other tests ran (and how
+/// many blocks each uploaded) is this file's business, not this test's.
+#[ignore = "meaningful only under a single-process run (cargo test -- --test-threads=1 --ignored); nextest isolates every test into its own process, so this would read 0/0 there"]
+#[test]
+fn upload_path_totals_report_after_the_full_parity_suite() {
+    let nocopy = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
+    let copy = omega::metal::COPYING_BUFFER_UPLOADS.get();
+    println!("metal_parity upload path totals: nocopy={nocopy} copy={copy}");
+    assert!(
+        nocopy + copy > 0,
+        "no real upload_block call was observed by this binary at all"
+    );
+}
