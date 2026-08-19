@@ -66,6 +66,15 @@ use core::arch::aarch64::{
     vaddvq_s32, vandq_u8, vdupq_n_s32, vdupq_n_u8, vld1q_s8, vld1q_u8, vreinterpretq_s8_u8,
     vshrq_n_u8,
 };
+// `dot_q4k_q8k_block_avx2`'s own intrinsics -- the x86 sibling of the
+// aarch64 `use` block above, same reasoning: a separate cfg-gated block so
+// a default build never imports symbols nothing references.
+#[cfg(all(q4k_avx2, feature = "q4k-int8-dot"))]
+use core::arch::x86_64::{
+    __m256i, _mm256_and_si256, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_loadu_si256,
+    _mm256_maddubs_epi16, _mm256_madd_epi16, _mm256_set1_epi16, _mm256_set1_epi8, _mm256_srli_epi16,
+    _mm_add_epi32, _mm_cvtsi128_si32, _mm_shuffle_epi32, _mm_unpackhi_epi64,
+};
 use core::any::TypeId;
 use core::cell::RefCell;
 use core::future::Future;
@@ -4031,13 +4040,20 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
 ///
 /// Dispatches to [`dot_q4k_q8k_block_neon_dotprod`] when built with the
 /// `q4k_dotprod` cfg (`build.rs`: every aarch64 target this workspace
-/// builds for) and to the portable [`dot_q4k_q8k_block_scalar`] everywhere
-/// else. Both compute the identical mechanism -- read 4.5 bits/weight off
-/// `weight_row` and do the multiply-accumulate against `Q8_K` `i8`
-/// activations directly, no `f32` intermediate at all -- the NEON arm is
-/// an acceleration of that mechanism (`vdotq_s32`'s 16-lane int8 dot via
-/// inline `sdot`, `core::arch::aarch64::vdotq_s32` itself being unstable
-/// on this toolchain -- `stdarch_neon_dotprod`), not a different one.
+/// builds for), to [`dot_q4k_q8k_block_avx2`] when built with the
+/// `q4k_avx2` cfg (`build.rs`: an x86 target whose `CARGO_CFG_TARGET_FEATURE`
+/// lists `avx2` -- unlike aarch64's `FEAT_DotProd`, AVX2 is NOT in the x86-64
+/// baseline ISA, so this one is opt-in via `-C target-feature=+avx2` /
+/// `-C target-cpu`, not implied by the target triple alone), and to the
+/// portable [`dot_q4k_q8k_block_scalar`] everywhere else. All three compute
+/// the identical mechanism -- read 4.5 bits/weight off `weight_row` and do
+/// the multiply-accumulate against `Q8_K` `i8` activations directly, no
+/// `f32` intermediate at all -- the NEON arm is an acceleration of that
+/// mechanism (`vdotq_s32`'s 16-lane int8 dot via inline `sdot`,
+/// `core::arch::aarch64::vdotq_s32` itself being unstable on this toolchain
+/// -- `stdarch_neon_dotprod`), and the AVX2 arm is a second, independent
+/// acceleration of it (`_mm256_maddubs_epi16` + `_mm256_madd_epi16`'s
+/// 32-lane unsigned-times-signed int8 dot), not a different one.
 ///
 /// # Errors
 /// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
@@ -4066,7 +4082,13 @@ pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
         // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
         // targets, all of which carry FEAT_DotProd (build.rs's own doc).
         let block_sum = unsafe { dot_q4k_q8k_block_neon_dotprod(weight_block, q8k_block) };
-        #[cfg(not(q4k_dotprod))]
+        #[cfg(all(q4k_avx2, not(q4k_dotprod)))]
+        // SAFETY: `q4k_avx2` is emitted by build.rs only when
+        // `CARGO_CFG_TARGET_FEATURE` actually lists `avx2` (build.rs's own
+        // doc) -- the caller opted the build itself into AVX2, so the
+        // instructions this block issues are guaranteed present.
+        let block_sum = unsafe { dot_q4k_q8k_block_avx2(weight_block, q8k_block) };
+        #[cfg(not(any(q4k_dotprod, q4k_avx2)))]
         let block_sum = dot_q4k_q8k_block_scalar(weight_block, q8k_block);
         acc += block_sum;
     }
@@ -4273,6 +4295,115 @@ unsafe fn dot_q4k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
         let d = activation_scale * d_weight;
         let dmin = activation_scale * dmin_weight;
         d.mul_add((sumi1 + sumi2) as f32, -(dmin * mins_correction as f32))
+    }
+}
+
+/// Horizontal sum of an `__m256i` holding eight packed `i32` lanes down to
+/// one scalar -- the standard AVX2 idiom (extract the high 128 bits, add to
+/// the low 128, fold 64-then-32), used by [`dot_q4k_q8k_block_avx2`] to
+/// collapse [`_mm256_madd_epi16`]'s eight-lane pairwise-sum result into the
+/// same single `i32` partial-dot value [`dot_q4k_q8k_block_scalar`]'s
+/// 32-iteration scalar loop accumulates directly.
+///
+/// # Safety
+/// Caller guarantees AVX2 is available -- every intrinsic this function
+/// calls (`_mm256_extracti128_si256`/`_mm256_castsi256_si128` need AVX;
+/// `_mm_add_epi32`/`_mm_unpackhi_epi64`/`_mm_shuffle_epi32`/
+/// `_mm_cvtsi128_si32` are SSE2, x86-64 baseline) is a "safe" intrinsic
+/// function under this toolchain's target-feature rules once the enclosing
+/// function's `#[target_feature(enable = "avx2")]` statically guarantees
+/// the feature, which is why the body below needs no inner `unsafe {}` --
+/// this function itself stays `unsafe fn` only so its signature doesn't
+/// imply it is callable outside an AVX2-guaranteed build.
+#[cfg(all(q4k_avx2, feature = "q4k-int8-dot"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum_epi32_avx2(v: __m256i) -> i32 {
+    let high = _mm256_extracti128_si256(v, 1);
+    let low = _mm256_castsi256_si128(v);
+    let sum128 = _mm_add_epi32(low, high);
+    let high64 = _mm_unpackhi_epi64(sum128, sum128);
+    let sum64 = _mm_add_epi32(sum128, high64);
+    let high32 = _mm_shuffle_epi32(sum64, 0b01);
+    let sum32 = _mm_add_epi32(sum64, high32);
+    _mm_cvtsi128_si32(sum32)
+}
+
+/// [`dot_q4k_q8k_block_scalar`]'s mechanism, AVX2-accelerated: identical
+/// per-sub-block structure (unpack scale/min via `get_scale_min_k4`, dot 32
+/// nibbles against 32 `Q8_K` activations, scale, accumulate; mins correction
+/// identical), but the 32-nibble dot is one `_mm256_maddubs_epi16` (32-lane
+/// unsigned-nibble x signed-`i8` multiply, pairwise-summed to 16 `i16`
+/// lanes) followed by `_mm256_madd_epi16` against an all-ones vector
+/// (pairwise-summed to 8 `i32` lanes) and [`hsum_epi32_avx2`], instead of a
+/// 32-iteration scalar loop -- low/high nibbles split via
+/// `_mm256_and_si256`/`_mm256_srli_epi16` exactly as
+/// `ggml_vec_dot_q4_K_q8_K`'s `__AVX2__` arm does
+/// (`ggml-cpu/arch/x86/quants.c`), but WITHOUT that function's
+/// `_mm256_shuffle_epi8`-based scale broadcast: this kernel multiplies each
+/// 32-lane partial dot by its scalar `i32` scale code AFTER the horizontal
+/// sum, the same order [`dot_q4k_q8k_block_scalar`] uses, rather than
+/// folding the scale into the SIMD `madd` itself -- integer multiplication
+/// distributes over integer addition exactly, so this is the identical
+/// mechanism at the identical resulting value, just without minting a
+/// scale-shuffle table this component doesn't otherwise need.
+///
+/// # Safety
+/// Caller guarantees AVX2 is available; `weight_block.len() ==
+/// Q4K_BLOCK_BYTES` and `q8k_block.len() == Q8K_BLOCK_BYTES` (both
+/// [`dot_q4k_q8k`]'s own `chunks_exact` calls already guarantee before
+/// calling this).
+#[cfg(all(q4k_avx2, feature = "q4k-int8-dot"))]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_q4k_q8k_block_avx2(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q4K_D_OFFSET);
+    let dmin_weight = f16_le_at(weight_block, Q4K_DMIN_OFFSET);
+    let mut scales = [0u8; Q4K_SCALE_BYTES];
+    scales.copy_from_slice(&weight_block[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+    let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+    let mut mins_correction = 0i32;
+    for sub_block in 0..Q4K_SUB_BLOCKS {
+        let (_, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+    }
+
+    // SAFETY: caller-guaranteed AVX2; `q4_base`/`q8_base` each walk exactly
+    // `Q4K_BLOCK_ELEMENTS / 2` / `Q4K_BLOCK_ELEMENTS` bytes across the
+    // `Q4K_SUB_BLOCKS / 2` loop iterations below, both within the slices'
+    // checked bounds (`_mm256_loadu_si256` needs no alignment).
+    unsafe {
+        let m4 = _mm256_set1_epi8(0x0f);
+        let ones = _mm256_set1_epi16(1);
+        let q4_base = weight_block[Q4K_QS_OFFSET..].as_ptr();
+        let q8_base = q8k_block[Q8K_QS_OFFSET..].as_ptr().cast::<i8>();
+
+        let mut sumi = 0i32;
+        for j in 0..Q4K_SUB_BLOCKS / 2 {
+            let q4bits = _mm256_loadu_si256(q4_base.add(j * 32).cast());
+            let q4_lo = _mm256_and_si256(q4bits, m4);
+            let q4_hi = _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4);
+
+            let q8_lo = _mm256_loadu_si256(q8_base.add(j * 64).cast());
+            let dot_lo = _mm256_madd_epi16(_mm256_maddubs_epi16(q4_lo, q8_lo), ones);
+            let scale_lo = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j, &scales).0;
+            sumi += hsum_epi32_avx2(dot_lo) * i32::from(scale_lo);
+
+            let q8_hi = _mm256_loadu_si256(q8_base.add(j * 64 + 32).cast());
+            let dot_hi = _mm256_madd_epi16(_mm256_maddubs_epi16(q4_hi, q8_hi), ones);
+            let scale_hi = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j + 1, &scales).0;
+            sumi += hsum_epi32_avx2(dot_hi) * i32::from(scale_hi);
+        }
+
+        let d = activation_scale * d_weight;
+        let dmin = activation_scale * dmin_weight;
+        d.mul_add(sumi as f32, -(dmin * mins_correction as f32))
     }
 }
 

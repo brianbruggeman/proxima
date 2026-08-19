@@ -3959,3 +3959,185 @@ printed per shape; correctness is the bench's own inline `assert!(diff <
    3-5-run minimum this skill calls for — CoV is UNKNOWN for those two
    rows' numbers, reported as single-run rather than dressed up with a
    borrowed CoV from the attn_q shape.
+
+## ROW 62 — AVX2 int8 dot on the same packed q4_K/Q8_K blocks: compiles, disassembles, UNVERIFIED-BY-EXECUTION
+
+ROW 61 landed `dot_q4k_q8k`'s aarch64 arm. This row adds the x86 sibling:
+`dot_q4k_q8k_block_avx2` (`cpu.rs`, feature `q4k-int8-dot`, still
+default-off), selected by a new `q4k_avx2` cfg (`build.rs::emit_avx2_cfg`)
+the same way `q4k_dotprod` selects the NEON arm — same mechanism (per
+sub-block: unpack `(scale, min)` via the already-`pub`
+`get_scale_min_k4`, dot 32 packed nibbles against 32 `Q8_K` `i8`
+activations, scale, accumulate; mins correction identical), a third
+acceleration of it, not a different one. Ports the scalar body of
+`ggml_vec_dot_q4_K_q8_K`'s `__AVX2__` arm
+(`ggml-cpu/arch/x86/quants.c`, read before writing anything, per the
+brief): `_mm256_and_si256`/`_mm256_srli_epi16` split low/high nibbles
+(the same 16-bit-lane-shift-then-per-byte-mask trick ggml's own kernel
+uses, since x86 has no per-byte 8-bit shift instruction), then
+`_mm256_maddubs_epi16` (32-lane unsigned-nibble x signed-`i8` multiply,
+pairwise-summed to 16 `i16`) + `_mm256_madd_epi16` against an all-ones
+vector (pairwise-summed to 8 `i32`) + a `hsum_epi32_avx2` horizontal
+fold — **without** ggml's `_mm256_shuffle_epi8` scale-broadcast table:
+this kernel multiplies the horizontally-summed 32-lane partial dot by
+its scalar `i32` scale code AFTER the sum, matching
+`dot_q4k_q8k_block_scalar`'s own order rather than folding the scale
+into the SIMD `madd` itself. Integer multiplication distributes over
+integer addition exactly, so this is the identical mechanism at the
+identical resulting value, minting no scale-shuffle table this component
+does not otherwise need.
+
+**AVX2 is NOT the x86-64 baseline (MEASURED, not assumed):** `rustc
+--print cfg --target x86_64-unknown-linux-gnu` lists `target_feature`
+values `fxsr,sse,sse2` only — no `avx2`. Unlike `q4k_dotprod` (every
+aarch64 target this workspace builds for carries `FEAT_DotProd`, so
+`build.rs` can key that cfg on `target_arch` alone), `emit_avx2_cfg`
+additionally requires `CARGO_CFG_TARGET_FEATURE` to list `avx2` — i.e.
+the build itself must opt in via `-C target-feature=+avx2` / `-C
+target-cpu=<v3 or newer, or native on an AVX2 host>`. An unqualified
+`x86_64-unknown-linux-gnu` build (this crate's own `cargo check --target
+x86_64-unknown-linux-gnu --features q4k-int8-dot` gate cell, no
+RUSTFLAGS) compiles the portable scalar arm only — `q4k_avx2` never
+fires there, confirmed by grepping the resulting disassembly for
+`dot_q4k_q8k_block_scalar`'s callq (found; no `vpmaddubsw`).
+
+**This host cannot execute an x86_64 binary (aarch64 Apple Silicon,
+no x86 emulator/rosetta-for-linux-elf available) — every claim below
+about the AVX2 arm is COMPILE-TIME and DISASSEMBLY evidence only. No
+throughput number, no correctness-by-running number, exists for this
+arm. Explicitly UNVERIFIED-BY-EXECUTION:**
+
+1. **Compiles (MEASURED, exit code):**
+   `cargo check -p proxima-tensor --target x86_64-unknown-linux-gnu
+   --features q4k-int8-dot` — exit 0, portable arm only (no RUSTFLAGS,
+   `q4k_avx2` off by design). `RUSTFLAGS="-C target-feature=+avx2" cargo
+   check -p proxima-tensor --target x86_64-unknown-linux-gnu --features
+   q4k-int8-dot` — exit 0, `q4k_avx2` cfg active. Same command with
+   `,test-support` added — exit 0.
+2. **The intrinsic path is what actually compiles, not merely what the
+   cfg claims (MEASURED, disassembly, not trusted from the cfg name):**
+   `cargo rustc -p proxima-tensor --lib --target x86_64-unknown-linux-gnu
+   --features q4k-int8-dot --release -- --emit=asm` with
+   `RUSTFLAGS="-C target-feature=+avx2"` emits a `.s` file whose
+   `dot_q4k_q8k` symbol (`_RNvNtCs82pdBFFVUbe_14proxima_tensor3cpu11dot_
+   q4k_q8k`) contains 8 `vpmaddubsw`/8 `vpmaddwd` instances (16 total,
+   `grep -c`), inlined directly — no call out to
+   `dot_q4k_q8k_block_scalar` (confirmed absent from that symbol's call
+   sites, present instead when the SAME command is run WITHOUT the
+   `+avx2` RUSTFLAGS). Inner loop (one of four `j` iterations, low-nibble
+   half):
+   ```asm
+   vpbroadcastb .LCPI275_3(%rip), %ymm6
+   vpand   %ymm6, %ymm0, %ymm2
+   vpmaddubsw 196(%r14,%r13), %ymm2, %ymm2
+   vpbroadcastw .LCPI275_4(%rip), %ymm7
+   vpmaddwd %ymm7, %ymm2, %ymm2
+   vextracti128 $1, %ymm2, %xmm3
+   vpaddd  %xmm2, %xmm3, %xmm2
+   vpshufd $238, %xmm2, %xmm3
+   vpaddd  %xmm3, %xmm2, %xmm2
+   vpshufd $85, %xmm2, %xmm3
+   vpaddd  %xmm2, %xmm3, %xmm2
+   vmovd   %xmm2, %r11d
+   ```
+   `vpand`+`vpmaddubsw`+`vpmaddwd` is the nibble-mask/multiply/pairwise-sum
+   sequence `dot_q4k_q8k_block_avx2` was written to produce; the
+   `vextracti128`/`vpaddd`/`vpshufd` chain is `hsum_epi32_avx2` inlined.
+   VEX-encoded 256-bit (`ymm`) forms confirm AVX2, not merely SSE.
+3. **Bit-exactness is asserted by construction, not by a dedicated new
+   test (mirrors ROW 61's own test rather than duplicating it):**
+   `matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm`
+   (`cpu.rs`, unchanged by this row) compares `matmul_q4k_q8k_f32`
+   (whichever arm `dot_q4k_q8k`'s cfg selects) against
+   `matmul_q4k_q8k_portable_f32` (always scalar) and asserts
+   `assert_eq!`. Because `dot_q4k_q8k`'s three arms are selected by
+   mutually-exclusive cfg (`q4k_dotprod` / `q4k_avx2 and not
+   q4k_dotprod` / neither), this ONE test exercises whichever arm the
+   build under test actually compiled — NEON dotprod on this host's
+   native aarch64 runs (293/298 nextest totals above, unchanged), and
+   would exercise AVX2 on an x86_64 build with `q4k_avx2` active, but
+   **that build cannot be executed from this host** (point above) — so
+   the AVX2 arm's bit-exactness is argued by the SAME reasoning ROW 61
+   used for `sdot` (every intermediate is `i32` until the final two
+   `f32` ops; integer addition is exact and associative regardless of
+   SIMD-vs-scalar summation order, so `hsum_epi32_avx2`'s
+   extract-and-fold reduction must equal `dot_q4k_q8k_block_scalar`'s
+   32-iteration serial sum bit-for-bit) — NOT proven by a passing
+   assertion on this arm, because no assertion has run on it anywhere.
+4. **No throughput number exists for this arm at all.** No `ns/mac`, no
+   CoV, no `design-favors` scorecard row against ggml's AVX2 kernel —
+   the frequency-weighted-scorecard requirement (guiding-principles
+   §13/`disciplined-component` gate 13) is UNSATISFIED for this row.
+   Producing one requires either (a) a real x86_64 host with the
+   toolchain to link a Rust binary (this box has `rustc`/`cargo` targets
+   but no `x86_64-linux-gnu-gcc` cross-linker — confirmed: `cargo test
+   --no-run --target x86_64-unknown-linux-gnu ...` fails at `alloca`'s
+   build script with `ToolNotFound: x86_64-linux-gnu-gcc`, a linking
+   step `cargo check`/`cargo rustc --emit=asm` never reach), or (b) CI
+   running on an actual x86_64 runner. Scheduled, not done here.
+
+**Types minted: none.** Reuses `get_scale_min_k4` (already `pub`,
+ROW 61), the existing `Q4K_*`/`Q8K_*` byte-offset constants, and
+`f16_le_at` — the only new items are the two functions
+(`dot_q4k_q8k_block_avx2`, `hsum_epi32_avx2`) and their intrinsic
+imports, cfg-gated identically to the NEON arm's own `use` block.
+
+**Allocation budget:** hot path (`dot_q4k_q8k_block_avx2`,
+`hsum_epi32_avx2`) — zero, matches ROW 61's stated budget; every value
+is a register or stack scalar, no new buffers. Not independently
+measured on this row (no executable x86 build) — inherits the
+COMPILE-TIME guarantee that the function contains no `alloc`/`Vec`/`Box`
+call (grepped the source; none present), not a runtime allocation-counter
+result.
+
+**Feature gate:** `q4k-int8-dot`, unchanged, still default-off. No new
+feature added for the x86 arm — it rides the same gate ROW 61 opened,
+selected purely by `build.rs`'s cfg logic at compile time, per the
+brief's instruction not to add a second x86 tier (no AVX-without-AVX2
+arm, no VNNI/AVX-512 — this workspace's actual targets are aarch64 and
+AVX2-or-later x86_64, and the brief's own framing that "if you believe a
+second x86 tier is needed, STOP and report why" did not surface a case
+for one: `ggml_vec_dot_q4_K_q8_K` itself branches only `__AVX2__` /
+`__AVX__` / scalar, and this row deliberately stops at the first,
+matching what the incumbent treats as its primary x86 tier).
+
+**Gates:** `cargo nextest run -p proxima-tensor` (default features,
+native aarch64) — 293 passed, 0 failed, 2 skipped (unchanged N; AVX2
+code is cfg'd off on this host by construction). `--features
+q4k-int8-dot,test-support` — 298 passed, 0 failed, 2 skipped (unchanged
+N — no new test was added; ROW 61's bit-exact test already covers
+whichever arm is active, per point 3 above). `cargo check -p
+proxima-tensor --target x86_64-unknown-linux-gnu --features
+q4k-int8-dot` — exit 0. `bash scripts/proxima-tensor-gate.sh` (with
+`GGML_BUILD_DIR` pointed at a freshly-built static-lib ggml checkout —
+`/Users/brianbruggeman/repos/others/llama.cpp/ggml`, standalone
+`cmake -S ggml -B ggml/build -DBUILD_SHARED_LIBS=OFF
+-DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF`, `ggml.pc.in` was
+missing from this vendored checkout and was recreated as a minimal
+pkg-config stub so `configure_file` would not abort the build — the
+static libs themselves are the standard cmake output, untouched) —
+`passed: 18, failed: 0`. GEMM checksums unchanged (native aarch64,
+unaffected by an x86-only cfg): `512 4 1` -> `135.87619`, `1024 4 1` ->
+`260.24106`, `2048 4 1` -> `513.10425`.
+
+**Re-prove:** the two x86 cells above
+(`cargo check --target x86_64-unknown-linux-gnu --features
+q4k-int8-dot`, and the same command prefixed with `RUSTFLAGS="-C
+target-feature=+avx2"` plus `cargo rustc ... --emit=asm` to regrep for
+`vpmaddubsw`/`vpmaddwd`) are exit-code and grep-count re-provable from
+this repo alone, no external asset needed. `bash
+scripts/proxima-tensor-gate.sh` additionally needs a built ggml
+checkout at `GGML_BUILD_DIR` (documented in ROW 61's own re-prove line;
+unchanged by this row).
+
+**Not landed as measured, one gap kept, not buried:** this row is
+compile-time and disassembly evidence ONLY. It does not claim the AVX2
+arm is fast, correct-by-execution, or even that it LINKS on a real
+x86_64 host — only that it compiles, that the compiled code contains
+the intended AVX2 instructions, and that its bit-exactness rests on the
+same integer-associativity argument ROW 61 used for `sdot`, unconfirmed
+by an actual run. A future row on x86_64 hardware (or x86_64 CI) owes:
+the `q4k-int8-dot,test-support` nextest run showing
+`matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm` PASS under
+`q4k_avx2`, and a `bench_q4k_matmul` `ns/mac` table against ggml's own
+AVX2 arm (`design-favors: incumbent`) to fill in point 4 above.
