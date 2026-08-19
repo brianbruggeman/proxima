@@ -107,9 +107,15 @@ workspace = true
 
 [dev-dependencies]
 conflaguration = { workspace = true, features = ["toml"] }
+criterion.workspace = true
 # `test-support` pulls in `proxima_tensor::test_support::Lcg`, the same
 # deterministic PRNG proxima-tensor's own examples share — see that crate's
 # Cargo.toml for why this is a feature, not a default.
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support"] }
 tempfile.workspace = true
 toml.workspace = true
+
+[[bench]]
+name = "metal_vs_cpu"
+harness = false
+required-features = ["metal"]
