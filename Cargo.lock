@@ -4731,6 +4731,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-tokenizer"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "conflaguration",
+ "proxima-gguf",
+ "proxima-primitives",
+ "serde",
+ "temp-env",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proxima-vm"
 version = "0.1.0"
 dependencies = [
