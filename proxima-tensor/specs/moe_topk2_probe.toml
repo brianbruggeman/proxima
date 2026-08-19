@@ -1,0 +1,247 @@
+# Probe, not a production spec: does top-k for a *fixed, compile-time* k > 1
+# stay inside the affine-only algebra, with zero new `Op`/`ScalarOp`
+# variants, the way top-1 (`moe_block.toml`) does? Answer: yes, for k
+# unrolled at spec-authoring time — this file is k=2 over 3 experts.
+#
+# The mechanism is two rounds of `moe_block.toml`'s own top-1 argmax, with
+# one extra step between them: after round 1 picks a winner, its logit is
+# masked to `-infinity` (the same `x - x` / `negate` / `reciprocal` IEEE-754
+# construction `causal_attention.toml` uses for its own mask) before round 2
+# runs the identical argmax again — so round 2 cannot re-select round 1's
+# expert. Each round's routed expert gathers its own weight slab and runs
+# its own linear layer exactly like top-1; the two experts' outputs combine
+# with a plain `add`, a static-arity elementwise op, not a scatter, because
+# each token always writes to the *same* two output slots regardless of
+# which two experts it routed to.
+#
+# What this does NOT prove: a *general*, variable-k `TopK` primitive (what
+# ONNX/XLA's own `TopK` op is) — that needs an actual sort or a data-driven
+# selection network (bitonic compare-exchange over XOR/modulo-indexed
+# pairs), which this crate's affine-only index grammar cannot express, and
+# still can't after this file. What this file shows is narrower and is what
+# production top-k MoE (Mixtral, etc.) actually needs: a *fixed* small k,
+# unrolled into k copies of the top-1 subgraph at spec-authoring time — a
+# config edit, the same claim this crate's whole `spec.rs` module doc rests
+# every other worked example on.
+#
+# One token, three experts, D_IN=2, D_OUT=1: gate weights are chosen so the
+# three logits are 2, 5, 3 (expert 1 highest, expert 2 second, expert 0
+# lowest) — top-2 must select experts 1 and 2 and exclude expert 0, whose
+# weight is set to a wildly different value in the test so a wrong
+# inclusion is impossible to miss.
+
+# --- inputs -----------------------------------------------------------------
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = ["?0", 2]
+
+[[node]]
+op = "input"
+id = "gate_w"
+dtype = "float32"
+shape = [2, 3]
+
+[[node]]
+op = "input"
+id = "expert_w"
+dtype = "float32"
+shape = [3, 2, 1]
+
+# --- gate: logits = x @ gate_w -----------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "gate_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "gate_w"]
+maps = ["sd->sde", "de->sde"]
+
+[[node]]
+op = "reduce"
+id = "logits"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "gate_product"
+in_map = "sde->sde"
+out_map = "se->sde"
+keep = "reduce"
+
+# --- round 1: argmax over the full expert axis -------------------------------
+
+[[node]]
+op = "reduce"
+id = "max_logit1"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "logits"
+in_map = "se->se"
+out_map = "s->se"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mask1"
+dtype = "float32"
+body = "equal"
+inputs = ["logits", "max_logit1"]
+maps = ["se->se", "s->se"]
+
+[[node]]
+op = "iota"
+id = "expert_index"
+dtype = "float32"
+extent = 3
+
+[[node]]
+op = "elementwise"
+id = "candidate1"
+dtype = "float32"
+body = "multiply"
+inputs = ["mask1", "expert_index"]
+maps = ["se->se", "e->se"]
+
+[[node]]
+op = "reduce"
+id = "route1"
+dtype = "int32"
+body = "maximum"
+init = "zero"
+input = "candidate1"
+in_map = "se->se"
+out_map = "s->se"
+keep = "reduce"
+
+# --- exclude round 1's winner: logits2 = select(mask1, -infinity, logits) ---
+
+[[node]]
+op = "elementwise"
+id = "zero_se"
+dtype = "float32"
+body = "subtract"
+inputs = ["logits", "logits"]
+maps = ["se->se", "se->se"]
+
+[[node]]
+op = "elementwise"
+id = "neg_zero_se"
+dtype = "float32"
+body = "negate"
+inputs = ["zero_se"]
+maps = ["se->se"]
+
+[[node]]
+op = "elementwise"
+id = "neg_infinity_se"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["neg_zero_se"]
+maps = ["se->se"]
+
+[[node]]
+op = "elementwise"
+id = "logits2"
+dtype = "float32"
+body = "select"
+inputs = ["mask1", "neg_infinity_se", "logits"]
+maps = ["se->se", "se->se", "se->se"]
+
+# --- round 2: argmax over the round-1-excluded logits ------------------------
+
+[[node]]
+op = "reduce"
+id = "max_logit2"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "logits2"
+in_map = "se->se"
+out_map = "s->se"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mask2"
+dtype = "float32"
+body = "equal"
+inputs = ["logits2", "max_logit2"]
+maps = ["se->se", "s->se"]
+
+[[node]]
+op = "elementwise"
+id = "candidate2"
+dtype = "float32"
+body = "multiply"
+inputs = ["mask2", "expert_index"]
+maps = ["se->se", "e->se"]
+
+[[node]]
+op = "reduce"
+id = "route2"
+dtype = "int32"
+body = "maximum"
+init = "zero"
+input = "candidate2"
+in_map = "se->se"
+out_map = "s->se"
+keep = "reduce"
+
+# --- two gathered expert FFNs, combined with a plain (unweighted) add -------
+
+[[node]]
+op = "elementwise"
+id = "ffn1_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["expert_w", "x"]
+maps = [
+  { gather = "route1", index_map = "s->sio", map = "io->sio", dim = 0 },
+  "si->sio",
+]
+
+[[node]]
+op = "reduce"
+id = "ffn1"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "ffn1_product"
+in_map = "sio->sio"
+out_map = "so->sio"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "ffn2_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["expert_w", "x"]
+maps = [
+  { gather = "route2", index_map = "s->sio", map = "io->sio", dim = 0 },
+  "si->sio",
+]
+
+[[node]]
+op = "reduce"
+id = "ffn2"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "ffn2_product"
+in_map = "sio->sio"
+out_map = "so->sio"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "y"
+dtype = "float32"
+body = "add"
+inputs = ["ffn1", "ffn2"]
+maps = ["so->so", "so->so"]
+name = "moe_top2_probe"

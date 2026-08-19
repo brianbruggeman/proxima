@@ -1,0 +1,138 @@
+# Sparse top-1 mixture-of-experts feed-forward: a gate projects each token to
+# one logit per expert, `argmax` (built the same way `causal_attention.toml`
+# built its mask index and the ONNX-survey technique names: a `Maximum`
+# reduce, an `Equal` mask, and `Op::Iota`) routes each token to exactly one
+# expert id, and that id gathers the *whole weight slab* for that expert out
+# of a `[n_experts, d_in, d_out]` stack — the same `IndexMap::Computed`
+# mechanism `spec.rs`'s embedding-lookup worked example uses to gather one
+# row out of a `[vocab, dim]` table, just with two non-gathered axes (`i`,
+# `o`) instead of one (`d`).
+#
+# `argmax` here needs no `Select` and no synthetic `-infinity` operand,
+# unlike the survey's spelling: `iota`'s values are all `>= 0`, so
+# `mask * iota` already sends every non-selected slot to `0` — the same
+# value slot `0` itself would contribute if it *were* the argmax — and a
+# `Maximum` reduce over that recovers the winning index directly. `zero` is
+# a safe reduce seed for the same reason: every real candidate is `>= 0`.
+#
+# `route`'s dtype is `int32`, not `float32` (unlike `causal_attention.toml`'s
+# purely-arithmetic `query_index`/`key_index` iotas) — it is consumed as a
+# gather's `indices`, and `shape::infer`'s `check_indices_dtype` rejects a
+# float index tensor outright (`TensorError::NonIntegerIndices`).
+#
+# One linear layer per expert (no bias, no activation) is "the expert's FFN"
+# here — enough to state and check the invariant that matters: a token's
+# output equals its routed expert's own weights applied to it, independent
+# of the graph.
+
+# --- inputs -----------------------------------------------------------------
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = ["?0", 3]
+
+[[node]]
+op = "input"
+id = "gate_w"
+dtype = "float32"
+shape = [3, 2]
+
+[[node]]
+op = "input"
+id = "expert_w"
+dtype = "float32"
+shape = [2, 3, 2]
+
+# --- gate: logits = x @ gate_w -----------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "gate_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "gate_w"]
+maps = ["sd->sde", "de->sde"]
+
+[[node]]
+op = "reduce"
+id = "logits"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "gate_product"
+in_map = "sde->sde"
+out_map = "se->sde"
+keep = "reduce"
+
+# --- route: argmax over the expert axis --------------------------------------
+
+[[node]]
+op = "reduce"
+id = "max_logit"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "logits"
+in_map = "se->se"
+out_map = "s->se"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mask"
+dtype = "float32"
+body = "equal"
+inputs = ["logits", "max_logit"]
+maps = ["se->se", "s->se"]
+
+[[node]]
+op = "iota"
+id = "expert_index"
+dtype = "float32"
+extent = 2
+
+[[node]]
+op = "elementwise"
+id = "candidate"
+dtype = "float32"
+body = "multiply"
+inputs = ["mask", "expert_index"]
+maps = ["se->se", "e->se"]
+
+[[node]]
+op = "reduce"
+id = "route"
+dtype = "int32"
+body = "maximum"
+init = "zero"
+input = "candidate"
+in_map = "se->se"
+out_map = "s->se"
+keep = "reduce"
+
+# --- gathered expert FFN: y = x @ expert_w[route[s]] -------------------------
+
+[[node]]
+op = "elementwise"
+id = "ffn_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["expert_w", "x"]
+maps = [
+  { gather = "route", index_map = "s->sio", map = "io->sio", dim = 0 },
+  "si->sio",
+]
+
+[[node]]
+op = "reduce"
+id = "y"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "ffn_product"
+in_map = "sio->sio"
+out_map = "so->sio"
+keep = "reduce"
+name = "moe_block"
