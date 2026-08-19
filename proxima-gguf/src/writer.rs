@@ -2,10 +2,7 @@
 //! [`crate::parser`], mirrored. [`write_complete`] never opens a file or
 //! writes to disk — it takes an in-memory [`GgufModel`] and returns owned
 //! bytes; the caller (an `std::fs::File`, a socket, anything) owns getting
-//! those bytes wherever they're going. [`WriteComplete`] is the `Pipe`
-//! wrapper around it, the dual of [`crate::pipe::ParseComplete`]: `In` is
-//! the model instead of `&[u8]`, `Out` is `Vec<u8>` instead of
-//! [`crate::pipe::ParsedGguf`].
+//! those bytes wherever they're going.
 //!
 //! Byte layout mirrors [`crate::parser::GgufParser`] exactly: magic,
 //! version, tensor/kv counts, the KV block, the tensor directory, then the
@@ -16,11 +13,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::future::Future;
-use core::marker::PhantomData;
 
 use arrayvec::ArrayVec;
-use proxima_primitives::pipe::primitives::Pipe;
 
 use crate::error::GgufError;
 use crate::parser::{MAGIC, pad_to_alignment};
@@ -239,60 +233,14 @@ fn write_tensor_entry(buf: &mut Vec<u8>, tensor: &TensorPayload<'_>, offset: u64
     buf.extend_from_slice(&offset.to_le_bytes());
 }
 
-/// Serializes one complete [`GgufModel`] in a single call. Stateless — a
-/// fresh serialization run happens on every [`Pipe::call`], same shape as
-/// [`crate::pipe::ParseComplete`]. Carries `'a` only to name `In = &'a
-/// GgufModel<'a>`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct WriteComplete<'a>(PhantomData<&'a ()>);
-
-impl<'a> WriteComplete<'a> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<'a> Pipe for WriteComplete<'a> {
-    type In = &'a GgufModel<'a>;
-    type Out = Vec<u8>;
-    type Err = GgufError;
-
-    fn call(&self, input: &'a GgufModel<'a>) -> impl Future<Output = Result<Vec<u8>, GgufError>> {
-        async move { write_complete(input) }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use alloc::string::ToString;
     use alloc::vec;
-    use core::pin::pin;
-    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     use super::*;
     use crate::parse_complete;
-
-    fn noop_raw_waker() -> RawWaker {
-        fn clone(_: *const ()) -> RawWaker {
-            noop_raw_waker()
-        }
-        fn no_op(_: *const ()) {}
-        let vtable = &RawWakerVTable::new(clone, no_op, no_op, no_op);
-        RawWaker::new(core::ptr::null(), vtable)
-    }
-
-    fn poll_ready<F: Future>(future: F) -> F::Output {
-        let mut future = pin!(future);
-        // SAFETY: the vtable's functions are all no-ops over a null data pointer.
-        let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-        let mut cx = Context::from_waker(&waker);
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => output,
-            Poll::Pending => panic!("WriteComplete::call must be ready on first poll"),
-        }
-    }
 
     fn dims(values: &[u64]) -> ArrayVec<u64, MAX_DIMS> {
         values.iter().copied().collect()
@@ -429,34 +377,5 @@ mod tests {
         };
         let outcome = write_complete(&model);
         assert!(matches!(outcome, Err(GgufError::DuplicateKey { .. })));
-    }
-
-    #[test]
-    fn write_complete_pipe_matches_the_free_function() {
-        let reference = parse_complete(&crate::tests::synthetic_gguf()).expect("reference parses");
-        let payloads: Vec<Vec<u8>> = reference
-            .tensors
-            .iter()
-            .map(|tensor| pattern_bytes(tensor.nbytes().expect("computable nbytes") as usize))
-            .collect();
-        let model = GgufModel {
-            version: reference.version,
-            metadata: reference.metadata.clone(),
-            tensors: reference
-                .tensors
-                .iter()
-                .zip(&payloads)
-                .map(|(tensor, data)| TensorPayload {
-                    name: tensor.name.clone(),
-                    dims: tensor.dims.clone(),
-                    ggml_type: tensor.ggml_type,
-                    data: data.as_slice(),
-                })
-                .collect(),
-        };
-
-        let via_pipe = poll_ready(WriteComplete::new().call(&model)).expect("pipe writes");
-        let via_free_fn = write_complete(&model).expect("free function writes");
-        assert_eq!(via_pipe, via_free_fn);
     }
 }

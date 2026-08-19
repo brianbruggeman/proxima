@@ -9,15 +9,10 @@
 
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::future::Future;
-use core::pin::pin;
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-use proxima_primitives::pipe::primitives::Pipe;
 
 use crate::error::GgufError;
 use crate::parser::{GgufEvent, GgufParser};
-use crate::pipe::{ParseComplete, ParsedGguf};
+use crate::pipe::ParsedGguf;
 use crate::tensor::TensorInfo;
 use crate::types::GgmlType;
 use crate::value::{MetadataArray, MetadataValue};
@@ -470,38 +465,6 @@ fn non_power_of_two_alignment_is_rejected() {
     push_kv_u32(&mut buf, "general.alignment", 24);
     let outcome = crate::parse_complete(&buf);
     assert!(matches!(outcome, Err(GgufError::InvalidAlignment { .. })));
-}
-
-// -- Pipe conformance: ParseComplete::call's future must be ready on the
-// first poll (it does no awaiting internally), so a no-op waker suffices.
-
-fn noop_raw_waker() -> RawWaker {
-    fn clone(_: *const ()) -> RawWaker {
-        noop_raw_waker()
-    }
-    fn no_op(_: *const ()) {}
-    let vtable = &RawWakerVTable::new(clone, no_op, no_op, no_op);
-    RawWaker::new(core::ptr::null(), vtable)
-}
-
-fn poll_ready<F: Future>(future: F) -> F::Output {
-    let mut future = pin!(future);
-    // SAFETY: the vtable's functions are all no-ops over a null data
-    // pointer; nothing is ever dereferenced.
-    let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-    let mut cx = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut cx) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("ParseComplete::call must be ready on first poll"),
-    }
-}
-
-#[test]
-fn parse_complete_pipe_matches_the_free_function() {
-    let fixture = build_fixture();
-    let via_pipe = poll_ready(ParseComplete::new().call(fixture.bytes.as_slice()))
-        .expect("pipe parse of synthetic gguf");
-    assert_fixture_parsed(&via_pipe, &fixture);
 }
 
 // -- Real Q4_K tensor from a host-local GGUF, not a synthetic fixture.
