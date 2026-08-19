@@ -188,6 +188,10 @@ extern crate alloc;
 // `compile_error!` above rather than leaving a half-populated crate root.
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod bind;
+// element conversion (`convert::Convert`, a `Pipe`) and decimal-as-conversion
+// (`convert::decimal`) need neither `alloc` nor `std` — slices and core
+// arithmetic only — so this stays ungated, same as `dtype`.
+pub mod convert;
 #[cfg(feature = "std")]
 pub mod cpu;
 pub mod dtype;
@@ -214,6 +218,7 @@ pub mod spec;
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
 };
+pub use convert::{Convert, SimdConvert};
 #[cfg(feature = "std")]
 pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel, evaluate_with_scratch};
 pub use dtype::DType;
