@@ -1816,6 +1816,99 @@ shape = ["seq"]
             .expect("the layer infers at a small sequence length too");
     }
 
+    /// Wall-clock probe for `bind.rs`'s reduce-fusion cost fix: runs
+    /// `mistral_layer.toml` at the model's real dimensions
+    /// (`embedding=4096`, `feed_forward=14336`) at `sequence=4`, the exact
+    /// configuration the sibling milestone test above found too slow to run
+    /// unfused (`ffn_out`'s reduce absorbing the whole SwiGLU activation
+    /// chain recomputed it once per `embedding` element instead of once per
+    /// its own `seq*feed_forward`). `#[ignore]`d — ~870MB of random weights
+    /// plus a multi-second real run does not belong in the default
+    /// `nextest` budget; run explicitly with `--ignored` when re-measuring.
+    #[test]
+    #[ignore = "measures the real-dimension mistral layer's wall clock; run explicitly"]
+    fn a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions() {
+        const SEQUENCE: usize = 4;
+        const EMBEDDING: usize = 4096;
+        const QUERY_HEADS: usize = 32;
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const PAIRS: usize = HEAD_DIM / 2;
+        const GROUP: usize = QUERY_HEADS / KV_HEADS;
+        const FEED_FORWARD: usize = 14336;
+
+        let text = include_str!("../specs/mistral_layer.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        let shapes = crate::shape::infer(&program, &symbols).expect("the real layer infers");
+
+        let activations = random_vec(101, SEQUENCE * EMBEDDING);
+        let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
+        let epsilon = alloc::vec![1e-5f32; SEQUENCE];
+        let ones = alloc::vec![1.0f32; SEQUENCE];
+        let wq = random_vec(102, EMBEDDING * QUERY_HEADS * HEAD_DIM);
+        let wk = random_vec(103, EMBEDDING * KV_HEADS * HEAD_DIM);
+        let wv = random_vec(104, EMBEDDING * KV_HEADS * HEAD_DIM);
+        let wo = random_vec(105, KV_HEADS * GROUP * HEAD_DIM * EMBEDDING);
+        let w_gate = random_vec(106, EMBEDDING * FEED_FORWARD);
+        let w_up = random_vec(107, EMBEDDING * FEED_FORWARD);
+        let w_down = random_vec(108, FEED_FORWARD * EMBEDDING);
+        let cos = random_vec(109, SEQUENCE * PAIRS);
+        let sin = random_vec(110, SEQUENCE * PAIRS);
+        let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
+
+        let blocks: [&[f32]; 14] = [
+            &activations,
+            &inverse_dim,
+            &epsilon,
+            &ones,
+            &wq,
+            &wk,
+            &wv,
+            &wo,
+            &w_gate,
+            &w_up,
+            &w_down,
+            &cos,
+            &sin,
+            &group_ones,
+        ];
+
+        let ffn_out = spec
+            .node
+            .iter()
+            .position(|node| node.id() == "ffn_out")
+            .expect("the spec defines an ffn_out node");
+        let ffn_out = NodeId(ffn_out as u32);
+        let root = NodeId(program.len() as u32 - 1);
+
+        let bound = crate::bind::bind(&program, &shapes, &[root, ffn_out])
+            .expect("the real layer binds");
+        let ffn_out_body_steps = bound
+            .iter()
+            .find(|op| op.node == ffn_out)
+            .expect("ffn_out is a bound op")
+            .element_body()
+            .steps
+            .len();
+        std::println!("ffn_out body_steps={ffn_out_body_steps}");
+
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let wall_start = std::time::Instant::now();
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the real mistral layer evaluates");
+        let wall = wall_start.elapsed();
+        std::println!("wall_clock={wall:?}");
+
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+    }
+
     /// The evaluation half of the milestone above: `mistral_layer_small.toml`
     /// is the same RoPE+GQA+causal-mask composition, small enough to
     /// actually run (see the sibling test's doc comment and that file's
