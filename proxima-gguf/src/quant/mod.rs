@@ -14,3 +14,31 @@ pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
 pub mod policy;
+
+use thiserror::Error;
+
+/// Everything that can go wrong sizing a block-quant codec call, shared by
+/// every codec in this module (`q4_k`/`q5_k`/`q6_k`/`q8_0`) instead of each
+/// declaring its own structurally identical type. Never a panic: a
+/// malformed or mis-sized buffer is always an `Err`. `codec` carries which
+/// codec raised it, so the rendered message still names it.
+#[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
+pub enum QuantError {
+    #[error("input length {found} bytes is not a multiple of the {codec} block size {block_bytes}")]
+    InputNotBlockMultiple {
+        codec: &'static str,
+        found: usize,
+        block_bytes: usize,
+    },
+    #[error("input length {found} elements is not a multiple of the {codec} {unit} size {block_elements}")]
+    InputNotElementMultiple {
+        codec: &'static str,
+        /// `"super-block"` for the K-quants (`q4_k`/`q5_k`/`q6_k`), plain
+        /// `"block"` for `q8_0`, which has no sub-block structure.
+        unit: &'static str,
+        found: usize,
+        block_elements: usize,
+    },
+    #[error("output slice has {found} elements, expected {expected}")]
+    OutputSizeMismatch { found: usize, expected: usize },
+}

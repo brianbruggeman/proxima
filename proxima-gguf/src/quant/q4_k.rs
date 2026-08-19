@@ -12,9 +12,11 @@
 //! [`crate::types::GgmlType::Q4_K`]'s already-landed
 //! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
 
-use thiserror::Error;
-
+use crate::quant::QuantError;
 use crate::types::GgmlType;
+
+/// This codec's name as it appears in a rendered [`QuantError`] message.
+const CODEC: &str = "q4_k";
 
 /// Elements per super-block (`ggml-common.h:89`, `#define QK_K 256`).
 pub const QK_K: usize = 256;
@@ -45,21 +47,6 @@ const D_OFFSET: usize = 0;
 const DMIN_OFFSET: usize = 2;
 const SCALES_OFFSET: usize = 4;
 const QS_OFFSET: usize = SCALES_OFFSET + K_SCALE_SIZE;
-
-/// Everything that can go wrong sizing a `Q4_K` codec call. Never a
-/// panic: a malformed or mis-sized buffer is always an `Err`.
-#[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
-pub enum QuantError {
-    #[error("input length {found} bytes is not a multiple of the q4_k block size {block_bytes}")]
-    InputNotBlockMultiple { found: usize, block_bytes: usize },
-    #[error("input length {found} elements is not a multiple of the q4_k super-block size {block_elements}")]
-    InputNotElementMultiple {
-        found: usize,
-        block_elements: usize,
-    },
-    #[error("output slice has {found} elements, expected {expected}")]
-    OutputSizeMismatch { found: usize, expected: usize },
-}
 
 /// Number of whole `Q4_K` super-blocks a byte run decodes to, or `None`
 /// if `byte_len` is not an exact multiple of [`BLOCK_BYTES`].
@@ -176,6 +163,7 @@ fn f16_at(block: &[u8], offset: usize) -> half::f16 {
 /// `output.len()` does not exactly match the decoded element count.
 pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     let block_count = blocks_for_bytes(data.len()).ok_or(QuantError::InputNotBlockMultiple {
+        codec: CODEC,
         found: data.len(),
         block_bytes: BLOCK_BYTES,
     })?;
@@ -391,6 +379,8 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
     if !input.len().is_multiple_of(QK_K) {
         return Err(QuantError::InputNotElementMultiple {
+            codec: CODEC,
+            unit: "super-block",
             found: input.len(),
             block_elements: QK_K,
         });
@@ -417,7 +407,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{
-        BLOCK_BYTES, K_SCALE_SIZE, QK_K, QuantError, SUB_BLOCK_ELEMENTS, SUB_BLOCKS, dequantize, quantize,
+        BLOCK_BYTES, CODEC, K_SCALE_SIZE, QK_K, QuantError, SUB_BLOCK_ELEMENTS, SUB_BLOCKS, dequantize, quantize,
     };
 
     /// One super-block, hand-packed and hand-decoded, checked against the
@@ -562,6 +552,7 @@ mod tests {
         assert_eq!(
             error,
             QuantError::InputNotBlockMultiple {
+                codec: CODEC,
                 found: BLOCK_BYTES - 1,
                 block_bytes: BLOCK_BYTES,
             }
@@ -590,6 +581,8 @@ mod tests {
         assert_eq!(
             error,
             QuantError::InputNotElementMultiple {
+                codec: CODEC,
+                unit: "super-block",
                 found: QK_K - 1,
                 block_elements: QK_K,
             }
