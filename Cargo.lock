@@ -4211,6 +4211,7 @@ dependencies = [
  "proxima-safetensors",
  "proxima-tensor",
  "proxima-tokenizer",
+ "rustix",
  "thiserror 2.0.19",
 ]
 
