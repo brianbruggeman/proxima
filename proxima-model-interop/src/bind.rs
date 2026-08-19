@@ -60,6 +60,47 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
     }
 }
 
+/// Zero-copy counterpart to [`gguf_tensor_as_f32`] for a `Q4_K` tensor:
+/// borrows `name`'s raw packed bytes straight out of `file_bytes` and wraps
+/// them as [`proxima_tensor::cpu::QuantizedBlock::Q4K`], instead of
+/// dequantizing into an owned `Vec<f32>` first. No copy, no allocation --
+/// exactly the bytes GGUF already stored.
+///
+/// This works without a transpose, unlike `gguf_tensor_as_f32`'s callers
+/// for a 2D projection weight (see `transpose_out_in_to_in_out` in this
+/// crate's real-forward-pass test): `QuantizedBlock::Q4K` bypasses the
+/// interpreter's strided operand machinery entirely --
+/// `proxima_tensor::cpu::matmul_q4k_f32` walks `weights` as `rows`
+/// contiguous per-row byte chunks and dot-products each row against the
+/// activation directly, so it only ever needs GGUF's native on-disk
+/// row-major `[out, in]` layout, the layout this function hands through
+/// unchanged.
+///
+/// # Errors
+///
+/// [`InteropError::UnknownTensor`] if `name` isn't in `parsed.tensors`;
+/// [`InteropError::Gguf`] if the tensor's declared byte range doesn't fit
+/// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] if `name`'s
+/// tensor isn't `Q4_K` -- callers route anything else through
+/// [`gguf_tensor_as_f32`] instead, which is what this crate has a decoder
+/// for.
+#[cfg(feature = "std")]
+pub fn gguf_tensor_as_q4k_block<'a>(
+    parsed: &ParsedGguf,
+    file_bytes: &'a [u8],
+    name: &str,
+) -> Result<proxima_tensor::cpu::QuantizedBlock<'a>, InteropError> {
+    let tensor = find_tensor(parsed, name)?;
+    if tensor.ggml_type != GgmlType::Q4_K {
+        return Err(InteropError::UnrepresentableGgmlType {
+            tensor: tensor.name.clone(),
+            ggml_type: tensor.ggml_type,
+        });
+    }
+    let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
+    Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(&file_bytes[range.start as usize..range.end as usize]))
+}
+
 fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
     parsed
         .tensors
@@ -205,24 +246,136 @@ mod tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {
     use alloc::vec::Vec;
+    use core::ffi::c_void;
+    use std::os::fd::AsFd;
 
     use proxima_gguf::GgmlType;
+    use proxima_gguf::pipe::ParsedGguf;
     use proxima_gguf::quant::q4_k;
     use proxima_tensor::DType;
-    use proxima_tensor::cpu::evaluate_named;
+    use proxima_tensor::cpu::{QuantizedBlock, evaluate_named, evaluate_quantized_named};
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
     use proxima_tokenizer::greedy_pick;
 
-    use super::gguf_tensor_as_f32;
+    use super::{gguf_tensor_as_f32, gguf_tensor_as_q4k_block};
 
     const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
+    /// A read-only `mmap` of the fixture file (rustix, already a workspace
+    /// dependency used the same way by `proxima-storage/src/dax/region.rs`
+    /// for its own domain) -- the whole reason to bind `Q4_K` tensors
+    /// packed is so the byte range GGUF already stored is the buffer
+    /// `evaluate_quantized_named` reads, with no owned copy in between;
+    /// `proxima_gguf::edge::read_file`'s `std::fs::read` would put that
+    /// copy straight back, one whole-file `Vec<u8>` at a time (its own doc,
+    /// `proxima-gguf/src/edge.rs:3`, names this exact tradeoff). `MapFlags::
+    /// PRIVATE`/`ProtFlags::READ` because this test only ever reads the
+    /// fixture; unmapped on drop.
+    struct MappedGguf {
+        base: *mut u8,
+        len: usize,
+        _file: std::fs::File,
+    }
+
+    impl MappedGguf {
+        fn open(path: &std::path::Path) -> std::io::Result<Self> {
+            let file = std::fs::File::open(path)?;
+            let len = usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            // SAFETY: `len` matches the just-opened file's own length; `file`
+            // is kept alive in `_file` for as long as `base` is used, and the
+            // mapping is read-only/private so no writer can observe or race it.
+            let base = unsafe {
+                rustix::mm::mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    rustix::mm::ProtFlags::READ,
+                    rustix::mm::MapFlags::PRIVATE,
+                    file.as_fd(),
+                    0,
+                )
+            }
+            .expect("mmap host-local openchat gguf fixture")
+            .cast::<u8>();
+            Ok(Self { base, len, _file: file })
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: `base` points at `len` bytes mapped for `self`'s whole
+            // lifetime; this borrows `self` immutably, so nothing can unmap
+            // the region while the returned slice is alive.
+            unsafe { core::slice::from_raw_parts(self.base, self.len) }
+        }
+    }
+
+    impl Drop for MappedGguf {
+        fn drop(&mut self) {
+            // SAFETY: `base`/`len` are exactly what `open`'s `mmap` call
+            // returned; nothing else unmaps this region.
+            let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+        }
+    }
+
+    /// The load loop's own accumulators, grouped so `bind_dense`/
+    /// `bind_matmul_weight` take one `&mut` argument instead of three --
+    /// purely a call-site grouping local to this test, not a library type:
+    /// nothing outside this module ever sees it.
+    struct LoadState<'file> {
+        resident_bytes: usize,
+        owned: Vec<(alloc::string::String, Vec<f32>)>,
+        packed: Vec<(alloc::string::String, QuantizedBlock<'file>)>,
+    }
+
+    /// A learned 1-D scale (RMSNorm weight) or `token_embd.weight` (indexed
+    /// by row via `embedding_lookup`, never projected) -- always dequantized
+    /// to owned `f32`, no `Q4_K` packed path: this checkpoint's norms are
+    /// `F32` on disk already, and even a quantized `token_embd.weight`
+    /// would not qualify for `reject_non_float32`'s matmul exemption
+    /// (`is_quantized_matmul_operand` requires feeding a `Multiply`-then-
+    /// `Add` reduce, which a gather is not).
+    fn bind_dense(parsed: &ParsedGguf, file_bytes: &[u8], name: alloc::string::String, state: &mut LoadState) {
+        let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
+            .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
+        state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+        state.owned.push((name, decoded));
+    }
+
+    /// A 2-D projection weight `mistral_forward_program` uses as one
+    /// `Multiply`-then-`Add`-reduce (matmul) operand -- the shape
+    /// `reject_non_float32`'s quantized-weight exemption requires. Tries
+    /// [`gguf_tensor_as_q4k_block`] first: a `Q4_K` tensor binds packed,
+    /// zero-copy, straight out of the mmap's bytes (`matmul_q4k_f32` wants
+    /// GGUF's native on-disk `[out, in]` row-major layout directly, so this
+    /// arm skips `transpose_out_in_to_in_out` entirely -- see
+    /// `gguf_tensor_as_q4k_block`'s own doc). Every other `GgmlType`
+    /// (`Q5_K`/`Q6_K`/`F32` in this checkpoint -- 9 tensors total) falls
+    /// back to dequantize-then-transpose, unchanged from before packing.
+    fn bind_matmul_weight<'file>(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        name: alloc::string::String,
+        out_dim: usize,
+        in_dim: usize,
+        state: &mut LoadState<'file>,
+    ) {
+        match gguf_tensor_as_q4k_block(parsed, file_bytes, &name) {
+            Ok(block) => state.packed.push((name, block)),
+            Err(_) => {
+                let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
+                    .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
+                state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+                state.owned.push((name, transpose_out_in_to_in_out(&decoded, out_dim, in_dim)));
+            }
+        }
+    }
+
     /// One real greedy-decoded token out of the real openchat-3.5 (Mistral
     /// architecture) checkpoint: every weight `mistral_forward_program`
-    /// needs is bound by name through [`gguf_tensor_as_f32`], a real prompt
-    /// is BPE-encoded through `proxima_tokenizer`, `evaluate_named` runs
-    /// the whole 32-layer forward, and the last position's logits are
+    /// needs is bound by name -- `Q4_K` tensors packed straight out of an
+    /// mmap via [`gguf_tensor_as_q4k_block`], everything else dequantized
+    /// through [`gguf_tensor_as_f32`] -- a real prompt is BPE-encoded
+    /// through `proxima_tokenizer`, `evaluate_quantized_named` runs the
+    /// whole 32-layer forward, and the last position's logits are
     /// greedy-picked and decoded back to text.
     ///
     /// GGUF stores every 2D projection weight `[in, out]` in `TensorInfo`'s
@@ -233,11 +386,13 @@ mod real_openchat_file {
     /// contiguous `in` values -- ggml's `nn.Linear`-style weight layout).
     /// `mistral_forward_program`'s access patterns (`"ihd->shdi"` for
     /// `wq`, `"dg->sdg"` for `w_gate`, `"gd->sgd"` for `w_down`, ...) all
-    /// index their weight as `[in, ...out]`, so every projection weight
-    /// except `token_embd.weight` (whose target `[vocab, embedding]` shape
-    /// already equals the GGUF-native flat layout, since an embedding
-    /// table is indexed by row, not projected) needs an explicit transpose
-    /// at load time -- [`transpose_out_in_to_in_out`] below.
+    /// index their weight as `[in, ...out]`, so every dequantized-f32
+    /// projection weight except `token_embd.weight` (whose target
+    /// `[vocab, embedding]` shape already equals the GGUF-native flat
+    /// layout, since an embedding table is indexed by row, not projected)
+    /// needs an explicit transpose at load time --
+    /// [`transpose_out_in_to_in_out`] below. A packed `Q4_K` weight skips
+    /// this transpose entirely -- see `bind_matmul_weight`'s own doc.
     ///
     /// This checkpoint's `tokenizer.ggml.model` metadata key is `"llama"`
     /// (SentencePiece/SPM, carrying a `tokenizer.ggml.scores` array, no
@@ -250,7 +405,7 @@ mod real_openchat_file {
     /// into the real vocab's five subword pieces (`sequence == 6` with
     /// BOS), not one token per byte.
     #[test]
-    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and dequantizes ~29GB of weights"]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn runs_one_real_forward_pass_and_greedy_picks_a_real_token() {
         let path = std::path::Path::new(FIXTURE_PATH);
         if !path.exists() {
@@ -271,56 +426,52 @@ mod real_openchat_file {
         const RMS_EPSILON: f32 = 1e-5;
 
         let load_start = std::time::Instant::now();
-        let (parsed, file_bytes) = proxima_gguf::edge::read_file(path).expect("read host-local openchat gguf fixture");
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
 
-        let mut resident_bytes: usize = file_bytes.len();
-        let mut named: Vec<(alloc::string::String, Vec<f32>)> = Vec::new();
-
-        let mut bind = |name: &str| -> Vec<f32> {
-            let decoded = gguf_tensor_as_f32(&parsed, &file_bytes, name)
-                .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
-            resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            decoded
+        // `resident_bytes` starts at the mapped file's own length: a full
+        // 32-layer forward pass reads essentially every `Q4_K` weight byte,
+        // so the kernel demand-pages nearly the whole mapping into this
+        // process's resident set even though nothing here copies it --
+        // `MappedGguf` never allocates a second 3.94 GB buffer the way
+        // `proxima_gguf::edge::read_file`'s `std::fs::read` did. Every
+        // owned `f32` buffer `bind_dense`/`bind_matmul_weight` allocate
+        // (norms, `token_embd.weight`, and the 9 `Q5_K`/`Q6_K` tensors this
+        // crate has no packed kernel for) adds on top of that.
+        let mut state = LoadState {
+            resident_bytes: file_bytes.len(),
+            owned: Vec::new(),
+            packed: Vec::new(),
         };
 
-        let table = bind("token_embd.weight");
-        named.push(("token_embd.weight".into(), table));
+        bind_dense(&parsed, file_bytes, "token_embd.weight".into(), &mut state);
 
         for layer in 0..BLOCK_COUNT {
             // 1-D `[embedding]` learned RMSNorm scale -- no `[out, in]`
             // GGUF layout to undo, so it skips `transpose_out_in_to_in_out`
             // (that helper is for rank-2 projections only).
-            let attn_norm_weight = bind(&alloc::format!("blk.{layer}.attn_norm.weight"));
-            let ffn_norm_weight = bind(&alloc::format!("blk.{layer}.ffn_norm.weight"));
-            let wq = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_q.weight")), EMBEDDING, EMBEDDING);
-            let wk = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_k.weight")), KV_HEADS * HEAD_DIM, EMBEDDING);
-            let wv = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_v.weight")), KV_HEADS * HEAD_DIM, EMBEDDING);
-            let wo = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.attn_output.weight")), EMBEDDING, EMBEDDING);
-            let w_gate = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.ffn_gate.weight")), FEED_FORWARD, EMBEDDING);
-            let w_up = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.ffn_up.weight")), FEED_FORWARD, EMBEDDING);
-            let w_down = transpose_out_in_to_in_out(&bind(&alloc::format!("blk.{layer}.ffn_down.weight")), EMBEDDING, FEED_FORWARD);
-
-            named.push((alloc::format!("blk.{layer}.attn_norm.weight"), attn_norm_weight));
-            named.push((alloc::format!("blk.{layer}.ffn_norm.weight"), ffn_norm_weight));
-            named.push((alloc::format!("blk.{layer}.attn_q.weight"), wq));
-            named.push((alloc::format!("blk.{layer}.attn_k.weight"), wk));
-            named.push((alloc::format!("blk.{layer}.attn_v.weight"), wv));
-            named.push((alloc::format!("blk.{layer}.attn_output.weight"), wo));
-            named.push((alloc::format!("blk.{layer}.ffn_gate.weight"), w_gate));
-            named.push((alloc::format!("blk.{layer}.ffn_up.weight"), w_up));
-            named.push((alloc::format!("blk.{layer}.ffn_down.weight"), w_down));
+            bind_dense(&parsed, file_bytes, alloc::format!("blk.{layer}.attn_norm.weight"), &mut state);
+            bind_dense(&parsed, file_bytes, alloc::format!("blk.{layer}.ffn_norm.weight"), &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.attn_q.weight"), EMBEDDING, EMBEDDING, &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.attn_k.weight"), KV_HEADS * HEAD_DIM, EMBEDDING, &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.attn_v.weight"), KV_HEADS * HEAD_DIM, EMBEDDING, &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.attn_output.weight"), EMBEDDING, EMBEDDING, &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.ffn_gate.weight"), FEED_FORWARD, EMBEDDING, &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.ffn_up.weight"), FEED_FORWARD, EMBEDDING, &mut state);
+            bind_matmul_weight(&parsed, file_bytes, alloc::format!("blk.{layer}.ffn_down.weight"), EMBEDDING, FEED_FORWARD, &mut state);
         }
 
-        let output_norm_weight = bind("output_norm.weight");
-        named.push(("output_norm.weight".into(), output_norm_weight));
-
-        let lm_head = transpose_out_in_to_in_out(&bind("output.weight"), VOCAB, EMBEDDING);
-        named.push(("output.weight".into(), lm_head));
+        bind_dense(&parsed, file_bytes, "output_norm.weight".into(), &mut state);
+        bind_matmul_weight(&parsed, file_bytes, "output.weight".into(), VOCAB, EMBEDDING, &mut state);
 
         let load_elapsed = load_start.elapsed();
+        let resident_bytes = state.resident_bytes;
         std::println!(
-            "load: wall_clock={load_elapsed:?} resident_bytes={resident_bytes} ({:.2} GiB)",
-            resident_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            "load: wall_clock={load_elapsed:?} resident_bytes={resident_bytes} ({:.2} GiB) packed_tensors={} owned_tensors={}",
+            resident_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            state.packed.len(),
+            state.owned.len()
         );
 
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from openchat gguf metadata");
@@ -355,24 +506,27 @@ mod real_openchat_file {
         )
         .expect("the whole forward pass lowers to a program");
 
-        let mut named_slices: Vec<(&str, &[f32])> = Vec::with_capacity(named.len() + 6);
-        named_slices.push(("ids", ids_f32.as_slice()));
-        for (name, data) in &named {
-            named_slices.push((name.as_str(), data.as_slice()));
+        let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(state.owned.len() + state.packed.len() + 6);
+        named_blocks.push(("ids", QuantizedBlock::Float32(ids_f32.as_slice())));
+        for (name, data) in &state.owned {
+            named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
         }
-        named_slices.push(("inv_dim", inv_dim.as_slice()));
-        named_slices.push(("eps", epsilon.as_slice()));
-        named_slices.push(("ones", ones.as_slice()));
-        named_slices.push(("rope_cos", cos.as_slice()));
-        named_slices.push(("rope_sin", sin.as_slice()));
-        named_slices.push(("group_ones", group_ones.as_slice()));
+        for (name, block) in &state.packed {
+            named_blocks.push((name.as_str(), *block));
+        }
+        named_blocks.push(("inv_dim", QuantizedBlock::Float32(inv_dim.as_slice())));
+        named_blocks.push(("eps", QuantizedBlock::Float32(epsilon.as_slice())));
+        named_blocks.push(("ones", QuantizedBlock::Float32(ones.as_slice())));
+        named_blocks.push(("rope_cos", QuantizedBlock::Float32(cos.as_slice())));
+        named_blocks.push(("rope_sin", QuantizedBlock::Float32(sin.as_slice())));
+        named_blocks.push(("group_ones", QuantizedBlock::Float32(group_ones.as_slice())));
 
         let root = op::NodeId(program.len() as u32 - 1);
         let symbols = [sequence as u64];
 
         let forward_start = std::time::Instant::now();
-        let evaluated =
-            evaluate_named(&program, &symbols, &named_slices, &[root]).expect("evaluate_named binds the whole forward pass by name");
+        let evaluated = evaluate_quantized_named(&program, &symbols, &named_blocks, &[root])
+            .expect("evaluate_quantized_named binds the whole forward pass by name, packed weights included");
         let forward_elapsed = forward_start.elapsed();
 
         let (logits, shape) = evaluated.get(root).expect("logits present in output");

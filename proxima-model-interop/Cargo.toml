@@ -33,3 +33,4 @@ workspace = true
 half = { version = "2.7.1", default-features = false }
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "std"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", features = ["gguf"] }
+rustix.workspace = true

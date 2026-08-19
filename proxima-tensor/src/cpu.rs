@@ -355,30 +355,21 @@ pub fn evaluate(
 /// gone by the time a consumer half receives its inputs, and only `name`
 /// survives the cut.
 ///
-/// This does not change `evaluate`'s signature or behaviour; it resolves
-/// `named` into the same positional `blocks: &[&[f32]]` `evaluate` already
-/// takes (in `program`'s own `Op::Input` order) and calls straight through,
-/// so every existing positional caller is untouched.
+/// This does not change `evaluate`'s signature or behaviour: every `named`
+/// entry is wrapped as [`QuantizedBlock::Float32`] and handed to
+/// [`evaluate_quantized_named`], the one name-resolution loop this and
+/// [`evaluate_quantized_named`] both share — see that function's doc for
+/// why `evaluate_quantized`'s gate is a no-op for an all-`Float32` caller
+/// like this one, so routing through it changes nothing observable here.
 pub fn evaluate_named(
     program: &[Op],
     symbols: &[u64],
     named: &[(&str, &[f32])],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let block_nodes = block_node_ids(program);
-    let mut blocks: Vec<&[f32]> = Vec::with_capacity(block_nodes.len());
-    for node in &block_nodes {
-        let name = program[node.0 as usize]
-            .name()
-            .ok_or(TensorError::UnnamedInput(*node))?;
-        let data = named
-            .iter()
-            .find(|(candidate, _)| *candidate == name)
-            .map(|(_, data)| *data)
-            .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
-        blocks.push(data);
-    }
-    evaluate(program, symbols, &blocks, outputs)
+    let wrapped: Vec<(&str, QuantizedBlock)> =
+        named.iter().map(|(name, data)| (*name, QuantizedBlock::Float32(data))).collect();
+    evaluate_quantized_named(program, symbols, &wrapped, outputs)
 }
 
 /// Same contract as [`evaluate`], plus one capability a caller cannot get
@@ -506,6 +497,36 @@ pub fn evaluate_quantized(
     }
 
     Ok(finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers))
+}
+
+/// [`evaluate_quantized`]'s counterpart for binding by name instead of
+/// position — the same relationship [`evaluate_named`] has to [`evaluate`],
+/// and the same resolution loop: walk `program`'s [`Op::Input`] nodes in
+/// order, look each one's name up in `named`, and hand the resolved
+/// positional `blocks: &[QuantizedBlock]` straight to [`evaluate_quantized`].
+/// [`evaluate_named`] is now this function plus one wrapping step
+/// (`QuantizedBlock::Float32`), rather than a second copy of this loop —
+/// there is exactly one name-to-[`Op::Input`] resolution in this module.
+pub fn evaluate_quantized_named<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let block_nodes = block_node_ids(program);
+    let mut blocks: Vec<QuantizedBlock<'block>> = Vec::with_capacity(block_nodes.len());
+    for node in &block_nodes {
+        let name = program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        let data = named
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, data)| *data)
+            .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
+        blocks.push(data);
+    }
+    evaluate_quantized(program, symbols, &blocks, outputs)
 }
 
 /// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only
@@ -1919,10 +1940,25 @@ fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, &[
 /// operands, packed `Q4_K` bytes rather than a bound `f32` buffer. The other
 /// operand is the plain `f32` activation, already sitting in `buffers` like
 /// any other node — read straight out of the same table [`run_reduce`]'s f32
-/// path uses, no second buffer convention for it. Delegates the actual
-/// per-row dot product to [`matmul_q4k_f32`], the dedicated, separately
-/// parity-tested kernel; this function's whole job is locating that kernel's
-/// two arguments inside a resolved `BoundOp`.
+/// path uses, no second buffer convention for it.
+///
+/// [`matmul_q4k_f32`] itself only knows one activation vector times one
+/// weight matrix — batch-1. A real forward pass batches every sequence
+/// position through the same weight in one call (`mistral_forward_program`'s
+/// `wq` node alone folds `s`, `h`, and `d` together into one packed-row
+/// dimension: `"ihd->shdi"` broadcasts the same `[s, i]` activation across
+/// every head, so the physical weight row a given `(h, d)` pair needs is
+/// `h * head_dim + d`, exactly GGUF's own on-disk row order for a
+/// `[embedding_in, embedding_out]` projection reinterpreted as heads x
+/// head_dim). Rather than re-deriving that per-op axis grouping here, `k`
+/// (the contraction width) and `rows` (the packed weight's own row count)
+/// are both derived from data already at hand — `k` from `resolved`'s own
+/// reduced dims exactly as [`run_reduce`] computes them, `rows` from
+/// `weights.len()` divided by `k`'s worth of packed bytes — so `rows` comes
+/// out correct regardless of how many *program* output axes the weight's
+/// flat row dimension was split into. `leading_total = output.len() / rows`
+/// then folds every one of those non-reduced output axes (`s`, `h`, `d`,
+/// ...) into one batch loop, one [`matmul_q4k_f32`] call per position.
 fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
@@ -1943,9 +1979,39 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         node: activation_node,
         reason: "quantized matmul activation operand has no bound buffer",
     })?;
-    let rows = output.len();
-    let result = matmul_q4k_f32(weights, rows, activation)?;
-    output.copy_from_slice(&result);
+
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        unreachable!("run_reduce_quantized is only called for a Keep::Reduce fold")
+    };
+    let reduction_dims: Vec<u16> =
+        (0..resolved.extents.len() as u16).filter(|dim| !output_axes.as_slice().contains(dim)).collect();
+    let contraction_width: u64 = reduction_dims.iter().map(|dim| resolved.extents[*dim as usize]).product();
+    let shape_error = || TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "quantized matmul batch shape does not evenly divide by its packed weight rows",
+    };
+    let k = usize::try_from(contraction_width).map_err(|_| shape_error())?;
+    if k == 0 || !weights.len().is_multiple_of(Q4K_BLOCK_BYTES) {
+        return Err(shape_error());
+    }
+    let total_weight_elements = (weights.len() / Q4K_BLOCK_BYTES) * Q4K_BLOCK_ELEMENTS;
+    if !total_weight_elements.is_multiple_of(k) {
+        return Err(shape_error());
+    }
+    let rows = total_weight_elements / k;
+    if rows == 0 || !output.len().is_multiple_of(rows) || !activation.len().is_multiple_of(k) {
+        return Err(shape_error());
+    }
+    let leading_total = output.len() / rows;
+    if leading_total != activation.len() / k {
+        return Err(shape_error());
+    }
+
+    for position in 0..leading_total {
+        let activation_row = &activation[position * k..(position + 1) * k];
+        let result = matmul_q4k_f32(weights, rows, activation_row)?;
+        output[position * rows..(position + 1) * rows].copy_from_slice(&result);
+    }
     Ok(())
 }
 
@@ -6487,6 +6553,89 @@ mod tests {
         assert!(
             reject_non_float32(&program, &exempt).is_err(),
             "a quantized node reduced directly (no Multiply) is not the matmul shape and must stay rejected"
+        );
+    }
+
+    /// `is_quantized_matmul_operand` is called once per candidate node, not
+    /// once per program — proving the exemption holds for many quantized
+    /// weights at once (a real checkpoint's 217 `Q4_K` tensors, not the
+    /// single-weight case the earlier tests above cover), and that each
+    /// node's own shape is judged independently: a second, unrelated
+    /// `Multiply`-then-`Add` matmul with its own `UInt8` weight is exempted
+    /// alongside the first when both are named, and rejected on its own
+    /// when only the first is named.
+    #[test]
+    fn reject_non_float32_exempts_many_independent_quantized_weights() {
+        let mut program = Vec::new();
+        let weight_a = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+        let activation_a = f32_block(&mut program, &[Extent::Static(4)]);
+        let product_a = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight_a, IndexMap::Affine(map::projection(1, &[0]))),
+                    (activation_a, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product_a,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let weight_b = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+        let activation_b = f32_block(&mut program, &[Extent::Static(4)]);
+        let product_b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight_b, IndexMap::Affine(map::projection(1, &[0]))),
+                    (activation_b, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product_b,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let mut only_a = BTreeSet::new();
+        only_a.insert(weight_a);
+        assert!(
+            reject_non_float32(&program, &only_a).is_err(),
+            "weight_b is UInt8 and unexempted, so the program must still be rejected"
+        );
+
+        let mut both = BTreeSet::new();
+        both.insert(weight_a);
+        both.insert(weight_b);
+        assert!(
+            reject_non_float32(&program, &both).is_ok(),
+            "two independent matmul-shaped quantized weights must both be exempted when both are named"
         );
     }
 
