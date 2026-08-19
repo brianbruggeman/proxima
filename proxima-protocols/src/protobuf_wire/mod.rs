@@ -40,7 +40,12 @@ pub enum ParseError {
     VarintOverflow,
     #[error("wire type {0} is deprecated (group start/end) or undefined")]
     UnknownWireType(u8),
-    #[error("declared length-delimited field of {0} bytes exceeds buffer")]
+    /// The declared length itself can never be satisfied by any buffer --
+    /// it does not fit `usize`, or adding it to the payload's start offset
+    /// overflows `usize`. Distinct from [`Self::Short`]: a `Short` field
+    /// might still arrive with more bytes; a `LengthOverflow` field cannot,
+    /// no matter how much more is fed in.
+    #[error("declared length-delimited field of {0} bytes can never fit in memory")]
     LengthOverflow(u64),
 }
 
@@ -165,12 +170,16 @@ pub fn parse_field(buf: &[u8]) -> Result<(Field<'_>, usize), ParseError> {
         WireType::Len => {
             let (len, len_used) = decode_varint(rest)?;
             let payload_start = tag_used + len_used;
+            // an unrepresentable length can never be satisfied by any
+            // buffer, however much more arrives -- that's LengthOverflow.
+            // a representable length the current buffer simply doesn't
+            // hold yet is Short -- more bytes might still complete it.
             let len_usize = usize::try_from(len).map_err(|_| ParseError::LengthOverflow(len))?;
             let payload_end = payload_start
                 .checked_add(len_usize)
                 .ok_or(ParseError::LengthOverflow(len))?;
             if buf.len() < payload_end {
-                return Err(ParseError::LengthOverflow(len));
+                return Err(ParseError::Short);
             }
             Ok((
                 Field::Len {
@@ -347,10 +356,27 @@ mod tests {
     }
 
     #[test]
-    fn length_delimited_field_must_fit_buffer() {
+    fn length_delimited_field_short_of_buffer_returns_short() {
+        // declared length 10, sane and representable, but the buffer only
+        // holds 2 payload bytes so far -- this was wrongly reported as
+        // LengthOverflow (the bug this test used to encode); a truncated
+        // buffer is a Short signal, since more bytes could still arrive.
         let buf = [(2 << 3) | 2, 10, b'h', b'i'];
         match parse_field(&buf) {
-            Err(ParseError::LengthOverflow(10)) => {}
+            Err(ParseError::Short) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn length_delimited_field_with_unrepresentable_length_returns_overflow() {
+        // declared length so large that `payload_start + len` overflows
+        // `usize` -- no amount of additional buffering can ever satisfy
+        // this, so it must be a hard LengthOverflow, never Short.
+        let mut buf = vec![(2 << 3) | 2];
+        encode_varint(u64::MAX - 1, &mut buf);
+        match parse_field(&buf) {
+            Err(ParseError::LengthOverflow(declared)) => assert_eq!(declared, u64::MAX - 1),
             other => panic!("unexpected: {other:?}"),
         }
     }
