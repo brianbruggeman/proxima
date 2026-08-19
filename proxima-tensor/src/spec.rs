@@ -609,9 +609,10 @@ fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId
 }
 
 /// `specs/mistral_layer.toml`'s `attn_norm`/`ffn_norm` node run, node for
-/// node: `x` normalized by its own root-mean-square, no learned scale (the
-/// TOML file carries none either).
-fn rmsnorm(program: &mut Vec<Op>, x: NodeId, inv_dim: NodeId, eps: NodeId) -> Result<NodeId, TensorError> {
+/// node: `x` normalized by its own root-mean-square, then scaled by `gamma`
+/// (`[embedding]`, broadcast `d->sd`), the checkpoint's learned
+/// `*_norm.weight` — RMSNorm without it is a different, un-trained function.
+fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps: NodeId) -> Result<NodeId, TensorError> {
     let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sd->sd"), (x, "sd->sd")])?;
     let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "sd->sd", "s->sd")?;
     let mean_square = elementwise(
@@ -628,11 +629,17 @@ fn rmsnorm(program: &mut Vec<Op>, x: NodeId, inv_dim: NodeId, eps: NodeId) -> Re
     )?;
     let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "s->s")])?;
     let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "s->s")])?;
-    elementwise(
+    let normed = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (inv_rms, "s->sd")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sd"), (gamma, "d->sd")],
     )
 }
 
@@ -680,6 +687,8 @@ fn append_mistral_layer(
     is_future: NodeId,
     neg_infinity: NodeId,
     group: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
     wq: NodeId,
     wk: NodeId,
     wv: NodeId,
@@ -688,7 +697,7 @@ fn append_mistral_layer(
     w_up: NodeId,
     w_down: NodeId,
 ) -> Result<NodeId, TensorError> {
-    let normed = rmsnorm(program, x, inv_dim, eps)?;
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
     let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
@@ -745,7 +754,7 @@ fn append_mistral_layer(
 
     let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
 
-    let normed2 = rmsnorm(program, residual1, inv_dim, eps)?;
+    let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
     let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")])?;
     let gate = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sdg->sdg", "sg->sdg")?;
@@ -828,6 +837,18 @@ pub fn mistral_forward_program(
     let (is_future, neg_infinity) = causal_mask(&mut program)?;
 
     for layer in 0..block_count {
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.attn_norm.weight"),
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_norm.weight"),
+        );
         let wq = input_leaf(
             &mut program,
             DType::Float32,
@@ -888,6 +909,8 @@ pub fn mistral_forward_program(
             is_future,
             neg_infinity,
             group,
+            attn_norm_weight,
+            ffn_norm_weight,
             wq,
             wk,
             wv,
@@ -898,7 +921,8 @@ pub fn mistral_forward_program(
         )?;
     }
 
-    let normed_final = rmsnorm(&mut program, x, inv_dim, eps)?;
+    let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
+    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
     let lm_head = input_leaf(
         &mut program,
