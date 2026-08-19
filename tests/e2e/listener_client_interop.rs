@@ -19,8 +19,7 @@
 ))]
 
 use std::future::Future;
-use std::net::{SocketAddr, TcpListener as StdTcpListener, TcpStream};
-use std::time::Duration;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 
 use bytes::Bytes;
 
@@ -61,22 +60,6 @@ fn free_loopback_addr() -> SocketAddr {
     addr
 }
 
-/// Poll a raw connect until the listener's real `bind`/`listen` syscalls have
-/// run. `App::serve` already blocks on a per-lane ready ack before returning
-/// (`App::run_until_signal`'s `ready_rx.recv_timeout`, mirroring
-/// `proxima_listen::handle::Listener::run_with_runtime`'s own readiness
-/// gate), so this loop is defensive rather than load-bearing — kept as a
-/// cheap belt-and-suspenders check rather than a bare single `connect`.
-fn wait_until_listening(addr: SocketAddr) {
-    for _ in 0..200 {
-        if TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("listener at {addr} never came up");
-}
-
 /// The symmetric proof: `Listener::builder()` (server side) and
 /// `Client::builder()` (client side) interoperate over a real loopback
 /// socket, both composing their own `.tcp()` (`ListenerTransportExt` /
@@ -96,8 +79,6 @@ async fn listener_builder_serves_what_client_builder_dials() {
         .serve()
         .await
         .expect("listener builder serves");
-
-    wait_until_listening(bind);
 
     let client = Client::builder()
         .http(format!("http://{bind}"))
@@ -205,8 +186,6 @@ async fn listener_builder_tls_terminates_a_real_handshake() {
         .serve()
         .await
         .expect("listener builder serves tls");
-
-    wait_until_listening(bind);
 
     let client_config = ClientConfig::builder()
         .dangerous()
