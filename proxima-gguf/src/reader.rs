@@ -5,6 +5,18 @@
 //! field. GGUF numeric fields are little-endian (matches every real GGUF
 //! file, all produced on little-endian hosts; `gguf.h`'s endian-swap note
 //! at the top only concerns cross-endian *production*, not the wire shape).
+//!
+//! `&mut self`, deliberately, not state-as-value (`fn u32(self) -> (Self,
+//! Option<u32>)`). `GgufParser::push`/`poll` are self-consuming because
+//! they cross an external boundary (a chunk arrives, the caller may not
+//! call again for a while). `Reader` never crosses that boundary — every
+//! call site is a local run of five-plus sequential reads inside one
+//! `poll_*` function, several inside a `for` loop over `n_dims`, each
+//! early-returning `Ok(None)` on shortfall via `let-else`. Made
+//! state-as-value, each read would need `let (reader, value) = reader.u32();`
+//! plus manual rebinding through the loop — strictly noisier, with a real
+//! footgun (forget the rebind, silently read stale state) that `&mut self`
+//! cannot express. Local sequential mutation is the honest shape here.
 
 use alloc::string::String;
 
