@@ -69,6 +69,7 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
+use crate::sized::SIMD_WIDTH;
 
 /// One compiled kernel: MSL source, its entry point, the buffer-index ->
 /// data mapping a driver needs to bind before dispatch, and the thread count
@@ -183,12 +184,8 @@ pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
     })
 }
 
-/// Every lane of one Apple GPU SIMD-group — fixed at 32 on every Apple
-/// Silicon/A-series GPU family this crate targets. Not read from the device
-/// at emit time: emission has no device handle, only the `BoundOp`'s
-/// structure, so the width has to be a compile-time fact the driver's
-/// dispatch (`crate::metal::dispatch`) is built to honor unconditionally.
-const SIMD_WIDTH: u64 = 32;
+// `SIMD_WIDTH` moved to `crate::sized::SIMD_WIDTH` (the build-time floor's
+// only configuration surface) -- imported at the top of this file.
 
 /// Whether `resolved` is a `Keep::Reduce` fold whose `reduce_op` is
 /// associative and commutative (`Add`, `Multiply`, `Maximum`, `Minimum`) with
