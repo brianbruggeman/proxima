@@ -49,7 +49,7 @@ pub fn annotate(program: &[Op], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
 
 fn uses(expr: &Op) -> Vec<NodeId> {
     match expr {
-        Op::Input { .. } => Vec::new(),
+        Op::Input { .. } | Op::Iota { .. } => Vec::new(),
         Op::Elementwise { operands, .. } => operands
             .iter()
             .flat_map(|(node, map)| map_uses(*node, map))

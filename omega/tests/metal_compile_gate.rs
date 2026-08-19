@@ -39,6 +39,34 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     omega::emit(&nests[0]).expect("elementwise emits")
 }
 
+/// `Erf` has no `metal_stdlib` counterpart (verified against the real
+/// toolchain — see `msl.rs`'s `PROXIMA_ERF_FN` doc), so this is the one
+/// kernel in this gate whose body is not a single `metal_stdlib` call: it
+/// exercises the hand-rolled `proxima_erf` helper `preamble` always emits.
+fn elementwise_erf_kernel() -> omega::Kernel {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(64)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Erf,
+            operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+            name: None,
+        },
+    );
+    let shapes = infer(&program, &[]).expect("erf infers");
+    let nests = bind(&program, &shapes, &[]).expect("erf lowers");
+    omega::emit(&nests[0]).expect("erf emits")
+}
+
 fn fused_matmul_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let lhs = append(
@@ -233,14 +261,34 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     omega::emit(&nests[0]).expect("embedding matmul emits")
 }
 
+/// `Op::Iota` standing alone: a leaf with no operands, so this is the
+/// smallest program that exercises `render_iota` — no elementwise consumer
+/// is needed to prove the emitted kernel assembles under the real
+/// toolchain.
+fn iota_kernel() -> omega::Kernel {
+    let mut program = Vec::new();
+    append(
+        &mut program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(16),
+        },
+    );
+    let shapes = infer(&program, &[]).expect("iota infers");
+    let nests = bind(&program, &shapes, &[]).expect("iota lowers");
+    omega::emit(&nests[0]).expect("iota emits")
+}
+
 #[test]
 fn emitted_source_compiles_with_the_metal_toolchain() {
     let kernels = [
         elementwise_tanh_kernel(),
+        elementwise_erf_kernel(),
         fused_matmul_kernel(),
         cumsum_kernel(),
         embedding_lookup_kernel(),
         embedding_matmul_kernel(),
+        iota_kernel(),
     ];
 
     let mut compiled = 0usize;
@@ -276,9 +324,9 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
     }
 
     assert!(
-        compiled >= 4,
-        "compiled {compiled} kernels — need at least 4 (including a gather) to prove this is \
-         not a vacuous pass"
+        compiled >= 6,
+        "compiled {compiled} kernels — need at least 6 (including a gather, an iota, and the \
+         hand-rolled erf helper) to prove this is not a vacuous pass"
     );
 }
 

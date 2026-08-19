@@ -91,6 +91,9 @@ impl ShapeTable {
                 self.infer_elementwise(node, *body, operands)?
             }
             Op::Reduce(reduce) => self.infer_reduce(node, reduce)?,
+            Op::Iota { extent, .. } => {
+                resolve_leaf_shape(core::slice::from_ref(extent), &self.symbols)?
+            }
         };
         self.dtypes.borrow_mut().push(expr.dtype());
         self.shapes.borrow_mut().push(resolved);
@@ -675,6 +678,77 @@ mod tests {
             matches!(error, TensorError::ExtentMismatch { .. }),
             "{error}"
         );
+    }
+
+    #[rstest]
+    #[case::static_extent(Extent::Static(4), &[], &[4])]
+    #[case::symbolic_extent(Extent::Symbolic(0), &[16], &[16])]
+    fn an_iota_resolves_its_own_shape_from_its_extent(
+        #[case] extent: Extent,
+        #[case] symbols: &[u64],
+        #[case] expected: &[u64],
+    ) {
+        let mut program = Vec::new();
+        let iota = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent,
+            },
+        );
+
+        let shapes = infer(&program, symbols).expect("an iota leaf infers");
+        assert_eq!(shapes.of(iota), expected);
+    }
+
+    #[test]
+    fn an_iota_over_an_unbound_symbol_is_rejected() {
+        let mut program = Vec::new();
+        append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Symbolic(0),
+            },
+        );
+
+        let error = infer(&program, &[]).expect_err("no symbols supplied");
+        assert!(
+            matches!(error, TensorError::UnboundSymbol { symbol: 0 }),
+            "{error}"
+        );
+    }
+
+    /// `Iota` broadcasts into a higher-rank consumer through the same
+    /// [`IndexMap`] machinery any other 1-D leaf uses — the mechanism
+    /// `causal_attention.toml` relies on to spread `query_index`/`key_index`
+    /// across the `st` iteration space.
+    #[test]
+    fn an_iota_broadcasts_into_a_higher_rank_consumer() {
+        let mut program = Vec::new();
+        let index = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(4),
+            },
+        );
+        let other = leaf(&mut program, &[Extent::Static(4), Extent::Static(3)]);
+        let broadcast = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (index, IndexMap::Affine(map::projection(2, &[0]))),
+                    (other, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+
+        let shapes = infer(&program, &[]).expect("iota broadcast infers");
+        assert_eq!(shapes.of(broadcast), &[4, 3]);
     }
 
     #[test]

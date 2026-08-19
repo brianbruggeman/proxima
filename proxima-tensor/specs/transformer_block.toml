@@ -20,15 +20,17 @@
 #     (`s->sg`, the same shape as `inv_rms`'s own `s->sd`) — not a new node
 #     kind or op.
 #
-# So the grammar does not gain a new gap here. The gaps this file inherits
-# are the same two `attention_block.toml` already named, unchanged by this
-# extension:
-#   - RoPE, which needs the multi-term affine `pos*stride + r*dilation` that
+# So the grammar does not gain a new gap here. Of the two gaps
+# `attention_block.toml` used to name, one remains and one has closed:
+#   - RoPE still needs the multi-term affine `pos*stride + r*dilation` that
 #     `spec.rs` documents as outside the einsum notation on purpose.
-#   - causal masking, which needs a tensor derived from iteration indices;
-#     there is no `Op` that produces one.
-# Both remain supplied as ordinary inputs (or omitted, for the mask), exactly
-# as in `attention_block.toml`.
+#   - causal masking is no longer unreachable: `Op::Iota` produces a tensor
+#     of iteration indices, which is what a mask needs — see
+#     `specs/causal_attention.toml` and `spec.rs`'s test over it.
+# RoPE remains supplied as an ordinary input, exactly as in
+# `attention_block.toml`; this file still omits the causal mask itself only
+# to keep the block one architecture at a time, the same reason it omits
+# RoPE.
 
 # --- inputs -----------------------------------------------------------------
 
