@@ -40,6 +40,7 @@ members = [
     "proxima-safetensors",
     "proxima-telemetry",
     "proxima-tensor",
+    "proxima-tokenizer",
     "proxima-intercept",
     "proxima-tls",
     "tools/proxima-cli",
@@ -82,6 +83,7 @@ proxima-config = { path = "proxima-config", default-features = false }
 proxima-core = { path = "proxima-core", default-features = false }
 proxima-dns = { path = "proxima-dns", default-features = false }
 proxima-gguf = { path = "proxima-gguf", default-features = false }
+proxima-tokenizer = { path = "proxima-tokenizer", default-features = false }
 proxima-http = { path = "proxima-http", default-features = false }
 proxima-kafka = { path = "proxima-kafka", default-features = false }
 proxima-listen = { path = "proxima-listen" }
