@@ -41,7 +41,6 @@ pub mod chaos;
 #[cfg(feature = "alloc")]
 pub mod delay;
 pub mod primitives;
-pub mod sans_io;
 // `Diff::call` used to require `tokio::join!` directly (predates the
 // pipe/sync primitives merge); it's now `futures::join!` (runtime-agnostic),
 // but the module stays `not(loom)` for parity with its sibling `lifecycle`
