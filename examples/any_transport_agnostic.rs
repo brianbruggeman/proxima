@@ -133,16 +133,6 @@ fn free_loopback_addr() -> Result<SocketAddr, ProximaError> {
     Ok(addr)
 }
 
-fn wait_until_listening(addr: SocketAddr) {
-    for _ in 0..200 {
-        if StdTcpStream::connect(addr).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("listener at {addr} never came up");
-}
-
 fn h1_round_trip(addr: SocketAddr) -> Result<String, ProximaError> {
     let mut stream = StdTcpStream::connect(addr)?;
     stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?;
@@ -189,7 +179,6 @@ async fn stream_and_datagram_share_one_port() -> Result<(), ProximaError> {
         })
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     // TCP: the built-in h1 candidate still classifies and drives normally.
     let h1_text = h1_round_trip(bind)?;
@@ -257,7 +246,6 @@ async fn datagram_candidates_are_priority_arbitrated() -> Result<(), ProximaErro
         })
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let hipri = udp_round_trip(bind, b"HIPRI/1\r\nx", Duration::from_secs(2))?
         .expect("the high-priority candidate must reply to its own literal");

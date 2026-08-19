@@ -165,14 +165,6 @@ async fn main() -> Result<(), ProximaError> {
         .serve()
         .await?;
 
-    // wait for the accept loop, the same bounded poll every on-ramp example uses
-    for _ in 0..200 {
-        if StdTcpStream::connect(bind).is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-
     let h1_text = h1_round_trip(bind)?;
     assert!(
         h1_text.starts_with("HTTP/1.1 200"),

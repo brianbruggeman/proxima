@@ -32,16 +32,6 @@ fn free_loopback_addr() -> Result<SocketAddr, ProximaError> {
     Ok(addr)
 }
 
-fn wait_until_listening(addr: SocketAddr) {
-    for _ in 0..200 {
-        if std::net::TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("listener at {addr} never came up");
-}
-
 struct NullHttp;
 
 impl SendPipe for NullHttp {
@@ -128,7 +118,6 @@ async fn memcached_section() -> Result<(), ProximaError> {
         .memcached(into_memcached_handle(KvStore::default()))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder()
         .memcached(format!("memcached://{bind}"))
@@ -245,7 +234,6 @@ async fn kafka_section() -> Result<(), ProximaError> {
         .kafka(into_kafka_handle(EchoProduce))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().kafka(format!("kafka://{bind}")).build()?;
     let request = RequestBody::Produce(ProduceRequest {
@@ -310,7 +298,6 @@ async fn mqtt_section() -> Result<(), ProximaError> {
         .mqtt(into_mqtt_handle(AllowAll))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().mqtt(format!("mqtt://{bind}")).build()?;
     let response = client.call("PING", "").send().await?;
@@ -367,7 +354,6 @@ async fn amqp_section() -> Result<(), ProximaError> {
         .amqp(into_amqp_handle(recorder))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().amqp(format!("amqp://{bind}")).build()?;
     client
@@ -464,7 +450,6 @@ async fn kafka_conflaguration_section() -> Result<(), ProximaError> {
         .protocol(configured)
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().kafka(format!("kafka://{bind}")).build()?;
     let request = RequestBody::Produce(ProduceRequest {
