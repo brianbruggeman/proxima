@@ -574,6 +574,8 @@ fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &st
 
 /// `[?0]`-shaped leaf: the per-sequence-position broadcast constants
 /// (`inv_dim`/`eps`/`ones`) every `rmsnorm`/SwiGLU call below reads.
+/// `inv_sqrt_head_dim` is a sibling constant with the same broadcast role
+/// but not a bound `Input` — see [`inv_sqrt_head_dim_constant`].
 fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
     input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)], name)
 }
@@ -667,6 +669,27 @@ fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
     Ok((is_future, neg_infinity))
 }
 
+/// `1/sqrt(head_dim)`, attention's usual score scale, built once and shared
+/// by every layer exactly like [`causal_mask`]'s `neg_infinity` — `head_dim`
+/// is a compile-time model-config constant here (`mistral_forward_program`'s
+/// own `u32` parameter), not per-request data, so it is derived by the same
+/// `Iota`-plus-arithmetic route `neg_infinity` uses rather than routed
+/// through `bind.rs` as a named runtime `Input`: a bound name is a value two
+/// files must agree on forever, and this one never varies at runtime.
+/// `Op::Iota` over `head_dim` gives per-element indices, `Equal` against
+/// itself turns every element into `1.0` (the same 0/1-as-float trick
+/// `is_future` uses `Greater` for), a full-reduction `Add` sums those to the
+/// scalar `head_dim`, and `SquareRoot`/`Reciprocal` finish it — a rank-0
+/// result that broadcasts into `scores`' `stug` shape the same way
+/// `neg_infinity` broadcasts from its own (rank-1) shape.
+fn inv_sqrt_head_dim_constant(program: &mut Vec<Op>, head_dim: u32) -> Result<NodeId, TensorError> {
+    let head_iota = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(head_dim) });
+    let head_ones = elementwise(program, DType::Float32, ScalarOp::Equal, &[(head_iota, "i->i"), (head_iota, "i->i")])?;
+    let head_dim_count = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, head_ones, "i->i", "->i")?;
+    let head_dim_sqrt = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(head_dim_count, "->")])?;
+    elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(head_dim_sqrt, "->")])
+}
+
 /// One transformer layer, node-for-node the same graph
 /// `specs/mistral_layer.toml` spells — attention (RoPE + GQA + causal mask)
 /// then the SwiGLU feed-forward, each wrapped in its own residual. `x` in,
@@ -681,6 +704,7 @@ fn append_mistral_layer(
     inv_dim: NodeId,
     eps: NodeId,
     ones: NodeId,
+    inv_sqrt_head_dim: NodeId,
     cos: NodeId,
     sin: NodeId,
     group_ones: NodeId,
@@ -732,11 +756,23 @@ fn append_mistral_layer(
     let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
     let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
 
+    // attention's usual `1/sqrt(d_k)`: without it QK^T over a real head_dim
+    // (128) saturates softmax toward one-hot instead of blending.
+    // `inv_sqrt_head_dim` is rank-0 ([`inv_sqrt_head_dim_constant`]'s own
+    // doc explains why it is not an `Input`), so it broadcasts via `->stug`
+    // rather than `neg_infinity`'s `s->stug`.
+    let scores_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
+
     let scores_masked = elementwise(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "st->stug"), (neg_infinity, "s->stug"), (scores, "stug->stug")],
+        &[(is_future, "st->stug"), (neg_infinity, "s->stug"), (scores_scaled, "stug->stug")],
     )?;
 
     let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
@@ -816,6 +852,7 @@ pub fn mistral_forward_program(
     let inv_dim = symbolic_leaf(&mut program, DType::Float32, "inv_dim");
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = symbolic_leaf(&mut program, DType::Float32, "ones");
+    let inv_sqrt_head_dim = inv_sqrt_head_dim_constant(&mut program, head_dim)?;
     let cos = input_leaf(
         &mut program,
         DType::Float32,
@@ -903,6 +940,7 @@ pub fn mistral_forward_program(
             inv_dim,
             eps,
             ones,
+            inv_sqrt_head_dim,
             cos,
             sin,
             group_ones,
@@ -2207,6 +2245,112 @@ shape = ["seq"]
         run_gqa_case(text, dims, 41);
     }
 
+    /// The regression this fix exists for: `1/sqrt(head_dim)` missing from
+    /// `scores` before the mask does not fail `sums to 1.0` — a saturated
+    /// softmax is still a valid softmax — so that invariant alone cannot
+    /// catch it. This builds the same score/scale/softmax composition
+    /// `append_mistral_layer` now runs (`q . k`, multiply by
+    /// [`inv_sqrt_head_dim_constant`], then max-shift/exp/normalize, no mask
+    /// — masking is `causal_attention.toml`'s own proven concern, not this
+    /// one's), at the model's real `head_dim=128`, built TWICE on the same
+    /// `q`/`k`: once with the scaling step omitted entirely (exactly the
+    /// pre-fix graph — before this fix `scores` fed the mask directly, which
+    /// is what `unscaled` below reproduces) and once with it present, using
+    /// the actual production helper rather than a hand-rolled stand-in.
+    ///
+    /// `q` is the all-ones vector and key 0 is `0.15 * q` (dot product
+    /// `0.15 * 128 = 19.2` exactly, no estimation); the other 15 keys are
+    /// all-zero (dot product `0.0` exactly). Chosen, not randomly sampled,
+    /// so the separation is provable arithmetic: unscaled, `exp(19.2)` so
+    /// overwhelms `15 * exp(0)` that key 0 takes essentially the whole
+    /// distribution; scaled by `1/sqrt(128)`, the same score drops to
+    /// `1.697`, and `exp(1.697) = 5.46` split against `15 * exp(0) = 15`
+    /// cannot exceed half the row.
+    ///
+    /// The assertion a plain "sums to 1.0" check would have missed: the
+    /// unscaled row's largest weight must be near-one-hot (`> 0.9`) and the
+    /// scaled row's must not (`< 0.5`) — both rows still sum to `1.0`, so
+    /// only a degeneracy check, not a normalization check, tells them apart.
+    #[test]
+    fn scaling_attention_scores_by_inverse_sqrt_head_dim_prevents_softmax_saturation() {
+        const HEAD_DIM: usize = 128;
+        const KEYS: usize = 16;
+        const KEY_ZERO_WEIGHT: f32 = 0.15;
+
+        fn build(scaled: bool) -> (Vec<Op>, NodeId) {
+            let mut program = Vec::new();
+            let query = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(HEAD_DIM as u32)], "q");
+            let key = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(KEYS as u32), Extent::Static(HEAD_DIM as u32)], "k");
+
+            let score_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(query, "sh->sth"), (key, "th->sth")])
+                .expect("score product builds");
+            let scores = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_product, "sth->sth", "st->sth")
+                .expect("scores reduce builds");
+            let scores = if scaled {
+                let inv_sqrt_head_dim = inv_sqrt_head_dim_constant(&mut program, HEAD_DIM as u32).expect("scale constant builds");
+                elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(scores, "st->st"), (inv_sqrt_head_dim, "->st")])
+                    .expect("scaling multiply builds")
+            } else {
+                scores
+            };
+            let score_max = reduce(&mut program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores, "st->st", "s->st")
+                .expect("max reduce builds");
+            let shifted = elementwise(&mut program, DType::Float32, ScalarOp::Subtract, &[(scores, "st->st"), (score_max, "s->st")])
+                .expect("shift builds");
+            let weights = elementwise(&mut program, DType::Float32, ScalarOp::Exponential, &[(shifted, "st->st")])
+                .expect("exponential builds");
+            let weight_sum = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "st->st", "s->st")
+                .expect("weight sum reduce builds");
+            let inv_weight_sum = elementwise(&mut program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "s->s")])
+                .expect("reciprocal builds");
+            let probabilities = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(weights, "st->st"), (inv_weight_sum, "s->st")])
+                .expect("probabilities multiply builds");
+            (program, probabilities)
+        }
+
+        let query_vector = alloc::vec![1.0f32; HEAD_DIM];
+        let mut key_vectors = alloc::vec![0.0f32; KEYS * HEAD_DIM];
+        key_vectors[0..HEAD_DIM].fill(KEY_ZERO_WEIGHT);
+        let symbols = [1u64];
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+
+        let evaluate = |scaled: bool| -> Vec<f32> {
+            let (program, probabilities) = build(scaled);
+            crate::shape::infer(&program, &symbols).expect("the isolated score/softmax slice infers");
+            let root = NodeId(program.len() as u32 - 1);
+            assert_eq!(root, probabilities, "probabilities is the program's own last node");
+            let blocks: [&[f32]; 2] = [&query_vector, &key_vectors];
+            let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the isolated score/softmax slice evaluates");
+            evaluated.root().to_vec()
+        };
+
+        let unscaled = evaluate(false);
+        let scaled = evaluate(true);
+
+        for (label, row) in [("unscaled (pre-fix)", &unscaled), ("scaled (post-fix)", &scaled)] {
+            let total: f32 = row.iter().sum();
+            assert!((total - 1.0).abs() < 1e-4, "{label} softmax row sums to {total}, not 1.0");
+        }
+
+        let unscaled_max = unscaled[0];
+        let scaled_max = scaled[0];
+        assert!(
+            unscaled_max > 0.9,
+            "pre-fix (no scaling) softmax should saturate toward one-hot over head_dim={HEAD_DIM} \
+             (key 0's raw score is {} against 15 keys at 0.0), but key 0's weight is only \
+             {unscaled_max} — the test data no longer reproduces the bug this regression test \
+             exists to catch",
+            KEY_ZERO_WEIGHT * HEAD_DIM as f32
+        );
+        assert!(
+            scaled_max < 0.5,
+            "post-fix (scaled by 1/sqrt(head_dim)) softmax should blend across {KEYS} keys instead \
+             of collapsing to one, but key 0's weight is {scaled_max}, no better than the unscaled \
+             {unscaled_max} — 1/sqrt(head_dim) is not doing its job"
+        );
+    }
+
     /// The milestone this crate has been building toward: one real
     /// openchat-3.5-1210 / Mistral-7B transformer layer, RoPE + GQA +
     /// causal mask composed together, at the model's own dimensions
@@ -2295,9 +2439,11 @@ shape = ["seq"]
         let w_down = random_vec(108, FEED_FORWARD * EMBEDDING);
         let cos = random_vec(109, SEQUENCE * PAIRS);
         let sin = random_vec(110, SEQUENCE * PAIRS);
+        let attn_norm_weight = alloc::vec![1.0f32; EMBEDDING];
+        let ffn_norm_weight = alloc::vec![1.0f32; EMBEDDING];
         let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
 
-        let blocks: [&[f32]; 14] = [
+        let blocks: [&[f32]; 16] = [
             &activations,
             &inverse_dim,
             &epsilon,
@@ -2311,6 +2457,8 @@ shape = ["seq"]
             &w_down,
             &cos,
             &sin,
+            &attn_norm_weight,
+            &ffn_norm_weight,
             &group_ones,
         ];
 
@@ -2540,9 +2688,12 @@ shape = ["seq"]
 
         // block order mirrors `mistral_forward_program`'s own `Input`
         // emission order exactly: ids, table, inv_dim/eps/ones, cos/sin,
-        // group_ones, then each layer's wq/wk/wv/wo/w_gate/w_up/w_down, then
-        // the lm head. `block_node_ids` (cpu.rs) reads `Input`s positionally,
-        // which is why this order is load-bearing, not cosmetic.
+        // group_ones, then each layer's attn_norm_weight/ffn_norm_weight/
+        // wq/wk/wv/wo/w_gate/w_up/w_down, then the lm head.
+        // `inv_sqrt_head_dim` is graph-derived (`inv_sqrt_head_dim_constant`),
+        // not a bound `Input`, so it has no block here. `block_node_ids`
+        // (cpu.rs) reads `Input`s positionally, which is why this order is
+        // load-bearing, not cosmetic.
         let ids: Vec<f32> = (0..SEQUENCE).map(|position| (position % VOCAB) as f32).collect();
         let table = random_vec(200, VOCAB * EMBEDDING);
         let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
@@ -2555,6 +2706,8 @@ shape = ["seq"]
         let mut owned: Vec<Vec<f32>> = Vec::new();
         let mut seed = 300u64;
         for _layer in 0..BLOCK_COUNT {
+            owned.push(alloc::vec![1.0f32; EMBEDDING]);
+            owned.push(alloc::vec![1.0f32; EMBEDDING]);
             owned.push(random_vec(seed, EMBEDDING * QUERY_HEADS * HEAD_DIM));
             seed += 1;
             owned.push(random_vec(seed, EMBEDDING * KV_HEADS * HEAD_DIM));
