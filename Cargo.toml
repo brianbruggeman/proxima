@@ -16,6 +16,7 @@ members = [
     "proxima-config",
     "proxima-core",
     "proxima-dns",
+    "proxima-gguf",
     "proxima-http",
     "proxima-kafka",
     "proxima-storage",
@@ -77,6 +78,7 @@ proxima-codec = { path = "proxima-codec", default-features = false }
 proxima-config = { path = "proxima-config", default-features = false }
 proxima-core = { path = "proxima-core", default-features = false }
 proxima-dns = { path = "proxima-dns", default-features = false }
+proxima-gguf = { path = "proxima-gguf", default-features = false }
 proxima-http = { path = "proxima-http", default-features = false }
 proxima-kafka = { path = "proxima-kafka", default-features = false }
 proxima-listen = { path = "proxima-listen" }
