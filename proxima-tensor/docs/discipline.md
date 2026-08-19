@@ -3779,3 +3779,183 @@ function entirely, and the checksums confirm no cross-contamination).
 loop — reuse-first (principle 1), no new magic number (principle 12/§15,
 `DOT_LANES` already existed and was already the measured-best value from
 ROW 12).
+
+## ROW 61 — int8 dot on packed q4_K/Q8_K blocks: 6.8x over the f32-dequant path, 1.29-1.40x behind ggml t1 (was 9.34x)
+
+ROW 60 closed the "own gap" between two variants of the SAME mechanism (f32
+multiply-add over a dequantized `[f32;256]` scratch). This row replaces the
+mechanism: `dot_q4k_q8k` (`cpu.rs`, feature `q4k-int8-dot`, default-off)
+reads `Q4_K`'s packed nibbles and a `Q8_K`-quantized activation directly,
+doing an INTEGER dot (`i32` partial sums, two `f32` ops per 256-element
+super-block: `d*sumi - dmin*mins_correction`) — no dequantize pass, no
+`f32` intermediate at all. Two implementations of that ONE mechanism, not
+two mechanisms: `dot_q4k_q8k_block_scalar` (portable, no arch intrinsics,
+what every non-aarch64 target compiles) and `dot_q4k_q8k_block_neon_dotprod`
+(aarch64, `sdot`-accelerated). `matmul_q4k_q8k_f32`/`_portable_f32`
+quantize the activation to `Q8_K` ONCE per call (`quantize_row_q8k`,
+hoisted out of the row loop — paying it per row would cost 4096x at this
+crate's shapes) and share it across every row.
+
+**`vdotq_s32` is unstable on this toolchain (MEASURED, not assumed):**
+`rustc 1.97.1` rejects `core::arch::aarch64::vdotq_s32` with
+`unstable library feature 'stdarch_neon_dotprod'` (probed directly,
+`rustc --edition 2024 -O --target aarch64-apple-darwin`). Issued the `sdot`
+instruction via `core::arch::asm!` instead (`sdot_s32`, `#[target_feature(enable
+= "dotprod")]`) — ggml's own `ggml_vdotq_s32` C wrapper is the exact
+analogue. `FEAT_DotProd` is a build-time decision, not runtime-detected:
+`build.rs::emit_dotprod_cfg` emits `cargo:rustc-cfg=q4k_dotprod` whenever
+`CARGO_CFG_TARGET_ARCH == "aarch64"` (every aarch64 target this workspace
+builds for has the feature; matches the existing NEON tiles' own
+"`neon` is unconditional on aarch64 baseline ISA" assumption, `cpu.rs:3877`).
+`dot_q4k_q8k` picks the `q4k_dotprod`-cfg'd arm at compile time; no runtime
+`is_aarch64_feature_detected!`, no second implementation shipped as a dead
+fallback. `dot_q4k_q8k_portable`/`matmul_q4k_q8k_portable_f32` additionally
+expose the scalar arm directly (bypassing `q4k_dotprod` dispatch) so it
+stays reachable and separately benchable from an aarch64 host, since this
+session had no non-aarch64 hardware to bench the portable arm on natively.
+
+**Correctness (MEASURED, ggml as oracle, real `openchat-3.5-1210.Q4_K_S.gguf`
+bytes, `bench_q4k_matmul.rs`):** packed-int8 `max_abs_diff` vs `ggml_mul_mat`
+on the SAME packed weight bytes:
+
+| shape | old f32-dequant diff vs ggml | packed-int8 diff vs ggml |
+|---|---|---|
+| attn_q 4096x4096 | 2.7386e-3 | **8.643e-7** |
+| attn_output 4096x4096 | 6.2376e-4 | **1.490e-7** |
+| attn_k 4096x1024 | 3.0455e-3 | **7.004e-7** |
+| ffn_gate 4096x14336 | 1.5026e-3 | **5.066e-7** |
+| ffn_up 4096x14336 | 9.1866e-4 | **2.459e-7** |
+
+The packed-int8 diff is 3-4 ORDERS OF MAGNITUDE tighter than the existing
+f32-dequant path's diff against the same oracle. Mechanism: ggml's own
+`ggml_mul_mat` quantizes the `f32` activation to `Q8_K` internally before
+calling this exact `q4_K x q8_K` int8 dot when multiplying against a `Q4_K`
+weight — `dot_q4k_q8k` is not merely *like* what ggml does, it is computing
+the SAME quantized-activation path ggml runs, so the two agree to within
+float32 rounding (~1e-7) rather than differing by two independently-lossy
+codecs. Additionally: `matmul_q4k_q8k_f32` (`q4k_dotprod` dispatch) and
+`matmul_q4k_q8k_portable_f32` (forced scalar) produce **bit-exact**-equal
+output on identical input (`matmul_q4k_q8k_f32_agrees_bit_exact_with_the_
+portable_arm`, `cpu.rs` test) — every intermediate value both arms compute
+is `i32` until the final two `f32` ops, and integer addition has no
+rounding, so `sdot`'s 16-lane hardware reduction and the scalar's 32-wide
+serial loop are provably the same mechanism, not two that happen to agree
+by luck.
+
+**Bench: `bench_q4k_matmul.rs`, release, single thread, real GGUF weight
+bytes, `sample_size(30)`, `measurement_time(5s)`. `attn_q` run 3x for CoV;
+`attn_k`/`ffn_gate` run 1x each (time budget) — reported as single-run,
+not averaged into a false-precision CoV.**
+
+| shape (macs/call) | old f32 (ROW 60) ns/mac | packed-int8 **portable** ns/mac | packed-int8 **dispatched** (`sdot`) ns/mac, CoV (n=3) | ggml t1 ns/mac, CoV (n=3) | ggml t8 ns/mac |
+|---|---|---|---|---|---|
+| attn_q 4096x4096 | 0.2288 | 0.1659 | 0.03378, **0.28%** | 0.02477, **0.65%** | 0.01483 |
+| attn_k 4096x1024 | 0.2258 | 0.1665 | 0.03414 (n=1) | 0.02644 (n=1) | 0.04452 |
+| ffn_gate 4096x14336 | 0.2291 | 0.1654 | 0.03343 (n=1) | 0.02381 (n=1) | 0.01089 |
+
+**Frequency-weighted scorecard (design-favors labels):**
+
+| arm | design-favors | verdict vs ggml t1 | verdict vs prior (ROW 60) f32 |
+|---|---|---|---|
+| packed-int8 dispatched (`sdot`) | **incumbent** (this IS ggml's own mechanism) | **LOSE 1.29-1.40x** (was 9.34x — 6.7-7.2x closer) | **WIN 6.6-6.9x** |
+| packed-int8 portable (scalar) | neutral | LOSE 6.5-7.0x | **WIN 1.36-1.39x** |
+| ggml t8 vs ggml t1 | incumbent, thread scaling | 1.7-2.2x (attn_q/ffn_gate); **REGRESSES** 1.68x at attn_k (thread overhead exceeds the work at that shape — a real ggml finding, not ours) | n/a |
+
+Honest read: the `sdot`-accelerated arm is the load-bearing number and it
+is a genuine, large step toward the incumbent (9.34x -> 1.29-1.40x gap),
+but it is still a LOSS on ggml's own single-thread home turf — this row
+does not claim parity. The portable arm, with zero architecture-specific
+code, already beats this crate's own prior f32-dequant path by ~1.36-1.39x
+at every shape, which is the "portable packing alone" number the owner
+asked to see reported standalone, separate from what the intrinsic adds.
+
+**Emitted assembly (MEASURED, not claimed):** `objdump --macho -d` (Apple
+LLVM 17 bundled `objdump`) does not have a mnemonic table entry for `sdot`
+on this host and prints raw `.long 0x4e949513` words instead; manually
+decoding the opcode (`bits[15:10] = 100101`, `U`-bit clear) confirms
+ARMv8.2 `SDOT (vector)`, signed. `llvm-objdump` (same Xcode toolchain,
+`xcrun --find llvm-objdump`) DOES carry the mnemonic and confirms it
+directly — `dot_q4k_q8k`'s compiled body (symbol
+`_RNvNtCsdesHdT7369h_14proxima_tensor3cpu11dot_q4k_q8k`) contains 16
+`sdot.4s` instructions interleaved with `and.16b` (low-nibble mask) and
+`ushr.16b` (high-nibble shift) — the exact three-instruction shape
+`vandq_u8`/`vshrq_n_u8`/`sdot` was written to produce, confirmed in machine
+code:
+
+```asm
+1000b4330: ushr.16b v8, v21, #0x4
+1000b4334: movi.2d  v19, #0
+1000b4338: sdot.4s  v19, v8, v20
+1000b433c: ushr.16b v20, v22, #0x4
+1000b4340: sdot.4s  v19, v20, v31
+1000b434c: and.16b  v21, v21, v18
+1000b4350: sdot.4s  v20, v21, v31
+```
+
+**Host loadout:** shared Mac host, moderately loaded throughout this row's
+bench runs — `uptime` load average 4.86/6.20/4.69 (1/5/15 min) before, rose
+to 6.56/6.20/5.40 after; `ps -eo pcpu,comm` topped by `iTerm2` (46-84%),
+`mediaanalysisd` (51-57%), `mds_stores`/`mdworker_shared` (Spotlight
+indexing, 7-61%), and one other local CLI process (32-37%). Despite
+the load, dispatched-arm CoV stayed at 0.28% (n=3) — well under the 5% bar
+— so the load did not visibly contaminate the headline number, but per-run
+values ranged 565.31/566.30/568.36 µs, a real (if small) spread worth
+recording rather than a single point estimate.
+
+**Types minted: none beyond what the wire format requires.**
+`activation_q8k: &[u8]` mirrors ggml's own `block_q8_K` byte layout exactly
+(`f32` scale + 256 `i8` quants + 16 `i16` bsums = 292 bytes/block) —
+guiding-principles §1: a byte buffer already in the incumbent's own wire
+shape needs no host struct type any more than `dot_q4k_f32`'s existing
+`weight_row: &[u8]` does. `get_scale_min_k4`/`nearest_int`
+(`proxima-gguf::quant::q4_k`) made `pub` (were crate-private) and reused
+rather than re-derived — one ggml `nearest_int`/`get_scale_min_k4` per the
+upstream source, not two.
+
+**Allocation budget:** hot path (`dot_q4k_q8k*`, `dot_q4k_q8k_block_*`) —
+**zero**, matches the stated budget; every buffer is caller-provided or
+stack (`[u8; K_SCALE_SIZE]`, `[u8; 4]`). Setup path
+(`matmul_q4k_q8k_f32`/`_portable_f32`) — one `Vec<u8>` allocation for the
+shared `Q8_K` activation buffer, sized once per call, not per row (the
+whole point of hoisting `quantize_row_q8k` out of the row loop).
+
+**Feature gate:** `q4k-int8-dot`, default-off (`proxima-tensor/Cargo.toml`).
+`dot_q4k_f32`/`matmul_q4k_f32` (ROW 60's path) are UNTOUCHED and remain the
+production default — this row adds a sibling arm behind its own gate, per
+guiding-principles §3/§11, until an e2e bench justifies the switch.
+
+**Gates:** `cargo nextest run -p proxima-tensor` (default features) — 293
+passed, 0 failed, 2 skipped (unchanged N). With `--features
+q4k-int8-dot,test-support` — 298 passed, 0 failed, 2 skipped (+6 new tests:
+bit-exact dispatched-vs-portable cross-check, dequantize-oracle tolerance,
+zero-vector `Q8_K` exactness, three shape-mismatch guards).
+`bash scripts/proxima-tensor-gate.sh` (with `GGML_BUILD_DIR` set) —
+`passed: 18, failed: 0`. GEMM checksums (`busy_per_mac --features
+instrument`) unchanged: `512 4 1` -> `135.87619`, `1024 4 1` -> `260.24106`,
+`2048 4 1` -> `513.10425` — confirms zero cross-contamination with ROW 60's
+path. `cargo check -p proxima-tensor --target x86_64-unknown-linux-gnu
+--features q4k-int8-dot` — EXIT 0 (the portable arm is what that target
+actually compiles; `q4k_dotprod` never fires off-aarch64).
+
+**Re-prove:** `CARGO_TARGET_DIR=<scratch> GGML_BUILD_DIR=<built ggml>/
+cargo build --release -p proxima-tensor --bench bench_q4k_matmul --features
+ggml-bench,q4k-int8-dot`, then run the produced binary with `--bench
+<shape-name>` (the raw binary defaults to criterion's `--test` mode and
+prints no timing without `--bench` — verified by reading
+`criterion-0.5.1/src/lib.rs:960-964`, `(bench, test) = (false, _) => true`
+i.e. test-mode unless `--bench` is passed). `ns/mac` is `time / macs/call`
+printed per shape; correctness is the bench's own inline `assert!(diff <
+0.5)` plus the bit-exact dispatched-vs-portable assertion. Disassembly:
+`xcrun --find llvm-objdump` then `llvm-objdump -d --symbolize-operands
+<binary>`, find the `dot_q4k_q8k` symbol.
+
+**Not landed as a default; two negatives kept, not buried:**
+1. The `sdot`-accelerated arm still LOSES to ggml single-thread by
+   1.29-1.40x — this row closes most, not all, of the gap. The remaining
+   difference is plausibly ggml's tinyBLAS-style block/tile scheduling
+   around the same `sdot` primitive (unmeasured; a follow-up row's job, not
+   asserted here per principle 18).
+2. `attn_k`/`ffn_gate` shapes were benched n=1 (time budget), not the
+   3-5-run minimum this skill calls for — CoV is UNKNOWN for those two
+   rows' numbers, reported as single-run rather than dressed up with a
+   borrowed CoV from the attn_q shape.

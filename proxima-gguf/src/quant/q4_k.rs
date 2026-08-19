@@ -80,7 +80,15 @@ pub const fn elements_for_blocks(block_count: usize) -> usize {
 /// keep it positive through the add. This also sidesteps `f32::round` /
 /// `round_ties_even` not existing on `core` (no_std, no libm) — the bit
 /// trick is core-only arithmetic, needed here regardless of tier.
-fn nearest_int(value: f32) -> i32 {
+///
+/// `pub` for the same reason as [`get_scale_min_k4`]: ggml's own
+/// `nearest_int` (`ggml-quants.c:366-371`) is not `Q4_K`-specific, it is
+/// the one rounding primitive every k-quant codec's reference quantizer
+/// calls, `Q8_K`'s (`quantize_row_q8_K_ref`, `ggml-quants.c:2471`)
+/// included — a second copy in `proxima-tensor`'s `Q8_K` activation
+/// quantizer would drift from this one silently; reusing it cannot.
+#[must_use]
+pub fn nearest_int(value: f32) -> i32 {
     let shifted = value + 12_582_912.0;
     let bits = shifted.to_bits();
     (bits & 0x007f_ffff) as i32 - 0x0040_0000
@@ -90,7 +98,16 @@ fn nearest_int(value: f32) -> i32 {
 /// `scales` field. Ports `get_scale_min_k4` (`ggml-quants.c:625-632`)
 /// exactly — the packing is bit-interleaved across non-adjacent bytes,
 /// not a fixed stride, and branches on `sub_block < 4`.
-fn get_scale_min_k4(sub_block: usize, scales: &[u8; K_SCALE_SIZE]) -> (u8, u8) {
+///
+/// `pub` (rather than crate-private) so the packed-`Q4_K` x packed-`Q8_K`
+/// int8 dot kernel in `proxima-tensor` (a different crate) can pull the
+/// same 8 `(scale, min)` pairs this module already tests, instead of
+/// re-deriving ggml's vectorized `mins8`/`kmask1..3` bit-trick a second
+/// time — same identity, this is just the scalar route to it, called 8
+/// times per super-block rather than once with SIMD lane tricks, which is
+/// cheap relative to the 256-element `vdotq_s32` reduction it feeds.
+#[must_use]
+pub fn get_scale_min_k4(sub_block: usize, scales: &[u8; K_SCALE_SIZE]) -> (u8, u8) {
     if sub_block < 4 {
         (scales[sub_block] & 63, scales[sub_block + 4] & 63)
     } else {
