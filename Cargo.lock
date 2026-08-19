@@ -4222,6 +4222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-onnx"
+version = "0.1.0"
+dependencies = [
+ "proxima-primitives",
+ "proxima-protocols",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proxima-patterns"
 version = "0.1.0"
 dependencies = [
