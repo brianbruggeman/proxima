@@ -190,6 +190,8 @@ extern crate alloc;
 pub mod align;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod bind;
+#[cfg(feature = "config")]
+pub mod config;
 // element conversion (`convert::Convert`, a `Pipe`) and decimal-as-conversion
 // (`convert::decimal`) need neither `alloc` nor `std` — slices and core
 // arithmetic only — so this stays ungated, same as `dtype`.
@@ -213,6 +215,8 @@ pub mod map;
 pub mod op;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod shape;
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub mod sized;
 #[cfg(feature = "config")]
 pub mod spec;
 // also active under plain `cfg(test)` (no feature flag needed) so this
