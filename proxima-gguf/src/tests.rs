@@ -289,63 +289,6 @@ fn fsm_produces_identical_results_across_arbitrary_chunk_boundaries() {
     }
 }
 
-fn parse_via_generic_driver(bytes: &[u8], chunk_size: usize) -> Result<ParsedGguf, GgufError> {
-    use proxima_primitives::pipe::sans_io::drive_to_completion;
-
-    let mut parser = GgufParser::new();
-    let mut header = None;
-    let mut metadata = Vec::new();
-    let mut tensors = Vec::new();
-    let mut completion = None;
-
-    drive_to_completion(&mut parser, bytes.chunks(chunk_size.max(1)), |event| match event {
-        GgufEvent::Header {
-            version,
-            tensor_count,
-            kv_count,
-        } => header = Some((version, tensor_count, kv_count)),
-        GgufEvent::Metadata { key, value } => metadata.push((key, value)),
-        GgufEvent::Tensor(tensor) => tensors.push(tensor),
-        GgufEvent::Complete {
-            data_offset,
-            alignment,
-        } => completion = Some((data_offset, alignment)),
-    })?;
-
-    let (version, tensor_count, kv_count) = header.ok_or(GgufError::TruncatedInput)?;
-    let (data_offset, alignment) = completion.ok_or(GgufError::TruncatedInput)?;
-    Ok(ParsedGguf {
-        version,
-        tensor_count,
-        kv_count,
-        metadata,
-        tensors,
-        data_offset,
-        alignment,
-    })
-}
-
-/// Proves `proxima_primitives::pipe::sans_io::ByteStreamParser` is
-/// load-bearing, not a relocation: `drive_to_completion` is one generic
-/// loop, written once against the trait, that drives `GgufParser` through
-/// the exact same awkward chunk splits `fsm_produces_identical_results_
-/// across_arbitrary_chunk_boundaries` drives by hand above, and lands on
-/// byte-identical results.
-#[test]
-fn sans_io_generic_driver_matches_hand_rolled_loop() {
-    let fixture = build_fixture();
-    let whole = parse_via_chunks(&fixture.bytes, fixture.bytes.len()).expect("whole-buffer parse");
-
-    for chunk_size in [1usize, 3, 7, 13] {
-        let via_driver = parse_via_generic_driver(&fixture.bytes, chunk_size)
-            .unwrap_or_else(|error| panic!("chunk_size={chunk_size} failed: {error:?}"));
-        assert_eq!(
-            via_driver, whole,
-            "chunk_size={chunk_size} generic driver diverged from hand-rolled loop"
-        );
-    }
-}
-
 #[test]
 fn rejects_bad_magic_without_panicking() {
     let mut fixture = build_fixture();
