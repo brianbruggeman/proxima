@@ -15,14 +15,16 @@
 //! inherently bidirectional — either format crate depending on the other
 //! would be an arbitrary direction to pick, and neither reader/writer
 //! needs to know the other format exists to do its own job.
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
+mod bind;
 mod dtype;
 mod error;
 mod transform;
 
+pub use bind::gguf_tensor_as_f32;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};
