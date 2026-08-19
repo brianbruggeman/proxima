@@ -504,6 +504,392 @@ fn lookup(resolved: &BTreeMap<String, NodeId>, reference: &str) -> Result<NodeId
         .ok_or_else(|| TensorError::UnknownNode(reference.to_string()))
 }
 
+/// Appends one [`Op::Elementwise`], parsing each operand's `operand->
+/// iteration` notation through the same [`parse_operand_pattern`] the TOML
+/// lowering above uses. This is the whole reason a hand-built full-model
+/// program stays honest to the TOML one node kind spells: both paths run the
+/// identical grammar, so a generated layer cannot silently drift from
+/// `specs/mistral_layer.toml`'s own addressing.
+fn elementwise(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    body: ScalarOp,
+    inputs: &[(NodeId, &str)],
+) -> Result<NodeId, TensorError> {
+    let operands = inputs
+        .iter()
+        .map(|(node, notation)| {
+            Ok((*node, IndexMap::Affine(parse_operand_pattern(notation)?)))
+        })
+        .collect::<Result<Vec<(NodeId, IndexMap)>, TensorError>>()?;
+    Ok(op::append(
+        program,
+        Op::Elementwise {
+            dtype,
+            body,
+            operands,
+            name: None,
+        },
+    ))
+}
+
+/// Appends one [`Op::Reduce`], same notation-parsing rationale as
+/// [`elementwise`].
+fn reduce(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    body: ScalarOp,
+    init: ReduceInit,
+    operand: NodeId,
+    in_map: &str,
+    out_map: &str,
+) -> Result<NodeId, TensorError> {
+    let in_pattern = parse_operand_pattern(in_map)?;
+    let (out_rank, out_projected) = parse_projection(out_map)?;
+    Ok(op::append(
+        program,
+        Op::Reduce(Reduce {
+            dtype,
+            body,
+            init,
+            operand,
+            in_map: IndexMap::Affine(in_pattern),
+            out_map: IndexMap::Affine(map::projection(out_rank, &out_projected)),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    ))
+}
+
+fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>) -> NodeId {
+    op::append(program, Op::Input { dtype, shape, name: None })
+}
+
+/// `[?0]`-shaped leaf: the per-sequence-position broadcast constants
+/// (`inv_dim`/`eps`/`ones`) every `rmsnorm`/SwiGLU call below reads.
+fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType) -> NodeId {
+    input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)])
+}
+
+/// `table[ids[s], d]`, the exact pattern `shape.rs`'s
+/// `embedding_lookup_program` unit test documents: `ids` selects `table`'s
+/// vocab axis, `d` passes through as a plain projection.
+fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(2, &[0]),
+        base: IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(table, gathered_map)],
+            name: None,
+        },
+    )
+}
+
+/// `specs/mistral_layer.toml`'s `attn_norm`/`ffn_norm` node run, node for
+/// node: `x` normalized by its own root-mean-square, no learned scale (the
+/// TOML file carries none either).
+fn rmsnorm(program: &mut Vec<Op>, x: NodeId, inv_dim: NodeId, eps: NodeId) -> Result<NodeId, TensorError> {
+    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sd->sd"), (x, "sd->sd")])?;
+    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "sd->sd", "s->sd")?;
+    let mean_square = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(sum_squares, "s->s"), (inv_dim, "s->s")],
+    )?;
+    let mean_square_eps = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mean_square, "s->s"), (eps, "s->s")],
+    )?;
+    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "s->s")])?;
+    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "s->s")])?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sd"), (inv_rms, "s->sd")],
+    )
+}
+
+/// The causal mask's data-independent half: `is_future` (a `(query, key)`
+/// comparison) and `neg_infinity` (a broadcastable `-inf` constant), built
+/// once and shared by every layer — position-only, no learned state, exactly
+/// like `cos`/`sin`.
+fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
+    let query_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
+    let key_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
+    let is_future = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(key_index, "t->st"), (query_index, "s->st")],
+    )?;
+    let zero = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(query_index, "s->s"), (query_index, "s->s")],
+    )?;
+    let neg_zero = elementwise(program, DType::Float32, ScalarOp::Negate, &[(zero, "s->s")])?;
+    let neg_infinity = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(neg_zero, "s->s")])?;
+    Ok((is_future, neg_infinity))
+}
+
+/// One transformer layer, node-for-node the same graph
+/// `specs/mistral_layer.toml` spells — attention (RoPE + GQA + causal mask)
+/// then the SwiGLU feed-forward, each wrapped in its own residual. `x` in,
+/// the layer's own residual-summed output out; every other argument is
+/// either a per-layer weight (`wq`/`wk`/`wv`/`wo`/`w_gate`/`w_up`/`w_down`)
+/// or one of the position-only constants [`causal_mask`]/`cos`/`sin` share
+/// across every layer.
+#[allow(clippy::too_many_arguments)]
+fn append_mistral_layer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    cos: NodeId,
+    sin: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    neg_infinity: NodeId,
+    group: u32,
+    wq: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+) -> Result<NodeId, TensorError> {
+    let normed = rmsnorm(program, x, inv_dim, eps)?;
+
+    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
+    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+
+    let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
+    let k = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+
+    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
+    let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+
+    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos, "si->shi")])?;
+    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")])?;
+    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
+    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin, "si->shi")])?;
+    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")])?;
+    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+
+    let k_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (cos, "si->sui")])?;
+    let k_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")])?;
+    let rotated_k_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")])?;
+    let k_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (sin, "si->sui")])?;
+    let k_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")])?;
+    let rotated_k_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")])?;
+
+    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+
+    let score_even_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (rotated_k_even, "tui->stugi")])?;
+    let score_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_even_product, "stugi->stugi", "stug->stugi")?;
+    let score_odd_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (rotated_k_odd, "tui->stugi")])?;
+    let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
+    let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
+
+    let scores_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(is_future, "st->stug"), (neg_infinity, "s->stug"), (scores, "stug->stug")],
+    )?;
+
+    let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
+    let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(scores_masked, "stug->stug"), (score_max, "sug->stug")])?;
+    let weights = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "stug->stug")])?;
+    let weight_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "stug->stug", "sug->stug")?;
+    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
+    let probabilities = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")])?;
+
+    let attended_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(probabilities, "stug->stugd"), (v, "tud->stugd")])?;
+    let attended = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_product, "stugd->stugd", "sugd->stugd")?;
+
+    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
+    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+
+    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+
+    let normed2 = rmsnorm(program, residual1, inv_dim, eps)?;
+
+    let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")])?;
+    let gate = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sdg->sdg", "sg->sdg")?;
+    let up_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_up, "dg->sdg")])?;
+    let up = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "sdg->sdg", "sg->sdg")?;
+
+    let neg_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate, "sg->sg")])?;
+    let exp_neg_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
+    let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "s->sg")])?;
+    let sigmoid_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
+    let silu_gate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
+    let ffn_hidden = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up, "sg->sg")])?;
+
+    let down_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")])?;
+    let ffn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "sgd->sgd", "sd->sgd")?;
+
+    elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
+}
+
+/// The whole model as one program: token embedding lookup, `block_count`
+/// copies of `specs/mistral_layer.toml`'s layer (each with its own weights,
+/// same node shape, generated rather than hand-authored — this is the whole
+/// reason this function exists, since a 32-layer TOML would repeat one graph
+/// 32 times with nothing but the weight names differing), a final RMSNorm,
+/// and the LM head projection down to `[seq, vocab]` logits.
+///
+/// Config is plain `u32` parameters, not a struct — nothing here needs a
+/// caller to hold them together as one type, and this crate deleted
+/// `TensorExecutionConfig` for being unread rather than reintroduce that
+/// shape. Composes this module's own `elementwise`/`reduce` (the exact
+/// notation grammar `Vec<Op>::try_from(&ProgramSpec)` above already parses),
+/// `embedding_lookup` (`shape.rs`'s `embedding_lookup_program` unit test is
+/// the addressing reference), and `append_mistral_layer` (mirrors
+/// `specs/mistral_layer.toml` node for node).
+#[allow(clippy::too_many_arguments)]
+pub fn mistral_forward_program(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+) -> Result<Vec<Op>, TensorError> {
+    let group = query_heads / kv_heads;
+    let pairs = head_dim / 2;
+
+    let mut program = Vec::new();
+
+    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)]);
+    let table = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+    );
+    let mut x = embedding_lookup(&mut program, table, ids);
+
+    let inv_dim = symbolic_leaf(&mut program, DType::Float32);
+    let eps = symbolic_leaf(&mut program, DType::Float32);
+    let ones = symbolic_leaf(&mut program, DType::Float32);
+    let cos = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)]);
+    let sin = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)]);
+    let group_ones = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+    );
+    let (is_future, neg_infinity) = causal_mask(&mut program)?;
+
+    for _layer in 0..block_count {
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(query_heads), Extent::Static(head_dim)],
+        );
+        let wk = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+        );
+        let wv = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+        );
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(kv_heads),
+                Extent::Static(group),
+                Extent::Static(head_dim),
+                Extent::Static(embedding),
+            ],
+        );
+        let w_gate = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+        );
+        let w_up = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+        );
+        let w_down = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+        );
+
+        x = append_mistral_layer(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            cos,
+            sin,
+            group_ones,
+            is_future,
+            neg_infinity,
+            group,
+            wq,
+            wk,
+            wv,
+            wo,
+            w_gate,
+            w_up,
+            w_down,
+        )?;
+    }
+
+    let normed_final = rmsnorm(&mut program, x, inv_dim, eps)?;
+
+    let lm_head = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+    );
+    let logits_product = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+    )?;
+    reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, logits_product, "sdv->sdv", "sv->sdv")?;
+
+    Ok(program)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -2031,5 +2417,152 @@ shape = ["seq"]
             SEQUENCE * SEQUENCE * KV_HEADS * GROUP,
             "every probability cell must be checked, not a subset"
         );
+    }
+
+    /// The whole model, built as a program instead of authored as 32 copies
+    /// of one TOML file: token embedding lookup, `block_count` layers (each
+    /// [`append_mistral_layer`], mirroring `specs/mistral_layer.toml`), a
+    /// final RMSNorm, and the LM head projection to `[seq, vocab]` logits.
+    /// Shape inference is symbolic arithmetic over extents, not data — cheap
+    /// enough to run unignored even at the model's real context length,
+    /// matching `a_mistral_layer_written_as_toml_infers_at_its_real_dimensions`
+    /// above for one layer.
+    #[test]
+    fn the_whole_mistral_forward_pass_infers_at_real_dimensions() {
+        const REAL_CONTEXT: u64 = 8192;
+
+        let build_start = std::time::Instant::now();
+        let program = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+            .expect("the whole forward pass lowers to a program");
+        let build_elapsed = build_start.elapsed();
+
+        let infer_start = std::time::Instant::now();
+        crate::shape::infer(&program, &[REAL_CONTEXT])
+            .expect("the whole forward pass infers at its real context length");
+        let infer_elapsed = infer_start.elapsed();
+
+        std::println!(
+            "mistral_forward_program: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}",
+            program.len()
+        );
+        assert!(
+            program.len() > 2_000,
+            "32 layers of dozens of nodes plus embedding/lm-head should be thousands of nodes, not {}",
+            program.len()
+        );
+    }
+
+    /// Wall-clock probe for the whole forward pass, `SEQUENCE=4`, RANDOM
+    /// weights, at the model's real dimensions — the 32-layer analogue of
+    /// `a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions`
+    /// above, gated `#[ignore]` for the same reason and then some: ~32
+    /// layers' worth of real-dimension weights is tens of GB and a
+    /// multi-second-per-layer run, neither of which belongs in the default
+    /// `nextest` budget. Run explicitly with `--ignored --release`.
+    #[test]
+    #[ignore = "measures the whole real-dimension mistral forward pass's wall clock; run explicitly"]
+    fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
+        const SEQUENCE: usize = 4;
+        const VOCAB: usize = 32_002;
+        const EMBEDDING: usize = 4096;
+        const QUERY_HEADS: usize = 32;
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const PAIRS: usize = HEAD_DIM / 2;
+        const GROUP: usize = QUERY_HEADS / KV_HEADS;
+        const FEED_FORWARD: usize = 14336;
+        const BLOCK_COUNT: u32 = 32;
+
+        let program = mistral_forward_program(
+            VOCAB as u32,
+            EMBEDDING as u32,
+            FEED_FORWARD as u32,
+            QUERY_HEADS as u32,
+            KV_HEADS as u32,
+            HEAD_DIM as u32,
+            BLOCK_COUNT,
+        )
+        .expect("the whole forward pass lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the whole forward pass infers");
+
+        // block order mirrors `mistral_forward_program`'s own `Input`
+        // emission order exactly: ids, table, inv_dim/eps/ones, cos/sin,
+        // group_ones, then each layer's wq/wk/wv/wo/w_gate/w_up/w_down, then
+        // the lm head. `block_node_ids` (cpu.rs) reads `Input`s positionally,
+        // which is why this order is load-bearing, not cosmetic.
+        let ids: Vec<f32> = (0..SEQUENCE).map(|position| (position % VOCAB) as f32).collect();
+        let table = random_vec(200, VOCAB * EMBEDDING);
+        let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
+        let epsilon = alloc::vec![1e-5f32; SEQUENCE];
+        let ones = alloc::vec![1.0f32; SEQUENCE];
+        let cos = random_vec(201, SEQUENCE * PAIRS);
+        let sin = random_vec(202, SEQUENCE * PAIRS);
+        let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
+
+        let mut owned: Vec<Vec<f32>> = Vec::new();
+        let mut seed = 300u64;
+        for _layer in 0..BLOCK_COUNT {
+            owned.push(random_vec(seed, EMBEDDING * QUERY_HEADS * HEAD_DIM));
+            seed += 1;
+            owned.push(random_vec(seed, EMBEDDING * KV_HEADS * HEAD_DIM));
+            seed += 1;
+            owned.push(random_vec(seed, EMBEDDING * KV_HEADS * HEAD_DIM));
+            seed += 1;
+            owned.push(random_vec(seed, KV_HEADS * GROUP * HEAD_DIM * EMBEDDING));
+            seed += 1;
+            owned.push(random_vec(seed, EMBEDDING * FEED_FORWARD));
+            seed += 1;
+            owned.push(random_vec(seed, EMBEDDING * FEED_FORWARD));
+            seed += 1;
+            owned.push(random_vec(seed, FEED_FORWARD * EMBEDDING));
+            seed += 1;
+        }
+        let lm_head = random_vec(seed, EMBEDDING * VOCAB);
+
+        let mut blocks: Vec<&[f32]> = alloc::vec![
+            ids.as_slice(),
+            table.as_slice(),
+            inverse_dim.as_slice(),
+            epsilon.as_slice(),
+            ones.as_slice(),
+            cos.as_slice(),
+            sin.as_slice(),
+            group_ones.as_slice(),
+        ];
+        for layer_weights in &owned {
+            blocks.push(layer_weights.as_slice());
+        }
+        blocks.push(lm_head.as_slice());
+
+        let root = NodeId(program.len() as u32 - 1);
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+
+        let wall_start = std::time::Instant::now();
+        let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+            .expect("the whole real-dimension mistral forward pass evaluates");
+        let wall = wall_start.elapsed();
+        std::println!(
+            "whole_forward_pass: wall_clock={wall:?} per_layer={:?}",
+            wall / BLOCK_COUNT
+        );
+
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * VOCAB, "logits must be [seq, vocab]");
+        assert!(output.iter().all(|value| value.is_finite()), "logits must be finite");
+
+        let last_row = &output[(SEQUENCE - 1) * VOCAB..SEQUENCE * VOCAB];
+        let argmax = last_row
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index)
+            .expect("logits row is nonempty");
+        assert!(
+            argmax < VOCAB,
+            "argmax {argmax} must address a real vocab entry, meaningless as it is with random weights"
+        );
+        std::println!("argmax(last position)={argmax}");
     }
 }
