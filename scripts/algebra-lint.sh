@@ -154,19 +154,53 @@ done
 
 # 4. blanket impls: an implicit bridge over an open set of foreign types is
 #    surface nobody agreed to. One explicit opt-in adapter instead.
+#
+#    A first cut of this check flagged `impl<P> DynPipe<..> for P where P: Pipe,
+#    ...` and `impl<P> SendDynPipe<..> for P where P: SendPipe, ...`
+#    (alloc_tier.rs) as blanket impls. Both are correct code: the rule bans a
+#    blanket over an OPEN, UNBOUNDED set of foreign types, and these are bounded
+#    by a trait THIS WORKSPACE declares — a type only qualifies by already
+#    implementing `Pipe`/`SendPipe`, so it has already opted in. This is also
+#    the one place `ProximaError: From<P::Err>` converts (alloc_tier.rs's own
+#    module doc), the erasure boundary that lets a `dyn` handle exist without a
+#    per-pipe wrapper type. Deleting it would force exactly the wrapper-to-host
+#    minting §1/§20 rule out — it is the mechanism that PREVENTS minting, not an
+#    instance of it. So the check now reads the where-clause: a candidate is a
+#    finding only when the target generic's bound is empty (unbounded) or names
+#    no trait this workspace declares. ROOT_TRAITS is read from the pipe
+#    layer's own trait declarations, not hand-copied, so a new root trait
+#    (`UnpinPipe`, `UnpinSendPipe`, ...) is picked up automatically.
 say ""
-say "no blanket impls"
+say "no blanket impls over an unbounded or foreign-only target"
 BEFORE=$FINDINGS
+ROOT_TRAITS=$(grep -hoE '^pub trait [A-Za-z_][A-Za-z0-9_]*' "$PIPE_DIR"/primitives.rs 2>/dev/null \
+                | awk '{print $3}' | paste -sd'|' -)
 while IFS= read -r hit; do
+  file=${hit%%:*}
+  rest=${hit#*:}
+  start_line=${rest%%:*}
+  header=${rest#*:}
   # impl<..., T, ...> SomeTrait for T   (bare generic param as the target)
-  target=$(sed -E 's/.*for[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\1/' <<< "$hit")
-  generics=$(sed -E 's/.*impl<([^>]*)>.*/\1/' <<< "$hit")
-  if grep -qE "(^|[,[:space:]])${target}([,:[:space:]]|$)" <<< "$generics"; then
-    finding "$hit"
+  target=$(sed -E 's/.*for[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\1/' <<< "$header")
+  generics=$(sed -E 's/.*impl<([^>]*)>.*/\1/' <<< "$header")
+  if ! grep -qE "(^|[,[:space:]])${target}([,:[:space:]]|$)" <<< "$generics"; then
+    continue
+  fi
+  # gather the where-clause: from this impl's header line up to its opening `{`
+  block=$(awk -v start="$start_line" 'NR >= start { print; if ($0 ~ /\{/) exit }' "$file")
+  # the bound directly on the target type, e.g. "P: Pipe," or "P: SendPipe,"
+  own_bound=$(grep -oE "(^|[^A-Za-z0-9_])${target}[[:space:]]*:[[:space:]]*[A-Za-z_][A-Za-z0-9_:]*" <<< "$block" \
+                | head -1 | sed -E 's/.*://; s/^[[:space:]]+|[[:space:]]+$//g' )
+  bounded_by_ours=0
+  if [ -n "$ROOT_TRAITS" ] && grep -qE "^($ROOT_TRAITS)\$" <<< "$own_bound"; then
+    bounded_by_ours=1
+  fi
+  if [ "$bounded_by_ours" -eq 0 ]; then
+    finding "$header — target's own bound is '${own_bound:-<none>}', not one of this workspace's root traits ($ROOT_TRAITS)"
   fi
 done < <(grep -rnE '^impl<[^>]+>\s+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?\s+for\s+[A-Z][A-Za-z0-9_]*\s*$' \
            --include='*.rs' "$PIPE_DIR" 2>/dev/null)
-[ "$FINDINGS" -eq "$BEFORE" ] && ok "no blanket impls in the pipe layer"
+[ "$FINDINGS" -eq "$BEFORE" ] && ok "every blanket impl is bounded by one of this workspace's own root traits"
 
 # 5. the generated-code tell.
 say ""
@@ -177,6 +211,61 @@ while IFS= read -r hit; do finding "$hit"; done < <(
     "$EX" "$PIPE_DIR" scripts 2>/dev/null | grep -vE 'frame.rs|algebra-lint.sh'
 )
 [ "$FINDINGS" -eq "$BEFORE" ] && ok "no banners"
+
+# 6. a type minted only to host an impl. This audit found seven zero-sized
+#    `PhantomData` structs whose entire purpose was carrying a `Pipe` impl for
+#    a free function beside them — each with zero callers outside its own
+#    module and test. They have since been deleted; this check is the
+#    mechanical trap for the next one. Shape: `struct Name(PhantomData<..>);`
+#    (or a `{ }` body whose only fields are `PhantomData`) with a trait `impl
+#    ... for Name` somewhere in the same file. Scoped to library crate source
+#    only — `examples/`, `tests/`, and `benches/` are allowed to build local
+#    fixtures (see algebra-lint's own header on that split), and a struct
+#    inside an in-file `#[cfg(test)]` module is a test fixture, not library
+#    surface (the awk companion tracks that by brace depth).
+#
+# Allow-list: a hit here is a real PhantomData-only type with a real trait
+# impl, so it always LOOKS like the deleted shape from the outside. What
+# distinguishes a legitimate one is a caller: a type built for external
+# construction (`pub use`, doc examples, downstream instantiation), not a
+# type that only exists so its impl block has somewhere to live.
+say ""
+say "library: no type minted only to host an impl"
+BEFORE=$FINDINGS
+PHANTOM_AWK="$(dirname "$0")/algebra-lint-phantom-host.awk"
+declare -a PHANTOM_ALLOW_FILE PHANTOM_ALLOW_NAME PHANTOM_ALLOW_REASON
+PHANTOM_ALLOW_FILE+=("proxima-codec/src/lib.rs")
+PHANTOM_ALLOW_NAME+=("JsonCodec")
+PHANTOM_ALLOW_REASON+=("public generic codec marker (Input/Output are compile-time selections, not runtime state); constructed by external callers (benches/perf_audit.rs), not just its own module/test")
+
+phantom_is_allowed() {
+  local file="$1" name="$2" index
+  for index in "${!PHANTOM_ALLOW_FILE[@]}"; do
+    if [ "${PHANTOM_ALLOW_FILE[$index]}" = "$file" ] && [ "${PHANTOM_ALLOW_NAME[$index]}" = "$name" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+while IFS= read -r hit; do
+  hit_file=${hit%%:*}
+  hit_rest=${hit#*:}
+  hit_line=${hit_rest%%:*}
+  hit_name=${hit_rest#*:}
+  if ! grep -qE "^impl(<[^>]*>)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?[[:space:]]+for[[:space:]]+${hit_name}(<|[[:space:]]|$)" "$hit_file" 2>/dev/null; then
+    continue
+  fi
+  if phantom_is_allowed "$hit_file" "$hit_name"; then
+    continue
+  fi
+  finding "$hit_file:$hit_line: $hit_name — PhantomData-only fields, trait impl present, not allow-listed"
+done < <(
+  find proxima-* prime rt -name '*.rs' 2>/dev/null \
+    | grep -vE '/(examples|tests|benches|target)/' \
+    | xargs -I{} awk -f "$PHANTOM_AWK" {} 2>/dev/null
+)
+[ "$FINDINGS" -eq "$BEFORE" ] && ok "no PhantomData-only struct exists solely to host an impl"
 
 say ""
 if [ "$FINDINGS" -gt 0 ]; then
