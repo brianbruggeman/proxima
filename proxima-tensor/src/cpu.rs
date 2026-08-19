@@ -2180,15 +2180,15 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     // stays within the source slices.
                     unsafe {
                         gemm_tile_neon::<TILE_ROWS>(
-                            WeightTile {
+                            KStridedTile {
                                 data: raw[plan.index_a],
-                                base: base_a,
-                                stride: plan.row_stride_a,
+                                base: base_a as i64,
+                                k_stride: plan.row_stride_a as i64,
                             },
-                            WeightTile {
+                            KStridedTile {
                                 data: raw[plan.index_b],
-                                base: base_b,
-                                stride: plan.col_stride_b,
+                                base: base_b as i64,
+                                k_stride: plan.col_stride_b as i64,
                             },
                             reduction_total as usize,
                             &mut tile_out,
@@ -2309,15 +2309,15 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     // differs.
                     unsafe {
                         gemm_tile_neon::<$rows>(
-                            WeightTile {
+                            KStridedTile {
                                 data: raw[plan.index_a],
-                                base: base_a,
-                                stride: plan.row_stride_a,
+                                base: base_a as i64,
+                                k_stride: plan.row_stride_a as i64,
                             },
-                            WeightTile {
+                            KStridedTile {
                                 data: raw[plan.index_b],
-                                base: base_b,
-                                stride: plan.col_stride_b,
+                                base: base_b as i64,
+                                k_stride: plan.col_stride_b as i64,
                             },
                             reduction_total as usize,
                             &mut tile_out,
@@ -3228,36 +3228,27 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     })
 }
 
-/// The row-invariant-across-width operand a width-tile call reads: fixed at
-/// a `(row, k)` corner and stepped by two independent strides, `row_stride`
-/// (between tile rows) and `k_stride` (along the reduction). Not
-/// [`WeightTile`]: that type carries one `stride` field only, sound because
-/// [`neon_tile_plan`]'s own gate proves the reduction dim is always unit
-/// stride for the tile it feeds, so no separate `k_stride` is needed there.
-/// This operand carries no such guarantee — `width_tile_plan` only proves
-/// the *width* dim's stride, not `k`'s — so it genuinely needs the second
-/// field `WeightTile` has nowhere to put; adding one to `WeightTile` for this
-/// caller's sake would hand every other caller a field it never reads.
-/// Bundled with its width-contiguous counterpart below for the same
-/// argument-count reason [`OperandSpan`]/[`DotFold`] already document.
+/// A flat `f32` operand's addressing bundle: `data` is the physical buffer,
+/// `base` the flat offset of this tile's `(row 0, col 0, k 0)` corner (dot
+/// path) or `(row, k)` corner (width path), `k_stride` the per-row (dot `a`),
+/// per-column (dot `b`), or per-reduction-step (width path, both operands)
+/// step between adjacent lanes the kernel reads — whichever axis that
+/// caller's kernel actually steps by.
+///
+/// `i64`, not `usize`: `neon_tile_plan` proves the dot path's strides
+/// non-negative, but `width_tile_plan`'s can run negative, so the one type
+/// serving both carries the wider constraint. The casts this costs
+/// `gemm_tile_neon` are free on aarch64 — both widths are one register, and
+/// the kernels emit zero `sxtw`/`uxtw` either way.
+///
+/// A per-row stride is a parameter, never a field: only `gemm_width_tile_neon`
+/// steps rows independently, and a field would make every other caller supply
+/// a value its kernel does not read.
+///
+/// Bundled for the same argument-count-lint reason [`OperandSpan`]/[`DotFold`]
+/// already document.
 #[cfg(target_arch = "aarch64")]
-struct RowInvariantTile<'a> {
-    data: &'a [f32],
-    base: i64,
-    row_stride: i64,
-    k_stride: i64,
-}
-
-/// The width-contiguous operand a width-tile call reads: one stride
-/// (`k_stride`) between reduction steps, the width dimension itself always
-/// unit-stride (read as whole `float32x4_t` lanes via `v * 4`). Same field
-/// shape as [`WeightTile`] but a different base type (`i64`, since
-/// `width_tile_plan`'s strides can run negative) and, in general, a
-/// different unit-stride dimension — kept as its own type rather than
-/// forced through [`WeightTile`] for a shape match that would not carry
-/// the same addressing guarantee.
-#[cfg(target_arch = "aarch64")]
-struct WidthContiguousTile<'a> {
+struct KStridedTile<'a> {
     data: &'a [f32],
     base: i64,
     k_stride: i64,
@@ -3273,14 +3264,15 @@ struct WidthContiguousTile<'a> {
 /// if that shape is ever needed.
 ///
 /// # Safety
-/// Caller guarantees every offset `a.base + i*a.row_stride + step*a.k_stride`
+/// Caller guarantees every offset `a.base + i*a_row_stride + step*a.k_stride`
 /// for `i in 0..WIDTH_TILE_ROWS, step in 0..k` lies within `a.data`, and
 /// every offset `b.base + step*b.k_stride + v*4 + lane` for `v in
 /// 0..WIDTH_TILE_VECS, lane in 0..4` lies within `b.data`.
 #[cfg(target_arch = "aarch64")]
 unsafe fn gemm_width_tile_neon(
-    a: RowInvariantTile,
-    b: WidthContiguousTile,
+    a: KStridedTile,
+    a_row_stride: i64,
+    b: KStridedTile,
     k: usize,
     out: &mut [[f32; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS],
 ) {
@@ -3295,7 +3287,7 @@ unsafe fn gemm_width_tile_neon(
                 *lane = vld1q_f32(b.data.as_ptr().add(offset as usize));
             }
             for (i, row_acc) in acc.iter_mut().enumerate() {
-                let offset = a.base + i as i64 * a.row_stride + step * a.k_stride;
+                let offset = a.base + i as i64 * a_row_stride + step * a.k_stride;
                 let value_a = *a.data.get_unchecked(offset as usize);
                 for (slot, &vector_b) in row_acc.iter_mut().zip(&bv) {
                     *slot = vfmaq_n_f32(*slot, vector_b, value_a);
@@ -3318,7 +3310,7 @@ unsafe fn gemm_width_tile_neon(
 /// there (`WIDTH_TILE_FALLBACK_ELEMENTS` proves it), but a caller with an
 /// arbitrary shape still gets a correct answer.
 #[cfg(target_arch = "aarch64")]
-fn width_tile_scalar_cell(a: RowInvariantTile, b: WidthContiguousTile, k: usize, seed: f32) -> f32 {
+fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32) -> f32 {
     let mut acc = seed;
     let mut offset_a = a.base;
     let mut offset_b = b.base;
@@ -3377,8 +3369,9 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
             // tiles carved out of `plan.leading_total`/`plan.width`.
             unsafe {
                 gemm_width_tile_neon(
-                    RowInvariantTile { data: data_a, base: base_a, row_stride: plan.row_stride_a, k_stride: plan.k_stride_a },
-                    WidthContiguousTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
+                    KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
+                    plan.row_stride_a,
+                    KStridedTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
                     plan.reduction_total,
                     &mut tile_out,
                 );
@@ -3403,13 +3396,12 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
             for i in 0..WIDTH_TILE_ROWS {
                 let row = row_start + i;
                 let value = width_tile_scalar_cell(
-                    RowInvariantTile {
+                    KStridedTile {
                         data: data_a,
                         base: plan.base_a + row as i64 * plan.row_stride_a,
-                        row_stride: plan.row_stride_a,
                         k_stride: plan.k_stride_a,
                     },
-                    WidthContiguousTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                    KStridedTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
                     plan.reduction_total,
                     plan.seed,
                 );
@@ -3429,13 +3421,12 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
     for row in row_tiles * WIDTH_TILE_ROWS..plan.leading_total {
         for col in 0..plan.width {
             let value = width_tile_scalar_cell(
-                RowInvariantTile {
+                KStridedTile {
                     data: data_a,
                     base: plan.base_a + row as i64 * plan.row_stride_a,
-                    row_stride: plan.row_stride_a,
                     k_stride: plan.k_stride_a,
                 },
-                WidthContiguousTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                KStridedTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
                 plan.reduction_total,
                 plan.seed,
             );
@@ -3743,23 +3734,6 @@ fn neon_tile_plan(
     })
 }
 
-/// A strided view over a borrowed `f32` weight buffer: `data` is the
-/// physical buffer, `base` the flat offset of this tile's `(row 0, col 0,
-/// k 0)` corner, `stride` the per-row (for `a`) or per-column (for `b`)
-/// step between adjacent tile lanes. Bundled for the same reason
-/// [`OperandSpan`] is — keeps the kernel under clippy's argument-count
-/// lint.
-///
-/// `cfg`-gated to aarch64: this is the addressing bundle for
-/// [`gemm_tile_neon`] below, its only constructor and only consumer, and
-/// that kernel is itself aarch64-only.
-#[cfg(target_arch = "aarch64")]
-pub(crate) struct WeightTile<'a> {
-    pub(crate) data: &'a [f32],
-    pub(crate) base: usize,
-    pub(crate) stride: usize,
-}
-
 /// Packed bytes per `Q4_K` super-block — re-exported at this crate's own
 /// name rather than spelling `proxima_gguf::quant::q4_k::BLOCK_BYTES` at
 /// every call site below.
@@ -3771,10 +3745,11 @@ const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
 
 /// One output row of a `Q4_K`-quantized-weight x `f32`-activation dot
 /// product — the scalar counterpart [`reject_non_float32`]'s quantized-weight
-/// exemption documents. `weight_row` is one [`WeightTile`] row's raw packed
-/// bytes (`row.stride` `Q4_K` super-blocks' worth, [`Q4K_BLOCK_BYTES`] each);
-/// `activation` is the matching `f32` slice, `Q4K_BLOCK_ELEMENTS` (256) wide
-/// per block.
+/// exemption documents. `weight_row` is one packed weight row's raw bytes
+/// (a whole number of `Q4_K` super-blocks, [`Q4K_BLOCK_BYTES`] each — not a
+/// [`KStridedTile`], which only ever addresses `f32` data, never the packed
+/// `u8` bytes a quantized row is stored as); `activation` is the matching
+/// `f32` slice, `Q4K_BLOCK_ELEMENTS` (256) wide per block.
 ///
 /// Dequantizes one super-block at a time into a reused stack buffer
 /// (`[f32; 256]`, never a per-row or per-matrix allocation) via
@@ -3865,7 +3840,7 @@ pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
 /// at whichever width `1..=5` the leftover row count needs, instead of a
 /// hand-duplicated copy per width.
 #[cfg(target_arch = "aarch64")]
-unsafe fn gemm_tile_neon<const ROWS: usize>(a: WeightTile, b: WeightTile, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
+unsafe fn gemm_tile_neon<const ROWS: usize>(a: KStridedTile, b: KStridedTile, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
     // `vdupq_n_f32` requires the `neon` target feature, unconditionally
     // present in the aarch64 base ISA this module is gated on.
     let mut acc = [[unsafe { vdupq_n_f32(0.0) }; TILE_COLS]; ROWS];
@@ -3874,16 +3849,18 @@ unsafe fn gemm_tile_neon<const ROWS: usize>(a: WeightTile, b: WeightTile, k: usi
         let l = step * 4;
         let mut av = [unsafe { vdupq_n_f32(0.0) }; ROWS];
         for (row, lane) in av.iter_mut().enumerate() {
-            // caller guarantees `a.base + row * a.stride + l + 4 <= a.data.len()`
+            // caller guarantees `a.base + row * a.k_stride + l + 4 <= a.data.len()`
             // via the reduction-dim contiguity and row-count checks in
             // `neon_tile_plan` and its `run_reduce` call site.
-            *lane = unsafe { vld1q_f32(a.data.as_ptr().add(a.base + row * a.stride + l)) };
+            let offset = (a.base + row as i64 * a.k_stride + l as i64) as usize;
+            *lane = unsafe { vld1q_f32(a.data.as_ptr().add(offset)) };
         }
         let mut bv = [unsafe { vdupq_n_f32(0.0) }; TILE_COLS];
         for (column, lane) in bv.iter_mut().enumerate() {
-            // caller guarantees `b.base + column * b.stride + l + 4 <= b.data.len()`
+            // caller guarantees `b.base + column * b.k_stride + l + 4 <= b.data.len()`
             // by the same contiguity and column-count checks.
-            *lane = unsafe { vld1q_f32(b.data.as_ptr().add(b.base + column * b.stride + l)) };
+            let offset = (b.base + column as i64 * b.k_stride + l as i64) as usize;
+            *lane = unsafe { vld1q_f32(b.data.as_ptr().add(offset)) };
         }
         for (row, acc_row) in acc.iter_mut().enumerate() {
             let row_vector = av[row];
@@ -3901,7 +3878,9 @@ unsafe fn gemm_tile_neon<const ROWS: usize>(a: WeightTile, b: WeightTile, k: usi
             // fully initialized above.
             let mut total = *out_value + unsafe { vaddvq_f32(acc_lane) };
             for l in steps * 4..k {
-                total = a.data[a.base + row * a.stride + l].mul_add(b.data[b.base + column * b.stride + l], total);
+                let offset_a = (a.base + row as i64 * a.k_stride + l as i64) as usize;
+                let offset_b = (b.base + column as i64 * b.k_stride + l as i64) as usize;
+                total = a.data[offset_a].mul_add(b.data[offset_b], total);
             }
             *out_value = total;
         }
