@@ -42,17 +42,26 @@
 //! dropped. No unsafe code; this is the same shape as a streaming/lending
 //! iterator.
 //!
-//! # The shared contract
+//! # Why `feed`/`poll`, not a self-consuming `push`
 //!
-//! [`OnnxParser`] implements
-//! [`proxima_primitives::pipe::sans_io::ByteStreamParser`], the named
-//! version of this `feed`/`poll` shape -- the lending `Event<'a>` GAT
-//! exists specifically so this crate's borrowing `PollOutcome<'a>` and
-//! `proxima-gguf`'s owning one satisfy the same trait.
+//! `proxima-gguf::GgufParser` and `proxima-safetensors::SafetensorsParser`
+//! both expose a self-consuming `push(self, chunk) -> Self` (or
+//! `-> (Self, Vec<Event>)`) because their events are fully owned. This
+//! parser cannot follow that shape: `ModelField<'a>` borrows straight into
+//! `self.accumulator` (`'a` binds real lifetimes -- `TensorProto::raw_data`
+//! points into the buffer, never copied). A `push` returning `(Self,
+//! Vec<ModelField<'_>>)` would need to hand back the moved parser and
+//! events borrowed from it in the same tuple, which the borrow checker
+//! rejects: moving `self` into the returned tuple while a `Vec<ModelField>`
+//! still borrows it is `E0505` ("cannot move out of `parser` because it is
+//! borrowed"), and collecting events across more than one poll step inside
+//! `push` hits `E0499` ("cannot borrow `parser` as mutable more than
+//! once") the moment two borrowed events need to be alive at once. `&mut
+//! self` `feed`/`poll` is the only shape this borrow can take without
+//! copying every event's payload out of the buffer.
 
 use alloc::vec::Vec;
 
-use proxima_primitives::pipe::sans_io::ByteStreamParser;
 use proxima_protocols::protobuf_wire::{
     Field, ParseError as WireError, WireType, decode_tag, decode_varint, parse_field,
 };
@@ -61,10 +70,7 @@ use crate::decode::{ModelField, decode_model_field};
 use crate::error::OnnxError;
 
 /// What [`OnnxParser::poll`] produced. A type alias for
-/// `Option<ModelField<'a>>`, not a separate enum -- see
-/// `proxima_primitives::pipe::sans_io`'s module doc and [`OnnxParser`]'s
-/// [`ByteStreamParser`] impl: this crate's own `poll` and the trait's
-/// `poll` are the same method.
+/// `Option<ModelField<'a>>`, not a separate enum.
 pub type PollOutcome<'a> = Option<ModelField<'a>>;
 
 /// The state machine itself. Owns one append-only accumulation buffer;
@@ -137,26 +143,6 @@ impl OnnxParser {
         let model_field = decode_model_field(field)?;
         self.cursor += consumed;
         Ok(Some(model_field))
-    }
-}
-
-impl ByteStreamParser for OnnxParser {
-    type Event<'a>
-        = ModelField<'a>
-    where
-        Self: 'a;
-    type Error = OnnxError;
-
-    fn feed(&mut self, bytes: &[u8]) {
-        Self::feed(self, bytes);
-    }
-
-    fn poll(&mut self) -> Result<Option<ModelField<'_>>, OnnxError> {
-        Self::poll(self)
-    }
-
-    fn finish(&self) -> Result<(), OnnxError> {
-        Self::finish(self)
     }
 }
 
