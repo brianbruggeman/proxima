@@ -115,7 +115,10 @@ fn get_scale_min_k4(sub_block: usize, scales: &[u8; K_SCALE_SIZE]) -> (u8, u8) {
 
 /// Dequantizes one 256-element `Q4_K` super-block. `block` must be
 /// exactly [`BLOCK_BYTES`] bytes and `output` exactly [`QK_K`] elements —
-/// callers go through [`dequantize`], which validates both.
+/// [`dequantize`] validates both before calling this in a loop; a caller
+/// that already has one super-block's bytes in hand (a GEMM kernel
+/// reading one tile's worth of a quantized weight row, without
+/// materializing the whole tensor to `f32`) may call this directly.
 ///
 /// Ports `dequantize_row_q4_K` (`ggml-quants.c:1274-1297`) exactly,
 /// including its nibble order: a `qs` byte's low nibble and high nibble
@@ -123,7 +126,12 @@ fn get_scale_min_k4(sub_block: usize, scales: &[u8; K_SCALE_SIZE]) -> (u8, u8) {
 /// -- the two inner `l in 0..32` loops write elements `[0,32)` from the
 /// low nibbles of `qs[0..32)` and `[32,64)` from the *same 32 bytes'*
 /// high nibbles, before the `qs` cursor advances).
-fn dequantize_block(block: &[u8], output: &mut [f32]) {
+///
+/// # Panics
+/// Indexing `block`/`output` panics the normal Rust way if either is
+/// shorter than its required length ([`BLOCK_BYTES`] / [`QK_K`]) — no
+/// separate explicit check, matching this crate's convention elsewhere.
+pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
     let d = f16_at(block, D_OFFSET).to_f32();
     let dmin = f16_at(block, DMIN_OFFSET).to_f32();
     let mut scales = [0u8; K_SCALE_SIZE];
