@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std", "config"]
+default = ["std", "config", "q4k-int8-dot"]
 std = ["alloc", "thiserror/std"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
@@ -41,10 +41,15 @@ tensor-bgpool = ["std", "dep:prime"]
 test-support = []
 # `cpu::dot_q4k_q8k`/`cpu::matmul_q4k_q8k_f32`: int8 dot on packed Q4_K
 # nibbles against a quantized (Q8_K) activation, `vdotq_s32`-accelerated on
-# aarch64 with `dotprod`. Default-off (guiding-principles §3/§11): the
-# existing `dot_q4k_f32` f32-on-dequantized path stays the production
-# default until an e2e bench shows the full stack wins; this feature is the
-# firewall until then.
+# aarch64 with `dotprod`, AVX2-accelerated on x86-64 when the target opts in,
+# and portable-scalar everywhere else (`emit_avx2_cfg`/`emit_dotprod_cfg` in
+# build.rs; the portable arm is the only one compiled on an unqualified
+# x86-64 target, so enabling this by default carries no ISA requirement).
+# Default-on since the e2e forward-pass bench this landed under
+# (`proxima-tensor/docs/discipline.md`): the packed kernel measures
+# 0.0334 ns/mac against `dot_q4k_f32`'s 0.2534, and `run_reduce_quantized`
+# routes through it. `dot_q4k_f32`/`matmul_q4k_f32` remain the codec path
+# for non-matmul consumers.
 q4k-int8-dot = []
 
 [dependencies]

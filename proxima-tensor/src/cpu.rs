@@ -2009,6 +2009,9 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
 
     for position in 0..leading_total {
         let activation_row = &activation[position * k..(position + 1) * k];
+        #[cfg(feature = "q4k-int8-dot")]
+        let result = matmul_q4k_q8k_f32(weights, rows, activation_row)?;
+        #[cfg(not(feature = "q4k-int8-dot"))]
         let result = matmul_q4k_f32(weights, rows, activation_row)?;
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);
     }
@@ -9133,9 +9136,10 @@ mod tests {
     /// exact same shape run through plain [`evaluate`] with the weight
     /// dequantized to `f32` first. Proves the dispatch chain
     /// `evaluate_quantized` -> `run_node_into` -> `run_reduce` ->
-    /// [`quantized_operand`] -> `run_reduce_quantized` -> `matmul_q4k_f32`
-    /// is reachable from the program-level entry point, not merely callable
-    /// in isolation.
+    /// [`quantized_operand`] -> `run_reduce_quantized` -> `matmul_q4k_q8k_f32`
+    /// (`q4k-int8-dot` is default-on; `matmul_q4k_f32` is the fallback when
+    /// it is off) is reachable from the program-level entry point, not
+    /// merely callable in isolation.
     #[test]
     fn evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate() {
         use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
@@ -9187,12 +9191,24 @@ mod tests {
             sum_sq_diff += f64::from(diff) * f64::from(diff);
         }
         let rms_diff = (sum_sq_diff / rows as f64).sqrt();
-        eprintln!("evaluate_quantized vs dequantize-then-evaluate: max_diff={max_diff} rms_diff={rms_diff}");
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative_max_diff = max_diff / max_magnitude;
+        eprintln!(
+            "evaluate_quantized vs dequantize-then-evaluate: max_diff={max_diff} rms_diff={rms_diff} \
+             max_magnitude={max_magnitude} relative_max_diff={relative_max_diff}"
+        );
 
-        // same loose sanity bound as `matmul_q4k_f32_agrees_with_..`, which
-        // this test's own inner kernel call bottoms out in — not tuned to
-        // the measured numbers.
-        assert!(max_diff < 0.05, "max_diff={max_diff} exceeds loose sanity bound");
-        assert!(rms_diff < 0.02, "rms_diff={rms_diff} exceeds loose sanity bound");
+        // `run_reduce_quantized` routes through `matmul_q4k_q8k_f32` by
+        // default (`q4k-int8-dot` default-on) — same second lossy step
+        // (Q8_K activation quantization) as
+        // `matmul_q4k_q8k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`,
+        // so this bound is RELATIVE to the signal's own magnitude the same
+        // way that test's is, not the absolute float-noise-floor bound that
+        // was right when this call bottomed out in `matmul_q4k_f32` alone.
+        assert!(
+            relative_max_diff < 0.01,
+            "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
+             exceeds loose sanity bound"
+        );
     }
 }
