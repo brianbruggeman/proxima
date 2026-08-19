@@ -164,7 +164,7 @@ mod tests {
     }
 
     fn parse_whole(buf: &[u8]) -> Result<crate::Manifest, SafetensorsError> {
-        SafetensorsParser::new().push(buf)?.finish()
+        SafetensorsParser::new().push(buf)?.into_manifest()
     }
 
     // Ready-on-first-poll, same discipline the reader's pipe tests use.

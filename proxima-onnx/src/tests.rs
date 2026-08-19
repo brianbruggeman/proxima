@@ -480,6 +480,61 @@ fn chunk_boundary_matches_whole_buffer_at_awkward_splits() {
     run_parser_and_compare(&fixture.bytes, &one_byte_at_a_time);
 }
 
+/// Same fixture, same chunk schedules as
+/// [`chunk_boundary_matches_whole_buffer_at_awkward_splits`], but driven
+/// through `proxima_primitives::pipe::sans_io::drive_to_completion` instead
+/// of the hand-rolled `feed`/`poll` loop `run_parser_and_compare` writes
+/// out. Proves `ByteStreamParser` is load-bearing for `OnnxParser` too, not
+/// just `GgufParser`: the same generic function drives both.
+fn run_generic_driver_and_compare(bytes: &[u8], chunk_bounds: &[usize]) {
+    use proxima_primitives::pipe::sans_io::drive_to_completion;
+
+    let expected = expected_events(bytes);
+    let mut bounds = chunk_bounds.to_vec();
+    bounds.push(bytes.len());
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    for &end in &bounds {
+        chunks.push(&bytes[start..end]);
+        start = end;
+    }
+
+    let mut parser = OnnxParser::new();
+    let mut expected_index = 0usize;
+    drive_to_completion(&mut parser, chunks, |event| {
+        assert_eq!(
+            event, expected[expected_index],
+            "event {expected_index} mismatched via generic driver"
+        );
+        expected_index += 1;
+    })
+    .expect("generic driver on well-formed synthetic bytes");
+    assert_eq!(
+        expected_index,
+        expected.len(),
+        "not every top-level field was observed via generic driver"
+    );
+}
+
+#[test]
+fn sans_io_generic_driver_matches_hand_rolled_loop() {
+    let fixture = build_fixture();
+    let len = fixture.bytes.len();
+    let schedules: [&[usize]; 5] = [
+        &[1, 3, 7, 13],
+        &[2, 5, 11, 17, 23],
+        &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        &[len / 2],
+        &[len - 1],
+    ];
+    for schedule in schedules {
+        run_generic_driver_and_compare(&fixture.bytes, schedule);
+    }
+    let one_byte_at_a_time: Vec<usize> = (1..len).collect();
+    run_generic_driver_and_compare(&fixture.bytes, &one_byte_at_a_time);
+}
+
 // -- sad paths: never a panic, never an out-of-bounds read, always a typed
 // error (or `NeedMore`, never a false positive).
 
