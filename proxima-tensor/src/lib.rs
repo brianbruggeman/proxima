@@ -220,7 +220,10 @@ pub use bind::{
 };
 pub use convert::{Convert, SimdConvert};
 #[cfg(feature = "std")]
-pub use cpu::{Evaluated, Interpreter, evaluate, evaluate_parallel, evaluate_with_scratch};
+pub use cpu::{
+    Evaluated, Interpreter, TypedBuffer, evaluate, evaluate_parallel, evaluate_typed,
+    evaluate_with_scratch,
+};
 pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;

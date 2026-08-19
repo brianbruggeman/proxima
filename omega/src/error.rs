@@ -1,4 +1,4 @@
-use proxima_tensor::NodeId;
+use proxima_tensor::{DType, NodeId};
 
 /// Everything [`crate::msl::emit`] can reject.
 ///
@@ -36,4 +36,12 @@ pub enum EmitError {
         "node {node} is a keep::scan scan over zero iteration axes, which has no reduced axis to scan along"
     )]
     EmptyScan { node: NodeId },
+
+    /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
+    /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
+    /// in practice, but [`crate::msl::emit`] is a public entry point a
+    /// caller may reach directly with a hand-built `BoundOp`, so this stays
+    /// a real rejection rather than a debug assertion.
+    #[error("node {node} declares dtype {dtype:?}, which this metal backend does not emit")]
+    UnsupportedDType { node: NodeId, dtype: DType },
 }

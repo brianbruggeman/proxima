@@ -57,6 +57,7 @@ use alloc::vec::Vec;
 use core::arch::aarch64::{
     vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vfmaq_n_f32, vld1q_f32, vst1q_f32,
 };
+use core::any::TypeId;
 use core::cell::RefCell;
 use core::future::Future;
 use core::num::NonZeroUsize;
@@ -1104,6 +1105,15 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 // `Cow<[f32]>`), indices included (an index value is an exact integer
 // carried as f32, per the module doc), so a gather's `indices` node is the
 // one deliberate exception to the f32 rule rather than a second buffer kind.
+//
+// The real boundary this enforces is narrower than "f32-only" now reads:
+// this function only gates `evaluate`/`evaluate_parallel`, the SIMD-tuned
+// pipeline whose buffers, width-tiling, and dot-fold kernels are `Vec<f32>`
+// throughout `cpu.rs` — regeneralizing *that* pipeline to every width is a
+// materially bigger change than fits alongside adding one. A non-float32,
+// non-gather-index, reduce/scan/gather-free program is not unsupported by
+// this crate any more; it runs through [`evaluate_typed`] instead, which
+// this function does not gate.
 fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
@@ -1111,7 +1121,8 @@ fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
         if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) {
             return Err(TensorError::NotLowerable {
                 node,
-                reason: "cpu evaluation is f32-only in v1, except for a gather's indices",
+                reason: "this pipeline's buffers and SIMD kernels are f32-only; route a \
+                         non-float32 elementwise program through evaluate_typed instead",
             });
         }
     }
@@ -4241,6 +4252,872 @@ fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------
+// Typed elementwise evaluator: every dtype `reject_non_float32` used to
+// reject outright, restricted to elementwise-only programs.
+//
+// `evaluate`/`evaluate_parallel` stay f32-only by construction (their
+// buffers, width-tiling, and dot-fold kernels are `Vec<f32>` end to end);
+// regeneralizing that pipeline to every width is the "generic element
+// parameter threaded through every kernel" option this module's author
+// considered and did not take, for the reason `dtype.rs`'s own doc already
+// gives for keeping `DType` a runtime field: a single node can mix several
+// dtypes (quantized matmul is `i8 x i8 -> i32`), which one `T` cannot
+// describe, and threading a type parameter through every SIMD/dot-fold
+// kernel here would monomorphize each one per width — compile time and
+// code size scale with the ~13-way product, for kernels most callers never
+// invoke at most of those widths.
+//
+// What follows instead is the other option: one runtime-dispatched
+// [`TypedBuffer`] enum, matched once at the entry point
+// ([`evaluate_typed`]) to pick a monomorphized [`Element`] instantiation —
+// same shape `DType` itself already uses. Every match arm still hands the
+// kernel one contiguous `&[T]`/`Vec<T>`, never a per-element tag or a boxed
+// scalar, which is what lets a future NEON kernel specialize per width
+// later without changing how a buffer is stored: a 128-bit register packs
+// 16 `i8` lanes, 8 `i16`, 4 `i32`, or 2 `i64`; `i128`/`u128` have no NEON
+// lane width and would run scalar-only even with a kernel written. No SIMD
+// kernel is written here — every op below is a scalar loop — this only
+// leaves the representation ready for one.
+// ---------------------------------------------------------------------
+
+/// A CPU-native scalar [`evaluate_typed`] can execute: every operand and
+/// every output is one contiguous `[Self]`, matching what [`TypedBuffer`]
+/// stores. `apply` is fallible, not merely a closed match: an integer dtype
+/// genuinely cannot execute a transcendental (`exp`/`ln`/`sqrt`/`tanh`/
+/// `reciprocal`), an unsigned dtype cannot negate, and integer division has
+/// a real undefined case (zero divisor, or `T::MIN / -1`) — each is a named
+/// [`TensorError`] at the node it was found, not a panic or a silently wrong
+/// answer.
+///
+/// `'static` is what lets [`run_reduce_typed`]/[`run_scan_typed`] compare
+/// `TypeId::of::<T>()` against `TypeId::of::<f32>()` and, on a match,
+/// reinterpret this evaluator's `Vec<T>` buffers as the `Vec<f32>` the
+/// existing NEON reduce/scan (`run_reduce`/`run_scan`) already take — the
+/// specialization that keeps the fast path a single implementation instead
+/// of a second copy of the reduction nest.
+trait Element: Copy + Default + 'static {
+    const DTYPE: DType;
+
+    fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]>;
+    fn apply(node: NodeId, op: ScalarOp, args: &[Self]) -> Result<Self, TensorError>;
+
+    /// The reduce seed for `init`, in this element's own type — the typed
+    /// counterpart of [`initial_value`]. `None` for [`ReduceInit::FirstElement`],
+    /// same as [`initial_value`]: there is no synthetic identity, the first
+    /// element visited seeds the accumulator instead.
+    fn reduce_seed(init: ReduceInit) -> Option<Self>;
+}
+
+macro_rules! impl_element_signed_integer {
+    ($ty:ty, $dtype:expr, $variant:ident) => {
+        impl Element for $ty {
+            const DTYPE: DType = $dtype;
+
+            fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
+                match buffer {
+                    TypedBuffer::$variant(data) => Some(data.as_slice()),
+                    _ => None,
+                }
+            }
+
+            fn apply(node: NodeId, op: ScalarOp, args: &[Self]) -> Result<Self, TensorError> {
+                Ok(match op {
+                    ScalarOp::Identity => args[0],
+                    ScalarOp::Add => args[0].wrapping_add(args[1]),
+                    ScalarOp::Subtract => args[0].wrapping_sub(args[1]),
+                    ScalarOp::Multiply => args[0].wrapping_mul(args[1]),
+                    ScalarOp::Divide => {
+                        return args[0]
+                            .checked_div(args[1])
+                            .ok_or(TensorError::CheckedDivisionFailed { node });
+                    }
+                    ScalarOp::Maximum => args[0].max(args[1]),
+                    ScalarOp::Minimum => args[0].min(args[1]),
+                    ScalarOp::Negate => args[0].wrapping_neg(),
+                    ScalarOp::Greater => Self::from(args[0] > args[1]),
+                    ScalarOp::Equal => Self::from(args[0] == args[1]),
+                    ScalarOp::Select => {
+                        if args[0] != 0 {
+                            args[1]
+                        } else {
+                            args[2]
+                        }
+                    }
+                    ScalarOp::Reciprocal
+                    | ScalarOp::Exponential
+                    | ScalarOp::Logarithm
+                    | ScalarOp::SquareRoot
+                    | ScalarOp::Tanh => {
+                        return Err(TensorError::UnsupportedScalarOp {
+                            node,
+                            op,
+                            dtype: Self::DTYPE,
+                        });
+                    }
+                })
+            }
+
+            fn reduce_seed(init: ReduceInit) -> Option<Self> {
+                match init {
+                    ReduceInit::Zero => Some(0),
+                    ReduceInit::One => Some(1),
+                    ReduceInit::NegativeInfinity => Some(Self::MIN),
+                    ReduceInit::PositiveInfinity => Some(Self::MAX),
+                    ReduceInit::FirstElement => None,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_element_unsigned_integer {
+    ($ty:ty, $dtype:expr, $variant:ident) => {
+        impl Element for $ty {
+            const DTYPE: DType = $dtype;
+
+            fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
+                match buffer {
+                    TypedBuffer::$variant(data) => Some(data.as_slice()),
+                    _ => None,
+                }
+            }
+
+            fn apply(node: NodeId, op: ScalarOp, args: &[Self]) -> Result<Self, TensorError> {
+                Ok(match op {
+                    ScalarOp::Identity => args[0],
+                    ScalarOp::Add => args[0].wrapping_add(args[1]),
+                    ScalarOp::Subtract => args[0].wrapping_sub(args[1]),
+                    ScalarOp::Multiply => args[0].wrapping_mul(args[1]),
+                    ScalarOp::Divide => {
+                        return args[0]
+                            .checked_div(args[1])
+                            .ok_or(TensorError::CheckedDivisionFailed { node });
+                    }
+                    ScalarOp::Maximum => args[0].max(args[1]),
+                    ScalarOp::Minimum => args[0].min(args[1]),
+                    ScalarOp::Greater => Self::from(args[0] > args[1]),
+                    ScalarOp::Equal => Self::from(args[0] == args[1]),
+                    ScalarOp::Select => {
+                        if args[0] != 0 {
+                            args[1]
+                        } else {
+                            args[2]
+                        }
+                    }
+                    ScalarOp::Negate
+                    | ScalarOp::Reciprocal
+                    | ScalarOp::Exponential
+                    | ScalarOp::Logarithm
+                    | ScalarOp::SquareRoot
+                    | ScalarOp::Tanh => {
+                        return Err(TensorError::UnsupportedScalarOp {
+                            node,
+                            op,
+                            dtype: Self::DTYPE,
+                        });
+                    }
+                })
+            }
+
+            fn reduce_seed(init: ReduceInit) -> Option<Self> {
+                match init {
+                    ReduceInit::Zero | ReduceInit::NegativeInfinity => Some(0),
+                    ReduceInit::One => Some(1),
+                    ReduceInit::PositiveInfinity => Some(Self::MAX),
+                    ReduceInit::FirstElement => None,
+                }
+            }
+        }
+    };
+}
+
+impl_element_signed_integer!(i8, DType::Int8, Int8);
+impl_element_signed_integer!(i16, DType::Int16, Int16);
+impl_element_signed_integer!(i32, DType::Int32, Int32);
+impl_element_signed_integer!(i64, DType::Int64, Int64);
+impl_element_signed_integer!(i128, DType::Int128, Int128);
+
+impl_element_unsigned_integer!(u8, DType::UInt8, UInt8);
+impl_element_unsigned_integer!(u16, DType::UInt16, UInt16);
+impl_element_unsigned_integer!(u32, DType::UInt32, UInt32);
+impl_element_unsigned_integer!(u64, DType::UInt64, UInt64);
+impl_element_unsigned_integer!(u128, DType::UInt128, UInt128);
+
+impl Element for f32 {
+    const DTYPE: DType = DType::Float32;
+
+    fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
+        match buffer {
+            TypedBuffer::Float32(data) => Some(data.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn apply(_node: NodeId, op: ScalarOp, args: &[Self]) -> Result<Self, TensorError> {
+        Ok(apply_scalar_op(op, args))
+    }
+
+    fn reduce_seed(init: ReduceInit) -> Option<Self> {
+        initial_value(init)
+    }
+}
+
+impl Element for f64 {
+    const DTYPE: DType = DType::Float64;
+
+    fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
+        match buffer {
+            TypedBuffer::Float64(data) => Some(data.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn apply(_node: NodeId, op: ScalarOp, args: &[Self]) -> Result<Self, TensorError> {
+        Ok(match op {
+            ScalarOp::Identity => args[0],
+            ScalarOp::Add => args[0] + args[1],
+            ScalarOp::Subtract => args[0] - args[1],
+            ScalarOp::Multiply => args[0] * args[1],
+            ScalarOp::Divide => args[0] / args[1],
+            ScalarOp::Maximum => args[0].max(args[1]),
+            ScalarOp::Minimum => args[0].min(args[1]),
+            ScalarOp::Negate => -args[0],
+            ScalarOp::Reciprocal => 1.0 / args[0],
+            ScalarOp::Exponential => args[0].exp(),
+            ScalarOp::Logarithm => args[0].ln(),
+            ScalarOp::SquareRoot => args[0].sqrt(),
+            ScalarOp::Tanh => args[0].tanh(),
+            ScalarOp::Greater => f64::from(u8::from(args[0] > args[1])),
+            ScalarOp::Equal => f64::from(u8::from((args[0] - args[1]).abs() == 0.0)),
+            ScalarOp::Select => {
+                if args[0] != 0.0 {
+                    args[1]
+                } else {
+                    args[2]
+                }
+            }
+        })
+    }
+
+    fn reduce_seed(init: ReduceInit) -> Option<Self> {
+        match init {
+            ReduceInit::Zero => Some(0.0),
+            ReduceInit::One => Some(1.0),
+            ReduceInit::NegativeInfinity => Some(f64::NEG_INFINITY),
+            ReduceInit::PositiveInfinity => Some(f64::INFINITY),
+            ReduceInit::FirstElement => None,
+        }
+    }
+}
+
+/// One contiguous typed buffer, tagged by which native type backs it — the
+/// storage half of [`evaluate_typed`]'s runtime dispatch. Every variant is a
+/// plain `Vec<T>`: a whole buffer is tagged, never a scalar, which is what
+/// keeps every operand a contiguous, SIMD-ready slice once a kernel is
+/// written for it (see this module's typed-evaluator doc). `Bool`,
+/// `BFloat16`, and `Float16` have no variant yet — `Bool`'s storage
+/// convention (packed bits vs. one byte per element) is undecided, and the
+/// two half-precision floats have no arithmetic on stable Rust; see
+/// [`typed_program_dtype`] for the boundary this actually enforces today.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedBuffer {
+    Int8(Vec<i8>),
+    UInt8(Vec<u8>),
+    Int16(Vec<i16>),
+    UInt16(Vec<u16>),
+    Int32(Vec<i32>),
+    UInt32(Vec<u32>),
+    Int64(Vec<i64>),
+    UInt64(Vec<u64>),
+    Int128(Vec<i128>),
+    UInt128(Vec<u128>),
+    Float32(Vec<f32>),
+    Float64(Vec<f64>),
+}
+
+impl TypedBuffer {
+    #[must_use]
+    pub const fn dtype(&self) -> DType {
+        match self {
+            Self::Int8(_) => DType::Int8,
+            Self::UInt8(_) => DType::UInt8,
+            Self::Int16(_) => DType::Int16,
+            Self::UInt16(_) => DType::UInt16,
+            Self::Int32(_) => DType::Int32,
+            Self::UInt32(_) => DType::UInt32,
+            Self::Int64(_) => DType::Int64,
+            Self::UInt64(_) => DType::UInt64,
+            Self::Int128(_) => DType::Int128,
+            Self::UInt128(_) => DType::UInt128,
+            Self::Float32(_) => DType::Float32,
+            Self::Float64(_) => DType::Float64,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Int8(data) => data.len(),
+            Self::UInt8(data) => data.len(),
+            Self::Int16(data) => data.len(),
+            Self::UInt16(data) => data.len(),
+            Self::Int32(data) => data.len(),
+            Self::UInt32(data) => data.len(),
+            Self::Int64(data) => data.len(),
+            Self::UInt64(data) => data.len(),
+            Self::Int128(data) => data.len(),
+            Self::UInt128(data) => data.len(),
+            Self::Float32(data) => data.len(),
+            Self::Float64(data) => data.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Validates a program is executable by [`evaluate_typed`] and returns its
+/// single uniform dtype.
+///
+/// One restriction narrows this evaluator below the full `Op` vocabulary,
+/// because of what genuinely is not built yet rather than a semantic limit:
+/// every node (bar a gather's `indices`, still carried as f32 — see
+/// [`reject_non_float32`]'s doc) must share one dtype, since a mixed-dtype
+/// fused body (quantized matmul's `i8 x i8 -> i32`) would need per-operand
+/// element types this evaluator's single `T::apply` cannot express yet.
+/// [`Op::Reduce`] (`Keep::Reduce` and `Keep::Scan` both) is supported at
+/// every width this function accepts — see [`run_reduce_typed`]/
+/// [`run_scan_typed`]. Gather is still rejected, in [`run_typed_program`]
+/// rather than here, since it is a per-operand property of a bound node, not
+/// a program-wide one. `Bool`/`BFloat16`/`Float16` are also out — see
+/// [`TypedBuffer`]'s doc.
+fn typed_program_dtype(program: &[Op]) -> Result<DType, TensorError> {
+    let dtype = program.first().ok_or(TensorError::Empty)?.dtype();
+    if matches!(dtype, DType::Bool | DType::BFloat16 | DType::Float16) {
+        return Err(TensorError::NotLowerable {
+            node: NodeId(0),
+            reason: "the typed evaluator does not support Bool, BFloat16, or Float16 yet",
+        });
+    }
+    for (position, expr) in program.iter().enumerate() {
+        let node = NodeId(position as u32);
+        if expr.dtype() != dtype {
+            return Err(TensorError::NotLowerable {
+                node,
+                reason: "the typed evaluator requires one uniform dtype across the whole program",
+            });
+        }
+    }
+    Ok(dtype)
+}
+
+/// One requested output's node, shape, and data — [`evaluate_typed`]'s
+/// per-dtype row, and [`run_typed_program`]'s own before it is wrapped into
+/// a [`TypedBuffer`].
+type TypedRow<Data> = (NodeId, Vec<u64>, Data);
+
+/// Run an elementwise-or-reduce tensor program against a caller-chosen
+/// non-f32 (or f64) dtype — the full-width counterpart of [`evaluate`] for
+/// the programs [`reject_non_float32`] used to reject outright. See
+/// [`typed_program_dtype`] for exactly which programs qualify. `DType::Float32`
+/// dispatches [`run_typed_program`] the same as every other width, but that
+/// function's own [`Op::Reduce`] handling specializes straight back to the
+/// existing NEON [`run_reduce`]/[`run_scan`] for `T = f32` — see
+/// [`run_reduce_typed`]'s doc.
+pub fn evaluate_typed(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[TypedBuffer],
+    outputs: &[NodeId],
+) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
+    let dtype = typed_program_dtype(program)?;
+    macro_rules! dispatch {
+        ($ty:ty, $variant:ident) => {{
+            run_typed_program::<$ty>(program, symbols, blocks, outputs)?
+                .into_iter()
+                .map(|(node, shape, data)| (node, shape, TypedBuffer::$variant(data)))
+                .collect()
+        }};
+    }
+    Ok(match dtype {
+        DType::Int8 => dispatch!(i8, Int8),
+        DType::UInt8 => dispatch!(u8, UInt8),
+        DType::Int16 => dispatch!(i16, Int16),
+        DType::UInt16 => dispatch!(u16, UInt16),
+        DType::Int32 => dispatch!(i32, Int32),
+        DType::UInt32 => dispatch!(u32, UInt32),
+        DType::Int64 => dispatch!(i64, Int64),
+        DType::UInt64 => dispatch!(u64, UInt64),
+        DType::Int128 => dispatch!(i128, Int128),
+        DType::UInt128 => dispatch!(u128, UInt128),
+        DType::Float32 => dispatch!(f32, Float32),
+        DType::Float64 => dispatch!(f64, Float64),
+        DType::Bool | DType::BFloat16 | DType::Float16 => {
+            unreachable!("typed_program_dtype already rejected this dtype")
+        }
+    })
+}
+
+/// The monomorphic body [`evaluate_typed`] dispatches into per dtype: shape
+/// inference, block binding, and a scalar-or-`T=f32`-specialized walk of
+/// every resolved node — the same three stages [`prepare`]/[`evaluate_pooled`]
+/// run for f32, minus chunk splitting (this evaluator does not parallelize
+/// yet).
+///
+/// Buffer handling mirrors [`prepare`]/[`evaluate_pooled`] rather than
+/// forking it: an input block is held as `Cow::Borrowed` (no per-call copy
+/// of the caller's data — the `data.to_vec()` this replaced copied every
+/// input block on every call regardless of whether the program even used
+/// it), a computed node's output comes from [`typed_take_or_allocate`]
+/// (reusing a retired buffer's storage instead of a fresh `vec![..]` per
+/// node), and [`node_retirement`] — already generic over the buffer type,
+/// unmodified here — decides when a buffer is done being read and goes back
+/// to the pool via [`typed_retire_into`].
+fn run_typed_program<T: Element>(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[TypedBuffer],
+    outputs: &[NodeId],
+) -> Result<Vec<TypedRow<Vec<T>>>, TensorError> {
+    let shapes = shape::infer(program, symbols)?;
+
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+
+    let block_nodes = block_node_ids(program);
+    if blocks.len() != block_nodes.len() {
+        return Err(TensorError::InputCountMismatch {
+            expected: block_nodes.len(),
+            found: blocks.len(),
+        });
+    }
+
+    let mut buffers: Vec<Option<Cow<'_, [T]>>> = vec![None; program.len()];
+    for (node, buffer) in block_nodes.iter().zip(blocks.iter()) {
+        let data = T::unwrap_block(buffer).ok_or(TensorError::NotLowerable {
+            node: *node,
+            reason: "typed evaluator input dtype does not match the program's uniform dtype",
+        })?;
+        let expected = element_count(shapes.of(*node));
+        if data.len() != expected {
+            return Err(TensorError::InputSizeMismatch {
+                node: *node,
+                expected,
+                found: data.len(),
+            });
+        }
+        buffers[node.0 as usize] = Some(Cow::Borrowed(data));
+    }
+
+    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    for node in &resolved {
+        if node.operands().iter().any(|(_, _, lookup)| lookup.is_some()) {
+            return Err(TensorError::NotLowerable {
+                node: node.node,
+                reason: "the typed evaluator does not support gather yet (indices stay f32-only)",
+            });
+        }
+    }
+
+    let retires = node_retirement(&resolved, &effective_outputs);
+    let mut free_buffers: Vec<Vec<T>> = Vec::new();
+    for (position, node) in resolved.iter().enumerate() {
+        let mut output = typed_take_or_allocate(&mut free_buffers, node_output_len(node));
+        match &node.kind {
+            BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers, &mut output)?,
+            BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
+                run_reduce_typed(node, &buffers, &mut output)?;
+            }
+            BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
+                run_scan_typed(node, &buffers, &mut output)?;
+            }
+        }
+        buffers[node.node.0 as usize] = Some(Cow::Owned(output));
+        for retired in &retires[position] {
+            typed_retire_into(&mut buffers, *retired, &mut free_buffers);
+        }
+    }
+
+    Ok(effective_outputs
+        .iter()
+        .map(|node| {
+            let shape = shapes.of(*node).to_vec();
+            let data = buffers[node.0 as usize]
+                .clone()
+                .map(Cow::into_owned)
+                .unwrap_or_default();
+            (*node, shape, data)
+        })
+        .collect())
+}
+
+/// The typed counterpart of [`take_or_allocate`]: same best-fit-by-capacity
+/// pool search, generic over [`Element`] instead of hardcoded to `f32`.
+fn typed_take_or_allocate<T: Element>(pool: &mut Vec<Vec<T>>, required: usize) -> Vec<T> {
+    let best_fit = pool
+        .iter()
+        .enumerate()
+        .filter(|(_, buffer)| buffer.capacity() >= required)
+        .min_by_key(|(_, buffer)| buffer.capacity())
+        .map(|(index, _)| index);
+
+    match best_fit {
+        Some(index) => {
+            let mut buffer = pool.swap_remove(index);
+            buffer.resize(required, T::default());
+            buffer
+        }
+        None => vec![T::default(); required],
+    }
+}
+
+/// The typed counterpart of [`retire_into`]: same take-and-stash, generic
+/// over [`Element`].
+fn typed_retire_into<T: Element>(buffers: &mut [Option<Cow<'_, [T]>>], node: NodeId, pool: &mut Vec<Vec<T>>) {
+    if let Some(Cow::Owned(buffer)) = buffers[node.0 as usize].take() {
+        pool.push(buffer);
+    }
+}
+
+/// The typed counterpart of [`operand_buffers`]: every node kind
+/// ([`run_elementwise_typed`], [`run_reduce_generic`], [`run_scan_generic`])
+/// reads its operands' physical buffers the same way, so this is the one
+/// place that walk is written.
+fn typed_operand_buffers<'a, T: Element>(
+    resolved: &BoundOp,
+    buffers: &'a [Option<Cow<'_, [T]>>],
+) -> Result<Vec<&'a [T]>, TensorError> {
+    resolved
+        .operands()
+        .iter()
+        .map(|(source, _, _)| {
+            buffers[source.0 as usize]
+                .as_deref()
+                .ok_or(TensorError::NotLowerable {
+                    node: *source,
+                    reason: "operand buffer missing at evaluation time",
+                })
+        })
+        .collect()
+}
+
+/// The typed counterpart of [`run_elementwise`]: same coordinate walk
+/// (`fill_running_offsets`/`unflatten_into`/`split_innermost` are pure
+/// geometry over `&[u64]`/[`bind::Layout`], with no f32 dependence, so they
+/// are shared verbatim), but no width-tile SIMD fast path and no gather
+/// cursor — see [`run_typed_program`]'s doc for why both are still only on
+/// the f32 side.
+fn run_elementwise_typed<T: Element>(
+    resolved: &BoundOp,
+    buffers: &[Option<Cow<'_, [T]>>],
+    output: &mut [T],
+) -> Result<(), TensorError> {
+    let (outer_extents, inner_len) = split_innermost(&resolved.extents);
+    let innermost_dim = outer_extents.len() as u16;
+    let raw = typed_operand_buffers(resolved, buffers)?;
+    let body = resolved.element_body();
+    let mut operand_values = vec![T::default(); raw.len()];
+    let mut step_values = vec![T::default(); body.steps.len()];
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| view.stride(innermost_dim))
+        .collect();
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut outer_coordinate = vec![0u64; outer_extents.len()];
+
+    for outer_position in 0..odometer_len(outer_extents) as usize {
+        unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
+        fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        let out_base = outer_position * inner_len;
+
+        for step in 0..inner_len {
+            for (index, data) in raw.iter().enumerate() {
+                operand_values[index] = data[running[index] as usize];
+                running[index] += strides[index];
+            }
+            output[out_base + step] =
+                eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
+        }
+    }
+    Ok(())
+}
+
+/// The typed counterpart of [`apply_body`]: same fused-step walk, fallible
+/// per [`Element::apply`] instead of the f32 body's infallible one.
+fn eval_body_typed<T: Element>(
+    node: NodeId,
+    body: &ComposedBody,
+    operand_values: &[T],
+    step_values: &mut [T],
+) -> Result<T, TensorError> {
+    for (index, step) in body.steps.iter().enumerate() {
+        let mut args = [T::default(); 3];
+        for (slot, arg) in step.args.iter().enumerate() {
+            args[slot] = match arg {
+                StepArg::Operand(operand_index) => operand_values[*operand_index as usize],
+                StepArg::Step(step_index) => step_values[*step_index as usize],
+            };
+        }
+        step_values[index] = T::apply(node, step.op, &args[..step.args.len()])?;
+    }
+    Ok(step_values[body.steps.len() - 1])
+}
+
+/// Reinterprets a `&[T]` as `&[f32]` with no copy.
+///
+/// # Safety
+/// The caller must have already confirmed `TypeId::of::<T>() ==
+/// TypeId::of::<f32>()`; only then are `T` and `f32` provably the same type,
+/// which is what makes this pointer reinterpretation sound.
+unsafe fn reinterpret_slice<T: 'static>(slice: &[T]) -> &[f32] {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<f32>(), slice.len()) }
+}
+
+/// The `&mut` counterpart of [`reinterpret_slice`]; same contract.
+///
+/// # Safety
+/// See [`reinterpret_slice`].
+unsafe fn reinterpret_slice_mut<T: 'static>(slice: &mut [T]) -> &mut [f32] {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { core::slice::from_raw_parts_mut(slice.as_mut_ptr().cast::<f32>(), slice.len()) }
+}
+
+/// [`Op::Reduce`] with `Keep::Reduce`, at any width [`Element`] covers.
+///
+/// This is the specialization point the module doc promises: for `T = f32`
+/// it does not run a second reduction nest at all — it reinterprets the
+/// typed evaluator's own `Vec<f32>` buffers as the `&[f32]` the existing
+/// NEON-tiled [`run_reduce`] already takes (sound because [`Element`]'s
+/// `'static` bound lets [`TypeId`] prove `T` really is `f32` first) and
+/// calls that function directly, so the GEMM tiling, dot-fold, and
+/// width-fast paths all still fire exactly as they do for [`evaluate`]. Only
+/// every other width falls through to [`run_reduce_generic`], the one new
+/// implementation this evaluator adds.
+fn run_reduce_typed<T: Element>(
+    resolved: &BoundOp,
+    buffers: &[Option<Cow<'_, [T]>>],
+    output: &mut [T],
+) -> Result<(), TensorError> {
+    if TypeId::of::<T>() == TypeId::of::<f32>() {
+        let buffers_f32: Vec<Option<&[f32]>> = buffers
+            .iter()
+            .map(|slot| {
+                slot.as_ref().map(|data| {
+                    // SAFETY: the `TypeId` check above proves `T == f32`.
+                    unsafe { reinterpret_slice(&data[..]) }
+                })
+            })
+            .collect();
+        // SAFETY: the `TypeId` check above proves `T == f32`.
+        let output_f32 = unsafe { reinterpret_slice_mut(output) };
+        return run_reduce(resolved, &buffers_f32, output_f32);
+    }
+    run_reduce_generic(resolved, buffers, output)
+}
+
+/// The scalar reduction nest generic over every [`Element`] width — the
+/// same (leading, reduction) coordinate walk [`run_reduce`]'s own generic
+/// fallback runs (its NEON/width-tile/dot-fold fast paths stay f32-only, so
+/// this has no equivalent of them to port), rewritten against
+/// [`Element::apply`]/[`eval_body_typed`] instead of `apply_scalar_op`/
+/// `eval_body_shape` so it type-checks for every width, and fallible where
+/// [`Element::apply`] is (an unsupported op, or an integer division that has
+/// no representable result). Gather is never reached here — the typed
+/// evaluator already rejects any node with a gathered operand before this
+/// runs, in [`run_typed_program`].
+fn run_reduce_generic<T: Element>(
+    resolved: &BoundOp,
+    buffers: &[Option<Cow<'_, [T]>>],
+    output: &mut [T],
+) -> Result<(), TensorError> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        out_layout,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("run_reduce_generic is only called for a Keep::Reduce fold")
+    };
+    let raw = typed_operand_buffers(resolved, buffers)?;
+    let body = resolved.element_body();
+    let mut operand_values = vec![T::default(); raw.len()];
+    let mut step_values = vec![T::default(); body.steps.len()];
+
+    let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16)
+        .filter(|dim| !output_axes.as_slice().contains(dim))
+        .collect();
+    let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
+    let leading_extents: Vec<u64> = leading_output_axes
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .collect();
+    let reduction_extents: Vec<u64> = reduction_dims
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .collect();
+    let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
+
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
+        .collect();
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut leading_coordinate = vec![0u64; leading_extents.len()];
+    let mut reduction_coordinate = vec![0u64; reduction_extents.len()];
+    let mut full_coordinate = vec![0u64; resolved.extents.len()];
+    let reduction_total = odometer_len(&reduction_extents);
+    let leading_total = odometer_len(&leading_extents);
+
+    let seed = T::reduce_seed(*init).unwrap_or_default();
+    let mut accumulator = vec![seed; width];
+
+    for leading_flat in 0..leading_total {
+        unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
+        accumulator.fill(seed);
+        let mut seeded = !matches!(init, ReduceInit::FirstElement);
+
+        for reduction_flat in 0..reduction_total {
+            unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
+            merge_coordinates_into(
+                leading_output_axes,
+                &leading_coordinate,
+                &reduction_dims,
+                &reduction_coordinate,
+                &mut full_coordinate,
+            );
+            fill_running_offsets(resolved, &full_coordinate, &mut running);
+
+            for slot in &mut accumulator {
+                for (index, data) in raw.iter().enumerate() {
+                    operand_values[index] = data[running[index] as usize];
+                    running[index] += strides[index];
+                }
+                let value = eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
+                *slot = if seeded {
+                    T::apply(resolved.node, *reduce_op, &[*slot, value])?
+                } else {
+                    value
+                };
+            }
+            seeded = true;
+        }
+
+        merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+        let out_prefix = out_layout.offset_of(&full_coordinate);
+        let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
+        for (slot, value) in accumulator.iter().enumerate() {
+            output[(out_prefix + out_stride * slot as i64) as usize] = *value;
+        }
+    }
+    Ok(())
+}
+
+/// [`Op::Reduce`] with `Keep::Scan`, at any width [`Element`] covers — the
+/// scan counterpart of [`run_reduce_typed`], same `T = f32` specialization
+/// down to the existing NEON-aware [`run_scan`].
+fn run_scan_typed<T: Element>(
+    resolved: &BoundOp,
+    buffers: &[Option<Cow<'_, [T]>>],
+    output: &mut [T],
+) -> Result<(), TensorError> {
+    if TypeId::of::<T>() == TypeId::of::<f32>() {
+        let buffers_f32: Vec<Option<&[f32]>> = buffers
+            .iter()
+            .map(|slot| {
+                slot.as_ref().map(|data| {
+                    // SAFETY: the `TypeId` check above proves `T == f32`.
+                    unsafe { reinterpret_slice(&data[..]) }
+                })
+            })
+            .collect();
+        // SAFETY: the `TypeId` check above proves `T == f32`.
+        let output_f32 = unsafe { reinterpret_slice_mut(output) };
+        return run_scan(resolved, &buffers_f32, output_f32);
+    }
+    run_scan_generic(resolved, buffers, output)
+}
+
+/// The scalar scan nest generic over every [`Element`] width — [`run_scan`]'s
+/// generic fallback (its width-fast SIMD path stays f32-only), rewritten
+/// against [`Element::apply`]/[`eval_body_typed`] the same way
+/// [`run_reduce_generic`] rewrites [`run_reduce`]'s.
+fn run_scan_generic<T: Element>(
+    resolved: &BoundOp,
+    buffers: &[Option<Cow<'_, [T]>>],
+    output: &mut [T],
+) -> Result<(), TensorError> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        out_layout,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("run_scan_generic is only called for a Keep::Scan fold")
+    };
+    let raw = typed_operand_buffers(resolved, buffers)?;
+    let (outer_extents, inner_len) = split_innermost(&resolved.extents);
+    let innermost_dim = outer_extents.len() as u16;
+    let body = resolved.element_body();
+    let mut operand_values = vec![T::default(); raw.len()];
+    let mut step_values = vec![T::default(); body.steps.len()];
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| view.stride(innermost_dim))
+        .collect();
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut outer_coordinate = vec![0u64; outer_extents.len()];
+
+    let mut accumulator = T::reduce_seed(*init).unwrap_or_default();
+    let mut seeded = !matches!(init, ReduceInit::FirstElement);
+
+    for outer_flat in 0..odometer_len(outer_extents) {
+        unflatten_into(outer_flat, outer_extents, &mut outer_coordinate);
+        fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        let mut out_running = out_layout.offset_of(&outer_coordinate);
+        let out_stride = out_layout.stride(innermost_dim);
+
+        for _ in 0..inner_len {
+            for (index, data) in raw.iter().enumerate() {
+                operand_values[index] = data[running[index] as usize];
+                running[index] += strides[index];
+            }
+            let value = eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
+            accumulator = if seeded {
+                T::apply(resolved.node, *reduce_op, &[accumulator, value])?
+            } else {
+                value
+            };
+            seeded = true;
+            output[out_running as usize] = accumulator;
+            out_running += out_stride;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -4248,6 +5125,23 @@ mod tests {
     use crate::map::{self, AxisTerm, IndexMap};
     use crate::op::{Extent, Reduce, append};
     use rstest::rstest;
+
+    /// Same recipe as `proxima-tensor/examples/spec_block.rs`'s `Lcg` —
+    /// varied, deterministic, no external `rand` dependency for a unit test.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_unit(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let bits = (self.0 >> 33) as u32;
+            (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
+        }
+    }
+
+    fn random_vec(seed: u64, count: usize) -> Vec<f32> {
+        let mut lcg = Lcg(seed);
+        (0..count).map(|_| lcg.next_unit()).collect()
+    }
 
     fn block(program: &mut Vec<Op>, dtype: DType, shape: &[Extent]) -> NodeId {
         append(
@@ -5738,5 +6632,456 @@ mod tests {
             evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("free-function matmul evaluates");
 
         assert_eq!(chain_result, evaluated.root());
+    }
+
+    fn typed_identity() -> IndexMap {
+        IndexMap::Affine(map::projection(1, &[0]))
+    }
+
+    fn typed_add_program(dtype: DType, len: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let lhs = block(&mut program, dtype, &[Extent::Static(len)]);
+        let rhs = block(&mut program, dtype, &[Extent::Static(len)]);
+        let sum = append(
+            &mut program,
+            Op::Elementwise {
+                dtype,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(lhs, typed_identity()), (rhs, typed_identity())],
+                name: None,
+            },
+        );
+        (program, lhs, rhs, sum)
+    }
+
+    #[rstest]
+    #[case::int8(DType::Int8, TypedBuffer::Int8(alloc::vec![1, 2, 3]), TypedBuffer::Int8(alloc::vec![10, 20, 30]), TypedBuffer::Int8(alloc::vec![11, 22, 33]))]
+    #[case::uint8(DType::UInt8, TypedBuffer::UInt8(alloc::vec![1, 2, 3]), TypedBuffer::UInt8(alloc::vec![10, 20, 30]), TypedBuffer::UInt8(alloc::vec![11, 22, 33]))]
+    #[case::int16(DType::Int16, TypedBuffer::Int16(alloc::vec![1, 2, 3]), TypedBuffer::Int16(alloc::vec![10, 20, 30]), TypedBuffer::Int16(alloc::vec![11, 22, 33]))]
+    #[case::uint16(DType::UInt16, TypedBuffer::UInt16(alloc::vec![1, 2, 3]), TypedBuffer::UInt16(alloc::vec![10, 20, 30]), TypedBuffer::UInt16(alloc::vec![11, 22, 33]))]
+    #[case::int32(DType::Int32, TypedBuffer::Int32(alloc::vec![1, 2, 3]), TypedBuffer::Int32(alloc::vec![10, 20, 30]), TypedBuffer::Int32(alloc::vec![11, 22, 33]))]
+    #[case::uint32(DType::UInt32, TypedBuffer::UInt32(alloc::vec![1, 2, 3]), TypedBuffer::UInt32(alloc::vec![10, 20, 30]), TypedBuffer::UInt32(alloc::vec![11, 22, 33]))]
+    #[case::int64(DType::Int64, TypedBuffer::Int64(alloc::vec![1, 2, 3]), TypedBuffer::Int64(alloc::vec![10, 20, 30]), TypedBuffer::Int64(alloc::vec![11, 22, 33]))]
+    #[case::uint64(DType::UInt64, TypedBuffer::UInt64(alloc::vec![1, 2, 3]), TypedBuffer::UInt64(alloc::vec![10, 20, 30]), TypedBuffer::UInt64(alloc::vec![11, 22, 33]))]
+    #[case::int128(DType::Int128, TypedBuffer::Int128(alloc::vec![1, 2, 3]), TypedBuffer::Int128(alloc::vec![10, 20, 30]), TypedBuffer::Int128(alloc::vec![11, 22, 33]))]
+    #[case::uint128(DType::UInt128, TypedBuffer::UInt128(alloc::vec![1, 2, 3]), TypedBuffer::UInt128(alloc::vec![10, 20, 30]), TypedBuffer::UInt128(alloc::vec![11, 22, 33]))]
+    #[case::float64(DType::Float64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.5]), TypedBuffer::Float64(alloc::vec![10.0, 20.0, 30.0]), TypedBuffer::Float64(alloc::vec![11.5, 22.5, 33.5]))]
+    fn evaluate_typed_adds_across_every_extended_width(
+        #[case] dtype: DType,
+        #[case] lhs: TypedBuffer,
+        #[case] rhs: TypedBuffer,
+        #[case] expected: TypedBuffer,
+    ) {
+        let (program, _, _, _) = typed_add_program(dtype, 3);
+        let results =
+            evaluate_typed(&program, &[], &[lhs, rhs], &[]).expect("typed add evaluates");
+        assert_eq!(results.len(), 1);
+        let (_, shape, data) = &results[0];
+        assert_eq!(shape, &alloc::vec![3u64]);
+        assert_eq!(*data, expected);
+        assert_eq!(data.dtype(), dtype);
+        assert_eq!(data.len(), 3);
+        assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn evaluate_typed_wraps_signed_narrow_overflow_instead_of_panicking() {
+        let (program, _, _, _) = typed_add_program(DType::Int8, 1);
+        let lhs = TypedBuffer::Int8(alloc::vec![127]);
+        let rhs = TypedBuffer::Int8(alloc::vec![1]);
+        let results = evaluate_typed(&program, &[], &[lhs, rhs], &[])
+            .expect("i8 add wraps rather than panicking");
+        assert_eq!(results[0].2, TypedBuffer::Int8(alloc::vec![-128]));
+    }
+
+    #[test]
+    fn evaluate_typed_rejects_negate_on_an_unsigned_dtype() {
+        let mut program = Vec::new();
+        let operand = block(&mut program, DType::UInt32, &[Extent::Static(2)]);
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::UInt32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(operand, typed_identity())],
+                name: None,
+            },
+        );
+        let blocks = [TypedBuffer::UInt32(alloc::vec![1, 2])];
+        let error =
+            evaluate_typed(&program, &[], &blocks, &[]).expect_err("u32 has no representable negative");
+        assert!(matches!(error, TensorError::UnsupportedScalarOp { op: ScalarOp::Negate, dtype: DType::UInt32, .. }), "{error}");
+    }
+
+    #[test]
+    fn evaluate_typed_rejects_a_transcendental_on_an_integer_dtype() {
+        let mut program = Vec::new();
+        let operand = block(&mut program, DType::Int32, &[Extent::Static(2)]);
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Int32,
+                body: ScalarOp::SquareRoot,
+                operands: alloc::vec![(operand, typed_identity())],
+                name: None,
+            },
+        );
+        let blocks = [TypedBuffer::Int32(alloc::vec![4, 9])];
+        let error = evaluate_typed(&program, &[], &blocks, &[])
+            .expect_err("sqrt is not defined over Int32 by this evaluator");
+        assert!(
+            matches!(error, TensorError::UnsupportedScalarOp { op: ScalarOp::SquareRoot, dtype: DType::Int32, .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn evaluate_typed_reports_integer_divide_by_zero_instead_of_panicking() {
+        let mut program = Vec::new();
+        let lhs = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+        let rhs = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Int32,
+                body: ScalarOp::Divide,
+                operands: alloc::vec![(lhs, typed_identity()), (rhs, typed_identity())],
+                name: None,
+            },
+        );
+        let blocks = [TypedBuffer::Int32(alloc::vec![10]), TypedBuffer::Int32(alloc::vec![0])];
+        let error = evaluate_typed(&program, &[], &blocks, &[])
+            .expect_err("integer division by zero is a real error, not UB");
+        assert!(matches!(error, TensorError::CheckedDivisionFailed { .. }), "{error}");
+    }
+
+    #[test]
+    fn evaluate_typed_computes_float64_transcendentals() {
+        let mut program = Vec::new();
+        let operand = block(&mut program, DType::Float64, &[Extent::Static(3)]);
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float64,
+                body: ScalarOp::SquareRoot,
+                operands: alloc::vec![(operand, typed_identity())],
+                name: None,
+            },
+        );
+        let blocks = [TypedBuffer::Float64(alloc::vec![4.0, 9.0, 16.0])];
+        let results =
+            evaluate_typed(&program, &[], &blocks, &[]).expect("f64 sqrt evaluates");
+        assert_eq!(results[0].2, TypedBuffer::Float64(alloc::vec![2.0, 3.0, 4.0]));
+    }
+
+    #[test]
+    fn evaluate_typed_rejects_a_program_mixing_dtypes() {
+        let mut program = Vec::new();
+        let lhs = block(&mut program, DType::Int32, &[Extent::Static(2)]);
+        let rhs = block(&mut program, DType::Int8, &[Extent::Static(2)]);
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Int32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(lhs, typed_identity()), (rhs, typed_identity())],
+                name: None,
+            },
+        );
+        let blocks = [
+            TypedBuffer::Int32(alloc::vec![1, 2]),
+            TypedBuffer::Int8(alloc::vec![1, 2]),
+        ];
+        let error = evaluate_typed(&program, &[], &blocks, &[])
+            .expect_err("a mixed-dtype fused body is not yet supported");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    fn typed_reduce_vector_to_scalar_program(dtype: DType, len: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let operand = block(&mut program, dtype, &[Extent::Static(len)]);
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, sum)
+    }
+
+    #[rstest]
+    #[case::int32(DType::Int32, TypedBuffer::Int32(alloc::vec![1, 2, 3, 4]), TypedBuffer::Int32(alloc::vec![10]))]
+    #[case::uint64(DType::UInt64, TypedBuffer::UInt64(alloc::vec![1, 2, 3, 4]), TypedBuffer::UInt64(alloc::vec![10]))]
+    #[case::float64(DType::Float64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.0, 4.0]), TypedBuffer::Float64(alloc::vec![11.0]))]
+    fn evaluate_typed_reduces_a_vector_to_a_scalar_across_widths(
+        #[case] dtype: DType,
+        #[case] operand: TypedBuffer,
+        #[case] expected: TypedBuffer,
+    ) {
+        let (program, _) = typed_reduce_vector_to_scalar_program(dtype, 4);
+        let results =
+            evaluate_typed(&program, &[], &[operand], &[]).expect("typed reduce evaluates");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].2, expected);
+    }
+
+    #[test]
+    fn evaluate_typed_scans_an_integer_vector_producing_a_running_sum() {
+        let mut program = Vec::new();
+        let source = block(&mut program, DType::Int32, &[Extent::Static(5)]);
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Int32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[0])),
+                keep: Keep::Scan,
+                name: None,
+            }),
+        );
+        let blocks = [TypedBuffer::Int32(alloc::vec![1, 2, 3, 4, 5])];
+        let results = evaluate_typed(&program, &[], &blocks, &[]).expect("typed scan evaluates");
+        assert_eq!(results[0].2, TypedBuffer::Int32(alloc::vec![1, 3, 6, 10, 15]));
+    }
+
+    /// Matmul-shaped: a `Multiply` elementwise body fused into an `Add`
+    /// reduce, same construction as [`matmul_program`] with `dtype`
+    /// parameterized so it can run through [`evaluate_typed`] at any width.
+    fn typed_matmul_program(
+        dtype: DType,
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let lhs = block(&mut program, dtype, &[Extent::Static(m), Extent::Static(k)]);
+        let rhs = block(&mut program, dtype, &[Extent::Static(k), Extent::Static(n)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("typed_matmul".into()),
+            }),
+        );
+        (program, lhs, rhs, sum)
+    }
+
+    #[test]
+    fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_int32() {
+        let (m, k, n) = (3usize, 4usize, 2usize);
+        let (program, _, _, _) = typed_matmul_program(DType::Int32, m as u32, k as u32, n as u32);
+        let lhs: Vec<i32> = (0..(m * k) as i32).collect();
+        let rhs: Vec<i32> = (0..(k * n) as i32).collect();
+        let blocks = [
+            TypedBuffer::Int32(lhs.clone()),
+            TypedBuffer::Int32(rhs.clone()),
+        ];
+        let results = evaluate_typed(&program, &[], &blocks, &[]).expect("typed matmul evaluates");
+
+        let mut expected = vec![0i32; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                let mut sum = 0i32;
+                for inner in 0..k {
+                    sum += lhs[row * k + inner] * rhs[inner * n + col];
+                }
+                expected[row * n + col] = sum;
+            }
+        }
+        assert_eq!(results[0].2, TypedBuffer::Int32(expected));
+    }
+
+    #[test]
+    fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_float64() {
+        let (m, k, n) = (3usize, 4usize, 2usize);
+        let (program, _, _, _) =
+            typed_matmul_program(DType::Float64, m as u32, k as u32, n as u32);
+        let lhs: Vec<f64> = (0..m * k).map(|value| value as f64 * 0.5).collect();
+        let rhs: Vec<f64> = (0..k * n).map(|value| value as f64 * 0.25).collect();
+        let blocks = [
+            TypedBuffer::Float64(lhs.clone()),
+            TypedBuffer::Float64(rhs.clone()),
+        ];
+        let results = evaluate_typed(&program, &[], &blocks, &[]).expect("typed matmul evaluates");
+
+        let mut expected = vec![0.0f64; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                let mut sum = 0.0f64;
+                for inner in 0..k {
+                    sum += lhs[row * k + inner] * rhs[inner * n + col];
+                }
+                expected[row * n + col] = sum;
+            }
+        }
+        let TypedBuffer::Float64(actual) = &results[0].2 else {
+            panic!("expected a Float64 result");
+        };
+        for (found, expect) in actual.iter().zip(expected.iter()) {
+            assert!((found - expect).abs() < 1e-9, "{found} vs {expect}");
+        }
+    }
+
+    /// `T = f32` is the specialization [`run_reduce_typed`] delegates
+    /// straight back to the existing NEON-tiled [`run_reduce`] — this checks
+    /// [`evaluate_typed`] and [`evaluate`] agree bit-for-bit on the exact
+    /// same matmul-shaped program, which they only can if both ran the same
+    /// function. (Whether the NEON tile itself fired, as opposed to one of
+    /// `run_reduce`'s other f32 fast paths, is checked separately by
+    /// `evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile`,
+    /// gated on `feature = "instrument"`.)
+    #[test]
+    fn evaluate_typed_float32_matmul_shaped_reduce_matches_evaluate_bit_for_bit() {
+        let (m, k, n) = (6usize, 32usize, 8usize);
+        let (program, _, _, _) =
+            typed_matmul_program(DType::Float32, m as u32, k as u32, n as u32);
+        let lhs: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| (value as f32 * 0.0271).cos()).collect();
+
+        let via_evaluate = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
+        let blocks = [TypedBuffer::Float32(lhs), TypedBuffer::Float32(rhs)];
+        let via_typed =
+            evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
+        let TypedBuffer::Float32(typed_data) = &via_typed[0].2 else {
+            panic!("expected a Float32 result");
+        };
+        assert_eq!(typed_data.as_slice(), via_evaluate.root());
+    }
+
+    /// Same claim as the test above, but over the RHS-transposed layout
+    /// that actually engages `neon_tile_plan`/`gemm_tile_neon` (see
+    /// `evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile`'s
+    /// doc on why plain `matmul_program`'s layout hits `width_tile_plan`
+    /// instead), with a contraction (`k = 64`) long enough for the NEON
+    /// tile's own row/lane splitting to matter, and compared via `to_bits`
+    /// rather than `==` — the generic nest and the NEON nest accumulate in
+    /// a different order, so a fallthrough from one to the other changes
+    /// bits even where it would not change `==` (e.g. `-0.0` vs `0.0`).
+    /// No feature gate: this is the check that fails the *default* gate if
+    /// `run_reduce_typed`'s `T == f32` specialization silently stops firing,
+    /// unlike `..._fires_the_neon_tile` below, which only runs under
+    /// `instrument` and checks the counters instead of the bits.
+    #[test]
+    fn evaluate_typed_float32_matmul_rhs_transposed_matches_evaluate_bit_for_bit() {
+        let (m, k, n) = (12usize, 64usize, 8usize);
+        let (program, _) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
+        let lhs = random_vec(0x1234_5678_9abc_def0, m * k);
+        let rhs = random_vec(0x0fed_cba9_8765_4321, n * k);
+
+        let via_evaluate =
+            evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
+        let blocks = [TypedBuffer::Float32(lhs), TypedBuffer::Float32(rhs)];
+        let via_typed =
+            evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
+        let TypedBuffer::Float32(typed_data) = &via_typed[0].2 else {
+            panic!("expected a Float32 result");
+        };
+
+        assert_eq!(typed_data.len(), via_evaluate.root().len());
+        let compared = typed_data.len();
+        assert!(compared > 0, "the bit-identity check compared zero elements");
+        for (index, (found, expected)) in typed_data.iter().zip(via_evaluate.root()).enumerate() {
+            assert_eq!(
+                found.to_bits(),
+                expected.to_bits(),
+                "node {index}: evaluate_typed produced {found} (bits {:#010x}), \
+                 evaluate produced {expected} (bits {:#010x})",
+                found.to_bits(),
+                expected.to_bits(),
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile() {
+        // `neon_tile_plan`'s gate (cpu.rs's own doc on that function) wants
+        // both contraction strides == 1 with the *width* dim non-contiguous
+        // on one operand — the RHS-transposed layout
+        // `matmul_program_rhs_transposed` uses, not plain `matmul_program`'s
+        // (whose RHS is `[k, n]` contiguous in `n` and hits `width_tile_plan`
+        // instead). Mirrored here rather than reusing `typed_matmul_program`.
+        let (m, k, n) = (12usize, 64usize, 8usize);
+        let mut program = Vec::new();
+        let lhs = block(&mut program, DType::Float32, &[Extent::Static(m as u32), Extent::Static(k as u32)]);
+        let rhs = block(&mut program, DType::Float32, &[Extent::Static(n as u32), Extent::Static(k as u32)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("typed_matmul_rhs_transposed".into()),
+            }),
+        );
+        let lhs_data: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();
+        let rhs_data: Vec<f32> = (0..n * k).map(|value| (value as f32 * 0.0271).cos()).collect();
+        let blocks = [TypedBuffer::Float32(lhs_data), TypedBuffer::Float32(rhs_data)];
+
+        let (gate_before, invocations_before, _) = neon_tile_counters();
+        evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
+        let (gate_after, invocations_after, _) = neon_tile_counters();
+
+        assert!(gate_after > gate_before, "neon_tile_plan never matched through evaluate_typed");
+        assert!(
+            invocations_after > invocations_before,
+            "gemm_tile_neon never ran through evaluate_typed"
+        );
+    }
+
+    #[test]
+    fn evaluate_typed_rejects_a_block_whose_dtype_does_not_match_the_program() {
+        let (program, _, _, _) = typed_add_program(DType::Int32, 2);
+        let blocks = [
+            TypedBuffer::Int32(alloc::vec![1, 2]),
+            TypedBuffer::Int8(alloc::vec![1, 2]),
+        ];
+        let error = evaluate_typed(&program, &[], &blocks, &[])
+            .expect_err("Int8 block cannot bind an Int32 program");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 }
