@@ -331,6 +331,10 @@ async fn amqp_section() -> Result<(), ProximaError> {
     #[derive(Default, Clone)]
     struct RecordPublishes {
         seen: Arc<Mutex<Vec<AmqpMessage>>>,
+        // signals the awaiting test task the moment a publish lands, so the
+        // wait below is an edge-triggered await instead of a polling loop —
+        // see `proxima::sync::Notify` at `proxima-primitives/src/sync/notify.rs`.
+        published: Arc<proxima::sync::Notify>,
     }
 
     impl SendPipe for RecordPublishes {
@@ -343,12 +347,17 @@ async fn amqp_section() -> Result<(), ProximaError> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request.payload);
+            self.published.notify_one();
             Ok(Response::typed(200, ()))
         }
     }
 
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let recorder = RecordPublishes { seen: seen.clone() };
+    let published = Arc::new(proxima::sync::Notify::new());
+    let recorder = RecordPublishes {
+        seen: seen.clone(),
+        published: published.clone(),
+    };
 
     let bind = free_loopback_addr()?;
     let server = Listener::builder()
@@ -367,16 +376,7 @@ async fn amqp_section() -> Result<(), ProximaError> {
         .send()
         .await?;
 
-    for _ in 0..50 {
-        if !seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let _ = proxima::time::timeout(Duration::from_secs(1), published.notified()).await;
     let recorded = seen
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
