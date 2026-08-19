@@ -47,4 +47,12 @@ pub enum TokenizerError {
         tokens_len: usize,
         token_type_len: usize,
     },
+
+    #[error(
+        "gguf metadata arrays 'tokenizer.ggml.tokens' (len {tokens_len}) and 'tokenizer.ggml.scores' (len {scores_len}) disagree in length"
+    )]
+    ScoreArrayLengthMismatch { tokens_len: usize, scores_len: usize },
+
+    #[error("gguf tokenizer.ggml.model '{model}' is not a tokenizer family this crate supports")]
+    UnsupportedTokenizerModel { model: String },
 }

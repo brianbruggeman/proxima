@@ -19,13 +19,19 @@
 //! out of a [`proxima_gguf::ParsedGguf`]'s metadata (the real key names,
 //! confirmed against a live GGUF fixture, are documented there).
 //!
-//! # BPE variant
+//! # Two encoders, selected by what the vocab declares
 //!
 //! Byte-level BPE over the GPT-2 alphabet ([`byte_level`]), with the
 //! LLAMA3 pretokenizer ([`pretokenize`]) -- the variant `tokenizer.ggml.
 //! model = "gpt2"` / `tokenizer.ggml.pre = "llama-bpe"` identify on the
 //! real fixture this crate was built against
 //! (`~/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf`).
+//!
+//! SentencePiece/SPM ([`unigram`]) for `tokenizer.ggml.model = "llama"`
+//! vocabs (`tokenizer.ggml.scores` present, no `tokenizer.ggml.merges`),
+//! confirmed against a real openchat-3.5-1210 fixture. [`pipe::encode`]/
+//! [`pipe::decode`] pick the encoder from [`vocab::Vocab::is_unigram`] --
+//! never a caller flag.
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -41,6 +47,7 @@ pub mod pipe;
 pub mod pretokenize;
 pub mod sample;
 pub mod sized;
+pub mod unigram;
 pub mod vocab;
 
 pub use error::TokenizerError;

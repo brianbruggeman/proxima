@@ -64,6 +64,7 @@ pub struct Vocab {
     id_to_bytes: Vec<Vec<u8>>,
     token_to_id: BTreeMap<String, u32>,
     merge_ranks: BTreeMap<(u32, u32), MergeRule>,
+    scores: Vec<f32>,
     base_byte_token_id: [Option<u32>; 256],
     bos_token_id: Option<u32>,
     eos_token_id: Option<u32>,
@@ -92,13 +93,55 @@ impl Vocab {
         eos_token_id: Option<u32>,
         unknown_token_id: Option<u32>,
     ) -> Result<Self, TokenizerError> {
+        Self::assemble(tokens, merges, Vec::new(), bos_token_id, eos_token_id, unknown_token_id)
+    }
+
+    /// Builds a SentencePiece-unigram vocab (`tokenizer.ggml.model =
+    /// "llama"`) from its per-token unigram scores instead of an explicit
+    /// merge list -- hands to [`crate::unigram::encode_fragment`], which
+    /// greedily merges the highest-[`Vocab::token_score`] adjacent pair
+    /// (mirroring llama.cpp's `llm_tokenizer_spm_session`) rather than
+    /// walking [`Vocab::merge_rule`]'s precomputed rank table the way
+    /// [`crate::bpe::encode_pretoken`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`TokenizerError::ScoreArrayLengthMismatch`] if `scores.len() !=
+    /// tokens.len()`; anything [`Vocab::new`] itself can fail with
+    /// otherwise (a missing base byte token, most likely -- SentencePiece
+    /// byte-fallback vocabs spell their 256-byte alphabet as `<0xXX>`
+    /// tokens, checked by [`hex_fallback_token`]).
+    pub fn new_unigram(
+        tokens: Vec<String>,
+        scores: Vec<f32>,
+        bos_token_id: Option<u32>,
+        eos_token_id: Option<u32>,
+        unknown_token_id: Option<u32>,
+    ) -> Result<Self, TokenizerError> {
+        if scores.len() != tokens.len() {
+            return Err(TokenizerError::ScoreArrayLengthMismatch {
+                tokens_len: tokens.len(),
+                scores_len: scores.len(),
+            });
+        }
+        Self::assemble(tokens, &[], scores, bos_token_id, eos_token_id, unknown_token_id)
+    }
+
+    fn assemble(
+        tokens: Vec<String>,
+        merges: &[String],
+        scores: Vec<f32>,
+        bos_token_id: Option<u32>,
+        eos_token_id: Option<u32>,
+        unknown_token_id: Option<u32>,
+    ) -> Result<Self, TokenizerError> {
         let token_to_id: BTreeMap<String, u32> = tokens
             .iter()
             .enumerate()
             .map(|(id, token)| (token.clone(), id as u32))
             .collect();
 
-        let id_to_bytes: Vec<Vec<u8>> = tokens.iter().map(|token| decode_display_string(token)).collect();
+        let id_to_bytes: Vec<Vec<u8>> = tokens.iter().map(|token| token_bytes_for(token)).collect();
 
         let mut base_byte_token_id = [None; 256];
         for byte in 0..=255u8 {
@@ -165,6 +208,7 @@ impl Vocab {
             id_to_bytes,
             token_to_id,
             merge_ranks,
+            scores,
             base_byte_token_id,
             bos_token_id,
             eos_token_id,
@@ -198,6 +242,25 @@ impl Vocab {
         self.merge_ranks
             .get(&(left, right))
             .map(|rule| (rule.rank, rule.merged_id))
+    }
+
+    /// Whether this vocab was built via [`Vocab::new_unigram`] (carries
+    /// per-token scores) rather than [`Vocab::new`] (carries merge rules).
+    /// [`crate::pipe::encode`]/[`crate::pipe::decode`] read this to select
+    /// [`crate::unigram::encode_fragment`] over
+    /// [`crate::bpe::encode_pretoken`] -- the vocab's own shape decides,
+    /// never a caller flag.
+    #[must_use]
+    pub fn is_unigram(&self) -> bool {
+        !self.scores.is_empty()
+    }
+
+    /// The unigram log-probability score for a token id, if this is a
+    /// scores-driven vocab. Higher (less negative) means "merge this pair
+    /// first" in [`crate::unigram::encode_fragment`]'s greedy loop.
+    #[must_use]
+    pub(crate) fn token_score(&self, token_id: u32) -> Option<f32> {
+        self.scores.get(token_id as usize).copied()
     }
 
     /// The display-domain string for a token id.
@@ -242,6 +305,28 @@ impl Vocab {
 /// either family's base-byte spelling.
 fn hex_fallback_token(byte: u8) -> String {
     format!("<0x{byte:02X}>")
+}
+
+/// A token's raw byte representation: [`parse_hex_fallback_byte`]'s single
+/// byte if `token` is a `"<0xXX>"` byte-fallback spelling (its whole point
+/// is naming exactly one raw byte, not six literal display chars),
+/// otherwise [`decode_display_string`].
+fn token_bytes_for(token: &str) -> Vec<u8> {
+    match parse_hex_fallback_byte(token) {
+        Some(byte) => alloc::vec![byte],
+        None => decode_display_string(token),
+    }
+}
+
+/// Parses a SentencePiece byte-fallback token's spelling ([`hex_fallback_token`]'s
+/// `"<0x1A>"` shape) back to the single raw byte it names, if `token`
+/// matches that exact shape.
+fn parse_hex_fallback_byte(token: &str) -> Option<u8> {
+    let hex = token.strip_prefix("<0x")?.strip_suffix('>')?;
+    if hex.len() != 2 {
+        return None;
+    }
+    u8::from_str_radix(hex, 16).ok()
 }
 
 /// Converts a token's display-domain string back to the raw bytes it
@@ -289,6 +374,20 @@ pub(crate) mod tests {
         Vocab::new(tokens, &merges, Some(1), Some(2), None).expect("tiny vocab builds")
     }
 
+    /// A tiny SentencePiece-unigram vocab: all 256 `<0xXX>` byte-fallback
+    /// pieces plus a chained-merge case ("▁"+"h" -> "▁h", "h"+"i" -> "hi"
+    /// scored higher so it wins the first pass, then "▁"+"hi" -> "▁hi"
+    /// scored highest of all) -- used across this crate's unigram tests.
+    pub(crate) fn tiny_unigram_vocab() -> Vocab {
+        let mut tokens: Vec<String> = (0..=255u8).map(hex_fallback_token).collect();
+        let mut scores = vec![0.0f32; tokens.len()];
+        for (word, score) in [("\u{2581}", -3.0), ("\u{2581}h", -5.0), ("hi", -2.0), ("\u{2581}hi", -1.0)] {
+            tokens.push(String::from(word));
+            scores.push(score);
+        }
+        Vocab::new_unigram(tokens, scores, Some(1), Some(2), None).expect("tiny unigram vocab builds")
+    }
+
     #[test]
     fn missing_base_byte_token_is_an_error() {
         let tokens: Vec<String> = (0..=254u8).map(|byte| String::from(byte_to_char(byte))).collect();
@@ -326,5 +425,28 @@ pub(crate) mod tests {
         assert_eq!(vocab.len(), 258);
         assert_eq!(vocab.bos_token_id(), Some(1));
         assert_eq!(vocab.eos_token_id(), Some(2));
+    }
+
+    #[test]
+    fn merges_driven_vocab_is_not_unigram() {
+        assert!(!tiny_vocab().is_unigram());
+    }
+
+    #[test]
+    fn scores_driven_vocab_is_unigram() {
+        let vocab = tiny_unigram_vocab();
+        assert!(vocab.is_unigram());
+        let hi_id = vocab.token_id("\u{2581}hi").expect("piece exists");
+        assert_eq!(vocab.token_score(hi_id), Some(-1.0));
+    }
+
+    #[test]
+    fn score_array_length_mismatch_is_an_error() {
+        let tokens: Vec<String> = (0..=255u8).map(hex_fallback_token).collect();
+        let error = Vocab::new_unigram(tokens, vec![0.0; 10], None, None, None).expect_err("length mismatch");
+        assert!(matches!(
+            error,
+            TokenizerError::ScoreArrayLengthMismatch { tokens_len: 256, scores_len: 10 }
+        ));
     }
 }
