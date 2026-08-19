@@ -168,11 +168,13 @@ mod tests {
     #[test]
     fn with_config_lowers_max_supported_version_and_rejects_newer_files() {
         let config = GgufParserConfig::builder().max_supported_version(2).build();
-        let mut parser = GgufParser::with_config(&config);
+        let parser = GgufParser::with_config(&config);
         let mut bytes = Vec::from(crate::parser::MAGIC);
         bytes.extend_from_slice(&3u32.to_le_bytes()); // version 3
-        parser.feed(&bytes);
-        let err = parser.poll().expect_err("version 3 must be rejected");
+        let err = match parser.push(&bytes) {
+            Ok(_) => panic!("version 3 must be rejected"),
+            Err(err) => err,
+        };
         assert!(matches!(
             err,
             crate::error::GgufError::UnsupportedVersion { version: 3 }
@@ -184,22 +186,18 @@ mod tests {
     #[test]
     fn with_config_changes_fallback_alignment() {
         let config = GgufParserConfig::builder().default_alignment(64).build();
-        let mut parser = GgufParser::with_config(&config);
+        let parser = GgufParser::with_config(&config);
         let mut bytes = Vec::from(crate::parser::MAGIC);
         bytes.extend_from_slice(&3u32.to_le_bytes()); // version
         bytes.extend_from_slice(&0i64.to_le_bytes()); // tensor_count
         bytes.extend_from_slice(&0i64.to_le_bytes()); // kv_count
-        parser.feed(&bytes);
-        // header event
-        parser.poll().expect("header");
         // kv_count == 0 -> resolves alignment and moves to tensor phase,
-        // then tensor remaining == 0 -> Complete.
-        let outcome = parser.poll().expect("complete");
-        match outcome {
-            Some(crate::parser::GgufEvent::Complete { alignment, .. }) => {
-                assert_eq!(alignment, 64, "fallback alignment came from the config");
-            }
-            other => panic!("expected Complete, got {other:?}"),
-        }
+        // then tensor remaining == 0 -> Complete, all drained by one push.
+        let (_parser, events) = parser.push(&bytes).expect("parses to completion");
+        let complete = events.into_iter().find_map(|event| match event {
+            crate::parser::GgufEvent::Complete { alignment, .. } => Some(alignment),
+            _ => None,
+        });
+        assert_eq!(complete, Some(64), "fallback alignment came from the config");
     }
 }

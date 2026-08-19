@@ -239,23 +239,23 @@ fn parse_via_chunks(bytes: &[u8], chunk_size: usize) -> Result<ParsedGguf, GgufE
     let mut completion = None;
 
     for chunk in bytes.chunks(chunk_size.max(1)) {
-        parser.feed(chunk);
-        loop {
-            match parser.poll()? {
-                None => break,
-                Some(GgufEvent::Header {
+        let events;
+        (parser, events) = parser.push(chunk)?;
+        for event in events {
+            match event {
+                GgufEvent::Header {
                     version,
                     tensor_count,
                     kv_count,
-                }) => header = Some((version, tensor_count, kv_count)),
-                Some(GgufEvent::Metadata { key, value }) => {
+                } => header = Some((version, tensor_count, kv_count)),
+                GgufEvent::Metadata { key, value } => {
                     metadata.push((key, value));
                 }
-                Some(GgufEvent::Tensor(tensor)) => tensors.push(tensor),
-                Some(GgufEvent::Complete {
+                GgufEvent::Tensor(tensor) => tensors.push(tensor),
+                GgufEvent::Complete {
                     data_offset,
                     alignment,
-                }) => completion = Some((data_offset, alignment)),
+                } => completion = Some((data_offset, alignment)),
             }
         }
     }

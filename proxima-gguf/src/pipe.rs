@@ -3,11 +3,12 @@
 //! caller's point of view — no cursor to thread back in, no partial-input
 //! case to report.
 //!
-//! [`crate::parser::GgufParser`] itself is a different shape: its
-//! `feed`/`poll` pair needs `&mut self` across a caller-controlled number of
-//! calls with real internal state (the accumulation buffer, the phase, the
-//! duplicate-key set). The FSM stays a plain `&mut self` type; this module
-//! is the single-call convenience built on top of it.
+//! [`crate::parser::GgufParser`] itself is a different shape: its `push` is
+//! a self-consuming `Self -> Self` state transition threaded across a
+//! caller-controlled number of chunks, with real internal state (the
+//! accumulation buffer, the phase, the duplicate-key set). The FSM stays a
+//! plain self-consuming type; this module is the single-call convenience
+//! built on top of it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -89,32 +90,29 @@ impl ParsedGguf {
 /// [`GgufError::TruncatedInput`] if `input` ends before the tensor
 /// directory is fully parsed.
 pub fn parse_complete(input: &[u8]) -> Result<ParsedGguf, GgufError> {
-    let mut parser = GgufParser::new();
-    parser.feed(input);
+    let (parser, events) = GgufParser::new().push(input)?;
 
     let mut header = None;
     let mut metadata = Vec::new();
     let mut tensors = Vec::new();
     let mut completion = None;
 
-    loop {
-        match parser.poll()? {
-            None => break,
-            Some(GgufEvent::Header {
+    for event in events {
+        match event {
+            GgufEvent::Header {
                 version,
                 tensor_count,
                 kv_count,
-            }) => header = Some((version, tensor_count, kv_count)),
-            Some(GgufEvent::Metadata { key, value }) => {
+            } => header = Some((version, tensor_count, kv_count)),
+            GgufEvent::Metadata { key, value } => {
                 metadata.push((key, value));
             }
-            Some(GgufEvent::Tensor(tensor)) => tensors.push(tensor),
-            Some(GgufEvent::Complete {
+            GgufEvent::Tensor(tensor) => tensors.push(tensor),
+            GgufEvent::Complete {
                 data_offset,
                 alignment,
-            }) => {
+            } => {
                 completion = Some((data_offset, alignment));
-                break;
             }
         }
     }

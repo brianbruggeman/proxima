@@ -5,7 +5,7 @@
 //! The parser/writer core ([`parser`], [`reader`], [`types`], [`value`],
 //! [`tensor`], [`error`], [`pipe`], [`sized`], [`quant`], [`writer`]) is
 //! `no_std + alloc`: it operates on `&[u8]` chunks handed to it by
-//! [`parser::GgufParser::feed`] (or, for [`writer::write_complete`],
+//! [`parser::GgufParser::push`] (or, for [`writer::write_complete`],
 //! returns an owned `Vec<u8>`) and never performs IO. It compiles under
 //! `--no-default-features` (this crate has no separate `alloc` feature
 //! toggle to flip — alloc is the floor, `std` only adds [`edge`] and
@@ -63,7 +63,7 @@ pub mod writer;
 pub mod edge;
 
 pub use error::GgufError;
-pub use parser::{GgufEvent, GgufParser, PollOutcome};
+pub use parser::{GgufEvent, GgufParser};
 pub use pipe::{ParsedGguf, parse_complete};
 pub use restack::{RestackError, StackPlan, discover_experts, expert_tensor_name, gather_expert, plan_stack, restack_into};
 pub use tensor::TensorInfo;
