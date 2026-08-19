@@ -4681,6 +4681,7 @@ dependencies = [
  "half",
  "libc",
  "prime",
+ "proxima-gguf",
  "proxima-primitives",
  "proxima-telemetry",
  "proxima-tensor",

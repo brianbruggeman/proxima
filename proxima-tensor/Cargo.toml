@@ -50,6 +50,12 @@ half = { version = "2.7.1", default-features = false }
 # rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
 libc = { workspace = true, optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par"], optional = true }
+# Q4_K block layout/dequant primitives for the quantized GEMM row source
+# (`cpu::dot_q4k_f32`/`cpu::matmul_q4k_f32`) — reuse-first: `proxima-gguf`
+# already ships and tests these against real weights, so this crate never
+# re-derives the nibble/scale bit-unpack. `default-features = false` +
+# `alloc` reaches it at this crate's own restricted tier.
+proxima-gguf = { workspace = true, default-features = false, features = ["alloc"] }
 # the Pipe algebra: `Pipe`/`PipeExt`/`AndThen` are core-tier (no cfg gate in
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
 # reaches them at every tier this crate has, alloc included.

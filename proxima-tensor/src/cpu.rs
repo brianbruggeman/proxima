@@ -214,7 +214,11 @@ fn prepare<'block>(
     outputs: &[NodeId],
 ) -> Result<Prepared<'block>, TensorError> {
     let shapes = shape::infer(program, symbols)?;
-    reject_non_float32(program)?;
+    // `evaluate`/`evaluate_parallel`'s own `blocks: &[&[f32]]` is f32-only,
+    // so neither has a quantized weight to offer this gate yet — see
+    // `reject_non_float32`'s doc for what the empty set here is standing in
+    // for and what `matmul_q4k_f32` covers instead.
+    reject_non_float32(program, &BTreeSet::new())?;
 
     let root = program
         .len()
@@ -348,6 +352,111 @@ pub fn evaluate_with_scratch(
     evaluate_pooled(program, symbols, blocks, outputs, scratch)
 }
 
+/// One [`evaluate_quantized`]-bound block: either a plain `f32`
+/// [`Op::Input`] buffer, exactly what [`evaluate`]'s own `blocks: &[&[f32]]`
+/// carries, or the raw packed bytes of a `Q4_K`-quantized weight matrix.
+/// [`evaluate`]'s `blocks` parameter has no way to carry the second case — a
+/// quantized weight has no legitimate `&[f32]` view to hand through it
+/// without dequantizing first, which would defeat the entire point (see
+/// [`matmul_q4k_f32`]'s doc on what dequantizing first costs). Both variants
+/// bind positionally, in the same [`Op::Input`] program order [`evaluate`]'s
+/// `blocks` already uses — one binding convention, not two.
+#[derive(Debug, Clone, Copy)]
+pub enum QuantizedBlock<'a> {
+    Float32(&'a [f32]),
+    Q4K(&'a [u8]),
+}
+
+/// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
+/// operand — the entry point that actually reaches [`matmul_q4k_f32`], which
+/// [`evaluate`]/[`evaluate_parallel`] cannot: their `blocks: &[&[f32]]`
+/// parameter is f32-only by construction, so neither has anywhere to put a
+/// packed byte buffer. This function is that seam: [`QuantizedBlock::Q4K`]
+/// entries are held back from the f32 buffer table and instead collected
+/// into a `NodeId -> &[u8]` side table that [`run_reduce`] consults (via
+/// [`quantized_operand`]) for the one `Reduce` node [`is_quantized_matmul_operand`]
+/// already proves is shaped for it — every other node in `program` still
+/// runs the exact same f32 path [`evaluate`] does, unchanged.
+///
+/// `evaluate_typed`'s `TypedBuffer` seam was considered and rejected for
+/// this: [`typed_program_dtype`] requires one uniform dtype across the
+/// *whole* program, but a quantized matmul is deliberately mixed —
+/// `UInt8`-packed weight times `Float32` activation into a `Float32`
+/// output — which is exactly the shape `reject_non_float32`'s
+/// quantized-weight exemption carves out, not a program `evaluate_typed`
+/// would ever accept.
+pub fn evaluate_quantized(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let shapes = shape::infer(program, symbols)?;
+    let block_nodes = block_node_ids(program);
+    if blocks.len() != block_nodes.len() {
+        return Err(TensorError::InputCountMismatch {
+            expected: block_nodes.len(),
+            found: blocks.len(),
+        });
+    }
+
+    let mut quantized_weights: BTreeMap<NodeId, &[u8]> = BTreeMap::new();
+    let mut buffers: Vec<Option<Cow<[f32]>>> = vec![None; program.len()];
+    for (node, block) in block_nodes.iter().zip(blocks.iter().copied()) {
+        match block {
+            QuantizedBlock::Float32(data) => {
+                let expected = element_count(shapes.of(*node));
+                if data.len() != expected {
+                    return Err(TensorError::InputSizeMismatch {
+                        node: *node,
+                        expected,
+                        found: data.len(),
+                    });
+                }
+                buffers[node.0 as usize] = Some(Cow::Borrowed(data));
+            }
+            QuantizedBlock::Q4K(bytes) => {
+                quantized_weights.insert(*node, bytes);
+            }
+        }
+    }
+
+    let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
+    reject_non_float32(program, &quantized_weight_nodes)?;
+
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+
+    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    let retires = node_retirement(&resolved, &effective_outputs);
+
+    let mut peak_live_buffers = live_count(&buffers);
+    for (position, computed) in resolved.iter().enumerate() {
+        let mut output = vec![0.0f32; node_output_len(computed)];
+        run_node_into(computed, &buffers, Some(&quantized_weights), &mut output)?;
+        buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
+        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        for retired in &retires[position] {
+            buffers[retired.0 as usize] = None;
+        }
+    }
+
+    Ok(finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers))
+}
+
 /// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only
 /// difference between the two public entry points is whether `free_buffers`
 /// arrives pre-seeded and is read back by the caller afterward, so that
@@ -393,7 +502,7 @@ fn evaluate_pooled(
         let mut output = take_or_allocate(free_buffers, node_output_len(computed));
         #[cfg(feature = "instrument")]
         drop(alloc_site_guard);
-        run_node_into(computed, &buffers, &mut output)?;
+        run_node_into(computed, &buffers, None, &mut output)?;
         #[cfg(feature = "instrument")]
         record_bound_op_operand_access(computed, &buffers);
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
@@ -664,7 +773,7 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             }
             #[cfg(feature = "instrument")]
             let sequential_start = Instant::now();
-            run_node_into(resolved, buffers, &mut output)?;
+            run_node_into(resolved, buffers, None, &mut output)?;
             #[cfg(feature = "instrument")]
             counter!(
                 instrument::SERIAL_SEQUENTIAL_COMPUTE_NANOS,
@@ -732,7 +841,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
                     let chunk_start = Instant::now();
                     #[cfg(feature = "instrument")]
                     let cpu_start = instrument::thread_cpu_nanos();
-                    let outcome = run_node_into(chunk, buffers, slice);
+                    let outcome = run_node_into(chunk, buffers, None, slice);
                     #[cfg(feature = "instrument")]
                     {
                         let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
@@ -841,7 +950,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 
     if chunks.len() < 2 {
         return match (chunks.first(), slices.into_iter().next()) {
-            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, slice),
+            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, slice),
             _ => Ok(()),
         };
     }
@@ -1026,7 +1135,7 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
         let chunk_start = Instant::now();
         #[cfg(feature = "instrument")]
         let cpu_start = instrument::thread_cpu_nanos();
-        let outcome = run_node_into(chunk, chunk_buffers, chunk_output);
+        let outcome = run_node_into(chunk, chunk_buffers, None, chunk_output);
         #[cfg(feature = "instrument")]
         {
             let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
@@ -1122,11 +1231,27 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 // non-gather-index, reduce/scan/gather-free program is not unsupported by
 // this crate any more; it runs through [`evaluate_typed`] instead, which
 // this function does not gate.
-fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
+//
+// `quantized_weights` is the second, narrower exception this now tolerates:
+// a node tagged as a `Q4_K`-packed weight buffer, permitted ONLY when it is
+// used exclusively as one operand of a `Reduce` whose body multiplies it
+// against another operand and folds with `Add` — a matmul shape, checked by
+// [`is_quantized_matmul_operand`] below, the same structural shape
+// `neon_tile_plan`/`width_tile_plan` already recognize for the dense f32
+// tile. `evaluate`/`evaluate_parallel` still pass an empty set (this is
+// additive, not a behavior change for either), because their own `blocks:
+// &[&[f32]]` parameter is itself f32-only — accepting the node here proves
+// only that the *shape* of a quantized-weight matmul type-checks, not that
+// this pipeline can execute one yet. [`matmul_q4k_f32`] is the dedicated,
+// separately-tested execution path for that shape today; wiring a quantized
+// buffer through `evaluate`'s own `blocks` array and `run_reduce`'s NEON
+// tile is the remaining integration work this does not yet do.
+fn reject_non_float32(program: &[Op], quantized_weights: &BTreeSet<NodeId>) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) {
+        let is_quantized_weight = quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
+        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) && !is_quantized_weight {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "this pipeline's buffers and SIMD kernels are f32-only; route a \
@@ -1135,6 +1260,51 @@ fn reject_non_float32(program: &[Op]) -> Result<(), TensorError> {
         }
     }
     Ok(())
+}
+
+/// Whether `node` appears, anywhere in `program`, ONLY as one operand of a
+/// `Multiply` [`Op::Elementwise`] — the OTHER operand `Float32` — that
+/// itself feeds directly into a `Reduce` whose `body` is `Add`: the exact
+/// "quantized weight x f32 activation" matmul shape [`reject_non_float32`]'s
+/// quantized-weight exemption requires. A quantized node used any other way
+/// (paired with a second non-float32 operand, a second elementwise op, a
+/// scan, a reduce with a different combiner) does not qualify: the
+/// exemption is for the one shape [`matmul_q4k_f32`] actually implements,
+/// not a blanket "trust the caller's tag."
+fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
+    let mut used_as_matmul_operand = false;
+    for (position, expr) in program.iter().enumerate() {
+        match expr {
+            Op::Elementwise { body, operands, .. } => {
+                if !operands.iter().any(|(source, _)| *source == node) {
+                    continue;
+                }
+                let other_operand_is_float32 = operands
+                    .iter()
+                    .any(|(source, _)| *source != node && program[source.0 as usize].dtype() == DType::Float32);
+                if *body != ScalarOp::Multiply || operands.len() != 2 || !other_operand_is_float32 {
+                    return false;
+                }
+                let elementwise_node = NodeId(position as u32);
+                let feeds_matmul_reduce = program.iter().any(|other| {
+                    matches!(other, Op::Reduce(fold) if fold.operand == elementwise_node && fold.body == ScalarOp::Add)
+                });
+                if !feeds_matmul_reduce {
+                    return false;
+                }
+                used_as_matmul_operand = true;
+            }
+            Op::Reduce(fold) => {
+                if fold.operand == node {
+                    // reduced directly, not through a Multiply elementwise —
+                    // not the matmul shape this exemption covers.
+                    return false;
+                }
+            }
+            Op::Input { .. } | Op::Iota { .. } => {}
+        }
+    }
+    used_as_matmul_operand
 }
 
 /// Every node referenced as a gather's `indices` anywhere in `program` —
@@ -1242,7 +1412,7 @@ fn initial_value(init: ReduceInit) -> Option<f32> {
 #[cfg(test)]
 fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
-    run_node_into(resolved, buffers, &mut output)?;
+    run_node_into(resolved, buffers, None, &mut output)?;
     Ok(output)
 }
 
@@ -1254,6 +1424,7 @@ fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>
 fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
+    quantized_weights: Option<&BTreeMap<NodeId, &[u8]>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match &resolved.kind {
@@ -1267,7 +1438,12 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Reduce);
-            run_reduce(resolved, buffers, output)
+            match quantized_weights {
+                Some(quantized_weights) => {
+                    run_reduce_with_quantized_weights(resolved, buffers, quantized_weights, output)
+                }
+                None => run_reduce(resolved, buffers, output),
+            }
         }
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
@@ -1373,7 +1549,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             let mut output = vec![0.0f32; node_output_len(resolved)];
             {
                 let buffers = self.buffers.borrow();
-                run_node_into(resolved, *buffers, &mut output)?;
+                run_node_into(resolved, *buffers, None, &mut output)?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
             }
@@ -1673,6 +1849,90 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
     Ok(())
 }
 
+/// Which of `resolved`'s operands, if any, is a `Q4_K`-packed weight named
+/// in `quantized_weights` — [`run_reduce`]'s own gate for routing to
+/// [`matmul_q4k_f32`] instead of the f32 tile/generic paths below. Only a
+/// `Keep::Reduce` fold can match: `quantized_weights` only ever names a node
+/// [`reject_non_float32`] already proved (via [`is_quantized_matmul_operand`])
+/// feeds exactly one such fold, so this need not re-check the shape, only
+/// find which physical operand it is.
+fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, &[u8]>) -> Option<NodeId> {
+    if !matches!(resolved.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+        return None;
+    }
+    resolved.operands().iter().map(|(node, _, _)| *node).find(|node| quantized_weights.contains_key(node))
+}
+
+/// [`run_reduce`]'s quantized-weight branch: `resolved` is the fused
+/// `Reduce(Elementwise(Multiply))` matmul shape, `weight_node` one of its two
+/// operands, packed `Q4_K` bytes rather than a bound `f32` buffer. The other
+/// operand is the plain `f32` activation, already sitting in `buffers` like
+/// any other node — read straight out of the same table [`run_reduce`]'s f32
+/// path uses, no second buffer convention for it. Delegates the actual
+/// per-row dot product to [`matmul_q4k_f32`], the dedicated, separately
+/// parity-tested kernel; this function's whole job is locating that kernel's
+/// two arguments inside a resolved `BoundOp`.
+fn run_reduce_quantized<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    weights: &[u8],
+    weight_node: NodeId,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let activation_node = resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| *node)
+        .find(|node| *node != weight_node)
+        .ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "quantized matmul reduce has no activation operand",
+        })?;
+    let activation = buffers[activation_node.0 as usize].as_deref().ok_or(TensorError::NotLowerable {
+        node: activation_node,
+        reason: "quantized matmul activation operand has no bound buffer",
+    })?;
+    let rows = output.len();
+    let result = matmul_q4k_f32(weights, rows, activation)?;
+    output.copy_from_slice(&result);
+    Ok(())
+}
+
+/// [`run_node_into`]'s entry point whenever a caller has any quantized
+/// weight bound at all ([`evaluate_quantized`], the only one) — checks
+/// [`quantized_operand`] and routes to [`run_reduce_quantized`] or falls
+/// through to the plain [`run_reduce`] unchanged. Kept as its own function,
+/// not folded into `run_reduce` itself, so `run_reduce`'s own compiled body
+/// — what every other caller ([`evaluate`], [`evaluate_parallel`],
+/// [`run_reduce_typed`]'s `f32` specialization) reaches through
+/// `run_node_into`'s `quantized_weights: None` arm — carries none of this
+/// check's machine code: measured to hold `run_reduce`'s own instruction
+/// count exactly at its pre-quantization baseline (8629 lines, 40 `fmla`,
+/// `sweep_gemm --release`) precisely because a caller that never binds a
+/// quantized weight never reaches this function at all, not even through a
+/// branch it doesn't take.
+fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    quantized_weights: &BTreeMap<NodeId, &[u8]>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
+        let weights = quantized_weights.get(&weight_node).copied().ok_or(TensorError::NotLowerable {
+            node: weight_node,
+            reason: "quantized weight node has no bound byte buffer",
+        })?;
+        return run_reduce_quantized(resolved, buffers, weights, weight_node, output);
+    }
+    run_reduce(resolved, buffers, output)
+}
+
+/// The dense f32 GEMM interpreter: NEON dot/width tiles then a generic
+/// fallback. Never sees a quantized weight — [`run_node_into`] routes any
+/// call with `quantized_weights: Some(_)` through
+/// [`run_reduce_with_quantized_weights`] instead, so this function's own
+/// signature and body stay exactly what they were before quantized weights
+/// existed anywhere in this module.
 fn run_reduce<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
@@ -1913,12 +2173,12 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     // stays within the source slices.
                     unsafe {
                         gemm_tile_neon::<TILE_ROWS>(
-                            TileOperand {
+                            WeightTile {
                                 data: raw[plan.index_a],
                                 base: base_a,
                                 stride: plan.row_stride_a,
                             },
-                            TileOperand {
+                            WeightTile {
                                 data: raw[plan.index_b],
                                 base: base_b,
                                 stride: plan.col_stride_b,
@@ -2042,12 +2302,12 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     // differs.
                     unsafe {
                         gemm_tile_neon::<$rows>(
-                            TileOperand {
+                            WeightTile {
                                 data: raw[plan.index_a],
                                 base: base_a,
                                 stride: plan.row_stride_a,
                             },
-                            TileOperand {
+                            WeightTile {
                                 data: raw[plan.index_b],
                                 base: base_b,
                                 stride: plan.col_stride_b,
@@ -2960,20 +3220,36 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     })
 }
 
-/// The `a`-side (row-invariant-across-width) operand a tile call reads —
-/// bundled with its `b`-side counterpart below for the same argument-count
-/// reason [`OperandSpan`]/[`DotFold`] already document.
+/// The row-invariant-across-width operand a width-tile call reads: fixed at
+/// a `(row, k)` corner and stepped by two independent strides, `row_stride`
+/// (between tile rows) and `k_stride` (along the reduction). Not
+/// [`WeightTile`]: that type carries one `stride` field only, sound because
+/// [`neon_tile_plan`]'s own gate proves the reduction dim is always unit
+/// stride for the tile it feeds, so no separate `k_stride` is needed there.
+/// This operand carries no such guarantee — `width_tile_plan` only proves
+/// the *width* dim's stride, not `k`'s — so it genuinely needs the second
+/// field `WeightTile` has nowhere to put; adding one to `WeightTile` for this
+/// caller's sake would hand every other caller a field it never reads.
+/// Bundled with its width-contiguous counterpart below for the same
+/// argument-count reason [`OperandSpan`]/[`DotFold`] already document.
 #[cfg(target_arch = "aarch64")]
-struct TileOperandA<'a> {
+struct RowInvariantTile<'a> {
     data: &'a [f32],
     base: i64,
     row_stride: i64,
     k_stride: i64,
 }
 
-/// The `b`-side (width-contiguous) operand a tile call reads.
+/// The width-contiguous operand a width-tile call reads: one stride
+/// (`k_stride`) between reduction steps, the width dimension itself always
+/// unit-stride (read as whole `float32x4_t` lanes via `v * 4`). Same field
+/// shape as [`WeightTile`] but a different base type (`i64`, since
+/// `width_tile_plan`'s strides can run negative) and, in general, a
+/// different unit-stride dimension — kept as its own type rather than
+/// forced through `WeightTile<f32>` for a shape match that would not carry
+/// the same addressing guarantee.
 #[cfg(target_arch = "aarch64")]
-struct TileOperandB<'a> {
+struct WidthContiguousTile<'a> {
     data: &'a [f32],
     base: i64,
     k_stride: i64,
@@ -2995,8 +3271,8 @@ struct TileOperandB<'a> {
 /// 0..WIDTH_TILE_VECS, lane in 0..4` lies within `b.data`.
 #[cfg(target_arch = "aarch64")]
 unsafe fn gemm_width_tile_neon(
-    a: TileOperandA,
-    b: TileOperandB,
+    a: RowInvariantTile,
+    b: WidthContiguousTile,
     k: usize,
     out: &mut [[f32; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS],
 ) {
@@ -3034,7 +3310,7 @@ unsafe fn gemm_width_tile_neon(
 /// there (`WIDTH_TILE_FALLBACK_ELEMENTS` proves it), but a caller with an
 /// arbitrary shape still gets a correct answer.
 #[cfg(target_arch = "aarch64")]
-fn width_tile_scalar_cell(a: TileOperandA, b: TileOperandB, k: usize, seed: f32) -> f32 {
+fn width_tile_scalar_cell(a: RowInvariantTile, b: WidthContiguousTile, k: usize, seed: f32) -> f32 {
     let mut acc = seed;
     let mut offset_a = a.base;
     let mut offset_b = b.base;
@@ -3093,8 +3369,8 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
             // tiles carved out of `plan.leading_total`/`plan.width`.
             unsafe {
                 gemm_width_tile_neon(
-                    TileOperandA { data: data_a, base: base_a, row_stride: plan.row_stride_a, k_stride: plan.k_stride_a },
-                    TileOperandB { data: data_b, base: base_b, k_stride: plan.k_stride_b },
+                    RowInvariantTile { data: data_a, base: base_a, row_stride: plan.row_stride_a, k_stride: plan.k_stride_a },
+                    WidthContiguousTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
                     plan.reduction_total,
                     &mut tile_out,
                 );
@@ -3119,13 +3395,13 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
             for i in 0..WIDTH_TILE_ROWS {
                 let row = row_start + i;
                 let value = width_tile_scalar_cell(
-                    TileOperandA {
+                    RowInvariantTile {
                         data: data_a,
                         base: plan.base_a + row as i64 * plan.row_stride_a,
                         row_stride: plan.row_stride_a,
                         k_stride: plan.k_stride_a,
                     },
-                    TileOperandB { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                    WidthContiguousTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
                     plan.reduction_total,
                     plan.seed,
                 );
@@ -3145,13 +3421,13 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
     for row in row_tiles * WIDTH_TILE_ROWS..plan.leading_total {
         for col in 0..plan.width {
             let value = width_tile_scalar_cell(
-                TileOperandA {
+                RowInvariantTile {
                     data: data_a,
                     base: plan.base_a + row as i64 * plan.row_stride_a,
                     row_stride: plan.row_stride_a,
                     k_stride: plan.k_stride_a,
                 },
-                TileOperandB { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                WidthContiguousTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
                 plan.reduction_total,
                 plan.seed,
             );
@@ -3463,16 +3739,114 @@ fn neon_tile_plan(
     })
 }
 
-/// One operand's tile-relative addressing for [`gemm_tile_neon`]: `data` is
-/// the physical buffer, `base` the flat offset of this tile's `(row 0, col
-/// 0, k 0)` corner, `stride` the per-row (for `a`) or per-column (for `b`)
-/// step between adjacent tile lanes. Bundled for the same reason
-/// [`OperandSpan`] is — keeps the kernel under clippy's argument-count lint.
-#[cfg(target_arch = "aarch64")]
-struct TileOperand<'a> {
-    data: &'a [f32],
-    base: usize,
-    stride: usize,
+/// A strided view over a borrowed weight buffer: `data` is the physical
+/// buffer, `base` the flat offset of this tile's `(row 0, col 0, k 0)`
+/// corner, `stride` the per-row (for `a`) or per-column (for `b`) step
+/// between adjacent tile lanes. Bundled for the same reason [`OperandSpan`]
+/// is — keeps the kernel under clippy's argument-count lint.
+///
+/// Generic over the source element `T` so the identical addressing shape
+/// hosts both this module's dense `f32` weight buffers ([`gemm_tile_neon`]
+/// below, unchanged) and [`dot_q4k_f32`]'s packed `u8` `Q4_K` byte buffers,
+/// where `stride` is a byte stride between rows rather than an `f32`-element
+/// stride. Before this type existed generic, a quantized weight matmul had
+/// no addressing primitive to reuse and would have hand-rolled a parallel
+/// one; now it reuses this struct exactly, only its element type and stride
+/// units differ.
+pub(crate) struct WeightTile<'a, T> {
+    pub(crate) data: &'a [T],
+    pub(crate) base: usize,
+    pub(crate) stride: usize,
+}
+
+/// Packed bytes per `Q4_K` super-block — re-exported at this crate's own
+/// name rather than spelling `proxima_gguf::quant::q4_k::BLOCK_BYTES` at
+/// every call site below.
+const Q4K_BLOCK_BYTES: usize = proxima_gguf::quant::q4_k::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `Q4_K` super-block (`QK_K` in ggml/gguf
+/// terms).
+const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
+
+/// One output row of a `Q4_K`-quantized-weight x `f32`-activation dot
+/// product — the scalar counterpart [`reject_non_float32`]'s quantized-weight
+/// exemption documents. `weight_row` is one [`WeightTile`] row's raw packed
+/// bytes (`row.stride` `Q4_K` super-blocks' worth, [`Q4K_BLOCK_BYTES`] each);
+/// `activation` is the matching `f32` slice, `Q4K_BLOCK_ELEMENTS` (256) wide
+/// per block.
+///
+/// Dequantizes one super-block at a time into a reused stack buffer
+/// (`[f32; 256]`, never a per-row or per-matrix allocation) via
+/// [`proxima_gguf::quant::q4_k::dequantize_block`] — the crate's own tested
+/// `Q4_K` codec, ported bit-for-bit from `ggml-quants.c` and proven against
+/// real GGUF weights — then folds it against the matching activation slice.
+/// This reads [`Q4K_BLOCK_BYTES`] (144) bytes per 256 weights from memory
+/// rather than the 1024 bytes a pre-expanded `f32` row would cost, which is
+/// the whole point: the weight matrix is never materialized as `f32`, only
+/// one super-block at a time is. It stops short of ggml's own register-level
+/// int4 `vec_dot` (masking/shifting nibbles straight into a SIMD multiply,
+/// no `f32` intermediate at all, not even a 256-element one) — see this
+/// function's caller for exactly what is and is not NEON-accelerated.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q4K_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q4K_BLOCK_ELEMENTS`].
+fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q4K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q4_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q4K_BLOCK_BYTES;
+    if activation.len() != block_count * Q4K_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .chunks_exact(Q4K_BLOCK_BYTES)
+        .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
+    {
+        proxima_gguf::quant::q4_k::dequantize_block(block, &mut scratch);
+        for (&weight, &value) in scratch.iter().zip(activation_chunk) {
+            acc = weight.mul_add(value, acc);
+        }
+    }
+    Ok(acc)
+}
+
+/// A full `Q4_K`-quantized weight matrix (`rows` x `k`, row-major packed
+/// bytes) times one `f32` activation vector (`k` wide) — batch-1 decode's
+/// actual shape, the case the module docs measure at 4.00 bytes/mac. Each
+/// output row is independent, so this is the scalar fallback
+/// [`reject_non_float32`]'s quantized-weight exemption routes to when no
+/// NEON tile plan claims the node; see [`dot_q4k_f32`] for the per-row
+/// kernel and exactly what it does and does not materialize.
+///
+/// # Errors
+/// Propagates [`dot_q4k_f32`]'s [`TensorError::QuantizedShapeMismatch`] for
+/// the first row that fails its shape check, or reports the same error if
+/// `weights.len()` is not a whole multiple of `rows`.
+pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q4k_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q4k_f32(weight_row, activation))
+        .collect()
 }
 
 /// Ported from ggml tinyBLAS's `gemm_bloc`: `ROWS` x [`TILE_COLS`]
@@ -3490,7 +3864,7 @@ struct TileOperand<'a> {
 /// at whichever width `1..=5` the leftover row count needs, instead of a
 /// hand-duplicated copy per width.
 #[cfg(target_arch = "aarch64")]
-unsafe fn gemm_tile_neon<const ROWS: usize>(a: TileOperand, b: TileOperand, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
+unsafe fn gemm_tile_neon<const ROWS: usize>(a: WeightTile<f32>, b: WeightTile<f32>, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
     // `vdupq_n_f32` requires the `neon` target feature, unconditionally
     // present in the aarch64 base ISA this module is gated on.
     let mut acc = [[unsafe { vdupq_n_f32(0.0) }; TILE_COLS]; ROWS];
@@ -5332,6 +5706,165 @@ mod tests {
         (0..count).map(|_| lcg.next_unit()).collect()
     }
 
+    /// [`matmul_q4k_f32`] against the reference path (`proxima_gguf`'s own
+    /// tested dequantize into a full `f32` weight matrix, then a naive f32
+    /// dot product) — [`super`]'s guiding-principle 14: the incumbent
+    /// (dequantize-then-matmul) is correct by construction, so this is a
+    /// parity check, not a round-trip-to-self check. Two real (pseudo-random,
+    /// non-degenerate — `Lcg`, not zeros/constants) rows x 2 super-blocks
+    /// (512 elements) each, `Q4_K`'s minimum non-trivial multi-block shape.
+    #[rstest]
+    #[case::seed_1(1)]
+    #[case::seed_7(7)]
+    #[case::seed_1000(1000)]
+    fn matmul_q4k_f32_matches_dequantize_then_f32_matmul(#[case] seed: u64) {
+        use proxima_gguf::quant::q4_k::{QK_K, dequantize, quantize};
+
+        const ROWS: usize = 2;
+        const BLOCKS_PER_ROW: usize = 2;
+        const K: usize = BLOCKS_PER_ROW * QK_K;
+
+        let weights_f32 = random_vec(seed, ROWS * K);
+        let activation = random_vec(seed.wrapping_add(1), K);
+
+        let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q4K_BLOCK_BYTES];
+        for (row_f32, row_packed) in weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES)) {
+            quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
+        }
+
+        let mut dequantized_reference = vec![0.0f32; ROWS];
+        let mut dequantized_row = vec![0.0f32; K];
+        for (row_index, row_packed) in packed.chunks_exact(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES).enumerate() {
+            dequantize(row_packed, &mut dequantized_row).expect("2 whole super-blocks dequantize cleanly");
+            dequantized_reference[row_index] =
+                dequantized_row.iter().zip(&activation).map(|(weight, value)| weight * value).sum();
+        }
+
+        let quantized_result = matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+
+        let mut max_diff = 0.0f32;
+        let mut sum_sq_diff = 0.0f64;
+        for (got, want) in quantized_result.iter().zip(&dequantized_reference) {
+            let diff = (got - want).abs();
+            max_diff = max_diff.max(diff);
+            sum_sq_diff += f64::from(diff) * f64::from(diff);
+        }
+        let rms_diff = (sum_sq_diff / ROWS as f64).sqrt();
+        eprintln!("matmul_q4k_f32 vs dequantize-then-matmul: seed={seed} max_diff={max_diff} rms_diff={rms_diff}");
+
+        // not bit-exact: `dot_q4k_f32` folds one super-block at a time in a
+        // single running accumulator, while the reference sums a
+        // fully-materialized 512-element row in one linear pass — same
+        // terms, different intermediate rounding. Loose bound, not tuned to
+        // the measured numbers, matching `q4_k.rs`'s own round-trip tests.
+        assert!(max_diff < 1e-2, "max_diff={max_diff} exceeds parity tolerance");
+        assert!(rms_diff < 1e-2, "rms_diff={rms_diff} exceeds parity tolerance");
+    }
+
+    /// [`reject_non_float32`]'s quantized-weight exemption: a `UInt8`-tagged
+    /// node (standing in for packed `Q4_K` bytes) used as one operand of a
+    /// `Multiply`-then-`Add`-reduce (matmul) now type-checks when named in
+    /// the exemption set, and still rejects everything else exactly as
+    /// before — proving "exactly as far as needed and no further."
+    #[test]
+    fn reject_non_float32_exempts_a_quantized_weight_in_matmul_position() {
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+        let activation = f32_block(&mut program, &[Extent::Static(4)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(1, &[0]))),
+                    (activation, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        assert!(
+            reject_non_float32(&program, &BTreeSet::new()).is_err(),
+            "an unexempted UInt8 node must still be rejected"
+        );
+
+        let mut exempt = BTreeSet::new();
+        exempt.insert(weight);
+        assert!(
+            reject_non_float32(&program, &exempt).is_ok(),
+            "a UInt8 node used exclusively as a matmul weight operand must be exempted"
+        );
+    }
+
+    /// The exemption is shape-scoped, not tag-scoped: a `UInt8` node that is
+    /// NOT feeding a `Multiply`-then-`Add` reduce is rejected even when
+    /// named in the exemption set.
+    #[test]
+    fn reject_non_float32_still_rejects_a_quantized_node_outside_matmul_shape() {
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: weight,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let mut exempt = BTreeSet::new();
+        exempt.insert(weight);
+        assert!(
+            reject_non_float32(&program, &exempt).is_err(),
+            "a quantized node reduced directly (no Multiply) is not the matmul shape and must stay rejected"
+        );
+    }
+
+    #[test]
+    fn matmul_q4k_f32_rejects_a_row_length_not_a_block_multiple() {
+        let weights = vec![0u8; Q4K_BLOCK_BYTES + 1];
+        let activation = vec![0.0f32; Q4K_BLOCK_ELEMENTS];
+        let error = matmul_q4k_f32(&weights, 1, &activation).unwrap_err();
+        assert_eq!(
+            error,
+            TensorError::QuantizedShapeMismatch {
+                reason: "weight row length is not a whole multiple of the q4_k block size",
+            }
+        );
+    }
+
+    #[test]
+    fn matmul_q4k_f32_rejects_an_activation_length_mismatch() {
+        let weights = vec![0u8; Q4K_BLOCK_BYTES];
+        let activation = vec![0.0f32; Q4K_BLOCK_ELEMENTS - 1];
+        let error = matmul_q4k_f32(&weights, 1, &activation).unwrap_err();
+        assert_eq!(
+            error,
+            TensorError::QuantizedShapeMismatch {
+                reason: "activation length does not match the weight row's decoded element count",
+            }
+        );
+    }
+
     fn block(program: &mut Vec<Op>, dtype: DType, shape: &[Extent]) -> NodeId {
         append(
             program,
@@ -6439,7 +6972,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
@@ -6469,7 +7002,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
@@ -7533,5 +8066,190 @@ mod tests {
                 "elementwise erf({raw_value}) = {result}, direct erf_f32 gives {expected}"
             );
         }
+    }
+
+    /// [`matmul_q4k_f32`] against the incumbent: quantize a random weight
+    /// matrix, then compare its output row-for-row to plain
+    /// dequantize-then-`f32`-dot-product on the same bytes. Both paths
+    /// call the identical [`proxima_gguf::quant::q4_k::dequantize_block`]
+    /// codec, so the only source of disagreement is accumulation order —
+    /// this path folds with [`f32::mul_add`] one super-block at a time
+    /// ([`dot_q4k_f32`]), the reference sums a plain `iter().zip().map()`
+    /// over the fully-dequantized row — so a nonzero difference is
+    /// expected (guiding-principle 14/19: report the measured number,
+    /// never assert bit-exact equality here).
+    #[test]
+    fn matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+        let rows = 5;
+        let blocks_per_row = 3;
+        let k = QK_K * blocks_per_row;
+
+        // realistic weight-scale values, not degenerate all-zero/constant
+        // inputs — `Lcg::next_unit` is already this file's own random-f32
+        // fixture generator (see `random_vec` above).
+        let activation: Vec<f32> = random_vec(7, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let weight_f32: Vec<f32> = random_vec(11, rows * k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        // incumbent: dequantize the packed bytes back to f32, then a plain
+        // dot product per row — never touches `dot_q4k_f32`/`matmul_q4k_f32`.
+        let mut expected = Vec::with_capacity(rows);
+        for row_blocks in weight_blocks.chunks_exact(blocks_per_row * BLOCK_BYTES) {
+            let mut dequantized = vec![0.0f32; k];
+            dequantize(row_blocks, &mut dequantized).expect("row_blocks is a whole number of q4_k super-blocks");
+            let dot: f32 = dequantized.iter().zip(activation.iter()).map(|(&weight, &value)| weight * value).sum();
+            expected.push(dot);
+        }
+
+        let actual = matmul_q4k_f32(&weight_blocks, rows, &activation).expect("well-formed quantized matmul");
+
+        assert_eq!(actual.len(), expected.len());
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (&got, &want) in actual.iter().zip(expected.iter()) {
+            assert!(got.is_finite(), "quantized matmul row produced a non-finite value: {got}");
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / rows as f64).sqrt();
+        eprintln!("matmul_q4k_f32 vs dequantize-then-matmul: max_error={max_error} rms_error={rms_error}");
+
+        // loose sanity bound around the accumulation-order float noise
+        // floor for a 768-element dot product at this value scale — not
+        // tuned to the measured numbers, matching this crate's existing
+        // q4_k round-trip test convention (`proxima-gguf`'s
+        // `quantize_dequantize_smooth_signal_round_trip_error`).
+        assert!(max_error < 0.05, "max_error={max_error} exceeds loose sanity bound");
+        assert!(rms_error < 0.02, "rms_error={rms_error} exceeds loose sanity bound");
+    }
+
+    /// [`dot_q4k_f32`]'s shape-mismatch guard: an activation slice whose
+    /// length does not match the weight row's decoded element count is
+    /// rejected, not silently truncated or padded.
+    #[test]
+    fn matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count() {
+        use proxima_gguf::quant::q4_k::BLOCK_BYTES;
+
+        let weight_blocks = vec![0u8; BLOCK_BYTES];
+        let wrong_length_activation = vec![0.0f32; 200];
+        let error = matmul_q4k_f32(&weight_blocks, 1, &wrong_length_activation).unwrap_err();
+        assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+    }
+
+    /// Same shape as [`matmul_program`] (`[rows, k] x [k, 1] -> [rows, 1]`,
+    /// `n = 1` — batch-1, [`matmul_q4k_f32`]'s own documented target shape),
+    /// weight declared `UInt8` instead of `Float32`: the program
+    /// [`evaluate_quantized`] runs, standing in for a `Q4_K`-packed weight
+    /// matrix.
+    fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+        let activation = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("quantized_matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// The capability this whole module change exists for: a real `Op`
+    /// program, with a `Q4_K`-packed weight operand, run end to end through
+    /// [`evaluate_quantized`] — not `matmul_q4k_f32` called directly, the
+    /// way every other test above exercises it — and checked against the
+    /// exact same shape run through plain [`evaluate`] with the weight
+    /// dequantized to `f32` first. Proves the dispatch chain
+    /// `evaluate_quantized` -> `run_node_into` -> `run_reduce` ->
+    /// [`quantized_operand`] -> `run_reduce_quantized` -> `matmul_q4k_f32`
+    /// is reachable from the program-level entry point, not merely callable
+    /// in isolation.
+    #[test]
+    fn evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+        let rows: u32 = 5;
+        let blocks_per_row = 3;
+        let k = QK_K as u32 * blocks_per_row as u32;
+
+        let activation: Vec<f32> = random_vec(13, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let weight_f32: Vec<f32> =
+            random_vec(17, rows as usize * k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in
+            weight_f32.chunks_exact(k as usize).zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let (quantized_program, quantized_sum) = quantized_matmul_program(rows, k);
+        let quantized_blocks = [QuantizedBlock::Q4K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+        let quantized_result = evaluate_quantized(&quantized_program, &[], &quantized_blocks, &[quantized_sum])
+            .expect("quantized matmul evaluates end to end");
+
+        let mut dequantized_weight = vec![0.0f32; rows as usize * k as usize];
+        for (row_blocks, row_f32) in weight_blocks
+            .chunks_exact(blocks_per_row * BLOCK_BYTES)
+            .zip(dequantized_weight.chunks_exact_mut(k as usize))
+        {
+            dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q4_k super-blocks");
+        }
+
+        let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
+        let f32_blocks: [&[f32]; 2] = [&dequantized_weight, &activation];
+        let f32_result =
+            evaluate(&f32_program, &[], &f32_blocks, &[f32_sum]).expect("dequantized f32 matmul evaluates");
+
+        let actual = quantized_result.root();
+        let expected = f32_result.root();
+        assert_eq!(actual.len(), rows as usize);
+        assert_eq!(actual.len(), expected.len());
+
+        let mut max_diff = 0.0f32;
+        let mut sum_sq_diff = 0.0f64;
+        for (&got, &want) in actual.iter().zip(expected.iter()) {
+            assert!(got.is_finite(), "evaluate_quantized produced a non-finite value: {got}");
+            let diff = (got - want).abs();
+            max_diff = max_diff.max(diff);
+            sum_sq_diff += f64::from(diff) * f64::from(diff);
+        }
+        let rms_diff = (sum_sq_diff / rows as f64).sqrt();
+        eprintln!("evaluate_quantized vs dequantize-then-evaluate: max_diff={max_diff} rms_diff={rms_diff}");
+
+        // same loose sanity bound as `matmul_q4k_f32_agrees_with_..`, which
+        // this test's own inner kernel call bottoms out in — not tuned to
+        // the measured numbers.
+        assert!(max_diff < 0.05, "max_diff={max_diff} exceeds loose sanity bound");
+        assert!(rms_diff < 0.02, "rms_diff={rms_diff} exceeds loose sanity bound");
     }
 }

@@ -166,4 +166,10 @@ pub enum TensorError {
     /// unlike float division, neither has a representable result.
     #[error("node {node} integer division is undefined (division by zero, or T::MIN / -1)")]
     CheckedDivisionFailed { node: NodeId },
+
+    /// [`cpu::matmul_q4k_f32`](crate::cpu::matmul_q4k_f32)'s row byte length
+    /// is not a whole multiple of `Q4_K`'s packed super-block size, or the
+    /// activation length does not match the declared reduction width.
+    #[error("quantized matmul shape mismatch: {reason}")]
+    QuantizedShapeMismatch { reason: &'static str },
 }
