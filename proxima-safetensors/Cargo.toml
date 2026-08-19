@@ -1,0 +1,24 @@
+[package]
+name = "proxima-safetensors"
+description = "Sans-IO safetensors reader: header + tensor-directory FSM over chunked bytes, no dequantization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+proxima-codec = { workspace = true, features = ["alloc"] }
+proxima-primitives = { workspace = true, features = ["alloc"] }
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true

@@ -35,6 +35,7 @@ members = [
     "proxima-recording",
     "proxima-redis",
     "proxima-runtime",
+    "proxima-safetensors",
     "proxima-telemetry",
     "proxima-tensor",
     "proxima-intercept",

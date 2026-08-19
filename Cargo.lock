@@ -4538,6 +4538,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-safetensors"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "proxima-codec",
+ "proxima-primitives",
+ "proxima-tensor",
+ "rstest",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proxima-storage"
 version = "0.1.0"
 dependencies = [
