@@ -4816,6 +4816,20 @@ fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
 /// existing NEON reduce/scan (`run_reduce`/`run_scan`) already take — the
 /// specialization that keeps the fast path a single implementation instead
 /// of a second copy of the reduction nest.
+///
+/// Not a pipe, and not converted to one. `DTYPE` is a type-level fact, not
+/// a transformation -- it is read only as an ordinary runtime struct field
+/// (`dtype: Self::DTYPE` at the two `UnsupportedScalarOp` sites above),
+/// never in a const item, array length, match pattern, or `const fn` body
+/// anywhere in this workspace, so today the "a `Pipe` impl can't be const"
+/// objection is theoretical, not load-bearing. The real reason `Element`
+/// stays a trait: `unwrap_block`/`apply`/`reduce_seed`/`from_index` are a
+/// per-type dispatch table the 11 `T: Element`-bound functions below
+/// (`run_typed_program` through `run_scan_generic`) select at monomorphize
+/// time, not a stream of values flowing through combinators -- each is
+/// called once per site with its arguments already in hand, nothing is
+/// composed. Splitting `apply` out as a pipe would still need a trait
+/// bound naming that pipe per `T`, i.e. the same trait under a new name.
 trait Element: Copy + Default + 'static {
     const DTYPE: DType;
 
