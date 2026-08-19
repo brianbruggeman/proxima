@@ -26,26 +26,11 @@ use std::time::Duration;
 use criterion::Criterion;
 use std::hint::black_box;
 use ggml_ffi::*;
+use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     append, evaluate, evaluate_parallel, map, AxisIndex, AxisTerm, DType, Extent, IndexMap, Keep,
     NodeId, Op, Reduce, ReduceInit, ScalarOp,
 };
-
-// ---------------------------------------------------------------------
-// deterministic data generation (no `rand` dependency: a tiny LCG is all
-// this needs, and it keeps the crate's "minimize dependencies" rule intact
-// for a dev-only bench).
-// ---------------------------------------------------------------------
-
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        let bits = (self.0 >> 33) as u32;
-        (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
-    }
-}
 
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);

@@ -144,30 +144,15 @@ pub fn reset_worker_busy() {
 // interfered with the run.
 static WORKER_CPU_NANOS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
 
-#[repr(C)]
-struct Timespec {
-    seconds: i64,
-    nanos: i64,
-}
-
-unsafe extern "C" {
-    fn clock_gettime(clock_id: i32, out: *mut Timespec) -> i32;
-}
-
-#[cfg(target_os = "macos")]
-const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
-#[cfg(not(target_os = "macos"))]
-const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
-
 /// This thread's consumed CPU time. Unlike an [`Instant`](std::time::Instant)
 /// delta, this does not advance while the thread is off-core.
 #[must_use]
 pub fn thread_cpu_nanos() -> u64 {
-    let mut now = Timespec { seconds: 0, nanos: 0 };
-    if unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut now) } != 0 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) } != 0 {
         return 0;
     }
-    (now.seconds as u64) * 1_000_000_000 + (now.nanos as u64)
+    (now.tv_sec as u64) * 1_000_000_000 + (now.tv_nsec as u64)
 }
 
 /// Adds `nanos` of consumed CPU time to the current thread's running total,

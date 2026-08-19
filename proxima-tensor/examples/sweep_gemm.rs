@@ -17,17 +17,8 @@ use std::env;
 use std::num::NonZeroUsize;
 use std::time::Instant;
 
+use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map};
-
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        let bits = (self.0 >> 33) as u32;
-        (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
-    }
-}
 
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);

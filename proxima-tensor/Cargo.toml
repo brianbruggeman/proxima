@@ -27,19 +27,28 @@ ggml-bench = ["std"]
 # tier. Counters are incremented in a local accumulator inside the loop and
 # committed ONCE per bound-op call (never per element), so the feature does
 # not perturb the thing it measures at any tier that has it off.
-instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros"]
+instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc"]
 # routes `cpu::run_chunks_threaded` through `prime`'s `ProximaBackgroundPool`
 # (crossbeam-deque work-stealing, built once and reused) instead of spawning
 # fresh `std::thread::scope` threads per nest. Default-off so a normal build
 # never needs the `prime` dependency; the `thread::scope` path stays the
 # default behavior.
 tensor-bgpool = ["std", "dep:prime"]
+# shared test/example fixtures (`test_support::Lcg`) — default-off so a
+# normal build never carries them; enabled for this crate's own dev targets
+# via the self-referential `dev-dependencies` entry below, and by `omega`'s
+# dev-dependency on this crate the same way.
+test-support = []
 
 [dependencies]
 arrayvec.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 half = { version = "2.7.1", default-features = false }
+# `instrument`'s `thread_cpu_nanos` needs `clock_gettime`/`CLOCK_THREAD_CPUTIME_ID`
+# — already audited, workspace-standard bindings (see `prime/src/os/reactor.rs`)
+# rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
+libc = { workspace = true, optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par"], optional = true }
 # the Pipe algebra: `Pipe`/`PipeExt`/`AndThen` are core-tier (no cfg gate in
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
@@ -55,6 +64,10 @@ workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
+# self-reference: pulls in `test_support` (feature-gated, see [features]
+# above) for this crate's own examples/tests/benches without exposing it to
+# a normal build.
+proxima-tensor = { path = ".", features = ["test-support"] }
 rstest.workspace = true
 tempfile.workspace = true
 toml.workspace = true
