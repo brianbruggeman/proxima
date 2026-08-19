@@ -84,6 +84,11 @@ name = "bench_vs_ggml"
 harness = false
 required-features = ["ggml-bench"]
 
+[[bench]]
+name = "bench_q4k_matmul"
+harness = false
+required-features = ["ggml-bench"]
+
 [[example]]
 name = "parallel_breakdown"
 required-features = ["instrument"]
