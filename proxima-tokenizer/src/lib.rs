@@ -43,7 +43,7 @@ pub mod sized;
 pub mod vocab;
 
 pub use error::TokenizerError;
-pub use pipe::{Decode, Encode, decode, encode, encode_with_bos_eos};
+pub use pipe::{decode, encode, encode_with_bos_eos};
 pub use vocab::{TokenType, Vocab};
 
 #[cfg(test)]

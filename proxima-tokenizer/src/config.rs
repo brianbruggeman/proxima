@@ -12,7 +12,7 @@ use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 
-/// Runtime policy for [`crate::bpe::encode`] and friends. Defaults from
+/// Runtime policy for [`crate::pipe::encode`] and friends. Defaults from
 /// [`crate::sized`]'s build-time floor and may be overridden per process
 /// (env `TOKENIZER_MAX_INPUT_BYTES`, a config file, or the fluent
 /// builder).
