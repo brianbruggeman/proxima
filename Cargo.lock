@@ -3974,6 +3974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-gguf"
+version = "0.1.0"
+dependencies = [
+ "arrayvec",
+ "proxima-primitives",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proxima-http"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,26 @@
+[package]
+name = "proxima-gguf"
+description = "Sans-IO GGUF metadata parser: a byte-fed state machine over header, typed KV metadata, and the tensor directory, with no IO in the core -- the caller (mmap, std::fs::read, network) owns getting bytes in front of it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+alloc = []
+std = ["alloc", "thiserror/std"]
+
+[dependencies]
+arrayvec.workspace = true
+proxima-primitives = { workspace = true, default-features = false }
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
