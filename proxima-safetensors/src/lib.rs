@@ -38,9 +38,9 @@ pub use dtype::{dtype_to_wire, map_dtype};
 pub use error::SafetensorsError;
 pub use header_codec::HeaderCodec;
 pub use parser::{Manifest, SafetensorsParser, TensorEntry};
-pub use pipe::{ParseComplete, parse_complete};
+pub use pipe::parse_complete;
 pub use sized::{HEADER_LEN_BYTES, MAX_HEADER_BYTES};
-pub use writer::{SafetensorsModel, TensorPayload, WriteComplete, write_complete};
+pub use writer::{SafetensorsModel, TensorPayload, write_complete};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
