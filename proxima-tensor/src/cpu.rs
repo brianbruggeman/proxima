@@ -2033,44 +2033,51 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // && ..`), so `width_tile_plan`'s own stride gate never fires on a node
     // the dot tile already claimed — no ordering dependency between the two
     // blocks, only one of them is ever `Some`.
-    let width_path_context = WidthPathContext {
-        resolved,
-        shape: &shape,
-        strides: &strides,
-        reduce_op: *reduce_op,
-        init: *init,
-        leading_output_axes,
-        reduction_dims: &reduction_dims,
-        last_output_dim,
-        width,
-        out_layout,
-    };
-    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-    let width_tile_counters_before = width_tile_counters();
-    if try_run_width_tile(&width_path_context, &raw, output) {
-        // the tile's own early return skips the rest of this function
-        // (including the `counters.commit` call every other path reaches),
-        // so this is instrument's only chance to record the node — read
-        // back the invocation/fallback deltas the tile itself already
-        // counted instead of re-deriving them from `leading_total`/`width`.
-        #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-        {
-            let (_, invocations_after, fallback_after) = width_tile_counters();
-            let (_, invocations_before, fallback_before) = width_tile_counters_before;
-            let invocations_delta = invocations_after - invocations_before;
-            let fallback_delta = fallback_after - fallback_before;
-            let tile_elements = (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) as u64;
-            counters.kernel_calls += invocations_delta + fallback_delta;
-            counters.mac_ops += invocations_delta * tile_elements * reduction_total;
-            counters.operand_loads += invocations_delta * (WIDTH_TILE_ROWS + WIDTH_TILE_VECS) as u64 * reduction_total;
-            counters.mac_ops += fallback_delta * reduction_total;
-            counters.operand_loads += fallback_delta * 2 * reduction_total;
-            counters.leading_iters += leading_total;
-            counters.output_writes += leading_total * width as u64;
-            let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
-            counters.commit(path, distinct_operand_elements);
+    //
+    // whole block gated to aarch64: `try_run_width_tile` is a constant-`false`
+    // stub everywhere else, so building `WidthPathContext` to hand it is dead
+    // work, not just a dead type.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let width_path_context = WidthPathContext {
+            resolved,
+            shape: &shape,
+            strides: &strides,
+            reduce_op: *reduce_op,
+            init: *init,
+            leading_output_axes,
+            reduction_dims: &reduction_dims,
+            last_output_dim,
+            width,
+            out_layout,
+        };
+        #[cfg(feature = "instrument")]
+        let width_tile_counters_before = width_tile_counters();
+        if try_run_width_tile(&width_path_context, &raw, output) {
+            // the tile's own early return skips the rest of this function
+            // (including the `counters.commit` call every other path reaches),
+            // so this is instrument's only chance to record the node — read
+            // back the invocation/fallback deltas the tile itself already
+            // counted instead of re-deriving them from `leading_total`/`width`.
+            #[cfg(feature = "instrument")]
+            {
+                let (_, invocations_after, fallback_after) = width_tile_counters();
+                let (_, invocations_before, fallback_before) = width_tile_counters_before;
+                let invocations_delta = invocations_after - invocations_before;
+                let fallback_delta = fallback_after - fallback_before;
+                let tile_elements = (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) as u64;
+                counters.kernel_calls += invocations_delta + fallback_delta;
+                counters.mac_ops += invocations_delta * tile_elements * reduction_total;
+                counters.operand_loads += invocations_delta * (WIDTH_TILE_ROWS + WIDTH_TILE_VECS) as u64 * reduction_total;
+                counters.mac_ops += fallback_delta * reduction_total;
+                counters.operand_loads += fallback_delta * 2 * reduction_total;
+                counters.leading_iters += leading_total;
+                counters.output_writes += leading_total * width as u64;
+                let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                counters.commit(path, distinct_operand_elements);
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     // Resolved ONCE per bound op: an explicit-NEON 6x4 microkernel for the
@@ -3128,9 +3135,10 @@ pub fn width_tile_counters() -> (u64, u64, u64) {
 
 /// Everything [`try_run_width_tile`] needs, bundled the same way
 /// [`OperandSpan`] and [`DotFold`] are — keeps the entry point under
-/// clippy's argument-count lint instead of reaching for `#[allow]`. Not
-/// `cfg`-gated to aarch64: `run_reduce` calls [`try_run_width_tile`] on
-/// every target, and the non-aarch64 stub still needs a type to accept.
+/// clippy's argument-count lint instead of reaching for `#[allow]`.
+/// `cfg`-gated to aarch64: the width tile path is compiled out entirely on
+/// every other target, so there is nothing left to hand this to.
+#[cfg(target_arch = "aarch64")]
 struct WidthPathContext<'a> {
     resolved: &'a BoundOp,
     shape: &'a BodyShape<'a>,
@@ -3456,8 +3464,9 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
 /// once, runs the whole node through [`run_width_tile_neon`] and reports
 /// `true` when it applies, or leaves `output` untouched and reports `false`
 /// so the caller falls back to the existing per-element width path
-/// unchanged. Non-aarch64 always reports `false` — the existing path is the
-/// only one compiled there.
+/// unchanged. `run_reduce`'s call site is itself aarch64-gated — every other
+/// target keeps the per-element width path only, this function never exists
+/// there.
 #[cfg(target_arch = "aarch64")]
 fn try_run_width_tile(context: &WidthPathContext, raw: &[&[f32]], output: &mut [f32]) -> bool {
     match width_tile_plan(context) {
@@ -3467,11 +3476,6 @@ fn try_run_width_tile(context: &WidthPathContext, raw: &[&[f32]], output: &mut [
         }
         None => false,
     }
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn try_run_width_tile(_context: &WidthPathContext, _raw: &[&[f32]], _output: &mut [f32]) -> bool {
-    false
 }
 
 /// The reduction-dim fast path's fold state, bundled for the same reason
@@ -3745,14 +3749,13 @@ fn neon_tile_plan(
 /// between adjacent tile lanes. Bundled for the same reason [`OperandSpan`]
 /// is — keeps the kernel under clippy's argument-count lint.
 ///
-/// Generic over the source element `T` so the identical addressing shape
-/// hosts both this module's dense `f32` weight buffers ([`gemm_tile_neon`]
-/// below, unchanged) and [`dot_q4k_f32`]'s packed `u8` `Q4_K` byte buffers,
-/// where `stride` is a byte stride between rows rather than an `f32`-element
-/// stride. Before this type existed generic, a quantized weight matmul had
-/// no addressing primitive to reuse and would have hand-rolled a parallel
-/// one; now it reuses this struct exactly, only its element type and stride
-/// units differ.
+/// `cfg`-gated to aarch64: [`gemm_tile_neon`] below is this type's only
+/// constructor and only consumer, and that kernel is itself aarch64-only.
+/// [`dot_q4k_f32`] takes a plain `&[u8]` row today, not a `WeightTile<u8>` —
+/// the `T` parameter stays generic for that eventual second instantiation,
+/// but until it lands there is nowhere non-aarch64 to build or consume this
+/// type from.
+#[cfg(target_arch = "aarch64")]
 pub(crate) struct WeightTile<'a, T> {
     pub(crate) data: &'a [T],
     pub(crate) base: usize,
