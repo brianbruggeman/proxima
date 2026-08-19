@@ -1,0 +1,26 @@
+[package]
+name = "proxima-onnx"
+description = "Sans-IO ONNX model parser: hand-rolled protobuf message decode over proxima-protocols' schema-agnostic wire walker, faithful to onnx.proto -- graph structure, node attributes, and initializer tensors as borrowed byte ranges, never translated into proxima_tensor::Op."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+alloc = []
+std = ["alloc", "thiserror/std", "proxima-protocols/std"]
+
+[dependencies]
+proxima-primitives = { workspace = true, default-features = false }
+proxima-protocols = { workspace = true, default-features = false, features = ["protobuf_wire"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

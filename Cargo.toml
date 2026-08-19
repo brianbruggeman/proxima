@@ -24,6 +24,7 @@ members = [
     "proxima-macros",
     "proxima-memcached",
     "proxima-mqtt",
+    "proxima-onnx",
     "proxima-patterns",
     "proxima-test",
     "proxima-net",
@@ -86,6 +87,7 @@ proxima-listen = { path = "proxima-listen" }
 proxima-macros = { path = "proxima-macros" }
 proxima-memcached = { path = "proxima-memcached", default-features = false }
 proxima-mqtt = { path = "proxima-mqtt", default-features = false }
+proxima-onnx = { path = "proxima-onnx", default-features = false }
 proxima-patterns = { path = "proxima-patterns", default-features = false }
 proxima-test = { path = "proxima-test" }
 proxima-net = { path = "proxima-net", default-features = false }
