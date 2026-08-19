@@ -7,7 +7,6 @@
 //! at the top only concerns cross-endian *production*, not the wire shape).
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 /// Borrowed cursor over one buffered chunk. Read methods return `None`
 /// (without moving `pos`) when the field would run past `buf`'s end.
@@ -113,38 +112,6 @@ impl<'a> Reader<'a> {
 pub enum StringError {
     TooLarge(u64),
     InvalidUtf8,
-}
-
-/// A `Vec<u8>`-backed accumulation buffer with a `Reader` view and a
-/// front-drain once a `Reader` reports how much it consumed.
-#[derive(Default)]
-pub struct Accumulator {
-    buf: Vec<u8>,
-}
-
-impl Accumulator {
-    #[must_use]
-    pub fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
-    pub fn extend(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[u8] {
-        &self.buf
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
-    }
-
-    pub fn drain_front(&mut self, len: usize) {
-        self.buf.drain(0..len);
-    }
 }
 
 #[cfg(test)]

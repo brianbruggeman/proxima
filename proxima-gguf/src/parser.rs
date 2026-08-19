@@ -31,7 +31,7 @@ use arrayvec::ArrayVec;
 use proxima_primitives::pipe::sans_io::ByteStreamParser;
 
 use crate::error::GgufError;
-use crate::reader::{Accumulator, Reader, StringError};
+use crate::reader::{Reader, StringError};
 use crate::sized::{MAX_DIMS, MAX_NAME_LEN};
 use crate::tensor::TensorInfo;
 use crate::types::{GgmlType, MetadataType, ScalarType};
@@ -80,7 +80,7 @@ enum Phase {
 /// completed items are drained off the front so the buffer only ever holds
 /// the not-yet-parsed tail of whatever's been fed.
 pub struct GgufParser {
-    accumulator: Accumulator,
+    accumulator: Vec<u8>,
     phase: Phase,
     stream_pos: u64,
     pending_version: u32,
@@ -102,7 +102,7 @@ impl GgufParser {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            accumulator: Accumulator::new(),
+            accumulator: Vec::new(),
             phase: Phase::Magic,
             stream_pos: 0,
             pending_version: 0,
@@ -133,7 +133,7 @@ impl GgufParser {
     /// Append bytes fed by the caller. Never blocks, never inspects the
     /// bytes — parsing happens in [`Self::poll`].
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.accumulator.extend(bytes);
+        self.accumulator.extend_from_slice(bytes);
     }
 
     /// True once [`GgufEvent::Complete`] has been emitted.
@@ -143,7 +143,7 @@ impl GgufParser {
     }
 
     /// The caller has no more bytes to feed. `Ok(())` only if the parser
-    /// had already reached [`Phase::Done`] — otherwise the stream ended
+    /// had already reached `Phase::Done` — otherwise the stream ended
     /// mid-item.
     pub fn finish(&self) -> Result<(), GgufError> {
         if self.phase == Phase::Done {
@@ -170,7 +170,7 @@ impl GgufParser {
     }
 
     fn commit(&mut self, consumed: usize) {
-        self.accumulator.drain_front(consumed);
+        self.accumulator.drain(0..consumed);
         self.stream_pos += consumed as u64;
     }
 
