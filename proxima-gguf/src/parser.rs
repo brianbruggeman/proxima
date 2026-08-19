@@ -6,11 +6,17 @@
 //! connection type, `GgufParser` does no IO of its own: it never opens a
 //! file, never seeks, never mmaps. The caller (an mmap'd slice, a
 //! `std::fs::read`, bytes off a socket, anything) owns getting bytes in
-//! front of it via [`GgufParser::feed`].
+//! front of it via [`GgufParser::push`].
 //!
 //! Layout: `gguf.h:1-30` (header + KV + tensor-directory shape),
 //! `gguf.cpp:319-636` (`gguf_init_from_file_impl`, the exact validation
 //! order this mirrors).
+//!
+//! `GgufEvent` is fully owned (no borrow into the parser), so the public
+//! boundary is the self-consuming `push(self, chunk) -> (Self,
+//! Vec<GgufEvent>)` shape: internally it still steps phase-by-phase over an
+//! accumulation buffer, draining every event a chunk unlocks before handing
+//! the parser back.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -48,8 +54,10 @@ pub enum GgufEvent {
     Complete { data_offset: u64, alignment: u32 },
 }
 
-/// What [`GgufParser::poll`] produced. A type alias, not a separate enum.
-pub type PollOutcome = Option<GgufEvent>;
+/// What one internal poll step produces. Private -- [`GgufParser::push`] is
+/// the public boundary; this is just the type the phase-stepping helpers
+/// below share.
+type PollOutcome = Option<GgufEvent>;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
@@ -118,7 +126,7 @@ impl GgufParser {
 
     /// Append bytes fed by the caller. Never blocks, never inspects the
     /// bytes — parsing happens in [`Self::poll`].
-    pub fn feed(&mut self, bytes: &[u8]) {
+    fn feed(&mut self, bytes: &[u8]) {
         self.accumulator.extend_from_slice(bytes);
     }
 
@@ -139,8 +147,19 @@ impl GgufParser {
         }
     }
 
+    /// Feed the next chunk, however it was split from the whole stream,
+    /// and drain every event it unlocks before handing the parser back.
+    pub fn push(mut self, chunk: &[u8]) -> Result<(Self, Vec<GgufEvent>), GgufError> {
+        self.feed(chunk);
+        let mut events = Vec::new();
+        while let Some(event) = self.poll()? {
+            events.push(event);
+        }
+        Ok((self, events))
+    }
+
     /// Attempt one unit of progress against the currently buffered bytes.
-    pub fn poll(&mut self) -> Result<PollOutcome, GgufError> {
+    fn poll(&mut self) -> Result<PollOutcome, GgufError> {
         match self.phase.clone() {
             Phase::Magic => self.poll_magic(),
             Phase::Version => self.poll_version(),
