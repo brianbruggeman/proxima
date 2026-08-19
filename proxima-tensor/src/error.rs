@@ -1,5 +1,5 @@
 use crate::dtype::DType;
-use crate::op::NodeId;
+use crate::op::{NodeId, ScalarOp};
 
 /// Every fault [`shape::infer`](crate::shape::infer) and the rest of the
 /// crate can raise, from a malformed program to a spec that will not parse.
@@ -147,4 +147,23 @@ pub enum TensorError {
     /// built (OS thread-spawn failure — resource exhaustion).
     #[error("nest thread pool unavailable: {0}")]
     ThreadedPoolUnavailable(alloc::string::String),
+
+    /// The typed elementwise interpreter ([`crate::cpu::evaluate_typed`])
+    /// rejects a body/dtype combination it cannot execute correctly: a
+    /// transcendental (`exp`/`ln`/`sqrt`/`tanh`/`reciprocal`) on an integer
+    /// dtype, or [`ScalarOp::Negate`] on an unsigned dtype (no representable
+    /// negative). Raised at the node that names the bad combination, not a
+    /// blanket rejection of the whole program.
+    #[error("node {node} applies {op:?} to dtype {dtype:?}, which does not support it")]
+    UnsupportedScalarOp {
+        node: NodeId,
+        op: ScalarOp,
+        dtype: DType,
+    },
+
+    /// An integer [`ScalarOp::Divide`] hit a divisor of zero, or the one
+    /// signed overflow case (`T::MIN / -1`) `checked_div` also refuses —
+    /// unlike float division, neither has a representable result.
+    #[error("node {node} integer division is undefined (division by zero, or T::MIN / -1)")]
+    CheckedDivisionFailed { node: NodeId },
 }

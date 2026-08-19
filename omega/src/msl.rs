@@ -170,7 +170,7 @@ pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry),
-    };
+    }?;
     Ok(Kernel {
         source,
         entry,
@@ -419,22 +419,32 @@ fn keep_token(keep: Keep) -> &'static str {
 /// The MSL scalar type a `BoundOp`'s own dtype declares its buffers,
 /// scratch array, and accumulator as. `Float16` is the one narrower type
 /// this backend emits (`half`, MSL's IEEE-754 binary16) — every other
-/// dtype keeps emitting `float`, matching this module's stance before
-/// `BoundOp` carried a dtype at all. `omega::execute`'s upstream gate is
-/// what keeps anything other than `Float32`/`Float16` from ever reaching
-/// [`emit`], so those are the only two cases that matter in practice, but
-/// the match stays total over every [`DType`] variant rather than assuming
-/// that gate ran.
-fn type_token(dtype: DType) -> &'static str {
+/// dtype that already reached the "float" bucket before `DType` widened
+/// keeps emitting `float`, matching this module's stance before `BoundOp`
+/// carried a dtype at all. `omega::execute`'s upstream gate is what keeps
+/// anything other than `Float32`/`Float16` from ever reaching [`emit`], so
+/// those are the only two cases that matter in practice, but the match
+/// stays total over every [`DType`] variant rather than assuming that gate
+/// ran — a width this backend has never emitted (the 64/128-bit integers,
+/// `Float64`) is rejected here by name instead of silently folded into the
+/// 4-byte `float` bucket it does not fit.
+fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Float16 => "half",
+        DType::Float16 => Ok("half"),
         DType::Float32
         | DType::BFloat16
         | DType::Bool
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => "float",
+        | DType::UInt32 => Ok("float"),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }),
     }
 }
 
@@ -711,13 +721,13 @@ fn preamble(source: &mut String) {
     source.push_str("using namespace metal;\n\n");
 }
 
-fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
+fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
-    let element_type = type_token(resolved.dtype);
+    let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
     preamble(&mut source);
@@ -781,10 +791,10 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
     let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
     source.push_str(&format!("    out[gid] = {result};\n"));
     source.push_str("}\n");
-    source
+    Ok(source)
 }
 
-fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
+fn render_reduce(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -804,7 +814,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
     let reduce_rank_len = reduce_rank.max(1);
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
-    let element_type = type_token(resolved.dtype);
+    let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
     preamble(&mut source);
@@ -862,7 +872,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
         );
     }
     source.push_str("}\n");
-    source
+    Ok(source)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1104,7 +1114,7 @@ fn push_cooperative_reduce_body(
     source.push_str("    }\n");
 }
 
-fn render_scan(resolved: &BoundOp, entry: &str) -> String {
+fn render_scan(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
     } = &resolved.kind
@@ -1119,7 +1129,7 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
     let operand_count = resolved.operands().len();
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
-    let element_type = type_token(resolved.dtype);
+    let element_type = type_token(resolved.node, resolved.dtype)?;
 
     let mut source = String::new();
     preamble(&mut source);
@@ -1243,7 +1253,7 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
     ));
     source.push_str("    }\n");
     source.push_str("}\n");
-    source
+    Ok(source)
 }
 
 #[cfg(test)]

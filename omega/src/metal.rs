@@ -152,7 +152,7 @@ pub fn execute(
         BTreeMap::new();
     for (node, data) in prepared.block_nodes.iter().zip(blocks.iter()) {
         let dtype = gpu_dtype(program, &prepared.index_nodes, *node);
-        device_buffers.insert(*node, upload_block(&device, data, dtype)?);
+        device_buffers.insert(*node, upload_block(&device, data, *node, dtype)?);
     }
 
     let mut pipeline_cache: BTreeMap<
@@ -630,10 +630,16 @@ fn allocate_buffer(
 /// Narrows the caller's f32 host data to `dtype`'s own width before
 /// uploading — see this module's dtype doc for why that narrowing happens
 /// exactly once, here, rather than the device buffer staying 4 bytes per
-/// element regardless of `dtype`.
+/// element regardless of `dtype`. `node` names the block input this upload
+/// is for, used only to point an [`EmitError::UnsupportedDType`] at the
+/// right place — [`reject_unsupported_gpu_dtype`] already keeps anything
+/// but `Float32`/`Float16` from reaching this call inside [`execute`], so
+/// the new arm below is a totality guard, not a path this driver's own
+/// pipeline can actually hit.
 fn upload_block(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
+    node: NodeId,
     dtype: DType,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
     match dtype {
@@ -645,6 +651,13 @@ fn upload_block(
         | DType::UInt8
         | DType::Int32
         | DType::UInt32 => upload_block_as_float(device, data),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }
 
@@ -907,24 +920,35 @@ fn read_fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize)
 
 /// Widens a device buffer back to the host's f32 contract — see this
 /// module's dtype doc for why that widening happens exactly once, here,
-/// mirroring the narrowing [`upload_block`] does on the way in.
+/// mirroring the narrowing [`upload_block`] does on the way in. `node`
+/// names the output this read-back is for, used only to point an
+/// [`EmitError::UnsupportedDType`] at the right place — same totality-guard
+/// stance as [`upload_block`]'s `node` parameter.
 fn read_back(
     buffer: &ProtocolObject<dyn MTLBuffer>,
     element_count: usize,
+    node: NodeId,
     dtype: DType,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, MetalError> {
     if element_count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     match dtype {
-        DType::Float16 => read_back_half(buffer, element_count),
+        DType::Float16 => Ok(read_back_half(buffer, element_count)),
         DType::Float32
         | DType::BFloat16
         | DType::Bool
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => read_back_float(buffer, element_count),
+        | DType::UInt32 => Ok(read_back_float(buffer, element_count)),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
     }
 }
 
@@ -962,7 +986,7 @@ fn finish(
         let shape = shapes.of(*node).to_vec();
         let dtype = gpu_dtype(program, index_nodes, *node);
         let data = match device_buffers.get(node) {
-            Some(buffer) => read_back(buffer, element_count(&shape), dtype),
+            Some(buffer) => read_back(buffer, element_count(&shape), *node, dtype)?,
             None => Vec::new(),
         };
         results.push((*node, shape, data));
