@@ -82,6 +82,11 @@ declare -a cells=(
     # unseen. all-features closes that hole.
     "all-features clippy|cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings"
 
+    # the default rustdoc cell above never compiles q4k-int8-dot's items, which
+    # is how ~11 doc errors (private-item intra-doc links, one arch-invisible
+    # link) sat in cpu.rs unseen until a dedicated `cargo doc` run found them.
+    "q4k-int8-dot rustdoc|cargo doc -p proxima-tensor --no-deps --features q4k-int8-dot"
+
     # the backend nothing else in the tree compiles. clippy --all-targets first
     # so a break shows as a compile error rather than a missing test.
     "tensor-bgpool clippy|cargo clippy -p proxima-tensor --all-targets --features tensor-bgpool -- -D warnings"

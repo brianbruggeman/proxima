@@ -3946,7 +3946,7 @@ fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
     half::f16::from_le_bytes(raw).to_f32()
 }
 
-/// Quantizes an activation vector into packed `Q8_K` bytes ([`Q8K_BLOCK_BYTES`]
+/// Quantizes an activation vector into packed `Q8_K` bytes (`Q8K_BLOCK_BYTES`
 /// per 256-element super-block) -- the one pass [`dot_q4k_q8k`]'s int8
 /// mechanism needs, hoisted OUT of the per-row loop the same way this
 /// module's docs already measured a conversion pipe at (52 vs 52
@@ -3962,9 +3962,9 @@ fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
 /// (`bsums`) [`dot_q4k_q8k`]'s mins correction consumes without
 /// re-scanning `qs`.
 ///
-/// `activation.len()` must be a whole multiple of [`Q4K_BLOCK_ELEMENTS`]
+/// `activation.len()` must be a whole multiple of `Q4K_BLOCK_ELEMENTS`
 /// (256); `output.len()` must exactly equal the block count times
-/// [`Q8K_BLOCK_BYTES`]. No allocation: `output` is caller-provided.
+/// `Q8K_BLOCK_BYTES`. No allocation: `output` is caller-provided.
 ///
 /// # Errors
 /// [`TensorError::QuantizedShapeMismatch`] if either length requirement
@@ -4029,8 +4029,8 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
 }
 
 /// One `Q4_K`-weight-row x `Q8_K`-activation int8 dot product --
-/// [`dot_q4k_f32`]'s packed-arithmetic sibling: same `weight_row` shape
-/// (raw `Q4_K` bytes, a whole number of [`Q4K_BLOCK_BYTES`] super-blocks),
+/// `dot_q4k_f32`'s packed-arithmetic sibling: same `weight_row` shape
+/// (raw `Q4_K` bytes, a whole number of `Q4K_BLOCK_BYTES` super-blocks),
 /// but `activation_q8k` is [`quantize_row_q8k`]'s packed `Q8_K` bytes
 /// instead of a plain `f32` slice, and the fold is an integer dot on the
 /// packed 4-bit nibbles rather than an `f32` multiply-add over a
@@ -4038,14 +4038,14 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
 /// correct codec path for non-matmul consumers (module-level comment
 /// above) -- this is an additional arm, not a replacement.
 ///
-/// Dispatches to [`dot_q4k_q8k_block_neon_dotprod`] when built with the
+/// Dispatches to `dot_q4k_q8k_block_neon_dotprod` when built with the
 /// `q4k_dotprod` cfg (`build.rs`: every aarch64 target this workspace
-/// builds for), to [`dot_q4k_q8k_block_avx2`] when built with the
+/// builds for), to `dot_q4k_q8k_block_avx2` when built with the
 /// `q4k_avx2` cfg (`build.rs`: an x86 target whose `CARGO_CFG_TARGET_FEATURE`
 /// lists `avx2` -- unlike aarch64's `FEAT_DotProd`, AVX2 is NOT in the x86-64
 /// baseline ISA, so this one is opt-in via `-C target-feature=+avx2` /
 /// `-C target-cpu`, not implied by the target triple alone), and to the
-/// portable [`dot_q4k_q8k_block_scalar`] everywhere else. All three compute
+/// portable `dot_q4k_q8k_block_scalar` everywhere else. All three compute
 /// the identical mechanism -- read 4.5 bits/weight off `weight_row` and do
 /// the multiply-accumulate against `Q8_K` `i8` activations directly, no
 /// `f32` intermediate at all -- the NEON arm is an acceleration of that
@@ -4057,8 +4057,8 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
 ///
 /// # Errors
 /// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
-/// whole multiple of [`Q4K_BLOCK_BYTES`], or `activation_q8k.len()` does
-/// not equal the row's block count times [`Q8K_BLOCK_BYTES`].
+/// whole multiple of `Q4K_BLOCK_BYTES`, or `activation_q8k.len()` does
+/// not equal the row's block count times `Q8K_BLOCK_BYTES`.
 #[cfg(feature = "q4k-int8-dot")]
 pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
     if !weight_row.len().is_multiple_of(Q4K_BLOCK_BYTES) {
@@ -4096,7 +4096,7 @@ pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
 }
 
 /// [`dot_q4k_q8k`] with the dispatch forced to
-/// [`dot_q4k_q8k_block_scalar`] regardless of `q4k_dotprod` -- the "what
+/// `dot_q4k_q8k_block_scalar` regardless of `q4k_dotprod` -- the "what
 /// does portable packing alone buy" measurement the discipline log's
 /// packed-kernel row reports standalone, next to the `vdotq_s32`-
 /// accelerated number `dot_q4k_q8k` itself produces on an aarch64 build.
