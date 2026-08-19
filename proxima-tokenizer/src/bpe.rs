@@ -9,7 +9,7 @@ use crate::vocab::Vocab;
 
 /// Encodes one pretoken (a contiguous slice of raw bytes -- already split
 /// out by `crate::pretokenize`) into token ids. Seeds one token per byte
-/// via [`Vocab::base_byte_token`], then repeatedly merges the adjacent
+/// via `Vocab::base_byte_token`, then repeatedly merges the adjacent
 /// pair with the lowest rank until none remain.
 ///
 /// # Errors
