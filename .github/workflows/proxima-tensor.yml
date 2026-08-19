@@ -70,11 +70,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install nextest
         uses: taiki-e/install-action@nextest
-      - name: clippy + tests
+      - name: clippy + tests + rustdoc
         run: |
           if [ "${{ matrix.tier }}" = "alloc" ]; then
             cargo clippy -p ${{ matrix.crate }} --no-default-features --features alloc -- -D warnings
           else
             cargo clippy -p ${{ matrix.crate }} --all-targets --all-features -- -D warnings
             cargo nextest run -p ${{ matrix.crate }} --all-features --no-fail-fast
+            # rustdoc is its own gate, not a clippy side effect: three private
+            # `dequantize_block` fns and a private `Phase::Done` broke their own
+            # modules' intra-doc links in proxima-gguf and nothing here ran
+            # `cargo doc` to see it. clippy and nextest are both green on a
+            # crate whose docs do not build.
+            cargo doc -p ${{ matrix.crate }} --no-deps --all-features
           fi
