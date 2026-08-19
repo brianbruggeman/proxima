@@ -12,6 +12,7 @@
 use conflaguration::Validate;
 use omega::MetalError;
 use proxima_tensor::spec::ProgramSpec;
+use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op,
     Reduce, ReduceInit, ScalarOp, TensorError, affine, append, bind, evaluate, infer, projection,
@@ -577,18 +578,6 @@ fn multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device() {
         .expect("metal multiply/sqrt/reciprocal chain executes on a real device");
 
     assert_parity("multiply_sqrt_reciprocal_chain", cpu.root(), metal.root());
-}
-
-// deterministic pseudo-random source, recipe shared with
-// proxima-tensor/examples/spec_block.rs and busy_per_mac.rs
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        let bits = (self.0 >> 33) as u32;
-        (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
-    }
 }
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {

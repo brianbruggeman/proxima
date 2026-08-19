@@ -213,6 +213,12 @@ pub mod op;
 pub mod shape;
 #[cfg(feature = "config")]
 pub mod spec;
+// also active under plain `cfg(test)` (no feature flag needed) so this
+// crate's own `#[cfg(test)] mod tests` blocks (spec.rs, cpu.rs) can reach it
+// via `crate::test_support` without requiring `--features test-support` on
+// an ordinary `cargo test`/`nextest run`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
