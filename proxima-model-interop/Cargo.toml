@@ -12,7 +12,7 @@ readme.workspace = true
 [dependencies]
 arrayvec.workspace = true
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
-proxima-safetensors = { path = "../proxima-safetensors" }
+proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 thiserror.workspace = true
 

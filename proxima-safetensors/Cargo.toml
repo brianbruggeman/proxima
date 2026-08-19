@@ -9,16 +9,29 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 
+[features]
+default = ["std"]
+alloc = []
+# runtime config surface ([`config::SafetensorsParserConfig`]): conflaguration
+# is std-only (Settings/env/file), so it rides in only here -- the
+# no_std+alloc floor never sees it and always uses `crate::sized` directly.
+std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
+
 [dependencies]
+bon = { workspace = true, optional = true }
 bytes = { workspace = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 proxima-codec = { workspace = true, features = ["alloc"] }
 proxima-primitives = { workspace = true, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+serde = { workspace = true, features = ["derive"], optional = true }
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+tempfile.workspace = true
+temp-env.workspace = true
 
 [lints]
 workspace = true

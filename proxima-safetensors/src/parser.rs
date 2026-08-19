@@ -32,13 +32,13 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_codec::FrameCodec;
 use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
 use proxima_tensor::DType;
 
 use crate::dtype::map_dtype;
 use crate::error::SafetensorsError;
-use crate::header_codec::{HEADER_LEN_BYTES, HeaderCodec};
+use crate::header_codec::HeaderCodec;
+use crate::sized::{HEADER_LEN_BYTES, MAX_HEADER_BYTES};
 
 /// One tensor's parsed directory entry. `data_offsets` are relative to
 /// the start of the byte buffer — i.e. the first byte AFTER the header —
@@ -92,16 +92,22 @@ impl Manifest {
 #[derive(Debug, Clone)]
 pub enum SafetensorsParser {
     /// Accumulating the 8-byte length prefix and then the declared JSON
-    /// header. `buf` never grows past `8 + MAX_HEADER_BYTES`.
-    Header { buf: Vec<u8> },
+    /// header. `buf` never grows past `8 + max_header_bytes`.
+    Header { buf: Vec<u8>, max_header_bytes: u64 },
     /// Header parsed; counting tensor-data bytes as they arrive.
     TensorData { manifest: Manifest, seen: u64 },
 }
 
 impl SafetensorsParser {
+    /// Applies [`crate::sized::MAX_HEADER_BYTES`], the build-time floor.
+    /// [`Self::with_config`] is the `std`-tier entry point for a
+    /// per-process override.
     #[must_use]
     pub const fn new() -> Self {
-        Self::Header { buf: Vec::new() }
+        Self::Header {
+            buf: Vec::new(),
+            max_header_bytes: MAX_HEADER_BYTES,
+        }
     }
 
     /// Append bytes fed by the caller. `Header` phase buffers them (the
@@ -109,7 +115,7 @@ impl SafetensorsParser {
     /// counts them — never buffered or copied.
     pub fn feed(&mut self, chunk: &[u8]) {
         match self {
-            Self::Header { buf } => buf.extend_from_slice(chunk),
+            Self::Header { buf, .. } => buf.extend_from_slice(chunk),
             Self::TensorData { seen, .. } => *seen += chunk.len() as u64,
         }
     }
@@ -121,10 +127,10 @@ impl SafetensorsParser {
     /// answers [`Outcome::NeedMore`] until [`Self::finish`] validates the
     /// total.
     pub fn poll(&mut self) -> Result<Outcome<&Manifest>, SafetensorsError> {
-        let Self::Header { buf } = self else {
+        let Self::Header { buf, max_header_bytes } = self else {
             return Ok(Outcome::NeedMore);
         };
-        match HeaderCodec.parse_frame(buf) {
+        match HeaderCodec.parse_frame_with_limit(buf, *max_header_bytes) {
             Ok((header_json, consumed)) => {
                 let manifest = parse_manifest(header_json)?;
                 let seen = (buf.len() - consumed) as u64;
@@ -146,7 +152,7 @@ impl SafetensorsParser {
     /// [`Manifest`] back once this returns `Ok(())`.
     pub fn finish(&self) -> Result<(), SafetensorsError> {
         match self {
-            Self::Header { buf } => {
+            Self::Header { buf, .. } => {
                 let needed = declared_total_len(buf).unwrap_or(HEADER_LEN_BYTES as u64);
                 Err(SafetensorsError::TruncatedInput {
                     needed,
@@ -184,6 +190,21 @@ impl SafetensorsParser {
             }
         }
         Ok(self)
+    }
+}
+
+#[cfg(feature = "std")]
+impl SafetensorsParser {
+    /// Same starting state as [`Self::new`], with
+    /// `max_header_bytes` resolved from `config` instead of
+    /// [`crate::sized::MAX_HEADER_BYTES`] directly -- the `std`-tier
+    /// per-process override path.
+    #[must_use]
+    pub fn with_config(config: &crate::config::SafetensorsParserConfig) -> Self {
+        Self::Header {
+            buf: Vec::new(),
+            max_header_bytes: config.max_header_bytes,
+        }
     }
 }
 
