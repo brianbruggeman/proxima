@@ -5,7 +5,7 @@
 //! [`Op`] whose addressing has been worked out against one call's symbol
 //! bindings — the same elementwise/reduce shape, with a resolved [`Layout`]
 //! standing in for a symbolic [`IndexMap`] and resolved iteration extents
-//! standing in for a symbolic [`Extent`] list. Nothing here is a competing
+//! standing in for a symbolic [`Extent`](crate::Extent) list. Nothing here is a competing
 //! tree: [`bind`] still walks the program left to right, one `Op` at a
 //! time, and every `BoundOp` it emits corresponds to exactly one `Op` that
 //! actually computes (`Op::Input` never does — it is where data enters,
@@ -35,7 +35,7 @@
 //! (`In = (Op, Shapes)`, `Out = `[`ReadyBatch`]) — the same state machine,
 //! not a second type wrapping it. `ReadyBatch` is a fixed-capacity, no-alloc
 //! batch rather than a `Vec`: a single `push` readies at most
-//! [`READY_BATCH_CAPACITY`] `BoundOp`s (see `push`'s own doc), so the
+//! `READY_BATCH_CAPACITY` `BoundOp`s (see `push`'s own doc), so the
 //! composition boundary between this stage and [`crate::cpu::Interpreter`]
 //! never pays a heap allocation per `Op` pushed through the chain.
 //! [`Pipe::call`] takes `&self`, so `held` below is
@@ -144,9 +144,9 @@ const READY_BATCH_CAPACITY: usize = 3;
 /// The batch [`BoundOpBuilder::push`] readies for one `Op`: [`Pipe::Out`]
 /// for [`BoundOpBuilder`] and, by the composition law, [`Pipe::In`] for
 /// [`crate::cpu::Interpreter`]. Fixed-capacity and stack-resident rather
-/// than heap-backed like [`BoundOperands`] above — one `Vec` allocation per
+/// than heap-backed like `BoundOperands` above — one `Vec` allocation per
 /// `Op` pushed through the chain was the actual cost this replaces, for a
-/// container that only ever holds 0 to [`READY_BATCH_CAPACITY`] items.
+/// container that only ever holds 0 to `READY_BATCH_CAPACITY` items.
 pub type ReadyBatch = ArrayVec<BoundOp, READY_BATCH_CAPACITY>;
 
 /// One argument to a [`BodyStep`]: a fresh read of one of the [`BoundOp`]'s
@@ -268,7 +268,7 @@ impl BoundOp {
     /// The composed body applied per step to build one combined value from
     /// `operands()`, before any reduction: an elementwise op's own
     /// (possibly fused) body, or a fused reduce's absorbed body (a one-step
-    /// `Identity` body if nothing fused). See [`EMPTY_BODY`]'s doc for the
+    /// `Identity` body if nothing fused). See `EMPTY_BODY`'s doc for the
     /// [`BoundOpKind::Iota`] case.
     #[must_use]
     pub fn element_body(&self) -> &ComposedBody {
@@ -509,7 +509,7 @@ impl BoundOpBuilder {
     /// standalone op and the current expression's own — and, for an
     /// elementwise expression, one materialization per operand that fails to
     /// fuse, up to [`ScalarOp::arity`]'s current maximum
-    /// ([`READY_BATCH_CAPACITY`]).
+    /// (`READY_BATCH_CAPACITY`).
     pub fn push(&self, expr: &Op, shapes: &Shapes) -> Result<ReadyBatch, TensorError> {
         let node = NodeId(self.position.get());
         self.position.set(self.position.get() + 1);
@@ -585,7 +585,7 @@ impl BoundOpBuilder {
     /// Processed from the highest [`NodeId`] down: a still-held node can
     /// only ever be fused into a consumer with a *greater* id (references
     /// point backwards only), so visiting consumers first lets
-    /// [`build_elementwise_op`] absorb whatever it still can before an
+    /// `build_elementwise_op` absorb whatever it still can before an
     /// earlier, now-absorbed node would otherwise be flushed standalone.
     pub fn finish(self, shapes: &Shapes) -> Result<Vec<BoundOp>, TensorError> {
         let mut remaining: Vec<NodeId> = self.held.borrow().keys().copied().collect();

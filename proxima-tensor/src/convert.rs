@@ -1,6 +1,6 @@
 //! Element conversion as an ordinary [`Pipe`] — `In` = source scalar, `Out` =
 //! target scalar, no new trait. [`Convert`] is the one type: a `PhantomData`
-//! marker plus a private [`Cast`] impl per concrete pair, generic over
+//! marker plus a private `Cast` impl per concrete pair, generic over
 //! whichever two of the machine scalar types
 //! ([`crate::dtype::DType`]'s `Int8`/`UInt8`/`Int32`/`UInt32`/`BFloat16`/
 //! `Float16`/`Float32`, `Bool` as `bool`) the caller names. A pair not wired
@@ -19,7 +19,7 @@
 //! bf16 and IEEE binary16 both need a marker distinct from a bare `u16` —
 //! bf16's truncated 8-bit exponent and binary16's 5-bit exponent are two
 //! incompatible encodings, so `u16` alone cannot say which one a value
-//! holds. This module used to mint that marker itself ([`Bf16`]/[`F16`]);
+//! holds. This module used to mint that marker itself (`Bf16`/`F16`);
 //! it now reuses [`half::bf16`]/[`half::f16`] instead — a sibling worktree
 //! (`omega`) already depends on `half` for GPU marshalling, so minting a
 //! second incompatible representation of the same concept would only

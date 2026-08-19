@@ -2,7 +2,7 @@
 //! buffers.
 //!
 //! This module owns none of the stride arithmetic — that lives in
-//! [`bind`](crate::bind), shared with any other backend. What is
+//! [`mod@bind`], shared with any other backend. What is
 //! CPU-specific and lives here: the f32-only restriction (a v1 limitation —
 //! [`ScalarOp`]'s transcendental bodies need `libm`-grade math this crate
 //! does not depend on, so a GPU backend targeting f16/bf16 natively is
@@ -27,7 +27,7 @@
 //! again, which is the other half of not paying for what a program does not
 //! keep — see [`Evaluated::peak_live_buffers`].
 //!
-//! [`Interpreter`] is this module's [`Pipe`](proxima_primitives::pipe::Pipe)
+//! [`Interpreter`] is this module's [`Pipe`]
 //! impl: `In = Vec<BoundOp>`, `Out = ()`. Its interior state is the buffer
 //! table — caller-provided scratch borrowed for `Interpreter`'s lifetime,
 //! exactly the same interior-mutability idiom [`shape::ShapeTable`] applies
@@ -45,7 +45,7 @@
 //! new type. `Interpreter::call` folds the batch internally the same way
 //! the buffer table itself already folds per-node writes; a zero-element
 //! batch is a no-op call, not a special case.
-//! [`run_node_into`] is the primitive `Interpreter::call` (and
+//! `run_node_into` is the primitive `Interpreter::call` (and
 //! [`evaluate`]/[`evaluate_parallel`]'s own loops) all drive — it writes
 //! into a caller-provided slice instead of allocating one, which is what
 //! lets `Interpreter` reach into a no-alloc-at-the-write-site tier.
@@ -373,13 +373,13 @@ pub enum QuantizedBlock<'a> {
 /// parameter is f32-only by construction, so neither has anywhere to put a
 /// packed byte buffer. This function is that seam: [`QuantizedBlock::Q4K`]
 /// entries are held back from the f32 buffer table and instead collected
-/// into a `NodeId -> &[u8]` side table that [`run_reduce`] consults (via
-/// [`quantized_operand`]) for the one `Reduce` node [`is_quantized_matmul_operand`]
+/// into a `NodeId -> &[u8]` side table that `run_reduce` consults (via
+/// `quantized_operand`) for the one `Reduce` node `is_quantized_matmul_operand`
 /// already proves is shaped for it — every other node in `program` still
 /// runs the exact same f32 path [`evaluate`] does, unchanged.
 ///
 /// `evaluate_typed`'s `TypedBuffer` seam was considered and rejected for
-/// this: [`typed_program_dtype`] requires one uniform dtype across the
+/// this: `typed_program_dtype` requires one uniform dtype across the
 /// *whole* program, but a quantized matmul is deliberately mixed —
 /// `UInt8`-packed weight times `Float32` activation into a `Float32`
 /// output — which is exactly the shape `reject_non_float32`'s
@@ -1513,9 +1513,9 @@ pub struct Interpreter<'buffers, B: Deref<Target = [f32]> + Sync> {
 
 impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'buffers, B> {
     /// `buffers` is caller-owned scratch, one slot per program node — the
-    /// same shape [`prepare`] already builds locally for [`evaluate`].
+    /// same shape `prepare` already builds locally for [`evaluate`].
     /// `Interpreter` never allocates it, resizes it, or takes ownership of
-    /// it. Generic over `B` (matching [`run_node_into`]'s bound) so the same
+    /// it. Generic over `B` (matching `run_node_into`'s bound) so the same
     /// interpreter drives both [`evaluate`]'s `Cow`-backed table (no
     /// redundant copy of an `Op::Input` block) and a plain `Vec<f32>` table.
     #[must_use]
@@ -1574,7 +1574,7 @@ impl<B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Pipe for Interpreter<'_, 
     /// `BoundOpBuilder::Out` already is — changing it would break the
     /// `Second::In = First::Out` composition law the streaming chain relies
     /// on — but the owned batch is only ever borrowed from here down; see
-    /// [`Interpreter::fold`].
+    /// `Interpreter::fold`.
     fn call(&self, ready: ReadyBatch) -> impl Future<Output = Result<(), TensorError>> {
         async move { self.fold(&ready) }
     }
@@ -3826,12 +3826,12 @@ fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 /// bytes) times one `f32` activation vector (`k` wide) — batch-1 decode's
 /// actual shape, the case the module docs measure at 4.00 bytes/mac. Each
 /// output row is independent, so this is the scalar fallback
-/// [`reject_non_float32`]'s quantized-weight exemption routes to when no
-/// NEON tile plan claims the node; see [`dot_q4k_f32`] for the per-row
+/// `reject_non_float32`'s quantized-weight exemption routes to when no
+/// NEON tile plan claims the node; see `dot_q4k_f32` for the per-row
 /// kernel and exactly what it does and does not materialize.
 ///
 /// # Errors
-/// Propagates [`dot_q4k_f32`]'s [`TensorError::QuantizedShapeMismatch`] for
+/// Propagates `dot_q4k_f32`'s [`TensorError::QuantizedShapeMismatch`] for
 /// the first row that fails its shape check, or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
 pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
@@ -5086,7 +5086,7 @@ impl Element for f64 {
 /// `BFloat16`, and `Float16` have no variant yet — `Bool`'s storage
 /// convention (packed bits vs. one byte per element) is undecided, and the
 /// two half-precision floats have no arithmetic on stable Rust; see
-/// [`typed_program_dtype`] for the boundary this actually enforces today.
+/// `typed_program_dtype` for the boundary this actually enforces today.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBuffer {
     Int8(Vec<i8>),
@@ -5188,12 +5188,12 @@ type TypedRow<Data> = (NodeId, Vec<u64>, Data);
 
 /// Run an elementwise-or-reduce tensor program against a caller-chosen
 /// non-f32 (or f64) dtype — the full-width counterpart of [`evaluate`] for
-/// the programs [`reject_non_float32`] used to reject outright. See
-/// [`typed_program_dtype`] for exactly which programs qualify. `DType::Float32`
-/// dispatches [`run_typed_program`] the same as every other width, but that
+/// the programs `reject_non_float32` used to reject outright. See
+/// `typed_program_dtype` for exactly which programs qualify. `DType::Float32`
+/// dispatches `run_typed_program` the same as every other width, but that
 /// function's own [`Op::Reduce`] handling specializes straight back to the
-/// existing NEON [`run_reduce`]/[`run_scan`] for `T = f32` — see
-/// [`run_reduce_typed`]'s doc.
+/// existing NEON `run_reduce`/`run_scan` for `T = f32` — see
+/// `run_reduce_typed`'s doc.
 pub fn evaluate_typed(
     program: &[Op],
     symbols: &[u64],
