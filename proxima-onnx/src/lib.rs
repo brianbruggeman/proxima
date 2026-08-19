@@ -73,7 +73,7 @@ pub use messages::{
     OperatorSetIdProto, TensorProto, TensorShapeProto, TypeProto, TypeProtoMap, TypeProtoTensor,
     TypeValue, ValueInfoProto,
 };
-pub use parser::{OnnxParser, PollOutcome};
+pub use parser::OnnxParser;
 pub use pipe::parse_complete;
 pub use types::{AttributeType, DataType};
 
