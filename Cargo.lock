@@ -4205,6 +4205,7 @@ name = "proxima-model-interop"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "half",
  "proxima-gguf",
  "proxima-safetensors",
  "proxima-tensor",

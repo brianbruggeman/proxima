@@ -32,9 +32,20 @@ pub enum InteropError {
         max: usize,
     },
 
+    /// [`crate::bind::gguf_tensor_as_f32`] was asked for a name absent
+    /// from the parsed tensor directory.
+    #[error("no tensor named {name:?} in the gguf tensor directory")]
+    UnknownTensor { name: String },
+
     #[error(transparent)]
     Gguf(#[from] proxima_gguf::GgufError),
 
     #[error(transparent)]
     Safetensors(#[from] proxima_safetensors::SafetensorsError),
+
+    /// A block-quantized tensor's bytes didn't fit its codec's own shape
+    /// contract (not a whole block multiple, or an output-size mismatch)
+    /// -- propagated from [`proxima_gguf::quant`] rather than re-derived.
+    #[error(transparent)]
+    Quant(#[from] proxima_gguf::quant::QuantError),
 }

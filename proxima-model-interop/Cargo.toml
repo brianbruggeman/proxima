@@ -9,6 +9,16 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 
+[features]
+default = []
+# strictly additive over the alloc-tier floor (guiding-principle 3): opens
+# proxima-gguf's `edge::read_file` (whole-file IO) and proxima-tensor's
+# `cpu` interpreter (both std-gated in their own crates) so this crate's
+# gguf-tensor-by-name bind can be driven end to end through evaluation.
+# The bind function itself (`bind::gguf_tensor_as_f32`) needs neither and
+# stays available at the no_std+alloc floor either way.
+std = ["proxima-gguf/std", "proxima-tensor/std"]
+
 [dependencies]
 arrayvec.workspace = true
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
@@ -18,3 +28,6 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+half = { version = "2.7.1", default-features = false }
