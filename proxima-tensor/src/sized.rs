@@ -34,8 +34,7 @@
 //!   surgery (new parameters threaded through several private helpers),
 //!   which this session declines to do while another agent is
 //!   concurrently restructuring that file's tile operands and quantized
-//!   paths. See `crate::config`'s module doc for the follow-up this
-//!   leaves open. [`NEON_COLUMN_PANEL_BUDGET_BYTES`] is the same policy
+//!   paths. [`NEON_COLUMN_PANEL_BUDGET_BYTES`] is the same policy
 //!   shape but additionally `target_arch = "aarch64"`-only, so it has no
 //!   build-time value on any other target to seed a cross-platform config
 //!   struct from -- staying `sized`-only is not just deferred here, it is

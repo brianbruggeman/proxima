@@ -190,8 +190,6 @@ extern crate alloc;
 pub mod align;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod bind;
-#[cfg(feature = "config")]
-pub mod config;
 // element conversion (`convert::Convert`, a `Pipe`) and decimal-as-conversion
 // (`convert::decimal`) need neither `alloc` nor `std` — slices and core
 // arithmetic only — so this stays ungated, same as `dtype`.
