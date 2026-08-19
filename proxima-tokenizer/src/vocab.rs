@@ -4,6 +4,7 @@
 //! it to [`crate::bpe`]/[`crate::pipe`] — this type never touches a file.
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -104,7 +105,10 @@ impl Vocab {
             let display = byte_to_char(byte);
             let mut single_char = String::new();
             single_char.push(display);
-            let token_id = token_to_id.get(&single_char).copied();
+            let token_id = token_to_id
+                .get(&single_char)
+                .copied()
+                .or_else(|| token_to_id.get(hex_fallback_token(byte).as_str()).copied());
             if token_id.is_none() {
                 return Err(TokenizerError::MissingBaseByteToken { byte, display });
             }
@@ -228,6 +232,16 @@ impl Vocab {
     pub fn unknown_token_id(&self) -> Option<u32> {
         self.unknown_token_id
     }
+}
+
+/// The SentencePiece byte-fallback token spelling for a raw byte
+/// (`"<0x1A>"`, uppercase hex, zero-padded) -- the convention llama.cpp's
+/// SentencePiece/unigram vocabs (`tokenizer.ggml.model = "llama"`) use for
+/// their base byte alphabet instead of the GPT-2 display alphabet
+/// ([`byte_to_char`]). Checked as a fallback so [`Vocab::new`] accepts
+/// either family's base-byte spelling.
+fn hex_fallback_token(byte: u8) -> String {
+    format!("<0x{byte:02X}>")
 }
 
 /// Converts a token's display-domain string back to the raw bytes it

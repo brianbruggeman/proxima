@@ -123,4 +123,83 @@ mod tests {
         assert_eq!(vocab.eos_token_id(), Some(128_001));
         println!("real fixture vocab: {} tokens", vocab.len());
     }
+
+    /// The decode path end to end at the real openchat-3.5-1210 vocab
+    /// scale (32002 tokens): a synthetic logits vector with a known peak
+    /// runs through [`crate::sample::greedy_pick`], and the resulting id
+    /// decodes ([`crate::decode`]) back to the exact expected string --
+    /// including a multi-byte UTF-8 token, so the byte-level decode path
+    /// is exercised, not just the id lookup. Only the metadata region is
+    /// read (growing-buffer `parse_complete` loop, matching
+    /// `proxima-gguf/src/restack.rs`'s `real_mixtral_file` module) -- the
+    /// 3.9 GB tensor payload is never touched. `#[ignore]`d: depends on a
+    /// host-local model cache outside this repo.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn greedy_decode_at_real_openchat_vocab_scale() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        use crate::sample::greedy_pick;
+
+        let candidate = Path::new(
+            "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf",
+        );
+        if !candidate.exists() {
+            eprintln!("no real openchat .gguf found at {candidate:?}, skipping");
+            return;
+        }
+
+        let mut file = std::fs::File::open(candidate).expect("open host-local openchat gguf fixture");
+
+        let mut header_buf = Vec::new();
+        let parsed = 'grow: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                    break 'grow parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 64 MiB");
+        };
+
+        let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real openchat metadata");
+        assert_eq!(vocab.len(), 32_002, "real openchat-3.5-1210 vocab must have exactly 32002 tokens");
+
+        // three distinct tokens, picked by inspecting the real vocab
+        // (`tokenizer.ggml.model = "llama"`, a SentencePiece/unigram
+        // vocab, confirmed via `tokenizer.ggml.scores` present and
+        // `tokenizer.ggml.merges` absent): the BOS control token, a
+        // plain ASCII subword, and a multi-byte UTF-8 katakana token.
+        let cases: [(u32, &str); 3] = [(1, "<s>"), (450, "de"), (30_000, "ァ")];
+
+        for (token_id, expected_text) in cases {
+            let mut logits = alloc::vec![0.0f32; vocab.len()];
+            logits[token_id as usize] = 100.0;
+
+            let picked = greedy_pick(&logits).expect("logits are non-empty");
+            assert_eq!(picked, token_id, "greedy pick must recover the peaked token id");
+
+            let decoded = decode_ids_for_test(&vocab, &[picked]);
+            assert_eq!(decoded, expected_text, "decode must recover the exact expected text");
+        }
+
+        // degenerate control: a flat, constant logits vector carries no
+        // signal. it must NOT resolve to any of the peaked ids above --
+        // otherwise a broken argmax (e.g. one that always returns a fixed
+        // index) could pass the assertions above by coincidence.
+        let flat_logits = alloc::vec![1.0f32; vocab.len()];
+        let flat_pick = greedy_pick(&flat_logits).expect("flat logits are non-empty");
+        assert_eq!(flat_pick, 0, "ties resolve deterministically to the lowest id");
+        for (token_id, _) in cases {
+            assert_ne!(flat_pick, token_id, "a flat vector must not coincidentally hit a real peak's id");
+        }
+    }
+
+    #[cfg(test)]
+    fn decode_ids_for_test(vocab: &Vocab, ids: &[u32]) -> String {
+        crate::decode(ids, vocab).expect("decodes real vocab ids")
+    }
 }
