@@ -66,6 +66,17 @@ pub enum TensorError {
     #[error("expected {expected} input operands but got {found}")]
     InputCountMismatch { expected: usize, found: usize },
 
+    /// [`cpu::evaluate_named`](crate::cpu::evaluate_named) binds `Op::Input`
+    /// by name, so an input with no name (`Op::Input::name` is `None`) has
+    /// nothing to bind by.
+    #[error("node {0} is an input with no name; evaluate_named binds by name")]
+    UnnamedInput(NodeId),
+
+    /// A name [`cpu::evaluate_named`](crate::cpu::evaluate_named)'s program
+    /// requires was not present in the caller-supplied `named` bindings.
+    #[error("no binding supplied for input `{0}`")]
+    UnboundInputName(alloc::string::String),
+
     #[error("node {node} input has {found} elements but its shape needs {expected}")]
     InputSizeMismatch {
         node: NodeId,

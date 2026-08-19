@@ -330,6 +330,39 @@ pub fn evaluate(
     evaluate_pooled(program, symbols, blocks, outputs, &mut free_buffers)
 }
 
+/// Same contract as [`evaluate`], but binds [`Op::Input`] inputs by
+/// [`Op::name`] instead of position — the counterpart [`evaluate`]'s own doc
+/// promises for the distributed case: a partition crossing a wire
+/// (`partition::partition_at`) renumbers a program, so positional order is
+/// gone by the time a consumer half receives its inputs, and only `name`
+/// survives the cut.
+///
+/// This does not change `evaluate`'s signature or behaviour; it resolves
+/// `named` into the same positional `blocks: &[&[f32]]` `evaluate` already
+/// takes (in `program`'s own `Op::Input` order) and calls straight through,
+/// so every existing positional caller is untouched.
+pub fn evaluate_named(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, &[f32])],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let block_nodes = block_node_ids(program);
+    let mut blocks: Vec<&[f32]> = Vec::with_capacity(block_nodes.len());
+    for node in &block_nodes {
+        let name = program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        let data = named
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, data)| *data)
+            .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
+        blocks.push(data);
+    }
+    evaluate(program, symbols, &blocks, outputs)
+}
+
 /// Same contract as [`evaluate`], plus one capability a caller cannot get
 /// from that function: `scratch` seeds this run's buffer-reuse pool instead
 /// of starting it empty, and receives back whatever the pool held once the
