@@ -1483,4 +1483,290 @@ shape = ["seq"]
             output[0]
         );
     }
+
+    /// Independent reference for grouped-query attention: a plain
+    /// `q @ k^T` -> causal softmax -> `@ v` over raw f32 slices, with no
+    /// dependency on `Op`, `IndexMap`, or anything else the graph under test
+    /// builds. `q`/`k`/`v` come from a linear projection (`project`) laid
+    /// out the same row-major way `Input`'s declared `shape` implies
+    /// (`[dim_in, heads, head_dim]`, slowest axis first) — the one place
+    /// this function and the spec's `wq`/`wk`/`wv` shapes must agree, and
+    /// the reason both are documented at the call site.
+    fn project(
+        x: &[f32],
+        weight: &[f32],
+        sequence: usize,
+        dim_in: usize,
+        heads: usize,
+        head_dim: usize,
+    ) -> alloc::vec::Vec<f32> {
+        let mut projected = alloc::vec![0.0f32; sequence * heads * head_dim];
+        for position in 0..sequence {
+            for head in 0..heads {
+                for dim in 0..head_dim {
+                    let mut accumulator = 0.0f32;
+                    for input_dim in 0..dim_in {
+                        let activation = x[position * dim_in + input_dim];
+                        let coefficient =
+                            weight[input_dim * heads * head_dim + head * head_dim + dim];
+                        accumulator += activation * coefficient;
+                    }
+                    projected[(position * heads + head) * head_dim + dim] = accumulator;
+                }
+            }
+        }
+        projected
+    }
+
+    /// The six sizes one grouped-query-attention case needs, gathered into
+    /// one type so `expected_gqa_attended` and `run_gqa_case` each take a
+    /// handful of arguments instead of one per size.
+    #[derive(Debug, Clone, Copy)]
+    struct GqaDims {
+        sequence: usize,
+        dim_in: usize,
+        query_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        group: usize,
+    }
+
+    /// `expected[((s*kv_heads+u)*group+g)*head_dim+d]` — the same `sugd`
+    /// physical order `gqa_attention.toml`'s `attended` reduce declares in
+    /// its `out_map`. `h = u*group + g` is the property under test, spelled
+    /// here as plain arithmetic rather than an index map, so the two can
+    /// disagree if the graph's addressing is wrong.
+    fn expected_gqa_attended(
+        x: &[f32],
+        wq: &[f32],
+        wk: &[f32],
+        wv: &[f32],
+        dims: GqaDims,
+    ) -> alloc::vec::Vec<f32> {
+        let GqaDims {
+            sequence,
+            dim_in,
+            query_heads,
+            kv_heads,
+            head_dim,
+            group,
+        } = dims;
+        let q = project(x, wq, sequence, dim_in, query_heads, head_dim);
+        let k = project(x, wk, sequence, dim_in, kv_heads, head_dim);
+        let v = project(x, wv, sequence, dim_in, kv_heads, head_dim);
+
+        let mut output = alloc::vec![0.0f32; sequence * kv_heads * group * head_dim];
+        for query_position in 0..sequence {
+            for kv_head in 0..kv_heads {
+                for offset in 0..group {
+                    let query_head = kv_head * group + offset;
+                    let mut scores = alloc::vec![f32::NEG_INFINITY; sequence];
+                    for key_position in 0..=query_position {
+                        let mut score = 0.0f32;
+                        for dim in 0..head_dim {
+                            let query_value =
+                                q[(query_position * query_heads + query_head) * head_dim + dim];
+                            let key_value =
+                                k[(key_position * kv_heads + kv_head) * head_dim + dim];
+                            score += query_value * key_value;
+                        }
+                        scores[key_position] = score;
+                    }
+                    let max_score = scores.iter().copied().fold(f32::MIN, f32::max);
+                    let exponentials: alloc::vec::Vec<f32> = scores
+                        .iter()
+                        .map(|&score| {
+                            if score.is_finite() {
+                                (score - max_score).exp()
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    let total: f32 = exponentials.iter().sum();
+                    for dim in 0..head_dim {
+                        let mut accumulator = 0.0f32;
+                        for key_position in 0..sequence {
+                            let probability = exponentials[key_position] / total;
+                            let value_value =
+                                v[(key_position * kv_heads + kv_head) * head_dim + dim];
+                            accumulator += probability * value_value;
+                        }
+                        let index =
+                            ((query_position * kv_heads + kv_head) * group + offset) * head_dim
+                                + dim;
+                        output[index] = accumulator;
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    /// The property that makes this GQA rather than plain multi-head
+    /// attention: query heads sharing a kv head must attend against the
+    /// *same* k/v head, and query heads in different groups must attend
+    /// against *different* ones. `wk`/`wv` give kv head 0 and kv head 1 a
+    /// +-10.0 offset on top of independent LCG noise, so a wrong kv-head
+    /// selection (e.g. every group reading kv head 0) shows up as an
+    /// order-of-magnitude disagreement, not a rounding error — the same
+    /// sharpness `a_topk2_probe_...`'s 100-vs-1 weights use.
+    ///
+    /// `expected_gqa_attended` computes the same arithmetic independently
+    /// of the graph, in `sugd` order, so it is compared element by element
+    /// against `attended` (the spec's root) rather than read back from any
+    /// intermediate the graph produced.
+    fn run_gqa_case(text: &str, dims: GqaDims, seed: u64) {
+        let GqaDims {
+            sequence,
+            dim_in,
+            query_heads,
+            kv_heads,
+            head_dim,
+            group,
+        } = dims;
+
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [sequence as u64];
+        crate::shape::infer(&program, &symbols).expect("the gqa block infers");
+
+        let x = random_vec(seed, sequence * dim_in);
+        let wq = random_vec(seed + 1, dim_in * query_heads * head_dim);
+
+        let wk_noise = random_vec(seed + 2, dim_in * kv_heads * head_dim);
+        let wv_noise = random_vec(seed + 3, dim_in * kv_heads * head_dim);
+        let mut wk = alloc::vec![0.0f32; dim_in * kv_heads * head_dim];
+        let mut wv = alloc::vec![0.0f32; dim_in * kv_heads * head_dim];
+        for input_dim in 0..dim_in {
+            for kv_head in 0..kv_heads {
+                let bias = if kv_head == 0 { 10.0 } else { -10.0 };
+                for dim in 0..head_dim {
+                    let index = input_dim * kv_heads * head_dim + kv_head * head_dim + dim;
+                    wk[index] = wk_noise[index] + bias;
+                    wv[index] = wv_noise[index] + bias;
+                }
+            }
+        }
+
+        // `group_ones` only pins `q_grouped`'s (kv-head, group) extents for
+        // `shape::infer` (see `gqa_attention.toml`'s header) — it must stay
+        // exactly 1.0 or it would silently rescale every query head's score.
+        let group_ones = alloc::vec![1.0f32; kv_heads * group];
+
+        let probabilities = spec
+            .node
+            .iter()
+            .position(|node| node.id() == "probabilities")
+            .expect("the spec defines a probabilities node");
+        let probabilities = NodeId(probabilities as u32);
+        let root = NodeId(program.len() as u32 - 1);
+
+        let blocks: [&[f32]; 5] = [&x, &wq, &wk, &wv, &group_ones];
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &blocks,
+            &[root, probabilities],
+            workers,
+        )
+        .expect("the gqa block evaluates");
+
+        let output = evaluated.root();
+        let expected_len = sequence * kv_heads * group * head_dim;
+        assert_eq!(output.len(), expected_len, "a vacuous output proves nothing");
+        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+
+        let expected = expected_gqa_attended(&x, &wq, &wk, &wv, dims);
+        assert_eq!(expected.len(), expected_len);
+
+        let mut compared = 0usize;
+        for (index, (&found, &wanted)) in output.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (found - wanted).abs() < 1e-3,
+                "element {index}: graph produced {found}, independent reference produced \
+                 {wanted} — a query head is attending against the wrong kv head"
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, expected_len, "every element must be checked, not a subset");
+
+        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        assert_eq!(rows.len(), sequence * sequence * kv_heads * group);
+
+        let mut checked = 0usize;
+        for query_position in 0..sequence {
+            for kv_head in 0..kv_heads {
+                for offset in 0..group {
+                    let mut total = 0.0f32;
+                    for key_position in 0..sequence {
+                        let index = ((query_position * sequence + key_position) * kv_heads
+                            + kv_head)
+                            * group
+                            + offset;
+                        let probability = rows[index];
+                        if key_position > query_position {
+                            assert_eq!(
+                                probability, 0.0,
+                                "query {query_position} kv-head {kv_head} group-offset \
+                                 {offset} key {key_position} is strictly upper-triangular \
+                                 and must be masked to exactly 0.0, found {probability}"
+                            );
+                        }
+                        total += probability;
+                        checked += 1;
+                    }
+                    assert!(
+                        (total - 1.0).abs() < 1e-5,
+                        "query {query_position} kv-head {kv_head} group-offset {offset} \
+                         softmax row sums to {total}, not 1.0"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            sequence * sequence * kv_heads * group,
+            "every probability cell must be checked, not a subset"
+        );
+    }
+
+    #[test]
+    fn a_gqa_attention_block_groups_query_heads_onto_shared_kv_heads() {
+        let text = include_str!("../specs/gqa_attention.toml");
+        let dims = GqaDims {
+            sequence: 4,
+            dim_in: 4,
+            query_heads: 4,
+            kv_heads: 2,
+            head_dim: 4,
+            group: 2,
+        };
+        run_gqa_case(text, dims, 31);
+    }
+
+    /// `deepseek-coder-33b` is `head_count=56`, `head_count_kv=8` — group 7,
+    /// not a power of two. This is that shape at a hand-checkable size (6
+    /// query heads, 2 kv heads, group 3): the only spec change from
+    /// `gqa_attention.toml` is `wq`'s head extent and the affine
+    /// coefficient (`2*u+g` -> `3*u+g`), so this test is the check that
+    /// `coeff=3` behaves identically to `coeff=2`, not an assumption resting
+    /// on the power-of-two case alone.
+    #[test]
+    fn a_gqa_attention_block_with_a_non_power_of_two_group_groups_query_heads_onto_shared_kv_heads()
+    {
+        let text = include_str!("../specs/gqa_attention_group3.toml");
+        let dims = GqaDims {
+            sequence: 4,
+            dim_in: 4,
+            query_heads: 6,
+            kv_heads: 2,
+            head_dim: 4,
+            group: 3,
+        };
+        run_gqa_case(text, dims, 41);
+    }
 }
