@@ -172,6 +172,7 @@ pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry),
         BoundOpKind::Iota => render_iota(resolved, &entry),
+        BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
     }?;
     Ok(Kernel {
         source,
@@ -398,7 +399,7 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
-        BoundOpKind::Iota => resolved.extents.iter().product(),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
     }
 }
 
@@ -545,6 +546,14 @@ fn entry_name(resolved: &BoundOp) -> String {
         // `Extent` — see `op.rs`'s doc — but this reads `extents.len()`
         // rather than assuming that, matching every other arm here).
         BoundOpKind::Iota => format!("omega_iota_r{rank}"),
+        // the literal is baked into the source (see `render_constant`), so
+        // it has to be part of the entry name too - otherwise two constants
+        // of the same rank would share one cached kernel and the second
+        // would run the first one's value. Raw bits, not the decimal, so
+        // the name is exact and identifier-safe.
+        BoundOpKind::Constant { value } => {
+            format!("omega_constant_r{rank}_v{:08x}", value.to_bits())
+        }
     };
     let gather_bits: String = resolved
         .operands()
@@ -795,6 +804,49 @@ fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     source.push_str(&format!("    out[gid] = ({element_type})gid;\n"));
     source.push_str("}\n");
     Ok(source)
+}
+
+/// [`BoundOpKind::Constant`]'s kernel, the same shape as [`render_iota`]'s
+/// with the position swapped for the literal. The literal is baked into the
+/// source rather than passed as a uniform so the `Uniforms` struct stays
+/// byte-identical to `render_iota`'s and both share
+/// [`crate::metal`]'s `pack_leaf_uniforms`; `kernel_entry` folds the value's
+/// bits into the entry name to keep the kernel cache correct.
+fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String, EmitError> {
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+
+    let mut source = String::new();
+    preamble(&mut source);
+
+    source.push_str("struct Uniforms {\n");
+    source.push_str("    long total_elements;\n");
+    source.push_str("};\n\n");
+
+    kernel_signature(&mut source, 0, 0, entry, element_type);
+    source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
+    source.push_str(&format!(
+        "    out[gid] = ({element_type}){};\n",
+        msl_literal(value)
+    ));
+    source.push_str("}\n");
+    Ok(source)
+}
+
+/// One `f32` as MSL source text. `Debug`'s shortest round-trip decimal is
+/// what MSL's own float grammar accepts, except for the values it has no
+/// decimal spelling for.
+fn msl_literal(value: f32) -> String {
+    if value.is_nan() {
+        return "NAN".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-INFINITY".to_string()
+        } else {
+            "INFINITY".to_string()
+        };
+    }
+    format!("{value:?}")
 }
 
 fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {

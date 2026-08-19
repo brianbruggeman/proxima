@@ -64,7 +64,7 @@ use crate::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 /// A declarative tensor program. Nodes are order-dependent: a node may only
 /// reference ids defined above it, which mirrors the program's
 /// backwards-reference rule so the two representations cannot disagree.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Builder, Deserialize, Serialize, Settings)]
+#[derive(Debug, Clone, Default, PartialEq, Builder, Deserialize, Serialize, Settings)]
 #[settings(prefix = "TENSOR")]
 #[builder(derive(Clone, Debug))]
 pub struct ProgramSpec {
@@ -118,7 +118,7 @@ pub enum MapSpec {
 }
 
 /// One node, discriminated by `op` so TOML reads as `op = "elementwise"`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum NodeSpec {
     Input {
@@ -158,14 +158,27 @@ pub enum NodeSpec {
         dtype: DType,
         extent: ExtentSpec,
     },
+    /// [`Op::Constant`]'s config face: a leaf whose every element is
+    /// `value`, spelled with the same [`ExtentSpec`] grammar `Input.shape`
+    /// entries use. `shape = []` is the rank-0 form that broadcasts into any
+    /// consumer. No `name` field — [`Op::Constant`] carries none.
+    Constant {
+        id: String,
+        dtype: DType,
+        shape: Vec<ExtentSpec>,
+        value: f32,
+    },
 }
 
 impl NodeSpec {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            Self::Input { id, .. } | Self::Elementwise { id, .. } | Self::Reduce { id, .. }
-            | Self::Iota { id, .. } => id,
+            Self::Input { id, .. }
+            | Self::Elementwise { id, .. }
+            | Self::Reduce { id, .. }
+            | Self::Iota { id, .. }
+            | Self::Constant { id, .. } => id,
         }
     }
 }
@@ -300,7 +313,7 @@ impl Validate for ProgramSpec {
                 errors.push(ValidationMessage::new(entry.id(), "defined twice"));
             }
             match entry {
-                NodeSpec::Input { .. } | NodeSpec::Iota { .. } => {}
+                NodeSpec::Input { .. } | NodeSpec::Iota { .. } | NodeSpec::Constant { .. } => {}
                 NodeSpec::Elementwise {
                     id, inputs, maps, ..
                 } => {
@@ -437,6 +450,22 @@ impl TryFrom<&ProgramSpec> for Vec<Op> {
                         extent: extent.resolve()?,
                     },
                 ),
+                NodeSpec::Constant {
+                    dtype,
+                    shape,
+                    value,
+                    ..
+                } => op::append(
+                    &mut program,
+                    Op::Constant {
+                        dtype: *dtype,
+                        shape: shape
+                            .iter()
+                            .map(ExtentSpec::resolve)
+                            .collect::<Result<Vec<Extent>, TensorError>>()?,
+                        value: *value,
+                    },
+                ),
             };
             resolved.insert(entry.id().to_string(), built);
         }
@@ -561,6 +590,16 @@ fn reduce(
     ))
 }
 
+/// `[?0]`-shaped bound leaf. `eps` is the only caller left: RMSNorm's
+/// epsilon is model metadata (`attention.layer_norm_rms_epsilon` in a GGUF
+/// checkpoint), not a value this function's `u32` parameters determine, so
+/// it is the one constant here that cannot become an [`Op::Constant`]
+/// without `mistral_forward_program` taking it as a parameter.
+/// `inv_dim`/`ones`/`group_ones` all could, and did — see [`scalar_constant`].
+fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
+    input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)], name)
+}
+
 fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str) -> NodeId {
     op::append(
         program,
@@ -572,12 +611,21 @@ fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &st
     )
 }
 
-/// `[?0]`-shaped leaf: the per-sequence-position broadcast constants
-/// (`inv_dim`/`eps`/`ones`) every `rmsnorm`/SwiGLU call below reads.
-/// `inv_sqrt_head_dim` is a sibling constant with the same broadcast role
-/// but not a bound `Input` — see [`inv_sqrt_head_dim_constant`].
-fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
-    input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)], name)
+/// A rank-0 [`Op::Constant`]: one literal that broadcasts into any consumer
+/// through an empty operand side (`"->sd"`, `"->stug"`). This is how every
+/// scalar this module needs is spelled — `inv_dim`, `ones`,
+/// `inv_sqrt_head_dim` and `neg_infinity` were a bound `Input` or a
+/// multi-node `Iota` derivation before the variant existed, and
+/// [`Op::Constant`]'s own doc records what each cost.
+fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
+    op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value,
+        },
+    )
 }
 
 /// `table[ids[s], d]`, the exact pattern `shape.rs`'s
@@ -621,7 +669,7 @@ fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(sum_squares, "s->s"), (inv_dim, "s->s")],
+        &[(sum_squares, "s->s"), (inv_dim, "->s")],
     )?;
     let mean_square_eps = elementwise(
         program,
@@ -646,9 +694,17 @@ fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps
 }
 
 /// The causal mask's data-independent half: `is_future` (a `(query, key)`
-/// comparison) and `neg_infinity` (a broadcastable `-inf` constant), built
-/// once and shared by every layer — position-only, no learned state, exactly
-/// like `cos`/`sin`.
+/// comparison between two [`Op::Iota`]s) and `neg_infinity`, built once and
+/// shared by every layer — position-only, no learned state, exactly like
+/// `cos`/`sin`.
+///
+/// `is_future` is what `Iota` is *for*: its value at `(s, t)` genuinely
+/// depends on position, so nothing but an index tensor can produce it.
+/// `neg_infinity` is the opposite and used to be spelled the same way —
+/// `Subtract(iota, iota)` for `0.0`, `Negate` for `-0.0`, `Reciprocal` for
+/// `-inf`, three nodes and a materialized `[?0]` tensor per call to say a
+/// number that never varies. It is now one rank-0 [`Op::Constant`], which
+/// is also why it broadcasts as `"->stug"` rather than `"s->stug"`.
 fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
     let query_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
     let key_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
@@ -658,36 +714,8 @@ fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
         ScalarOp::Greater,
         &[(key_index, "t->st"), (query_index, "s->st")],
     )?;
-    let zero = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(query_index, "s->s"), (query_index, "s->s")],
-    )?;
-    let neg_zero = elementwise(program, DType::Float32, ScalarOp::Negate, &[(zero, "s->s")])?;
-    let neg_infinity = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(neg_zero, "s->s")])?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     Ok((is_future, neg_infinity))
-}
-
-/// `1/sqrt(head_dim)`, attention's usual score scale, built once and shared
-/// by every layer exactly like [`causal_mask`]'s `neg_infinity` — `head_dim`
-/// is a compile-time model-config constant here (`mistral_forward_program`'s
-/// own `u32` parameter), not per-request data, so it is derived by the same
-/// `Iota`-plus-arithmetic route `neg_infinity` uses rather than routed
-/// through `bind.rs` as a named runtime `Input`: a bound name is a value two
-/// files must agree on forever, and this one never varies at runtime.
-/// `Op::Iota` over `head_dim` gives per-element indices, `Equal` against
-/// itself turns every element into `1.0` (the same 0/1-as-float trick
-/// `is_future` uses `Greater` for), a full-reduction `Add` sums those to the
-/// scalar `head_dim`, and `SquareRoot`/`Reciprocal` finish it — a rank-0
-/// result that broadcasts into `scores`' `stug` shape the same way
-/// `neg_infinity` broadcasts from its own (rank-1) shape.
-fn inv_sqrt_head_dim_constant(program: &mut Vec<Op>, head_dim: u32) -> Result<NodeId, TensorError> {
-    let head_iota = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(head_dim) });
-    let head_ones = elementwise(program, DType::Float32, ScalarOp::Equal, &[(head_iota, "i->i"), (head_iota, "i->i")])?;
-    let head_dim_count = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, head_ones, "i->i", "->i")?;
-    let head_dim_sqrt = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(head_dim_count, "->")])?;
-    elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(head_dim_sqrt, "->")])
 }
 
 /// One transformer layer, node-for-node the same graph
@@ -758,9 +786,8 @@ fn append_mistral_layer(
 
     // attention's usual `1/sqrt(d_k)`: without it QK^T over a real head_dim
     // (128) saturates softmax toward one-hot instead of blending.
-    // `inv_sqrt_head_dim` is rank-0 ([`inv_sqrt_head_dim_constant`]'s own
-    // doc explains why it is not an `Input`), so it broadcasts via `->stug`
-    // rather than `neg_infinity`'s `s->stug`.
+    // `inv_sqrt_head_dim` is a rank-0 `Op::Constant`, so it broadcasts via
+    // an empty operand side, the same way `neg_infinity` does.
     let scores_scaled = elementwise(
         program,
         DType::Float32,
@@ -772,7 +799,7 @@ fn append_mistral_layer(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "st->stug"), (neg_infinity, "s->stug"), (scores_scaled, "stug->stug")],
+        &[(is_future, "st->stug"), (neg_infinity, "->stug"), (scores_scaled, "stug->stug")],
     )?;
 
     let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
@@ -799,7 +826,7 @@ fn append_mistral_layer(
 
     let neg_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate, "sg->sg")])?;
     let exp_neg_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
-    let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "s->sg")])?;
+    let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
     let sigmoid_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
     let silu_gate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
     let ffn_hidden = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up, "sg->sg")])?;
@@ -849,10 +876,13 @@ pub fn mistral_forward_program(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = symbolic_leaf(&mut program, DType::Float32, "inv_dim");
+    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
-    let ones = symbolic_leaf(&mut program, DType::Float32, "ones");
-    let inv_sqrt_head_dim = inv_sqrt_head_dim_constant(&mut program, head_dim)?;
+    let ones = scalar_constant(&mut program, 1.0);
+    // attention's usual `1/sqrt(d_k)`, the same two IEEE ops the deleted
+    // five-node `Iota` derivation performed, at build time instead of once
+    // per forward pass.
+    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
     let cos = input_leaf(
         &mut program,
         DType::Float32,
@@ -865,11 +895,16 @@ pub fn mistral_forward_program(
         alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
         "rope_sin",
     );
-    let group_ones = input_leaf(
+    // the one constant here that is not rank-0: `q_*_grouped`'s `u` and `g`
+    // iteration extents have no other operand to come from, so this leaf
+    // carries them. Its values are all `1.0` either way.
+    let group_ones = op::append(
         &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
-        "group_ones",
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            value: 1.0,
+        },
     );
     let (is_future, neg_infinity) = causal_mask(&mut program)?;
 
@@ -2250,7 +2285,7 @@ shape = ["seq"]
     /// softmax is still a valid softmax — so that invariant alone cannot
     /// catch it. This builds the same score/scale/softmax composition
     /// `append_mistral_layer` now runs (`q . k`, multiply by
-    /// [`inv_sqrt_head_dim_constant`], then max-shift/exp/normalize, no mask
+    /// [`scalar_constant`], then max-shift/exp/normalize, no mask
     /// — masking is `causal_attention.toml`'s own proven concern, not this
     /// one's), at the model's real `head_dim=128`, built TWICE on the same
     /// `q`/`k`: once with the scaling step omitted entirely (exactly the
@@ -2287,7 +2322,7 @@ shape = ["seq"]
             let scores = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_product, "sth->sth", "st->sth")
                 .expect("scores reduce builds");
             let scores = if scaled {
-                let inv_sqrt_head_dim = inv_sqrt_head_dim_constant(&mut program, HEAD_DIM as u32).expect("scale constant builds");
+                let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
                 elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(scores, "st->st"), (inv_sqrt_head_dim, "->st")])
                     .expect("scaling multiply builds")
             } else {
@@ -2427,9 +2462,7 @@ shape = ["seq"]
         let shapes = crate::shape::infer(&program, &symbols).expect("the real layer infers");
 
         let activations = random_vec(101, SEQUENCE * EMBEDDING);
-        let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
         let epsilon = alloc::vec![1e-5f32; SEQUENCE];
-        let ones = alloc::vec![1.0f32; SEQUENCE];
         let wq = random_vec(102, EMBEDDING * QUERY_HEADS * HEAD_DIM);
         let wk = random_vec(103, EMBEDDING * KV_HEADS * HEAD_DIM);
         let wv = random_vec(104, EMBEDDING * KV_HEADS * HEAD_DIM);
@@ -2441,13 +2474,10 @@ shape = ["seq"]
         let sin = random_vec(110, SEQUENCE * PAIRS);
         let attn_norm_weight = alloc::vec![1.0f32; EMBEDDING];
         let ffn_norm_weight = alloc::vec![1.0f32; EMBEDDING];
-        let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
 
-        let blocks: [&[f32]; 16] = [
+        let blocks: [&[f32]; 13] = [
             &activations,
-            &inverse_dim,
             &epsilon,
-            &ones,
             &wq,
             &wk,
             &wv,
@@ -2459,7 +2489,6 @@ shape = ["seq"]
             &sin,
             &attn_norm_weight,
             &ffn_norm_weight,
-            &group_ones,
         ];
 
         let ffn_out = spec
@@ -2523,9 +2552,7 @@ shape = ["seq"]
         crate::shape::infer(&program, &symbols).expect("the small layer infers");
 
         let activations = random_vec(101, SEQUENCE * EMBEDDING);
-        let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
         let epsilon = alloc::vec![1e-5f32; SEQUENCE];
-        let ones = alloc::vec![1.0f32; SEQUENCE];
         let wq = random_vec(102, EMBEDDING * QUERY_HEADS * HEAD_DIM);
         let wk = random_vec(103, EMBEDDING * KV_HEADS * HEAD_DIM);
         let wv = random_vec(104, EMBEDDING * KV_HEADS * HEAD_DIM);
@@ -2535,13 +2562,10 @@ shape = ["seq"]
         let w_down = random_vec(108, FEED_FORWARD * EMBEDDING);
         let cos = random_vec(109, SEQUENCE * PAIRS);
         let sin = random_vec(110, SEQUENCE * PAIRS);
-        let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
 
-        let blocks: [&[f32]; 14] = [
+        let blocks: [&[f32]; 11] = [
             &activations,
-            &inverse_dim,
             &epsilon,
-            &ones,
             &wq,
             &wk,
             &wv,
@@ -2551,7 +2575,6 @@ shape = ["seq"]
             &w_down,
             &cos,
             &sin,
-            &group_ones,
         ];
 
         let probabilities = spec
@@ -2626,6 +2649,80 @@ shape = ["seq"]
     /// enough to run unignored even at the model's real context length,
     /// matching `a_mistral_layer_written_as_toml_infers_at_its_real_dimensions`
     /// above for one layer.
+    /// The contract the [`Op::Constant`] variant exists to hold: a literal
+    /// is a node, so the only names crossing the binding surface are data
+    /// (`ids`), model weights, position tables (`rope_cos`/`rope_sin`), and
+    /// the one piece of model metadata this function's `u32` parameters do
+    /// not carry (`eps`). `inv_dim`, `ones` and `group_ones` were bound
+    /// `Input`s that `proxima-model-interop`'s `bind.rs` filled with a
+    /// repeated scalar on every call; each was a name two files had to agree
+    /// on forever, which is the drift class this asserts is gone.
+    #[test]
+    fn no_repeated_scalar_crosses_the_binding_surface() {
+        let program = mistral_forward_program(128, 64, 172, 8, 4, 16, 2)
+            .expect("the forward pass lowers to a program");
+
+        let bound: Vec<&str> = program
+            .iter()
+            .filter_map(|expr| match expr {
+                Op::Input { .. } => expr.name(),
+                _ => None,
+            })
+            .collect();
+
+        for collapsed in ["inv_dim", "ones", "group_ones", "inv_sqrt_head_dim", "neg_infinity"] {
+            assert!(
+                !bound.contains(&collapsed),
+                "{collapsed} is a literal and must be an Op::Constant, not a bound Input; \
+                 bound names are {bound:?}"
+            );
+        }
+
+        assert!(bound.contains(&"eps"), "eps is model metadata, still bound");
+        assert!(bound.contains(&"ids"), "ids is per-call data, still bound");
+        assert!(bound.contains(&"rope_cos"), "rope_cos varies with position, still bound");
+    }
+
+    /// `op = "constant"` is the TOML face of [`Op::Constant`], and
+    /// `shape = []` is the rank-0 spelling every scalar literal uses.
+    #[test]
+    fn a_constant_node_reads_from_toml_with_its_literal_and_shape() {
+        const TOML: &str = r#"
+[[node]]
+op = "constant"
+id = "eps"
+dtype = "float32"
+shape = []
+value = 1e-5
+
+[[node]]
+op = "constant"
+id = "group_ones"
+dtype = "float32"
+shape = [4, 2]
+value = 1.0
+"#;
+        let spec: ProgramSpec = toml::from_str(TOML).expect("constant nodes parse");
+        let program = Vec::<Op>::try_from(&spec).expect("constant nodes lower");
+
+        assert_eq!(
+            program[0],
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 1e-5,
+            }
+        );
+        assert_eq!(
+            program[1],
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4), Extent::Static(2)],
+                value: 1.0,
+            }
+        );
+    }
+
     #[test]
     fn the_whole_mistral_forward_pass_infers_at_real_dimensions() {
         const REAL_CONTEXT: u64 = 8192;
@@ -2687,21 +2784,19 @@ shape = ["seq"]
         crate::shape::infer(&program, &symbols).expect("the whole forward pass infers");
 
         // block order mirrors `mistral_forward_program`'s own `Input`
-        // emission order exactly: ids, table, inv_dim/eps/ones, cos/sin,
-        // group_ones, then each layer's attn_norm_weight/ffn_norm_weight/
-        // wq/wk/wv/wo/w_gate/w_up/w_down, then the lm head.
-        // `inv_sqrt_head_dim` is graph-derived (`inv_sqrt_head_dim_constant`),
-        // not a bound `Input`, so it has no block here. `block_node_ids`
-        // (cpu.rs) reads `Input`s positionally, which is why this order is
-        // load-bearing, not cosmetic.
+        // emission order exactly: ids, table, eps, cos/sin, then each
+        // layer's attn_norm_weight/ffn_norm_weight/wq/wk/wv/wo/w_gate/
+        // w_up/w_down, then the lm head. `inv_dim`, `ones`, `group_ones`,
+        // `inv_sqrt_head_dim` and `neg_infinity` are `Op::Constant` now, so
+        // none of them has a block here — that collapse is what
+        // `no_repeated_scalar_crosses_the_binding_surface` asserts.
+        // `block_node_ids` (cpu.rs) reads `Input`s positionally, which is
+        // why this order is load-bearing, not cosmetic.
         let ids: Vec<f32> = (0..SEQUENCE).map(|position| (position % VOCAB) as f32).collect();
         let table = random_vec(200, VOCAB * EMBEDDING);
-        let inverse_dim = alloc::vec![1.0 / EMBEDDING as f32; SEQUENCE];
         let epsilon = alloc::vec![1e-5f32; SEQUENCE];
-        let ones = alloc::vec![1.0f32; SEQUENCE];
         let cos = random_vec(201, SEQUENCE * PAIRS);
         let sin = random_vec(202, SEQUENCE * PAIRS);
-        let group_ones = alloc::vec![1.0f32; KV_HEADS * GROUP];
 
         let mut owned: Vec<Vec<f32>> = Vec::new();
         let mut seed = 300u64;
@@ -2728,12 +2823,9 @@ shape = ["seq"]
         let mut blocks: Vec<&[f32]> = alloc::vec![
             ids.as_slice(),
             table.as_slice(),
-            inverse_dim.as_slice(),
             epsilon.as_slice(),
-            ones.as_slice(),
             cos.as_slice(),
             sin.as_slice(),
-            group_ones.as_slice(),
         ];
         for layer_weights in &owned {
             blocks.push(layer_weights.as_slice());
