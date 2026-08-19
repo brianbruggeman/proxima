@@ -596,6 +596,46 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit()).collect()
 }
 
+/// `next_unit` scaled into `[0.98, 1.02)` — a repeated `Multiply` reduce over
+/// raw `[-1, 1)` values collapses toward `0.0` within a few dozen terms
+/// (magnitude < 1 shrinks every step), which would make a broken lane
+/// combination and a correct one equally indistinguishable at `1e-6`. Values
+/// near `1.0` keep the running product away from both underflow and
+/// overflow across a contraction long enough to span multiple SIMD lanes.
+fn random_vec_near_one(seed: u64, count: usize) -> Vec<f32> {
+    let mut lcg = Lcg(seed);
+    (0..count).map(|_| 1.0 + lcg.next_unit() * 0.02).collect()
+}
+
+/// One `Reduce` over the last axis of a `(rows, cols)` input, output
+/// `(rows,)` — the minimal program shape to drive `body`/`init` straight at
+/// `crate::msl::render_reduce` without an elementwise fusion in the way.
+fn axis_reduce_program(rows: u32, cols: u32, body: ScalarOp, init: ReduceInit) -> Vec<Op> {
+    let mut program = Vec::new();
+    let input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(rows), Extent::Static(cols)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body,
+            init,
+            operand: input,
+            in_map: IndexMap::Affine(projection(2, &[0, 1])),
+            out_map: IndexMap::Affine(projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    program
+}
+
 /// Inputs are LCG-derived rather than uniform constants: uniform q/k/v rows
 /// make every attention score identical, so the softmax collapses to a
 /// uniform `1/SEQUENCE` and the Metal-vs-CPU comparison stays symmetric
@@ -928,4 +968,179 @@ fn block_size_mismatch_produces_the_same_tensor_error_as_cpu() {
         MetalError::Tensor(tensor_error) => assert_eq!(tensor_error, cpu_error),
         other => panic!("expected MetalError::Tensor, got {other:?}"),
     }
+}
+
+/// `k = 97` is prime and well past `SIMD_WIDTH` (32): every one of the 32
+/// lanes a cooperative reduce dispatches gets a real, uneven share of the
+/// contraction (97 = 3*32 + 1), and the tail lane (lane 0 alone gets a 4th
+/// element) is exactly the boundary a naive `reduction_total / SIMD_WIDTH`
+/// assumption would get wrong. Varied LCG inputs (not the constant/sequential
+/// data `matmul_parity_is_exact_for_integer_valued_inputs` uses) so a broken
+/// lane combination cannot hide behind every lane holding the same value.
+#[test]
+fn matmul_parity_holds_over_a_contraction_spanning_multiple_simd_lanes() {
+    let (m, k, n) = (5usize, 97usize, 6usize);
+    let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
+    let lhs = random_vec(0x5eed_5eed_5eed_5eed, m * k);
+    let rhs = random_vec(0x1234_5678_9abc_def0, k * n);
+
+    let cpu = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("cpu matmul evaluates");
+    let metal = omega::execute(&program, &[], &[&lhs, &rhs], &[])
+        .expect("metal matmul executes on a real device");
+
+    // observed worst-case diff on this host: 7.629395e-6 (k=97 lanes
+    // reassociated) — a real, expected float-reassociation cost, not a
+    // shared-epsilon change. Widened to 1e-5 for this call site only.
+    assert_parity_within("matmul_wide_k", cpu.root(), metal.root(), 1e-5);
+}
+
+/// `Maximum`/`Minimum` and `Multiply` reduces, isolated from any fused
+/// elementwise body, over the same `cols = 97` multi-lane contraction —
+/// `matmul_parity_holds_over_a_contraction_spanning_multiple_simd_lanes`
+/// only exercises `Add` (via `simd_sum`); this covers the other three
+/// cooperative bodies (`simd_max`, `simd_min`, `simd_product`) directly.
+#[test]
+fn axis_reduce_parity_holds_for_every_cooperative_reduce_body() {
+    let (rows, cols) = (4u32, 97u32);
+    let data = random_vec(0x9e37_79b9_7f4a_7c15, (rows * cols) as usize);
+    let data_near_one = random_vec_near_one(0xbf58_476d_1ce4_e5b9, (rows * cols) as usize);
+
+    let cases = [
+        ("axis_max", ScalarOp::Maximum, ReduceInit::NegativeInfinity, &data),
+        ("axis_min", ScalarOp::Minimum, ReduceInit::PositiveInfinity, &data),
+        ("axis_multiply", ScalarOp::Multiply, ReduceInit::One, &data_near_one),
+    ];
+
+    for (case, body, init, input) in cases {
+        let program = axis_reduce_program(rows, cols, body, init);
+        let cpu = evaluate(&program, &[], &[input], &[]).unwrap_or_else(|error| {
+            panic!("{case}: cpu axis reduce evaluates: {error}");
+        });
+        let metal = omega::execute(&program, &[], &[input], &[]).unwrap_or_else(|error| {
+            panic!("{case}: metal axis reduce executes on a real device: {error}");
+        });
+        assert_parity(case, cpu.root(), metal.root());
+    }
+}
+
+/// Same shape [`matmul_program`] builds, parameterized over `dtype` instead
+/// of hardcoding `Float32` — the f16 parity gate below builds the identical
+/// structure twice, once per dtype, so a divergence in the comparison can
+/// only be the dtype itself, never an accidental shape mismatch between two
+/// independently-hand-written programs.
+fn matmul_program_with_dtype(m: u32, k: u32, n: u32, dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype,
+            shape: vec![Extent::Static(k), Extent::Static(n)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("matmul_f16".into()),
+        }),
+    );
+    (program, sum)
+}
+
+/// The GPU-vs-CPU parity gate for real f16 execution: an f16-tagged program
+/// dispatches through `omega::execute` (`msl.rs` emits `half` buffers and
+/// `metal.rs` marshals f32 host data down to `half::f16` at upload and back
+/// up at read-back — see `metal.rs`'s dtype doc), compared against the
+/// identically-shaped f32-tagged program run through `cpu::evaluate`, the
+/// f32 reference oracle. `m`, `k`, `n` are pairwise coprime and none is a
+/// power of two, so a row/column swap or a transposed stride would not
+/// accidentally produce the right element count at the right shape.
+///
+/// f16 carries 10 explicit mantissa bits (11 with the implicit leading
+/// one) versus f32's 23, so relative error is the only fair comparison —
+/// an absolute epsilon that works for one magnitude of input is meaningless
+/// at another. `EPSILON` below is set from a measured run, not a round
+/// number: with `Lcg` seeds 11/12 over `m=17, k=23, n=13` (221 output
+/// elements, each a 23-term dot product), the worst observed relative
+/// error printed by this test was `1.6379411e-3`, consistent with f16's
+/// ~2^-11 (4.9e-4) per-rounding unit compounding over a 23-deep
+/// accumulation chain. `EPSILON` is set to 5e-3, roughly 3x that measured
+/// worst case, to absorb run-to-run rounding-mode variance (a different
+/// `Lcg` seed shifts which dot products land near a rounding boundary)
+/// without the gate flaking on a re-run.
+#[test]
+fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
+    const EPSILON: f32 = 5e-3;
+
+    let (m, k, n) = (17usize, 23usize, 13usize);
+    let (f32_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::Float32);
+    let (f16_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::Float16);
+
+    let lhs = random_vec(11, m * k);
+    let rhs = random_vec(12, k * n);
+
+    let cpu =
+        evaluate(&f32_program, &[], &[&lhs, &rhs], &[]).expect("f32 cpu oracle matmul evaluates");
+    let metal = omega::execute(&f16_program, &[], &[&lhs, &rhs], &[])
+        .expect("f16 metal matmul executes on a real device");
+
+    assert!(
+        !cpu.root().is_empty(),
+        "cpu oracle produced zero elements, a 0-length comparison proves nothing"
+    );
+    assert_eq!(
+        cpu.root().len(),
+        m * n,
+        "unexpected element count from the cpu oracle"
+    );
+    assert_eq!(
+        cpu.root().len(),
+        metal.root().len(),
+        "element count mismatch (cpu={}, metal={})",
+        cpu.root().len(),
+        metal.root().len()
+    );
+
+    let mut worst_relative = 0.0f32;
+    for (reference, observed) in cpu.root().iter().zip(metal.root().iter()) {
+        let denominator = reference.abs().max(1e-6);
+        let relative = (reference - observed).abs() / denominator;
+        worst_relative = worst_relative.max(relative);
+    }
+    println!(
+        "matmul_f16: {} elements compared, worst relative error = {worst_relative:e} \
+         (epsilon = {EPSILON:e})",
+        cpu.root().len()
+    );
+    assert!(
+        worst_relative <= EPSILON,
+        "f16 matmul worst relative error {worst_relative} exceeds the f16 epsilon {EPSILON}"
+    );
 }

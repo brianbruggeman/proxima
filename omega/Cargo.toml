@@ -28,6 +28,7 @@ metal = [
     "dep:objc2",
     "dep:objc2-metal",
     "dep:objc2-foundation",
+    "dep:half",
     "proxima-tensor/std",
 ]
 
@@ -69,6 +70,16 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSError",
     "NSObject",
 ], optional = true }
+# half: real IEEE-754 binary16 <-> f32 conversion (round-to-nearest-even,
+# subnormal-correct) for `upload_block`/`read_back`'s device-buffer
+# marshalling — the arithmetic hand-rolling a bit-twiddled version of this
+# gets wrong at the edges (subnormals, rounding ties) is exactly what a
+# narrow, already-in-the-workspace-transitive-graph (via ciborium) crate is
+# for. `default-features = false`: only the no_std-safe `f16`/`bf16` scalar
+# types, no `std`/`alloc`/serde machinery this driver never touches. Lives in
+# this macOS-only section because `src/metal.rs`, its only caller, is itself
+# `target_os = "macos"`-gated.
+half = { version = "2.7.1", default-features = false, optional = true }
 
 [lints]
 workspace = true

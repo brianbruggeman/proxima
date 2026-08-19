@@ -45,18 +45,27 @@
 //!
 //! # dtype
 //!
-//! `BoundOp` carries no dtype at all (see [`proxima_tensor::bind`]'s
-//! documentation) — by the time a program reaches a `BoundOp` it has already
-//! passed `cpu::reject_non_float32` upstream in every path this crate is
-//! meant to consume, so every kernel here is generated in `float`
-//! unconditionally, matching `cpu.rs`'s own f32-only v1 stance.
+//! `BoundOp` carries its own element type ([`proxima_tensor::BoundOp::dtype`],
+//! read straight from the [`proxima_tensor::Op`] it was built from). Every
+//! buffer/scratch/accumulator declaration this module renders is spelled
+//! from [`type_token`] rather than hardcoding `float`, so a `Float16` node
+//! emits a kernel of `half` declarations while a `Float32` node emits the
+//! same `float` kernel this module always has. The *op logic* — which
+//! `ScalarOp` token, which reduction init, how a body's steps chain — never
+//! consults dtype at all: [`op_token`], [`scalar_op_expr`], [`init_token`],
+//! [`fold_init_tokens`] stay total over their enums exactly as before, and
+//! only the declaration spelling varies. `cpu.rs`'s own evaluator remains
+//! f32-only (`cpu::reject_non_float32`) — it is the reference oracle, not
+//! this crate's dtype ceiling. `omega::execute` runs its own, narrower
+//! upstream gate (`Float32` or `Float16` only) before a `BoundOp` ever
+//! reaches [`emit`].
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
 };
 
 use crate::error::EmitError;
@@ -102,6 +111,13 @@ pub enum Binding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridSpec {
     pub threads: u64,
+    /// `Some(SIMD_WIDTH)` for a cooperative reduce (see [`reduce_is_cooperative`]):
+    /// the driver must dispatch threadgroups exactly this wide so every
+    /// SIMD-group boundary lands on an output-element boundary (`gid / SIMD_WIDTH`
+    /// is only a valid output index under that alignment — see
+    /// `push_cooperative_reduce_body`'s doc). `None` for every other kernel,
+    /// which keeps the occupancy-driven width the driver already picks.
+    pub threadgroup_width: Option<u64>,
 }
 
 /// Emits an MSL kernel from a bound [`BoundOp`] — the GPU-emission half of
@@ -161,8 +177,76 @@ pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
         bindings: bindings(resolved),
         grid: GridSpec {
             threads: grid_threads(resolved),
+            threadgroup_width: reduce_is_cooperative(resolved).then_some(SIMD_WIDTH),
         },
     })
+}
+
+/// Every lane of one Apple GPU SIMD-group — fixed at 32 on every Apple
+/// Silicon/A-series GPU family this crate targets. Not read from the device
+/// at emit time: emission has no device handle, only the `BoundOp`'s
+/// structure, so the width has to be a compile-time fact the driver's
+/// dispatch (`crate::metal::dispatch`) is built to honor unconditionally.
+const SIMD_WIDTH: u64 = 32;
+
+/// Whether `resolved` is a `Keep::Reduce` fold whose `reduce_op` is
+/// associative and commutative (`Add`, `Multiply`, `Maximum`, `Minimum`) with
+/// no gathered operand — the set [`render_reduce`] emits a SIMD-group
+/// cooperative loop for instead of the one-thread-per-output serial fold.
+/// `Subtract`/`Divide` are not associative, so reordering their combination
+/// across lanes is not imprecise, it is wrong — they and every other
+/// `ScalarOp` stay on the serial path. Gather is excluded too: cooperative
+/// striding would need each lane recording its own fault-slot contribution,
+/// which this pass does not implement — default to serial when unsure.
+fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
+    match &resolved.kind {
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            reduce_op,
+            ..
+        } => gather_count(resolved) == 0 && is_cooperative_reduce_op(*reduce_op),
+        _ => false,
+    }
+}
+
+fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
+    matches!(
+        op,
+        ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum
+    )
+}
+
+/// The MSL SIMD-group reduction builtin that combines one lane's private
+/// accumulator across the whole 32-lane group — only called for a
+/// [`is_cooperative_reduce_op`] body, so the wildcard arm is unreachable in
+/// practice, not a silent default.
+fn simd_combine_fn(op: ScalarOp) -> &'static str {
+    match op {
+        ScalarOp::Add => "simd_sum",
+        ScalarOp::Multiply => "simd_product",
+        ScalarOp::Maximum => "simd_max",
+        ScalarOp::Minimum => "simd_min",
+        _ => unreachable!("simd_combine_fn is only called for a cooperative reduce_op"),
+    }
+}
+
+/// The algebraic identity `op` folds against without changing a value: `e op
+/// x == x` for every `x`. Every SIMD lane but lane 0 seeds its private
+/// accumulator with this (never with the `BoundOp`'s own `ReduceInit`, which
+/// may be `FirstElement` or otherwise mismatched with `op`) — folding that
+/// untouched identity into the final `simd_*` combine can never perturb the
+/// result, because `e op e == e` holds for any identity by definition. Lane
+/// 0 alone carries the real seed, so it is folded into the group exactly
+/// once, matching `cpu::run_reduce`'s single-seed semantics regardless of
+/// how many idle lanes there are.
+fn cooperative_identity_token(op: ScalarOp) -> &'static str {
+    match op {
+        ScalarOp::Add => "0.0f",
+        ScalarOp::Multiply => "1.0f",
+        ScalarOp::Maximum => "-INFINITY",
+        ScalarOp::Minimum => "INFINITY",
+        _ => unreachable!("cooperative_identity_token is only called for a cooperative reduce_op"),
+    }
 }
 
 /// Structural checks over a (possibly fused) [`ComposedBody`]: every step's
@@ -272,10 +356,19 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             keep: Keep::Reduce,
             output_axes,
             ..
-        } => output_axes
-            .iter()
-            .map(|dim| resolved.extents[*dim as usize])
-            .product(),
+        } => {
+            let output_total: u64 = output_axes
+                .iter()
+                .map(|dim| resolved.extents[*dim as usize])
+                .product();
+            if reduce_is_cooperative(resolved) {
+                // one SIMD-group (SIMD_WIDTH lanes) per output element, not
+                // one thread — see `reduce_is_cooperative`'s doc.
+                output_total * SIMD_WIDTH
+            } else {
+                output_total
+            }
+        }
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => {
@@ -320,6 +413,28 @@ fn keep_token(keep: Keep) -> &'static str {
     match keep {
         Keep::Reduce => "reduce",
         Keep::Scan => "scan",
+    }
+}
+
+/// The MSL scalar type a `BoundOp`'s own dtype declares its buffers,
+/// scratch array, and accumulator as. `Float16` is the one narrower type
+/// this backend emits (`half`, MSL's IEEE-754 binary16) — every other
+/// dtype keeps emitting `float`, matching this module's stance before
+/// `BoundOp` carried a dtype at all. `omega::execute`'s upstream gate is
+/// what keeps anything other than `Float32`/`Float16` from ever reaching
+/// [`emit`], so those are the only two cases that matter in practice, but
+/// the match stays total over every [`DType`] variant rather than assuming
+/// that gate ran.
+fn type_token(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Float16 => "half",
+        DType::Float32
+        | DType::BFloat16
+        | DType::Bool
+        | DType::Int8
+        | DType::UInt8
+        | DType::Int32
+        | DType::UInt32 => "float",
     }
 }
 
@@ -444,7 +559,12 @@ fn fold_init_tokens(init: ReduceInit) -> (&'static str, &'static str) {
 /// step), which a caller splices directly into whatever it does with the
 /// value (`out[gid] = ...` for elementwise, `float value = ...` for a
 /// reduce/scan step).
-fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str) -> String {
+fn push_body_steps(
+    source: &mut String,
+    body: &ComposedBody,
+    indent: &str,
+    element_type: &str,
+) -> String {
     for (index, step) in body.steps.iter().enumerate() {
         let args: Vec<String> = step
             .args
@@ -456,26 +576,36 @@ fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str) -> St
             .collect();
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let expr = scalar_op_expr(step.op, &arg_refs);
-        source.push_str(&format!("{indent}float step{index} = {expr};\n"));
+        source.push_str(&format!("{indent}{element_type} step{index} = {expr};\n"));
     }
     format!("step{}", body.steps.len().saturating_sub(1))
 }
 
-fn kernel_signature(source: &mut String, operand_count: usize, gather_count: usize, entry: &str) {
+fn kernel_signature(
+    source: &mut String,
+    operand_count: usize,
+    gather_count: usize,
+    entry: &str,
+    element_type: &str,
+) {
     source.push_str(&format!("kernel void {entry}(\n"));
     for index in 0..operand_count {
         source.push_str(&format!(
-            "    device const float* in{index} [[buffer({index})]],\n"
+            "    device const {element_type}* in{index} [[buffer({index})]],\n"
         ));
     }
     for slot in 0..gather_count {
+        // a gather's fetched index is always carried as an exact-integer
+        // `float`, independent of the op's own element type — see this
+        // crate's doc for `gather_idx` and `cpu::reject_non_float32`'s own
+        // note on indices being the one deliberate non-dtype exception.
         source.push_str(&format!(
             "    device const float* gather_idx{slot} [[buffer({})]],\n",
             operand_count + slot
         ));
     }
     source.push_str(&format!(
-        "    device float* out [[buffer({})]],\n",
+        "    device {element_type}* out [[buffer({})]],\n",
         operand_count + gather_count
     ));
     source.push_str(&format!(
@@ -587,6 +717,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
     let operand_count = resolved.operands().len();
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
+    let element_type = type_token(resolved.dtype);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -601,7 +732,13 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, operand_count, gather_count, entry);
+    kernel_signature(
+        &mut source,
+        operand_count,
+        gather_count,
+        entry,
+        element_type,
+    );
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -633,12 +770,15 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> String {
         }
     }
 
-    source.push_str(&format!("    float scratch[{}];\n", operand_count.max(1)));
+    source.push_str(&format!(
+        "    {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for index in 0..operand_count {
         source.push_str(&format!("    scratch[{index}] = in{index}[off{index}];\n"));
     }
 
-    let result = push_body_steps(&mut source, resolved.element_body(), "    ");
+    let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
     source.push_str(&format!("    out[gid] = {result};\n"));
     source.push_str("}\n");
     source
@@ -664,6 +804,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
     let reduce_rank_len = reduce_rank.max(1);
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
+    let element_type = type_token(resolved.dtype);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -682,7 +823,66 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, operand_count, gather_count, entry);
+    kernel_signature(
+        &mut source,
+        operand_count,
+        gather_count,
+        entry,
+        element_type,
+    );
+
+    if reduce_is_cooperative(resolved) {
+        push_cooperative_reduce_body(
+            &mut source,
+            resolved,
+            *reduce_op,
+            *init,
+            output_axes,
+            &reduce_dims,
+            rank,
+            element_type,
+        );
+    } else {
+        push_serial_reduce_body(
+            &mut source,
+            resolved,
+            *reduce_op,
+            *init,
+            output_axes,
+            &reduce_dims,
+            rank,
+            rank_len,
+            output_rank,
+            output_rank_len,
+            reduce_rank,
+            reduce_rank_len,
+            operand_count,
+            &gather_slots,
+            element_type,
+        );
+    }
+    source.push_str("}\n");
+    source
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_serial_reduce_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    reduce_dims: &[u16],
+    rank: usize,
+    rank_len: usize,
+    output_rank: usize,
+    output_rank_len: usize,
+    reduce_rank: usize,
+    reduce_rank_len: usize,
+    operand_count: usize,
+    gather_slots: &[Option<usize>],
+    element_type: &str,
+) {
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
@@ -704,8 +904,8 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
         }
     }
 
-    let (init_expr, seeded_init) = fold_init_tokens(*init);
-    source.push_str(&format!("    float accumulator = {init_expr};\n"));
+    let (init_expr, seeded_init) = fold_init_tokens(init);
+    source.push_str(&format!("    {element_type} accumulator = {init_expr};\n"));
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
     source.push_str("    for (long r = 0; r < u.reduction_total; r++) {\n");
@@ -738,7 +938,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
         }
         if let Some(slot) = gather_slot {
             push_gather_fetch(
-                &mut source,
+                source,
                 index,
                 *slot,
                 rank,
@@ -748,7 +948,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
         }
     }
     source.push_str(&format!(
-        "        float scratch[{}];\n",
+        "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
     for index in 0..operand_count {
@@ -756,9 +956,9 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
             "        scratch[{index}] = in{index}[off{index}];\n"
         ));
     }
-    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ");
-    source.push_str(&format!("        float value = {value_expr};\n"));
-    let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
+    let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
+    source.push_str(&format!("        {element_type} value = {value_expr};\n"));
+    let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
         "        accumulator = seeded ? {combine_expr} : value;\n"
     ));
@@ -772,8 +972,136 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> String {
         ));
     }
     source.push_str("    out[out_offset] = accumulator;\n");
-    source.push_str("}\n");
-    source
+}
+
+/// The SIMD-group cooperative fold: `SIMD_WIDTH` lanes split one output
+/// element's contraction axis, each striding through `reduction_total` by
+/// `SIMD_WIDTH` so every element is visited by exactly one lane, then
+/// combine via [`simd_combine_fn`]. Only lane 0 writes the result, and only
+/// lane 0 seeds from the `BoundOp`'s real `ReduceInit` — every other lane
+/// seeds from [`cooperative_identity_token`] so the true seed is folded into
+/// the group exactly once (see that function's doc). `gid / SIMD_WIDTH` is a
+/// valid output index, and `gid % SIMD_WIDTH` a valid lane-within-group
+/// index, only because [`GridSpec::threadgroup_width`] pins the dispatched
+/// threadgroup width to exactly `SIMD_WIDTH` — see `crate::metal::dispatch`.
+/// Gather is out of scope here: [`reduce_is_cooperative`] never selects this
+/// path when the op gathers, so operand offsets are read straight off
+/// `operand_base`/`operand_strides` with no fetch/fault machinery.
+#[allow(clippy::too_many_arguments)]
+fn push_cooperative_reduce_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    reduce_dims: &[u16],
+    rank: usize,
+    element_type: &str,
+) {
+    let rank_len = rank.max(1);
+    let output_rank = output_axes.len();
+    let output_rank_len = output_rank.max(1);
+    let reduce_rank = reduce_dims.len();
+    let reduce_rank_len = reduce_rank.max(1);
+    let operand_count = resolved.operands().len();
+
+    source.push_str(&format!("    long output_index = (long)gid / {SIMD_WIDTH};\n"));
+    source.push_str("    if (output_index >= u.output_total) { return; }\n");
+    source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+
+    source.push_str(&format!("    long full_coord[{rank_len}];\n"));
+    for dim in 0..rank {
+        source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
+    }
+
+    if output_rank > 0 {
+        source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
+        source.push_str("    long remaining = output_index;\n");
+        for index in (0..output_rank).rev() {
+            source.push_str(&format!(
+                "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
+                 remaining /= u.output_extents[{index}];\n"
+            ));
+        }
+        for (index, dim) in output_axes.iter().enumerate() {
+            source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
+        }
+    }
+
+    let (init_expr, seeded_init) = fold_init_tokens(init);
+    let identity = cooperative_identity_token(reduce_op);
+    source.push_str(&format!("    {element_type} accumulator;\n"));
+    source.push_str("    bool seeded;\n");
+    source.push_str("    if (lane == 0u) {\n");
+    source.push_str(&format!("        accumulator = {init_expr};\n"));
+    source.push_str(&format!("        seeded = {seeded_init};\n"));
+    source.push_str("    } else {\n");
+    source.push_str(&format!("        accumulator = {identity};\n"));
+    source.push_str("        seeded = true;\n");
+    source.push_str("    }\n");
+
+    source.push_str(&format!(
+        "    for (long r = (long)lane; r < u.reduction_total; r += {SIMD_WIDTH}) {{\n"
+    ));
+    if reduce_rank > 0 {
+        source.push_str(&format!(
+            "        long reduction_coord[{reduce_rank_len}];\n"
+        ));
+        source.push_str("        long remaining_r = r;\n");
+        for index in (0..reduce_rank).rev() {
+            source.push_str(&format!(
+                "        reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
+                 remaining_r /= u.reduction_extents[{index}];\n"
+            ));
+        }
+        for (index, dim) in reduce_dims.iter().enumerate() {
+            source.push_str(&format!(
+                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
+        }
+    }
+
+    for index in 0..operand_count {
+        source.push_str(&format!(
+            "        long off{index} = u.operand_base[{index}];\n"
+        ));
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+    }
+    source.push_str(&format!(
+        "        {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
+    for index in 0..operand_count {
+        source.push_str(&format!(
+            "        scratch[{index}] = in{index}[off{index}];\n"
+        ));
+    }
+    let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
+    source.push_str(&format!("        {element_type} value = {value_expr};\n"));
+    let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+    source.push_str(&format!(
+        "        accumulator = seeded ? {combine_expr} : value;\n"
+    ));
+    source.push_str("        seeded = true;\n");
+    source.push_str("    }\n");
+
+    let combine_fn = simd_combine_fn(reduce_op);
+    source.push_str(&format!(
+        "    {element_type} reduced = {combine_fn}(accumulator);\n"
+    ));
+    source.push_str("    if (lane == 0u) {\n");
+    source.push_str("        long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    source.push_str("        out[out_offset] = reduced;\n");
+    source.push_str("    }\n");
 }
 
 fn render_scan(resolved: &BoundOp, entry: &str) -> String {
@@ -791,6 +1119,7 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
     let operand_count = resolved.operands().len();
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
+    let element_type = type_token(resolved.dtype);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -808,7 +1137,13 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, operand_count, gather_count, entry);
+    kernel_signature(
+        &mut source,
+        operand_count,
+        gather_count,
+        entry,
+        element_type,
+    );
     source.push_str("    if ((long)gid >= u.outer_total) { return; }\n");
 
     if outer_rank > 0 {
@@ -850,12 +1185,12 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
     }
 
     let (init_expr, seeded_init) = fold_init_tokens(*init);
-    source.push_str(&format!("    float accumulator = {init_expr};\n"));
+    source.push_str(&format!("    {element_type} accumulator = {init_expr};\n"));
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
     source.push_str("    for (long step = 0; step < u.inner_len; step++) {\n");
     source.push_str(&format!(
-        "        float scratch[{}];\n",
+        "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
     for (index, gather_slot) in gather_slots.iter().enumerate() {
@@ -890,8 +1225,13 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> String {
             "        running{index} += u.operand_strides[{index}][{last_dim}];\n"
         ));
     }
-    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ");
-    source.push_str(&format!("        float value = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        &mut source,
+        resolved.element_body(),
+        "        ",
+        element_type,
+    );
+    source.push_str(&format!("        {element_type} value = {value_expr};\n"));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
         "        accumulator = seeded ? {combine_expr} : value;\n"
@@ -1204,7 +1544,20 @@ mod tests {
         assert!(kernel.source.contains("reduction_total"));
         assert!(kernel.source.contains("(scratch[0] * scratch[1])"));
         assert!(kernel.source.contains("(accumulator + value)"));
-        assert_eq!(kernel.grid.threads, 4 * 5, "one thread per (row, col)");
+        assert!(
+            kernel.source.contains("simd_sum(accumulator)"),
+            "an Add-reduce body must take the cooperative SIMD-group path"
+        );
+        assert_eq!(
+            kernel.grid.threads,
+            4 * 5 * 32,
+            "one SIMD-group (32 lanes) per (row, col), not one thread"
+        );
+        assert_eq!(
+            kernel.grid.threadgroup_width,
+            Some(32),
+            "the driver must dispatch exactly one SIMD-group per threadgroup"
+        );
     }
 
     #[test]
