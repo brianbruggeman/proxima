@@ -3667,3 +3667,115 @@ it, rather than a blanket `allow(dead_code)`. `gemm_tile_neon` and
 
 **Only found because we finally built on a second architecture.** One host
 cannot detect a cfg error that a second host makes immediate.
+
+## ROW 60 — q4_k dot: independent accumulators, 5.7x measured (prediction was 3.2x, LOW)
+
+A root-cause pass decomposed the 48-55x q4_K deficit vs ggml into two
+multiplicative factors, both DERIVED from assembly/ISA reading, neither
+measured in isolation: (a) 16x scalar-fmadd-vs-`vdotq_s32` SIMD width, (b)
+3.2x one-accumulator-serial-chain vs ggml's four independent partial sums.
+This row isolates (b) alone.
+
+`dot_q4k_f32` (`cpu.rs:3804`) ran one scalar `mul_add` per weight/activation
+pair, threaded through a single `acc` across the whole 256-wide block —
+the serial FMA chain `dot_fold_fused_multiply_add`'s own doc comment
+already names as LLVM-unwidenable. Changed ONLY the accumulator shape:
+each block now folds through the file's existing `dot_fold_fused_multiply_add`
+(`DOT_LANES=8` independent partial sums, the same primitive
+`reduce_dot_binary` already uses for every f32 GEMM contraction, ROW 12) —
+reuse, not a hand-rolled second implementation. `Q4K_BLOCK_ELEMENTS` (256)
+is a whole multiple of `DOT_LANES` (8), so every block folds with zero
+remainder; no new constant, no new type.
+
+**Correctness (MEASURED):** `bench_q4k_matmul`'s own inline
+`assert!(diff < 0.5)` against ggml's `ggml_mul_mat` on the same packed
+Q4_K bytes from the real `openchat-3.5-1210.Q4_K_S.gguf`, ran on every one
+of 3 shapes x 4 runs (12 checks), all passed, exit 0. Diff magnitude
+unchanged by the reassociation (e.g. attn_q: `2.738297e-3` before vs
+`2.738595e-3` after — last-ULP drift from reassociating the sum, expected
+and within the pre-existing 0.5 tolerance this bench already uses for
+Q4_K's own lossy codec).
+
+**Bench: `proxima-tensor/benches/bench_q4k_matmul.rs`, release, single
+thread (`_t1` arm), `sample_size(30)`, `measurement_time(5s)`.**
+
+| shape (macs/call) | before ns/mac (3 runs) | CoV | after ns/mac (3 runs) | CoV | speedup |
+|---|---|---|---|---|---|
+| attn_q 4096x4096 (16,777,216) | 1.3175 / 1.3103 / — (n=2) | 0.27% | 0.2307 / 0.2317 / 0.2333 | 0.47% | **5.68x** |
+| attn_k 4096x1024 (4,194,304) | 1.3207 / 1.3128 / — (n=2) | 0.30% | 0.2321 / 0.2315 / 0.2322 | 0.15% | **5.68x** |
+| ffn_gate 4096x14336 (58,720,256) | 1.3267 / 1.3117 / — (n=2) | 0.57% | 0.2321 / 0.2316 / 0.2325 | 0.20% | **5.69x** |
+
+Before-run3 timed out (host contention, see loadout below) mid-collection;
+n=2 for the before arm, n=3 for after. All CoV well under the 5% bar.
+
+**Host loadout:** shared Mac host, NOT quiet — `uptime` load average
+ranged 1.25 (start) to 5.60 (during the after-runs), with other local
+tenant processes visible in `ps` throughout alongside this worktree's own
+gate/build/nextest runs. Despite the load, per-shape CoV stayed under 0.6%
+both before and after — the wall-clock bench proved robust to the
+contention, but the load is recorded per the loadout-disclosure rule
+regardless.
+
+**Prediction FAILED — in the good direction.** Predicted ~1.315 -> ~0.41
+ns/mac (3.2x) if factor (b) alone were real. Measured ~1.32 -> ~0.232
+ns/mac, a **5.7x** improvement, not 3.2x. Mechanism, read from the
+disassembled release binary (`objdump --macho -d` on the built bench,
+`matmul_q4k_f32`'s inlined closure): the compiler did NOT keep 8 scalar
+accumulators. It auto-vectorized the `[f32; 8]` lane array into **two**
+`float32x4_t` NEON registers (`v6`, `v7`) and the inner loop is:
+
+```asm
+1000b0d90: add    x12, x21, x11
+1000b0d94: add    x13, x19, x11
+1000b0d98: ldp    q16, q17, [x12]     ; 8 scratch (weight) floats
+1000b0d9c: ldp    q18, q19, [x13]     ; 8 activation floats
+1000b0da0: fmla.4s v6, v19, v17       ; 4 macs, accumulator 1
+1000b0da4: fmla.4s v7, v18, v16       ; 4 macs, accumulator 2
+1000b0da8: add    x11, x11, #0x20
+1000b0dac: cmp    x11, #0x400
+1000b0db0: b.ne   0x1000b0d90
+```
+
+8 macs/iteration via 2 vector `fmla.4s` instead of the original 1
+mac/iteration via 1 scalar `fmadd s8, s0, s1, s8`. The isolated-(b)
+experiment did not isolate (b) — breaking the serial dependency chain
+*also* unlocked LLVM's auto-vectorizer, which packed the now-independent
+lanes into SIMD registers. Factors (a) and (b) are not separable in this
+codepath: the derivation's own premise (scalar fmadd persists, only the
+chain breaks) was falsified by the compiler's actual behavior. The
+combined win (independent chains x this SIMD packing) landed at 5.7x
+rather than the modeled 3.2x, still short of ggml's full 16x (int8
+`vdotq_s32`, which this f32-intermediate path does not attempt).
+
+**Remaining gap to ggml (MEASURED, same `openchat-3.5-1210` shapes,
+`ggml_mul_mat` on identical packed bytes):** before, ours/ggml-t1 =
+22.104ms/414.24us = **53.35x** (matches the task's cited 48-55x). After,
+ours/ggml-t1 = 3.8701ms/414.24us = **9.34x**. Against ggml's 8-thread arm
+(232-244us) — not an apples-to-apples thread count, noted as such — the
+remaining gap is **~16.3x**. The 4.24 cycles/mac the original decomposition
+assumed no longer describes this path; the dominant remaining cost is the
+per-block dequantize-into-`[f32;256]`-scratch step (never eliminated by
+this change) plus the still-f32, still-not-int4-native dot.
+
+**Re-prove:** `CARGO_TARGET_DIR=<scratch> GGML_BUILD_DIR=<a built ggml
+checkout's dir containing build/src/{libggml,libggml-cpu,libggml-base}.a>
+cargo build --release -p proxima-tensor --bench bench_q4k_matmul --features
+ggml-bench`, then run the produced binary with `--bench`; the `ns/mac`
+values are `time / macs/call` printed per shape, and correctness is the
+bench's own inline `assert!(diff < 0.5)`. Disassembly re-derivable via
+`objdump --macho -d` on the same binary, `matmul_q4k_f32`'s inlined
+`ChunksExact::next` closure.
+
+**Gates:** `cargo nextest run -p proxima-tensor` — 293 passed, 0 failed, 2
+skipped. `bash scripts/proxima-tensor-gate.sh` — `passed: 18, failed: 0`.
+GEMM checksums (`busy_per_mac` example, `--features instrument`)
+unchanged: `512 4 1` -> `135.87619`, `1024 4 1` -> `260.24106`, `2048 4 1`
+-> `513.10425` (expected — this path already reused `DOT_LANES=8` via
+`dot_fold_fused_multiply_add`; the q4_k change touches a different
+function entirely, and the checksums confirm no cross-contamination).
+
+**Landed.** `dot_q4k_f32` now calls the file's existing
+`dot_fold_fused_multiply_add`/`DotFold` instead of hand-rolling a serial
+loop — reuse-first (principle 1), no new magic number (principle 12/§15,
+`DOT_LANES` already existed and was already the measured-best value from
+ROW 12).
