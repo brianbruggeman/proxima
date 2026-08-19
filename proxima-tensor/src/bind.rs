@@ -63,6 +63,7 @@ use arrayvec::ArrayVec;
 use proxima_primitives::pipe::Pipe;
 use smallvec::SmallVec;
 
+use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::live;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
@@ -198,6 +199,12 @@ impl ComposedBody {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundOp {
     pub node: NodeId,
+    /// This node's own element type, carried straight from the [`Op`] it
+    /// was built from ([`Op::dtype`]) — an executor spells its buffers and
+    /// scratch declarations from this rather than assuming `f32`, which is
+    /// what lets a GPU backend emit a narrower kernel for a narrower node
+    /// without a second, parallel emitter.
+    pub dtype: DType,
     /// The iteration-space extents this op's loop walks. Equal to the
     /// output shape for an [`BoundOpKind::Elementwise`] or a `Keep::Scan` reduce
     /// (a scan drops no axis); wider than the output shape for a
@@ -374,6 +381,7 @@ impl BoundOp {
 
         BoundOp {
             node: self.node,
+            dtype: self.dtype,
             extents,
             kind,
         }
@@ -432,6 +440,7 @@ fn rebase_layout(layout: &Layout, split_axis: u16, chunk_start: u64) -> Layout {
 }
 
 struct HeldElementwise {
+    dtype: DType,
     body: ScalarOp,
     operands: Vec<(NodeId, IndexMap)>,
 }
@@ -483,7 +492,12 @@ impl BoundOpBuilder {
 
         match expr {
             Op::Input { .. } => {}
-            Op::Elementwise { body, operands, .. } => {
+            Op::Elementwise {
+                dtype,
+                body,
+                operands,
+                ..
+            } => {
                 for (operand_node, map) in operands {
                     let fuses = retires.contains(operand_node)
                         && is_identity_projection(map)
@@ -495,6 +509,7 @@ impl BoundOpBuilder {
                 self.held.borrow_mut().insert(
                     node,
                     HeldElementwise {
+                        dtype: *dtype,
                         body: *body,
                         operands: operands.clone(),
                     },
@@ -549,6 +564,7 @@ impl BoundOpBuilder {
                     node,
                     shapes,
                     &self.held,
+                    held.dtype,
                     held.body,
                     &held.operands,
                 ));
@@ -568,8 +584,14 @@ impl BoundOpBuilder {
         // body runs, since `build_elementwise_op` borrows `self.held` too.
         let removed = self.held.borrow_mut().remove(&node);
         if let Some(held) = removed {
-            let materialized =
-                build_elementwise_op(node, shapes, &self.held, held.body, &held.operands);
+            let materialized = build_elementwise_op(
+                node,
+                shapes,
+                &self.held,
+                held.dtype,
+                held.body,
+                &held.operands,
+            );
             push_ready(emitted, node, materialized)?;
         }
         Ok(())
@@ -609,6 +631,7 @@ fn build_elementwise_op(
     node: NodeId,
     shapes: &Shapes,
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    dtype: DType,
     body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
 ) -> BoundOp {
@@ -616,6 +639,7 @@ fn build_elementwise_op(
     let (composed_body, built_operands) = compose(shapes, held, body, operands);
     BoundOp {
         node,
+        dtype,
         extents,
         kind: BoundOpKind::Elementwise {
             body: composed_body,
@@ -668,6 +692,7 @@ fn build_reduce_op(
     let output_axes = pure_projection_axes(out_pattern);
     BoundOp {
         node,
+        dtype: reduce.dtype,
         extents: shape::fold_iteration_extents(reduce, shapes),
         kind: BoundOpKind::Reduce {
             element_body,
@@ -1555,7 +1580,9 @@ mod tests {
         // extent 10, 3 parts: raw_len = 10 / 3 = 3, rounded down to the
         // nearest multiple of 2 is 2 — only the final (already-ragged)
         // chunk absorbs what the rounding shaved off the other two.
-        let chunks = op.split_aligned(3, 2).expect("extent 10 over 3 parts splits");
+        let chunks = op
+            .split_aligned(3, 2)
+            .expect("extent 10 over 3 parts splits");
         let lengths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
         assert_eq!(
             lengths,
@@ -1571,16 +1598,24 @@ mod tests {
         // raw_len = 10 / 3 = 3 is already below alignment 4, so rounding
         // down would zero the chunk out — the doc promises the raw
         // unaligned width is kept instead.
-        let chunks = op.split_aligned(3, 4).expect("extent 10 over 3 parts splits");
+        let chunks = op
+            .split_aligned(3, 4)
+            .expect("extent 10 over 3 parts splits");
         let lengths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
-        assert_eq!(lengths, alloc::vec![3, 3, 4], "falls back to split's own behavior");
+        assert_eq!(
+            lengths,
+            alloc::vec![3, 3, 4],
+            "falls back to split's own behavior"
+        );
     }
 
     #[test]
     fn split_aligned_with_alignment_one_matches_split_exactly() {
         let op = elementwise_op();
 
-        let aligned = op.split_aligned(3, 1).expect("extent 10 over 3 parts splits");
+        let aligned = op
+            .split_aligned(3, 1)
+            .expect("extent 10 over 3 parts splits");
         let plain = op.split(3).expect("extent 10 over 3 parts splits");
         let aligned_lengths: Vec<u64> = aligned.iter().map(|chunk| chunk.extents[0]).collect();
         let plain_lengths: Vec<u64> = plain.iter().map(|chunk| chunk.extents[0]).collect();
