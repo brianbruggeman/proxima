@@ -39,6 +39,7 @@ tensor-bgpool = ["std", "dep:prime"]
 arrayvec.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+half = { version = "2.7.1", default-features = false }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par"], optional = true }
 # the Pipe algebra: `Pipe`/`PipeExt`/`AndThen` are core-tier (no cfg gate in
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
@@ -55,6 +56,7 @@ workspace = true
 [dev-dependencies]
 criterion = { workspace = true }
 rstest.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 
 [[bench]]
