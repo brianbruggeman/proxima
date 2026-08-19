@@ -562,7 +562,7 @@ fn take_or_allocate(pool: &mut Vec<Vec<f32>>, required: usize) -> Vec<f32> {
 /// Below this many iteration-space elements, a nest runs the plain
 /// sequential path even when `workers > 1`: `std::thread::scope`'s spawn
 /// and join overhead outweighs the work for a small nest.
-const PARALLEL_THRESHOLD: usize = 4096;
+use crate::sized::PARALLEL_THRESHOLD;
 
 /// chunk count is `workers * OVERSUBSCRIBE`, not `workers`: equal row
 /// counts do not mean equal wall-clock (measured 2.04x spread across 8
@@ -597,7 +597,7 @@ const PARALLEL_THRESHOLD: usize = 4096;
 /// rather than letting any of them steal another's slack (see this
 /// constant's own first paragraph) — that argument does not depend on
 /// whichever value the pool path settles on.
-const OVERSUBSCRIBE: usize = 1;
+use crate::sized::OVERSUBSCRIBE;
 
 /// Row-alignment applied to every non-final chunk boundary via
 /// `BoundOp::split_aligned`. `1` is a no-op (see that method's doc): every
@@ -642,7 +642,7 @@ const OVERSUBSCRIBE: usize = 1;
 /// session's own, 2026-08-18; its sample count for the alignment
 /// comparison specifically is not broken out beyond the three-configuration
 /// grid it ran alongside.
-const SPLIT_ALIGNMENT: u64 = 1;
+use crate::sized::SPLIT_ALIGNMENT;
 
 /// Same contract as [`evaluate`], including the exact same [`Evaluated`]
 /// and error variants — the only difference is that each large-enough nest
@@ -3096,14 +3096,14 @@ fn reduce_width_binary_scalar_dispatch(
 
 /// Output rows one call to [`gemm_width_tile_neon`] computes.
 #[cfg(target_arch = "aarch64")]
-const WIDTH_TILE_ROWS: usize = 4;
+use crate::sized::WIDTH_TILE_ROWS;
 
 /// `float32x4_t` vectors of output columns one call to [`gemm_width_tile_neon`]
 /// computes — 4 gives `WIDTH_TILE_ROWS * WIDTH_TILE_VECS` = 16 independent
 /// accumulators, the measured saturation point for this core's NEON FMA
 /// throughput.
 #[cfg(target_arch = "aarch64")]
-const WIDTH_TILE_VECS: usize = 4;
+use crate::sized::WIDTH_TILE_VECS;
 
 /// Pass/invocation/fallback-element counts for the width tile — mandatory
 /// verification, not a runtime feature: a caller (`profile_hot`) reads
@@ -3508,7 +3508,7 @@ struct DotFold {
 /// consistently faster (~0.337-0.349s vs ~0.352-0.354s, 1024^3
 /// transposed-RHS GEMM, 5 runs each) — more independent lanes hide more
 /// of the reduce's latency on this core's issue width. 8 was kept.
-const DOT_LANES: usize = 8;
+use crate::sized::DOT_LANES;
 
 /// Whether the target issues a fused multiply-add as one instruction.
 /// aarch64 carries `fmla` in the base ISA; x86-64 needs FMA3. Without it
@@ -3564,9 +3564,9 @@ fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) 
 /// identical accumulator count and loads/MAC. Why orientation dominates is
 /// still unexplained.
 #[cfg(target_arch = "aarch64")]
-const TILE_ROWS: usize = 6;
+use crate::sized::TILE_ROWS;
 #[cfg(target_arch = "aarch64")]
-const TILE_COLS: usize = 4;
+use crate::sized::TILE_COLS;
 
 /// Bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
 /// pass below. M1 Max: 12 MiB shared L2 per performance cluster of 4 cores —
@@ -3600,7 +3600,7 @@ const TILE_COLS: usize = 4;
 /// this data. checksums (135.87619/260.24106/513.10425) and the 1024^3
 /// allocation shape were unchanged across every budget tested.
 #[cfg(target_arch = "aarch64")]
-const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = 2_621_440;
+use crate::sized::NEON_COLUMN_PANEL_BUDGET_BYTES;
 
 /// Column-panel width for the tiled GEMM pass: the widest multiple of
 /// `TILE_COLS` whose panel of `b` (`panel_cols` columns, each a contiguous
