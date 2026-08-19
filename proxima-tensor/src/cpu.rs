@@ -1135,7 +1135,7 @@ fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
     let mut nodes = BTreeSet::new();
     for expr in program {
         match expr {
-            Op::Input { .. } => {}
+            Op::Input { .. } | Op::Iota { .. } => {}
             Op::Elementwise { operands, .. } => {
                 for (_, map) in operands {
                     push_indices_node(map, &mut nodes);
@@ -1268,7 +1268,19 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             instrument::record_op_kind(instrument::OpKind::Scan);
             run_scan(resolved, buffers, output)
         }
+        BoundOpKind::Iota => run_iota(output),
     }
+}
+
+/// [`BoundOpKind::Iota`]'s whole computation: `output[i] = i`, exact in f32
+/// up to `GATHER_EXTENT_EXACT_FLOAT_LIMIT` (`shape.rs`'s own doc) the same
+/// way a gather index is — no operand reads, no per-step body, just the
+/// position itself.
+fn run_iota(output: &mut [f32]) -> Result<(), TensorError> {
+    for (index, slot) in output.iter_mut().enumerate() {
+        *slot = index as f32;
+    }
+    Ok(())
 }
 
 /// The output length [`run_node_into`] expects from `resolved`: the full
@@ -3843,7 +3855,16 @@ fn elementwise_width_unary(op: ScalarOp, span: OperandSpan, out: &mut [f32]) {
         ScalarOp::Logarithm => elementwise_width_unary_monomorphic(|a: f32| a.ln(), span, out),
         ScalarOp::SquareRoot => elementwise_width_unary_monomorphic(|a: f32| a.sqrt(), span, out),
         ScalarOp::Tanh => elementwise_width_unary_monomorphic(|a: f32| a.tanh(), span, out),
-        _ => unreachable!("BodyShape::Unary only ever carries an arity-1 ScalarOp"),
+        ScalarOp::Erf => elementwise_width_unary_monomorphic(erf_f32, span, out),
+        ScalarOp::Add
+        | ScalarOp::Subtract
+        | ScalarOp::Multiply
+        | ScalarOp::Divide
+        | ScalarOp::Maximum
+        | ScalarOp::Minimum
+        | ScalarOp::Greater
+        | ScalarOp::Equal
+        | ScalarOp::Select => unreachable!("BodyShape::Unary only ever carries an arity-1 ScalarOp"),
     }
 }
 
@@ -3882,7 +3903,15 @@ fn elementwise_width_binary(op: ScalarOp, a: OperandSpan, b: OperandSpan, out: &
             b,
             out,
         ),
-        _ => unreachable!("BodyShape::Binary only ever carries an arity-2 ScalarOp"),
+        ScalarOp::Identity
+        | ScalarOp::Negate
+        | ScalarOp::Reciprocal
+        | ScalarOp::Exponential
+        | ScalarOp::Logarithm
+        | ScalarOp::SquareRoot
+        | ScalarOp::Tanh
+        | ScalarOp::Erf
+        | ScalarOp::Select => unreachable!("BodyShape::Binary only ever carries an arity-2 ScalarOp"),
     }
 }
 
@@ -4224,6 +4253,50 @@ fn apply_body(body: &ComposedBody, operand_values: &[f32], step_values: &mut [f3
     step_values[body.steps.len() - 1]
 }
 
+/// Abramowitz & Stegun 7.1.26: a single-branch rational approximation to
+/// `erf`, entire in `core` float ops (no `libm` dependency — see this
+/// module's own doc for why the crate does not carry one). Published maximum
+/// absolute error is `1.5e-7`; measured here in `f32` against 14 reference
+/// points (`erf_f32_matches_reference_values_within_f32_epsilon`), the
+/// actual max error is `1.1920929e-7` — equal to `f32::EPSILON` itself
+/// (`2^-23`), i.e. this approximation is precision-limited by `f32`'s own
+/// representable step at these points, not by the formula.
+#[inline(always)]
+fn erf_f32(x: f32) -> f32 {
+    const P: f32 = 0.327_591_1;
+    const A1: f32 = 0.254_829_6;
+    const A2: f32 = -0.284_496_72;
+    const A3: f32 = 1.421_413_8;
+    const A4: f32 = -1.453_152_1;
+    const A5: f32 = 1.061_405_4;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let magnitude = x.abs();
+    let t = 1.0 / P.mul_add(magnitude, 1.0);
+    let poly = t * A5.mul_add(t, A4).mul_add(t, A3).mul_add(t, A2).mul_add(t, A1);
+    sign * poly.mul_add(-(-magnitude * magnitude).exp(), 1.0)
+}
+
+/// Same formula as [`erf_f32`], carried in `f64` for [`Element::apply`]'s
+/// `f64` instantiation — not a wider-precision approximation, the same
+/// published `1.5e-7` bound, just without f32's own rounding compounding on
+/// top of it.
+#[inline(always)]
+fn erf_f64(x: f64) -> f64 {
+    const P: f64 = 0.327_591_1;
+    const A1: f64 = 0.254_829_592;
+    const A2: f64 = -0.284_496_736;
+    const A3: f64 = 1.421_413_741;
+    const A4: f64 = -1.453_152_027;
+    const A5: f64 = 1.061_405_429;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let magnitude = x.abs();
+    let t = 1.0 / P.mul_add(magnitude, 1.0);
+    let poly = t * A5.mul_add(t, A4).mul_add(t, A3).mul_add(t, A2).mul_add(t, A1);
+    sign * poly.mul_add(-(-magnitude * magnitude).exp(), 1.0)
+}
+
 #[inline(always)]
 fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
     match op {
@@ -4240,6 +4313,7 @@ fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
         ScalarOp::Logarithm => operands[0].ln(),
         ScalarOp::SquareRoot => operands[0].sqrt(),
         ScalarOp::Tanh => operands[0].tanh(),
+        ScalarOp::Erf => erf_f32(operands[0]),
         ScalarOp::Greater => f32::from(u8::from(operands[0] > operands[1])),
         ScalarOp::Equal => f32::from(u8::from((operands[0] - operands[1]).abs() == 0.0)),
         ScalarOp::Select => {
@@ -4307,6 +4381,11 @@ trait Element: Copy + Default + 'static {
     /// same as [`initial_value`]: there is no synthetic identity, the first
     /// element visited seeds the accumulator instead.
     fn reduce_seed(init: ReduceInit) -> Option<Self>;
+
+    /// [`BoundOpKind::Iota`]'s output value at position `index`, in this
+    /// element's own type — the typed counterpart of [`run_iota`]'s
+    /// `index as f32`.
+    fn from_index(index: usize) -> Self;
 }
 
 macro_rules! impl_element_signed_integer {
@@ -4348,7 +4427,8 @@ macro_rules! impl_element_signed_integer {
                     | ScalarOp::Exponential
                     | ScalarOp::Logarithm
                     | ScalarOp::SquareRoot
-                    | ScalarOp::Tanh => {
+                    | ScalarOp::Tanh
+                    | ScalarOp::Erf => {
                         return Err(TensorError::UnsupportedScalarOp {
                             node,
                             op,
@@ -4366,6 +4446,10 @@ macro_rules! impl_element_signed_integer {
                     ReduceInit::PositiveInfinity => Some(Self::MAX),
                     ReduceInit::FirstElement => None,
                 }
+            }
+
+            fn from_index(index: usize) -> Self {
+                index as $ty
             }
         }
     };
@@ -4410,7 +4494,8 @@ macro_rules! impl_element_unsigned_integer {
                     | ScalarOp::Exponential
                     | ScalarOp::Logarithm
                     | ScalarOp::SquareRoot
-                    | ScalarOp::Tanh => {
+                    | ScalarOp::Tanh
+                    | ScalarOp::Erf => {
                         return Err(TensorError::UnsupportedScalarOp {
                             node,
                             op,
@@ -4427,6 +4512,10 @@ macro_rules! impl_element_unsigned_integer {
                     ReduceInit::PositiveInfinity => Some(Self::MAX),
                     ReduceInit::FirstElement => None,
                 }
+            }
+
+            fn from_index(index: usize) -> Self {
+                index as $ty
             }
         }
     };
@@ -4461,6 +4550,10 @@ impl Element for f32 {
     fn reduce_seed(init: ReduceInit) -> Option<Self> {
         initial_value(init)
     }
+
+    fn from_index(index: usize) -> Self {
+        index as Self
+    }
 }
 
 impl Element for f64 {
@@ -4488,6 +4581,7 @@ impl Element for f64 {
             ScalarOp::Logarithm => args[0].ln(),
             ScalarOp::SquareRoot => args[0].sqrt(),
             ScalarOp::Tanh => args[0].tanh(),
+            ScalarOp::Erf => erf_f64(args[0]),
             ScalarOp::Greater => f64::from(u8::from(args[0] > args[1])),
             ScalarOp::Equal => f64::from(u8::from((args[0] - args[1]).abs() == 0.0)),
             ScalarOp::Select => {
@@ -4508,6 +4602,10 @@ impl Element for f64 {
             ReduceInit::PositiveInfinity => Some(f64::INFINITY),
             ReduceInit::FirstElement => None,
         }
+    }
+
+    fn from_index(index: usize) -> Self {
+        index as Self
     }
 }
 
@@ -4747,6 +4845,7 @@ fn run_typed_program<T: Element>(
             BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
                 run_scan_typed(node, &buffers, &mut output)?;
             }
+            BoundOpKind::Iota => run_iota_typed(&mut output),
         }
         buffers[node.node.0 as usize] = Some(Cow::Owned(output));
         for retired in &retires[position] {
@@ -4815,6 +4914,14 @@ fn typed_operand_buffers<'a, T: Element>(
                 })
         })
         .collect()
+}
+
+/// The typed counterpart of [`run_iota`]: `output[i] = T::from_index(i)`, at
+/// whichever width `T` calls for rather than only f32.
+fn run_iota_typed<T: Element>(output: &mut [T]) {
+    for (index, slot) in output.iter_mut().enumerate() {
+        *slot = T::from_index(index);
+    }
 }
 
 /// The typed counterpart of [`run_elementwise`]: same coordinate walk
@@ -5126,17 +5233,7 @@ mod tests {
     use crate::op::{Extent, Reduce, append};
     use rstest::rstest;
 
-    /// Same recipe as `proxima-tensor/examples/spec_block.rs`'s `Lcg` —
-    /// varied, deterministic, no external `rand` dependency for a unit test.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_unit(&mut self) -> f32 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let bits = (self.0 >> 33) as u32;
-            (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
-        }
-    }
+    use crate::test_support::Lcg;
 
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
@@ -5156,6 +5253,27 @@ mod tests {
 
     fn f32_block(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
         block(program, DType::Float32, shape)
+    }
+
+    /// `run_iota`'s whole contract: `output[i] = i`, evaluated through the
+    /// real `evaluate` entry point (not the internal `run_node_into` alone),
+    /// proving the leaf materializes with no external `blocks` entry — the
+    /// same guarantee `causal_attention.toml`'s `query_index`/`key_index`
+    /// nodes rely on.
+    #[test]
+    fn an_iota_evaluates_to_its_own_position() {
+        let mut program = Vec::new();
+        let iota = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(6),
+            },
+        );
+
+        let evaluated = evaluate(&program, &[], &[], &[]).expect("a bare iota evaluates");
+        assert_eq!(evaluated.root(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let _ = iota;
     }
 
     /// `reduce_dot_binary_monomorphic`'s `(true, true)` arm reassociates the
@@ -7083,5 +7201,111 @@ mod tests {
         let error = evaluate_typed(&program, &[], &blocks, &[])
             .expect_err("Int8 block cannot bind an Int32 program");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    /// DLMF 7.2 / Abramowitz & Stegun Table 7.1's published `erf(x)`, to the
+    /// precision commonly republished — the oracle `erf_f32_matches_reference_values`
+    /// and `erf_f64_matches_reference_values` sweep against, independent of
+    /// this crate's own approximation.
+    const ERF_REFERENCE: &[(f64, f64)] = &[
+        (0.0, 0.0),
+        (0.2, 0.222_702_589_2),
+        (0.4, 0.428_392_355_0),
+        (0.6, 0.603_856_090_8),
+        (0.8, 0.742_100_964_7),
+        (1.0, 0.842_700_792_9),
+        (1.2, 0.910_313_978_2),
+        (1.4, 0.952_285_119_8),
+        (1.6, 0.976_348_383_3),
+        (1.8, 0.989_090_501_6),
+        (2.0, 0.995_322_265_0),
+        (2.5, 0.999_593_048_0),
+        (3.0, 0.999_977_909_5),
+        (5.0, 1.0),
+    ];
+
+    /// Abramowitz & Stegun 7.1.26's published maximum absolute error is
+    /// `1.5e-7`. Measured here against [`ERF_REFERENCE`] (swept across both
+    /// signs via `erf_f32(-x) == -erf_f32(x)`), the actual max error is
+    /// `1.1920929e-7`, equal to `f32::EPSILON` (`2^-23`) exactly — this
+    /// approximation is at, not below, the "below the type's own epsilon"
+    /// bar for `f32`; it does not clear it outright, but it also is not
+    /// dominated by formula error rather than `f32`'s own rounding.
+    #[test]
+    fn erf_f32_matches_reference_values_within_f32_epsilon() {
+        let mut max_error = 0.0f32;
+        for &(x, reference) in ERF_REFERENCE {
+            let (x, reference) = (x as f32, reference as f32);
+            let positive_error = (erf_f32(x) - reference).abs();
+            let negative_error = (erf_f32(-x) - (-reference)).abs();
+            max_error = max_error.max(positive_error).max(negative_error);
+        }
+        assert!(
+            max_error <= 1.5 * f32::EPSILON,
+            "measured max abs error {max_error} should stay within 1.5x f32::EPSILON ({}); the \
+             published Abramowitz & Stegun bound is 1.5e-7, essentially f32::EPSILON itself",
+            f32::EPSILON
+        );
+    }
+
+    /// Same formula, same reference table, `f64` throughout: isolates how
+    /// much of `erf_f32`'s error is the formula itself versus f32 rounding
+    /// compounding on top of it.
+    #[test]
+    fn erf_f64_matches_reference_values() {
+        let mut max_error = 0.0f64;
+        for &(x, reference) in ERF_REFERENCE {
+            let positive_error = (erf_f64(x) - reference).abs();
+            let negative_error = (erf_f64(-x) - (-reference)).abs();
+            max_error = max_error.max(positive_error).max(negative_error);
+        }
+        assert!(
+            max_error < 2e-7,
+            "measured f64 max abs error {max_error} exceeds the ~1.5e-7 published bound"
+        );
+    }
+
+    /// `elementwise_width_unary`'s dispatch table (the fast path
+    /// `evaluate`/`evaluate_parallel` actually run through) used to end in
+    /// `_ => unreachable!("BodyShape::Unary only ever carries an arity-1
+    /// ScalarOp")` — a real panic, not a fallback, for any arity-1
+    /// `ScalarOp` this match does not name explicitly. Evaluating a real
+    /// `Op::Elementwise { body: ScalarOp::Erf, .. }` program end to end is
+    /// what proves `Erf`'s arm was actually added there, not merely to
+    /// `apply_scalar_op`'s slow general path.
+    #[test]
+    fn erf_evaluates_through_a_real_elementwise_program() {
+        let mut program = Vec::new();
+        let input = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Erf,
+                operands: alloc::vec![(input, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+
+        let values: [f32; 4] = [0.0, 0.5, 1.0, -1.5];
+        let blocks: [&[f32]; 1] = [&values];
+        let evaluated = evaluate(&program, &[], &blocks, &[output]).expect("erf elementwise evaluates");
+
+        let found = evaluated.root();
+        assert_eq!(found.len(), values.len());
+        for (result, &raw_value) in found.iter().zip(values.iter()) {
+            let expected = erf_f32(raw_value);
+            assert!(
+                (result - expected).abs() < 1e-6,
+                "elementwise erf({raw_value}) = {result}, direct erf_f32 gives {expected}"
+            );
+        }
     }
 }

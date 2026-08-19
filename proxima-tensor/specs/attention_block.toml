@@ -7,10 +7,12 @@
 #   - RoPE, whose pairwise `2*i` / `2*i+1` addressing the grammar can now
 #     spell (see `specs/rope.toml` and its `spec.rs` test) — left out of
 #     *this* file only to keep the block one architecture at a time.
-#   - causal masking, which needs a tensor derived from iteration indices;
-#     there is no `Op` that produces one, and no notation change fixes that.
-# `inv_dim` stands in for the still-absent piece here; there is no mask at
-# all, which is exactly how far the config face reaches for masking today.
+#   - causal masking — no longer an unreachable gap: `Op::Iota` produces a
+#     tensor of iteration indices, which is what a mask needs, and
+#     `specs/causal_attention.toml` is this file plus that mask, checked by
+#     `spec.rs`'s test. Left out of *this* file only to keep the block one
+#     architecture at a time, the same reason RoPE is absent above.
+# `inv_dim` is RMSNorm's own denominator, unrelated to masking.
 
 # --- inputs -----------------------------------------------------------------
 

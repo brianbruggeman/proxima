@@ -121,7 +121,7 @@ fn reduce_output_len(chunk: &proxima_tensor::BoundOp) -> usize {
             let width = last.first().map_or(1, |axis| chunk.extents[*axis as usize]);
             leading_product as usize * width as usize
         }
-        proxima_tensor::BoundOpKind::Elementwise { .. } => {
+        proxima_tensor::BoundOpKind::Elementwise { .. } | proxima_tensor::BoundOpKind::Iota => {
             chunk.extents.iter().product::<u64>() as usize
         }
     }

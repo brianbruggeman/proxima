@@ -71,6 +71,7 @@ pub enum ScalarOp {
     Logarithm,
     SquareRoot,
     Tanh,
+    Erf,
     Greater,
     Equal,
     Select,
@@ -89,7 +90,8 @@ impl ScalarOp {
             | Self::Exponential
             | Self::Logarithm
             | Self::SquareRoot
-            | Self::Tanh => 1,
+            | Self::Tanh
+            | Self::Erf => 1,
             Self::Add
             | Self::Subtract
             | Self::Multiply
@@ -194,13 +196,42 @@ pub enum Op {
     /// [`Reduce::keep`] and by whether [`Reduce::out_map`] is
     /// data-dependent.
     Reduce(Reduce),
+
+    /// A leaf like [`Op::Input`], but computed instead of externally
+    /// supplied: `output[i] = i` for `i` in `0..extent`. Named `Iota` after
+    /// XLA HLO's op of the same name and semantics, an established tensor-IR
+    /// precedent for exactly this generator.
+    ///
+    /// This is what lets a caller build a causal mask: `Greater` compares
+    /// two broadcast `Iota`s (a query-position one and a key-position one)
+    /// into a 0/1 tensor, and `Select` routes that comparison into
+    /// [`crate::op::ReduceInit::NegativeInfinity`]'s elementwise counterpart
+    /// before a softmax — the composition `specs/causal_attention.toml`
+    /// spells and `spec.rs`'s test evaluates. Before this variant, no
+    /// composition of `Input`/`Elementwise`/`Reduce` could produce a tensor
+    /// whose values are iteration indices rather than either external data
+    /// or a fold over one: `Input` is the only leaf (this module's own
+    /// enum), and [`crate::map::IndexMap`] only ever *consumes* an index to
+    /// address an operand — nothing upstream of that turns an index into a
+    /// value a body can compute over.
+    ///
+    /// `extent` (not `axis`) is this field's name: an axis *position* is
+    /// already a `u16` elsewhere in this crate ([`crate::map::AxisTerm::axis`]),
+    /// and this field carries the axis's *size*, the same quantity
+    /// [`Op::Input`]'s `shape: Vec<Extent>` carries per dimension — collapsed
+    /// to one [`Extent`] because an `Iota` is definitionally one axis; a
+    /// multi-axis index tensor is two `Iota`s combined through the existing
+    /// elementwise algebra, not a second field here.
+    Iota { dtype: DType, extent: Extent },
 }
 
 impl Op {
     #[must_use]
     pub const fn dtype(&self) -> DType {
         match self {
-            Self::Input { dtype, .. } | Self::Elementwise { dtype, .. } => *dtype,
+            Self::Input { dtype, .. } | Self::Elementwise { dtype, .. } | Self::Iota { dtype, .. } => {
+                *dtype
+            }
             Self::Reduce(reduce) => reduce.dtype,
         }
     }
@@ -210,6 +241,7 @@ impl Op {
         match self {
             Self::Input { name, .. } | Self::Elementwise { name, .. } => name.as_deref(),
             Self::Reduce(reduce) => reduce.name.as_deref(),
+            Self::Iota { .. } => None,
         }
     }
 }
@@ -309,5 +341,16 @@ mod tests {
         });
         assert_eq!(reduce.dtype(), DType::Int32);
         assert_eq!(reduce.name(), None);
+
+        let iota = Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(4),
+        };
+        assert_eq!(iota.dtype(), DType::Float32);
+        assert_eq!(
+            iota.name(),
+            None,
+            "Iota carries no name field, unlike Input"
+        );
     }
 }

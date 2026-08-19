@@ -238,7 +238,21 @@ pub enum BoundOpKind {
         output_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
         out_layout: Layout,
     },
+    /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
+    /// executor derives every output value straight from its own position
+    /// in `BoundOp::extents`, which is why this variant carries no fields of
+    /// its own.
+    Iota,
 }
+
+/// A fused body with zero steps — [`BoundOp::element_body`]'s answer for
+/// [`BoundOpKind::Iota`], which has no combining body at all. Every real
+/// caller (`cpu::run_elementwise`/`run_reduce`/`run_scan`,
+/// `omega`'s renderers) only reaches `element_body()` from inside a branch
+/// already matched on `Elementwise`/`Reduce`, so this is never actually
+/// read; it exists so the accessor stays total over every `BoundOpKind`
+/// instead of panicking on the one variant that has nothing to answer with.
+static EMPTY_BODY: ComposedBody = ComposedBody { steps: Vec::new() };
 
 impl BoundOp {
     #[must_use]
@@ -247,18 +261,21 @@ impl BoundOp {
             BoundOpKind::Elementwise { operands, .. } | BoundOpKind::Reduce { operands, .. } => {
                 operands
             }
+            BoundOpKind::Iota => &[],
         }
     }
 
     /// The composed body applied per step to build one combined value from
     /// `operands()`, before any reduction: an elementwise op's own
     /// (possibly fused) body, or a fused reduce's absorbed body (a one-step
-    /// `Identity` body if nothing fused).
+    /// `Identity` body if nothing fused). See [`EMPTY_BODY`]'s doc for the
+    /// [`BoundOpKind::Iota`] case.
     #[must_use]
     pub fn element_body(&self) -> &ComposedBody {
         match &self.kind {
             BoundOpKind::Elementwise { body, .. } => body,
             BoundOpKind::Reduce { element_body, .. } => element_body,
+            BoundOpKind::Iota => &EMPTY_BODY,
         }
     }
 
@@ -345,6 +362,11 @@ impl BoundOp {
                 Keep::Scan => None,
                 Keep::Reduce => output_axes.first().copied(),
             },
+            // an `Iota` is cheap enough (one write per element, no operand
+            // reads) that splitting it across workers is not worth the
+            // bookkeeping; `None` here just means a caller runs it as one
+            // chunk, the same as any other unsplittable op.
+            BoundOpKind::Iota => None,
         }
     }
 
@@ -377,6 +399,12 @@ impl BoundOp {
                 // offsets.
                 out_layout: out_layout.clone(),
             },
+            // unreachable in practice: `split_axis` returns `None` for
+            // `Iota`, so `split`/`split_aligned` never call this for one —
+            // kept explicit rather than a catch-all so a future change to
+            // `split_axis` cannot silently start routing `Iota` here with no
+            // rebase logic to run.
+            BoundOpKind::Iota => BoundOpKind::Iota,
         };
 
         BoundOp {
@@ -492,6 +520,19 @@ impl BoundOpBuilder {
 
         match expr {
             Op::Input { .. } => {}
+            Op::Iota { dtype, .. } => {
+                let extents = shapes.of(node).to_vec();
+                push_ready(
+                    &mut emitted,
+                    node,
+                    BoundOp {
+                        node,
+                        dtype: *dtype,
+                        extents,
+                        kind: BoundOpKind::Iota,
+                    },
+                )?;
+            }
             Op::Elementwise {
                 dtype,
                 body,
@@ -1011,6 +1052,34 @@ mod tests {
             }),
         );
         (program, product, sum, lhs)
+    }
+
+    /// An `Iota` binds directly to its own ready `BoundOp`, the same way a
+    /// `Reduce` always does — never held pending fusion the way an
+    /// `Elementwise` op is, since it has no operand to fuse with anything.
+    #[test]
+    fn an_iota_binds_to_its_own_ready_bound_op_with_no_operands() {
+        let mut program = Vec::new();
+        let iota = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(8),
+            },
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("iota infers");
+        let built = bind(&program, &shapes, &[]).expect("iota builds ops");
+
+        assert_eq!(built.len(), 1, "the iota leaf materializes on its own");
+        assert_eq!(built[0].node, iota);
+        assert_eq!(built[0].dtype, DType::Float32);
+        assert_eq!(built[0].extents, alloc::vec![8]);
+        assert!(matches!(built[0].kind, BoundOpKind::Iota));
+        assert!(
+            built[0].operands().is_empty(),
+            "a leaf with no operands binds to none"
+        );
     }
 
     #[test]

@@ -170,6 +170,7 @@ pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry),
+        BoundOpKind::Iota => render_iota(resolved, &entry),
     }?;
     Ok(Kernel {
         source,
@@ -218,15 +219,28 @@ fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
 
 /// The MSL SIMD-group reduction builtin that combines one lane's private
 /// accumulator across the whole 32-lane group — only called for a
-/// [`is_cooperative_reduce_op`] body, so the wildcard arm is unreachable in
-/// practice, not a silent default.
+/// [`is_cooperative_reduce_op`] body, so the non-cooperative arms below are
+/// enumerated rather than wildcarded — adding a `ScalarOp` variant forces a
+/// decision here instead of silently panicking.
 fn simd_combine_fn(op: ScalarOp) -> &'static str {
     match op {
         ScalarOp::Add => "simd_sum",
         ScalarOp::Multiply => "simd_product",
         ScalarOp::Maximum => "simd_max",
         ScalarOp::Minimum => "simd_min",
-        _ => unreachable!("simd_combine_fn is only called for a cooperative reduce_op"),
+        ScalarOp::Identity
+        | ScalarOp::Subtract
+        | ScalarOp::Divide
+        | ScalarOp::Negate
+        | ScalarOp::Reciprocal
+        | ScalarOp::Exponential
+        | ScalarOp::Logarithm
+        | ScalarOp::SquareRoot
+        | ScalarOp::Tanh
+        | ScalarOp::Erf
+        | ScalarOp::Greater
+        | ScalarOp::Equal
+        | ScalarOp::Select => unreachable!("simd_combine_fn is only called for a cooperative reduce_op"),
     }
 }
 
@@ -245,7 +259,19 @@ fn cooperative_identity_token(op: ScalarOp) -> &'static str {
         ScalarOp::Multiply => "1.0f",
         ScalarOp::Maximum => "-INFINITY",
         ScalarOp::Minimum => "INFINITY",
-        _ => unreachable!("cooperative_identity_token is only called for a cooperative reduce_op"),
+        ScalarOp::Identity
+        | ScalarOp::Subtract
+        | ScalarOp::Divide
+        | ScalarOp::Negate
+        | ScalarOp::Reciprocal
+        | ScalarOp::Exponential
+        | ScalarOp::Logarithm
+        | ScalarOp::SquareRoot
+        | ScalarOp::Tanh
+        | ScalarOp::Erf
+        | ScalarOp::Greater
+        | ScalarOp::Equal
+        | ScalarOp::Select => unreachable!("cooperative_identity_token is only called for a cooperative reduce_op"),
     }
 }
 
@@ -375,6 +401,7 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
+        BoundOpKind::Iota => resolved.extents.iter().product(),
     }
 }
 
@@ -393,6 +420,7 @@ fn op_token(op: ScalarOp) -> &'static str {
         ScalarOp::Logarithm => "logarithm",
         ScalarOp::SquareRoot => "square_root",
         ScalarOp::Tanh => "tanh",
+        ScalarOp::Erf => "erf",
         ScalarOp::Greater => "greater",
         ScalarOp::Equal => "equal",
         ScalarOp::Select => "select",
@@ -498,9 +526,9 @@ fn body_token(body: &ComposedBody) -> String {
 fn entry_name(resolved: &BoundOp) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
-    let body = body_token(resolved.element_body());
     let base = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => {
+            let body = body_token(resolved.element_body());
             format!("omega_elementwise_r{rank}_n{operand_count}_{body}")
         }
         BoundOpKind::Reduce {
@@ -509,11 +537,17 @@ fn entry_name(resolved: &BoundOp) -> String {
             keep,
             ..
         } => {
+            let body = body_token(resolved.element_body());
             let kind = keep_token(*keep);
             let reduce_body = op_token(*reduce_op);
             let init = init_token(*init);
             format!("omega_{kind}_r{rank}_n{operand_count}_{body}_{reduce_body}_{init}")
         }
+        // no operand count, no body: an `Iota`'s whole structure is its
+        // rank (always 1 in practice, since `Op::Iota` resolves one
+        // `Extent` — see `op.rs`'s doc — but this reads `extents.len()`
+        // rather than assuming that, matching every other arm here).
+        BoundOpKind::Iota => format!("omega_iota_r{rank}"),
     };
     let gather_bits: String = resolved
         .operands()
@@ -542,6 +576,7 @@ fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
         ScalarOp::Logarithm => format!("log({})", args[0]),
         ScalarOp::SquareRoot => format!("sqrt({})", args[0]),
         ScalarOp::Tanh => format!("tanh({})", args[0]),
+        ScalarOp::Erf => format!("proxima_erf({})", args[0]),
         ScalarOp::Greater => format!("(({} > {}) ? 1.0f : 0.0f)", args[0], args[1]),
         ScalarOp::Equal => format!("((fabs({} - {}) == 0.0f) ? 1.0f : 0.0f)", args[0], args[1]),
         ScalarOp::Select => format!("(({} != 0.0f) ? {} : {})", args[0], args[1], args[2]),
@@ -716,9 +751,53 @@ fn push_gather_fetch(
     ));
 }
 
+/// `metal_stdlib` has no `erf` in any namespace — verified against the real
+/// toolchain (`xcrun -sdk macosx metal -c`, `no member named 'erf'`, tried
+/// bare, `metal::`, and `metal::precise::`), not assumed from the ONNX
+/// survey that first named it. This is the same Abramowitz & Stegun 7.1.26
+/// approximation [`crate cpu::erf_f32`](../../proxima_tensor/src/cpu.rs) uses
+/// on the CPU path, so a kernel and the CPU interpreter it is checked
+/// against agree on more than "close enough" — they run the identical
+/// formula.
+const PROXIMA_ERF_FN: &str = "\
+inline float proxima_erf(float x) {
+    float sign = x < 0.0f ? -1.0f : 1.0f;
+    float magnitude = fabs(x);
+    float t = 1.0f / fma(0.3275911f, magnitude, 1.0f);
+    float poly = t * fma(fma(fma(fma(1.061405429f, t, -1.453152027f), t, 1.421413741f), t, -0.284496736f), t, 0.254829592f);
+    return sign * fma(poly, -exp(-magnitude * magnitude), 1.0f);
+}
+";
+
 fn preamble(source: &mut String) {
     source.push_str("#include <metal_stdlib>\n");
     source.push_str("using namespace metal;\n\n");
+    source.push_str(PROXIMA_ERF_FN);
+    source.push('\n');
+}
+
+/// [`BoundOpKind::Iota`]'s kernel: no operand buffers, no gather, no body —
+/// the output value at each position is the thread's own grid coordinate,
+/// which every kernel already computes as `gid`, so there is nothing to
+/// derive beyond casting it to the node's element type. Reuses
+/// [`kernel_signature`] with `operand_count = 0`, `gather_count = 0` so the
+/// buffer-index arithmetic (`out` at 0, `Uniforms` at 1) stays the one place
+/// that owns it rather than being re-derived here.
+fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+
+    let mut source = String::new();
+    preamble(&mut source);
+
+    source.push_str("struct Uniforms {\n");
+    source.push_str("    long total_elements;\n");
+    source.push_str("};\n\n");
+
+    kernel_signature(&mut source, 0, 0, entry, element_type);
+    source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
+    source.push_str(&format!("    out[gid] = ({element_type})gid;\n"));
+    source.push_str("}\n");
+    Ok(source)
 }
 
 fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {

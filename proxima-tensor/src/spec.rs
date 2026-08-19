@@ -26,6 +26,20 @@
 //! and [`AxisTerm`] already expressed every one of these patterns before
 //! this module could spell them.
 //!
+//! A [`NodeSpec::Reduce`]'s `in_map` reads through this same richer grammar
+//! ([`parse_operand_pattern`]) — the asymmetry where only `Elementwise`
+//! operands could spell a multi-term axis was an oversight, not a design
+//! decision, since a `Reduce`'s operand is windowed exactly the same way a
+//! convolution's `Elementwise(Multiply)` operand is (see
+//! `specs/conv2d.toml`). `out_map` stays on the older, bare-letter-only
+//! [`parse_projection`] deliberately: [`shape::project_output_shape`] already
+//! rejects any `out_map` axis that is not a pure single-term `coeff == 1`
+//! projection (`NotLowerable`, "reduce output maps must be pure projections
+//! in v1"), so parsing a richer `out_map` would only ever be thrown away at
+//! bind time — [`parse_projection`]'s narrower grammar gives the same
+//! rejection at parse time instead, before a spec that could never lower
+//! reaches shape inference at all.
+//!
 //! A [`NodeSpec::Elementwise`] operand map may instead be a
 //! [`MapSpec::Gather`] table: `{ gather = "ids", index_map = "s->sd", map =
 //! "d->sd", dim = 0 }`. `index_map` addresses the `gather` node the same
@@ -135,13 +149,23 @@ pub enum NodeSpec {
         #[serde(default)]
         name: Option<String>,
     },
+    /// `Op::Iota`'s config face: a leaf that produces `0, 1, 2, ...` up to
+    /// `extent`, spelled with the same [`ExtentSpec`] grammar `Input.shape`
+    /// entries use. No `name` field — [`Op::Iota`] carries none (see that
+    /// variant's own doc for why).
+    Iota {
+        id: String,
+        dtype: DType,
+        extent: ExtentSpec,
+    },
 }
 
 impl NodeSpec {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            Self::Input { id, .. } | Self::Elementwise { id, .. } | Self::Reduce { id, .. } => id,
+            Self::Input { id, .. } | Self::Elementwise { id, .. } | Self::Reduce { id, .. }
+            | Self::Iota { id, .. } => id,
         }
     }
 }
@@ -276,7 +300,7 @@ impl Validate for ProgramSpec {
                 errors.push(ValidationMessage::new(entry.id(), "defined twice"));
             }
             match entry {
-                NodeSpec::Input { .. } => {}
+                NodeSpec::Input { .. } | NodeSpec::Iota { .. } => {}
                 NodeSpec::Elementwise {
                     id, inputs, maps, ..
                 } => {
@@ -390,7 +414,7 @@ impl TryFrom<&ProgramSpec> for Vec<Op> {
                     ..
                 } => {
                     let operand = lookup(&resolved, input)?;
-                    let (in_rank, in_projected) = parse_projection(in_map)?;
+                    let in_pattern = parse_operand_pattern(in_map)?;
                     let (out_rank, out_projected) = parse_projection(out_map)?;
                     op::append(
                         &mut program,
@@ -399,13 +423,20 @@ impl TryFrom<&ProgramSpec> for Vec<Op> {
                             body: *body,
                             init: *init,
                             operand,
-                            in_map: IndexMap::Affine(map::projection(in_rank, &in_projected)),
+                            in_map: IndexMap::Affine(in_pattern),
                             out_map: IndexMap::Affine(map::projection(out_rank, &out_projected)),
                             keep: *keep,
                             name: name.clone(),
                         }),
                     )
                 }
+                NodeSpec::Iota { dtype, extent, .. } => op::append(
+                    &mut program,
+                    Op::Iota {
+                        dtype: *dtype,
+                        extent: extent.resolve()?,
+                    },
+                ),
             };
             resolved.insert(entry.id().to_string(), built);
         }
@@ -816,17 +847,7 @@ shape = ["seq"]
         ));
     }
 
-    // deterministic pseudo-random source, recipe shared with
-    // proxima-tensor/examples/spec_block.rs and busy_per_mac.rs
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_unit(&mut self) -> f32 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let bits = (self.0 >> 33) as u32;
-            (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
-        }
-    }
+    use crate::test_support::Lcg;
 
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
@@ -987,6 +1008,99 @@ shape = ["seq"]
         }
     }
 
+    /// The test that makes `Op::Iota` worth having: `causal_attention.toml`
+    /// is `attention_block.toml` plus a real causal mask built from two
+    /// `Iota` leaves, and the property that makes a mask *causal* rather
+    /// than decorative is checked directly on the evaluated softmax output —
+    /// not just that the spec parses or that the output is finite.
+    ///
+    /// Two invariants, over every one of the `SEQUENCE * SEQUENCE` = 16
+    /// probability cells (`checked` asserts that count, so a loop bug can't
+    /// silently check zero of them):
+    /// - every strictly-upper-triangular cell (`key > query`, a key position
+    ///   later than its query) is *exactly* `0.0` — not merely small,
+    ///   because `exp(-infinity)` is exact zero in IEEE-754 and a mask that
+    ///   only suppresses without zeroing is not a causal mask;
+    /// - every row still sums to `1.0`, the same softmax invariant
+    ///   `an_attention_block_written_as_toml_evaluates` checks, proving the
+    ///   mask did not just zero everything.
+    ///
+    /// Inputs are LCG-derived, not uniform, for the same reason
+    /// `an_attention_block_written_as_toml_evaluates` gives: under uniform
+    /// input every unmasked score in a row is identical, so a mask that
+    /// masked the wrong cells (or none at all) could still coincidentally
+    /// leave the *sum* at 1.0 — varied scores make a wrong mask show up as a
+    /// nonzero cell instead of vanishing by symmetry.
+    #[test]
+    fn a_causal_attention_block_written_as_toml_masks_future_positions() {
+        const SEQUENCE: usize = 4;
+        const MODEL: usize = 8;
+
+        let text = include_str!("../specs/causal_attention.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the causal block infers");
+
+        let activations = random_vec(11, SEQUENCE * MODEL);
+        let inverse_dim = alloc::vec![1.0 / MODEL as f32; SEQUENCE];
+        let wq = random_vec(12, MODEL * MODEL);
+        let wk = random_vec(13, MODEL * MODEL);
+        let wv = random_vec(14, MODEL * MODEL);
+        let blocks: [&[f32]; 5] = [&activations, &inverse_dim, &wq, &wk, &wv];
+
+        let probabilities = spec
+            .node
+            .iter()
+            .position(|node| node.id() == "probabilities")
+            .expect("the spec defines a probabilities node");
+        let probabilities = NodeId(probabilities as u32);
+        let root = NodeId(program.len() as u32 - 1);
+
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &blocks,
+            &[root, probabilities],
+            workers,
+        )
+        .expect("the causal block evaluates");
+
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * MODEL, "a vacuous output proves nothing");
+        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+
+        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        assert_eq!(rows.len(), SEQUENCE * SEQUENCE);
+
+        let mut checked = 0usize;
+        for (query, row) in rows.chunks_exact(SEQUENCE).enumerate() {
+            let total: f32 = row.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-5,
+                "softmax row {query} sums to {total}, not 1.0"
+            );
+            for (key, &probability) in row.iter().enumerate() {
+                if key > query {
+                    assert_eq!(
+                        probability, 0.0,
+                        "row {query} col {key} is strictly upper-triangular (key {key} > \
+                         query {query}) and must be masked to exactly 0.0, found {probability}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked,
+            SEQUENCE * SEQUENCE,
+            "every probability cell must be checked, not a subset"
+        );
+    }
+
     /// A full llama-style block — attention plus its output projection and
     /// residual, a second RMSNorm, and a SwiGLU feed-forward with its own
     /// residual — built on top of the attention block above. Every addition
@@ -1092,6 +1206,87 @@ shape = ["seq"]
             assert!(
                 (result - input).abs() < 1e-5,
                 "residual did not carry: got {result}, expected input {input}"
+            );
+        }
+    }
+
+    /// `specs/conv2d.toml`'s whole reason to exist: proves a [`NodeSpec::Reduce`]'s
+    /// `in_map` can now spell the same multi-term windowing an `Elementwise`
+    /// operand already could — `Reduce(Add)` over `Elementwise(Multiply)`,
+    /// this file's own `matmul` shape, but with a two-term spatial axis
+    /// (`h+y`, `w+x`) in place of a bare projection.
+    ///
+    /// Two invariants, not just finiteness:
+    /// - output channel 0's kernel is all zero except a single 1 at the 3x3
+    ///   window's centre, so every output pixel is exactly the padded
+    ///   image's centre-tapped pixel — which, because the image was padded
+    ///   by exactly the kernel's radius, is the *original* unpadded pixel at
+    ///   the same coordinate. Reproducing 25 pixels exactly proves the
+    ///   two-term axis addressed the right element at every position, not
+    ///   merely that evaluation completed;
+    /// - output channel 1's kernel is all zero, a degenerate control: every
+    ///   one of its 25 pixels must be exactly zero, proving the reduction
+    ///   actually depends on the kernel's weights rather than echoing its
+    ///   windowed input regardless of them.
+    #[test]
+    fn a_conv2d_written_as_toml_reproduces_its_input_through_a_center_tap_kernel() {
+        const IMAGE: usize = 5;
+        const PADDED: usize = IMAGE + 2;
+        const KERNEL: usize = 3;
+        const CENTRE: usize = KERNEL / 2;
+
+        let text = include_str!("../specs/conv2d.toml");
+        let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
+        spec.validate().expect("spec is structurally sound");
+        let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
+
+        let symbols: [u64; 0] = [];
+        crate::shape::infer(&program, &symbols).expect("the convolution infers");
+
+        // image: a zero border (the materialized padding) around a real,
+        // non-constant 5x5 interior, so a transposed axis or a wrong offset
+        // reads a different, numerically distinct pixel rather than
+        // vanishing by symmetry.
+        let interior = random_vec(11, IMAGE * IMAGE);
+        let mut image = alloc::vec![0.0f32; PADDED * PADDED];
+        for row in 0..IMAGE {
+            for col in 0..IMAGE {
+                image[(row + 1) * PADDED + (col + 1)] = interior[row * IMAGE + col];
+            }
+        }
+
+        // kernel: [co, ho, wo, kh, kw] = [2, 5, 5, 3, 3]. Channel 0 is a
+        // center-tap identity at every output position; channel 1 stays all
+        // zero (the `vec!` default).
+        let mut kernel = alloc::vec![0.0f32; 2 * IMAGE * IMAGE * KERNEL * KERNEL];
+        for out_row in 0..IMAGE {
+            for out_col in 0..IMAGE {
+                let index = (((out_row * IMAGE + out_col) * KERNEL) + CENTRE) * KERNEL + CENTRE;
+                kernel[index] = 1.0;
+            }
+        }
+
+        let root = NodeId(program.len() as u32 - 1);
+        let blocks: [&[f32]; 2] = [&image, &kernel];
+        let evaluated =
+            crate::cpu::evaluate(&program, &symbols, &blocks, &[root]).expect("the convolution evaluates");
+
+        let output = evaluated.root();
+        assert_eq!(output.len(), 2 * IMAGE * IMAGE, "a vacuous output proves nothing");
+
+        let channel_0 = &output[..IMAGE * IMAGE];
+        let channel_1 = &output[IMAGE * IMAGE..];
+
+        assert_eq!(
+            channel_0,
+            interior.as_slice(),
+            "channel 0's center-tap kernel must reproduce all {} interior pixels exactly",
+            IMAGE * IMAGE
+        );
+        for (index, value) in channel_1.iter().enumerate() {
+            assert_eq!(
+                *value, 0.0,
+                "channel 1's all-zero kernel must produce exactly zero at pixel {index}, got {value}"
             );
         }
     }
