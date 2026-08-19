@@ -4,7 +4,7 @@
 //! `~/.claude/rules/rust.md`'s conflag skill and
 //! `proxima-telemetry/src/config.rs`, the canonical example), so this
 //! whole module lives behind the `std` feature -- the no_std+alloc floor
-//! ([`crate::parser`], via [`crate::parser::SafetensorsParser::new`])
+//! (`crate::parser`, via [`crate::parser::SafetensorsParser::new`])
 //! never sees it and always uses [`crate::sized`]'s constant directly.
 //!
 //! The bridge: `default_max_header_bytes` seeds from `crate::sized`, never

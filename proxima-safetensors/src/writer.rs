@@ -1,8 +1,7 @@
 //! The write half of this crate, sans-IO the same way [`crate::parser`] is:
 //! [`write_complete`] never opens a file — it takes an in-memory
 //! [`SafetensorsModel`] and returns owned bytes; the caller owns getting
-//! those bytes wherever they're going. [`WriteComplete`] is the `Pipe`
-//! wrapper, the dual of [`crate::pipe::ParseComplete`].
+//! those bytes wherever they're going.
 //!
 //! Wire layout mirrors [`crate::parser`] exactly: `[u64 LE header
 //! len][header JSON][raw tensor bytes]`. Unlike GGUF, safetensors has no
@@ -12,10 +11,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::future::Future;
-use core::marker::PhantomData;
 
-use proxima_primitives::pipe::Pipe;
 use proxima_tensor::DType;
 
 use crate::dtype::dtype_to_wire;
@@ -122,33 +118,6 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
     Ok(wire)
 }
 
-/// Serializes one complete [`SafetensorsModel`] in a single call. Stateless
-/// — a fresh serialization run happens on every [`Pipe::call`], same shape
-/// as [`crate::pipe::ParseComplete`]. Carries `'a` only to name `In = &'a
-/// SafetensorsModel<'a>`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct WriteComplete<'a>(PhantomData<&'a ()>);
-
-impl<'a> WriteComplete<'a> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<'a> Pipe for WriteComplete<'a> {
-    type In = &'a SafetensorsModel<'a>;
-    type Out = Vec<u8>;
-    type Err = SafetensorsError;
-
-    fn call(
-        &self,
-        input: &'a SafetensorsModel<'a>,
-    ) -> impl Future<Output = Result<Vec<u8>, SafetensorsError>> {
-        async move { write_complete(input) }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -165,20 +134,6 @@ mod tests {
 
     fn parse_whole(buf: &[u8]) -> Result<crate::Manifest, SafetensorsError> {
         SafetensorsParser::new().push(buf)?.into_manifest()
-    }
-
-    // Ready-on-first-poll, same discipline the reader's pipe tests use.
-    fn block_on_ready<F: Future>(future: F) -> F::Output {
-        use core::pin::pin;
-        use core::task::{Context, Poll, Waker};
-
-        let mut future = pin!(future);
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => output,
-            Poll::Pending => panic!("WriteComplete::call must be ready on first poll"),
-        }
     }
 
     /// Drives `crate::tests::build_buffer` — the reader's own fixture
@@ -298,23 +253,5 @@ mod tests {
             outcome,
             Err(SafetensorsError::ReservedTensorName { .. })
         ));
-    }
-
-    #[test]
-    fn write_complete_pipe_matches_the_free_function() {
-        let data = pattern_bytes(16);
-        let model = SafetensorsModel {
-            tensors: vec![TensorPayload {
-                name: "t".to_string(),
-                dtype: DType::Float32,
-                shape: vec![4],
-                data: data.as_slice(),
-            }],
-            metadata: BTreeMap::new(),
-        };
-
-        let via_pipe = block_on_ready(WriteComplete::new().call(&model)).expect("pipe writes");
-        let via_free_fn = write_complete(&model).expect("free function writes");
-        assert_eq!(via_pipe, via_free_fn);
     }
 }
