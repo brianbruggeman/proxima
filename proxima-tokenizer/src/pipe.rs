@@ -8,16 +8,26 @@ use alloc::vec::Vec;
 use crate::bpe::{decode_ids, encode_pretoken};
 use crate::error::TokenizerError;
 use crate::pretokenize::pretokenize;
+use crate::unigram;
 use crate::vocab::Vocab;
 
 /// Splits `text` into pretokens ([`crate::pretokenize::pretokenize`]) and
-/// BPE-merges each independently, concatenating the resulting ids in order.
+/// BPE-merges each independently, concatenating the resulting ids in order
+/// -- for a merges-driven vocab. For a scores-driven ([`Vocab::is_unigram`])
+/// vocab, normalizes the whole input ([`unigram::escape`]) and segments it
+/// as one fragment ([`unigram::encode_fragment`]) instead: SentencePiece has
+/// no separate pretokenizer stage, see [`crate::unigram`]'s module doc.
 /// Never adds BOS/EOS -- see [`encode_with_bos_eos`] for that, explicitly.
 ///
 /// # Errors
 ///
-/// Any [`TokenizerError`] [`encode_pretoken`] surfaces.
+/// Any [`TokenizerError`] [`encode_pretoken`]/[`unigram::encode_fragment`]
+/// surfaces.
 pub fn encode(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
+    if vocab.is_unigram() {
+        let normalized = unigram::escape(text);
+        return unigram::encode_fragment(&normalized, vocab);
+    }
     let mut ids = Vec::new();
     for span in pretokenize(text) {
         let piece = &text[span];
@@ -70,14 +80,18 @@ pub fn encode_with_bos_eos(
 /// UTF-8 boundaries).
 pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
     let bytes = decode_ids(ids, vocab)?;
-    String::from_utf8(bytes).map_err(|_| TokenizerError::InvalidUtf8)
+    let text = String::from_utf8(bytes).map_err(|_| TokenizerError::InvalidUtf8)?;
+    if vocab.is_unigram() {
+        return Ok(unigram::unescape(&text));
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::vocab::tests::tiny_vocab;
+    use crate::vocab::tests::{tiny_unigram_vocab, tiny_vocab};
 
     #[test]
     fn encode_with_bos_eos_prepends_and_appends() {
@@ -96,5 +110,32 @@ mod tests {
             let decoded = decode(&ids, &vocab).expect("decodes");
             assert_eq!(decoded, text, "round trip failed for {text:?}");
         }
+    }
+
+    #[test]
+    fn unigram_round_trip_arbitrary_ascii_and_multibyte_utf8() {
+        let vocab = tiny_unigram_vocab();
+        for text in [" hi", "hi hi", "xyz", "\u{1F600} hi", ""] {
+            let ids = encode(text, &vocab).expect("encodes");
+            let decoded = decode(&ids, &vocab).expect("decodes");
+            assert_eq!(decoded, text, "round trip failed for {text:?} (ids: {ids:?})");
+        }
+    }
+
+    #[test]
+    fn unigram_vocab_dispatches_to_the_unigram_encoder_not_bpe() {
+        // degenerate control: a merges-driven vocab given the same input
+        // must NOT collapse "hi" the same way a scores-driven vocab does --
+        // proves `encode` actually branches on `Vocab::is_unigram` rather
+        // than always running one encoder.
+        let unigram_vocab = tiny_unigram_vocab();
+        let bpe_vocab = tiny_vocab();
+        let unigram_ids = encode("hi", &unigram_vocab).expect("unigram encodes");
+        let bpe_ids = encode("hi", &bpe_vocab).expect("bpe encodes");
+        assert_eq!(unigram_ids.len(), 1, "unigram vocab merges \u{2581}hi to one piece");
+        assert_eq!(bpe_ids.len(), 1, "bpe vocab merges h+i to one piece");
+        assert_ne!(unigram_ids, bpe_ids, "the two encoders assign different ids for the same text");
+        assert_eq!(decode(&unigram_ids, &unigram_vocab).expect("unigram decodes"), "hi");
+        assert_eq!(decode(&bpe_ids, &bpe_vocab).expect("bpe decodes"), "hi");
     }
 }

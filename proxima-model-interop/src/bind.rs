@@ -239,19 +239,16 @@ mod real_openchat_file {
     /// table is indexed by row, not projected) needs an explicit transpose
     /// at load time -- [`transpose_out_in_to_in_out`] below.
     ///
-    /// Known finding, not fixed here: this checkpoint's `tokenizer.ggml.
-    /// model` metadata key is `"llama"` (SentencePiece unigram, carrying a
-    /// `tokenizer.ggml.scores` array) and has no `tokenizer.ggml.merges`
-    /// key at all, but `proxima_tokenizer::pipe::encode` is a byte-level
-    /// BPE codec keyed on merges -- this crate's own module doc says as
-    /// much ("the variant `tokenizer.ggml.model = "gpt2"` ... identify on
-    /// the real fixture this crate was built against"). With no merges to
-    /// apply, `encode_with_bos_eos` degenerates to one token per input
-    /// byte: encoding `"The capital of France is"` (24 characters) plus
-    /// BOS yields `sequence == 25`, not the ~6 subword tokens a working
-    /// tokenizer would produce. That is the tokenizer stage, not the
-    /// forward pass or the weight transpose above, and it is why this
-    /// test's picked token is not `"▁Paris"`.
+    /// This checkpoint's `tokenizer.ggml.model` metadata key is `"llama"`
+    /// (SentencePiece/SPM, carrying a `tokenizer.ggml.scores` array, no
+    /// `tokenizer.ggml.merges` key at all). `proxima_tokenizer::gguf::
+    /// vocab_from_metadata` now dispatches on that key (`Vocab::
+    /// new_unigram` for `"llama"`, `Vocab::new` for `"gpt2"`), and
+    /// `proxima_tokenizer::pipe::encode`/`decode` select the matching
+    /// encoder from `Vocab::is_unigram` -- see `proxima-tokenizer/src/
+    /// unigram.rs`. Encoding `"The capital of France is"` now segments
+    /// into the real vocab's five subword pieces (`sequence == 6` with
+    /// BOS), not one token per byte.
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and dequantizes ~29GB of weights"]
     fn runs_one_real_forward_pass_and_greedy_picks_a_real_token() {
