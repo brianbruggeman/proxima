@@ -112,6 +112,28 @@ paths = [
     ".github/workflows/no-std.yml",
 ]
 
+# The model stack. `packages` are dependency-closure ROOTS, so every crate that
+# owns a cell in proxima-tensor-gate.sh is named directly rather than reached
+# through a sibling — see the note in [area.nostd] about a gate that cannot be
+# triggered. omega is a root because it depends on proxima-tensor and carries
+# the metal_parity cases; the format crates are roots because nothing depends
+# on them yet, so a closure walk would never reach them.
+[area.tensor]
+packages = [
+    "proxima-tensor",
+    "omega",
+    "proxima-gguf",
+    "proxima-safetensors",
+    "proxima-onnx",
+    "proxima-model-interop",
+    "proxima-tokenizer",
+]
+paths = [
+    "scripts/proxima-tensor-gate.sh",
+    ".github/workflows/proxima-tensor.yml",
+    "proxima-tensor/specs/**",
+]
+
 [area.dpdk_stack]
 packages = ["proxima-protocols"]
 paths = [

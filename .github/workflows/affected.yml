@@ -27,6 +27,8 @@ on:
         value: ${{ jobs.detect.outputs.nostd }}
       dpdk_stack:
         value: ${{ jobs.detect.outputs.dpdk_stack }}
+      tensor:
+        value: ${{ jobs.detect.outputs.tensor }}
 
 jobs:
   detect:
@@ -41,6 +43,7 @@ jobs:
       telemetry:   ${{ steps.affected.outputs.telemetry }}
       nostd:       ${{ steps.affected.outputs.nostd }}
       dpdk_stack:  ${{ steps.affected.outputs.dpdk_stack }}
+      tensor:      ${{ steps.affected.outputs.tensor }}
     steps:
       - uses: actions/checkout@v4
         with:
