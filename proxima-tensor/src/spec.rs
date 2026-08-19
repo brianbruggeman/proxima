@@ -14,7 +14,7 @@
 //!
 //! An operand axis may also be a comma-separated *expression*, one term per
 //! axis: `"s,2*i->si"` says axis 0 is plain `s` and axis 1 is `2*i` — the
-//! `AxisTerm { axis, coeff }` sum [`map::affine`](crate::map::affine) already
+//! `AxisTerm { axis, coeff }` sum [`map::affine`] already
 //! builds in Rust, spelled as data. A term is `[coeff*]letter` (letters stay
 //! single ASCII characters, the same alphabet the bare-letter grammar uses),
 //! several terms may be summed with `+`/`-`, and a bare integer term
@@ -27,16 +27,16 @@
 //! this module could spell them.
 //!
 //! A [`NodeSpec::Reduce`]'s `in_map` reads through this same richer grammar
-//! ([`parse_operand_pattern`]) — the asymmetry where only `Elementwise`
+//! (`parse_operand_pattern`) — the asymmetry where only `Elementwise`
 //! operands could spell a multi-term axis was an oversight, not a design
 //! decision, since a `Reduce`'s operand is windowed exactly the same way a
 //! convolution's `Elementwise(Multiply)` operand is (see
 //! `specs/conv2d.toml`). `out_map` stays on the older, bare-letter-only
-//! [`parse_projection`] deliberately: [`shape::project_output_shape`] already
+//! `parse_projection` deliberately: `shape::project_output_shape` already
 //! rejects any `out_map` axis that is not a pure single-term `coeff == 1`
 //! projection (`NotLowerable`, "reduce output maps must be pure projections
 //! in v1"), so parsing a richer `out_map` would only ever be thrown away at
-//! bind time — [`parse_projection`]'s narrower grammar gives the same
+//! bind time — `parse_projection`'s narrower grammar gives the same
 //! rejection at parse time instead, before a spec that could never lower
 //! reaches shape inference at all.
 //!
@@ -45,7 +45,7 @@
 //! "d->sd", dim = 0 }`. `index_map` addresses the `gather` node the same
 //! einsum way; `map` addresses the operand's *non-gathered* axes only, in
 //! operand-axis order, skipping the position `dim` names —
-//! [`build_base_pattern`] splices an empty (gathered) entry back in at that
+//! `build_base_pattern` splices an empty (gathered) entry back in at that
 //! position.
 
 use alloc::collections::BTreeMap;

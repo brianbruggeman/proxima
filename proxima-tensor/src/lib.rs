@@ -89,7 +89,7 @@
 //! # Tiers
 //!
 //! - `alloc` (no_std + alloc): the program representation, [`shape`], and
-//!   [`bind`] — everything an out-of-process backend (a GPU kernel emitter,
+//!   [`mod@bind`] — everything an out-of-process backend (a GPU kernel emitter,
 //!   say) needs to consume a program with bound addressing.
 //! - `std` (default): forwards `alloc`, adds `std::error::Error` and the CPU
 //!   interpreter ([`cpu`]), which needs floating-point transcendentals.
