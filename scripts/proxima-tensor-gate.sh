@@ -73,6 +73,11 @@ declare -a cells=(
     "instrument clippy|cargo clippy -p proxima-tensor --all-targets --features instrument -- -D warnings"
     "instrument tests|cargo nextest run -p proxima-tensor --features instrument --no-fail-fast"
 
+    # the default clippy cell above never compiles the ggml-bench bench
+    # target, which is how 38 lint errors sat in benches/bench_vs_ggml.rs
+    # unseen. all-features closes that hole.
+    "all-features clippy|cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings"
+
     # the backend nothing else in the tree compiles. clippy --all-targets first
     # so a break shows as a compile error rather than a missing test.
     "tensor-bgpool clippy|cargo clippy -p proxima-tensor --all-targets --features tensor-bgpool -- -D warnings"
