@@ -1,0 +1,747 @@
+# One full openchat-3.5-1210 / Mistral-7B transformer layer, at the model's
+# real dimensions, with RoPE + GQA + a causal mask composed together for the
+# first time — `rope.toml`, `gqa_attention.toml`, `causal_attention.toml`,
+# and `transformer_block.toml` each prove one mechanism in isolation; this
+# file is the proof that composing them costs no new `Op` or `ScalarOp`.
+#
+# Real config (read from the gguf's own metadata, not invented):
+#   block_count=32 (this file is ONE of the 32, not the stack)
+#   embedding_length=4096, feed_forward_length=14336
+#   head_count=32, head_count_kv=8 (group=4), head_dim=128
+#   rope.dimension_count=128 (the full head_dim rotates)
+#   layer_norm_rms_epsilon=1e-5, vocab=32002, context_length=8192
+# Sequence length is the only `Extent::Symbolic` axis (`?0`); every other
+# axis below is the model's real static size.
+#
+# RoPE and GQA compose without a new `Op`, but not for free: `rope.toml`
+# rotates a rank-2 `(seq, model)` tensor pairwise on its last axis; here `q`
+# and `k` are rank-3 `(seq, head, head_dim)` after projection, so the same
+# `2*i` / `2*i+1` affine reads the *last* axis while `head` (or `head_kv`)
+# passes through as a bare, broadcast letter — exactly the same broadcast
+# rule `rmsnorm`'s `inv_rms` (`s->sd`) already relies on, just on a third
+# axis instead of a second. Once `q`/`k` are rotated pairwise, the ordinary
+# per-head dot product `sum_d q_d * k_d` is computed as `sum_i (q_even_i *
+# k_even_i) + sum_i (q_odd_i * k_odd_i)` — two independent contractions over
+# the pairs axis, added — rather than interleaving the rotated halves back
+# into head_dim order, which would need a write-placement op (`Concat`) this
+# crate does not have. `gqa_attention.toml`'s own `group_ones` trick (query
+# head `h = group*u + g` decomposed via a `[kv_heads, group]` all-ones
+# operand that pins both `u` and `g`'s extents) is applied identically to
+# each rotated half before the two contractions.
+#
+# `layer_norm_rms_epsilon` is included by the same mechanism
+# `transformer_block.toml` already uses for its SwiGLU `+ 1.0`: an `Input`
+# broadcast in from a lower rank (`s->s`), not a new node kind.
+
+# --- inputs -------------------------------------------------------------
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = ["?0", 4096]
+
+[[node]]
+op = "input"
+id = "inv_dim"
+dtype = "float32"
+shape = ["?0"]
+
+[[node]]
+op = "input"
+id = "eps"
+dtype = "float32"
+shape = ["?0"]
+
+[[node]]
+op = "input"
+id = "ones"
+dtype = "float32"
+shape = ["?0"]
+
+[[node]]
+op = "input"
+id = "wq"
+dtype = "float32"
+shape = [4096, 32, 128]
+
+[[node]]
+op = "input"
+id = "wk"
+dtype = "float32"
+shape = [4096, 8, 128]
+
+[[node]]
+op = "input"
+id = "wv"
+dtype = "float32"
+shape = [4096, 8, 128]
+
+[[node]]
+op = "input"
+id = "wo"
+dtype = "float32"
+shape = [8, 4, 128, 4096]
+
+[[node]]
+op = "input"
+id = "w_gate"
+dtype = "float32"
+shape = [4096, 14336]
+
+[[node]]
+op = "input"
+id = "w_up"
+dtype = "float32"
+shape = [4096, 14336]
+
+[[node]]
+op = "input"
+id = "w_down"
+dtype = "float32"
+shape = [14336, 4096]
+
+[[node]]
+op = "input"
+id = "cos"
+dtype = "float32"
+shape = ["?0", 64]
+
+[[node]]
+op = "input"
+id = "sin"
+dtype = "float32"
+shape = ["?0", 64]
+
+[[node]]
+op = "input"
+id = "group_ones"
+dtype = "float32"
+shape = [8, 4]
+
+# --- attn_norm (rmsnorm) --------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "x_squared"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "x"]
+maps = ["sd->sd", "sd->sd"]
+
+[[node]]
+op = "reduce"
+id = "sum_squares"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "x_squared"
+in_map = "sd->sd"
+out_map = "s->sd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mean_square"
+dtype = "float32"
+body = "multiply"
+inputs = ["sum_squares", "inv_dim"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "mean_square_eps"
+dtype = "float32"
+body = "add"
+inputs = ["mean_square", "eps"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "rms"
+dtype = "float32"
+body = "square_root"
+inputs = ["mean_square_eps"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "inv_rms"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["rms"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "normed"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "inv_rms"]
+maps = ["sd->sd", "s->sd"]
+
+# --- q / k / v projections, heads kept as their own axis ------------------
+
+[[node]]
+op = "elementwise"
+id = "q_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wq"]
+maps = ["si->shdi", "ihd->shdi"]
+
+[[node]]
+op = "reduce"
+id = "q"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "q_product"
+in_map = "shdi->shdi"
+out_map = "shd->shdi"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "k_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wk"]
+maps = ["si->sudi", "iud->sudi"]
+
+[[node]]
+op = "reduce"
+id = "k"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "k_product"
+in_map = "sudi->sudi"
+out_map = "sud->sudi"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "v_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wv"]
+maps = ["si->sudi", "iud->sudi"]
+
+[[node]]
+op = "reduce"
+id = "v"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "v_product"
+in_map = "sudi->sudi"
+out_map = "sud->sudi"
+keep = "reduce"
+
+# --- rope on q: pairwise rotation over head_dim, broadcast over head ------
+
+[[node]]
+op = "elementwise"
+id = "q_even_cos"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "cos"]
+maps = ["s,h,2*i->shi", "si->shi"]
+
+[[node]]
+op = "elementwise"
+id = "q_odd_sin"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "sin"]
+maps = ["s,h,2*i+1->shi", "si->shi"]
+
+[[node]]
+op = "elementwise"
+id = "rotated_q_even"
+dtype = "float32"
+body = "subtract"
+inputs = ["q_even_cos", "q_odd_sin"]
+maps = ["shi->shi", "shi->shi"]
+
+[[node]]
+op = "elementwise"
+id = "q_even_sin"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "sin"]
+maps = ["s,h,2*i->shi", "si->shi"]
+
+[[node]]
+op = "elementwise"
+id = "q_odd_cos"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "cos"]
+maps = ["s,h,2*i+1->shi", "si->shi"]
+
+[[node]]
+op = "elementwise"
+id = "rotated_q_odd"
+dtype = "float32"
+body = "add"
+inputs = ["q_even_sin", "q_odd_cos"]
+maps = ["shi->shi", "shi->shi"]
+
+# --- rope on k: same rotation, kv-head axis instead of query-head axis ----
+
+[[node]]
+op = "elementwise"
+id = "k_even_cos"
+dtype = "float32"
+body = "multiply"
+inputs = ["k", "cos"]
+maps = ["s,u,2*i->sui", "si->sui"]
+
+[[node]]
+op = "elementwise"
+id = "k_odd_sin"
+dtype = "float32"
+body = "multiply"
+inputs = ["k", "sin"]
+maps = ["s,u,2*i+1->sui", "si->sui"]
+
+[[node]]
+op = "elementwise"
+id = "rotated_k_even"
+dtype = "float32"
+body = "subtract"
+inputs = ["k_even_cos", "k_odd_sin"]
+maps = ["sui->sui", "sui->sui"]
+
+[[node]]
+op = "elementwise"
+id = "k_even_sin"
+dtype = "float32"
+body = "multiply"
+inputs = ["k", "sin"]
+maps = ["s,u,2*i->sui", "si->sui"]
+
+[[node]]
+op = "elementwise"
+id = "k_odd_cos"
+dtype = "float32"
+body = "multiply"
+inputs = ["k", "cos"]
+maps = ["s,u,2*i+1->sui", "si->sui"]
+
+[[node]]
+op = "elementwise"
+id = "rotated_k_odd"
+dtype = "float32"
+body = "add"
+inputs = ["k_even_sin", "k_odd_cos"]
+maps = ["sui->sui", "sui->sui"]
+
+# --- gqa grouping: each rotated half, pinned onto (kv-head, group) --------
+
+[[node]]
+op = "elementwise"
+id = "q_even_grouped"
+dtype = "float32"
+body = "multiply"
+inputs = ["rotated_q_even", "group_ones"]
+maps = ["s,4*u+g,i->sugi", "ug->sugi"]
+
+[[node]]
+op = "elementwise"
+id = "q_odd_grouped"
+dtype = "float32"
+body = "multiply"
+inputs = ["rotated_q_odd", "group_ones"]
+maps = ["s,4*u+g,i->sugi", "ug->sugi"]
+
+# --- scores: dot product recovered as even-pairs + odd-pairs --------------
+
+[[node]]
+op = "elementwise"
+id = "score_even_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["q_even_grouped", "rotated_k_even"]
+maps = ["sugi->stugi", "tui->stugi"]
+
+[[node]]
+op = "reduce"
+id = "score_even"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "score_even_product"
+in_map = "stugi->stugi"
+out_map = "stug->stugi"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "score_odd_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["q_odd_grouped", "rotated_k_odd"]
+maps = ["sugi->stugi", "tui->stugi"]
+
+[[node]]
+op = "reduce"
+id = "score_odd"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "score_odd_product"
+in_map = "stugi->stugi"
+out_map = "stug->stugi"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "scores"
+dtype = "float32"
+body = "add"
+inputs = ["score_even", "score_odd"]
+maps = ["stug->stug", "stug->stug"]
+
+# --- causal mask ------------------------------------------------------------
+
+[[node]]
+op = "iota"
+id = "query_index"
+dtype = "float32"
+extent = "?0"
+
+[[node]]
+op = "iota"
+id = "key_index"
+dtype = "float32"
+extent = "?0"
+
+[[node]]
+op = "elementwise"
+id = "is_future"
+dtype = "float32"
+body = "greater"
+inputs = ["key_index", "query_index"]
+maps = ["t->st", "s->st"]
+
+[[node]]
+op = "elementwise"
+id = "zero"
+dtype = "float32"
+body = "subtract"
+inputs = ["query_index", "query_index"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "neg_zero"
+dtype = "float32"
+body = "negate"
+inputs = ["zero"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "neg_infinity"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["neg_zero"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "scores_masked"
+dtype = "float32"
+body = "select"
+inputs = ["is_future", "neg_infinity", "scores"]
+maps = ["st->stug", "s->stug", "stug->stug"]
+
+# --- softmax over the key axis --------------------------------------------
+
+[[node]]
+op = "reduce"
+id = "score_max"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "scores_masked"
+in_map = "stug->stug"
+out_map = "sug->stug"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "shifted"
+dtype = "float32"
+body = "subtract"
+inputs = ["scores_masked", "score_max"]
+maps = ["stug->stug", "sug->stug"]
+
+[[node]]
+op = "elementwise"
+id = "weights"
+dtype = "float32"
+body = "exponential"
+inputs = ["shifted"]
+maps = ["stug->stug"]
+
+[[node]]
+op = "reduce"
+id = "weight_sum"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "weights"
+in_map = "stug->stug"
+out_map = "sug->stug"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "inv_weight_sum"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["weight_sum"]
+maps = ["sug->sug"]
+
+[[node]]
+op = "elementwise"
+id = "probabilities"
+dtype = "float32"
+body = "multiply"
+inputs = ["weights", "inv_weight_sum"]
+maps = ["stug->stug", "sug->stug"]
+
+# --- weighted sum of values, v stays broadcast over g like the mask -------
+
+[[node]]
+op = "elementwise"
+id = "attended_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["probabilities", "v"]
+maps = ["stug->stugd", "tud->stugd"]
+
+[[node]]
+op = "reduce"
+id = "attended"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "attended_product"
+in_map = "stugd->stugd"
+out_map = "sugd->stugd"
+keep = "reduce"
+
+# --- attention output projection ------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "wo_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["attended", "wo"]
+maps = ["sugd->sugdo", "ugdo->sugdo"]
+
+[[node]]
+op = "reduce"
+id = "attn_out"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "wo_product"
+in_map = "sugdo->sugdo"
+out_map = "so->sugdo"
+keep = "reduce"
+
+# --- residual around attention ---------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "residual1"
+dtype = "float32"
+body = "add"
+inputs = ["attn_out", "x"]
+maps = ["sd->sd", "sd->sd"]
+
+# --- ffn_norm (rmsnorm) -----------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "residual1_squared"
+dtype = "float32"
+body = "multiply"
+inputs = ["residual1", "residual1"]
+maps = ["sd->sd", "sd->sd"]
+
+[[node]]
+op = "reduce"
+id = "sum_squares2"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "residual1_squared"
+in_map = "sd->sd"
+out_map = "s->sd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mean_square2"
+dtype = "float32"
+body = "multiply"
+inputs = ["sum_squares2", "inv_dim"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "mean_square2_eps"
+dtype = "float32"
+body = "add"
+inputs = ["mean_square2", "eps"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "rms2"
+dtype = "float32"
+body = "square_root"
+inputs = ["mean_square2_eps"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "inv_rms2"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["rms2"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "normed2"
+dtype = "float32"
+body = "multiply"
+inputs = ["residual1", "inv_rms2"]
+maps = ["sd->sd", "s->sd"]
+
+# --- swiglu feed-forward -----------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "gate_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed2", "w_gate"]
+maps = ["sd->sdg", "dg->sdg"]
+
+[[node]]
+op = "reduce"
+id = "gate"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "gate_product"
+in_map = "sdg->sdg"
+out_map = "sg->sdg"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "up_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed2", "w_up"]
+maps = ["sd->sdg", "dg->sdg"]
+
+[[node]]
+op = "reduce"
+id = "up"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "up_product"
+in_map = "sdg->sdg"
+out_map = "sg->sdg"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "neg_gate"
+dtype = "float32"
+body = "negate"
+inputs = ["gate"]
+maps = ["sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "exp_neg_gate"
+dtype = "float32"
+body = "exponential"
+inputs = ["neg_gate"]
+maps = ["sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "one_plus_exp"
+dtype = "float32"
+body = "add"
+inputs = ["exp_neg_gate", "ones"]
+maps = ["sg->sg", "s->sg"]
+
+[[node]]
+op = "elementwise"
+id = "sigmoid_gate"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["one_plus_exp"]
+maps = ["sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "silu_gate"
+dtype = "float32"
+body = "multiply"
+inputs = ["gate", "sigmoid_gate"]
+maps = ["sg->sg", "sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "ffn_hidden"
+dtype = "float32"
+body = "multiply"
+inputs = ["silu_gate", "up"]
+maps = ["sg->sg", "sg->sg"]
+
+[[node]]
+op = "elementwise"
+id = "down_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["ffn_hidden", "w_down"]
+maps = ["sg->sgd", "gd->sgd"]
+
+[[node]]
+op = "reduce"
+id = "ffn_out"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "down_product"
+in_map = "sgd->sgd"
+out_map = "sd->sgd"
+keep = "reduce"
+
+# --- residual around the feed-forward ---------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "mistral_layer"
+dtype = "float32"
+body = "add"
+inputs = ["ffn_out", "residual1"]
+maps = ["sd->sd", "sd->sd"]
+name = "mistral_layer"
