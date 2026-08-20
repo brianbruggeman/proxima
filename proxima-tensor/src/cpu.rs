@@ -2939,6 +2939,7 @@ fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, str
 /// already proved no other stride reaches here. Bundling the three fields
 /// keeps `reduce_width_binary` under clippy's argument-count lint without
 /// reaching for `#[allow]`.
+#[derive(Clone, Copy)]
 struct OperandSpan<'a> {
     data: &'a [f32],
     base: usize,
@@ -6289,29 +6290,6 @@ fn elementwise_width_fast(
     }
 }
 
-/// One argument source for a [`BodyStep`], resolved once per step rather
-/// than re-read every position: either a pre-sliced contiguous run (an
-/// affine operand's own data, or an earlier step's whole output row) or a
-/// hoisted broadcast scalar (a stride-0 operand). Both `StepArg` cases
-/// collapse to the same two shapes, which is what lets the position loop in
-/// [`elementwise_width_generic_step`] stay a single 2-arm match instead of
-/// re-deriving "operand or step, contiguous or not" per element.
-#[derive(Clone, Copy)]
-enum ArgKind<'a> {
-    Contiguous(&'a [f32]),
-    Broadcast(f32),
-}
-
-impl ArgKind<'_> {
-    #[inline(always)]
-    fn at(self, position: usize) -> f32 {
-        match self {
-            ArgKind::Contiguous(slice) => slice[position],
-            ArgKind::Broadcast(value) => value,
-        }
-    }
-}
-
 /// The width-loop fast path for a fused multi-step [`ComposedBody`]
 /// (`BodyShape::Generic`) — the same straight-line shape
 /// [`elementwise_width_fast`]'s `Unary`/`Binary` arms already give a
@@ -6319,21 +6297,27 @@ impl ArgKind<'_> {
 /// evaluation instead of a bespoke per-arity function.
 ///
 /// Step-outer, position-inner (the reverse of the position-outer loop this
-/// replaced): each step's [`ScalarOp`] is matched to a monomorphized closure
-/// **once**, in [`elementwise_width_generic_step`], then that closure runs a
-/// branch-free pass over every position — the same "specialize once per
-/// call" discipline `elementwise_width_unary`/`elementwise_width_binary`
-/// already apply, extended to a step-by-step chain. `step_values` is now a
+/// replaced): each step resolves its [`StepArg`]s to plain [`OperandSpan`]s
+/// **once**, the same struct [`elementwise_width_unary`]/`_binary` already
+/// read, then hands them to that step's arity-specific monomorphic function
+/// — [`elementwise_width_unary_monomorphic`] and
+/// [`elementwise_width_binary_monomorphic`] are reused verbatim for arity
+/// 1/2, [`elementwise_width_ternary_monomorphic`] added for `Select`'s arity
+/// 3. Each of those matches `contiguous`/`broadcast` per operand **once,
+/// before** the position loop, so the loop body itself is a fixed slice (or
+/// scalar) walk with no per-element branch — earlier `ArgKind::at` case-fell
+/// back to a per-element match instead, which measured slower, not faster,
+/// than the naive path it replaced. `step_values` is a
 /// `body.steps.len() * out.len()` flat row table (row `index` holds step
 /// `index`'s value at every position) instead of one scalar reused across
 /// steps, because `StepArg::Step` is backwards-only (`BodyStep`'s own doc)
-/// and every earlier row must survive until the last step reads it. Each
-/// `StepArg::Operand` still reads straight out of its operand's contiguous
-/// slice or hoisted broadcast scalar (no `gather_cursors` `Option` check, no
-/// per-element `running` mutation — both already ruled out by
-/// [`body_shape_is_affine_fast_path`]), so evaluation order and every
-/// `apply_scalar_op` call match [`apply_body`]'s scalar path exactly: output
-/// is bit-identical (`proxima-tensor/docs/discipline.md` ROW 5).
+/// and every earlier row must survive until the last step reads it. A
+/// `StepArg::Step` read is always a whole prior row, so it is always
+/// `contiguous: true` — never the loop-invariant-broadcast case, which only
+/// ever applies to a genuine stride-0 `StepArg::Operand`. Evaluation order
+/// and every `apply_scalar_op` call match [`apply_body`]'s scalar path
+/// exactly: output is bit-identical (`proxima-tensor/docs/discipline.md`
+/// ROW 5).
 #[inline(always)]
 fn elementwise_width_generic(
     body: &ComposedBody,
@@ -6344,66 +6328,84 @@ fn elementwise_width_generic(
     step_values: &mut [f32],
 ) {
     let width = out.len();
+    let empty: &[f32] = &[];
     for (index, step) in body.steps.iter().enumerate() {
         let (earlier, rest) = step_values.split_at_mut(index * width);
         let row = &mut rest[..width];
 
-        let mut sources = [ArgKind::Broadcast(0.0); 3];
+        let mut spans = [OperandSpan {
+            data: empty,
+            base: 0,
+            contiguous: true,
+        }; 3];
         for (arg_slot, arg) in step.args.iter().enumerate() {
-            sources[arg_slot] = match *arg {
+            spans[arg_slot] = match *arg {
                 StepArg::Operand(operand_index) => {
                     let operand_index = operand_index as usize;
-                    let data = raw[operand_index];
-                    let base = running[operand_index] as usize;
-                    if strides[operand_index] == 1 {
-                        ArgKind::Contiguous(&data[base..base + width])
-                    } else {
-                        ArgKind::Broadcast(data[base])
+                    OperandSpan {
+                        data: raw[operand_index],
+                        base: running[operand_index] as usize,
+                        contiguous: strides[operand_index] == 1,
                     }
                 }
                 StepArg::Step(step_index) => {
                     let step_index = step_index as usize;
-                    ArgKind::Contiguous(&earlier[step_index * width..(step_index + 1) * width])
+                    OperandSpan {
+                        data: &earlier[step_index * width..(step_index + 1) * width],
+                        base: 0,
+                        contiguous: true,
+                    }
                 }
             };
         }
-        elementwise_width_generic_step(step.op, &sources[..step.args.len()], row);
+        elementwise_width_generic_step(step.op, &spans, row);
     }
     let last = body.steps.len() - 1;
     out.copy_from_slice(&step_values[last * width..(last + 1) * width]);
 }
 
-/// Picks `step`'s `ScalarOp` **once** and runs the resulting monomorphized
-/// closure over every position in `row` — the `Generic`-body counterpart of
+/// Picks `step`'s `ScalarOp` **once** and dispatches to the matching arity's
+/// monomorphic function — the `Generic`-body counterpart of
 /// [`elementwise_width_unary`]/[`elementwise_width_binary`]'s own
-/// once-per-call dispatch, generalized over `args.len()` (1 to 3) instead of
-/// a fixed arity.
+/// once-per-call dispatch, generalized to a `Select`-only ternary case.
 #[inline(always)]
-fn elementwise_width_generic_step(op: ScalarOp, args: &[ArgKind], row: &mut [f32]) {
+fn elementwise_width_generic_step(op: ScalarOp, spans: &[OperandSpan; 3], row: &mut [f32]) {
     match op {
-        ScalarOp::Identity => elementwise_width_generic_unary(|a: f32| a, args, row),
-        ScalarOp::Negate => elementwise_width_generic_unary(|a: f32| -a, args, row),
-        ScalarOp::Reciprocal => elementwise_width_generic_unary(|a: f32| 1.0 / a, args, row),
-        ScalarOp::Exponential => elementwise_width_generic_unary(|a: f32| a.exp(), args, row),
-        ScalarOp::Logarithm => elementwise_width_generic_unary(|a: f32| a.ln(), args, row),
-        ScalarOp::SquareRoot => elementwise_width_generic_unary(|a: f32| a.sqrt(), args, row),
-        ScalarOp::Tanh => elementwise_width_generic_unary(|a: f32| a.tanh(), args, row),
-        ScalarOp::Erf => elementwise_width_generic_unary(erf_f32, args, row),
-        ScalarOp::Add => elementwise_width_generic_binary(|a: f32, b: f32| a + b, args, row),
-        ScalarOp::Subtract => elementwise_width_generic_binary(|a: f32, b: f32| a - b, args, row),
-        ScalarOp::Multiply => elementwise_width_generic_binary(|a: f32, b: f32| a * b, args, row),
-        ScalarOp::Divide => elementwise_width_generic_binary(|a: f32, b: f32| a / b, args, row),
-        ScalarOp::Maximum => elementwise_width_generic_binary(|a: f32, b: f32| a.max(b), args, row),
-        ScalarOp::Minimum => elementwise_width_generic_binary(|a: f32, b: f32| a.min(b), args, row),
-        ScalarOp::Greater => {
-            elementwise_width_generic_binary(|a: f32, b: f32| f32::from(u8::from(a > b)), args, row)
+        ScalarOp::Identity => elementwise_width_unary_monomorphic(|a: f32| a, spans[0], row),
+        ScalarOp::Negate => elementwise_width_unary_monomorphic(|a: f32| -a, spans[0], row),
+        ScalarOp::Reciprocal => elementwise_width_unary_monomorphic(|a: f32| 1.0 / a, spans[0], row),
+        ScalarOp::Exponential => elementwise_width_unary_monomorphic(|a: f32| a.exp(), spans[0], row),
+        ScalarOp::Logarithm => elementwise_width_unary_monomorphic(|a: f32| a.ln(), spans[0], row),
+        ScalarOp::SquareRoot => elementwise_width_unary_monomorphic(|a: f32| a.sqrt(), spans[0], row),
+        ScalarOp::Tanh => elementwise_width_unary_monomorphic(|a: f32| a.tanh(), spans[0], row),
+        ScalarOp::Erf => elementwise_width_unary_monomorphic(erf_f32, spans[0], row),
+        ScalarOp::Add => elementwise_width_binary_monomorphic(|a: f32, b: f32| a + b, spans[0], spans[1], row),
+        ScalarOp::Subtract => {
+            elementwise_width_binary_monomorphic(|a: f32, b: f32| a - b, spans[0], spans[1], row);
         }
-        ScalarOp::Equal => elementwise_width_generic_binary(
-            |a: f32, b: f32| f32::from(u8::from((a - b).abs() == 0.0)),
-            args,
+        ScalarOp::Multiply => {
+            elementwise_width_binary_monomorphic(|a: f32, b: f32| a * b, spans[0], spans[1], row);
+        }
+        ScalarOp::Divide => elementwise_width_binary_monomorphic(|a: f32, b: f32| a / b, spans[0], spans[1], row),
+        ScalarOp::Maximum => {
+            elementwise_width_binary_monomorphic(|a: f32, b: f32| a.max(b), spans[0], spans[1], row);
+        }
+        ScalarOp::Minimum => {
+            elementwise_width_binary_monomorphic(|a: f32, b: f32| a.min(b), spans[0], spans[1], row);
+        }
+        ScalarOp::Greater => elementwise_width_binary_monomorphic(
+            |a: f32, b: f32| f32::from(u8::from(a > b)),
+            spans[0],
+            spans[1],
             row,
         ),
-        ScalarOp::Select => elementwise_width_generic_ternary(
+        ScalarOp::Equal => elementwise_width_binary_monomorphic(
+            |a: f32, b: f32| f32::from(u8::from((a - b).abs() == 0.0)),
+            spans[0],
+            spans[1],
+            row,
+        ),
+        ScalarOp::Select => elementwise_width_ternary_monomorphic(
             |condition: f32, when_true: f32, when_false: f32| {
                 if condition != 0.0 {
                     when_true
@@ -6411,45 +6413,111 @@ fn elementwise_width_generic_step(op: ScalarOp, args: &[ArgKind], row: &mut [f32
                     when_false
                 }
             },
-            args,
+            spans[0],
+            spans[1],
+            spans[2],
             row,
         ),
     }
 }
 
+/// The `Select`-arity counterpart of
+/// [`elementwise_width_binary_monomorphic`]: every operand's
+/// `contiguous`/`broadcast` case is matched **once**, before the position
+/// loop, so each of the eight combinations runs a fixed slice-or-scalar walk
+/// with no per-element branch. A fully-broadcast step (all three operands
+/// stride-0) computes `op` exactly once and splats the single result, same
+/// as the all-broadcast arm of the binary/unary cases — never re-evaluated
+/// per position, since none of its inputs vary by position.
 #[inline(always)]
-fn elementwise_width_generic_unary<F>(op: F, args: &[ArgKind], row: &mut [f32])
-where
-    F: Fn(f32) -> f32,
-{
-    let a = args[0];
-    for (position, slot) in row.iter_mut().enumerate() {
-        *slot = op(a.at(position));
-    }
-}
-
-#[inline(always)]
-fn elementwise_width_generic_binary<F>(op: F, args: &[ArgKind], row: &mut [f32])
-where
-    F: Fn(f32, f32) -> f32,
-{
-    let a = args[0];
-    let b = args[1];
-    for (position, slot) in row.iter_mut().enumerate() {
-        *slot = op(a.at(position), b.at(position));
-    }
-}
-
-#[inline(always)]
-fn elementwise_width_generic_ternary<F>(op: F, args: &[ArgKind], row: &mut [f32])
-where
+fn elementwise_width_ternary_monomorphic<F>(
+    op: F,
+    condition: OperandSpan,
+    when_true: OperandSpan,
+    when_false: OperandSpan,
+    row: &mut [f32],
+) where
     F: Fn(f32, f32, f32) -> f32,
 {
-    let a = args[0];
-    let b = args[1];
-    let c = args[2];
-    for (position, slot) in row.iter_mut().enumerate() {
-        *slot = op(a.at(position), b.at(position), c.at(position));
+    let width = row.len();
+    match (condition.contiguous, when_true.contiguous, when_false.contiguous) {
+        (true, true, true) => {
+            let condition_slice = &condition.data[condition.base..condition.base + width];
+            let when_true_slice = &when_true.data[when_true.base..when_true.base + width];
+            let when_false_slice = &when_false.data[when_false.base..when_false.base + width];
+            for (((slot, &condition_value), &when_true_value), &when_false_value) in row
+                .iter_mut()
+                .zip(condition_slice)
+                .zip(when_true_slice)
+                .zip(when_false_slice)
+            {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (true, true, false) => {
+            let condition_slice = &condition.data[condition.base..condition.base + width];
+            let when_true_slice = &when_true.data[when_true.base..when_true.base + width];
+            let when_false_value = when_false.data[when_false.base];
+            for ((slot, &condition_value), &when_true_value) in
+                row.iter_mut().zip(condition_slice).zip(when_true_slice)
+            {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (true, false, true) => {
+            let condition_slice = &condition.data[condition.base..condition.base + width];
+            let when_true_value = when_true.data[when_true.base];
+            let when_false_slice = &when_false.data[when_false.base..when_false.base + width];
+            for ((slot, &condition_value), &when_false_value) in
+                row.iter_mut().zip(condition_slice).zip(when_false_slice)
+            {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (true, false, false) => {
+            let condition_slice = &condition.data[condition.base..condition.base + width];
+            let when_true_value = when_true.data[when_true.base];
+            let when_false_value = when_false.data[when_false.base];
+            for (slot, &condition_value) in row.iter_mut().zip(condition_slice) {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (false, true, true) => {
+            let condition_value = condition.data[condition.base];
+            let when_true_slice = &when_true.data[when_true.base..when_true.base + width];
+            let when_false_slice = &when_false.data[when_false.base..when_false.base + width];
+            for ((slot, &when_true_value), &when_false_value) in
+                row.iter_mut().zip(when_true_slice).zip(when_false_slice)
+            {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (false, true, false) => {
+            let condition_value = condition.data[condition.base];
+            let when_true_slice = &when_true.data[when_true.base..when_true.base + width];
+            let when_false_value = when_false.data[when_false.base];
+            for (slot, &when_true_value) in row.iter_mut().zip(when_true_slice) {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (false, false, true) => {
+            let condition_value = condition.data[condition.base];
+            let when_true_value = when_true.data[when_true.base];
+            let when_false_slice = &when_false.data[when_false.base..when_false.base + width];
+            for (slot, &when_false_value) in row.iter_mut().zip(when_false_slice) {
+                *slot = op(condition_value, when_true_value, when_false_value);
+            }
+        }
+        (false, false, false) => {
+            let value = op(
+                condition.data[condition.base],
+                when_true.data[when_true.base],
+                when_false.data[when_false.base],
+            );
+            for slot in row.iter_mut() {
+                *slot = value;
+            }
+        }
     }
 }
 
