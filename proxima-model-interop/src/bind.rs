@@ -575,6 +575,7 @@ mod real_openchat_file {
 
         instrument::reset_parallel();
         instrument::reset_matmul_dispatch();
+        instrument::reset_worker_cpu();
         std::eprintln!("DIAG phase=forward_start t_ms={} pid={diag_pid}", diag_now_ms());
         let forward_start = std::time::Instant::now();
         let main_thread_cpu_start = instrument::thread_cpu_nanos();
@@ -609,10 +610,12 @@ mod real_openchat_file {
             diag_minflt_after.saturating_sub(diag_minflt_before)
         );
         std::println!(
-            "DIAG matmul_dispatch workers_calls={} workers_none={} threaded_calls={} spawn_ms={:.3} own_chunk_ms={:.3} recv_wait_ms={:.3} quantize_activation_ms={:.3}",
+            "DIAG matmul_dispatch workers_calls={} workers_none={} threaded_calls={} setup_ms={:.3} available_parallelism_ms={:.3} spawn_ms={:.3} own_chunk_ms={:.3} recv_wait_ms={:.3} quantize_activation_ms={:.3}",
             matmul_dispatch.workers_calls,
             matmul_dispatch.workers_none,
             matmul_dispatch.calls,
+            matmul_dispatch.setup_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.available_parallelism_nanos as f64 / 1_000_000.0,
             matmul_dispatch.spawn_nanos as f64 / 1_000_000.0,
             matmul_dispatch.own_chunk_nanos as f64 / 1_000_000.0,
             matmul_dispatch.recv_wait_nanos as f64 / 1_000_000.0,
@@ -635,6 +638,72 @@ mod real_openchat_file {
             parallel.chunk_nanos_sum as f64 / 1_000_000.0,
             parallel.chunk_nanos_min as f64 / 1_000.0,
             parallel.chunk_nanos_max as f64 / 1_000.0,
+        );
+        // DIAGNOSTIC (proxima-debugger, remove before landing): mac-count
+        // and per-codec ns/mac, directly comparable against the isolated
+        // single-threaded kernel bench (0.0334 ns/mac) and ggml's own
+        // (0.0255 ns/mac) -- see instrument.rs's MATMUL_Q4K_MACS/etc doc.
+        let total_matmul_macs = matmul_dispatch.q4k_macs + matmul_dispatch.q5k_macs + matmul_dispatch.q6k_macs;
+        std::println!(
+            "DIAG matmul_reduce_quantized_calls={} position_loop_iters={} total_macs={total_matmul_macs}",
+            matmul_dispatch.reduce_quantized_calls, matmul_dispatch.position_loop_iters,
+        );
+        std::println!(
+            "DIAG matmul_bucket_ns_per_mac={:.6}  (reduce_quantized_ms={:.3} / total_macs={total_matmul_macs})",
+            matmul_dispatch.reduce_quantized_nanos as f64 / total_matmul_macs as f64,
+            matmul_dispatch.reduce_quantized_nanos as f64 / 1_000_000.0,
+        );
+        std::println!(
+            "DIAG q4k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
+            matmul_dispatch.q4k_macs,
+            matmul_dispatch.q4k_call_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.q4k_call_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
+        );
+        std::println!(
+            "DIAG q5k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
+            matmul_dispatch.q5k_macs,
+            matmul_dispatch.q5k_call_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.q5k_call_nanos as f64 / matmul_dispatch.q5k_macs.max(1) as f64,
+        );
+        std::println!(
+            "DIAG q6k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
+            matmul_dispatch.q6k_macs,
+            matmul_dispatch.q6k_call_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.q6k_call_nanos as f64 / matmul_dispatch.q6k_macs.max(1) as f64,
+        );
+        // spawn/own_chunk/recv_wait are timed as one sequential chain per
+        // `matmul_rows_threaded` call (`cpu.rs`'s `diag_spawn_started` ->
+        // `diag_own_chunk_started` -> `diag_recv_started`), so their sum
+        // across every call is the total wall-clock time this process spent
+        // inside that function across the whole forward pass -- the
+        // denominator `chunk_nanos_sum` (total compute work, summed across
+        // every chunk on every worker) needs to read achieved core count
+        // directly against the 10 physical cores this box has.
+        let dispatch_wall_ns = matmul_dispatch.setup_nanos
+            + matmul_dispatch.available_parallelism_nanos
+            + matmul_dispatch.spawn_nanos
+            + matmul_dispatch.own_chunk_nanos
+            + matmul_dispatch.recv_wait_nanos;
+        let achieved_parallel_cores = parallel.chunk_nanos_sum as f64 / dispatch_wall_ns.max(1) as f64;
+        std::println!(
+            "DIAG achieved_parallel_cores={achieved_parallel_cores:.3}  (chunk_compute_sum_ms={:.3} / dispatch_wall_ms={:.3})",
+            parallel.chunk_nanos_sum as f64 / 1_000_000.0,
+            dispatch_wall_ns as f64 / 1_000_000.0,
+        );
+        // DIAGNOSTIC (proxima-debugger, remove before landing): deschedule-
+        // immune peer of `matmul_chunk_compute`'s wall-clock sum -- every
+        // matmul row-chunk this run executed goes through Q4_K's
+        // `matmul_rows_threaded` alone (Q5_K/Q6_K's int8 paths never reach
+        // it, confirmed by `parallel_nodes == workers_calls`), so this sum
+        // divided by `q4k_macs` is directly comparable to the isolated
+        // single-threaded kernel bench's 0.0334 ns/mac WITHOUT host-load
+        // wall-clock contamination.
+        let worker_cpu_sum_nanos: u64 = instrument::worker_cpu_snapshot().iter().sum();
+        std::println!(
+            "DIAG matmul_chunk_cpu_sum_ms={:.3}  ns_per_mac_cpu={:.6}  (vs wall ns_per_mac={:.6}, isolated single-thread bench=0.0334)",
+            worker_cpu_sum_nanos as f64 / 1_000_000.0,
+            worker_cpu_sum_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
+            parallel.chunk_nanos_sum as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
         );
 
         let (logits, shape) = evaluated.get(root).expect("logits present in output");

@@ -2044,8 +2044,20 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         return Err(shape_error());
     }
 
+    #[cfg(feature = "instrument")]
+    counter!(instrument::MATMUL_REDUCE_QUANTIZED_CALLS, 1);
+    #[cfg(feature = "instrument")]
+    counter!(instrument::MATMUL_POSITION_LOOP_ITERS, leading_total as u64);
     for position in 0..leading_total {
         let activation_row = &activation[position * k..(position + 1) * k];
+        // proxima-debugger diagnostic: per-position, per-codec call timer
+        // plus `rows * k` mac count -- localizes whether the missing 2x is
+        // inside one codec's kernel (ns/mac far above the isolated
+        // single-threaded bench) or purely dispatch overhead multiplied by
+        // `leading_total` separate `matmul_rows_threaded` rounds (one per
+        // position, never folded into a single wider row-batch).
+        #[cfg(feature = "instrument")]
+        let diag_call_started = Instant::now();
         let result = match weight_block {
             QuantizedBlock::Float32(_) => return Err(shape_error()),
             QuantizedBlock::Q4K(_) => {
@@ -2079,6 +2091,26 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
             }
         };
+        #[cfg(feature = "instrument")]
+        {
+            let diag_call_nanos = diag_call_started.elapsed().as_nanos() as u64;
+            let diag_call_macs = (rows as u64) * (k as u64);
+            match weight_block {
+                QuantizedBlock::Float32(_) => {}
+                QuantizedBlock::Q4K(_) => {
+                    counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
+                    counter!(instrument::MATMUL_Q4K_CALL_NANOS, diag_call_nanos);
+                }
+                QuantizedBlock::Q5K(_) => {
+                    counter!(instrument::MATMUL_Q5K_MACS, diag_call_macs);
+                    counter!(instrument::MATMUL_Q5K_CALL_NANOS, diag_call_nanos);
+                }
+                QuantizedBlock::Q6K(_) => {
+                    counter!(instrument::MATMUL_Q6K_MACS, diag_call_macs);
+                    counter!(instrument::MATMUL_Q6K_CALL_NANOS, diag_call_nanos);
+                }
+            }
+        }
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);
     }
     #[cfg(feature = "instrument")]
@@ -4284,7 +4316,14 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
         counter!(instrument::MATMUL_WORKERS_NONE, 1);
         return None;
     }
+    #[cfg(feature = "instrument")]
+    let diag_available_parallelism_started = Instant::now();
     let workers = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::MATMUL_AVAILABLE_PARALLELISM_NANOS,
+        diag_available_parallelism_started.elapsed().as_nanos() as u64
+    );
     let decision = (workers > 1 && rows >= workers).then_some(workers);
     #[cfg(feature = "instrument")]
     if decision.is_none() {
@@ -4333,6 +4372,14 @@ fn matmul_rows_threaded<Row>(rows: usize, workers: usize, dot_row: Row) -> Resul
 where
     Row: Fn(usize) -> Result<f32, TensorError> + Sync,
 {
+    // proxima-debugger diagnostic: everything this function does before its
+    // own spawn/own_chunk/recv_wait timer chain starts -- the `output`
+    // alloc, the `chunk_ranges` build, `nest_pool()`, and the `Arc`/
+    // `sync_channel` allocations. Named `MATMUL_SETUP_NANOS` so a caller can
+    // tell "the dispatch chain is slow" apart from "this untimed setup,
+    // paid once per call, is slow" -- see that counter's doc.
+    #[cfg(feature = "instrument")]
+    let diag_setup_started = Instant::now();
     let mut output = vec![0.0f32; rows];
     let chunk_count = (workers.saturating_mul(ROW_OVERSUBSCRIBE)).clamp(1, rows.max(1));
     let chunk_len = rows.div_ceil(chunk_count);
@@ -4357,6 +4404,11 @@ where
     let chunk_ranges: Arc<Vec<(usize, usize, usize)>> = Arc::new(chunk_ranges);
     let spawned_count = workers.saturating_sub(1).min(chunk_ranges_len.saturating_sub(1));
     let (result_sender, result_receiver) = sync_channel(chunk_ranges_len);
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::MATMUL_SETUP_NANOS,
+        diag_setup_started.elapsed().as_nanos() as u64
+    );
 
     #[cfg(feature = "instrument")]
     counter!(instrument::PARALLEL_NODES, 1);
@@ -4488,11 +4540,26 @@ where
 {
     #[cfg(feature = "instrument")]
     let chunk_started = Instant::now();
+    // proxima-debugger diagnostic: `Instant`-elapsed wall time (below) keeps
+    // accruing while this worker is off-core, so on a box carrying ambient
+    // load it cannot tell "the kernel is slower in situ" apart from "this
+    // thread got descheduled" (`instrument.rs`'s own doc on
+    // `WORKER_CPU_NANOS` already established this for the 1->8 scaling
+    // read). `thread_cpu_nanos` is the deschedule-immune peer, reused here
+    // via `record_worker_cpu_nanos` -- this row-chunk path is the only
+    // caller of that function during a quantized forward (the elementwise
+    // `claim_and_run` path is the other), so the two never mix within one
+    // matmul-only run.
+    #[cfg(feature = "instrument")]
+    let chunk_cpu_started = instrument::thread_cpu_nanos();
     for (offset, slot) in chunk_output.iter_mut().enumerate() {
         *slot = dot_row(chunk_start + offset)?;
     }
     #[cfg(feature = "instrument")]
-    instrument::record_chunk_nanos(chunk_started.elapsed().as_nanos() as u64);
+    {
+        instrument::record_chunk_nanos(chunk_started.elapsed().as_nanos() as u64);
+        instrument::record_worker_cpu_nanos(instrument::thread_cpu_nanos() - chunk_cpu_started);
+    }
     Ok(())
 }
 
@@ -5416,10 +5483,16 @@ pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
     quantize_row_q8k(activation, &mut activation_q8k)?;
 
     let row_bytes = weights.len() / rows;
-    weights
-        .chunks_exact(row_bytes)
-        .map(|weight_row| dot_q5k_q8k(weight_row, &activation_q8k))
-        .collect()
+    match quantized_matmul_workers(rows, activation.len()) {
+        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+            let start = row * row_bytes;
+            dot_q5k_q8k(&weights[start..start + row_bytes], &activation_q8k)
+        }),
+        None => weights
+            .chunks_exact(row_bytes)
+            .map(|weight_row| dot_q5k_q8k(weight_row, &activation_q8k))
+            .collect(),
+    }
 }
 
 /// [`matmul_q5k_q8k_f32`] with every row routed through
@@ -5775,10 +5848,16 @@ pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
     quantize_row_q8k(activation, &mut activation_q8k)?;
 
     let row_bytes = weights.len() / rows;
-    weights
-        .chunks_exact(row_bytes)
-        .map(|weight_row| dot_q6k_q8k(weight_row, &activation_q8k))
-        .collect()
+    match quantized_matmul_workers(rows, activation.len()) {
+        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+            let start = row * row_bytes;
+            dot_q6k_q8k(&weights[start..start + row_bytes], &activation_q8k)
+        }),
+        None => weights
+            .chunks_exact(row_bytes)
+            .map(|weight_row| dot_q6k_q8k(weight_row, &activation_q8k))
+            .collect(),
+    }
 }
 
 /// [`matmul_q6k_q8k_f32`] with every row routed through
@@ -8456,6 +8535,94 @@ mod tests {
         let sequential_reference: Vec<f32> = packed
             .chunks_exact(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES)
             .map(|weight_row| dot_q6k_f32(weight_row, &activation).expect("well-formed row"))
+            .collect();
+
+        assert_eq!(
+            pooled_result, sequential_reference,
+            "pool-dispatched rows must be bit-identical to the sequential per-row kernel: \
+             each row is an independent reduction, so dispatch mechanism cannot move rounding"
+        );
+    }
+
+    /// [`matmul_q5k_q8k_f32`] was unconditionally sequential (never called
+    /// [`quantized_matmul_workers`]) despite [`matmul_q4k_q8k_f32`] already
+    /// routing through the pool — same test shape as
+    /// `matmul_q4k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel`,
+    /// proving the fix actually reaches the pool path and stays bit-exact.
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn matmul_q5k_q8k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel() {
+        use proxima_gguf::quant::q5_k::quantize;
+
+        const ROWS: usize = 128;
+        const BLOCKS_PER_ROW: usize = 2;
+        const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q5_k::QK_K;
+
+        let weights_f32 = random_vec(48, ROWS * K);
+        let activation = random_vec(49, K);
+
+        let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q5K_BLOCK_BYTES];
+        for (row_f32, row_packed) in
+            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES))
+        {
+            quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
+        }
+
+        assert!(
+            quantized_matmul_workers(ROWS, activation.len()).is_some(),
+            "test fixture must actually clear the parallel threshold to exercise the pool path"
+        );
+
+        let pooled_result = matmul_q5k_q8k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+
+        let mut activation_q8k = vec![0u8; BLOCKS_PER_ROW * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
+        let sequential_reference: Vec<f32> = packed
+            .chunks_exact(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES)
+            .map(|weight_row| dot_q5k_q8k(weight_row, &activation_q8k).expect("well-formed row"))
+            .collect();
+
+        assert_eq!(
+            pooled_result, sequential_reference,
+            "pool-dispatched rows must be bit-identical to the sequential per-row kernel: \
+             each row is an independent reduction, so dispatch mechanism cannot move rounding"
+        );
+    }
+
+    /// [`matmul_q6k_q8k_f32`]'s counterpart to the `matmul_q5k_q8k_f32` test
+    /// above — same was-always-sequential bug, same fix, same bit-exactness
+    /// proof.
+    #[cfg(feature = "q6k-int8-dot")]
+    #[test]
+    fn matmul_q6k_q8k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel() {
+        use proxima_gguf::quant::q6_k::quantize;
+
+        const ROWS: usize = 128;
+        const BLOCKS_PER_ROW: usize = 2;
+        const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q6_k::QK_K;
+
+        let weights_f32 = random_vec(50, ROWS * K);
+        let activation = random_vec(51, K);
+
+        let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q6K_BLOCK_BYTES];
+        for (row_f32, row_packed) in
+            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES))
+        {
+            quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
+        }
+
+        assert!(
+            quantized_matmul_workers(ROWS, activation.len()).is_some(),
+            "test fixture must actually clear the parallel threshold to exercise the pool path"
+        );
+
+        let pooled_result = matmul_q6k_q8k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+
+        let mut activation_q8k = vec![0u8; BLOCKS_PER_ROW * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
+        let sequential_reference: Vec<f32> = packed
+            .chunks_exact(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES)
+            .map(|weight_row| dot_q6k_q8k(weight_row, &activation_q8k).expect("well-formed row"))
             .collect();
 
         assert_eq!(
