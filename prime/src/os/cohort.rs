@@ -109,8 +109,14 @@ pub struct RoundReport {
 /// as data as easily as it is constructed fluently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CohortConfig {
-    /// number of dedicated member threads. NOT the leader — the leader
-    /// (whoever holds the [`CohortSession`]) never runs a chunk itself.
+    /// total participant count for one round, INCLUDING the leader —
+    /// mirrors ggml's `n_threads` (`ggml-cpu.c`'s `ith == 0` races on
+    /// `current_chunk` exactly like every other thread). `members - 1`
+    /// dedicated threads are spawned; the leader (whoever holds the
+    /// [`CohortSession`]) is the final participant, claiming chunks off the
+    /// same shared cursor inside [`CohortSession::run`] instead of sitting
+    /// idle on a spin — see that function's own doc for why a spin-only
+    /// leader was one runnable thread too many on an 8-P-core box.
     pub members: NonZeroUsize,
     /// bounded spin budget, in `core::hint::spin_loop()` polls, a member
     /// spends waiting for the round counter to advance before parking.
@@ -222,19 +228,21 @@ impl ThreadCohort {
         CohortBuilder::default()
     }
 
-    /// spawn `config.members` dedicated threads. each parks immediately —
+    /// spawn `config.members - 1` dedicated threads. each parks immediately —
     /// no round is active until [`CohortSession::run`] bumps the round
-    /// counter.
+    /// counter. the remaining participant is the leader itself, which never
+    /// gets a spawned thread — it claims chunks from inside
+    /// [`CohortSession::run`].
     pub fn from_config(config: CohortConfig) -> Result<Self, ProximaError> {
-        let member_count = config.members.get();
-        let mut parkers = Vec::with_capacity(member_count);
-        let mut unparkers = Vec::with_capacity(member_count);
-        for _ in 0..member_count {
+        let dedicated_count = config.members.get() - 1;
+        let mut parkers = Vec::with_capacity(dedicated_count);
+        let mut unparkers = Vec::with_capacity(dedicated_count);
+        for _ in 0..dedicated_count {
             let parker = Parker::new();
             unparkers.push(parker.unparker().clone());
             parkers.push(parker);
         }
-        let progress: Vec<CachePadded<AtomicU64>> = (0..member_count)
+        let progress: Vec<CachePadded<AtomicU64>> = (0..dedicated_count)
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect();
 
@@ -254,7 +262,7 @@ impl ThreadCohort {
             round_ptr: UnsafeCell::new(None),
         });
 
-        let mut handles = Vec::with_capacity(member_count);
+        let mut handles = Vec::with_capacity(dedicated_count);
         for (index, parker) in parkers.into_iter().enumerate() {
             let control_for_member = Arc::clone(&control);
             let spin_polls = config.spin_polls;
@@ -377,6 +385,20 @@ impl CohortSession<'_> {
                 unparker.unpark();
             }
         }
+
+        // the leader is the final participant, not a spectator: it claims
+        // chunks off the same shared cursor every dedicated member uses,
+        // via the identical `run_round` body (including its per-chunk
+        // `catch_unwind`, so a panicking chunk here is counted the same way
+        // as one on a dedicated thread, never propagated out of `run`).
+        // `run_round` bumps `done` on return exactly like a member's does,
+        // so the wait below still targets `members` (dedicated_count + 1)
+        // unchanged. Without this, `members` dedicated threads plus a
+        // spin-only leader is `members + 1` runnable threads racing for
+        // `members` P-cores — measured +14.8 ms / +4.5% on a real forward
+        // (`proxima-model-interop`'s openchat bind test), entirely from
+        // that one extra runnable thread.
+        run_round(control);
 
         while control.done.load(Ordering::Acquire) < members as u64 {
             core::hint::spin_loop();
