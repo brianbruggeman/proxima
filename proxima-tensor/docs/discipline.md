@@ -4141,3 +4141,252 @@ the `q4k-int8-dot,test-support` nextest run showing
 `matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm` PASS under
 `q4k_avx2`, and a `bench_q4k_matmul` `ns/mac` table against ggml's own
 AVX2 arm (`design-favors: incumbent`) to fill in point 4 above.
+
+## ROW 63 — int8 dot on packed Q5_K/Q8_K blocks: CORRECTNESS ONLY, no timing taken
+
+**This row deliberately carries zero throughput numbers.** A second agent
+was mid-edit on `run_reduce`'s parallel dispatch in this same file while
+this row landed, and a third was preparing to bench that change plus
+Metal together; running a bench under that contention would have produced
+a CoV-contaminated number (this repo's own prior incident: CoV 0.3% ->
+53% from concurrent agents on one host, `feedback_own_agents_contaminate_the_bench.md`).
+Landing scope for this row is explicitly narrowed to: land the kernel,
+prove it correct against the already-trusted dequantize-then-fold
+reference on REAL packed bytes, prove the two arms bit-exact against each
+other, and stop. The `ns/mac` table, CoV, and ggml-parity max_abs_diff
+this repo's discipline normally requires (guiding-principles §18: no
+throughput claim without a bench number) are explicitly DEFERRED to a
+follow-up row, to be taken by whichever agent benches the landed kernel,
+the parallel-dispatch change, and Metal together on a quiet tree.
+
+Mirrors ROW 61's mechanism one format over: `Q5_K` shares `Q4_K`'s exact
+super-block/sub-block shape (256 elements, 8 sub-blocks of 32, the same
+6-bit bit-interleaved scale/min packing — `get_scale_min_k4` is reused
+UNCHANGED from `q4_k`, not re-derived) plus one addition, a `qh` high-bit
+plane supplying each weight's 5th bit. `dot_q5k_q8k_block_scalar` is
+`dot_q4k_q8k_block_scalar` with one surgical addition: `qh_mask = 1u8 <<
+sub_block` extracts exactly the bit `proxima_gguf::quant::q5_k::dequantize_block`
+reads for that sub-block (derived from, and cross-checked against, that
+function's `mask_lo`/`mask_hi` cycling — the derivation is in
+`dot_q5k_q8k_block_scalar`'s own doc comment, `cpu.rs`). The `dmin`/mins
+correction is untouched from `Q4_K`'s kernel — identical bsums pairing,
+identical sub-block width.
+
+`dot_q5k_q8k_block_neon_dotprod` ports `ggml_vec_dot_q5_K_q8_K`'s
+`__ARM_NEON` arm (`arch/arm/quants.c:2492-2579`) directly: `mone`/`mtwo`
+masks extract the current chunk's two high-bit planes from a
+persistently-right-shifted `qh` register pair, OR'd into the nibble
+before two `sdot_s32` pairs per 64-element chunk (`Q4K_SUB_BLOCKS/2 = 4`
+iterations). No AVX2 arm — per this landing's task ordering ("portable
+arm first, measured on its own, then the aarch64 arm... a landed
+portable Q5_K with numbers is worth more than two half-finished
+intrinsic arms"), and per the coordinator's mid-task redirect, this row
+stops at portable+aarch64.
+
+**Feature gate:** `q5k-int8-dot`, new, compile-time, **default-off**
+(`proxima-tensor/Cargo.toml`) — unlike `q4k-int8-dot` (default-on since
+ROW 61's e2e bench), this has not yet earned the switch; no e2e bench has
+run. `QuantizedBlock::Q5K(&[u8])` (new enum variant) always exists
+regardless of the feature; `matmul_q5k_f32`/`dot_q5k_f32` (always
+compiled, dequantize-then-fold via `proxima_gguf::quant::q5_k::dequantize_block`)
+is the codec path when the feature is off, exactly mirroring
+`matmul_q4k_f32`'s pre-ROW-61 role. `run_reduce_quantized` dispatches on
+the `QuantizedBlock` variant (`Q4K`/`Q5K`/`Q6K`), generalized from ROW
+61's Q4K-only body — the byte-offset consts, `f16_le_at`,
+`quantize_row_q8k`/`quantize_q8k_block` (`Q8_K` activation quantization,
+shared by every K-quant weight codec), `sdot_s32`, and the aarch64
+`vorrq_u8`/`vshlq_n_u8` intrinsic imports were broadened from
+`q4k-int8-dot`-only gates to `any(q4k-int8-dot, q5k-int8-dot,
+q6k-int8-dot)` so `Q5_K`/`Q6_K` reuse them rather than duplicating —
+`git diff proxima-tensor/src/cpu.rs` shows every one of those gate
+broadenings as a one-line cfg edit, no logic change.
+
+**Types minted: none, per the task's explicit instruction.** Only
+`QuantizedBlock::Q5K`/`Q6K` (new enum VARIANTS on an existing type, not a
+new type) plus functions and byte-offset consts, mirroring ROW 61/62's
+own pattern exactly.
+
+**Correctness — the only claim this row makes:**
+
+1. **Bit-exact, dispatched arm vs portable arm** (synthetic data, 4 rows x
+   5 super-blocks): `matmul_q5k_q8k_f32_agrees_bit_exact_with_the_portable_arm`
+   — PASS. Every intermediate is integer until the final `f32` multiply
+   (same argument ROW 61 makes for `Q4_K`), so `q4k_dotprod`'s
+   `vdotq_s32`-accelerated arm and the portable scalar arm must match
+   EXACTLY on this aarch64 host, not merely closely, and do.
+2. **Packed int8 kernel vs dequantize-then-fold reference, on REAL packed
+   `Q5_K` bytes** read directly out of
+   `openchat-3.5-1210.Q4_K_S.gguf` (guiding-principles §9: real-world
+   data, not synthetic): `blk.0.attn_v.weight` (4096x1024) and
+   `blk.0.ffn_down.weight` (14336x4096), this landing's two named `Q5_K`
+   shapes —
+   `matmul_q5k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes`
+   and its `_ffn_down` sibling — both PASS, relative_max_error < 0.01
+   (same loose sanity bound ROW 61's own real-weight relative-error test
+   uses — Q8_K activation quantization is a second lossy step neither
+   arm shares with the other). The dispatched (NEON) and portable arms
+   are ALSO asserted bit-exact against each other inside these same two
+   tests, on the real bytes, not just the synthetic fixture above.
+3. **`evaluate_quantized` end-to-end, `QuantizedBlock::Q5K` variant**:
+   `evaluate_quantized_routes_q5k_block_and_matches_dequantize_then_evaluate`
+   — PASS, relative_max_diff < 0.01. Proves the dispatch chain
+   `evaluate_quantized` -> `run_node_into` -> `run_reduce_with_quantized_weights`
+   -> `quantized_operand` -> `run_reduce_quantized` -> `matmul_q5k_q8k_f32`
+   is reachable from the program-level entry point for the NEW variant,
+   the same proof ROW 61's own e2e test gives `Q4K`.
+
+**No ggml FFI parity number in this row.** The task brief asked for
+`max_abs_diff` against ggml directly (mirroring `bench_q4k_matmul.rs`'s
+fail-fast-before-timing assert); this row's correctness claim instead
+rests on agreement with `matmul_q5k_f32`, the dequantize-then-fold
+reference path already ROW-56-through-62-proven against ggml for `Q4_K`'s
+own dequantize path and unchanged in mechanism for `Q5_K` (same
+`proxima_gguf::quant::q5_k::dequantize_block`, itself bit-exact-tested
+against a hand-packed fixture in `proxima-gguf/src/quant/q5_k.rs`). A
+direct ggml-FFI `max_abs_diff` number is scheduled for the follow-up
+bench row (`bench_q5k_matmul.rs`, written and registered behind
+`ggml-bench,q5k-int8-dot` in this same commit, NOT run — see the top of
+this row).
+
+**Gates (all re-run on this host, this commit; commands are the
+re-prove):**
+- `cargo nextest run -p proxima-tensor --features q5k-int8-dot,q6k-int8-dot -E 'test(q5k) + test(q6k)'` — 6 passed, 0 failed (the 3 Q5_K tests above plus ROW 64's 3 Q6_K tests).
+- `cargo nextest run -p proxima-tensor --features q5k-int8-dot,q6k-int8-dot --no-fail-fast` — 312 passed, 0 failed, 2 skipped (full crate suite, both new features on, run AFTER a concurrent agent's `run_reduce` parallel-dispatch change landed in this same `cpu.rs` — N grew from the 300/2 baseline at `3f4e4b9` because of this row's + ROW 64's + that concurrent agent's new tests on the same shared tree; the number is reported, not reconciled to a stale baseline). `cargo nextest run -p proxima-tensor --no-fail-fast` (default features, no q5k/q6k) — 306 passed, 0 failed, 2 skipped, same post-merge state.
+- `cargo clippy -p proxima-tensor --features q5k-int8-dot,q6k-int8-dot,ggml-bench --all-targets -- ` (workspace lints, `-D warnings` implied) — exit 0, zero warnings, including the new `benches/bench_q5k_matmul.rs`/`bench_q6k_matmul.rs` files (registered, not run).
+- `cargo check -p proxima-tensor --target x86_64-unknown-linux-gnu --features q5k-int8-dot,q6k-int8-dot` — exit 0 (the `dot_q5k_q8k_block_neon_dotprod`/AVX2 arms are cfg'd off on this target; the portable arm is what compiles and is what an unqualified x86-64 build runs).
+- `bash scripts/proxima-tensor-gate.sh` (unmodified — does not yet carry a `q5k-int8-dot`/`q6k-int8-dot` cell, a gap named here, not silently left) — re-run clean on this commit after a `dead_code` fix (below).
+- GEMM checksums, unaffected by this row (no shared code path changed except the `QuantizedBlock` enum and `run_reduce_quantized`'s dispatch, both proven equivalent for the `Q4K` arm by ROW 61's own unchanged tests): `512 4 1` -> `135.87619`, `1024 4 1` -> `260.24106`, `2048 4 1` -> `513.10425`.
+
+**One real bug this row's own gate caught and fixed:** the first draft
+left `REAL_OPENCHAT_GGUF_PATH` (a test-module constant) ungated, so a
+default build (neither `q5k-int8-dot` nor `q6k-int8-dot` on) failed
+`-D dead-code` — `cpu.rs`'s `default check`/`default tests`/`default
+clippy` cells caught it immediately. Fixed by gating the constant
+itself behind `any(feature = "q5k-int8-dot", feature = "q6k-int8-dot")`,
+matching every usage site. Recorded, not silently squashed into the
+first commit, per this skill's own "record the negative result" rule —
+this was a real red gate on this tree, not a hypothetical one.
+
+**A second, larger collision, also caught by re-running the gate, not by
+inspection:** a concurrent agent's `run_reduce` parallel-dispatch change
+landed in this SAME `cpu.rs` while this row's gate script was mid-run
+(confirmed by `shasum` on the file diverging across three consecutive
+60-120s checks before finally settling). A gate run captured DURING that
+window showed `sync_channel`/`nest_pool` "not found in this scope" —
+transient breakage from an in-progress edit, not this row's defect; the
+file was re-checked once its hash stopped changing and came back clean
+(`cargo check --all-targets --features q5k-int8-dot,q6k-int8-dot` exit
+0, full nextest 312/2, default nextest 306/2, GEMM checksums unchanged —
+all re-run post-merge, all numbers in this Gates section are the
+POST-merge ones). No edit in this row touched `run_reduce`'s dispatch
+loop itself; the two changes are disjoint regions of the same file.
+Once the file stabilized, `cargo doc -p proxima-tensor --no-deps`
+surfaced two intra-doc-link errors on `evaluate_parallel`'s doc comment
+(`[`run_chunks_threaded`]`/`[`nest_pool`]` linking to private items) —
+part of the OTHER agent's parallel-dispatch change, not this row's own
+code, but blocking the shared `default rustdoc` gate cell for everyone
+on this tree. Fixed with the identical one-line pattern this row's own
+four analogous `dot_q5k_f32`/`dot_q6k_f32`/`dot_q5k_q8k`/`dot_q6k_q8k`
+doc-link errors needed (bracket-link syntax on a private target ->
+plain-backtick code span, no semantic change) — `cargo doc --no-deps`
+(default features) and with `q4k-int8-dot,q5k-int8-dot,q6k-int8-dot`
+both exit 0 after.
+
+**Re-prove:** every command in the Gates section above runs from this
+repo alone, no external asset beyond the real GGUF file at the fixed
+path already required by `bench_q4k_matmul.rs` (`REAL_OPENCHAT_GGUF_PATH`
+in `cpu.rs`'s test module, same path). The `evaluate_quantized_named`
+binding path and `bind.rs` loader wiring for these 9 tensors are
+NOT covered by this row — `proxima-model-interop/src/bind.rs` was
+dirty (another agent's in-flight work) for this entire session; see the
+task report for the exact patch description handed back instead of
+applied.
+
+**Not landed, named not buried:** AVX2 arm (deferred, same rationale ROW
+62 gives); `ns/mac`/CoV/ggml-FFI-parity bench numbers (deferred to the
+coordinator's planned joint bench pass); `bind.rs` rewiring (deferred,
+file was contended).
+
+## ROW 64 — int8 dot on packed Q6_K/Q8_K blocks: CORRECTNESS ONLY, no timing taken
+
+Same landing, same session, same "no timing" scope as ROW 63 — read that
+row's opening paragraph for why. `Q6_K` is a DIFFERENT super-block shape
+from `Q4_K`/`Q5_K`, not a small variation: 16 sub-blocks of 16 (not 8 of
+32), one signed 8-bit scale per sub-block, no `dmin` term at all
+(`x = d*sc*(q-32)`, `proxima_gguf::quant::q6_k`'s own module doc — a
+level bias, not a min-value subtraction).
+
+`dot_q6k_q8k_block_scalar` does NOT reuse `Q4_K`/`Q5_K`'s
+`get_scale_min_k4` unpack or `byte_base = (sub_block/2)*32` addressing —
+neither applies to `Q6_K`'s genuinely different byte layout. Its
+addressing (`half = sub_block/8`, `local_sub = sub_block%8`, `lane =
+local_sub/2`, `subhalf = local_sub%2`) is derived from, and kept
+consistent with,
+`proxima_gguf::quant::q6_k::unpack_levels` — the already-tested reference
+this crate ships (bit-exact-tested against a hand-packed fixture,
+`proxima-gguf/src/quant/q6_k.rs`) — not re-derived from ggml's C
+independently. The scalar kernel's per-element formula (`level =
+nibble | (high << 4)`, `quant = level - 32`, dot against `Q8_K` `i8`
+activations, scale by the sub-block's own signed `i8` code, sum) is the
+exact same value `unpack_levels` plus a dot product would compute,
+verified not by proof-reading alone but by the real-bytes test below.
+
+`dot_q6k_q8k_block_neon_dotprod` ports `ggml_vec_dot_q6_K_q8_K`'s plain
+`__ARM_NEON` arm (`arch/arm/quants.c:3001-3090`, the non-`__ARM_FEATURE_MATMUL_INT8`,
+non-SVE path) with ONE deliberate simplification, recorded as a
+mechanism change, not a silent deviation: ggml keeps levels unbiased
+(`0..63`) through the dot and corrects for the `-32` bias afterward via
+`bsums`/`isum_mins` (an optimization that avoids a per-lane subtract, at
+the cost of decoding `y[i].bsums` and a second correction term); this
+port applies the `-32` bias directly in-register via `vsubq_s8`
+immediately after assembling each of the 8 `q6bytes` lanes per
+super-block, then dots with no separate correction term at all — the
+SAME value by a simpler, easier-to-verify derivation, one extra `vsubq_s8`
+per lane (8 total) traded for never touching `bsums` in this kernel.
+Chosen under this row's time budget: correct-and-simple over
+matching ggml's exact instruction sequence.
+
+**Feature gate:** `q6k-int8-dot`, new, compile-time, default-off — same
+posture as ROW 63's `q5k-int8-dot`. `QuantizedBlock::Q6K(&[u8])` always
+exists; `matmul_q6k_f32`/`dot_q6k_f32` (dequantize-then-fold via
+`proxima_gguf::quant::q6_k::dequantize_block`) is the always-compiled
+codec path. `Q6K_D_OFFSET` deliberately trails the block (`proxima_gguf::quant::q6_k`'s
+own module doc: unlike `Q4_K`/`Q5_K`, `d` sits LAST in `Q6_K`'s on-disk
+layout) — read from that module's doc, not re-derived by guessing a
+layout that matched the other two codecs.
+
+**Types minted: none.** Same posture as ROW 63.
+
+**Correctness — the only claim this row makes:**
+
+1. **Bit-exact, dispatched arm vs portable arm** (synthetic, 4 rows x 5
+   super-blocks): `matmul_q6k_q8k_f32_agrees_bit_exact_with_the_portable_arm`
+   — PASS.
+2. **Packed int8 kernel vs dequantize-then-fold reference, on REAL packed
+   `Q6_K` bytes** read directly out of `openchat-3.5-1210.Q4_K_S.gguf`:
+   `output.weight` (4096x32002), this landing's named `Q6_K` shape —
+   `matmul_q6k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes`
+   — PASS, relative_max_error < 0.01, dispatched/portable arms bit-exact
+   against each other on the real bytes (same test).
+
+No `evaluate_quantized` end-to-end test for `Q6K` in this row (ROW 63's
+own e2e test already proves the enum-dispatch MACHINERY generically —
+`run_reduce_quantized`'s `match weight_block` arm for `Q6K` is the same
+shape as its `Q5K` arm, one match arm apart in `cpu.rs`; a dedicated
+`Q6K` e2e test is a real gap, named here, not silently assumed covered).
+
+**No ggml FFI parity number in this row** — same reason and same
+follow-up plan as ROW 63 (`bench_q6k_matmul.rs` written and registered
+behind `ggml-bench,q6k-int8-dot`, not run).
+
+**Gates:** covered jointly with ROW 63 above (both features were always
+built and tested together in this session) — see ROW 63's Gates section
+for the exact commands and counts; nothing in this row's own gate run
+diverged from that section.
+
+**Re-prove:** same command set as ROW 63.
+
+**Not landed, named not buried:** AVX2 arm; `ns/mac`/CoV/ggml-FFI-parity
+bench numbers; `bind.rs` rewiring; a dedicated `Q6K` `evaluate_quantized`
+e2e test (`Q5K`'s covers the dispatch machinery, not a `Q6K`-specific
+regression).

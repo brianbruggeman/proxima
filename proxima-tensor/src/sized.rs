@@ -79,6 +79,39 @@ pub const PARALLEL_THRESHOLD: usize = 4096;
 #[cfg(feature = "std")]
 pub const OVERSUBSCRIBE: usize = 1;
 
+/// Chunk-count multiplier over `workers` for `matmul_rows_threaded`'s
+/// dynamic-claiming row split. A separate constant from [`OVERSUBSCRIBE`]
+/// rather than a shared one: that constant's own doc records a `4` rejected
+/// specifically for `run_chunks_threaded`'s `BoundOp`/GEMM-tile chunk shape
+/// on an unvalidated measurement (no ambient-load record, 8-worker cells
+/// never cleared their own CoV gate) -- that rejection is about the evidence
+/// quality of one measurement, not a verdict against oversubscription in
+/// general, and the row-loop's per-row quantized-dot chunk cost has a
+/// different distribution than a GEMM tile's.
+///
+/// `4` is measured on this box (`proxima-tensor/src/cpu.rs`'s
+/// `bench_row_oversubscribe_picks_the_multiplier`, 10 cores, ambient load
+/// via `uptime` recorded with every run, 4096 rows, n=5 samples/arm across
+/// two repeated runs): an imbalanced arm (last 1/8 of rows ~8x a normal
+/// row's cost, echoing [`OVERSUBSCRIBE`]'s own 2.04x measured spread) went
+/// 1 -> 5063-5675us (cov 0.17-0.22, the static split's own straggler-driven
+/// noise) -> 2 -> 2592-3262us (cov 0.004-0.036) -> 4 -> 1657-1820us (cov
+/// 0.008-0.041); 8/16/32 kept falling (down to ~1290us at 32) but with
+/// diminishing, noisier steps (8's cov spiked to 0.025). A degenerate
+/// control (uniform per-row cost, nothing to steal around -- isolates
+/// atomic/`SyncSender` overhead from any real imbalance) improved
+/// 1 -> 2304us -> 4 -> 1672us -> 8/16/32 -> 1624-1688us, i.e. flat past 4,
+/// so the gain past 4 in the imbalanced arm is real oversubscription payoff
+/// (matches [`run_chunks_threaded`]'s own `claim_and_run` mechanism) but
+/// small relative to `1`'s idle-recv cost, while `chunk_count`'s
+/// `clamp(1, rows)` bounds worst case for small-`rows` call sites regardless
+/// of how high this constant goes. `4` is chosen over 8/16/32 as the point
+/// past which both arms plateau within their own run-to-run noise, leaving
+/// headroom before per-chunk `SyncSender`/atomic overhead could matter at
+/// the smaller row counts this call site can see.
+#[cfg(feature = "std")]
+pub const ROW_OVERSUBSCRIBE: usize = 4;
+
 /// Row-alignment applied to every non-final chunk boundary via
 /// `BoundOp::split_aligned`. Execution policy (see this module's doc);
 /// currently build-time-only in practice, not by necessity.

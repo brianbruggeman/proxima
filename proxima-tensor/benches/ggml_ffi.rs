@@ -50,6 +50,8 @@ pub const GGML_TYPE_F32: c_int = 0;
 pub const GGML_TYPE_Q4_0: c_int = 2;
 pub const GGML_TYPE_Q8_0: c_int = 8;
 pub const GGML_TYPE_Q4_K: c_int = 12;
+pub const GGML_TYPE_Q5_K: c_int = 13;
+pub const GGML_TYPE_Q6_K: c_int = 14;
 pub const GGML_TYPE_I32: c_int = 26;
 
 unsafe extern "C" {

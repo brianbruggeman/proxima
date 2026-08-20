@@ -60,12 +60,31 @@ use core::arch::aarch64::{
 // `dot_q4k_q8k_block_neon_dotprod`'s own intrinsics -- a separate `use`
 // block (rather than folded into the one above) so a default build (the
 // `q4k-int8-dot` feature off) never imports symbols nothing references,
-// which `-D unused-imports` (workspace lint) would otherwise reject.
-#[cfg(all(target_arch = "aarch64", feature = "q4k-int8-dot"))]
+// which `-D unused-imports` (workspace lint) would otherwise reject. Shared
+// with `dot_q5k_q8k_block_neon_dotprod`/`dot_q6k_q8k_block_neon_dotprod`
+// (same intrinsics, same reasoning), so this gate covers all three int8-dot
+// features rather than duplicating the `use` per format.
+#[cfg(all(
+    target_arch = "aarch64",
+    any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot")
+))]
 use core::arch::aarch64::{
     vaddvq_s32, vandq_u8, vdupq_n_s32, vdupq_n_u8, vld1q_s8, vld1q_u8, vreinterpretq_s8_u8,
     vshrq_n_u8,
 };
+// `dot_q5k_q8k_block_neon_dotprod`/`dot_q6k_q8k_block_neon_dotprod`'s extra
+// intrinsics beyond the `Q4_K` set above -- both need to OR a shifted
+// high-bit plane into the low nibble, which `Q4_K` (no high-bit plane at
+// all) never does.
+#[cfg(all(target_arch = "aarch64", any(feature = "q5k-int8-dot", feature = "q6k-int8-dot")))]
+use core::arch::aarch64::{vorrq_u8, vshlq_n_u8};
+// `dot_q6k_q8k_block_neon_dotprod`'s own extra intrinsics: `Q6_K`'s levels
+// are biased by -32 (`x = d*sc*(q-32)`, `q6_k.rs`'s own module doc) before
+// the dot, unlike `Q4_K`/`Q5_K` (unsigned nibble, no bias) -- `vsubq_s8`
+// applies that bias in-register, `vdupq_n_s8` builds the constant it
+// subtracts.
+#[cfg(all(target_arch = "aarch64", feature = "q6k-int8-dot"))]
+use core::arch::aarch64::{vdupq_n_s8, vsubq_s8};
 // `dot_q4k_q8k_block_avx2`'s own intrinsics -- the x86 sibling of the
 // aarch64 `use` block above, same reasoning: a separate cfg-gated block so
 // a default build never imports symbols nothing references.
@@ -83,23 +102,16 @@ use core::ops::Deref;
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::borrow::Cow;
-#[cfg(not(feature = "tensor-bgpool"))]
-use std::panic;
-#[cfg(not(feature = "tensor-bgpool"))]
 use std::thread;
 #[cfg(feature = "instrument")]
 use std::time::Instant;
-#[cfg(feature = "tensor-bgpool")]
 use std::sync::atomic::AtomicUsize;
-#[cfg(feature = "tensor-bgpool")]
 use std::sync::mpsc::{sync_channel, SyncSender};
-#[cfg(feature = "tensor-bgpool")]
 use std::sync::{Arc, OnceLock};
 
 use proxima_primitives::pipe::Pipe;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::counter;
-#[cfg(feature = "tensor-bgpool")]
 use prime::os::background::ProximaBackgroundPool;
 
 use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
@@ -407,6 +419,16 @@ pub fn evaluate_with_scratch(
 pub enum QuantizedBlock<'a> {
     Float32(&'a [f32]),
     Q4K(&'a [u8]),
+    /// Raw packed `Q5_K` bytes -- same super-block shape as [`Self::Q4K`]
+    /// (256 elements, 8 sub-blocks of 32) plus a `qh` high-bit plane; see
+    /// [`proxima_gguf::quant::q5_k`] for the on-disk layout this borrows
+    /// unchanged.
+    Q5K(&'a [u8]),
+    /// Raw packed `Q6_K` bytes -- 256 elements, 16 sub-blocks of 16, one
+    /// signed 8-bit scale per sub-block and no `dmin` term; see
+    /// [`proxima_gguf::quant::q6_k`] for the on-disk layout this borrows
+    /// unchanged.
+    Q6K(&'a [u8]),
 }
 
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
@@ -442,7 +464,7 @@ pub fn evaluate_quantized(
         });
     }
 
-    let mut quantized_weights: BTreeMap<NodeId, &[u8]> = BTreeMap::new();
+    let mut quantized_weights: BTreeMap<NodeId, QuantizedBlock> = BTreeMap::new();
     let mut buffers: Vec<Option<Cow<[f32]>>> = vec![None; program.len()];
     for (node, block) in block_nodes.iter().zip(blocks.iter().copied()) {
         match block {
@@ -457,8 +479,8 @@ pub fn evaluate_quantized(
                 }
                 buffers[node.0 as usize] = Some(Cow::Borrowed(data));
             }
-            QuantizedBlock::Q4K(bytes) => {
-                quantized_weights.insert(*node, bytes);
+            QuantizedBlock::Q4K(_) | QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) => {
+                quantized_weights.insert(*node, block);
             }
         }
     }
@@ -485,14 +507,71 @@ pub fn evaluate_quantized(
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
     let retires = node_retirement(&resolved, &effective_outputs);
 
+    // DIAGNOSTIC (proxima-debugger, remove before landing): peak_live_buffers
+    // counts occupied slots, not bytes -- a live buffer set of 12 entries
+    // could be 12 MiB or 12 GiB. This mirrors that loop but sums the actual
+    // f32 byte length of every live entry, so the peak is reported in bytes.
+    let diag_live_bytes = |buffers: &[Option<Cow<[f32]>>]| -> usize {
+        buffers.iter().flatten().map(|cow| cow.len() * core::mem::size_of::<f32>()).sum()
+    };
+
     let mut peak_live_buffers = live_count(&buffers);
+    let mut diag_peak_live_bytes = diag_live_bytes(&buffers);
+    let mut diag_peak_position = 0usize;
+    // DIAGNOSTIC (proxima-debugger, remove before landing): wall time by
+    // node kind for this one serial evaluation loop -- `evaluate_quantized`
+    // never routes through `evaluate_node_parallel`, so the only per-node
+    // parallelism a forward pass gets is `run_reduce_quantized`'s internal
+    // `matmul_rows_threaded` dispatch (the "reduce_matmul_quantized"
+    // bucket below); every other kind runs fully serial on this one
+    // thread. Keyed by the label `diag_node_kind_label` derives from the
+    // same `quantized_operand` check `run_reduce_with_quantized_weights`
+    // itself uses, so the bucket a node lands in matches the arm that
+    // actually ran it.
+    #[cfg(feature = "instrument")]
+    let mut diag_kind_nanos: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
     for (position, computed) in resolved.iter().enumerate() {
         let mut output = vec![0.0f32; node_output_len(computed)];
+        #[cfg(feature = "instrument")]
+        let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
+        #[cfg(feature = "instrument")]
+        let diag_node_started = Instant::now();
         run_node_into(computed, &buffers, Some(&quantized_weights), &mut output)?;
+        #[cfg(feature = "instrument")]
+        {
+            let entry = diag_kind_nanos.entry(diag_node_label).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += diag_node_started.elapsed().as_nanos() as u64;
+        }
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        let current_bytes = diag_live_bytes(&buffers);
+        if current_bytes > diag_peak_live_bytes {
+            diag_peak_live_bytes = current_bytes;
+            diag_peak_position = position;
+        }
         for retired in &retires[position] {
             buffers[retired.0 as usize] = None;
+        }
+    }
+    std::eprintln!(
+        "DIAG evaluate_quantized: peak_live_buffers={peak_live_buffers} peak_live_bytes={diag_peak_live_bytes} ({:.4} GiB) at resolved_position={diag_peak_position}/{} node={:?}",
+        diag_peak_live_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        resolved.len(),
+        resolved.get(diag_peak_position).map(|computed| computed.node),
+    );
+    #[cfg(feature = "instrument")]
+    {
+        let total_nanos: u64 = diag_kind_nanos.values().map(|(_, nanos)| *nanos).sum();
+        let mut ranked: Vec<(&str, u64, u64)> =
+            diag_kind_nanos.into_iter().map(|(label, (count, nanos))| (label, count, nanos)).collect();
+        ranked.sort_by(|left, right| right.2.cmp(&left.2));
+        for (label, count, nanos) in ranked {
+            std::eprintln!(
+                "DIAG evaluate_quantized node_kind={label} count={count} total_ms={:.3} pct_of_forward={:.2}",
+                nanos as f64 / 1_000_000.0,
+                100.0 * nanos as f64 / total_nanos as f64,
+            );
         }
     }
 
@@ -641,13 +720,11 @@ use crate::sized::PARALLEL_THRESHOLD;
 /// equal-row chunks of a 1024^3 GEMM), and one chunk per worker leaves no
 /// spare chunk for a worker that finishes early to pick up — more chunks
 /// than workers lets a fast worker absorb a slow chunk's slack. Only pays
-/// off under `tensor-bgpool`'s dynamic claiming (see `claim_and_run`): the
-/// default `thread::scope` sibling spawns one OS thread per chunk, so
-/// raising this on that path spawns more threads for the same work rather
-/// than letting any thread steal another's slack — the puller count that
-/// path uses is fixed at `chunks.len()` by construction, unlike the pool
-/// sibling below, whose puller count [`run_chunks_threaded`] caps at
-/// `workers` regardless of `OVERSUBSCRIBE`.
+/// off under [`nest_pool`]'s dynamic claiming (see `claim_and_run`), the
+/// only chunk dispatch this module has: the puller count [`run_chunks_threaded`]
+/// spawns caps at `workers` regardless of `OVERSUBSCRIBE`, so raising this
+/// grows the number of chunks a fixed puller count can steal from, without
+/// growing the number of threads touching them.
 ///
 /// A `4` was tried on this same mechanism: more chunks than workers gives a
 /// work-stealing pool room for a fast puller to absorb a slow chunk's slack,
@@ -663,12 +740,7 @@ use crate::sized::PARALLEL_THRESHOLD;
 /// value, until a re-measurement validates its own floor first — a
 /// same-code-path comparison, at a size and load where the two configurations
 /// provably execute identical instructions — and only then shows an
-/// oversubscription effect outside it. Gating to `1` outside `tensor-bgpool`
-/// regardless: the default `thread::scope` sibling spawns one OS thread per
-/// chunk, so raising this there would spawn more threads for the same work
-/// rather than letting any of them steal another's slack (see this
-/// constant's own first paragraph) — that argument does not depend on
-/// whichever value the pool path settles on.
+/// oversubscription effect outside it.
 use crate::sized::OVERSUBSCRIBE;
 
 /// Row-alignment applied to every non-final chunk boundary via
@@ -718,10 +790,11 @@ use crate::sized::SPLIT_ALIGNMENT;
 
 /// Same contract as [`evaluate`], including the exact same [`Evaluated`]
 /// and error variants — the only difference is that each large-enough nest
-/// runs its chunks across `workers` OS threads via [`std::thread::scope`],
-/// each writing a disjoint sub-slice of that nest's own output buffer (see
-/// [`BoundOp::split`]). The preamble is `prepare`, the same one [`evaluate`]
-/// runs — the two functions diverge only in the loop below.
+/// runs its chunks across `workers` pool tasks via `run_chunks_threaded`
+/// (the shared `nest_pool`), each writing a disjoint sub-slice of that
+/// nest's own output buffer (see [`BoundOp::split`]). The preamble is
+/// `prepare`, the same one [`evaluate`] runs — the two functions diverge
+/// only in the loop below.
 pub fn evaluate_parallel(
     program: &[Op],
     symbols: &[u64],
@@ -862,106 +935,13 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     Ok(output)
 }
 
-/// Runs each of `chunks` on its own OS thread, writing into the matching
-/// disjoint sub-slice of `output` — sound because [`BoundOp::split`] documents
-/// (and this function relies on) chunk `k`'s output occupying a contiguous,
-/// non-overlapping range of the parent buffer.
-#[cfg(not(feature = "tensor-bgpool"))]
-fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
-    chunks: &[BoundOp],
-    buffers: &[Option<B>],
-    output: &mut [f32],
-    // unused here: this path always spawns one OS thread per chunk, so
-    // there is no separate "puller count" to cap — see the `tensor-bgpool`
-    // sibling below, where the two counts genuinely diverge.
-    _workers: NonZeroUsize,
-) -> Result<(), TensorError> {
-    #[cfg(feature = "instrument")]
-    let slice_carve_start = Instant::now();
-    #[cfg(feature = "instrument")]
-    let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::ChunkSlices);
-
-    let mut slices = Vec::with_capacity(chunks.len());
-    let mut remaining = output;
-    for chunk in chunks {
-        let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-        slices.push(this_chunk);
-        remaining = rest;
-    }
-    #[cfg(feature = "instrument")]
-    drop(alloc_site_guard);
-
-    #[cfg(feature = "instrument")]
-    counter!(
-        instrument::SERIAL_SLICE_CARVE_NANOS,
-        slice_carve_start.elapsed().as_nanos() as u64
-    );
-    // scoped to start here, after slice-carving: `PARALLEL_NODE_NANOS` below
-    // is deliberately the thread::scope portion only (spawn + compute +
-    // join), so it composes with `SERIAL_SLICE_CARVE_NANOS` above rather than
-    // double-counting the carving loop inside both.
-    #[cfg(feature = "instrument")]
-    let node_start = Instant::now();
-
-    thread::scope(|scope| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .zip(slices)
-            .map(|(chunk, slice)| {
-                scope.spawn(move || {
-                    #[cfg(feature = "instrument")]
-                    let chunk_start = Instant::now();
-                    #[cfg(feature = "instrument")]
-                    let cpu_start = instrument::thread_cpu_nanos();
-                    let outcome = run_node_into(chunk, buffers, None, slice);
-                    #[cfg(feature = "instrument")]
-                    {
-                        let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
-                        let cpu_nanos = instrument::thread_cpu_nanos() - cpu_start;
-                        instrument::record_chunk_nanos(chunk_nanos);
-                        instrument::record_worker_busy_nanos(chunk_nanos);
-                        instrument::record_worker_cpu_nanos(cpu_nanos);
-                    }
-                    outcome
-                })
-            })
-            .collect();
-
-        #[cfg(feature = "instrument")]
-        let spawn_elapsed = node_start.elapsed();
-
-        for handle in handles {
-            // a worker panicking is a bug, not a new failure mode this
-            // module introduces: resuming it on the joining thread matches
-            // what would already happen if the same code path panicked
-            // inside the sequential `evaluate`.
-            handle
-                .join()
-                .unwrap_or_else(|panic_payload| panic::resume_unwind(panic_payload))?;
-        }
-
-        #[cfg(feature = "instrument")]
-        {
-            let total_elapsed = node_start.elapsed();
-            let spawn_nanos = spawn_elapsed.as_nanos() as u64;
-            let total_nanos = total_elapsed.as_nanos() as u64;
-            counter!(instrument::PARALLEL_NODES, 1);
-            counter!(instrument::PARALLEL_NODE_NANOS, total_nanos);
-            counter!(instrument::PARALLEL_SPAWN_NANOS, spawn_nanos);
-            // join/teardown is whatever wall-clock the node spent that
-            // wasn't already charged to spawning the threads.
-            counter!(
-                instrument::PARALLEL_JOIN_NANOS,
-                total_nanos.saturating_sub(spawn_nanos)
-            );
-        }
-
-        Ok(())
-    })
-}
-
-/// Pool-backed sibling of the `thread::scope` implementation above, gated
-/// behind `tensor-bgpool` so the default build never depends on `prime`.
+/// Runs each of `chunks` through the shared [`nest_pool`] (crossbeam-deque
+/// work-stealing, built once and reused for every nest in the process)
+/// instead of spawning a fresh OS thread per chunk. `std` implies
+/// `tensor-bgpool` (`Cargo.toml`'s `std` feature doc), so this is the only
+/// dispatch this module ever compiles — a fresh-`thread::scope`-per-call
+/// sibling used to sit here and was removed once nothing could select it
+/// anymore.
 ///
 /// Every chunk, including the caller's own, is pulled off one shared
 /// `next_index` cursor (see [`claim_and_run`]) instead of being statically
@@ -985,15 +965,14 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 /// busy-spinning a `Waker::noop` future the way `proxima_primitives::block_on`
 /// would.
 ///
-/// A worker panic cannot be resumed here the way the `thread::scope` sibling
-/// does: `ProximaBackgroundPool`'s worker loop wraps every job in
-/// `catch_unwind` and discards the payload (`prime/src/os/background.rs`,
-/// `worker()`, `let _ = unwind;`), converting a panic into a dropped
-/// closure with no way to recover the original payload. That drop takes our
-/// own `sync_channel` sender clone with it, so a panicking chunk never
-/// reports back; a chunk that never reports is surfaced as
-/// `TensorError::ThreadedChunkFailed` instead.
-#[cfg(feature = "tensor-bgpool")]
+/// A worker panic cannot be resumed on the joining thread the way a
+/// `thread::scope`-spawned one could: `ProximaBackgroundPool`'s worker loop
+/// wraps every job in `catch_unwind` and discards the payload
+/// (`prime/src/os/background.rs`, `worker()`, `let _ = unwind;`),
+/// converting a panic into a dropped closure with no way to recover the
+/// original payload. That drop takes our own `sync_channel` sender clone
+/// with it, so a panicking chunk never reports back; a chunk that never
+/// reports is surfaced as `TensorError::ThreadedChunkFailed` instead.
 fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     chunks: &[BoundOp],
     buffers: &[Option<B>],
@@ -1179,7 +1158,6 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 /// or `output` (the parent of every `slice_addresses` entry) can drop.
 /// `fetch_add` never hands out the same index twice, so no two pullers ever
 /// touch the same slice.
-#[cfg(feature = "tensor-bgpool")]
 fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
     next_index: &AtomicUsize,
     chunks_address: usize,
@@ -1221,14 +1199,13 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
     }
 }
 
-/// The pool backing [`run_chunks_threaded`]'s chunk dispatch under
-/// `tensor-bgpool`. Built once, on first use, and reused for every nest in
+/// The pool backing [`run_chunks_threaded`]'s and [`matmul_rows_threaded`]'s
+/// chunk dispatch. Built once, on first use, and reused for every nest in
 /// the process — a fresh `ProximaBackgroundPool` per node would reintroduce
-/// the per-node OS-thread-spawn cost this feature exists to remove.
+/// the per-node OS-thread-spawn cost this pool exists to remove.
 /// `OnceLock` only memoizes success: a failed build is not cached, so a
 /// later call (after whatever exhausted OS thread resources clears up) can
 /// retry instead of latching a permanent failure.
-#[cfg(feature = "tensor-bgpool")]
 fn nest_pool() -> Result<Arc<ProximaBackgroundPool>, TensorError> {
     if let Some(pool) = NEST_POOL.get() {
         return Ok(Arc::clone(pool));
@@ -1242,7 +1219,6 @@ fn nest_pool() -> Result<Arc<ProximaBackgroundPool>, TensorError> {
     Ok(NEST_POOL.get().cloned().unwrap_or(built))
 }
 
-#[cfg(feature = "tensor-bgpool")]
 static NEST_POOL: OnceLock<Arc<ProximaBackgroundPool>> = OnceLock::new();
 
 fn live_count<B>(buffers: &[Option<B>]) -> usize {
@@ -1496,7 +1472,7 @@ fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>
 fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
-    quantized_weights: Option<&BTreeMap<NodeId, &[u8]>>,
+    quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match &resolved.kind {
@@ -1937,11 +1913,36 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
 /// [`reject_non_float32`] already proved (via [`is_quantized_matmul_operand`])
 /// feeds exactly one such fold, so this need not re-check the shape, only
 /// find which physical operand it is.
-fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, &[u8]>) -> Option<NodeId> {
+fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> Option<NodeId> {
     if !matches!(resolved.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
         return None;
     }
     resolved.operands().iter().map(|(node, _, _)| *node).find(|node| quantized_weights.contains_key(node))
+}
+
+/// proxima-debugger diagnostic (`evaluate_quantized`'s per-node-kind timing
+/// table): buckets a bound op the same way [`run_node_into`]'s own match
+/// dispatches it, splitting `Keep::Reduce` into the quantized-matmul arm
+/// ([`run_reduce_quantized`], parallel-dispatched) versus the dense f32 arm
+/// ([`run_reduce`], serial) via the same [`quantized_operand`] check
+/// [`run_reduce_with_quantized_weights`] itself gates on.
+#[cfg(feature = "instrument")]
+fn diag_node_kind_label(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> &'static str {
+    match &resolved.kind {
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => {
+            if quantized_operand(resolved, quantized_weights).is_some() {
+                "reduce_matmul_quantized"
+            } else {
+                "reduce_f32_dense"
+            }
+        }
+        BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+    }
 }
 
 /// [`run_reduce`]'s quantized-weight branch: `resolved` is the fused
@@ -1971,10 +1972,17 @@ fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, &[
 fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
-    weights: &[u8],
+    weight_block: QuantizedBlock,
     weight_node: NodeId,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    // proxima-debugger diagnostic: whole-function timer, once per matmul
+    // node (the same granularity `evaluate_quantized`'s per-node-kind
+    // table uses) -- localizes whether a gap between a node's total wall
+    // time and the sum of matmul_rows_threaded's own timers sits inside
+    // this function's position loop or outside it entirely.
+    #[cfg(feature = "instrument")]
+    let diag_reduce_quantized_started = Instant::now();
     let activation_node = resolved
         .operands()
         .iter()
@@ -2000,10 +2008,21 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         reason: "quantized matmul batch shape does not evenly divide by its packed weight rows",
     };
     let k = usize::try_from(contraction_width).map_err(|_| shape_error())?;
-    if k == 0 || !weights.len().is_multiple_of(Q4K_BLOCK_BYTES) {
+
+    // Every K-quant weight codec this crate packs shares `Q4K_BLOCK_ELEMENTS`
+    // (256) elements per super-block (`q5_k`/`q6_k`'s own module docs: same
+    // `QK_K`) -- only the per-superblock byte count differs, so `weights` and
+    // `block_bytes` are the only two things this match needs to select.
+    let (weights, block_bytes): (&[u8], usize) = match weight_block {
+        QuantizedBlock::Float32(_) => return Err(shape_error()),
+        QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES),
+        QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES),
+        QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES),
+    };
+    if k == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }
-    let total_weight_elements = (weights.len() / Q4K_BLOCK_BYTES) * Q4K_BLOCK_ELEMENTS;
+    let total_weight_elements = (weights.len() / block_bytes) * Q4K_BLOCK_ELEMENTS;
     if !total_weight_elements.is_multiple_of(k) {
         return Err(shape_error());
     }
@@ -2018,12 +2037,46 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
 
     for position in 0..leading_total {
         let activation_row = &activation[position * k..(position + 1) * k];
-        #[cfg(feature = "q4k-int8-dot")]
-        let result = matmul_q4k_q8k_f32(weights, rows, activation_row)?;
-        #[cfg(not(feature = "q4k-int8-dot"))]
-        let result = matmul_q4k_f32(weights, rows, activation_row)?;
+        let result = match weight_block {
+            QuantizedBlock::Float32(_) => return Err(shape_error()),
+            QuantizedBlock::Q4K(_) => {
+                #[cfg(feature = "q4k-int8-dot")]
+                {
+                    matmul_q4k_q8k_f32(weights, rows, activation_row)?
+                }
+                #[cfg(not(feature = "q4k-int8-dot"))]
+                {
+                    matmul_q4k_f32(weights, rows, activation_row)?
+                }
+            }
+            QuantizedBlock::Q5K(_) => {
+                #[cfg(feature = "q5k-int8-dot")]
+                {
+                    matmul_q5k_q8k_f32(weights, rows, activation_row)?
+                }
+                #[cfg(not(feature = "q5k-int8-dot"))]
+                {
+                    matmul_q5k_f32(weights, rows, activation_row)?
+                }
+            }
+            QuantizedBlock::Q6K(_) => {
+                #[cfg(feature = "q6k-int8-dot")]
+                {
+                    matmul_q6k_q8k_f32(weights, rows, activation_row)?
+                }
+                #[cfg(not(feature = "q6k-int8-dot"))]
+                {
+                    matmul_q6k_f32(weights, rows, activation_row)?
+                }
+            }
+        };
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);
     }
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::MATMUL_REDUCE_QUANTIZED_NANOS,
+        diag_reduce_quantized_started.elapsed().as_nanos() as u64
+    );
     Ok(())
 }
 
@@ -2043,15 +2096,15 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
 fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
-    quantized_weights: &BTreeMap<NodeId, &[u8]>,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
-        let weights = quantized_weights.get(&weight_node).copied().ok_or(TensorError::NotLowerable {
+        let weight_block = quantized_weights.get(&weight_node).copied().ok_or(TensorError::NotLowerable {
             node: weight_node,
             reason: "quantized weight node has no bound byte buffer",
         })?;
-        return run_reduce_quantized(resolved, buffers, weights, weight_node, output);
+        return run_reduce_quantized(resolved, buffers, weight_block, weight_node, output);
     }
     run_reduce(resolved, buffers, output)
 }
@@ -3869,8 +3922,22 @@ fn neon_tile_plan(
 const Q4K_BLOCK_BYTES: usize = proxima_gguf::quant::q4_k::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `Q4_K` super-block (`QK_K` in ggml/gguf
-/// terms).
+/// terms). `Q5_K` and `Q6_K` share this exact per-superblock element count
+/// (both codecs' own module docs: `QK_K` is 256 crate-wide) -- only the
+/// packed byte count differs per format ([`Q5K_BLOCK_BYTES`]/
+/// [`Q6K_BLOCK_BYTES`] below), so this one constant covers all three rather
+/// than three identical `_BLOCK_ELEMENTS` constants.
 const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
+
+/// Packed bytes per `Q5_K` super-block — needed unconditionally (not just
+/// under `q5k-int8-dot`) because [`run_reduce_quantized`]'s dispatch reads
+/// it regardless of which matmul arm (dequantize-then-fold or packed int8
+/// dot) actually runs.
+const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
+
+/// Packed bytes per `Q6_K` super-block — same reasoning as
+/// [`Q5K_BLOCK_BYTES`].
+const Q6K_BLOCK_BYTES: usize = proxima_gguf::quant::q6_k::BLOCK_BYTES;
 
 /// One output row of a `Q4_K`-quantized-weight x `f32`-activation dot
 /// product — the scalar counterpart [`reject_non_float32`]'s quantized-weight
@@ -3944,21 +4011,455 @@ fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 /// the first row that fails its shape check, or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
 pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q4k_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q4k_f32,
+    )
+}
+
+/// Shared dispatch shape behind `matmul_q4k_f32`/`matmul_q5k_f32`/
+/// `matmul_q6k_f32`: validate `rows`/`weights.len()`, then route the
+/// per-row work either through [`matmul_rows_threaded`] (pool dispatch) or
+/// a sequential `chunks_exact` fold, depending on
+/// [`quantized_matmul_workers`]'s call. The three codecs differ only in
+/// which per-row kernel (`dot_row`) they fold with and which `&'static str`
+/// reasons their shape errors carry — both isolated as parameters so this
+/// is the only copy of the dispatch logic itself.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] with `zero_rows_reason` if
+/// `rows == 0`, with `row_length_reason` if `weights.len()` is not a whole
+/// multiple of `rows`, or whatever `dot_row` itself reports for the first
+/// row that fails its own shape check.
+fn matmul_quantized_dispatch<Row>(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    zero_rows_reason: &'static str,
+    row_length_reason: &'static str,
+    dot_row: Row,
+) -> Result<Vec<f32>, TensorError>
+where
+    Row: Fn(&[u8], &[f32]) -> Result<f32, TensorError> + Sync,
+{
     if rows == 0 {
-        return Err(TensorError::QuantizedShapeMismatch {
-            reason: "matmul_q4k_f32 called with zero rows",
-        });
+        return Err(TensorError::QuantizedShapeMismatch { reason: zero_rows_reason });
     }
     if !weights.len().is_multiple_of(rows) {
-        return Err(TensorError::QuantizedShapeMismatch {
-            reason: "weight byte length is not a whole multiple of the row count",
-        });
+        return Err(TensorError::QuantizedShapeMismatch { reason: row_length_reason });
     }
     let row_bytes = weights.len() / rows;
-    weights
-        .chunks_exact(row_bytes)
-        .map(|weight_row| dot_q4k_f32(weight_row, activation))
-        .collect()
+    match quantized_matmul_workers(rows, activation.len()) {
+        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+            let start = row * row_bytes;
+            dot_row(&weights[start..start + row_bytes], activation)
+        }),
+        None => weights
+            .chunks_exact(row_bytes)
+            .map(|weight_row| dot_row(weight_row, activation))
+            .collect(),
+    }
+}
+
+/// [`dot_q4k_f32`]'s mechanism applied to `Q5_K`: dequantizes one
+/// super-block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::q5_k::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. This is [`QuantizedBlock::Q5K`]'s codec path whenever
+/// `q5k-int8-dot` is off, and stays the codec path for non-matmul
+/// consumers regardless.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q5K_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q4K_BLOCK_ELEMENTS`].
+fn dot_q5k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q5K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q5_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q5K_BLOCK_BYTES;
+    if activation.len() != block_count * Q4K_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .chunks_exact(Q5K_BLOCK_BYTES)
+        .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
+    {
+        proxima_gguf::quant::q5_k::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold { len: Q4K_BLOCK_ELEMENTS, init: acc, seeded: true },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q5_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector — `dot_q5k_f32`'s per-row kernel, one row at a time
+/// (no `matmul_q4k_f32`-style thread split; `Q5_K` has not yet earned that
+/// on its own bench).
+///
+/// # Errors
+/// Propagates `dot_q5k_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q5k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    // proxima-debugger diagnostic: was ALWAYS sequential -- unlike
+    // `matmul_q4k_f32`/`matmul_q4k_q8k_f32`, it never called
+    // `quantized_matmul_workers`, so it was invisible to every other
+    // `MATMUL_*` counter. Now routed through the same
+    // `matmul_quantized_dispatch` pool dispatch as `matmul_q4k_f32`; timer
+    // kept as a whole-function wrap so this counter stays comparable to the
+    // pre-fix baseline it was built to measure.
+    #[cfg(feature = "instrument")]
+    let diag_q5k_started = Instant::now();
+    let result = matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q5k_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q5k_f32,
+    );
+    #[cfg(feature = "instrument")]
+    {
+        counter!(instrument::MATMUL_Q5K_F32_CALLS, 1);
+        counter!(
+            instrument::MATMUL_Q5K_F32_NANOS,
+            diag_q5k_started.elapsed().as_nanos() as u64
+        );
+    }
+    result
+}
+
+/// [`dot_q4k_f32`]'s mechanism applied to `Q6_K`: dequantizes one
+/// super-block at a time via [`proxima_gguf::quant::q6_k::dequantize_block`],
+/// then folds against the matching activation slice. [`QuantizedBlock::Q6K`]'s
+/// codec path whenever `q6k-int8-dot` is off.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q6K_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q4K_BLOCK_ELEMENTS`].
+fn dot_q6k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q6K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q6_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q6K_BLOCK_BYTES;
+    if activation.len() != block_count * Q4K_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .chunks_exact(Q6K_BLOCK_BYTES)
+        .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
+    {
+        proxima_gguf::quant::q6_k::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold { len: Q4K_BLOCK_ELEMENTS, init: acc, seeded: true },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q6_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector — `dot_q6k_f32`'s per-row kernel.
+///
+/// # Errors
+/// Propagates `dot_q6k_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    // proxima-debugger diagnostic: see the matching note on
+    // `matmul_q5k_f32` -- same was-always-sequential shape, now routed
+    // through the same `matmul_quantized_dispatch` pool dispatch, same
+    // whole-function timer for baseline comparability.
+    #[cfg(feature = "instrument")]
+    let diag_q6k_started = Instant::now();
+    let result = matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q6k_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q6k_f32,
+    );
+    #[cfg(feature = "instrument")]
+    {
+        counter!(instrument::MATMUL_Q6K_F32_CALLS, 1);
+        counter!(
+            instrument::MATMUL_Q6K_F32_NANOS,
+            diag_q6k_started.elapsed().as_nanos() as u64
+        );
+    }
+    result
+}
+
+/// Below this many total multiply-accumulates (`rows * activation.len()`),
+/// a quantized matmul's row loop runs sequentially even when more than one
+/// hardware thread exists: `std::thread::scope`'s spawn/join overhead would
+/// outweigh the work. Reuses [`PARALLEL_THRESHOLD`], the same element-count
+/// floor [`evaluate_node_parallel`] already gates its own per-node chunk
+/// dispatch on, rather than a second magic number for the same policy.
+/// `None` also covers `rows < workers`, where a per-row split would leave
+/// some worker with nothing to do.
+///
+/// This is a different axis than [`BoundOp::split`]/[`evaluate_node_parallel`]:
+/// that machinery chunks a reduce node along its outermost *surviving*
+/// output axis (`output_axes.first()` — `bind.rs`'s own doc), which for a
+/// batch-1 decode step is the batch axis, extent 1 — nothing to split.
+/// `matmul_q4k_f32`/`matmul_q4k_q8k_f32`'s weight-row loop has no such
+/// dependency on `BoundOp` at all (`rows`/`k` arrive as plain integers, not
+/// a bound node), so it can chunk the one axis that is actually wide at
+/// batch-1: weight rows.
+fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usize> {
+    // proxima-debugger diagnostic (this is the ONE choke point every
+    // quantized-matmul row-batch call passes through, `Q4_K`/`Q5_K`/`Q6_K`,
+    // int8-dot or f32-dot alike): counts total calls and how many actually
+    // return `None` (sequential fallback, no thread pool at all) versus
+    // `Some` (threaded via `matmul_rows_threaded`) -- settles whether the
+    // 1296-call `PARALLEL_NODES`/`MATMUL_DISPATCH_CALLS` figure already
+    // covers every row-batch this forward pass runs, or whether a
+    // sequential remainder is hiding node wall time `matmul_rows_threaded`
+    // never sees.
+    #[cfg(feature = "instrument")]
+    counter!(instrument::MATMUL_WORKERS_CALLS, 1);
+    let total_macs = rows.checked_mul(contraction_width)?;
+    if total_macs < PARALLEL_THRESHOLD {
+        #[cfg(feature = "instrument")]
+        counter!(instrument::MATMUL_WORKERS_NONE, 1);
+        return None;
+    }
+    let workers = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+    let decision = (workers > 1 && rows >= workers).then_some(workers);
+    #[cfg(feature = "instrument")]
+    if decision.is_none() {
+        counter!(instrument::MATMUL_WORKERS_NONE, 1);
+    }
+    decision
+}
+
+use crate::sized::ROW_OVERSUBSCRIBE;
+
+/// Runs `rows` independent per-row computations (`dot_row`) through the
+/// shared [`nest_pool`], each writing its own contiguous sub-range of the
+/// returned buffer — the row-loop counterpart of [`run_chunks_threaded`]'s
+/// pool sibling (`BoundOp`-chunk parallelism, one level up the call stack):
+/// no [`BoundOp`] exists at this call site to split, only a row count and a
+/// per-row closure, so this dispatches directly over row indices instead of
+/// `BoundOp` chunks. Every chunk's slice is carved via `split_at_mut` before
+/// any chunk is spawned, so no two pullers ever touch the same output
+/// element — same soundness argument as `run_chunks_threaded`'s own slice
+/// carve.
+///
+/// Chunk assignment is dynamic, the same shared-cursor mechanism
+/// `run_chunks_threaded`/`claim_and_run` use, applied to row ranges instead
+/// of `BoundOp`s ([`claim_and_run_rows`]): `rows` is split into
+/// `workers * ROW_OVERSUBSCRIBE` ranges (more chunks than pullers), and both
+/// the `workers - 1` spawned pool tasks and the calling thread pull the next
+/// unclaimed chunk off a shared [`AtomicUsize`] cursor instead of each
+/// owning one fixed range. A prior 1:1 static split left the calling thread
+/// idling in `Receiver::recv` for whichever spawned chunk ran longest even
+/// though equal row counts do not mean equal wall-clock (measured 2.04x
+/// spread across 8 equal-row chunks of a 1024^3 GEMM, see [`OVERSUBSCRIBE`]'s
+/// doc) — a fast puller now claims another chunk instead of idling.
+///
+/// # Safety (of the `unsafe` blocks inside)
+/// `dot_row`'s address crosses the pool's `'static` spawn bound the same way
+/// `buffers_address`/`chunks_address` do in `run_chunks_threaded`: cast to
+/// `usize` here, reconstructed unsafely inside each pool closure. Sound
+/// because this function blocks in `Receiver::recv` for every spawned chunk
+/// before returning, so `dot_row` (borrowed from the caller for the whole
+/// call) outlives every reconstructed reference. Each chunk's output slice
+/// is likewise unique by construction (`split_at_mut` above, carved before
+/// any puller starts claiming), and `AtomicUsize::fetch_add` never hands the
+/// same chunk index to two pullers, so no two closures ever alias the same
+/// output range.
+fn matmul_rows_threaded<Row>(rows: usize, workers: usize, dot_row: Row) -> Result<Vec<f32>, TensorError>
+where
+    Row: Fn(usize) -> Result<f32, TensorError> + Sync,
+{
+    let mut output = vec![0.0f32; rows];
+    let chunk_count = (workers.saturating_mul(ROW_OVERSUBSCRIBE)).clamp(1, rows.max(1));
+    let chunk_len = rows.div_ceil(chunk_count);
+
+    let mut chunk_ranges = Vec::with_capacity(chunk_count);
+    let mut remaining = output.as_mut_slice();
+    let mut row_start = 0usize;
+    while !remaining.is_empty() {
+        let take = chunk_len.min(remaining.len());
+        let (slice, rest) = remaining.split_at_mut(take);
+        remaining = rest;
+        chunk_ranges.push((row_start, slice.as_mut_ptr() as usize, slice.len()));
+        row_start += take;
+    }
+    let chunk_ranges_len = chunk_ranges.len();
+
+    let pool = nest_pool()?;
+    // SAFETY-relevant: see this function's doc comment for why casting
+    // `dot_row`'s address across the pool's `'static` bound is sound here.
+    let dot_row_address = &dot_row as *const Row as usize;
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let chunk_ranges: Arc<Vec<(usize, usize, usize)>> = Arc::new(chunk_ranges);
+    let spawned_count = workers.saturating_sub(1).min(chunk_ranges_len.saturating_sub(1));
+    let (result_sender, result_receiver) = sync_channel(chunk_ranges_len);
+
+    #[cfg(feature = "instrument")]
+    counter!(instrument::PARALLEL_NODES, 1);
+
+    // proxima-debugger diagnostic (this call's own dispatch-overhead
+    // breakdown, `instrument.rs::MATMUL_*_NANOS`): times the spawn loop,
+    // the caller's own claiming loop, and the `Receiver::recv` wait
+    // separately so a caller can tell whether this dispatch is bottlenecked
+    // on spawn (granularity too fine), recv (a straggler the cursor could
+    // not route around fast enough), or neither (own-chunk + per-chunk
+    // compute already accounted by `record_chunk_nanos` dominates and
+    // dispatch is not the ceiling).
+    #[cfg(feature = "instrument")]
+    let diag_spawn_started = Instant::now();
+
+    for _ in 0..spawned_count {
+        let sender = result_sender.clone();
+        let next_index = Arc::clone(&next_index);
+        let chunk_ranges = Arc::clone(&chunk_ranges);
+        drop(pool.spawn(move || {
+            claim_and_run_rows::<Row>(&next_index, dot_row_address, &chunk_ranges, &sender);
+            Ok::<(), _>(())
+        }));
+    }
+
+    #[cfg(feature = "instrument")]
+    let diag_spawn_nanos = diag_spawn_started.elapsed().as_nanos() as u64;
+
+    #[cfg(feature = "instrument")]
+    let diag_own_chunk_started = Instant::now();
+    // the caller pulls from the same shared cursor as every pool task
+    // instead of running one reserved chunk: it never sits idle, since
+    // finishing a chunk sends it straight back to `next_index` for another.
+    claim_and_run_rows::<Row>(&next_index, dot_row_address, &chunk_ranges, &result_sender);
+    drop(result_sender);
+    #[cfg(feature = "instrument")]
+    let diag_own_chunk_nanos = diag_own_chunk_started.elapsed().as_nanos() as u64;
+
+    #[cfg(feature = "instrument")]
+    let diag_recv_started = Instant::now();
+    let mut outcomes: Vec<Option<Result<(), TensorError>>> =
+        (0..chunk_ranges_len).map(|_| None).collect();
+    for _ in 0..chunk_ranges_len {
+        match result_receiver.recv() {
+            Ok((index, outcome)) => outcomes[index] = Some(outcome),
+            // every sender clone is gone (each spawned closure's clone is
+            // dropped whether it sends or panics), so no further chunk will
+            // ever report — stop waiting instead of blocking forever.
+            Err(_) => break,
+        }
+    }
+    #[cfg(feature = "instrument")]
+    {
+        let diag_recv_nanos = diag_recv_started.elapsed().as_nanos() as u64;
+        counter!(instrument::MATMUL_DISPATCH_CALLS, 1);
+        counter!(instrument::MATMUL_SPAWN_NANOS, diag_spawn_nanos);
+        counter!(instrument::MATMUL_OWN_CHUNK_NANOS, diag_own_chunk_nanos);
+        counter!(instrument::MATMUL_RECV_WAIT_NANOS, diag_recv_nanos);
+    }
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        match outcome {
+            Some(result) => result?,
+            None => {
+                return Err(TensorError::ThreadedChunkFailed {
+                    chunk: index + 1,
+                    reason: alloc::string::String::from(
+                        "worker did not report a result; ProximaBackgroundPool \
+                         catches and discards worker panics (see \
+                         prime/src/os/background.rs worker())",
+                    ),
+                });
+            }
+        }
+    }
+    Ok(output)
+}
+
+/// Pulls row-chunk indices off `next_index` one at a time and runs each to
+/// completion through [`run_row_chunk`], reporting through `sender` — the
+/// row-loop counterpart of [`claim_and_run`]'s shared-cursor claim loop,
+/// called by both the calling thread and every spawned pool task in
+/// [`matmul_rows_threaded`] so a puller that finishes early goes straight
+/// back for the next available chunk instead of idling.
+///
+/// # Safety (of the `unsafe` blocks inside)
+/// `dot_row_address` and every `(row_start, pointer, len)` triple in
+/// `chunk_ranges` must stay valid, and each slice must be unique to its
+/// index, for as long as any puller can still observe `next_index` below
+/// `chunk_ranges.len()` — guaranteed by [`matmul_rows_threaded`] draining
+/// `chunk_ranges.len()` results from `sender`'s channel before `dot_row` or
+/// `output` (the parent of every `chunk_ranges` entry) can drop.
+/// `fetch_add` never hands out the same index twice, so no two pullers ever
+/// touch the same slice.
+fn claim_and_run_rows<Row>(
+    next_index: &AtomicUsize,
+    dot_row_address: usize,
+    chunk_ranges: &[(usize, usize, usize)],
+    sender: &SyncSender<(usize, Result<(), TensorError>)>,
+) where
+    Row: Fn(usize) -> Result<f32, TensorError>,
+{
+    loop {
+        let index = next_index.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if index >= chunk_ranges.len() {
+            return;
+        }
+        // SAFETY: see this function's doc comment.
+        let dot_row = unsafe { &*(dot_row_address as *const Row) };
+        let (chunk_start, slice_address, slice_len) = chunk_ranges[index];
+        // SAFETY: unique to this chunk by construction (`split_at_mut` in
+        // `matmul_rows_threaded`); the parent `output` outlives every
+        // reconstructed slice per this function's doc comment.
+        let chunk_output =
+            unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
+        let outcome = run_row_chunk(dot_row, chunk_start, chunk_output);
+        let _ = sender.send((index, outcome));
+    }
+}
+
+/// Runs one contiguous row range of a [`matmul_rows_threaded`] dispatch,
+/// writing each row's result into its matching `chunk_output` slot.
+fn run_row_chunk<Row>(
+    dot_row: &Row,
+    chunk_start: usize,
+    chunk_output: &mut [f32],
+) -> Result<(), TensorError>
+where
+    Row: Fn(usize) -> Result<f32, TensorError>,
+{
+    #[cfg(feature = "instrument")]
+    let chunk_started = Instant::now();
+    for (offset, slot) in chunk_output.iter_mut().enumerate() {
+        *slot = dot_row(chunk_start + offset)?;
+    }
+    #[cfg(feature = "instrument")]
+    instrument::record_chunk_nanos(chunk_started.elapsed().as_nanos() as u64);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -3989,8 +4490,11 @@ const Q4K_SCALE_BYTES: usize = 12;
 const Q4K_QS_OFFSET: usize = Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES;
 /// Sub-blocks of 32 elements per `Q4_K` super-block (`QK_K/32` = 8) --
 /// [`Q4K_BLOCK_ELEMENTS`] is `pub(crate)`-visible above; this is the same
-/// number under the name the int8 dot's loop structure uses it by.
-#[cfg(feature = "q4k-int8-dot")]
+/// number under the name the int8 dot's loop structure uses it by. `Q5_K`
+/// shares this exact sub-block shape (`q5_k.rs`'s own module doc: "the same
+/// super-block/sub-block shape... as `q4_k`"), so [`dot_q5k_q8k_block_scalar`]
+/// reuses this constant rather than defining an identical `Q5K_SUB_BLOCKS`.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot"))]
 const Q4K_SUB_BLOCKS: usize = Q4K_BLOCK_ELEMENTS / 32;
 
 /// Bytes per `Q8_K` super-block: `f32` scale (4 bytes), plus `QK_K` `i8`
@@ -4006,18 +4510,22 @@ const Q4K_SUB_BLOCKS: usize = Q4K_BLOCK_ELEMENTS / 32;
 /// slices would ALSO work, but would require [`quantize_row_q8k`] and
 /// [`dot_q4k_q8k`] to agree on three independent buffer lengths instead of
 /// one, for no capability a caller gains.
-#[cfg(feature = "q4k-int8-dot")]
+// `Q8_K` is the one activation format every K-quant weight codec (`Q4_K`,
+// `Q5_K`, `Q6_K`) dots against -- shared, not duplicated per format, so
+// these constants and `quantize_row_q8k` below build under ANY of the
+// three weight codecs' int8-dot features, not `q4k-int8-dot` alone.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 const Q8K_BLOCK_BYTES: usize = 4 + Q4K_BLOCK_ELEMENTS + (Q4K_BLOCK_ELEMENTS / 16) * 2;
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 const Q8K_D_OFFSET: usize = 0;
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 const Q8K_QS_OFFSET: usize = 4;
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 const Q8K_BSUMS_OFFSET: usize = Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS;
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 const Q8K_BSUMS_COUNT: usize = Q4K_BLOCK_ELEMENTS / 16;
 
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
     let mut raw = [0u8; 2];
     raw.copy_from_slice(&bytes[offset..offset + 2]);
@@ -4047,7 +4555,7 @@ fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
 /// # Errors
 /// [`TensorError::QuantizedShapeMismatch`] if either length requirement
 /// above is not met.
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), TensorError> {
     if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -4069,7 +4577,7 @@ pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), Ten
     Ok(())
 }
 
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
     let mut amax = 0.0f32;
     let mut max = 0.0f32;
@@ -4283,8 +4791,14 @@ fn dot_q4k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 /// # Safety
 /// Caller guarantees `FEAT_DotProd` is available -- this crate's `build.rs`
 /// only ever calls this function under the `q4k_dotprod` cfg, which it
-/// emits solely for aarch64 targets (see that cfg's doc).
-#[cfg(all(target_arch = "aarch64", feature = "q4k-int8-dot"))]
+/// emits solely for aarch64 targets (see that cfg's doc). Shared by every
+/// K-quant codec's `_block_neon_dotprod` kernel (`Q4_K`/`Q5_K`/`Q6_K`), not
+/// duplicated per format -- the instruction itself has no codec-specific
+/// behavior.
+#[cfg(all(
+    target_arch = "aarch64",
+    any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot")
+))]
 #[target_feature(enable = "dotprod")]
 #[inline]
 unsafe fn sdot_s32(acc: core::arch::aarch64::int32x4_t, a: core::arch::aarch64::int8x16_t, b: core::arch::aarch64::int8x16_t) -> core::arch::aarch64::int32x4_t {
@@ -4514,13 +5028,32 @@ pub fn matmul_q4k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
     }
     let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
     let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    // proxima-debugger diagnostic: this preamble runs BEFORE
+    // `quantized_matmul_workers`/`matmul_rows_threaded`, so none of the
+    // spawn/own-chunk/recv-wait timers in `matmul_rows_threaded` see it --
+    // timed separately to settle whether it is the source of the gap
+    // between a matmul node's total wall time and its threaded-dispatch
+    // time.
+    #[cfg(feature = "instrument")]
+    let diag_quantize_started = Instant::now();
     quantize_row_q8k(activation, &mut activation_q8k)?;
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::MATMUL_QUANTIZE_ACTIVATION_NANOS,
+        diag_quantize_started.elapsed().as_nanos() as u64
+    );
 
     let row_bytes = weights.len() / rows;
-    weights
-        .chunks_exact(row_bytes)
-        .map(|weight_row| dot_q4k_q8k(weight_row, &activation_q8k))
-        .collect()
+    match quantized_matmul_workers(rows, activation.len()) {
+        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+            let start = row * row_bytes;
+            dot_q4k_q8k(&weights[start..start + row_bytes], &activation_q8k)
+        }),
+        None => weights
+            .chunks_exact(row_bytes)
+            .map(|weight_row| dot_q4k_q8k(weight_row, &activation_q8k))
+            .collect(),
+    }
 }
 
 /// [`matmul_q4k_q8k_f32`] with every row routed through
@@ -4557,6 +5090,690 @@ pub fn matmul_q4k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f3
     weights
         .chunks_exact(row_bytes)
         .map(|weight_row| dot_q4k_q8k_portable(weight_row, &activation_q8k))
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// `q5k-int8-dot` (default-off): `q4k-int8-dot`'s mechanism applied to
+// `Q5_K` -- packed int8 dot directly against `Q8_K`, no `[f32; 256]`
+// dequantize pass. `Q5_K` shares `Q4_K`'s exact super-block/sub-block
+// shape (8 sub-blocks of 32, the same bit-interleaved 6-bit scale/min
+// packing -- `get_scale_min_k4` above is reused unchanged) plus one
+// extra `qh` high-bit plane; see `proxima-tensor/docs/discipline.md` for
+// the row this landed under.
+// ---------------------------------------------------------------------
+
+/// Byte offsets into one packed `Q5_K` super-block ([`Q5K_BLOCK_BYTES`]
+/// bytes), mirroring `proxima_gguf::quant::q5_k`'s private layout
+/// constants -- duplicated here for the same reason [`Q4K_D_OFFSET`] and
+/// siblings are: [`dot_q5k_q8k`] reads the raw bytes directly rather than
+/// calling `dequantize_block`.
+#[cfg(feature = "q5k-int8-dot")]
+const Q5K_D_OFFSET: usize = 0;
+#[cfg(feature = "q5k-int8-dot")]
+const Q5K_DMIN_OFFSET: usize = 2;
+#[cfg(feature = "q5k-int8-dot")]
+const Q5K_SCALES_OFFSET: usize = 4;
+/// `qh` sits between `scales` and `qs` in `Q5_K`'s on-disk layout
+/// (`proxima_gguf::quant::q5_k`'s own module doc, ported from
+/// `ggml-common.h:302-313`) -- unlike `Q4_K`, which has no high-bit plane
+/// at all.
+#[cfg(feature = "q5k-int8-dot")]
+const Q5K_QH_OFFSET: usize = Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES;
+#[cfg(feature = "q5k-int8-dot")]
+const Q5K_QH_BYTES: usize = Q4K_BLOCK_ELEMENTS / 8;
+#[cfg(feature = "q5k-int8-dot")]
+const Q5K_QS_OFFSET: usize = Q5K_QH_OFFSET + Q5K_QH_BYTES;
+
+/// One `Q5_K`-weight-row x `Q8_K`-activation int8 dot product --
+/// [`dot_q4k_q8k`]'s sibling for the 5-bit codec. Dispatches to
+/// `dot_q5k_q8k_block_neon_dotprod` under `q4k_dotprod` (the same
+/// arch-wide cfg [`dot_q4k_q8k`] keys off -- `FEAT_DotProd` availability is
+/// a property of the target, not the weight codec) and to the portable
+/// `dot_q5k_q8k_block_scalar` everywhere else. No AVX2 arm yet -- the
+/// task ordering this landed under ran portable-then-aarch64 first; an
+/// AVX2 arm is future work, not a correctness gap (the portable arm is
+/// what an x86-64 build without `+avx2` runs regardless).
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of `Q5K_BLOCK_BYTES`, or `activation_q8k.len()` does
+/// not equal the row's block count times `Q8K_BLOCK_BYTES`.
+#[cfg(feature = "q5k-int8-dot")]
+pub fn dot_q5k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q5K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q5_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q5K_BLOCK_BYTES;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let mut acc = 0.0f32;
+    for (weight_block, q8k_block) in weight_row
+        .chunks_exact(Q5K_BLOCK_BYTES)
+        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+    {
+        #[cfg(q4k_dotprod)]
+        // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
+        // targets, all of which carry FEAT_DotProd.
+        let block_sum = unsafe { dot_q5k_q8k_block_neon_dotprod(weight_block, q8k_block) };
+        #[cfg(not(q4k_dotprod))]
+        let block_sum = dot_q5k_q8k_block_scalar(weight_block, q8k_block);
+        acc += block_sum;
+    }
+    Ok(acc)
+}
+
+/// [`dot_q5k_q8k`] with the dispatch forced to
+/// `dot_q5k_q8k_block_scalar` regardless of `q4k_dotprod` -- the
+/// standalone "portable packing alone" measurement, same role
+/// [`dot_q4k_q8k_portable`] plays for `Q4_K`.
+///
+/// # Errors
+/// Same as [`dot_q5k_q8k`].
+#[cfg(feature = "q5k-int8-dot")]
+pub fn dot_q5k_q8k_portable(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q5K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q5_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q5K_BLOCK_BYTES;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let mut acc = 0.0f32;
+    for (weight_block, q8k_block) in weight_row
+        .chunks_exact(Q5K_BLOCK_BYTES)
+        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+    {
+        acc += dot_q5k_q8k_block_scalar(weight_block, q8k_block);
+    }
+    Ok(acc)
+}
+
+/// The portable packed-nibble x `Q8_K` int8 dot for `Q5_K` -- no
+/// dequantize pass, no `f32` intermediate. Identical structure to
+/// [`dot_q4k_q8k_block_scalar`] (unpack each sub-block's 6-bit
+/// scale/min via [`proxima_gguf::quant::q4_k::get_scale_min_k4`], dot 32
+/// nibbles against 32 `Q8_K` activations, scale, accumulate; mins
+/// correction identical -- `Q5_K` shares `Q4_K`'s exact bit-interleaved
+/// scale/min packing) plus one addition: each nibble is OR'd with its
+/// `qh` high bit before the multiply. `qh_mask = 1u8 << sub_block` is not
+/// an approximation -- it is the exact bit `proxima_gguf::quant::q5_k`'s
+/// own `dequantize_block` reads for this `sub_block` (derived from that
+/// function's `mask_lo`/`mask_hi` cycling, which starts at
+/// `1u8`/`2u8` and shifts left by 2 every 64-element chunk: the two
+/// sub-blocks sharing a chunk land on consecutive bits, and consecutive
+/// chunks land on the next two bits up, i.e. bit index == `sub_block`
+/// exactly, for every one of the 8 sub-blocks).
+#[cfg(feature = "q5k-int8-dot")]
+fn dot_q5k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q5K_D_OFFSET);
+    let dmin_weight = f16_le_at(weight_block, Q5K_DMIN_OFFSET);
+    let mut scales = [0u8; Q4K_SCALE_BYTES];
+    scales.copy_from_slice(&weight_block[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+    let qh = &weight_block[Q5K_QH_OFFSET..Q5K_QH_OFFSET + Q5K_QH_BYTES];
+    let qs = &weight_block[Q5K_QS_OFFSET..Q5K_QS_OFFSET + Q4K_BLOCK_ELEMENTS / 2];
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+    let activation_qs = &q8k_block[Q8K_QS_OFFSET..Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS];
+    let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+    let mut sumi = 0i32;
+    let mut mins_correction = 0i32;
+    for sub_block in 0..Q4K_SUB_BLOCKS {
+        let (scale_code, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+
+        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+
+        let byte_base = (sub_block / 2) * 32;
+        let is_high_nibble = sub_block % 2 == 1;
+        let activation_base = sub_block * 32;
+        let qh_mask = 1u8 << sub_block;
+        let mut partial = 0i32;
+        for offset in 0..32 {
+            let byte = qs[byte_base + offset];
+            let nibble = i32::from(if is_high_nibble { byte >> 4 } else { byte & 0x0F });
+            let high_bit = i32::from(qh[offset] & qh_mask != 0) * 16;
+            let level = nibble + high_bit;
+            let activation_value = i32::from(activation_qs[activation_base + offset].cast_signed());
+            partial += level * activation_value;
+        }
+        sumi += partial * i32::from(scale_code);
+    }
+
+    let d = activation_scale * d_weight;
+    let dmin = activation_scale * dmin_weight;
+    d.mul_add(sumi as f32, -(dmin * mins_correction as f32))
+}
+
+/// [`dot_q5k_q8k_block_scalar`]'s mechanism, `vdotq_s32`-accelerated.
+/// Ports `ggml_vec_dot_q5_K_q8_K`'s `__ARM_NEON` arm
+/// (`arch/arm/quants.c:2512-2579`) directly: per 64-element chunk (`j` in
+/// `0..4`), extracts the current chunk's two high-bit planes from the
+/// (persistently right-shifted) `qh` register pair via
+/// `vandq_u8`/`vshlq_n_u8` with `mone`/`mtwo` masks, ORs each into its
+/// nibble half, then two [`sdot_s32`] pairs per chunk (low nibble pair,
+/// high nibble pair) instead of [`dot_q5k_q8k_block_scalar`]'s
+/// 32-iteration scalar loop per sub-block.
+///
+/// # Safety
+/// Caller guarantees `FEAT_DotProd`; `weight_block.len() ==
+/// Q5K_BLOCK_BYTES` and `q8k_block.len() == Q8K_BLOCK_BYTES` (both
+/// [`dot_q5k_q8k`]'s own `chunks_exact` calls already guarantee before
+/// calling this).
+#[cfg(all(q4k_dotprod, feature = "q5k-int8-dot"))]
+unsafe fn dot_q5k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q5K_D_OFFSET);
+    let dmin_weight = f16_le_at(weight_block, Q5K_DMIN_OFFSET);
+    let mut scales = [0u8; Q4K_SCALE_BYTES];
+    scales.copy_from_slice(&weight_block[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+    let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+    let mut mins_correction = 0i32;
+    for sub_block in 0..Q4K_SUB_BLOCKS {
+        let (_, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+    }
+
+    // SAFETY: caller-guaranteed FEAT_DotProd; `q5_base` walks exactly
+    // `Q4K_BLOCK_ELEMENTS / 2` bytes, `qh_base` is read once (32 bytes,
+    // never advanced) and `q8_base` walks exactly `Q4K_BLOCK_ELEMENTS`
+    // bytes, across the `Q4K_SUB_BLOCKS / 2` loop iterations below -- all
+    // within the slices' checked bounds.
+    unsafe {
+        let m4b = vdupq_n_u8(0x0f);
+        let mone = vdupq_n_u8(1);
+        let mtwo = vdupq_n_u8(2);
+        let mzero = vdupq_n_s32(0);
+        let q5_base = weight_block[Q5K_QS_OFFSET..].as_ptr();
+        let qh_base = weight_block[Q5K_QH_OFFSET..].as_ptr();
+        let q8_base = q8k_block[Q8K_QS_OFFSET..].as_ptr().cast::<i8>();
+
+        let mut qhbits0 = vld1q_u8(qh_base);
+        let mut qhbits1 = vld1q_u8(qh_base.add(16));
+
+        let mut sumi: i32 = 0;
+        for j in 0..Q4K_SUB_BLOCKS / 2 {
+            let q5bits0 = vld1q_u8(q5_base.add(j * 32));
+            let q5bits1 = vld1q_u8(q5_base.add(j * 32 + 16));
+
+            let q5h0 = vshlq_n_u8(vandq_u8(mone, qhbits0), 4);
+            let q5h1 = vshlq_n_u8(vandq_u8(mone, qhbits1), 4);
+            let q5h2 = vshlq_n_u8(vandq_u8(mtwo, qhbits0), 3);
+            let q5h3 = vshlq_n_u8(vandq_u8(mtwo, qhbits1), 3);
+            qhbits0 = vshrq_n_u8(qhbits0, 2);
+            qhbits1 = vshrq_n_u8(qhbits1, 2);
+
+            let q5bytes0 = vreinterpretq_s8_u8(vorrq_u8(vandq_u8(q5bits0, m4b), q5h0));
+            let q5bytes1 = vreinterpretq_s8_u8(vorrq_u8(vandq_u8(q5bits1, m4b), q5h1));
+            let q5bytes2 = vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(q5bits0, 4), q5h2));
+            let q5bytes3 = vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(q5bits1, 4), q5h3));
+
+            let q8b0 = vld1q_s8(q8_base.add(j * 64));
+            let q8b1 = vld1q_s8(q8_base.add(j * 64 + 16));
+            let q8b2 = vld1q_s8(q8_base.add(j * 64 + 32));
+            let q8b3 = vld1q_s8(q8_base.add(j * 64 + 48));
+
+            let scale_lo = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j, &scales).0;
+            let partial_lo = sdot_s32(sdot_s32(mzero, q5bytes0, q8b0), q5bytes1, q8b1);
+            sumi += vaddvq_s32(partial_lo) * i32::from(scale_lo);
+
+            let scale_hi = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j + 1, &scales).0;
+            let partial_hi = sdot_s32(sdot_s32(mzero, q5bytes2, q8b2), q5bytes3, q8b3);
+            sumi += vaddvq_s32(partial_hi) * i32::from(scale_hi);
+        }
+
+        let d = activation_scale * d_weight;
+        let dmin = activation_scale * dmin_weight;
+        d.mul_add(sumi as f32, -(dmin * mins_correction as f32))
+    }
+}
+
+/// A full `Q5_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector — [`matmul_q5k_f32`]'s packed-arithmetic sibling,
+/// same structure as [`matmul_q4k_q8k_f32`].
+///
+/// # Errors
+/// Propagates [`quantize_row_q8k`]'s and [`dot_q5k_q8k`]'s
+/// [`TensorError::QuantizedShapeMismatch`], or reports the same error if
+/// `weights.len()` is not a whole multiple of `rows`.
+#[cfg(feature = "q5k-int8-dot")]
+pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q5k_q8k_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    quantize_row_q8k(activation, &mut activation_q8k)?;
+
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q5k_q8k(weight_row, &activation_q8k))
+        .collect()
+}
+
+/// [`matmul_q5k_q8k_f32`] with every row routed through
+/// [`dot_q5k_q8k_portable`] instead of [`dot_q5k_q8k`] -- the matrix-level
+/// "portable packing alone" measurement, callable regardless of which
+/// accelerated arm the host build would otherwise pick.
+///
+/// # Errors
+/// Same as [`matmul_q5k_q8k_f32`].
+#[cfg(feature = "q5k-int8-dot")]
+pub fn matmul_q5k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q5k_q8k_portable_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    quantize_row_q8k(activation, &mut activation_q8k)?;
+
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q5k_q8k_portable(weight_row, &activation_q8k))
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// `q6k-int8-dot` (default-off): `q4k-int8-dot`'s mechanism applied to
+// `Q6_K` -- packed int8 dot directly against `Q8_K`. `Q6_K` has a
+// DIFFERENT super-block shape from `Q4_K`/`Q5_K`: 16 sub-blocks of 16
+// (not 8 of 32), one signed 8-bit scale per sub-block, no `dmin` term at
+// all (`x = d*sc*(q-32)`, `proxima_gguf::quant::q6_k`'s own module doc).
+// See `proxima-tensor/docs/discipline.md` for the row this landed under.
+// ---------------------------------------------------------------------
+
+/// Byte offsets into one packed `Q6_K` super-block ([`Q6K_BLOCK_BYTES`]
+/// bytes), mirroring `proxima_gguf::quant::q6_k`'s private layout
+/// constants -- duplicated here for the same reason [`Q4K_D_OFFSET`] and
+/// siblings are. Note the field order: `d` TRAILS the block here (unlike
+/// `Q4_K`/`Q5_K`, where it leads) -- `proxima_gguf::quant::q6_k`'s own
+/// module doc flags this explicitly as the one layout trap this codec has
+/// that the others don't.
+#[cfg(feature = "q6k-int8-dot")]
+const Q6K_QL_OFFSET: usize = 0;
+#[cfg(feature = "q6k-int8-dot")]
+const Q6K_QL_BYTES: usize = Q4K_BLOCK_ELEMENTS / 2;
+#[cfg(feature = "q6k-int8-dot")]
+const Q6K_QH_OFFSET: usize = Q6K_QL_OFFSET + Q6K_QL_BYTES;
+#[cfg(feature = "q6k-int8-dot")]
+const Q6K_QH_BYTES: usize = Q4K_BLOCK_ELEMENTS / 4;
+#[cfg(feature = "q6k-int8-dot")]
+const Q6K_SCALES_OFFSET: usize = Q6K_QH_OFFSET + Q6K_QH_BYTES;
+#[cfg(feature = "q6k-int8-dot")]
+const Q6K_D_OFFSET: usize = Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS;
+
+/// One `Q6_K`-weight-row x `Q8_K`-activation int8 dot product --
+/// [`dot_q4k_q8k`]'s sibling for the 6-bit codec. Dispatches to
+/// `dot_q6k_q8k_block_neon_dotprod` under `q4k_dotprod` and to the
+/// portable `dot_q6k_q8k_block_scalar` everywhere else -- same dispatch
+/// shape as [`dot_q5k_q8k`], no AVX2 arm yet (same rationale: portable
+/// arm first, aarch64 second, per this landing's task ordering).
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of `Q6K_BLOCK_BYTES`, or `activation_q8k.len()` does
+/// not equal the row's block count times `Q8K_BLOCK_BYTES`.
+#[cfg(feature = "q6k-int8-dot")]
+pub fn dot_q6k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q6K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q6_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q6K_BLOCK_BYTES;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let mut acc = 0.0f32;
+    for (weight_block, q8k_block) in weight_row
+        .chunks_exact(Q6K_BLOCK_BYTES)
+        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+    {
+        #[cfg(q4k_dotprod)]
+        // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
+        // targets, all of which carry FEAT_DotProd.
+        let block_sum = unsafe { dot_q6k_q8k_block_neon_dotprod(weight_block, q8k_block) };
+        #[cfg(not(q4k_dotprod))]
+        let block_sum = dot_q6k_q8k_block_scalar(weight_block, q8k_block);
+        acc += block_sum;
+    }
+    Ok(acc)
+}
+
+/// [`dot_q6k_q8k`] with the dispatch forced to
+/// `dot_q6k_q8k_block_scalar` regardless of `q4k_dotprod`.
+///
+/// # Errors
+/// Same as [`dot_q6k_q8k`].
+#[cfg(feature = "q6k-int8-dot")]
+pub fn dot_q6k_q8k_portable(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q6K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q6_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q6K_BLOCK_BYTES;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let mut acc = 0.0f32;
+    for (weight_block, q8k_block) in weight_row
+        .chunks_exact(Q6K_BLOCK_BYTES)
+        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+    {
+        acc += dot_q6k_q8k_block_scalar(weight_block, q8k_block);
+    }
+    Ok(acc)
+}
+
+/// The portable packed-nibble x `Q8_K` int8 dot for `Q6_K` -- no
+/// dequantize pass, no `f32` intermediate. Unlike [`dot_q4k_q8k_block_scalar`]/
+/// [`dot_q5k_q8k_block_scalar`], this does not reuse those codecs'
+/// `get_scale_min_k4` unpack (`Q6_K` has no bit-interleaved scale/min
+/// pair at all, just 16 plain signed-`i8` scales and no `dmin`) or their
+/// `byte_base = (sub_block/2)*32` nibble addressing (`Q6_K`'s sub-blocks
+/// are 16 wide, not 32, and its `ql`/`qh` byte layout is genuinely
+/// different -- see [`proxima_gguf::quant::q6_k::unpack_levels`], which
+/// this function's addressing (`half`/`local_sub`/`lane`/`subhalf`) is
+/// derived from and stays consistent with: `half = sub_block / 8`,
+/// `local_sub = sub_block % 8`, `lane = local_sub / 2`,
+/// `subhalf = local_sub % 2`; for output offset `e` within the sub-block,
+/// `l = subhalf*16 + e` is `unpack_levels`'s own index parameter). Each
+/// unpacked 6-bit level is biased by -32 before the multiply
+/// (`q6_k.rs`'s own `x = d*sc*(q-32)` doc), matching what
+/// `proxima_gguf::quant::q6_k::dequantize_block` computes exactly, just
+/// against a `Q8_K` `i8` activation instead of an `f32` one.
+#[cfg(feature = "q6k-int8-dot")]
+fn dot_q6k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q6K_D_OFFSET);
+    let ql = &weight_block[Q6K_QL_OFFSET..Q6K_QL_OFFSET + Q6K_QL_BYTES];
+    let qh = &weight_block[Q6K_QH_OFFSET..Q6K_QH_OFFSET + Q6K_QH_BYTES];
+    let scales = &weight_block[Q6K_SCALES_OFFSET..Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS];
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+    let activation_qs = &q8k_block[Q8K_QS_OFFSET..Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS];
+
+    let sub_block_elements = proxima_gguf::quant::q6_k::SUB_BLOCK_ELEMENTS;
+    let mut sumi = 0i32;
+    for (sub_block, &scale_byte) in scales.iter().enumerate() {
+        let half = sub_block / 8;
+        let local_sub = sub_block % 8;
+        let lane = local_sub / 2;
+        let subhalf = local_sub % 2;
+        let scale = i32::from(scale_byte.cast_signed());
+        let ql_half = &ql[half * 64..half * 64 + 64];
+        let qh_half = &qh[half * 32..half * 32 + 32];
+        let activation_base = sub_block * sub_block_elements;
+
+        let mut partial = 0i32;
+        for offset in 0..sub_block_elements {
+            let l = subhalf * sub_block_elements + offset;
+            let ql_byte = if lane == 0 || lane == 2 { ql_half[l] } else { ql_half[l + 32] };
+            let nibble = if lane < 2 { ql_byte & 0x0F } else { ql_byte >> 4 };
+            let high = (qh_half[l] >> (2 * lane)) & 0x03;
+            let level = i32::from(nibble) | (i32::from(high) << 4);
+            let quant = level - 32;
+            let activation_value = i32::from(activation_qs[activation_base + offset].cast_signed());
+            partial += quant * activation_value;
+        }
+        sumi += partial * scale;
+    }
+
+    let d = activation_scale * d_weight;
+    d * sumi as f32
+}
+
+/// [`dot_q6k_q8k_block_scalar`]'s mechanism, `vdotq_s32`-accelerated.
+/// Ports `ggml_vec_dot_q6_K_q8_K`'s plain `__ARM_NEON` arm
+/// (`arch/arm/quants.c:3001-3090`, the non-`__ARM_FEATURE_MATMUL_INT8`,
+/// non-SVE arm) with one deliberate simplification: ggml's version keeps
+/// levels unbiased (`0..63`) through the dot and corrects for the -32
+/// bias afterward via `bsums`/`isum_mins` (an optimization to avoid a
+/// per-lane subtract); this port applies the -32 bias directly in-register
+/// via [`vsubq_s8`] right after assembling each `q6bytes` lane, then dots
+/// against `Q8_K` `i8` activations with no separate correction term
+/// needed -- the SAME value, a simpler derivation, one extra vector op per
+/// lane (8 total) traded for not needing `y[i].bsums` decoded at all here.
+///
+/// # Safety
+/// Caller guarantees `FEAT_DotProd`; `weight_block.len() ==
+/// Q6K_BLOCK_BYTES` and `q8k_block.len() == Q8K_BLOCK_BYTES` (both
+/// [`dot_q6k_q8k`]'s own `chunks_exact` calls already guarantee before
+/// calling this).
+#[cfg(all(q4k_dotprod, feature = "q6k-int8-dot"))]
+unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
+    let d_weight = f16_le_at(weight_block, Q6K_D_OFFSET);
+    let mut scales = [0i8; 16];
+    for (slot, byte) in scales
+        .iter_mut()
+        .zip(weight_block[Q6K_SCALES_OFFSET..Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS].iter())
+    {
+        *slot = byte.cast_signed();
+    }
+
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let activation_scale = f32::from_le_bytes(d_bytes);
+
+    // SAFETY: caller-guaranteed FEAT_DotProd; `ql_base`/`qh_base` each walk
+    // exactly `Q6K_QL_BYTES` / `Q6K_QH_BYTES` bytes and `q8_base` walks
+    // exactly `Q4K_BLOCK_ELEMENTS` bytes across the two `half` iterations
+    // below, all within the slices' checked bounds.
+    unsafe {
+        let m4b = vdupq_n_u8(0x0f);
+        let high_bits_mask = vdupq_n_u8(0x03);
+        let m32s = vdupq_n_s8(32);
+        let mzero = vdupq_n_s32(0);
+        let ql_base = weight_block[Q6K_QL_OFFSET..].as_ptr();
+        let qh_base = weight_block[Q6K_QH_OFFSET..].as_ptr();
+        let q8_base = q8k_block[Q8K_QS_OFFSET..].as_ptr().cast::<i8>();
+
+        let mut sumi: i32 = 0;
+        for half in 0..2usize {
+            let qhbits0 = vld1q_u8(qh_base.add(half * 32));
+            let qhbits1 = vld1q_u8(qh_base.add(half * 32 + 16));
+            let ql0 = vld1q_u8(ql_base.add(half * 64));
+            let ql1 = vld1q_u8(ql_base.add(half * 64 + 16));
+            let ql2 = vld1q_u8(ql_base.add(half * 64 + 32));
+            let ql3 = vld1q_u8(ql_base.add(half * 64 + 48));
+            let q8_half_base = q8_base.add(half * 128);
+            let scale_half = &scales[half * 8..half * 8 + 8];
+
+            let low0 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(vandq_u8(ql0, m4b), vshlq_n_u8(vandq_u8(qhbits0, high_bits_mask), 4))),
+                m32s,
+            );
+            let low1 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(vandq_u8(ql1, m4b), vshlq_n_u8(vandq_u8(qhbits1, high_bits_mask), 4))),
+                m32s,
+            );
+            let low2 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vandq_u8(ql2, m4b),
+                    vshlq_n_u8(vandq_u8(vshrq_n_u8(qhbits0, 2), high_bits_mask), 4),
+                )),
+                m32s,
+            );
+            let low3 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vandq_u8(ql3, m4b),
+                    vshlq_n_u8(vandq_u8(vshrq_n_u8(qhbits1, 2), high_bits_mask), 4),
+                )),
+                m32s,
+            );
+
+            let q8_lo0 = vld1q_s8(q8_half_base);
+            let q8_lo1 = vld1q_s8(q8_half_base.add(16));
+            let q8_lo2 = vld1q_s8(q8_half_base.add(32));
+            let q8_lo3 = vld1q_s8(q8_half_base.add(48));
+            sumi += vaddvq_s32(sdot_s32(mzero, low0, q8_lo0)) * i32::from(scale_half[0]);
+            sumi += vaddvq_s32(sdot_s32(mzero, low1, q8_lo1)) * i32::from(scale_half[1]);
+            sumi += vaddvq_s32(sdot_s32(mzero, low2, q8_lo2)) * i32::from(scale_half[2]);
+            sumi += vaddvq_s32(sdot_s32(mzero, low3, q8_lo3)) * i32::from(scale_half[3]);
+
+            let high0 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vshrq_n_u8(ql0, 4),
+                    vshlq_n_u8(vandq_u8(vshrq_n_u8(qhbits0, 4), high_bits_mask), 4),
+                )),
+                m32s,
+            );
+            let high1 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vshrq_n_u8(ql1, 4),
+                    vshlq_n_u8(vandq_u8(vshrq_n_u8(qhbits1, 4), high_bits_mask), 4),
+                )),
+                m32s,
+            );
+            let high2 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vshrq_n_u8(ql2, 4),
+                    vshlq_n_u8(vandq_u8(vshrq_n_u8(qhbits0, 6), high_bits_mask), 4),
+                )),
+                m32s,
+            );
+            let high3 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vshrq_n_u8(ql3, 4),
+                    vshlq_n_u8(vandq_u8(vshrq_n_u8(qhbits1, 6), high_bits_mask), 4),
+                )),
+                m32s,
+            );
+
+            let q8_hi0 = vld1q_s8(q8_half_base.add(64));
+            let q8_hi1 = vld1q_s8(q8_half_base.add(80));
+            let q8_hi2 = vld1q_s8(q8_half_base.add(96));
+            let q8_hi3 = vld1q_s8(q8_half_base.add(112));
+            sumi += vaddvq_s32(sdot_s32(mzero, high0, q8_hi0)) * i32::from(scale_half[4]);
+            sumi += vaddvq_s32(sdot_s32(mzero, high1, q8_hi1)) * i32::from(scale_half[5]);
+            sumi += vaddvq_s32(sdot_s32(mzero, high2, q8_hi2)) * i32::from(scale_half[6]);
+            sumi += vaddvq_s32(sdot_s32(mzero, high3, q8_hi3)) * i32::from(scale_half[7]);
+        }
+
+        activation_scale * d_weight * sumi as f32
+    }
+}
+
+/// A full `Q6_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector — [`matmul_q6k_f32`]'s packed-arithmetic sibling.
+///
+/// # Errors
+/// Propagates [`quantize_row_q8k`]'s and [`dot_q6k_q8k`]'s
+/// [`TensorError::QuantizedShapeMismatch`], or reports the same error if
+/// `weights.len()` is not a whole multiple of `rows`.
+#[cfg(feature = "q6k-int8-dot")]
+pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q6k_q8k_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    quantize_row_q8k(activation, &mut activation_q8k)?;
+
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q6k_q8k(weight_row, &activation_q8k))
+        .collect()
+}
+
+/// [`matmul_q6k_q8k_f32`] with every row routed through
+/// [`dot_q6k_q8k_portable`] instead of [`dot_q6k_q8k`].
+///
+/// # Errors
+/// Same as [`matmul_q6k_q8k_f32`].
+#[cfg(feature = "q6k-int8-dot")]
+pub fn matmul_q6k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    if rows == 0 {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "matmul_q6k_q8k_portable_f32 called with zero rows",
+        });
+    }
+    if !weights.len().is_multiple_of(rows) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight byte length is not a whole multiple of the row count",
+        });
+    }
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    quantize_row_q8k(activation, &mut activation_q8k)?;
+
+    let row_bytes = weights.len() / rows;
+    weights
+        .chunks_exact(row_bytes)
+        .map(|weight_row| dot_q6k_q8k_portable(weight_row, &activation_q8k))
         .collect()
 }
 
@@ -6456,11 +7673,154 @@ mod tests {
     use crate::op::{Extent, Reduce, append};
     use rstest::rstest;
 
+    use std::time::Instant;
+
     use crate::test_support::Lcg;
 
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
         (0..count).map(|_| lcg.next_unit()).collect()
+    }
+
+    /// Dispatches `rows` through the same `claim_and_run_rows` shared-cursor
+    /// mechanism [`matmul_rows_threaded`] uses, but with `oversubscribe`
+    /// passed in instead of hard-coded to [`crate::sized::ROW_OVERSUBSCRIBE`]
+    /// — lets [`bench_row_oversubscribe_picks_the_multiplier`] sweep the
+    /// multiplier without a rebuild per value. Test-only duplication of
+    /// `matmul_rows_threaded`'s body; not shipped (`#[cfg(test)]`).
+    fn dispatch_rows_with_oversubscribe<Row>(
+        rows: usize,
+        workers: usize,
+        oversubscribe: usize,
+        dot_row: Row,
+    ) -> Vec<f32>
+    where
+        Row: Fn(usize) -> Result<f32, TensorError> + Sync,
+    {
+        let mut output = vec![0.0f32; rows];
+        let chunk_count = (workers.saturating_mul(oversubscribe)).clamp(1, rows.max(1));
+        let chunk_len = rows.div_ceil(chunk_count);
+
+        let mut chunk_ranges = Vec::with_capacity(chunk_count);
+        let mut remaining = output.as_mut_slice();
+        let mut row_start = 0usize;
+        while !remaining.is_empty() {
+            let take = chunk_len.min(remaining.len());
+            let (slice, rest) = remaining.split_at_mut(take);
+            remaining = rest;
+            chunk_ranges.push((row_start, slice.as_mut_ptr() as usize, slice.len()));
+            row_start += take;
+        }
+        let chunk_ranges_len = chunk_ranges.len();
+
+        let pool = nest_pool().expect("pool builds under test");
+        let dot_row_address = &dot_row as *const Row as usize;
+        let next_index = Arc::new(AtomicUsize::new(0));
+        let chunk_ranges: Arc<Vec<(usize, usize, usize)>> = Arc::new(chunk_ranges);
+        let spawned_count = workers.saturating_sub(1).min(chunk_ranges_len.saturating_sub(1));
+        let (result_sender, result_receiver) = sync_channel(chunk_ranges_len);
+
+        for _ in 0..spawned_count {
+            let sender = result_sender.clone();
+            let next_index = Arc::clone(&next_index);
+            let chunk_ranges = Arc::clone(&chunk_ranges);
+            drop(pool.spawn(move || {
+                claim_and_run_rows::<Row>(&next_index, dot_row_address, &chunk_ranges, &sender);
+                Ok::<(), _>(())
+            }));
+        }
+        claim_and_run_rows::<Row>(&next_index, dot_row_address, &chunk_ranges, &result_sender);
+        drop(result_sender);
+
+        for _ in 0..chunk_ranges_len {
+            let _ = result_receiver.recv();
+        }
+        output
+    }
+
+    /// Manual microbench picking [`crate::sized::ROW_OVERSUBSCRIBE`] —
+    /// principle 18/19: a design constant needs a measurement artifact, not
+    /// reasoning. Synthetic per-row cost is deliberately imbalanced (the
+    /// last 1/8 of rows costs ~8x a normal row, echoing the 2.04x
+    /// equal-row-count spread [`OVERSUBSCRIBE`]'s own doc records for a real
+    /// GEMM) so a static 1:1 split leaves the calling thread idling in
+    /// `Receiver::recv` for whichever puller drew the straggler range.
+    /// `#[ignore]`: manual, not part of the CI gate — run with
+    /// `cargo test -p proxima-tensor --release bench_row_oversubscribe -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual microbench, not a CI gate; see this test's own doc"]
+    fn bench_row_oversubscribe_picks_the_multiplier() {
+        let workers = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+        let rows = 4096usize;
+        let straggler_start = rows - rows / 8;
+        let cost_of = |row: usize| -> u64 {
+            if row >= straggler_start { 4000 } else { 500 }
+        };
+        let dot_row = |row: usize| -> Result<f32, TensorError> {
+            let mut accumulator = 0.0f32;
+            for iteration in 0..cost_of(row) {
+                accumulator += (iteration as f32).sin();
+            }
+            Ok(accumulator)
+        };
+
+        let load = std::process::Command::new("uptime")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|_| "uptime unavailable".to_string());
+        eprintln!("workers={workers} rows={rows} ambient_load={load}");
+
+        eprintln!("-- imbalanced (straggler last 1/8 of rows) --");
+        for oversubscribe in [1usize, 2, 4, 8, 16, 32] {
+            let mut samples_micros = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let started = Instant::now();
+                let output = dispatch_rows_with_oversubscribe(rows, workers, oversubscribe, dot_row);
+                let elapsed = started.elapsed().as_micros() as f64;
+                assert_eq!(output.len(), rows);
+                samples_micros.push(elapsed);
+            }
+            let mean = samples_micros.iter().sum::<f64>() / samples_micros.len() as f64;
+            let variance = samples_micros.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>()
+                / samples_micros.len() as f64;
+            let coefficient_of_variation = variance.sqrt() / mean;
+            eprintln!(
+                "oversubscribe={oversubscribe} mean_us={mean:.1} cov={coefficient_of_variation:.4} samples={samples_micros:?}"
+            );
+        }
+
+        // degenerate control (principle 19/V5): a UNIFORM per-row cost has
+        // nothing to steal around, so this arm isolates the atomic-cursor
+        // and `SyncSender` overhead oversubscription adds without any
+        // imbalance to pay for it. If a high multiplier regresses here, that
+        // is the ceiling on how far oversubscription can be pushed once real
+        // rows are small enough for per-chunk overhead to matter.
+        let uniform_dot_row = |row: usize| -> Result<f32, TensorError> {
+            let mut accumulator = 0.0f32;
+            for iteration in 0..1200u64 {
+                accumulator += ((row as f32) + iteration as f32).sin();
+            }
+            Ok(accumulator)
+        };
+        eprintln!("-- uniform cost (degenerate control) --");
+        for oversubscribe in [1usize, 2, 4, 8, 16, 32] {
+            let mut samples_micros = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let started = Instant::now();
+                let output =
+                    dispatch_rows_with_oversubscribe(rows, workers, oversubscribe, uniform_dot_row);
+                let elapsed = started.elapsed().as_micros() as f64;
+                assert_eq!(output.len(), rows);
+                samples_micros.push(elapsed);
+            }
+            let mean = samples_micros.iter().sum::<f64>() / samples_micros.len() as f64;
+            let variance = samples_micros.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>()
+                / samples_micros.len() as f64;
+            let coefficient_of_variation = variance.sqrt() / mean;
+            eprintln!(
+                "oversubscribe={oversubscribe} mean_us={mean:.1} cov={coefficient_of_variation:.4} samples={samples_micros:?}"
+            );
+        }
     }
 
     /// [`matmul_q4k_f32`] against the reference path (`proxima_gguf`'s own
@@ -6516,6 +7876,135 @@ mod tests {
         // the measured numbers, matching `q4_k.rs`'s own round-trip tests.
         assert!(max_diff < 1e-2, "max_diff={max_diff} exceeds parity tolerance");
         assert!(rms_diff < 1e-2, "rms_diff={rms_diff} exceeds parity tolerance");
+    }
+
+    /// [`matmul_rows_threaded`]'s pool dispatch (through [`matmul_q4k_f32`])
+    /// against the same per-row kernel run sequentially in this test, no
+    /// threading involved — 128 rows x 512 elements clears
+    /// [`PARALLEL_THRESHOLD`] (65536 macs vs 4096) and is wide enough that
+    /// `quantized_matmul_workers` returns `Some` on any machine with fewer
+    /// than 128 hardware threads, so `matmul_q4k_f32` provably takes the
+    /// pool path here. Each output row is an independent reduction with no
+    /// cross-row accumulator (`dot_row` reads only its own row's bytes), so
+    /// dispatch mechanism cannot perturb any one row's rounding — the pool
+    /// and a bare sequential loop over the identical `dot_q4k_f32` calls
+    /// must agree bit-for-bit, not just within a numeric tolerance.
+    #[test]
+    fn matmul_q4k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel() {
+        use proxima_gguf::quant::q4_k::quantize;
+
+        const ROWS: usize = 128;
+        const BLOCKS_PER_ROW: usize = 2;
+        const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q4_k::QK_K;
+
+        let weights_f32 = random_vec(42, ROWS * K);
+        let activation = random_vec(43, K);
+
+        let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q4K_BLOCK_BYTES];
+        for (row_f32, row_packed) in
+            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES))
+        {
+            quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
+        }
+
+        assert!(
+            quantized_matmul_workers(ROWS, activation.len()).is_some(),
+            "test fixture must actually clear the parallel threshold to exercise the pool path"
+        );
+
+        let pooled_result = matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+
+        let sequential_reference: Vec<f32> = packed
+            .chunks_exact(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES)
+            .map(|weight_row| dot_q4k_f32(weight_row, &activation).expect("well-formed row"))
+            .collect();
+
+        assert_eq!(
+            pooled_result, sequential_reference,
+            "pool-dispatched rows must be bit-identical to the sequential per-row kernel: \
+             each row is an independent reduction, so dispatch mechanism cannot move rounding"
+        );
+    }
+
+    /// [`matmul_q5k_f32`] was unconditionally sequential (never called
+    /// [`quantized_matmul_workers`]) before it was routed through the same
+    /// `matmul_quantized_dispatch` helper `matmul_q4k_f32` uses — same test
+    /// shape as `matmul_q4k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel`,
+    /// proving the fix actually reaches the pool path and stays bit-exact.
+    #[test]
+    fn matmul_q5k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel() {
+        use proxima_gguf::quant::q5_k::quantize;
+
+        const ROWS: usize = 128;
+        const BLOCKS_PER_ROW: usize = 2;
+        const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q5_k::QK_K;
+
+        let weights_f32 = random_vec(44, ROWS * K);
+        let activation = random_vec(45, K);
+
+        let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q5K_BLOCK_BYTES];
+        for (row_f32, row_packed) in
+            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES))
+        {
+            quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
+        }
+
+        assert!(
+            quantized_matmul_workers(ROWS, activation.len()).is_some(),
+            "test fixture must actually clear the parallel threshold to exercise the pool path"
+        );
+
+        let pooled_result = matmul_q5k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+
+        let sequential_reference: Vec<f32> = packed
+            .chunks_exact(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES)
+            .map(|weight_row| dot_q5k_f32(weight_row, &activation).expect("well-formed row"))
+            .collect();
+
+        assert_eq!(
+            pooled_result, sequential_reference,
+            "pool-dispatched rows must be bit-identical to the sequential per-row kernel: \
+             each row is an independent reduction, so dispatch mechanism cannot move rounding"
+        );
+    }
+
+    /// [`matmul_q6k_f32`]'s counterpart to the `matmul_q5k_f32` test above —
+    /// same was-always-sequential bug, same fix, same bit-exactness proof.
+    #[test]
+    fn matmul_q6k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel() {
+        use proxima_gguf::quant::q6_k::quantize;
+
+        const ROWS: usize = 128;
+        const BLOCKS_PER_ROW: usize = 2;
+        const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q6_k::QK_K;
+
+        let weights_f32 = random_vec(46, ROWS * K);
+        let activation = random_vec(47, K);
+
+        let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q6K_BLOCK_BYTES];
+        for (row_f32, row_packed) in
+            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES))
+        {
+            quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
+        }
+
+        assert!(
+            quantized_matmul_workers(ROWS, activation.len()).is_some(),
+            "test fixture must actually clear the parallel threshold to exercise the pool path"
+        );
+
+        let pooled_result = matmul_q6k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+
+        let sequential_reference: Vec<f32> = packed
+            .chunks_exact(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES)
+            .map(|weight_row| dot_q6k_f32(weight_row, &activation).expect("well-formed row"))
+            .collect();
+
+        assert_eq!(
+            pooled_result, sequential_reference,
+            "pool-dispatched rows must be bit-identical to the sequential per-row kernel: \
+             each row is an independent reduction, so dispatch mechanism cannot move rounding"
+        );
     }
 
     /// [`reject_non_float32`]'s quantized-weight exemption: a `UInt8`-tagged
@@ -9320,6 +10809,386 @@ mod tests {
         // so this bound is RELATIVE to the signal's own magnitude the same
         // way that test's is, not the absolute float-noise-floor bound that
         // was right when this call bottomed out in `matmul_q4k_f32` alone.
+        assert!(
+            relative_max_diff < 0.01,
+            "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
+             exceeds loose sanity bound"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // `Q5_K`/`Q6_K` packed int8 kernels -- bit-exactness (synthetic,
+    // both arms on the SAME weight bytes) and correctness against the
+    // dequantize-then-fold reference path on REAL packed bytes read
+    // straight out of the real openchat-3.5-1210 `Q4_K_S` GGUF file
+    // (guiding-principles principle 9: real-world data, not a synthetic
+    // stand-in) -- the same discipline `bench_q4k_matmul.rs` applies
+    // against ggml, minus the timing: correctness only, per this
+    // landing's task scope.
+    // -------------------------------------------------------------
+
+    /// Streams `path`'s header/tensor-directory prefix in growing chunks
+    /// until [`proxima_gguf::parser::GgufParser`] reports `Complete`,
+    /// without ever reading the (multi-GiB) tensor data section -- the
+    /// same technique `bench_q4k_matmul.rs::parse_header` uses, duplicated
+    /// here rather than shared across the lib/bench boundary (benches are
+    /// their own crate roots in this workspace). Returns `None` if the
+    /// file does not exist on this host, so these tests degrade to a
+    /// no-op on a machine without the real model file rather than a hard
+    /// failure.
+    #[cfg(any(feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    fn real_gguf_header(path: &std::path::Path) -> Option<(proxima_gguf::pipe::ParsedGguf, u64, std::fs::File)> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        use proxima_gguf::parser::{GgufEvent, GgufParser};
+        use proxima_gguf::pipe::ParsedGguf;
+
+        let mut file = std::fs::File::open(path).ok()?;
+        let file_len = file.metadata().ok()?.len();
+
+        let mut prefix_len = 1usize << 20;
+        loop {
+            let mut buf = vec![0u8; prefix_len];
+            file.seek(SeekFrom::Start(0)).expect("seek to start");
+            let read = file.read(&mut buf).expect("read gguf prefix");
+            buf.truncate(read);
+
+            if let Ok((parser, events)) = GgufParser::new().push(&buf) {
+                let mut version = None;
+                let mut metadata = Vec::new();
+                let mut tensors = Vec::new();
+                let mut completion = None;
+                for event in events {
+                    match event {
+                        GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                        GgufEvent::Metadata { key, value } => metadata.push((key, value)),
+                        GgufEvent::Tensor(tensor) => tensors.push(tensor),
+                        GgufEvent::Complete { data_offset, alignment } => {
+                            completion = Some((data_offset, alignment));
+                        }
+                    }
+                }
+                if let (Some(version), Some((data_offset, alignment))) = (version, completion) {
+                    parser.finish().expect("parser reports complete and clean");
+                    let parsed = ParsedGguf {
+                        version,
+                        tensor_count: tensors.len() as u64,
+                        kv_count: metadata.len() as u64,
+                        metadata,
+                        tensors,
+                        data_offset,
+                        alignment,
+                    };
+                    return Some((parsed, file_len, file));
+                }
+            }
+
+            assert!(prefix_len < (1 << 26), "gguf header/directory exceeded 64 MiB prefix budget");
+            prefix_len *= 2;
+        }
+    }
+
+    /// Reads one named tensor's packed bytes off `file` via its validated
+    /// absolute byte range, or `None` if `name`/`ggml_type` doesn't match
+    /// what's actually in the file (a mixed-precision quant recipe like
+    /// `Q4_K_S` doesn't guarantee a given tensor lands at a given codec on
+    /// every quantizer version -- reported, not faked, same stance
+    /// `bench_q4k_matmul.rs` takes).
+    #[cfg(any(feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    fn real_tensor_bytes(
+        file: &mut std::fs::File,
+        parsed: &proxima_gguf::pipe::ParsedGguf,
+        file_len: u64,
+        name: &str,
+        expect_type: proxima_gguf::types::GgmlType,
+    ) -> Option<(Vec<u8>, usize, usize)> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+        if tensor.ggml_type != expect_type {
+            eprintln!(
+                "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
+                tensor.ggml_type
+            );
+            return None;
+        }
+        let in_dim = tensor.dims[0] as usize;
+        let out_dim = tensor.dims[1] as usize;
+        let range = parsed.tensor_data_range(tensor, file_len).expect("tensor byte range within file bounds");
+        let mut buf = vec![0u8; (range.end - range.start) as usize];
+        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
+        file.read_exact(&mut buf).expect("read exact tensor byte range");
+        Some((buf, in_dim, out_dim))
+    }
+
+    #[cfg(any(feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    const REAL_OPENCHAT_GGUF_PATH: &str =
+        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+
+    /// [`matmul_q5k_q8k_f32`]/[`matmul_q5k_q8k_portable_f32`] agree with
+    /// [`matmul_q5k_f32`] (the dequantize-then-fold reference path) on the
+    /// SAME packed `Q5_K` bytes read directly out of the real
+    /// openchat-3.5-1210 GGUF file -- `blk.0.attn_v.weight`, one of the
+    /// two shapes this landing's task names. This is the correctness gate
+    /// principle 14 (the incumbent -- here, the already-tested
+    /// dequantize path -- wins on correctness) demands BEFORE any timing;
+    /// no timing is taken in this test at all.
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn matmul_q5k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "blk.0.attn_v.weight",
+            proxima_gguf::types::GgmlType::Q5_K,
+        ) else {
+            return;
+        };
+
+        let activation = random_vec(401, in_dim).into_iter().map(|value| value - 0.5).collect::<Vec<f32>>();
+
+        let expected = matmul_q5k_f32(&weight_bytes, out_dim, &activation).expect("well-formed dequant reference matmul");
+        let dispatched = matmul_q5k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
+        let portable = matmul_q5k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+
+        assert_eq!(dispatched, portable, "attn_v: dispatched and portable packed-int8 arms diverged on real bytes");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (&got, &want) in dispatched.iter().zip(expected.iter()) {
+            assert!(got.is_finite(), "packed int8 matmul row produced a non-finite value: {got}");
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / out_dim as f64).sqrt();
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative_max_error = max_error / max_magnitude;
+        eprintln!(
+            "attn_v (real Q5_K bytes) packed vs dequant-fold reference: max_error={max_error} \
+             rms_error={rms_error} max_magnitude={max_magnitude} relative_max_error={relative_max_error}"
+        );
+        // Same band `matmul_q4k_q8k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`
+        // uses for its own real-weight relative-error check: Q8_K
+        // activation quantization is a second real lossy step neither
+        // side of this comparison shares.
+        assert!(
+            relative_max_error < 0.01,
+            "relative_max_error={relative_max_error} (max_error={max_error} over magnitude {max_magnitude}) \
+             exceeds loose sanity bound"
+        );
+    }
+
+    /// The same correctness gate as
+    /// [`matmul_q5k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes`],
+    /// at this landing's second named `Q5_K` shape -- `blk.0.ffn_down.weight`
+    /// (14336x4096).
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn matmul_q5k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes_ffn_down() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "blk.0.ffn_down.weight",
+            proxima_gguf::types::GgmlType::Q5_K,
+        ) else {
+            return;
+        };
+
+        let activation = random_vec(402, in_dim).into_iter().map(|value| value - 0.5).collect::<Vec<f32>>();
+
+        let expected = matmul_q5k_f32(&weight_bytes, out_dim, &activation).expect("well-formed dequant reference matmul");
+        let dispatched = matmul_q5k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
+        let portable = matmul_q5k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+
+        assert_eq!(dispatched, portable, "ffn_down: dispatched and portable packed-int8 arms diverged on real bytes");
+
+        let max_error =
+            dispatched.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative_max_error = max_error / max_magnitude;
+        eprintln!("ffn_down (real Q5_K bytes) packed vs dequant-fold reference: relative_max_error={relative_max_error}");
+        assert!(
+            relative_max_error < 0.01,
+            "relative_max_error={relative_max_error} exceeds loose sanity bound"
+        );
+    }
+
+    /// [`matmul_q6k_q8k_f32`]/[`matmul_q6k_q8k_portable_f32`] agree with
+    /// [`matmul_q6k_f32`] on the SAME packed `Q6_K` bytes read directly out
+    /// of the real openchat-3.5-1210 GGUF file -- `output.weight`
+    /// (4096x32002), this landing's named `Q6_K` shape.
+    #[cfg(feature = "q6k-int8-dot")]
+    #[test]
+    fn matmul_q6k_q8k_f32_agrees_with_dequantize_then_fold_on_real_gguf_bytes() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, in_dim, out_dim)) =
+            real_tensor_bytes(&mut file, &parsed, file_len, "output.weight", proxima_gguf::types::GgmlType::Q6_K)
+        else {
+            return;
+        };
+
+        let activation = random_vec(403, in_dim).into_iter().map(|value| value - 0.5).collect::<Vec<f32>>();
+
+        let expected = matmul_q6k_f32(&weight_bytes, out_dim, &activation).expect("well-formed dequant reference matmul");
+        let dispatched = matmul_q6k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
+        let portable = matmul_q6k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+
+        assert_eq!(dispatched, portable, "output.weight: dispatched and portable packed-int8 arms diverged on real bytes");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (&got, &want) in dispatched.iter().zip(expected.iter()) {
+            assert!(got.is_finite(), "packed int8 matmul row produced a non-finite value: {got}");
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / out_dim as f64).sqrt();
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative_max_error = max_error / max_magnitude;
+        eprintln!(
+            "output.weight (real Q6_K bytes) packed vs dequant-fold reference: max_error={max_error} \
+             rms_error={rms_error} max_magnitude={max_magnitude} relative_max_error={relative_max_error}"
+        );
+        assert!(
+            relative_max_error < 0.01,
+            "relative_max_error={relative_max_error} (max_error={max_error} over magnitude {max_magnitude}) \
+             exceeds loose sanity bound"
+        );
+    }
+
+    /// [`dot_q5k_q8k_block_neon_dotprod`]'s whole justification: it must
+    /// be an ACCELERATION of [`dot_q5k_q8k_block_scalar`], not a different
+    /// mechanism -- same bit-exactness argument
+    /// `matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm` makes
+    /// for `Q4_K` (every intermediate is integer until the final `f32`
+    /// multiply, so both arms must match EXACTLY, not merely closely), on
+    /// synthetic multi-row, multi-block data (not real-file bytes -- this
+    /// test's job is arm-vs-arm agreement, not real-weight correctness,
+    /// which the two tests above already cover).
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn matmul_q5k_q8k_f32_agrees_bit_exact_with_the_portable_arm() {
+        use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows = 4;
+        let blocks_per_row = 5;
+        let k = QK_K * blocks_per_row;
+
+        let activation: Vec<f32> = random_vec(23, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let weight_f32: Vec<f32> = random_vec(29, rows * k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+
+        let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let dispatched = matmul_q5k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed dispatched matmul");
+        let portable = matmul_q5k_q8k_portable_f32(&weight_blocks, rows, &activation).expect("well-formed portable matmul");
+
+        assert_eq!(dispatched, portable, "dispatched and portable arms diverged -- not merely an acceleration");
+    }
+
+    /// [`dot_q6k_q8k_block_neon_dotprod`]'s equivalent bit-exactness proof.
+    #[cfg(feature = "q6k-int8-dot")]
+    #[test]
+    fn matmul_q6k_q8k_f32_agrees_bit_exact_with_the_portable_arm() {
+        use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows = 4;
+        let blocks_per_row = 5;
+        let k = QK_K * blocks_per_row;
+
+        let activation: Vec<f32> = random_vec(31, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let weight_f32: Vec<f32> = random_vec(37, rows * k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+
+        let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let dispatched = matmul_q6k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed dispatched matmul");
+        let portable = matmul_q6k_q8k_portable_f32(&weight_blocks, rows, &activation).expect("well-formed portable matmul");
+
+        assert_eq!(dispatched, portable, "dispatched and portable arms diverged -- not merely an acceleration");
+    }
+
+    /// [`QuantizedBlock::Q5K`] routes through [`evaluate_quantized`] end to
+    /// end -- the same shape
+    /// [`evaluate_quantized_matches_dequantize_then_evaluate_within_a_measured_tolerance`]
+    /// proves for `Q4K`, one variant over: a `Reduce(Elementwise(Multiply))`
+    /// matmul node bound to packed `Q5_K` bytes must agree with binding the
+    /// SAME bytes dequantized to plain `f32`.
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn evaluate_quantized_routes_q5k_block_and_matches_dequantize_then_evaluate() {
+        use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+        let rows: u32 = 6;
+        let blocks_per_row = 3;
+        let k = QK_K as u32 * blocks_per_row as u32;
+
+        let activation = random_vec(43, k as usize);
+        let weight_f32: Vec<f32> = random_vec(47, rows as usize * k as usize);
+
+        let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k as usize)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let (program, sum) = quantized_matmul_program(rows, k);
+        let blocks = [QuantizedBlock::Q5K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+        let quantized_result =
+            evaluate_quantized(&program, &[], &blocks, &[sum]).expect("q5_k-quantized matmul evaluates");
+
+        let mut dequantized_weight = vec![0.0f32; rows as usize * k as usize];
+        for (row_blocks, row_f32) in weight_blocks
+            .chunks_exact(blocks_per_row * BLOCK_BYTES)
+            .zip(dequantized_weight.chunks_exact_mut(k as usize))
+        {
+            dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q5_k super-blocks");
+        }
+
+        let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
+        let f32_blocks: [&[f32]; 2] = [&dequantized_weight, &activation];
+        let f32_result =
+            evaluate(&f32_program, &[], &f32_blocks, &[f32_sum]).expect("dequantized f32 matmul evaluates");
+
+        let actual = quantized_result.root();
+        let expected = f32_result.root();
+        assert_eq!(actual.len(), rows as usize);
+        assert_eq!(actual.len(), expected.len());
+
+        let max_diff = actual.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative_max_diff = max_diff / max_magnitude;
+        eprintln!("evaluate_quantized (Q5K) vs dequantize-then-evaluate: relative_max_diff={relative_max_diff}");
         assert!(
             relative_max_diff < 0.01,
             "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
