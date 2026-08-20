@@ -48,4 +48,11 @@ pub enum InteropError {
     /// -- propagated from [`proxima_gguf::quant`] rather than re-derived.
     #[error(transparent)]
     Quant(#[from] proxima_gguf::quant::QuantError),
+
+    /// [`crate::loader::prefault`]'s shared background pool failed to build,
+    /// or a spawned page-touch chunk never reported back (a worker panic;
+    /// `ProximaBackgroundPool` catches and discards worker panics rather
+    /// than propagating them).
+    #[error("prefault: {0}")]
+    PrefaultPoolUnavailable(String),
 }
