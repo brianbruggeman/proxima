@@ -214,6 +214,24 @@ pub static MATMUL_WORKERS_CALLS: Counter = Counter::new("proxima_tensor.matmul.w
 pub static MATMUL_WORKERS_NONE: Counter = Counter::new("proxima_tensor.matmul.workers_none");
 
 pub static MATMUL_DISPATCH_CALLS: Counter = Counter::new("proxima_tensor.matmul.dispatch_calls");
+// everything `matmul_rows_threaded` (`cpu.rs`) does BEFORE its own
+// spawn/own_chunk/recv_wait timer chain starts: the `output` Vec alloc,
+// the `chunk_ranges` Vec build (one `split_at_mut` per chunk), the
+// `nest_pool()` OnceLock fetch, and the `Arc`/`sync_channel` allocations --
+// none of which any existing MATMUL_* counter captured, so a caller could
+// not tell "the dispatch chain is slow" apart from "the untimed setup
+// before it is slow" (`reduce_quantized_ms` minus spawn+own_chunk+recv_wait
+// is exactly this).
+pub static MATMUL_SETUP_NANOS: Counter = Counter::new("proxima_tensor.matmul.setup_nanos");
+// `std::thread::available_parallelism()` (`cpu.rs::quantized_matmul_workers`)
+// is called once per row-batch call (once per position, per matmul node --
+// 1296 times this forward), not cached anywhere. Unlike a libc `sysconf`
+// result an OS is free to memoize internally, Rust's std does not cache
+// this across calls on every platform, so a caller could not previously
+// tell "the per-call syscall/query cost is negligible" apart from "it is
+// the missing time" -- this is the direct witness.
+pub static MATMUL_AVAILABLE_PARALLELISM_NANOS: Counter =
+    Counter::new("proxima_tensor.matmul.available_parallelism_nanos");
 pub static MATMUL_SPAWN_NANOS: Counter = Counter::new("proxima_tensor.matmul.spawn_nanos");
 pub static MATMUL_OWN_CHUNK_NANOS: Counter = Counter::new("proxima_tensor.matmul.own_chunk_nanos");
 pub static MATMUL_RECV_WAIT_NANOS: Counter = Counter::new("proxima_tensor.matmul.recv_wait_nanos");
@@ -246,6 +264,30 @@ pub static MATMUL_Q5K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q
 pub static MATMUL_Q6K_F32_CALLS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_calls");
 pub static MATMUL_Q6K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_nanos");
 
+// per-call mac/nanos witness for `run_reduce_quantized`'s position loop
+// (`cpu.rs`), split by codec -- `rows * contraction_width` is an element
+// count already at hand at the call site (`run_reduce_quantized`'s own
+// `rows`/`k` locals), not re-derived from tensor shape after the fact.
+// Answers "measured ns/mac in situ" per codec, directly comparable against
+// the isolated single-threaded kernel bench (0.0334 ns/mac) and ggml's
+// (0.0255 ns/mac) -- if one codec's in-situ ns/mac is far worse than the
+// other two, this is the only witness that names which.
+pub static MATMUL_Q4K_MACS: Counter = Counter::new("proxima_tensor.matmul.q4k_macs");
+pub static MATMUL_Q4K_CALL_NANOS: Counter = Counter::new("proxima_tensor.matmul.q4k_call_nanos");
+pub static MATMUL_Q5K_MACS: Counter = Counter::new("proxima_tensor.matmul.q5k_macs");
+pub static MATMUL_Q5K_CALL_NANOS: Counter = Counter::new("proxima_tensor.matmul.q5k_call_nanos");
+pub static MATMUL_Q6K_MACS: Counter = Counter::new("proxima_tensor.matmul.q6k_macs");
+pub static MATMUL_Q6K_CALL_NANOS: Counter = Counter::new("proxima_tensor.matmul.q6k_call_nanos");
+// how many times `run_reduce_quantized`'s position loop ran a single
+// weight's matmul, and how many distinct nodes it ran across -- the
+// direct witness for whether a node's `leading_total` positions are
+// dispatched as one wide row-batch or `leading_total` separate ones
+// (each paying its own `matmul_rows_threaded` spawn/recv-wait).
+pub static MATMUL_POSITION_LOOP_ITERS: Counter =
+    Counter::new("proxima_tensor.matmul.position_loop_iters");
+pub static MATMUL_REDUCE_QUANTIZED_CALLS: Counter =
+    Counter::new("proxima_tensor.matmul.reduce_quantized_calls");
+
 /// One process run's worth of [`matmul_rows_threaded`](crate::cpu)'s own
 /// dispatch-overhead breakdown, read back the same way [`parallel_totals`]
 /// is.
@@ -254,6 +296,8 @@ pub struct MatmulDispatchTotals {
     pub workers_calls: u64,
     pub workers_none: u64,
     pub calls: u64,
+    pub setup_nanos: u64,
+    pub available_parallelism_nanos: u64,
     pub spawn_nanos: u64,
     pub own_chunk_nanos: u64,
     pub recv_wait_nanos: u64,
@@ -263,6 +307,14 @@ pub struct MatmulDispatchTotals {
     pub q5k_f32_nanos: u64,
     pub q6k_f32_calls: u64,
     pub q6k_f32_nanos: u64,
+    pub q4k_macs: u64,
+    pub q4k_call_nanos: u64,
+    pub q5k_macs: u64,
+    pub q5k_call_nanos: u64,
+    pub q6k_macs: u64,
+    pub q6k_call_nanos: u64,
+    pub position_loop_iters: u64,
+    pub reduce_quantized_calls: u64,
 }
 
 #[must_use]
@@ -271,6 +323,8 @@ pub fn matmul_dispatch_totals() -> MatmulDispatchTotals {
         workers_calls: MATMUL_WORKERS_CALLS.get(),
         workers_none: MATMUL_WORKERS_NONE.get(),
         calls: MATMUL_DISPATCH_CALLS.get(),
+        setup_nanos: MATMUL_SETUP_NANOS.get(),
+        available_parallelism_nanos: MATMUL_AVAILABLE_PARALLELISM_NANOS.get(),
         spawn_nanos: MATMUL_SPAWN_NANOS.get(),
         own_chunk_nanos: MATMUL_OWN_CHUNK_NANOS.get(),
         recv_wait_nanos: MATMUL_RECV_WAIT_NANOS.get(),
@@ -280,6 +334,14 @@ pub fn matmul_dispatch_totals() -> MatmulDispatchTotals {
         q5k_f32_nanos: MATMUL_Q5K_F32_NANOS.get(),
         q6k_f32_calls: MATMUL_Q6K_F32_CALLS.get(),
         q6k_f32_nanos: MATMUL_Q6K_F32_NANOS.get(),
+        q4k_macs: MATMUL_Q4K_MACS.get(),
+        q4k_call_nanos: MATMUL_Q4K_CALL_NANOS.get(),
+        q5k_macs: MATMUL_Q5K_MACS.get(),
+        q5k_call_nanos: MATMUL_Q5K_CALL_NANOS.get(),
+        q6k_macs: MATMUL_Q6K_MACS.get(),
+        q6k_call_nanos: MATMUL_Q6K_CALL_NANOS.get(),
+        position_loop_iters: MATMUL_POSITION_LOOP_ITERS.get(),
+        reduce_quantized_calls: MATMUL_REDUCE_QUANTIZED_CALLS.get(),
     }
 }
 
@@ -288,6 +350,8 @@ pub fn reset_matmul_dispatch() {
     let _ = MATMUL_WORKERS_CALLS.snapshot_and_reset();
     let _ = MATMUL_WORKERS_NONE.snapshot_and_reset();
     let _ = MATMUL_DISPATCH_CALLS.snapshot_and_reset();
+    let _ = MATMUL_SETUP_NANOS.snapshot_and_reset();
+    let _ = MATMUL_AVAILABLE_PARALLELISM_NANOS.snapshot_and_reset();
     let _ = MATMUL_SPAWN_NANOS.snapshot_and_reset();
     let _ = MATMUL_OWN_CHUNK_NANOS.snapshot_and_reset();
     let _ = MATMUL_RECV_WAIT_NANOS.snapshot_and_reset();
@@ -297,6 +361,14 @@ pub fn reset_matmul_dispatch() {
     let _ = MATMUL_Q5K_F32_NANOS.snapshot_and_reset();
     let _ = MATMUL_Q6K_F32_CALLS.snapshot_and_reset();
     let _ = MATMUL_Q6K_F32_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q4K_MACS.snapshot_and_reset();
+    let _ = MATMUL_Q4K_CALL_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q5K_MACS.snapshot_and_reset();
+    let _ = MATMUL_Q5K_CALL_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q6K_MACS.snapshot_and_reset();
+    let _ = MATMUL_Q6K_CALL_NANOS.snapshot_and_reset();
+    let _ = MATMUL_POSITION_LOOP_ITERS.snapshot_and_reset();
+    let _ = MATMUL_REDUCE_QUANTIZED_CALLS.snapshot_and_reset();
 }
 
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part
