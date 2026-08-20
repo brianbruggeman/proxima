@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 //! Per-tensor dequantization fidelity against ggml's own decoder.
 //!
 //! The oracle is `ggml_get_type_traits(type)->to_float`, which for the
@@ -44,6 +45,19 @@ unsafe extern "C" {}
 #[link(name = "ggml-base", kind = "static")]
 unsafe extern "C" {
     fn ggml_get_type_traits(type_: c_int) -> *const GgmlTypeTraits;
+}
+
+/// One tensor's comparison against ggml's decoder, sorted worst-first for
+/// the report table.
+struct FidelityRow {
+    tensor_name: String,
+    dtype: String,
+    block_count: usize,
+    max_abs_diff: f32,
+    worst_block: usize,
+    worst_index: usize,
+    ours: f32,
+    ggml: f32,
 }
 
 fn ggml_type_code(ggml_type: GgmlType) -> Option<c_int> {
@@ -103,7 +117,7 @@ fn main() {
     let mut compared_tensors = 0usize;
     let mut compared_blocks = 0usize;
     let mut skipped: Vec<(String, String)> = Vec::new();
-    let mut rows: Vec<(String, String, usize, f32, usize, usize, f32, f32)> = Vec::new();
+    let mut rows: Vec<FidelityRow> = Vec::new();
 
     for tensor in &parsed.tensors {
         let range = parsed.tensor_data_range(tensor, file_len).expect("range");
@@ -184,26 +198,35 @@ fn main() {
                 .tag("max_abs_diff", 0.0f64)
                 .emit();
         }
-        rows.push((
-            tensor.name.clone(),
+        rows.push(FidelityRow {
+            tensor_name: tensor.name.clone(),
             dtype,
             block_count,
-            max_diff,
+            max_abs_diff: max_diff,
             worst_block,
-            worst,
-            mine[worst],
-            theirs[worst],
-        ));
+            worst_index: worst,
+            ours: mine[worst],
+            ggml: theirs[worst],
+        });
     }
 
     while recorder.drain() > 0 {}
 
-    rows.sort_by(|a, b| b.3.total_cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    rows.sort_by(|a, b| {
+        b.max_abs_diff.total_cmp(&a.max_abs_diff).then_with(|| a.tensor_name.cmp(&b.tensor_name))
+    });
     println!("\nname dtype blocks max_abs_diff worst_block worst_index ours ggml");
     for row in &rows {
         println!(
             "{} {} {} {:e} {} {} {:e} {:e}",
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7
+            row.tensor_name,
+            row.dtype,
+            row.block_count,
+            row.max_abs_diff,
+            row.worst_block,
+            row.worst_index,
+            row.ours,
+            row.ggml
         );
     }
     println!(
