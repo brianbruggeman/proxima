@@ -4208,6 +4208,8 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "half",
+ "prime",
+ "proxima-core",
  "proxima-gguf",
  "proxima-safetensors",
  "proxima-tensor",

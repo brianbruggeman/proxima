@@ -17,10 +17,17 @@ default = []
 # gguf-tensor-by-name bind can be driven end to end through evaluation.
 # The bind function itself (`bind::gguf_tensor_as_f32`) needs neither and
 # stays available at the no_std+alloc floor either way.
-std = ["proxima-gguf/std", "proxima-tensor/std"]
+std = ["proxima-gguf/std", "proxima-tensor/std", "interop-bgpool"]
+# split from `std` the same way proxima-tensor splits `tensor-bgpool`
+# (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
+# stays out of the alloc-only floor even though every current `std` build
+# wants it (loader::prefault is the only std-gated consumer today).
+interop-bgpool = ["dep:prime", "dep:proxima-core"]
 
 [dependencies]
 arrayvec.workspace = true
+prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
+proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
 proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }

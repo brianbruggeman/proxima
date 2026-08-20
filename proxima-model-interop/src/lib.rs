@@ -22,6 +22,8 @@ extern crate alloc;
 mod bind;
 mod dtype;
 mod error;
+#[cfg(feature = "std")]
+mod loader;
 mod transform;
 
 pub use bind::gguf_tensor_as_f32;
@@ -29,4 +31,6 @@ pub use bind::gguf_tensor_as_f32;
 pub use bind::gguf_tensor_as_packed_block;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
+#[cfg(feature = "std")]
+pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};

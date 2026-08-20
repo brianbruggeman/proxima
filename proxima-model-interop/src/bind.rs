@@ -269,6 +269,8 @@ mod real_openchat_file {
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
     use proxima_tokenizer::greedy_pick;
 
+    use crate::loader::prefault;
+
     use super::{gguf_tensor_as_f32, gguf_tensor_as_packed_block};
 
     const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
@@ -522,6 +524,31 @@ mod real_openchat_file {
                 QuantizedBlock::Q4K(_) | QuantizedBlock::Float32(_) => {}
             }
         }
+
+        // DIAGNOSTIC (proxima-debugger, remove before landing): A/B toggle
+        // for `crate::loader::prefault` at the loader's own phase boundary
+        // -- bind just finished (every packed tensor's byte range is now
+        // known), forward has not started. `PROXIMA_PREFAULT=1` warms every
+        // page of the mmap through the shared background pool before the
+        // timed forward runs; unset skips it entirely (the explicit-opt-in
+        // this module's own doc names: a caller serving many small models
+        // should not pay to warm a mapping it will only read a slice of).
+        let prefault_enabled = std::env::var("PROXIMA_PREFAULT").is_ok_and(|value| value == "1");
+        let diag_minflt_prefault_before = instrument::ru_minflt();
+        let prefault_start = std::time::Instant::now();
+        if prefault_enabled {
+            prefault(file_bytes).expect("prefault the host-local openchat gguf mapping");
+        }
+        let prefault_elapsed = prefault_start.elapsed();
+        let diag_minflt_prefault_after = instrument::ru_minflt();
+        std::eprintln!(
+            "DIAG phase=prefault t_ms={} pid={diag_pid} enabled={prefault_enabled}",
+            diag_now_ms()
+        );
+        std::println!(
+            "prefault: enabled={prefault_enabled} wall_clock={prefault_elapsed:?} minflt_delta={}",
+            diag_minflt_prefault_after.saturating_sub(diag_minflt_prefault_before)
+        );
 
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from openchat gguf metadata");
         let prompt = "The capital of France is";
