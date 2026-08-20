@@ -1574,7 +1574,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
-            run_elementwise(resolved, buffers, output)
+            run_elementwise_dispatch(resolved, buffers, session, output)
         }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
@@ -1911,9 +1911,161 @@ fn fill_running_offsets(resolved: &BoundOp, coordinate: &[u64], running: &mut [i
     }
 }
 
+/// Dispatches one elementwise node across the cohort when a `session` is
+/// open, the node clears [`PARALLEL_THRESHOLD`], and there is more than one
+/// outer position to spread across workers. [`BoundOp::split`] only chunks
+/// the outermost *axis* (`split_axis`'s own doc), which for this program's
+/// shapes is the sequence dim — 6 for the forward pass this was measured
+/// against, smaller than `workers` on any real box, so every elementwise
+/// node fell through to the sequential fallback and the split never fired
+/// (`DIAG elementwise_split_none`, measured against every node above
+/// threshold). The fix chunks the same *flattened* outer-position space
+/// [`run_elementwise`]'s own loop already walks instead: each outer
+/// position writes an independent, contiguous `inner_len`-wide row of
+/// `output` (`fill_running_offsets`/`fill_gather_cursors` reseed fresh from
+/// that position's own coordinate every iteration, so no state carries
+/// across positions — see their own docs), so a contiguous range of
+/// positions is exactly as independent as [`matmul_rows_threaded`]'s row
+/// ranges, without needing [`BoundOp::split`]'s single-axis rebase at all.
+/// Reuses [`row_chunk_count`] (rows = outer positions, contraction width =
+/// `inner_len`) for the same oversubscription/macs-floor policy
+/// [`matmul_rows_threaded`] already tunes, rather than a second policy for
+/// this axis. Falls straight through to [`run_elementwise`] whenever any
+/// gate fails: no session, too few elements, or too few outer positions to
+/// clear even a one-chunk-per-worker split.
+fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    session: Option<&CohortSession<'_>>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let Some(session) = session else {
+        return run_elementwise(resolved, buffers, output);
+    };
+    if element_count(&resolved.extents) < PARALLEL_THRESHOLD {
+        return run_elementwise(resolved, buffers, output);
+    }
+    let workers = matmul_worker_count();
+    let (outer_extents, inner_len) = split_innermost(&resolved.extents);
+    let outer_len = odometer_len(outer_extents) as usize;
+    if workers <= 1 || outer_len < 2 || inner_len == 0 {
+        return run_elementwise(resolved, buffers, output);
+    }
+
+    // `row_chunk_count`'s own `MIN_MACS_PER_CHUNK` floor is tuned to a
+    // matmul dot-product's per-mac cost (`matmul_rows_threaded`'s doc); an
+    // elementwise op's per-element cost is a small constant number of
+    // scalar ops, not a mac, so reusing that floor left almost every node
+    // (median 12288 elements, `MIN_MACS_PER_CHUNK` 500,000) computing
+    // exactly one chunk — no different from the sequential fallback
+    // (measured: `elementwise` term unchanged at ~25.6 ms with that floor
+    // applied here). `PARALLEL_THRESHOLD` above already gates whether
+    // splitting is worth a round-open at all, so once past it this reuses
+    // `evaluate_node_parallel`'s own chunk-count policy instead
+    // (`workers * OVERSUBSCRIBE`, `evaluate_node_parallel`'s own doc),
+    // capped at one row per chunk so `chunk_len` never rounds to zero.
+    let chunk_count = (workers * OVERSUBSCRIBE).min(outer_len);
+    let chunk_len = outer_len.div_ceil(chunk_count);
+    let mut chunk_ranges = Vec::with_capacity(chunk_count);
+    let mut remaining = &mut *output;
+    let mut outer_start = 0usize;
+    while !remaining.is_empty() {
+        let take = chunk_len.min(remaining.len() / inner_len);
+        let (slice, rest) = remaining.split_at_mut(take * inner_len);
+        remaining = rest;
+        chunk_ranges.push((outer_start, slice.as_mut_ptr() as usize, slice.len()));
+        outer_start += take;
+    }
+    if chunk_ranges.len() < 2 {
+        return run_elementwise(resolved, buffers, output);
+    }
+
+    let error_slot: OnceLock<TensorError> = OnceLock::new();
+    let round = ElementwiseRowRound {
+        resolved,
+        buffers,
+        inner_len,
+        chunk_ranges: &chunk_ranges,
+        error: &error_slot,
+    };
+    let report = session.run(&round);
+    if let Some(error) = error_slot.get() {
+        return Err(error.clone());
+    }
+    if report.abandoned > 0 {
+        return Err(TensorError::ThreadedChunkFailed {
+            chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
+            reason: alloc::string::String::from(
+                "cohort member panicked while running this elementwise chunk",
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// [`run_elementwise_dispatch`]'s cohort dispatch shape — the same
+/// relationship [`RowRound`] has to [`matmul_rows_threaded`], one round
+/// over `(outer_start, chunk_address, len)` ranges of the flattened outer
+/// position space, run through [`CohortSession::run`]. `resolved`/`buffers`
+/// stay ordinary borrows for the round's whole lifetime, the same argument
+/// [`RowRound`]'s own doc makes.
+struct ElementwiseRowRound<'round, B> {
+    resolved: &'round BoundOp,
+    buffers: &'round [Option<B>],
+    inner_len: usize,
+    chunk_ranges: &'round [(usize, usize, usize)],
+    error: &'round OnceLock<TensorError>,
+}
+
+impl<B> CohortRound for ElementwiseRowRound<'_, B>
+where
+    B: Deref<Target = [f32]> + Sync,
+{
+    fn chunks(&self) -> usize {
+        self.chunk_ranges.len()
+    }
+
+    fn run_chunk(&self, chunk: ChunkIndex) {
+        let (outer_start, slice_address, slice_len) = self.chunk_ranges[chunk.0];
+        // SAFETY: unique to this chunk by construction (`split_at_mut` in
+        // `run_elementwise_dispatch` before the round starts); the parent
+        // `output` outlives every reconstructed slice because
+        // `CohortSession::run` does not return until every member has
+        // reported done.
+        let chunk_output =
+            unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
+        let outer_end = outer_start + slice_len / self.inner_len;
+        if let Err(error) =
+            run_elementwise_range(self.resolved, self.buffers, outer_start, outer_end, chunk_output)
+        {
+            let _ = self.error.set(error);
+        }
+    }
+}
+
 fn run_elementwise<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let (outer_extents, _) = split_innermost(&resolved.extents);
+    let outer_len = odometer_len(outer_extents) as usize;
+    run_elementwise_range(resolved, buffers, 0, outer_len, output)
+}
+
+/// [`run_elementwise`]'s whole computation, restricted to
+/// `[outer_start, outer_end)` of the flattened outer-position space —
+/// `run_elementwise` itself is the `0..outer_len` case. Every outer
+/// position is independent (see [`run_elementwise_dispatch`]'s doc), so
+/// narrowing the range changes nothing about what any position computes,
+/// only how many of them this call covers; `output` is indexed relative to
+/// `outer_start` (`out_base` below), matching the disjoint sub-slice a
+/// caller like [`ElementwiseRowRound`] hands in.
+fn run_elementwise_range<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    outer_start: usize,
+    outer_end: usize,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
@@ -1953,10 +2105,10 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
     #[cfg(feature = "instrument")]
     let path = if fast_path { Path::WidthFast } else { Path::Generic };
 
-    for outer_position in 0..odometer_len(outer_extents) as usize {
+    for outer_position in outer_start..outer_end {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
-        let out_base = outer_position * inner_len;
+        let out_base = (outer_position - outer_start) * inner_len;
         #[cfg(feature = "instrument")]
         {
             counters.leading_iters += 1;
@@ -2173,11 +2325,18 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // loop below writes, and what downstream consumes unchanged) — this
         // copy is the transpose back, `O(rows * leading_total)`, far
         // cheaper than the weight stream it replaces.
+        #[cfg(feature = "instrument")]
+        let diag_transpose_started = instrument::read_ticks();
         for row in 0..rows {
             for position in 0..leading_total {
                 output[position * rows + row] = wide[row * leading_total + position];
             }
         }
+        #[cfg(feature = "instrument")]
+        counter!(
+            instrument::MATMUL_Q4K_TRANSPOSE_TICKS,
+            instrument::elapsed_ticks(diag_transpose_started)
+        );
         #[cfg(feature = "instrument")]
         counter!(
             instrument::MATMUL_REDUCE_QUANTIZED_TICKS,
@@ -10639,6 +10798,70 @@ mod tests {
                 "node {node} output diverges"
             );
         }
+    }
+
+    /// [`run_elementwise_dispatch`]'s own cohort path only ever fires
+    /// inside [`evaluate_quantized`] (the `session: Some(..)` arm
+    /// `evaluate_parallel` never takes — `evaluate_parallel_matches_evaluate`'s
+    /// cases above all exercise the pool path, `run_chunks_threaded` with
+    /// `session: None`, not this one). A large elementwise chain clears
+    /// `PARALLEL_THRESHOLD` and has `outer_len` (64) comfortably above any
+    /// worker count tried here, so this is the one test that actually
+    /// drives a cohort round for [`ElementwiseRowRound`] and checks its
+    /// output is bit-identical — `assert_eq!`, not a tolerance — to the
+    /// fully sequential [`evaluate`] path, per this node kind's own
+    /// no-cross-element-accumulation argument (`run_elementwise_dispatch`'s
+    /// doc).
+    #[rstest]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(#[case] workers: usize) {
+        // SAFETY of the test env var mutation: `PROXIMA_MATMUL_WORKERS` is
+        // read exactly once, lazily, behind `matmul_worker_count`'s own
+        // `OnceLock` — set before that lock is ever touched by any other
+        // test in this process would be a race, so this case relies on
+        // nextest's default one-test-per-process isolation instead of
+        // resetting the lock.
+        // SAFETY: nextest runs each test in its own process, so no other
+        // thread in this process reads or writes the environment
+        // concurrently with this call.
+        unsafe {
+            std::env::set_var("PROXIMA_MATMUL_WORKERS", workers.to_string());
+        }
+
+        let mut program = Vec::new();
+        let (rows, width) = (64usize, 8192usize);
+        let mut current = f32_block(
+            &mut program,
+            &[Extent::Static(rows as u32), Extent::Static(width as u32)],
+        );
+        for _ in 0..3 {
+            current = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(current, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                    name: None,
+                },
+            );
+        }
+        let _ = current;
+
+        let input: Vec<f32> = (0..rows * width).map(|value| (value as f32) * 0.0001).collect();
+
+        let sequential = evaluate(&program, &[], &[&input], &[]).expect("sequential evaluates");
+        let blocks = [QuantizedBlock::Float32(&input)];
+        let quantized =
+            evaluate_quantized(&program, &[], &blocks, &[]).expect("quantized evaluates");
+
+        assert_eq!(quantized.shape(), sequential.shape());
+        assert_eq!(
+            quantized.root(),
+            sequential.root(),
+            "cohort-dispatched elementwise output diverges from the sequential path"
+        );
     }
 
     #[rstest]
