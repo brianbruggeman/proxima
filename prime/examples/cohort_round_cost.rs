@@ -5,6 +5,10 @@
 //! the measured 23,072 ns/call of spawn+recv_wait cited in the design.
 
 #![cfg(all(feature = "runtime-prime-cohort", feature = "runtime-prime-bgpool"))]
+// bench harness: a setup/API-contract failure (bad config, poisoned lock,
+// no NaNs in a timing sample) has no recovery that makes sense mid-run --
+// panicking immediately with a message is correct here, not a shortcut.
+#![allow(clippy::expect_used)]
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
