@@ -555,16 +555,6 @@ pub fn evaluate_quantized(
     // instrument-only so it costs nothing outside this run.
     #[cfg(feature = "instrument")]
     let mut diag_loop_overhead_ticks: u64 = 0;
-    // proxima-debugger diagnostic: the bookkeeping half of the overhead
-    // above, split out because `live_count` + `diag_live_bytes` are the two
-    // UNGATED full-table rescans in this loop body (the `#[cfg]` above the
-    // `diag_bookkeeping_started` let covers only that let) -- they run in the
-    // plain `std` build too, so their size has to be reported on its own
-    // line rather than folded into an instrument-only aggregate.
-    #[cfg(feature = "instrument")]
-    let mut diag_bookkeeping_ticks: u64 = 0;
-    #[cfg(feature = "instrument")]
-    let mut diag_rescan_ticks: u64 = 0;
     #[cfg(feature = "instrument")]
     let diag_setup_ticks = instrument::elapsed_ticks(diag_setup_started);
     // Entered ONCE, before the node loop -- not per matmul call -- so the
@@ -599,14 +589,8 @@ pub fn evaluate_quantized(
         #[cfg(feature = "instrument")]
         let diag_bookkeeping_started = instrument::read_ticks();
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-        #[cfg(feature = "instrument")]
-        let diag_rescan_started = instrument::read_ticks();
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         let current_bytes = diag_live_bytes(&buffers);
-        #[cfg(feature = "instrument")]
-        {
-            diag_rescan_ticks += instrument::elapsed_ticks(diag_rescan_started);
-        }
         if current_bytes > diag_peak_live_bytes {
             diag_peak_live_bytes = current_bytes;
             diag_peak_position = position;
@@ -616,9 +600,7 @@ pub fn evaluate_quantized(
         }
         #[cfg(feature = "instrument")]
         {
-            let bookkeeping = instrument::elapsed_ticks(diag_bookkeeping_started);
-            diag_loop_overhead_ticks += bookkeeping;
-            diag_bookkeeping_ticks += bookkeeping;
+            diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
         }
     }
     std::eprintln!(
@@ -636,31 +618,14 @@ pub fn evaluate_quantized(
         for (label, count, ticks) in ranked {
             std::eprintln!(
                 "DIAG evaluate_quantized node_kind={label} count={count} total_ms={:.3} pct_of_forward={:.2}",
-                ticks as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(ticks) as f64 / 1_000_000.0,
                 100.0 * ticks as f64 / total_ticks as f64,
             );
         }
         std::eprintln!(
             "DIAG evaluate_quantized setup_ms={:.3} loop_overhead_ms={:.3}",
-            diag_setup_ticks as f64 / 1_000_000.0,
-            diag_loop_overhead_ticks as f64 / 1_000_000.0,
-        );
-        // proxima-debugger diagnostic: the same three quantities converted
-        // through `ticks_to_nanos`. The line above divides RAW mach ticks by
-        // 1e6 and labels the result `_ms`; on Apple silicon one tick is
-        // `numer/denom` = 125/3 = 41.667 ns, so every `_ms` on that line
-        // (and on the `node_kind` lines above it) is understated 41.667x.
-        // `ungated_rescan_ms` is `live_count` + `diag_live_bytes` alone --
-        // the two full-buffer-table scans at this loop's bookkeeping step
-        // that are NOT behind `#[cfg(feature = "instrument")]` and therefore
-        // run in the plain `std` build too.
-        std::eprintln!(
-            "DIAG evaluate_quantized_ns setup_ms={:.3} loop_overhead_ms={:.3} bookkeeping_ms={:.3} ungated_rescan_ms={:.3} nodes={}",
             instrument::ticks_to_nanos(diag_setup_ticks) as f64 / 1_000_000.0,
             instrument::ticks_to_nanos(diag_loop_overhead_ticks) as f64 / 1_000_000.0,
-            instrument::ticks_to_nanos(diag_bookkeeping_ticks) as f64 / 1_000_000.0,
-            instrument::ticks_to_nanos(diag_rescan_ticks) as f64 / 1_000_000.0,
-            resolved.len(),
         );
     }
     #[cfg(feature = "instrument")]
@@ -4683,15 +4648,6 @@ where
     }
 
     fn run_chunk(&self, chunk: ChunkIndex) {
-        // proxima-debugger diagnostic: outer window, deliberately wider than
-        // `run_row_chunk`'s own timer -- it includes that function's
-        // instrumentation (the `WORKER_CPU_NANOS` mutex), so the difference
-        // between this sum and `PARALLEL_CHUNK_TICKS_SUM` sizes what the
-        // `instrument` build itself costs on the member threads.
-        #[cfg(feature = "instrument")]
-        let (diag_slot, diag_started) = instrument::chunk_entry();
-        #[cfg(feature = "instrument")]
-        let diag_cpu_started = instrument::thread_cpu_nanos();
         let (chunk_start, slice_address, slice_len) = self.chunk_ranges[chunk.0];
         // SAFETY: unique to this chunk by construction (`split_at_mut` in
         // `matmul_rows_threaded` before the round starts); the parent
@@ -4703,12 +4659,6 @@ where
         if let Err(error) = run_row_chunk(self.dot_row, self.width, chunk_start, chunk_output) {
             let _ = self.error.set(error);
         }
-        #[cfg(feature = "instrument")]
-        instrument::chunk_exit(
-            diag_slot,
-            diag_started,
-            instrument::thread_cpu_nanos() - diag_cpu_started,
-        );
     }
 }
 
@@ -4770,11 +4720,7 @@ where
         // `CohortSession::run` doc for the +14.8 ms it cost while it was.
         #[cfg(feature = "instrument")]
         let diag_own_chunk_started = instrument::read_ticks();
-        #[cfg(feature = "instrument")]
-        let diag_round_opened = instrument::round_open();
         let report = session.run(&round);
-        #[cfg(feature = "instrument")]
-        instrument::round_close(diag_round_opened, report.members);
         #[cfg(feature = "instrument")]
         counter!(
             instrument::MATMUL_OWN_CHUNK_TICKS,

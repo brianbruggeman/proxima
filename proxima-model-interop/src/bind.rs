@@ -611,7 +611,6 @@ mod real_openchat_file {
             instrument::reset_matmul_dispatch();
             instrument::reset_worker_cpu();
             instrument::reset_q4k_shape_buckets();
-            instrument::reset_round_attribution();
         }
         std::eprintln!("DIAG phase=forward_start t_ms={} pid={diag_pid}", diag_now_ms());
         // `forward_start`/`forward_elapsed` are the one clock read per
@@ -773,91 +772,6 @@ mod real_openchat_file {
             // 0.0462 vs 0.0332 gap is uniform across every matmul shape this
             // forward runs, or concentrated in the small (attn_k/attn_v,
             // rows=1024) shapes ggml's own t8 already regresses at.
-            // DIAGNOSTIC (proxima-debugger, remove before landing): per-member
-            // cohort round attribution. `slot=0` is the leader by construction
-            // (`instrument::round_open` runs on it before any member claims).
-            // busy/tail/first_latency are wall ticks; cpu is thread-CPU nanos
-            // over the identical window, so busy-minus-cpu per slot is that
-            // member's off-core time while nominally running a chunk.
-            let rounds = instrument::round_totals();
-            let round_wall_ns = instrument::ticks_to_nanos(rounds.wall_ticks);
-            std::println!(
-                "DIAG cohort_rounds count={} wall_ms={:.3} absent_ms={:.3} member_slots={}",
-                rounds.rounds,
-                round_wall_ns as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(rounds.absent_ticks) as f64 / 1_000_000.0,
-                rounds.member_slots,
-            );
-            std::println!(
-                "DIAG cohort_slot_table slot chunks rounds busy_ms cpu_ms first_latency_ms tail_ms mean_first_latency_us mean_tail_us"
-            );
-            let mut slot_busy_total_ns = 0_u64;
-            let mut slot_first_latency_total_ns = 0_u64;
-            let mut slot_tail_total_ns = 0_u64;
-            for row in instrument::slot_rows() {
-                let busy_ns = instrument::ticks_to_nanos(row.busy_ticks);
-                let first_ns = instrument::ticks_to_nanos(row.first_latency_ticks);
-                let tail_ns = instrument::ticks_to_nanos(row.tail_ticks);
-                slot_busy_total_ns += busy_ns;
-                slot_first_latency_total_ns += first_ns;
-                slot_tail_total_ns += tail_ns;
-                std::println!(
-                    "DIAG cohort_slot slot={} chunks={} rounds={} busy_ms={:.3} cpu_ms={:.3} first_latency_ms={:.3} tail_ms={:.3} mean_first_latency_us={:.3} mean_tail_us={:.3}",
-                    row.slot,
-                    row.chunks,
-                    row.rounds,
-                    busy_ns as f64 / 1_000_000.0,
-                    row.cpu_nanos as f64 / 1_000_000.0,
-                    first_ns as f64 / 1_000_000.0,
-                    tail_ns as f64 / 1_000_000.0,
-                    first_ns as f64 / row.rounds.max(1) as f64 / 1_000.0,
-                    tail_ns as f64 / row.rounds.max(1) as f64 / 1_000.0,
-                );
-            }
-            // the identity every term below has to satisfy: over one round of
-            // wall W with M members, member-wall M*W splits into busy, the
-            // round-open-to-first-claim wait, the post-last-chunk tail, the
-            // whole-round idle of members that claimed nothing, and whatever
-            // is left (mid-round claim gaps) -- named as a residual, not
-            // folded into a neighbour.
-            let member_wall_ns = instrument::ticks_to_nanos(
-                rounds.wall_ticks * (rounds.member_slots / rounds.rounds.max(1)),
-            );
-            let absent_ns = instrument::ticks_to_nanos(rounds.absent_ticks);
-            let gap_ns = member_wall_ns
-                .saturating_sub(slot_busy_total_ns)
-                .saturating_sub(slot_first_latency_total_ns)
-                .saturating_sub(slot_tail_total_ns)
-                .saturating_sub(absent_ns);
-            let members_per_round = (rounds.member_slots / rounds.rounds.max(1)).max(1);
-            std::println!(
-                "DIAG cohort_idle_split member_wall_ms={:.3} busy_ms={:.3} first_latency_ms={:.3} tail_ms={:.3} absent_ms={:.3} gap_residual_ms={:.3}",
-                member_wall_ns as f64 / 1_000_000.0,
-                slot_busy_total_ns as f64 / 1_000_000.0,
-                slot_first_latency_total_ns as f64 / 1_000_000.0,
-                slot_tail_total_ns as f64 / 1_000_000.0,
-                absent_ns as f64 / 1_000_000.0,
-                gap_ns as f64 / 1_000_000.0,
-            );
-            std::println!(
-                "DIAG cohort_wall_cost_ms first_latency={:.3} tail={:.3} absent={:.3} gap_residual={:.3} (each = its member-time / {members_per_round})",
-                slot_first_latency_total_ns as f64 / members_per_round as f64 / 1_000_000.0,
-                slot_tail_total_ns as f64 / members_per_round as f64 / 1_000_000.0,
-                absent_ns as f64 / members_per_round as f64 / 1_000_000.0,
-                gap_ns as f64 / members_per_round as f64 / 1_000_000.0,
-            );
-            // DIAGNOSTIC (proxima-debugger, remove before landing): whether
-            // members reach a round by spinning or by an OS unpark, and what
-            // the leader's serial unpark loop costs when they parked.
-            std::println!(
-                "DIAG cohort_wake parks={} spin_hits={} unpark_rounds={} unpark_ms={:.3} preamble_ms={:.3} drain_ms={:.3}",
-                prime::os::cohort::DIAG_PARKS.load(core::sync::atomic::Ordering::Relaxed),
-                prime::os::cohort::DIAG_SPIN_HITS.load(core::sync::atomic::Ordering::Relaxed),
-                prime::os::cohort::DIAG_UNPARK_ROUNDS.load(core::sync::atomic::Ordering::Relaxed),
-                prime::os::cohort::DIAG_UNPARK_NANOS.load(core::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
-                prime::os::cohort::DIAG_PREAMBLE_NANOS.load(core::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
-                prime::os::cohort::DIAG_DRAIN_NANOS.load(core::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
-            );
             std::println!("DIAG q4k_shape_table rows k calls macs ns_per_mac");
             for (rows, k, calls, macs, ticks) in instrument::q4k_shape_snapshot() {
                 let nanos = instrument::ticks_to_nanos(ticks);
