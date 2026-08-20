@@ -44,11 +44,20 @@
 //! the `parked_count` short-circuit notify trick (`background.rs:205`),
 //! and join-on-drop (`background.rs:266-279`). no `Injector`, no `Job`
 //! enum, no channel — a barrier round is not a heterogeneous job queue.
-//! the park itself is `park_timeout`, not an unbounded `park` — see
-//! [`PARK_TIMEOUT`] for why: under heavy CPU oversubscription a targeted
-//! `unpark()` was observed arriving while its member was mid-transition
-//! into `park()`, stranding it; a bounded timeout makes the wait
-//! self-healing instead of chasing that race inside `Parker` itself.
+//! the park is an unbounded `park()`, not `park_timeout`. an earlier
+//! revision bounded every park at 50us, blaming "OS scheduling" for a
+//! stranding that was actually a store-buffer ordering bug at the `round`
+//! bump and at [`wait_for_round`]'s arm-then-recheck — Release/Acquire on
+//! two distinct locations does not order them against each other, so both
+//! sides could miss (measured: 345 strands per 300,000 rounds on aarch64,
+//! where `load(Acquire)` lowers to RCpc `ldapr`). those four operations are
+//! SeqCst now and the strand does not reproduce in 18,000,000 rounds
+//! (`cargo nextest run -p prime --features runtime-prime-cohort`, cohort
+//! stress tests). the 50us bound was never load-bearing for correctness —
+//! it only masked the bug by re-polling `round` on a timer — and it cost a
+//! resident cohort roughly 6,600 spurious wakes per 330ms forward pass (one
+//! per member per timeout), each contending the P-cores the leader needs.
+//! see [`wait_for_round`] for the SeqCst argument the unbounded park relies on.
 
 #![cfg(feature = "runtime-prime-cohort")]
 
@@ -60,7 +69,6 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
 
 use crossbeam_utils::CachePadded;
 use crossbeam_utils::sync::{Parker, Unparker};
@@ -452,39 +460,25 @@ fn member_loop(control: &Control, member_index: usize, parker: &Parker, spin_pol
     }
 }
 
-/// worst-case latency for a member to notice a round it was not woken for.
-/// bounds an otherwise-unbounded park: measured under heavy CPU
-/// oversubscription (many parallel test processes each spinning multiple
-/// dedicated threads), an `unpark()` racing a thread mid-transition into
-/// `park()` can be delayed indefinitely by OS scheduling even though
-/// crossbeam's `Parker` itself has no missed-wakeup window — the observed
-/// failure was a real thread parked with its target `unpark()` already
-/// consumed elsewhere in the storm of concurrent parks/unparks across
-/// every cohort test's own dedicated threads. `park_timeout` makes the
-/// wait self-healing: a member that missed its wake re-polls `round`
-/// itself within one timeout instead of blocking forever.
-/// HISTORY, because the reason recorded here before was wrong and cost a
-/// reproduction to disprove: this bound was introduced blaming "OS scheduling"
-/// and "a storm of concurrent parks/unparks", and explicitly exonerating
-/// `Parker`. `Parker` was innocent, but scheduling was never the cause either.
-/// The real defect was the store-buffer pair at the `round` bump and at
-/// `wait_for_round`'s arm-then-recheck, using Release/Acquire across distinct
-/// locations -- 345 strands per 300,000 on aarch64, where `load(Acquire)`
-/// lowers to RCpc `ldapr`. Those four operations are SeqCst now and the strand
-/// does not reproduce in 18,000,000 rounds.
+/// spin `spin_polls` times, then park (unbounded — no `park_timeout`),
+/// until `round` advances past `local_round` or `shutdown` fires. returns
+/// the new round value, or `None` on shutdown.
 ///
-/// The bound stays as a floor under a genuinely missed transition -- a
-/// shutdown edge, a future member-side path -- NOT as cover for an ordering
-/// bug. Note what it costs to keep: a stranding degrades into a 50us stall
-/// that no test asserts on and no metric separates from scheduling noise,
-/// which is exactly why the defect above survived until someone reverted this
-/// line to reproduce it. If a stranding is ever suspected again, remove this
-/// bound first and reproduce with an unbounded `park()`.
-const PARK_TIMEOUT: Duration = Duration::from_micros(50);
-
-/// spin `spin_polls` times, then park (bounded by [`PARK_TIMEOUT`]), until
-/// `round` advances past `local_round` or `shutdown` fires. returns the
-/// new round value, or `None` on shutdown.
+/// HISTORY: this park used to be bounded at 50us (`PARK_TIMEOUT`, since
+/// deleted), on the theory that under heavy CPU oversubscription an
+/// `unpark()` could race a thread mid-transition into `park()` and strand
+/// it indefinitely, with `Parker` explicitly exonerated. `Parker` was
+/// innocent, but the bound was chasing the wrong cause: the real defect was
+/// a store-buffer pair between the `round` bump in [`CohortSession::run`]
+/// and this function's arm-then-recheck, both Release/Acquire on distinct
+/// locations, which does not order them against each other. Measured 345
+/// strands per 300,000 rounds on aarch64 (`load(Acquire)` lowers to RCpc
+/// `ldapr`), 0 per 18,000,000 once every op in the pair below is SeqCst.
+/// The bound only ever converted a stranding into an undebuggable 50us
+/// stall that no test asserted on and no metric separated from scheduling
+/// noise — exactly why the ordering bug survived. Removing it turns any
+/// future stranding back into a hang a stress test can catch, instead of
+/// absorbing it silently.
 fn wait_for_round(
     control: &Control,
     local_round: u64,
@@ -526,7 +520,7 @@ fn wait_for_round(
             }
             continue;
         }
-        parker.park_timeout(PARK_TIMEOUT);
+        parker.park();
         control.parked_count.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -795,5 +789,40 @@ mod tests {
         let round = CountingRound::new(5);
         let report = session.run(&round);
         assert_eq!(report.completed, 5);
+    }
+
+    /// the shape that reproduced the pre-fix strand: a near-zero spin budget
+    /// (so members reach the park path almost every round instead of
+    /// catching the round bump in the spin loop) driven through a high round
+    /// count on an unbounded `park()`. the fixed bug reproduced between 12
+    /// and 118,425 rounds under this shape; this runs an order of magnitude
+    /// past that ceiling and asserts every chunk of every round completed
+    /// exactly once, which is impossible if any member ever stranded on a
+    /// missed `unpark()`.
+    #[test]
+    fn high_round_count_low_spin_never_strands_with_unbounded_park() {
+        let config = ThreadCohort::builder()
+            .members(NonZeroUsize::new(8).expect("nonzero member count"))
+            .spin_polls(0)
+            .build();
+        let cohort = ThreadCohort::from_config(config).expect("build cohort");
+        let session = cohort.enter().expect("open session");
+
+        let total_rounds = 200_000_u64;
+        let mut rounds_executed = 0_u64;
+        for _ in 0..total_rounds {
+            let round = CountingRound::new(8);
+            let report = session.run(&round);
+            assert_eq!(report.completed, 8, "no chunk should strand");
+            assert_eq!(report.abandoned, 0);
+            for seen in &round.seen {
+                assert_eq!(seen.load(Ordering::Relaxed), 1);
+            }
+            rounds_executed += 1;
+        }
+        assert_eq!(
+            rounds_executed, total_rounds,
+            "stress test must actually execute every round, never pass vacuously"
+        );
     }
 }
