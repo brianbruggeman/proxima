@@ -530,16 +530,32 @@ pub fn evaluate_quantized(
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
     let retires = node_retirement(&resolved, &effective_outputs);
 
-    // DIAGNOSTIC (proxima-debugger, remove before landing): peak_live_buffers
+    // DIAGNOSTIC (proxima-debugger, instrument-only): peak_live_buffers
     // counts occupied slots, not bytes -- a live buffer set of 12 entries
-    // could be 12 MiB or 12 GiB. This mirrors that loop but sums the actual
+    // could be 12 MiB or 12 GiB. This mirrors that count but sums the actual
     // f32 byte length of every live entry, so the peak is reported in bytes.
+    // Gated (unlike `peak_live_buffers` itself below, which `finish` needs
+    // unconditionally): nothing in `Evaluated` carries a byte figure, only
+    // the `DIAG` eprintln this landing also gated does, so an
+    // instrument-off build pays neither the closure call nor its
+    // `O(program.len())` rescan per node.
+    #[cfg(feature = "instrument")]
     let diag_live_bytes = |buffers: &[Option<Cow<[f32]>>]| -> usize {
         buffers.iter().flatten().map(|cow| cow.len() * core::mem::size_of::<f32>()).sum()
     };
 
+    // `peak_live_buffers` is real, always-returned `Evaluated` state (see
+    // `finish` below and `Evaluated::peak_live_buffers`'s own tests), so it
+    // stays unconditional -- but tracked via `live_now`, an O(1) running
+    // count incremented/decremented alongside the loop's own `Some`/`None`
+    // writes, rather than `live_count(&buffers)`'s O(program.len()) full
+    // rescan called once per node (the actual quadratic cost this landing
+    // removes: `O(program.len())` work times `program.len()` nodes).
     let mut peak_live_buffers = live_count(&buffers);
+    let mut live_now = peak_live_buffers;
+    #[cfg(feature = "instrument")]
     let mut diag_peak_live_bytes = diag_live_bytes(&buffers);
+    #[cfg(feature = "instrument")]
     let mut diag_peak_position = 0usize;
     // DIAGNOSTIC (proxima-debugger, remove before landing): wall time by
     // node kind for this one serial evaluation loop -- `evaluate_quantized`
@@ -556,10 +572,10 @@ pub fn evaluate_quantized(
     // DIAGNOSTIC (proxima-debugger, remove before landing): everything in
     // this loop body OTHER than run_node_into -- the output Vec's zero-fill
     // allocation (ahead of diag_node_started so it is never in
-    // diag_kind_ticks) and the live-buffer/live-bytes bookkeeping after the
-    // call (diag_live_bytes rescans the whole buffers table every node).
-    // Both run unconditionally today, gated build or not; this counter is
-    // instrument-only so it costs nothing outside this run.
+    // diag_kind_ticks) and the live-bytes bookkeeping after the call
+    // (`diag_live_bytes` rescans the whole buffers table every node, but is
+    // itself instrument-gated now -- see that closure's own doc). This
+    // counter is instrument-only so it costs nothing outside this run.
     #[cfg(feature = "instrument")]
     let mut diag_loop_overhead_ticks: u64 = 0;
     #[cfg(feature = "instrument")]
@@ -596,20 +612,33 @@ pub fn evaluate_quantized(
         #[cfg(feature = "instrument")]
         let diag_bookkeeping_started = instrument::read_ticks();
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
-        let current_bytes = diag_live_bytes(&buffers);
-        if current_bytes > diag_peak_live_bytes {
-            diag_peak_live_bytes = current_bytes;
-            diag_peak_position = position;
+        // `computed.node` is written exactly once (this position, in
+        // program order), so this is always a `None` -> `Some` transition --
+        // `live_now += 1` is the O(1) replacement for rescanning `buffers`.
+        live_now += 1;
+        peak_live_buffers = peak_live_buffers.max(live_now);
+        #[cfg(feature = "instrument")]
+        {
+            let current_bytes = diag_live_bytes(&buffers);
+            if current_bytes > diag_peak_live_bytes {
+                diag_peak_live_bytes = current_bytes;
+                diag_peak_position = position;
+            }
         }
         for retired in &retires[position] {
             buffers[retired.0 as usize] = None;
+            // symmetric `Some` -> `None` transition: `retired` was written
+            // at its own computed position above and read (never retired
+            // twice -- `node_retirement` records each node's LAST read
+            // position only), so it is always live here.
+            live_now -= 1;
         }
         #[cfg(feature = "instrument")]
         {
             diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
         }
     }
+    #[cfg(feature = "instrument")]
     std::eprintln!(
         "DIAG evaluate_quantized: peak_live_buffers={peak_live_buffers} peak_live_bytes={diag_peak_live_bytes} ({:.4} GiB) at resolved_position={diag_peak_position}/{} node={:?}",
         diag_peak_live_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
@@ -727,7 +756,13 @@ fn evaluate_pooled(
     #[cfg(feature = "instrument")]
     drop(alloc_site_guard);
 
+    // `live_now`: O(1) running live-buffer count, incremented/decremented
+    // alongside this loop's own `Some`/`None` writes -- see
+    // `evaluate_quantized`'s identical `live_now` doc for why this replaces
+    // `live_count(&buffers)`'s O(program.len()) full rescan per node (the
+    // quadratic cost this landing removes).
     let mut peak_live_buffers = live_count(&buffers);
+    let mut live_now = peak_live_buffers;
     for (position, computed) in resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
         let alloc_site_guard =
@@ -739,9 +774,11 @@ fn evaluate_pooled(
         #[cfg(feature = "instrument")]
         record_bound_op_operand_access(computed, &buffers);
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        live_now += 1;
+        peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
             retire_into(&mut buffers, *retired, free_buffers);
+            live_now -= 1;
         }
     }
 
@@ -907,15 +944,21 @@ pub fn evaluate_parallel(
         instrument::elapsed_ticks(prepare_start)
     );
 
+    // `live_now`: O(1) running live-buffer count -- see `evaluate_quantized`'s
+    // identical `live_now` doc for why this replaces `live_count(&buffers)`'s
+    // O(program.len()) full rescan per node.
     let mut peak_live_buffers = live_count(&buffers);
+    let mut live_now = peak_live_buffers;
     for (position, computed) in resolved.iter().enumerate() {
         let output = evaluate_node_parallel(computed, &buffers, workers)?;
         #[cfg(feature = "instrument")]
         let bookkeeping_start = instrument::read_ticks();
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-        peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
+        live_now += 1;
+        peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
             buffers[retired.0 as usize] = None;
+            live_now -= 1;
         }
         #[cfg(feature = "instrument")]
         counter!(
@@ -2211,21 +2254,22 @@ fn diag_node_kind_label(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId,
     }
 }
 
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 use crate::sized::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
 
 /// The `wide` (`[row][position]`) -> `output` (`[position][row]`) transpose
-/// copy-back the `Q4_K` wide-fold arm of [`run_reduce_quantized`] pays --
-/// dispatched across the cohort when a `session` is open and
-/// `rows * leading_total` clears [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`].
-/// Splits on `position`, the same outer axis [`run_elementwise_dispatch`]
-/// splits on: each position range writes a contiguous, disjoint
-/// `rows`-wide slice of `output` (safe [`slice::split_at_mut`], no raw
-/// pointer needed for the write side), reading a strided range of `wide`
-/// (a shared `&[f32]`, never mutated). Falls straight through to the plain
-/// serial loop whenever any gate fails: no session, too few elements, or
-/// fewer than two position chunks to split into.
-#[cfg(feature = "q4k-int8-dot")]
+/// copy-back the `Q4_K`/`Q5_K`/`Q6_K` wide-fold arms of
+/// [`run_reduce_quantized`] pay -- dispatched across the cohort when a
+/// `session` is open and `rows * leading_total` clears
+/// [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`]. Splits on `position`, the same
+/// outer axis [`run_elementwise_dispatch`] splits on: each position range
+/// writes a contiguous, disjoint `rows`-wide slice of `output` (safe
+/// [`slice::split_at_mut`], no raw pointer needed for the write side),
+/// reading a strided range of `wide` (a shared `&[f32]`, never mutated).
+/// Falls straight through to the plain serial loop whenever any gate fails:
+/// no session, too few elements, or fewer than two position chunks to split
+/// into.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 fn transpose_wide_to_output(
     wide: &[f32],
     rows: usize,
@@ -2289,7 +2333,7 @@ fn transpose_wide_to_output(
 /// `(position_start, out_ptr, out_len)` ranges of `output`'s position axis,
 /// run through [`CohortSession::run`]. No error path -- pure data movement,
 /// nothing here can fail the way a matmul row's dot product can.
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 struct TransposeRound<'round> {
     wide: &'round [f32],
     rows: usize,
@@ -2297,7 +2341,7 @@ struct TransposeRound<'round> {
     chunk_ranges: &'round [(usize, usize, usize)],
 }
 
-#[cfg(feature = "q4k-int8-dot")]
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 impl CohortRound for TransposeRound<'_> {
     fn chunks(&self) -> usize {
         self.chunk_ranges.len()
@@ -2425,7 +2469,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // call so each weight row's bytes are streamed once and its dot reused
     // across `leading_total` positions, instead of the per-position loop
     // below re-streaming the whole weight matrix once per position.
-    // `Q5_K`/`Q6_K` (9 of 225 weights) stay on that per-position loop.
+    // `Q5_K`/`Q6_K` (9 of 225 weights) use the identically-shaped
+    // `matmul_q5k_q8k_f32_impl`/`matmul_q6k_q8k_f32_impl` wide calls below.
     #[cfg(feature = "q4k-int8-dot")]
     if let QuantizedBlock::Q4K(_) = weight_block {
         #[cfg(feature = "instrument")]
@@ -2453,6 +2498,56 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             instrument::MATMUL_Q4K_TRANSPOSE_TICKS,
             instrument::elapsed_ticks(diag_transpose_started)
         );
+        #[cfg(feature = "instrument")]
+        counter!(
+            instrument::MATMUL_REDUCE_QUANTIZED_TICKS,
+            instrument::elapsed_ticks(diag_reduce_quantized_started)
+        );
+        return Ok(());
+    }
+
+    // `Q5_K`'s wide-fold arm -- same mechanism as the `Q4_K` arm above,
+    // `matmul_q5k_q8k_f32_impl` in place of `matmul_q4k_q8k_f32_impl`. No
+    // per-codec transpose-tick counter exists for `Q5_K` (only
+    // `MATMUL_Q4K_TRANSPOSE_TICKS` does); the transpose's cost is still
+    // captured inside `MATMUL_REDUCE_QUANTIZED_TICKS` below, which is not
+    // codec-specific.
+    #[cfg(feature = "q5k-int8-dot")]
+    if let QuantizedBlock::Q5K(_) = weight_block {
+        #[cfg(feature = "instrument")]
+        let diag_call_started = instrument::read_ticks();
+        let wide = matmul_q5k_q8k_f32_impl(weights, rows, activation, leading_total, session)?;
+        #[cfg(feature = "instrument")]
+        {
+            let diag_call_ticks = instrument::elapsed_ticks(diag_call_started);
+            let diag_call_macs = (rows as u64) * (k as u64) * (leading_total as u64);
+            counter!(instrument::MATMUL_Q5K_MACS, diag_call_macs);
+            counter!(instrument::MATMUL_Q5K_CALL_TICKS, diag_call_ticks);
+        }
+        transpose_wide_to_output(&wide, rows, leading_total, session, output)?;
+        #[cfg(feature = "instrument")]
+        counter!(
+            instrument::MATMUL_REDUCE_QUANTIZED_TICKS,
+            instrument::elapsed_ticks(diag_reduce_quantized_started)
+        );
+        return Ok(());
+    }
+
+    // `Q6_K`'s wide-fold arm -- same mechanism as the `Q4_K` arm above,
+    // `matmul_q6k_q8k_f32_impl` in place of `matmul_q4k_q8k_f32_impl`.
+    #[cfg(feature = "q6k-int8-dot")]
+    if let QuantizedBlock::Q6K(_) = weight_block {
+        #[cfg(feature = "instrument")]
+        let diag_call_started = instrument::read_ticks();
+        let wide = matmul_q6k_q8k_f32_impl(weights, rows, activation, leading_total, session)?;
+        #[cfg(feature = "instrument")]
+        {
+            let diag_call_ticks = instrument::elapsed_ticks(diag_call_started);
+            let diag_call_macs = (rows as u64) * (k as u64) * (leading_total as u64);
+            counter!(instrument::MATMUL_Q6K_MACS, diag_call_macs);
+            counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
+        }
+        transpose_wide_to_output(&wide, rows, leading_total, session, output)?;
         #[cfg(feature = "instrument")]
         counter!(
             instrument::MATMUL_REDUCE_QUANTIZED_TICKS,
@@ -2490,9 +2585,13 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
             }
             QuantizedBlock::Q5K(_) => {
+                // unreachable when `q5k-int8-dot` is on: the wide fold above
+                // already handled and returned for every `Q5K` weight. Kept
+                // compiling (not `unreachable!()`) only because this match
+                // still names all three `QuantizedBlock` variants.
                 #[cfg(feature = "q5k-int8-dot")]
                 {
-                    matmul_q5k_q8k_f32_impl(weights, rows, activation_row, session)?
+                    matmul_q5k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
                 }
                 #[cfg(not(feature = "q5k-int8-dot"))]
                 {
@@ -2500,9 +2599,13 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
             }
             QuantizedBlock::Q6K(_) => {
+                // unreachable when `q6k-int8-dot` is on: the wide fold above
+                // already handled and returned for every `Q6K` weight. Kept
+                // compiling (not `unreachable!()`) only because this match
+                // still names all three `QuantizedBlock` variants.
                 #[cfg(feature = "q6k-int8-dot")]
                 {
-                    matmul_q6k_q8k_f32_impl(weights, rows, activation_row, session)?
+                    matmul_q6k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
                 }
                 #[cfg(not(feature = "q6k-int8-dot"))]
                 {
@@ -6329,17 +6432,23 @@ unsafe fn dot_q5k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q5k-int8-dot")]
 pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
-    matmul_q5k_q8k_f32_impl(weights, rows, activation, None)
+    matmul_q5k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
-/// [`matmul_q5k_q8k_f32`]'s body, plus the [`CohortSession`] a caller already
-/// inside a forward pass's session can supply — see [`matmul_q4k_q8k_f32_impl`]'s
-/// doc for why the public entry point stays 3-argument.
+/// [`matmul_q5k_q8k_f32`]'s body, plus `leading_total` (the sequence-position
+/// count [`run_reduce_quantized`] derives as `activation.len() / k`) and the
+/// [`CohortSession`] a caller already inside a forward pass's session can
+/// supply — identical shape to [`matmul_q4k_q8k_f32_impl`]: `activation` is
+/// one contiguous position-major `&[f32]` of `leading_total * k` elements,
+/// quantized to `Q8_K` once, so each weight row's bytes are read once and its
+/// dot reused across every position instead of the weight stream being
+/// re-read once per position.
 #[cfg(feature = "q5k-int8-dot")]
 fn matmul_q5k_q8k_f32_impl(
     weights: &[u8],
     rows: usize,
     activation: &[f32],
+    leading_total: usize,
     session: Option<&CohortSession<'_>>,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
@@ -6352,26 +6461,42 @@ fn matmul_q5k_q8k_f32_impl(
             reason: "weight byte length is not a whole multiple of the row count",
         });
     }
-    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+    if leading_total == 0 || !activation.len().is_multiple_of(leading_total) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the position count",
+        });
+    }
+    let k = activation.len() / leading_total;
+    if !k.is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "activation length is not a whole multiple of the q8_k super-block size",
         });
     }
     let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let q8k_row_bytes = (k / Q4K_BLOCK_ELEMENTS) * Q8K_BLOCK_BYTES;
     let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
-    quantize_row_q8k(activation, &mut activation_q8k)?;
+    quantize_row_q8k_dispatch(activation, &mut activation_q8k, session)?;
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, 1, workers, session, activation.len(), |row, slot| {
+        Some(workers) => matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
             let start = row * row_bytes;
-            slot[0] = dot_q5k_q8k(&weights[start..start + row_bytes], &activation_q8k)?;
+            let weight_row = &weights[start..start + row_bytes];
+            for (position, output_slot) in slot.iter_mut().enumerate() {
+                let q8k_start = position * q8k_row_bytes;
+                *output_slot = dot_q5k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?;
+            }
             Ok(())
         }),
         None => weights
             .chunks_exact(row_bytes)
-            .map(|weight_row| dot_q5k_q8k(weight_row, &activation_q8k))
-            .collect(),
+            .try_fold(Vec::with_capacity(rows * leading_total), |mut output, weight_row| {
+                for position in 0..leading_total {
+                    let q8k_start = position * q8k_row_bytes;
+                    output.push(dot_q5k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?);
+                }
+                Ok::<Vec<f32>, TensorError>(output)
+            }),
     }
 }
 
@@ -6720,17 +6845,23 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q6k-int8-dot")]
 pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
-    matmul_q6k_q8k_f32_impl(weights, rows, activation, None)
+    matmul_q6k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
-/// [`matmul_q6k_q8k_f32`]'s body, plus the [`CohortSession`] a caller already
-/// inside a forward pass's session can supply — see [`matmul_q4k_q8k_f32_impl`]'s
-/// doc for why the public entry point stays 3-argument.
+/// [`matmul_q6k_q8k_f32`]'s body, plus `leading_total` (the sequence-position
+/// count [`run_reduce_quantized`] derives as `activation.len() / k`) and the
+/// [`CohortSession`] a caller already inside a forward pass's session can
+/// supply — identical shape to [`matmul_q4k_q8k_f32_impl`]: `activation` is
+/// one contiguous position-major `&[f32]` of `leading_total * k` elements,
+/// quantized to `Q8_K` once, so each weight row's bytes are read once and its
+/// dot reused across every position instead of the weight stream being
+/// re-read once per position.
 #[cfg(feature = "q6k-int8-dot")]
 fn matmul_q6k_q8k_f32_impl(
     weights: &[u8],
     rows: usize,
     activation: &[f32],
+    leading_total: usize,
     session: Option<&CohortSession<'_>>,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
@@ -6743,26 +6874,42 @@ fn matmul_q6k_q8k_f32_impl(
             reason: "weight byte length is not a whole multiple of the row count",
         });
     }
-    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+    if leading_total == 0 || !activation.len().is_multiple_of(leading_total) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the position count",
+        });
+    }
+    let k = activation.len() / leading_total;
+    if !k.is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "activation length is not a whole multiple of the q8_k super-block size",
         });
     }
     let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let q8k_row_bytes = (k / Q4K_BLOCK_ELEMENTS) * Q8K_BLOCK_BYTES;
     let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
-    quantize_row_q8k(activation, &mut activation_q8k)?;
+    quantize_row_q8k_dispatch(activation, &mut activation_q8k, session)?;
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, 1, workers, session, activation.len(), |row, slot| {
+        Some(workers) => matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
             let start = row * row_bytes;
-            slot[0] = dot_q6k_q8k(&weights[start..start + row_bytes], &activation_q8k)?;
+            let weight_row = &weights[start..start + row_bytes];
+            for (position, output_slot) in slot.iter_mut().enumerate() {
+                let q8k_start = position * q8k_row_bytes;
+                *output_slot = dot_q6k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?;
+            }
             Ok(())
         }),
         None => weights
             .chunks_exact(row_bytes)
-            .map(|weight_row| dot_q6k_q8k(weight_row, &activation_q8k))
-            .collect(),
+            .try_fold(Vec::with_capacity(rows * leading_total), |mut output, weight_row| {
+                for position in 0..leading_total {
+                    let q8k_start = position * q8k_row_bytes;
+                    output.push(dot_q6k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?);
+                }
+                Ok::<Vec<f32>, TensorError>(output)
+            }),
     }
 }
 
@@ -12983,6 +13130,111 @@ mod tests {
         for position in 0..leading_total {
             let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
             let narrow = matmul_q4k_q8k_f32(&weight_bytes, out_dim, activation_row).expect("narrow per-position call");
+            for row in 0..out_dim {
+                assert_eq!(
+                    wide[row * leading_total + position],
+                    narrow[row],
+                    "row {row} position {position}: folded and per-position paths diverged"
+                );
+            }
+        }
+    }
+
+    /// [`matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes`]'s
+    /// exact mechanism, ported to `Q5_K`: [`matmul_q5k_q8k_f32_impl`] now
+    /// takes `leading_total` and folds every position's dot into one pass
+    /// over the weight rows, in place of `run_reduce_quantized`'s old
+    /// per-position loop re-streaming the whole `Q5_K` weight matrix
+    /// `leading_total` times. Run the wide path at `leading_total = 3` on
+    /// real packed `Q5_K` bytes (`blk.0.ffn_down.weight`, this crate's named
+    /// `Q5_K` shape) and check it against `leading_total` separate
+    /// single-position calls through the narrow (already-tested) public
+    /// entry point -- `assert_eq!`, not a tolerance, for the same reason the
+    /// `Q4_K` test uses one: folding changes neither the per-element
+    /// arithmetic nor its order, only which weight bytes get re-read.
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn matmul_q5k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "blk.0.ffn_down.weight",
+            proxima_gguf::types::GgmlType::Q5_K,
+        ) else {
+            return;
+        };
+
+        let leading_total = 3usize;
+        let activation: Vec<f32> = (0..leading_total)
+            .flat_map(|position| {
+                random_vec(600 + position as u64, in_dim).into_iter().map(|value| value - 0.5)
+            })
+            .collect();
+
+        let wide =
+            matmul_q5k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None).expect("wide fold call");
+        assert_eq!(wide.len(), out_dim * leading_total, "wide output is not row-major [row][position]");
+
+        for position in 0..leading_total {
+            let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
+            let narrow = matmul_q5k_q8k_f32(&weight_bytes, out_dim, activation_row).expect("narrow per-position call");
+            for row in 0..out_dim {
+                assert_eq!(
+                    wide[row * leading_total + position],
+                    narrow[row],
+                    "row {row} position {position}: folded and per-position paths diverged"
+                );
+            }
+        }
+    }
+
+    /// [`matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes`]'s
+    /// exact mechanism, ported to `Q6_K`: [`matmul_q6k_q8k_f32_impl`] now
+    /// takes `leading_total` and folds every position's dot into one pass
+    /// over the weight rows. Run the wide path at `leading_total = 3` on
+    /// real packed `Q6_K` bytes (`output.weight`, this crate's named `Q6_K`
+    /// shape) and check it against `leading_total` separate single-position
+    /// calls through the narrow (already-tested) public entry point --
+    /// `assert_eq!`, not a tolerance, same reasoning as the `Q4_K`/`Q5_K`
+    /// tests.
+    #[cfg(feature = "q6k-int8-dot")]
+    #[test]
+    fn matmul_q6k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "output.weight",
+            proxima_gguf::types::GgmlType::Q6_K,
+        ) else {
+            return;
+        };
+
+        let leading_total = 3usize;
+        let activation: Vec<f32> = (0..leading_total)
+            .flat_map(|position| {
+                random_vec(700 + position as u64, in_dim).into_iter().map(|value| value - 0.5)
+            })
+            .collect();
+
+        let wide =
+            matmul_q6k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None).expect("wide fold call");
+        assert_eq!(wide.len(), out_dim * leading_total, "wide output is not row-major [row][position]");
+
+        for position in 0..leading_total {
+            let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
+            let narrow = matmul_q6k_q8k_f32(&weight_bytes, out_dim, activation_row).expect("narrow per-position call");
             for row in 0..out_dim {
                 assert_eq!(
                     wide[row * leading_total + position],
