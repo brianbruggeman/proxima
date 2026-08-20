@@ -152,6 +152,11 @@ name = "bench_q4k_cold_cache"
 harness = false
 required-features = ["ggml-bench", "q4k-int8-dot"]
 
+[[bench]]
+name = "bench_q4k_superblock_phases"
+harness = false
+required-features = ["ggml-bench", "q4k-int8-dot"]
+
 [[example]]
 name = "q4k_ggml_fidelity"
 required-features = ["ggml-bench", "instrument"]
