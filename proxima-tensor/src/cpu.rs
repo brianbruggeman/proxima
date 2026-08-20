@@ -4299,6 +4299,33 @@ pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
 /// dependency on `BoundOp` at all (`rows`/`k` arrive as plain integers, not
 /// a bound node), so it can chunk the one axis that is actually wide at
 /// batch-1: weight rows.
+///
+/// Worker count for the row split, resolved once and cached for the process
+/// lifetime. `std::thread::available_parallelism` is a `sysctl` on macOS —
+/// measured at 3.53 us/call, 4.768 ms across the 1350 calls one real forward
+/// pass makes through [`quantized_matmul_workers`] — so calling it per
+/// matmul is pure waste on a value that never changes at runtime.
+///
+/// `PROXIMA_MATMUL_WORKERS`, if set to a valid non-zero integer, overrides
+/// the OS-reported count; this exists to sweep worker counts on
+/// heterogeneous SoCs (e.g. Apple Silicon's P+E core split, where
+/// `available_parallelism` returns P+E but only the P cores run this
+/// workload at full speed) without a rebuild. The env var is read once via
+/// `OnceLock`, never per call — a per-call `std::env::var` allocates a
+/// `String` on every one of those 1350 calls and would contaminate the very
+/// cost this cache exists to remove. Default (unset) behavior is unchanged:
+/// `available_parallelism()`.
+fn matmul_worker_count() -> usize {
+    static WORKER_COUNT: OnceLock<usize> = OnceLock::new();
+    *WORKER_COUNT.get_or_init(|| {
+        std::env::var("PROXIMA_MATMUL_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&count| count > 0)
+            .unwrap_or_else(|| thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1))
+    })
+}
+
 fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usize> {
     // proxima-debugger diagnostic (this is the ONE choke point every
     // quantized-matmul row-batch call passes through, `Q4_K`/`Q5_K`/`Q6_K`,
@@ -4319,7 +4346,7 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
     }
     #[cfg(feature = "instrument")]
     let diag_available_parallelism_started = Instant::now();
-    let workers = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+    let workers = matmul_worker_count();
     #[cfg(feature = "instrument")]
     counter!(
         instrument::MATMUL_AVAILABLE_PARALLELISM_NANOS,

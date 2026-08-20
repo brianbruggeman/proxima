@@ -4390,3 +4390,171 @@ diverged from that section.
 bench numbers; `bind.rs` rewiring; a dedicated `Q6K` `evaluate_quantized`
 e2e test (`Q5K`'s covers the dispatch machinery, not a `Q6K`-specific
 regression).
+
+## ROW 65 — cache `available_parallelism`; sweep workers 6/8/10 on the P+E hypothesis: 8 beats 10, MEASURED
+
+**Repo:** this worktree, HEAD `388d93a`, tree clean before this row's edit.
+**Host:** Apple M1 Max, macOS, 8 P-cores + 2 E-cores (`sysctl -n
+hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` -> `8` / `2`).
+`std::thread::available_parallelism()` reports `10` (P+E summed, no tier
+distinction).
+
+### A. Cache `available_parallelism` — landed
+
+Prior code called `thread::available_parallelism()` on every
+`quantized_matmul_workers` invocation — 1350 calls per real forward pass,
+each a `sysctl`. Added `matmul_worker_count()` (`cpu.rs:4319-4326`,
+immediately above `quantized_matmul_workers`), a `OnceLock<usize>` resolved
+once for the process lifetime. `quantized_matmul_workers` now calls it
+instead of the raw `available_parallelism()`.
+
+**Measured, before/after, same instrumented counter
+(`MATMUL_AVAILABLE_PARALLELISM_NANOS`), same 1350-call forward pass:**
+
+| | total over 1350 calls | per-call |
+|---|---|---|
+| before (uncached) | 4.768 ms | 3.53 us |
+| after (cached, this row, mean of 9 runs) | 0.052 ms | 0.038 ns effective |
+
+A ~98.9% reduction in that specific accounted cost, MEASURED via the
+existing `instrument` counter, not estimated.
+
+### B. Worker-count override — landed as override only, default unchanged
+
+Added `PROXIMA_MATMUL_WORKERS` env override inside the same `OnceLock`
+closure — read exactly once (never per-call: a per-call `std::env::var`
+allocates a `String` 1350 times and would contaminate the very cost A
+removes). Unset -> unchanged behavior (`available_parallelism()`).
+
+### Hypothesis under test
+
+`recv_wait_ms` (42.9 ms) + unattributed residual (59.85 ms) from the prior
+session's decomposition is straggler-shaped; `available_parallelism()`
+returning 10 (8P+2E) means every dispatch waits on the 2 slow E-cores.
+Corroborating: llama.cpp on this same box measures FASTER at `-t 8` (150.1
+ms) than `-t 10` (205.7 ms).
+
+### Sweep: real forward, `PROXIMA_PREFAULT=1`, `--features std`, release,
+`test-threads=1`, order alternated 10/8/6 x3 (9 runs total, driver:
+`bind::real_openchat_file::runs_one_real_forward_pass_and_greedy_picks_a_real_token`)
+
+**Token every run, every arm: `2651` / `"known"`. 9/9 `test result: ok. 1
+passed`. EXIT=0 every run.**
+
+**Host loadout (pasted next to every number, not summarized away):**
+`uptime` load average 2.7-5.4 across the 9 runs (not a quiet box);
+`mediaanalysisd` (a macOS system indexing daemon, single-process) at
+52-95% CPU throughout, plus a local background service at 17-43%
+intermittently.
+Present identically across all three arms since order was alternated, so
+drift is spread rather than confounding one arm.
+
+| arm (workers) | forward wall (mean, 3 runs) | range | CoV | spawn_ms | recv_wait_ms | own_chunk_ms |
+|---|---|---|---|---|---|---|
+| **10 (default)** | 356.40 ms | 353.19-359.12 ms | 0.69% | 19.96 | 41.03 | 236.78 |
+| **8 (override)** | **346.55 ms** | 341.13-350.65 ms | 1.15% | **16.42** | **36.57** | 236.01 |
+| 6 (override) | 397.84 ms | 392.33-407.93 ms | 1.79% | 10.62 | 36.46 | 292.11 |
+
+Delta, 8 vs 10: **-9.86 ms, -2.77%**, forward wall. Delta, 6 vs 10: +41.44
+ms, +11.63% (slower — too few cores, `own_chunk_ms` rises 23% because each
+worker does more per-row work).
+
+**Per-shape `ns_per_mac`, mean of 3 runs each, from `DIAG q4k_shape_table`:**
+
+| shape (rows x k) | w=10 | w=8 | w=6 |
+|---|---|---|---|
+| 1024x4096 | 0.018141 | **0.017952** | 0.019449 |
+| 4096x4096 | 0.009654 | **0.008929** | 0.010061 |
+| 4096x14336 | 0.007084 | **0.006849** | 0.007894 |
+| 14336x4096 | 0.006154 | **0.006087** | 0.007286 |
+
+`w=8` wins on **every one of the 4 shapes**, not just the aggregate —
+12/12 individual runs (3 runs x 4 shapes) show `w=8 < w=10` on
+`ns_per_mac`. This is the strongest evidence in this row: the aggregate
+forward-wall delta (2.77%, ~2x the combined CoV) is corroborated by a
+shape-level signal an order of magnitude more consistent than the noise
+floor.
+
+### Mechanism (why 8 wins, not just that it does)
+
+`spawn_ms` drops 17.7% (19.96 -> 16.42 ms) and `recv_wait_ms` drops 10.9%
+(41.03 -> 36.57 ms) going from 10 to 8 workers — fewer threads to spawn
+per dispatch and fewer stragglers to wait on. `own_chunk_ms` (actual
+compute) is FLAT between 10 and 8 (236.78 vs 236.01 ms) — the 2 extra
+"workers" at `w=10` are the 2 E-cores, doing E-core-speed work that does
+not move the compute-time needle but does cost coordination on every one
+of 1350 dispatches. At `w=6`, coordination drops further (spawn 10.62,
+recv_wait 36.46) but compute rises sharply (292.11 ms, +23.5% vs w=8)
+because now only 6 P-cores worth of parallelism is available and the
+per-worker row count grows — net loss.
+
+**Result: the hypothesis holds. `available_parallelism()`'s 10 (8P+2E) is
+measurably worse than the P-core count (8) on this SoC — not because 8
+cores are individually faster, but because dispatching to the 2 E-cores
+adds coordination overhead (spawn+recv_wait) without adding usable
+compute.**
+
+### Selection rule — data only, no rule landed this row per the task's
+instruction
+
+The right rule is P-core count, not a hardcoded 8. `hw.perflevel0.logicalcpu`
+is available via `sysctlbyname` and IS what this data says to use.
+Checked both crates already in the dependency graph:
+
+- **`rustix` 1.1.x (workspace dep, `Cargo.toml:196`):** grepped the vendored
+  source (`~/.cargo/registry/.../rustix-1.1.4/`) for `perflevel` and
+  `sysctlbyname` — zero matches. Rustix does not expose Apple's
+  `sysctlbyname`-by-name surface; it is not the mechanism.
+- **`libc` 0.2 (already a `proxima-tensor` dependency, `Cargo.toml:87,109`,
+  optional/std-gated):** `libc::sysctlbyname` exists on the Apple target
+  (`unix/bsd/apple/mod.rs:4409`, `extern "C"`). This is the mechanism: an
+  unsafe `sysctlbyname(c"hw.perflevel0.logicalcpu", ...)` call, parsed as
+  `u32`, would need to live behind the same `std`-gated surface
+  `available_parallelism()` already requires (this file's `use std::thread`
+  at `cpu.rs:105` is already std-only). Not implemented this row — the task
+  asked for data, not a landed rule.
+
+### Gates
+
+- `cargo nextest run -p proxima-tensor --no-fail-fast`: **328 tests run,
+  328 passed, 3 skipped.** Command re-proves as-is.
+- `cargo clippy -p proxima-tensor --all-targets -- -D warnings`: clean,
+  exit 0.
+- `bash scripts/proxima-tensor-gate.sh`: **19 passed, 0 failed.**
+
+**Re-prove command (this row's forward-wall and per-shape numbers):**
+```
+PROXIMA_PREFAULT=1 PROXIMA_MATMUL_WORKERS=8 cargo test -p proxima-model-interop \
+  --release --lib --features std -- --ignored --exact \
+  bind::real_openchat_file::runs_one_real_forward_pass_and_greedy_picks_a_real_token \
+  --nocapture --test-threads=1
+```
+Swap `PROXIMA_MATMUL_WORKERS` for `10`/`6`/unset to reproduce the other
+arms. Token (`2651`/`"known"`), `forward_wall_clock`, `matmul_dispatch`
+line, and `q4k_shape_table` all print to stdout — same artifact this row's
+numbers were read from, nothing paraphrased.
+
+### Bar
+
+llama.cpp forward on this box: **205.7 ms** (`-t 8`, prior session,
+external instrument, not re-measured this row — flagged DERIVED, not
+re-verified here). Best arm this row (`w=8`, 346.55 ms mean): **1.69x
+slower than llama.cpp.** `w=10` (prior default): 1.73x slower. The
+2.77% win narrows the gap but does not close it — the residual 33.5%
+"unattributed straggler tail" from the prior session's decomposition is
+partially explained (E-core dispatch cost) but not eliminated; `own_chunk_ms`
+at `w=8` (236.01 ms) is still the dominant single line and unmoved by this
+row's change.
+
+**Not landed, named not buried:** the P-core-count selection rule itself
+(data says use it; owner decides); an `sysctlbyname`-based
+`hw.perflevel0.logicalcpu` read (would need its own log row: allocation
+budget, error path for non-Apple targets, and a compile-time gate per
+platform); a rebench of the llama.cpp `-t 8` bar in this same session
+(carried forward from the prior session as DERIVED).
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+|---|---|---|---|---|
+| 2026-08-20 | cache `available_parallelism` in `OnceLock` | -98.9% on `MATMUL_AVAILABLE_PARALLELISM_NANOS` (4.768ms -> 0.052ms over 1350 calls) | measured every run, 9/9 | load avg 2.7-5.4, mediaanalysisd 52-95% |
+| 2026-08-20 | worker override, swept 6/8/10 | **8: -2.77% forward wall vs 10 (KEPT as override, default unchanged). 6: +11.63% vs 10 (documented, not landed as default)** | 0.69-1.79% CoV, 3 runs/arm | same as above |
