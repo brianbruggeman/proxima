@@ -131,6 +131,15 @@ pub struct CohortConfig {
     pub spin_polls: u32,
 }
 
+impl CohortConfig {
+    /// measured default spin budget (this module's doc): 2000 polls hide a
+    /// round-trip wake at 8 members; 200 measured worse. named rather than a
+    /// literal inside `CohortBuilder::default` so a consumer that surfaces
+    /// this knob (`proxima_tensor::sized::COHORT_SPIN_POLLS`) reads the same
+    /// number instead of copying it.
+    pub const DEFAULT_SPIN_POLLS: u32 = 2_000;
+}
+
 /// fluent builder for [`CohortConfig`]. `.build()` yields the immutable
 /// config; [`ThreadCohort::from_config`] accepts that config directly, so
 /// callers can round-trip through data with no divergent path.
@@ -144,7 +153,7 @@ impl Default for CohortBuilder {
     fn default() -> Self {
         Self {
             members: NonZeroUsize::MIN,
-            spin_polls: 2_000,
+            spin_polls: CohortConfig::DEFAULT_SPIN_POLLS,
         }
     }
 }

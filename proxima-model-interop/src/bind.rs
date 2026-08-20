@@ -525,15 +525,14 @@ mod real_openchat_file {
             }
         }
 
-        // DIAGNOSTIC (proxima-debugger, remove before landing): A/B toggle
-        // for `crate::loader::prefault` at the loader's own phase boundary
-        // -- bind just finished (every packed tensor's byte range is now
-        // known), forward has not started. `PROXIMA_PREFAULT=1` warms every
-        // page of the mmap through the shared background pool before the
-        // timed forward runs; unset skips it entirely (the explicit-opt-in
-        // this module's own doc names: a caller serving many small models
-        // should not pay to warm a mapping it will only read a slice of).
-        let prefault_enabled = std::env::var("PROXIMA_PREFAULT").is_ok_and(|value| value == "1");
+        // `crate::loader::prefault` at the loader's own phase boundary --
+        // bind just finished (every packed tensor's byte range is now known),
+        // forward has not started. The knob is `ModelPolicy::prefault`
+        // (`prefault = true` in a model TOML, or `PROXIMA_MODEL_PREFAULT=1`
+        // with `--features config`), resolved once through conflaguration;
+        // the ad-hoc `std::env::var("PROXIMA_PREFAULT")` this replaces was
+        // measurement scaffolding and is gone.
+        let prefault_enabled = crate::policy::active().prefault;
         let diag_minflt_prefault_before = instrument::ru_minflt();
         let prefault_start = std::time::Instant::now();
         if prefault_enabled {
