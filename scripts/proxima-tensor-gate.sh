@@ -60,6 +60,15 @@ declare -a cells=(
     "portable check|cargo check -p proxima-tensor --target ${PORTABLE_TARGET}"
 
     # tiers. `alloc` alone is the no_std floor this crate claims.
+    #
+    # WHAT THESE TWO CELLS DO NOT COVER: `pub mod cpu` is `#[cfg(feature =
+    # "std")]` (`src/lib.rs:204`), so an `alloc`-only build compiles ZERO lines
+    # of `cpu.rs` -- the largest file in the crate and the one carrying every
+    # kernel. Three separate agents in one session read these cells green and
+    # reported them as coverage for a `cpu.rs` change; they prove the crate's
+    # alloc tier still builds, and nothing whatsoever about the kernels. The
+    # cell that actually compiles `cpu.rs` against a non-host arch is
+    # `portable check` above (default features, so `std`, so `cpu`).
     "alloc tier check|cargo check -p proxima-tensor --no-default-features --features alloc"
     "alloc tier clippy|cargo clippy -p proxima-tensor --no-default-features --features alloc -- -D warnings"
     "std without config|cargo clippy -p proxima-tensor --all-targets --no-default-features --features std -- -D warnings"
