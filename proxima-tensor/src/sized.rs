@@ -245,6 +245,16 @@ pub const WIDTH_TILE_VECS: usize = 4;
 #[cfg(feature = "std")]
 pub const DOT_LANES: usize = 8;
 
+/// Spin budget, in `core::hint::spin_loop()` polls, a cohort member burns
+/// waiting for the next round to open before it parks. prime's own default
+/// is 2000, sized for a cohort whose rounds are far apart. A forward pass
+/// opens rounds back to back -- four call sites (`cpu`'s elementwise,
+/// transpose, matmul-rows and quantize dispatches) -- separated only by the
+/// leader's serial work, so a member that parks pays a futex wake the spin
+/// would have avoided. Held at prime's default until the A/B measures.
+#[cfg(feature = "std")]
+pub const COHORT_SPIN_POLLS: u32 = generated::COHORT_SPIN_POLLS;
+
 /// Output rows computed per call of `gemm_tile_neon` -- ggml tinyBLAS's
 /// `RM`. Instantiates a `const ROWS: usize` kernel generic
 /// (`gemm_tile_neon::<TILE_ROWS>`) -- cannot be runtime config at any
@@ -286,6 +296,7 @@ mod tests {
         assert_eq!(MIN_MACS_PER_CHUNK, 500_000);
         assert_eq!(MIN_QUANTIZE_BLOCKS_FOR_DISPATCH, 200);
         assert_eq!(MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH, 64_000);
+        assert_eq!(COHORT_SPIN_POLLS, 2_000);
     }
 
     #[cfg(target_arch = "aarch64")]
