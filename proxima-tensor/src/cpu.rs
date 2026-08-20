@@ -72,6 +72,16 @@ use core::arch::aarch64::{
     vaddvq_s32, vandq_u8, vdupq_n_s32, vdupq_n_u8, vld1q_s8, vld1q_u8, vreinterpretq_s8_u8,
     vshrq_n_u8,
 };
+// `dot_q4k_q8k_block_neon_dotprod`'s mins-correction path: unpack the 6-bit
+// scale/min codes once per super-block (`vld1_u32`/`vreinterpret_u8_u32`/
+// `vmovl_u8`), then reduce `bsums . mins` with pairwise-add + widening
+// multiply (`vpaddq_s16`/`vmull_s16`/`vget_low_s16`/`vget_high_s16`/
+// `vaddq_s32`) instead of the auto-vectorized scalar loop this replaced.
+#[cfg(all(target_arch = "aarch64", feature = "q4k-int8-dot"))]
+use core::arch::aarch64::{
+    vaddq_s32, vget_high_s16, vget_low_s16, vld1_u32, vld1q_s16, vmovl_u8, vmull_s16,
+    vpaddq_s16, vreinterpret_u8_u32, vreinterpretq_s16_u16,
+};
 // `dot_q5k_q8k_block_neon_dotprod`/`dot_q6k_q8k_block_neon_dotprod`'s extra
 // intrinsics beyond the `Q4_K` set above -- both need to OR a shifted
 // high-bit plane into the low nibble, which `Q4_K` (no high-bit plane at
@@ -5024,13 +5034,20 @@ unsafe fn sdot_s32(acc: core::arch::aarch64::int32x4_t, a: core::arch::aarch64::
 }
 
 /// [`dot_q4k_q8k_block_scalar`]'s mechanism, `vdotq_s32`-accelerated:
-/// identical per-sub-block structure (unpack scale/min via
-/// `get_scale_min_k4`, dot 32 nibbles against 32 `Q8_K` activations, scale,
-/// accumulate; mins correction identical), but the 32-nibble dot is two
-/// 16-lane `sdot_s32` calls (`ggml_vec_dot_q4_K_q8_K`'s `__ARM_NEON` arm,
-/// `arch/arm/quants.c:2408-2427`) instead of a 32-iteration scalar loop --
-/// low/high nibbles split in-register via `vandq_u8`/`vshrq_n_u8`, never
-/// written to memory.
+/// identical per-sub-block structure (unpack scale/min, dot 32 nibbles
+/// against 32 `Q8_K` activations, scale, accumulate; mins correction
+/// identical), but the 32-nibble dot is two 16-lane `sdot_s32` calls
+/// (`ggml_vec_dot_q4_K_q8_K`'s `__ARM_NEON` arm, `arch/arm/quants.c:2408-
+/// 2427`) instead of a 32-iteration scalar loop -- low/high nibbles split
+/// in-register via `vandq_u8`/`vshrq_n_u8`, never written to memory. The
+/// scale/min codes are unpacked ONCE per super-block by the same bit-trick
+/// ggml's NEON arm uses (`arch/arm/quants.c:2367-2381`) rather than calling
+/// [`proxima_gguf::quant::q4_k::get_scale_min_k4`] per sub-block -- same
+/// identity as that function (see its own doc), just the vectorized route
+/// instead of the scalar one. The mins correction (`sum(bsums[i] *
+/// min_code[i])`) is reduced with `vpaddq_s16`/`vmull_s16`/`vaddvq_s32`
+/// mirroring `arch/arm/quants.c:2380-2387`, in place of the auto-vectorized
+/// scalar loop this replaced.
 ///
 /// # Safety
 /// Caller guarantees `FEAT_DotProd`; `weight_block.len() ==
@@ -5049,13 +5066,10 @@ unsafe fn dot_q4k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
     let activation_scale = f32::from_le_bytes(d_bytes);
     let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
 
-    let mut mins_correction = 0i32;
-    for sub_block in 0..Q4K_SUB_BLOCKS {
-        let (_, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
-        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
-        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
-        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
-    }
+    // SAFETY: caller-guaranteed FEAT_DotProd (this fn's own doc);
+    // `mins_correction_neon`'s own preconditions (`scales`/`bsums` lengths)
+    // are met by the fixed-size array and the slice sized above.
+    let (scales_unpacked, mins_correction) = unsafe { mins_correction_neon(&scales, bsums) };
 
     // SAFETY: caller-guaranteed FEAT_DotProd; `q4_ptr`/`q8_ptr` each walk
     // exactly `Q4K_BLOCK_ELEMENTS / 2` / `Q4K_BLOCK_ELEMENTS` bytes across
@@ -5077,22 +5091,78 @@ unsafe fn dot_q4k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
             let q8b0 = vld1q_s8(q8_base.add(j * 64));
             let q8b1 = vld1q_s8(q8_base.add(j * 64 + 16));
             let partial_lo = sdot_s32(sdot_s32(mzero, lo0, q8b0), lo1, q8b1);
-            let scale_lo = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j, &scales).0;
-            sumi1 += vaddvq_s32(partial_lo) * i32::from(scale_lo);
+            sumi1 += vaddvq_s32(partial_lo) * i32::from(scales_unpacked[2 * j]);
 
             let hi0 = vreinterpretq_s8_u8(vshrq_n_u8(q4bits0, 4));
             let hi1 = vreinterpretq_s8_u8(vshrq_n_u8(q4bits1, 4));
             let q8b2 = vld1q_s8(q8_base.add(j * 64 + 32));
             let q8b3 = vld1q_s8(q8_base.add(j * 64 + 48));
             let partial_hi = sdot_s32(sdot_s32(mzero, hi0, q8b2), hi1, q8b3);
-            let scale_hi = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j + 1, &scales).0;
-            sumi2 += vaddvq_s32(partial_hi) * i32::from(scale_hi);
+            sumi2 += vaddvq_s32(partial_hi) * i32::from(scales_unpacked[2 * j + 1]);
         }
 
         let d = activation_scale * d_weight;
         let dmin = activation_scale * dmin_weight;
         d.mul_add((sumi1 + sumi2) as f32, -(dmin * mins_correction as f32))
     }
+}
+
+/// [`dot_q4k_q8k_block_neon_dotprod`]'s scale-unpack and mins-correction
+/// step, factored out so the test below can exercise it in isolation
+/// against [`proxima_gguf::quant::q4_k::get_scale_min_k4`]'s scalar route
+/// to the identical quantity. Unpacks all 8 sub-blocks' 6-bit scale/min
+/// codes ONCE via the same bit-trick ggml's NEON arm uses
+/// (`arch/arm/quants.c:2367-2381`), then reduces `sum(bsums[i] *
+/// min_code[i])` with `vpaddq_s16`/`vmull_s16`/`vaddvq_s32`
+/// (`arch/arm/quants.c:2380-2387`) in place of a scalar loop.
+///
+/// Returns `(scales_unpacked, mins_correction)`: `scales_unpacked[i]` is
+/// sub-block `i`'s masked scale byte, matching
+/// `get_scale_min_k4(i, scales).0`; `mins_correction` is the widened `i32`
+/// reduction, matching `sum(get_scale_min_k4(i, scales).1 as i32 *
+/// bsum_pair_sum(i) as i32)` for `i in 0..Q4K_SUB_BLOCKS`.
+///
+/// # Safety
+/// Caller guarantees `FEAT_DotProd`; `bsums.len() == Q8K_BSUMS_COUNT * 2`
+/// (16 `i16`s) so the two 8-lane `vld1q_s16` loads stay in bounds.
+#[cfg(all(q4k_dotprod, feature = "q4k-int8-dot"))]
+unsafe fn mins_correction_neon(scales: &[u8; Q4K_SCALE_BYTES], bsums: &[u8]) -> ([u8; Q4K_SUB_BLOCKS], i32) {
+    // Same masks as `get_scale_min_k4`'s scalar bit-trick, applied once to
+    // the whole 12-byte field instead of once per sub-block per call.
+    const KMASK1: u32 = 0x3f3f_3f3f;
+    const KMASK2: u32 = 0x0f0f_0f0f;
+    const KMASK3: u32 = 0x0303_0303;
+    let word_0 = u32::from_le_bytes([scales[0], scales[1], scales[2], scales[3]]);
+    let word_1 = u32::from_le_bytes([scales[4], scales[5], scales[6], scales[7]]);
+    let word_2 = u32::from_le_bytes([scales[8], scales[9], scales[10], scales[11]]);
+    let mins_lo = word_1 & KMASK1;
+    let mins_hi = ((word_2 >> 4) & KMASK2) | (((word_1 >> 6) & KMASK3) << 4);
+    let scale_hi = (word_2 & KMASK2) | (((word_0 >> 6) & KMASK3) << 4);
+    let scale_lo = word_0 & KMASK1;
+    // `scales_unpacked[sub_block]` is that sub-block's masked scale byte,
+    // matching `get_scale_min_k4(sub_block, &scales).0` for every
+    // `sub_block in 0..Q4K_SUB_BLOCKS`.
+    let mut scales_unpacked = [0u8; Q4K_SUB_BLOCKS];
+    scales_unpacked[..4].copy_from_slice(&scale_lo.to_le_bytes());
+    scales_unpacked[4..].copy_from_slice(&scale_hi.to_le_bytes());
+
+    // SAFETY: caller-guaranteed FEAT_DotProd; caller-guaranteed
+    // `bsums.len() == 32` bytes (16 `i16`s), so the two 8-lane `vld1q_s16`
+    // loads below stay in bounds.
+    let mins_correction = unsafe {
+        let mins_words = [mins_lo, mins_hi];
+        let mins8 = vld1_u32(mins_words.as_ptr());
+        let mins = vreinterpretq_s16_u16(vmovl_u8(vreinterpret_u8_u32(mins8)));
+        let bsums_ptr = bsums.as_ptr().cast::<i16>();
+        let q8sums = vpaddq_s16(vld1q_s16(bsums_ptr), vld1q_s16(bsums_ptr.add(8)));
+        let mins_product = vaddq_s32(
+            vmull_s16(vget_low_s16(q8sums), vget_low_s16(mins)),
+            vmull_s16(vget_high_s16(q8sums), vget_high_s16(mins)),
+        );
+        vaddvq_s32(mins_product)
+    };
+
+    (scales_unpacked, mins_correction)
 }
 
 /// Horizontal sum of an `__m256i` holding eight packed `i32` lanes down to
@@ -11472,6 +11542,68 @@ mod tests {
         assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
     }
 
+    /// [`mins_correction_neon`] (the explicit NEON mins-correction path
+    /// this landing introduced) against the scalar route through
+    /// [`proxima_gguf::quant::q4_k::get_scale_min_k4`] it replaced -- bit
+    /// exact, not approximate (guiding-principles: the mins correction is
+    /// an integer computation widened to `i32`, so exact equality is
+    /// achievable and is the bar). Uses the FIRST `Q4_K` super-block of a
+    /// real weight tensor read straight out of the real openchat-3.5-1210
+    /// `Q4_K_S` GGUF file (principle 9: real-world data), against a real
+    /// (non-zero) quantized activation super-block, so the scale/min bit
+    /// patterns and `bsums` are whatever ggml's own quantizer actually
+    /// produced -- not a synthetic stand-in.
+    #[cfg(all(q4k_dotprod, feature = "q4k-int8-dot"))]
+    #[test]
+    fn mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gguf_bytes() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, _in_dim, _out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "blk.0.attn_q.weight",
+            proxima_gguf::types::GgmlType::Q4_K,
+        ) else {
+            eprintln!("blk.0.attn_q.weight is not Q4_K in this file; test skipped, not faked");
+            return;
+        };
+
+        let mut scales = [0u8; Q4K_SCALE_BYTES];
+        scales.copy_from_slice(&weight_bytes[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+
+        let activation: Vec<f32> = random_vec(29, Q4K_BLOCK_ELEMENTS).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let mut activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation super-block");
+        let bsums = &activation_q8k[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+        let mut expected_mins_correction = 0i32;
+        for sub_block in 0..Q4K_SUB_BLOCKS {
+            let (expected_scale, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+            assert_eq!(
+                // SAFETY: `q4k_dotprod` cfg guarantees `FEAT_DotProd`; `bsums` is
+                // exactly `Q8K_BSUMS_COUNT * 2` bytes from the fixed-size buffer above.
+                unsafe { mins_correction_neon(&scales, bsums) }.0[sub_block],
+                expected_scale,
+                "scales_unpacked[{sub_block}] diverged from the scalar get_scale_min_k4 route"
+            );
+            let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+            let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+            expected_mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+        }
+
+        // SAFETY: `q4k_dotprod` cfg guarantees `FEAT_DotProd`; `bsums` is
+        // exactly `Q8K_BSUMS_COUNT * 2` bytes from the fixed-size buffer above.
+        let (_, actual_mins_correction) = unsafe { mins_correction_neon(&scales, bsums) };
+        assert_eq!(
+            actual_mins_correction, expected_mins_correction,
+            "NEON mins_correction diverged from the scalar get_scale_min_k4 route -- nonzero delta, faster wrong kernel"
+        );
+    }
+
     /// Same shape as [`matmul_program`] (`[rows, k] x [k, 1] -> [rows, 1]`,
     /// `n = 1` — batch-1, [`matmul_q4k_f32`]'s own documented target shape),
     /// weight declared `UInt8` instead of `Float32`: the program
@@ -11612,7 +11744,7 @@ mod tests {
     /// file does not exist on this host, so these tests degrade to a
     /// no-op on a machine without the real model file rather than a hard
     /// failure.
-    #[cfg(any(feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
     fn real_gguf_header(path: &std::path::Path) -> Option<(proxima_gguf::pipe::ParsedGguf, u64, std::fs::File)> {
         use std::io::{Read, Seek, SeekFrom};
 
@@ -11670,7 +11802,7 @@ mod tests {
     /// `Q4_K_S` doesn't guarantee a given tensor lands at a given codec on
     /// every quantizer version -- reported, not faked, same stance
     /// `bench_q4k_matmul.rs` takes).
-    #[cfg(any(feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
     fn real_tensor_bytes(
         file: &mut std::fs::File,
         parsed: &proxima_gguf::pipe::ParsedGguf,
@@ -11697,7 +11829,7 @@ mod tests {
         Some((buf, in_dim, out_dim))
     }
 
-    #[cfg(any(feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
     const REAL_OPENCHAT_GGUF_PATH: &str =
         "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
