@@ -4693,6 +4693,7 @@ dependencies = [
  "half",
  "libc",
  "prime",
+ "proxima-clock",
  "proxima-gguf",
  "proxima-primitives",
  "proxima-telemetry",

@@ -103,9 +103,12 @@ fn main() {
         let chunk_mean_ns = if totals.chunk_count == 0 {
             0.0
         } else {
-            totals.chunk_nanos_sum as f64 / totals.chunk_count as f64
+            instrument::ticks_to_nanos(totals.chunk_ticks_sum) as f64 / totals.chunk_count as f64
         };
-        let busy = instrument::worker_busy_snapshot();
+        // `worker_busy_snapshot` returns raw tick deltas (`instrument.rs`'s
+        // own doc) -- converted to nanoseconds once here, not per element.
+        let busy: Vec<u64> =
+            instrument::worker_busy_snapshot().into_iter().map(instrument::ticks_to_nanos).collect();
         let busy_count = busy.len();
         let busy_sum: u64 = busy.iter().sum();
         let busy_min = busy.iter().copied().min().unwrap_or(0);
@@ -121,10 +124,11 @@ fn main() {
         // utilization: summed busy time versus the region wall clock stretched
         // across every worker that claimed a chunk — 1.0 means every worker was
         // busy for the entire parallel region, no idling.
-        let utilization = if totals.node_nanos == 0 || busy_count == 0 {
+        let node_nanos = instrument::ticks_to_nanos(totals.node_ticks);
+        let utilization = if node_nanos == 0 || busy_count == 0 {
             0.0
         } else {
-            busy_sum as f64 / (totals.node_nanos as f64 * busy_count as f64)
+            busy_sum as f64 / (node_nanos as f64 * busy_count as f64)
         };
         let busy_per_mac = if kernel.mac_ops == 0 { 0.0 } else { busy_sum as f64 / kernel.mac_ops as f64 };
         println!(
@@ -138,22 +142,22 @@ fn main() {
              serial_finish_ns={} serial_bookkeeping_ns={} serial_sequential_compute_ns={} \
              serial_evaluate_parallel_ns={} serial_evaluate_parallel_calls={}",
             totals.parallel_nodes,
-            totals.node_nanos,
-            totals.spawn_nanos,
-            totals.join_nanos,
+            node_nanos,
+            instrument::ticks_to_nanos(totals.spawn_ticks),
+            instrument::ticks_to_nanos(totals.join_ticks),
             totals.chunk_count,
-            totals.chunk_nanos_min,
-            totals.chunk_nanos_max,
+            instrument::ticks_to_nanos(totals.chunk_ticks_min),
+            instrument::ticks_to_nanos(totals.chunk_ticks_max),
             kernel.mac_ops,
             kernel.operand_loads,
-            serial.prepare_nanos,
-            serial.alloc_nanos,
-            serial.split_nanos,
-            serial.slice_carve_nanos,
-            serial.finish_nanos,
-            serial.bookkeeping_nanos,
-            serial.sequential_compute_nanos,
-            serial.evaluate_parallel_nanos,
+            instrument::ticks_to_nanos(serial.prepare_ticks),
+            instrument::ticks_to_nanos(serial.alloc_ticks),
+            instrument::ticks_to_nanos(serial.split_ticks),
+            instrument::ticks_to_nanos(serial.slice_carve_ticks),
+            instrument::ticks_to_nanos(serial.finish_ticks),
+            instrument::ticks_to_nanos(serial.bookkeeping_ticks),
+            instrument::ticks_to_nanos(serial.sequential_compute_ticks),
+            instrument::ticks_to_nanos(serial.evaluate_parallel_ticks),
             serial.evaluate_parallel_calls,
         );
     }

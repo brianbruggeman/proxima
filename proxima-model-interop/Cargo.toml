@@ -23,6 +23,11 @@ std = ["proxima-gguf/std", "proxima-tensor/std", "interop-bgpool"]
 # stays out of the alloc-only floor even though every current `std` build
 # wants it (loader::prefault is the only std-gated consumer today).
 interop-bgpool = ["dep:prime", "dep:proxima-core"]
+# passthrough to `proxima-tensor/instrument` -- opt-in so the acceptance
+# forward-pass test (`bind::real_openchat_file`) can also be built and run
+# WITHOUT the per-chunk/per-node tick counters compiled in at all, to answer
+# whether the instrumentation itself is part of what gets measured.
+instrument = ["proxima-tensor/instrument"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -38,6 +43,6 @@ workspace = true
 
 [dev-dependencies]
 half = { version = "2.7.1", default-features = false }
-proxima-tensor = { path = "../proxima-tensor", features = ["config", "std", "instrument"] }
+proxima-tensor = { path = "../proxima-tensor", features = ["config", "std"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", features = ["gguf"] }
 rustix.workspace = true

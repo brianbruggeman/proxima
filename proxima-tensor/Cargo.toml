@@ -32,7 +32,11 @@ ggml-bench = ["std"]
 # tier. Counters are incremented in a local accumulator inside the loop and
 # committed ONCE per bound-op call (never per element), so the feature does
 # not perturb the thing it measures at any tier that has it off.
-instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc"]
+# ticks come from `proxima-clock::Ticks` (raw hardware counter units) rather
+# than `std::time::Instant`/`Duration` — see `instrument::read_ticks`'s doc
+# for why: a `Duration` costs a multiply/divide per read on Darwin, exactly
+# the conversion `proxima-clock`'s own doc forbids on a hot path.
+instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc", "dep:proxima-clock"]
 # routes `cpu::run_chunks_threaded`/`cpu::matmul_rows_threaded` through
 # `prime`'s `ProximaBackgroundPool` (crossbeam-deque work-stealing, built
 # once and reused) instead of spawning fresh `std::thread::scope` threads
@@ -97,6 +101,7 @@ half = { version = "2.7.1", default-features = false }
 # rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
 libc = { workspace = true, optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par", "runtime-prime-cohort"], optional = true }
+proxima-clock = { version = "0.1.0", path = "../proxima-clock", default-features = false, optional = true }
 # Q4_K block layout/dequant primitives for the quantized GEMM row source
 # (`cpu::dot_q4k_f32`/`cpu::matmul_q4k_f32`) — reuse-first: `proxima-gguf`
 # already ships and tests these against real weights, so this crate never

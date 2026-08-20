@@ -126,10 +126,14 @@ fn main() {
 
         let totals = instrument::totals();
         let serial = instrument::serial_totals();
-        let busy_samples = instrument::worker_busy_snapshot();
+        let sequential_compute_nanos = instrument::ticks_to_nanos(serial.sequential_compute_ticks);
+        // raw tick deltas (`instrument::read_ticks`'s doc), converted once
+        // here rather than per element.
+        let busy_samples: Vec<u64> =
+            instrument::worker_busy_snapshot().into_iter().map(instrument::ticks_to_nanos).collect();
 
         let (busy_ns, busy_workers, busy_min, busy_max, busy_mean, busy_stddev) = if busy_samples.is_empty() {
-            let sequential = serial.sequential_compute_nanos;
+            let sequential = sequential_compute_nanos;
             (sequential, 1u64, sequential, sequential, sequential as f64, 0.0)
         } else {
             let sum: u64 = busy_samples.iter().sum();
@@ -145,7 +149,7 @@ fn main() {
         // own report of how much the host stole.
         let cpu_samples = instrument::worker_cpu_snapshot();
         let cpu_ns: u64 = if cpu_samples.is_empty() {
-            serial.sequential_compute_nanos
+            sequential_compute_nanos
         } else {
             cpu_samples.iter().sum()
         };
@@ -159,7 +163,7 @@ fn main() {
              busy_stddev_ns={busy_stddev:.1} busy_per_mac={busy_per_mac:.6} \
              cpu_ns={cpu_ns} cpu_per_mac={cpu_per_mac:.6} host_steal={host_steal:.4} \
              serial_sequential_compute_ns={}",
-            totals.mac_ops, totals.operand_loads, serial.sequential_compute_nanos,
+            totals.mac_ops, totals.operand_loads, sequential_compute_nanos,
         );
     }
 }
