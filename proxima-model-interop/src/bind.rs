@@ -60,17 +60,24 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
     }
 }
 
-/// Zero-copy counterpart to [`gguf_tensor_as_f32`] for a `Q4_K` tensor:
+/// Zero-copy counterpart to [`gguf_tensor_as_f32`] for a k-quant tensor:
 /// borrows `name`'s raw packed bytes straight out of `file_bytes` and wraps
-/// them as [`proxima_tensor::cpu::QuantizedBlock::Q4K`], instead of
-/// dequantizing into an owned `Vec<f32>` first. No copy, no allocation --
-/// exactly the bytes GGUF already stored.
+/// them as the matching [`proxima_tensor::cpu::QuantizedBlock`] variant,
+/// instead of dequantizing into an owned `Vec<f32>` first. No copy, no
+/// allocation -- exactly the bytes GGUF already stored.
+///
+/// One function over `Q4_K`/`Q5_K`/`Q6_K` rather than three near-identical
+/// ones: the three differ only in which variant carries the byte range, and
+/// every k-quant super-block is stored the same way -- a contiguous
+/// row-major `[out, in]` byte run whose per-row period is a function of the
+/// type alone. A per-type entry point would be that `match` arm rewritten as
+/// a signature, three times over.
 ///
 /// This works without a transpose, unlike `gguf_tensor_as_f32`'s callers
 /// for a 2D projection weight (see `transpose_out_in_to_in_out` in this
-/// crate's real-forward-pass test): `QuantizedBlock::Q4K` bypasses the
-/// interpreter's strided operand machinery entirely --
-/// `proxima_tensor::cpu::matmul_q4k_f32` walks `weights` as `rows`
+/// crate's real-forward-pass test): a packed [`proxima_tensor::cpu::QuantizedBlock`]
+/// bypasses the interpreter's strided operand machinery entirely -- the
+/// `proxima_tensor::cpu::matmul_q4k_f32` family walks `weights` as `rows`
 /// contiguous per-row byte chunks and dot-products each row against the
 /// activation directly, so it only ever needs GGUF's native on-disk
 /// row-major `[out, in]` layout, the layout this function hands through
@@ -81,24 +88,27 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// [`InteropError::UnknownTensor`] if `name` isn't in `parsed.tensors`;
 /// [`InteropError::Gguf`] if the tensor's declared byte range doesn't fit
 /// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] if `name`'s
-/// tensor isn't `Q4_K` -- callers route anything else through
-/// [`gguf_tensor_as_f32`] instead, which is what this crate has a decoder
-/// for.
+/// tensor is not one of `Q4_K`/`Q5_K`/`Q6_K` -- callers route anything else
+/// through [`gguf_tensor_as_f32`] instead, which is what this crate has a
+/// decoder for.
 #[cfg(feature = "std")]
-pub fn gguf_tensor_as_q4k_block<'a>(
+pub fn gguf_tensor_as_packed_block<'a>(
     parsed: &ParsedGguf,
     file_bytes: &'a [u8],
     name: &str,
 ) -> Result<proxima_tensor::cpu::QuantizedBlock<'a>, InteropError> {
     let tensor = find_tensor(parsed, name)?;
-    if tensor.ggml_type != GgmlType::Q4_K {
-        return Err(InteropError::UnrepresentableGgmlType {
-            tensor: tensor.name.clone(),
-            ggml_type: tensor.ggml_type,
-        });
-    }
     let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
-    Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(&file_bytes[range.start as usize..range.end as usize]))
+    let bytes = &file_bytes[range.start as usize..range.end as usize];
+    match tensor.ggml_type {
+        GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
+        GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
+        GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
+        other => Err(InteropError::UnrepresentableGgmlType {
+            tensor: tensor.name.clone(),
+            ggml_type: other,
+        }),
+    }
 }
 
 fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
@@ -254,11 +264,12 @@ mod real_openchat_file {
     use proxima_gguf::quant::q4_k;
     use proxima_tensor::DType;
     use proxima_tensor::cpu::{QuantizedBlock, evaluate_named, evaluate_quantized_named};
+    use proxima_tensor::instrument;
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
     use proxima_tokenizer::greedy_pick;
 
-    use super::{gguf_tensor_as_f32, gguf_tensor_as_q4k_block};
+    use super::{gguf_tensor_as_f32, gguf_tensor_as_packed_block};
 
     const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
@@ -343,13 +354,14 @@ mod real_openchat_file {
     /// A 2-D projection weight `mistral_forward_program` uses as one
     /// `Multiply`-then-`Add`-reduce (matmul) operand -- the shape
     /// `reject_non_float32`'s quantized-weight exemption requires. Tries
-    /// [`gguf_tensor_as_q4k_block`] first: a `Q4_K` tensor binds packed,
-    /// zero-copy, straight out of the mmap's bytes (`matmul_q4k_f32` wants
-    /// GGUF's native on-disk `[out, in]` row-major layout directly, so this
-    /// arm skips `transpose_out_in_to_in_out` entirely -- see
-    /// `gguf_tensor_as_q4k_block`'s own doc). Every other `GgmlType`
-    /// (`Q5_K`/`Q6_K`/`F32` in this checkpoint -- 9 tensors total) falls
-    /// back to dequantize-then-transpose, unchanged from before packing.
+    /// [`gguf_tensor_as_packed_block`] first: a `Q4_K`/`Q5_K`/`Q6_K` tensor
+    /// binds packed, zero-copy, straight out of the mmap's bytes (the
+    /// `matmul_q*k_f32` kernels want GGUF's native on-disk `[out, in]`
+    /// row-major layout directly, so this arm skips
+    /// `transpose_out_in_to_in_out` entirely -- see
+    /// `gguf_tensor_as_packed_block`'s own doc). Only `F32` now falls back to
+    /// dequantize-then-transpose; `Q5_K`/`Q6_K` used to take that path too,
+    /// which meant the packed kernels for them were correct and unreachable.
     fn bind_matmul_weight<'file>(
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
@@ -358,7 +370,7 @@ mod real_openchat_file {
         in_dim: usize,
         state: &mut LoadState<'file>,
     ) {
-        match gguf_tensor_as_q4k_block(parsed, file_bytes, &name) {
+        match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
             Ok(block) => state.packed.push((name, block)),
             Err(_) => {
                 let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
@@ -372,7 +384,7 @@ mod real_openchat_file {
     /// One real greedy-decoded token out of the real openchat-3.5 (Mistral
     /// architecture) checkpoint: every weight `mistral_forward_program`
     /// needs is bound by name -- `Q4_K` tensors packed straight out of an
-    /// mmap via [`gguf_tensor_as_q4k_block`], everything else dequantized
+    /// mmap via [`gguf_tensor_as_packed_block`], everything else dequantized
     /// through [`gguf_tensor_as_f32`] -- a real prompt is BPE-encoded
     /// through `proxima_tokenizer`, `evaluate_quantized_named` runs the
     /// whole 32-layer forward, and the last position's logits are
@@ -425,10 +437,25 @@ mod real_openchat_file {
         const ROPE_FREQ_BASE: f32 = 10_000.0;
         const RMS_EPSILON: f32 = 1e-5;
 
+        // DIAGNOSTIC (proxima-debugger, remove before landing): phase
+        // markers with epoch-ms timestamps so an external RSS/footprint
+        // sampler on this process's pid can be correlated against the
+        // load/parse/bind/forward phase boundaries.
+        fn diag_now_ms() -> u128 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis()
+        }
+        let diag_pid = std::process::id();
+        std::eprintln!("DIAG phase=process_start t_ms={} pid={diag_pid}", diag_now_ms());
+
         let load_start = std::time::Instant::now();
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        std::eprintln!("DIAG phase=mmap_open t_ms={} pid={diag_pid}", diag_now_ms());
         let file_bytes = mapped.as_slice();
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        std::eprintln!("DIAG phase=parse_complete t_ms={} pid={diag_pid}", diag_now_ms());
 
         // `resident_bytes` starts at the mapped file's own length: a full
         // 32-layer forward pass reads essentially every `Q4_K` weight byte,
@@ -467,12 +494,29 @@ mod real_openchat_file {
 
         let load_elapsed = load_start.elapsed();
         let resident_bytes = state.resident_bytes;
+        std::eprintln!("DIAG phase=bind_complete t_ms={} pid={diag_pid}", diag_now_ms());
         std::println!(
             "load: wall_clock={load_elapsed:?} resident_bytes={resident_bytes} ({:.2} GiB) packed_tensors={} owned_tensors={}",
             resident_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             state.packed.len(),
             state.owned.len()
         );
+        // DIAGNOSTIC (proxima-debugger, remove before landing): names every
+        // Q5_K/Q6_K-packed weight -- `matmul_q5k_f32`/`matmul_q6k_f32`
+        // (`proxima-tensor/src/cpu.rs`) never dispatch through
+        // `quantized_matmul_workers`, so these specific tensors run their
+        // matmul fully single-threaded regardless of size.
+        for (name, block) in &state.packed {
+            match block {
+                QuantizedBlock::Q5K(bytes) => {
+                    std::eprintln!("DIAG packed_tensor name={name} codec=Q5K bytes={}", bytes.len())
+                }
+                QuantizedBlock::Q6K(bytes) => {
+                    std::eprintln!("DIAG packed_tensor name={name} codec=Q6K bytes={}", bytes.len())
+                }
+                QuantizedBlock::Q4K(_) | QuantizedBlock::Float32(_) => {}
+            }
+        }
 
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from openchat gguf metadata");
         let prompt = "The capital of France is";
@@ -524,10 +568,69 @@ mod real_openchat_file {
         let root = op::NodeId(program.len() as u32 - 1);
         let symbols = [sequence as u64];
 
+        instrument::reset_parallel();
+        instrument::reset_matmul_dispatch();
+        std::eprintln!("DIAG phase=forward_start t_ms={} pid={diag_pid}", diag_now_ms());
         let forward_start = std::time::Instant::now();
+        let main_thread_cpu_start = instrument::thread_cpu_nanos();
+        // DIAGNOSTIC (proxima-debugger, remove before landing): minor-fault
+        // delta across the forward call. `evaluate_quantized_named` reads
+        // essentially every `Q4_K` weight byte from the mmap; if the parser
+        // no longer pre-faults it (established: load 1,473ms -> 1,605ms
+        // when pre-fault was removed), first-touch page-in during the
+        // forward should show up here as a nonzero minflt delta.
+        let diag_minflt_before = instrument::ru_minflt();
         let evaluated = evaluate_quantized_named(&program, &symbols, &named_blocks, &[root])
             .expect("evaluate_quantized_named binds the whole forward pass by name, packed weights included");
+        let diag_minflt_after = instrument::ru_minflt();
+        let main_thread_cpu_nanos = instrument::thread_cpu_nanos() - main_thread_cpu_start;
         let forward_elapsed = forward_start.elapsed();
+        std::eprintln!("DIAG phase=forward_complete t_ms={} pid={diag_pid}", diag_now_ms());
+        let wall_ns = forward_elapsed.as_nanos() as u64;
+        let parallel = instrument::parallel_totals();
+        let matmul_dispatch = instrument::matmul_dispatch_totals();
+        std::println!(
+            "wall_ns={wall_ns}  main_thread_cpu_ns={main_thread_cpu_nanos}  ratio={:.4}",
+            main_thread_cpu_nanos as f64 / wall_ns as f64
+        );
+        std::println!(
+            "nodes={}  parallel_nodes={}  parallel_chunks={}",
+            program.len(),
+            parallel.parallel_nodes,
+            parallel.chunk_count
+        );
+        std::println!(
+            "DIAG minflt_delta={} (before={diag_minflt_before} after={diag_minflt_after})",
+            diag_minflt_after.saturating_sub(diag_minflt_before)
+        );
+        std::println!(
+            "DIAG matmul_dispatch workers_calls={} workers_none={} threaded_calls={} spawn_ms={:.3} own_chunk_ms={:.3} recv_wait_ms={:.3} quantize_activation_ms={:.3}",
+            matmul_dispatch.workers_calls,
+            matmul_dispatch.workers_none,
+            matmul_dispatch.calls,
+            matmul_dispatch.spawn_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.own_chunk_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.recv_wait_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.quantize_activation_nanos as f64 / 1_000_000.0,
+        );
+        std::println!(
+            "DIAG matmul_reduce_quantized_ms={:.3}",
+            matmul_dispatch.reduce_quantized_nanos as f64 / 1_000_000.0
+        );
+        std::println!(
+            "DIAG matmul_q5k_f32 calls={} total_ms={:.3}  matmul_q6k_f32 calls={} total_ms={:.3}",
+            matmul_dispatch.q5k_f32_calls,
+            matmul_dispatch.q5k_f32_nanos as f64 / 1_000_000.0,
+            matmul_dispatch.q6k_f32_calls,
+            matmul_dispatch.q6k_f32_nanos as f64 / 1_000_000.0,
+        );
+        std::println!(
+            "DIAG matmul_chunk_compute chunk_count={} sum_ms={:.3} min_us={:.3} max_us={:.3}",
+            parallel.chunk_count,
+            parallel.chunk_nanos_sum as f64 / 1_000_000.0,
+            parallel.chunk_nanos_min as f64 / 1_000.0,
+            parallel.chunk_nanos_max as f64 / 1_000.0,
+        );
 
         let (logits, shape) = evaluated.get(root).expect("logits present in output");
         assert_eq!(shape, [sequence as u64, VOCAB as u64], "logits must be [seq, vocab]");
@@ -553,6 +656,15 @@ mod real_openchat_file {
         std::println!(
             "prompt={prompt:?} sequence={sequence} token_id={token_id} token={token_text:?} forward_wall_clock={forward_elapsed:?}"
         );
+
+        // llama.cpp's own captured greedy answer for this exact prompt and
+        // checkpoint (guiding-principle 14: the incumbent is the oracle).
+        // Parallel row-chunking can reassociate float addition, so a small
+        // numeric shift in the logits is expected, but the argmax must not
+        // move -- if it does, the dispatch above changed the answer, not
+        // just its speed.
+        assert_eq!(token_id, 2651, "greedy token id drifted off llama.cpp's captured answer");
+        assert_eq!(token_text, "known", "greedy token text drifted off llama.cpp's captured answer");
     }
 
     /// Row-major transpose from GGUF's native flat layout (`[out, in]`,

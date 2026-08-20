@@ -26,7 +26,7 @@ mod transform;
 
 pub use bind::gguf_tensor_as_f32;
 #[cfg(feature = "std")]
-pub use bind::gguf_tensor_as_q4k_block;
+pub use bind::gguf_tensor_as_packed_block;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};
