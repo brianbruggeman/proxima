@@ -197,3 +197,6 @@ required-features = ["instrument", "config"]
 # ever applies on the matching platform, so the `alloc`-only floor and every
 # non-Apple target never see it.
 libc = { workspace = true, optional = true }
+
+[build-dependencies]
+toml.workspace = true

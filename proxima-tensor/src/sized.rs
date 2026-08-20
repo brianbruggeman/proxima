@@ -23,23 +23,38 @@
 //!   policy choice -- no target or profile ever changes it. [`DOT_LANES`]
 //!   sizes the portable scalar dot-fold lane array used by every target,
 //!   not just aarch64 -- see its own doc for why it carries no
-//!   `target_arch` gate.
-//! - **Execution policy, currently build-time-only in practice**:
-//!   [`PARALLEL_THRESHOLD`], [`OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`],
-//!   [`MIN_MACS_PER_CHUNK`] are
-//!   plain runtime values (not const generics) read inside `cpu.rs`'s
-//!   hot-path functions (`evaluate_node_parallel`, `run_chunks_threaded`,
-//!   `BoundOp::split_aligned`) -- nothing about their *type* forbids a
-//!   runtime override. There is no `config.rs` surface for them yet:
-//!   wiring a per-process override into those call sites is real cpu.rs
-//!   surgery (new parameters threaded through several private helpers),
-//!   which this session declines to do while another agent is
-//!   concurrently restructuring that file's tile operands and quantized
-//!   paths. [`NEON_COLUMN_PANEL_BUDGET_BYTES`] is the same policy
-//!   shape but additionally `target_arch = "aarch64"`-only, so it has no
-//!   build-time value on any other target to seed a cross-platform config
-//!   struct from -- staying `sized`-only is not just deferred here, it is
-//!   the only correct shape for an arch-conditional constant.
+//!   `target_arch` gate. This family stays hand-written literals: nothing
+//!   below `std` needs a `proxima-tensor-runtime.toml`, and the values
+//!   never vary by target or measurement, only by array shape.
+//! - **Execution policy, build-time-configurable**: [`PARALLEL_THRESHOLD`],
+//!   [`OVERSUBSCRIBE`], [`ROW_OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`],
+//!   [`MIN_MACS_PER_CHUNK`], [`MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`],
+//!   [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`], and (aarch64-only)
+//!   [`NEON_COLUMN_PANEL_BUDGET_BYTES`] are plain runtime values (not const
+//!   generics) read inside `cpu.rs`'s hot-path functions
+//!   (`evaluate_node_parallel`, `run_chunks_threaded`,
+//!   `BoundOp::split_aligned`). These now trace to
+//!   `proxima-tensor-runtime.toml` via `build.rs`'s `emit_sizing_consts`
+//!   (mirrors `prime/build.rs`'s `emit_sizing_consts` over
+//!   `prime-runtime.toml`): the TOML holds the number and a one-line
+//!   pointer, this module keeps the doc comment carrying the full
+//!   measurement record (sweeps, rejected candidates, degenerate
+//!   controls) since intra-doc links like `[`MIN_MACS_PER_CHUNK`]` only
+//!   resolve in a Rust doc comment, not TOML. `toml` is a
+//!   `[build-dependencies]`-only crate -- it runs inside `build.rs` and
+//!   never links into the compiled artifact (a *runtime* conflaguration
+//!   surface over these same constants was built and reverted: linking
+//!   `bon` + `conflaguration` + `serde` + `toml` grew `.text` 18.7% and
+//!   cost +31% end-to-end under fat LTO/`codegen-units=1` by displacing
+//!   the hot path's codegen; that exposure does not exist at build time).
+//!
+//! There is no runtime override for these yet (unlike `prime`'s
+//! `os::sizing` layer, which additionally lets `std` callers override past
+//! the build-time TOML): wiring a per-process override into `cpu.rs`'s
+//! call sites is real surgery (new parameters threaded through several
+//! private helpers) this session declines to do while another agent is
+//! concurrently restructuring that file's tile operands and quantized
+//! paths.
 
 /// Inline capacity for one bound op's per-iteration-axis buffers
 /// ([`crate::bind::Layout::strides`]). Sizes a `SmallVec` const generic --
@@ -67,18 +82,31 @@ pub const MAX_INLINE_TERMS: usize = 2;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub const GATHER_EXTENT_EXACT_FLOAT_LIMIT: u64 = 1 << 24;
 
+/// Raw values emitted by `build.rs`'s `emit_sizing_consts` from
+/// `proxima-tensor-runtime.toml` -- the pub consts below this module
+/// re-export each one under its doc-commented name (see this module's own
+/// doc for why the measurement record stays a Rust doc comment rather than
+/// moving into the TOML). Private and `std`-gated: no execution-policy
+/// const is consumed below `std` (`cpu` itself is `#[cfg(feature =
+/// "std")]`), so an alloc-only build never references this module and it
+/// would otherwise be flagged unused.
+#[cfg(feature = "std")]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/proxima_tensor_sized.rs"));
+}
+
 /// Below this many iteration-space elements, a nest runs the plain
 /// sequential path even when `workers > 1`. Execution policy (see this
 /// module's doc); currently build-time-only in practice, not by
 /// necessity.
 #[cfg(feature = "std")]
-pub const PARALLEL_THRESHOLD: usize = 4096;
+pub const PARALLEL_THRESHOLD: usize = generated::PARALLEL_THRESHOLD;
 
 /// Chunk-count multiplier over `workers` for `run_chunks_threaded`.
 /// Execution policy (see this module's doc); currently build-time-only in
 /// practice, not by necessity.
 #[cfg(feature = "std")]
-pub const OVERSUBSCRIBE: usize = 1;
+pub const OVERSUBSCRIBE: usize = generated::OVERSUBSCRIBE;
 
 /// Chunk-count multiplier over `workers` for `matmul_rows_threaded`'s
 /// dynamic-claiming row split. A separate constant from [`OVERSUBSCRIBE`]
@@ -111,13 +139,13 @@ pub const OVERSUBSCRIBE: usize = 1;
 /// headroom before per-chunk `SyncSender`/atomic overhead could matter at
 /// the smaller row counts this call site can see.
 #[cfg(feature = "std")]
-pub const ROW_OVERSUBSCRIBE: usize = 4;
+pub const ROW_OVERSUBSCRIBE: usize = generated::ROW_OVERSUBSCRIBE;
 
 /// Row-alignment applied to every non-final chunk boundary via
 /// `BoundOp::split_aligned`. Execution policy (see this module's doc);
 /// currently build-time-only in practice, not by necessity.
 #[cfg(feature = "std")]
-pub const SPLIT_ALIGNMENT: u64 = 1;
+pub const SPLIT_ALIGNMENT: u64 = generated::SPLIT_ALIGNMENT;
 
 /// Floor on multiply-adds per chunk for `matmul_rows_threaded`'s row split
 /// (`cpu.rs`'s `row_chunk_count`) -- caps `workers * ROW_OVERSUBSCRIBE`
@@ -151,7 +179,50 @@ pub const SPLIT_ALIGNMENT: u64 = 1;
 /// `proxima-model-interop/src/bind.rs`'s `runs_one_real_forward_pass_and_
 /// greedy_picks_a_real_token` for the harness this was measured against.
 #[cfg(feature = "std")]
-pub const MIN_MACS_PER_CHUNK: usize = 500_000;
+pub const MIN_MACS_PER_CHUNK: usize = generated::MIN_MACS_PER_CHUNK;
+
+/// Floor on `Q8_K` super-blocks (256 elements each) before
+/// `cpu.rs`'s `quantize_row_q8k_dispatch` splits a call's activation buffer
+/// across the cohort instead of running it serially on the leader.
+/// Execution policy (see this module's doc); currently build-time-only in
+/// practice, not by necessity.
+///
+/// Derived against the same real openchat-3.5 forward shapes
+/// [`MIN_MACS_PER_CHUNK`]'s own doc measures against (`EMBEDDING = 4096`,
+/// `FEED_FORWARD = 14_336`, `leading_total = 6`): `attn_q`/`attn_o`/
+/// `ffn_gate`/`ffn_up` (`k = 4096`) quantize 96 blocks/call, `ffn_down`
+/// (`k = 14_336`) quantizes 336 blocks/call, `attn_k`/`attn_v` (`k = 4096`,
+/// narrower `rows`) also land at 96. A cohort round costs ~32us of
+/// fixed open/close overhead regardless of chunk count (`cpu.rs`'s own
+/// `RowRound`/`ElementwiseRowRound` doc); at this term's measured
+/// ~300ns/block (10.603ms / ~29,184 blocks across the forward, `DIAG
+/// quantize_activation`), only a call clearing ~121 blocks recovers that
+/// overhead across `workers - 1` idle cohort members. `200` sits above
+/// every 96-block shape (left serial) and below `ffn_down`'s 336 (dispatched)
+/// -- the only shape this term's real-forward measurement showed clearing
+/// break-even.
+#[cfg(feature = "std")]
+pub const MIN_QUANTIZE_BLOCKS_FOR_DISPATCH: usize = generated::MIN_QUANTIZE_BLOCKS_FOR_DISPATCH;
+
+/// Floor on `rows * leading_total` output elements before
+/// `cpu.rs`'s `run_reduce_quantized` splits the `Q4_K` wide-fold transpose
+/// copy-back across the cohort instead of running it serially on the
+/// leader. Execution policy (see this module's doc); currently
+/// build-time-only in practice, not by necessity.
+///
+/// Derived against the same real openchat-3.5 forward shapes
+/// [`MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`]'s own doc measures against:
+/// `attn_q`/`attn_o`/`ffn_down` (`rows = 4096`, `leading_total = 6`)
+/// transpose 24,576 elements/call, `attn_k`/`attn_v` (`rows = 1024`)
+/// transpose 6,144, `ffn_gate`/`ffn_up` (`rows = 14_336`) transpose 86,016.
+/// This term's measured ~0.635ns/element (5.247ms / ~8,257,536 elements
+/// across the forward, `DIAG q4k transpose`) puts break-even (recovering
+/// the same ~32us round overhead across `workers - 1` idle members) at
+/// ~57,600 elements -- only `ffn_gate`/`ffn_up`'s 86,016 clears it.
+/// `64_000` sits above every other shape (left serial) and below
+/// `ffn_gate`/`ffn_up`'s 86,016 (dispatched).
+#[cfg(feature = "std")]
+pub const MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH: usize = generated::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
 
 /// Output rows one call to `gemm_width_tile_neon` computes. Sizes a fixed
 /// `[[f32; _]; WIDTH_TILE_ROWS]` output array -- cannot be runtime config
@@ -193,4 +264,33 @@ pub const TILE_COLS: usize = 4;
 /// no other target has a build-time value for this constant to seed a
 /// cross-platform runtime config struct from, so it stays `sized`-only.
 #[cfg(all(feature = "std", target_arch = "aarch64"))]
-pub const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = 2_621_440;
+pub const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = generated::NEON_COLUMN_PANEL_BUDGET_BYTES;
+
+/// Asserts every execution-policy const still equals the value on record
+/// (this module's own doc comments) after `build.rs`'s
+/// `emit_sizing_consts` started sourcing them from
+/// `proxima-tensor-runtime.toml` -- catches a TOML/doc-comment drift that
+/// the type system cannot: nothing stops someone editing one file and not
+/// the other.
+#[cfg(test)]
+#[cfg(feature = "std")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_consts_match_the_measurement_record() {
+        assert_eq!(PARALLEL_THRESHOLD, 4096);
+        assert_eq!(OVERSUBSCRIBE, 1);
+        assert_eq!(ROW_OVERSUBSCRIBE, 4);
+        assert_eq!(SPLIT_ALIGNMENT, 1);
+        assert_eq!(MIN_MACS_PER_CHUNK, 500_000);
+        assert_eq!(MIN_QUANTIZE_BLOCKS_FOR_DISPATCH, 200);
+        assert_eq!(MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH, 64_000);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_column_panel_budget_matches_the_measurement_record() {
+        assert_eq!(NEON_COLUMN_PANEL_BUDGET_BYTES, 2_621_440);
+    }
+}
