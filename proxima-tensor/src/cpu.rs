@@ -565,7 +565,7 @@ pub fn evaluate_quantized(
         let total_nanos: u64 = diag_kind_nanos.values().map(|(_, nanos)| *nanos).sum();
         let mut ranked: Vec<(&str, u64, u64)> =
             diag_kind_nanos.into_iter().map(|(label, (count, nanos))| (label, count, nanos)).collect();
-        ranked.sort_by(|left, right| right.2.cmp(&left.2));
+        ranked.sort_by_key(|entry| core::cmp::Reverse(entry.2));
         for (label, count, nanos) in ranked {
             std::eprintln!(
                 "DIAG evaluate_quantized node_kind={label} count={count} total_ms={:.3} pct_of_forward={:.2}",
@@ -4463,13 +4463,16 @@ where
 }
 
 // ---------------------------------------------------------------------
-// `q4k-int8-dot` (default-off): int8 dot directly on packed `Q4_K`
-// nibbles against a `Q8_K`-quantized activation, skipping `dot_q4k_f32`'s
-// per-superblock `[f32; 256]` dequantize entirely. Behind its own
-// compile-time feature (guiding-principles §3/§11 -- the production
-// default stays `dot_q4k_f32`/`matmul_q4k_f32` above until an e2e bench
-// shows the full stack wins); see `proxima-tensor/docs/discipline.md` for
-// the row this landed under.
+// `q4k-int8-dot`: int8 dot directly on packed `Q4_K` nibbles against a
+// `Q8_K`-quantized activation, skipping `dot_q4k_f32`'s per-superblock
+// `[f32; 256]` dequantize entirely. Still its own compile-time feature so
+// the codec path stays reachable, but now ON by default alongside its
+// `q5k`/`q6k` siblings -- the e2e bench this gate waited for exists: on the
+// real openchat-3.5 forward, adding q5k+q6k moved `reduce_matmul_quantized`
+// 513.70 -> 497.80 ms with the greedy token bit-identical over 8 runs.
+// Note what that measures: 15.91 ms of the 134.84 ms those 9 tensors cost,
+// an ~11.8% cut on them, NOT the near-elimination the dequantize framing
+// suggests. See `proxima-tensor/docs/discipline.md` for the landing rows.
 // ---------------------------------------------------------------------
 
 /// Byte offsets into one packed `Q4_K` super-block ([`Q4K_BLOCK_BYTES`]
