@@ -470,6 +470,7 @@ pub struct MatmulDispatchTotals {
     pub q6k_call_ticks: u64,
     pub position_loop_iters: u64,
     pub reduce_quantized_calls: u64,
+    pub q4k_transpose_ticks: u64,
 }
 
 #[must_use]
@@ -497,6 +498,7 @@ pub fn matmul_dispatch_totals() -> MatmulDispatchTotals {
         q6k_call_ticks: MATMUL_Q6K_CALL_TICKS.get(),
         position_loop_iters: MATMUL_POSITION_LOOP_ITERS.get(),
         reduce_quantized_calls: MATMUL_REDUCE_QUANTIZED_CALLS.get(),
+        q4k_transpose_ticks: MATMUL_Q4K_TRANSPOSE_TICKS.get(),
     }
 }
 
@@ -512,6 +514,7 @@ pub fn reset_matmul_dispatch() {
     let _ = MATMUL_RECV_WAIT_TICKS.snapshot_and_reset();
     let _ = MATMUL_QUANTIZE_ACTIVATION_TICKS.snapshot_and_reset();
     let _ = MATMUL_REDUCE_QUANTIZED_TICKS.snapshot_and_reset();
+    let _ = MATMUL_Q4K_TRANSPOSE_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q5K_F32_CALLS.snapshot_and_reset();
     let _ = MATMUL_Q5K_F32_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q6K_F32_CALLS.snapshot_and_reset();
@@ -1001,3 +1004,18 @@ pub fn gather_distinct_rows(node: NodeId) -> u64 {
     let rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
     rows.get(&node).map_or(0, HashSet::len) as u64
 }
+
+/// Total wall ticks the leader spends transposing `matmul_q4k_q8k_f32_impl`'s
+/// row-major `[row][position]` result back into the position-major layout
+/// `run_reduce_quantized`'s callers consume (`cpu.rs`'s copy loop after the
+/// wide fold). Leader-serial: it is not inside any cohort round, so no
+/// dispatch counter sees it.
+pub static MATMUL_Q4K_TRANSPOSE_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.q4k_transpose_ticks");
+
+/// The cohort's own round-level forensics (`prime::os::cohort::diag`),
+/// re-exported so a consumer of this crate's `instrument` feature reads
+/// park/spin/unpark tallies and per-slot claim latencies without taking its
+/// own `prime` dependency.
+#[cfg(feature = "tensor-cohort")]
+pub use prime::os::cohort::diag as cohort;

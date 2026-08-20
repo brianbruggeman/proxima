@@ -96,6 +96,11 @@ runtime-prime-executor    = ["runtime-prime-timer"]
 # default-off, standalone stage-1 primitive, not wired into any other
 # feature or the tensor path yet.
 runtime-prime-cohort      = ["runtime-prime", "std"]
+# forensic counters inside os/cohort.rs (park/spin/unpark tallies and
+# per-slot round-open->first-claim / post-last-chunk-tail nanos). Default-off
+# scaffolding for the matmul-cohort wall-time decomposition; carries a
+# per-round `Instant::now()` on the leader and two per slot.
+cohort-instrument         = ["runtime-prime-cohort"]
 runtime-prime-bgpool      = ["runtime-prime", "std", "dep:core_affinity"]
 runtime-prime-bgpool-rayon = ["runtime-prime-bgpool", "dep:rayon"]
 runtime-prime-bgpool-par   = ["runtime-prime-bgpool"]

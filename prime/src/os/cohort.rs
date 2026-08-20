@@ -75,6 +75,92 @@ use crossbeam_utils::sync::{Parker, Unparker};
 
 use proxima_core::ProximaError;
 
+/// forensic counters for the matmul-cohort wall-time decomposition:
+/// where a round's wall goes between the leader publishing it and the
+/// leader observing `done == members`. default-off scaffolding.
+#[cfg(feature = "cohort-instrument")]
+pub mod diag {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    pub const MAX_SLOTS: usize = 16;
+
+    static BASE: OnceLock<Instant> = OnceLock::new();
+
+    pub fn now_nanos() -> u64 {
+        let base = BASE.get_or_init(Instant::now);
+        base.elapsed().as_nanos() as u64
+    }
+
+    pub static ROUNDS: AtomicU64 = AtomicU64::new(0);
+    pub static ROUND_OPEN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static UNPARK_ROUNDS: AtomicU64 = AtomicU64::new(0);
+    pub static UNPARK_NANOS: AtomicU64 = AtomicU64::new(0);
+    pub static PARKS: AtomicU64 = AtomicU64::new(0);
+    pub static SPIN_HITS: AtomicU64 = AtomicU64::new(0);
+    pub static IMMEDIATE_HITS: AtomicU64 = AtomicU64::new(0);
+    pub static ARM_ABORTS: AtomicU64 = AtomicU64::new(0);
+
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    pub static SLOT_CHUNKS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+    pub static SLOT_FIRST_CLAIM_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+    pub static SLOT_COMPUTE_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+    pub static SLOT_TAIL_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+    pub static SLOT_ROUNDS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+    static SLOT_DONE_NS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+
+    pub fn open_round() {
+        ROUNDS.fetch_add(1, Ordering::Relaxed);
+        ROUND_OPEN_NS.store(now_nanos(), Ordering::Release);
+    }
+
+    pub fn record_first_claim(slot: usize, at_nanos: u64) {
+        if slot >= MAX_SLOTS {
+            return;
+        }
+        let open = ROUND_OPEN_NS.load(Ordering::Acquire);
+        SLOT_FIRST_CLAIM_NANOS[slot].fetch_add(at_nanos.saturating_sub(open), Ordering::Relaxed);
+        SLOT_ROUNDS[slot].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_slot_done(slot: usize, chunks: u64, compute_nanos: u64, at_nanos: u64) {
+        if slot >= MAX_SLOTS {
+            return;
+        }
+        SLOT_CHUNKS[slot].fetch_add(chunks, Ordering::Relaxed);
+        SLOT_COMPUTE_NANOS[slot].fetch_add(compute_nanos, Ordering::Relaxed);
+        SLOT_DONE_NS[slot].store(at_nanos, Ordering::Release);
+    }
+
+    /// called by the leader once `done == members`: every slot's
+    /// `SLOT_DONE_NS` is final for this round and cannot advance until the
+    /// leader publishes the next one.
+    pub fn close_round(members: usize, at_nanos: u64) {
+        for slot in 0..members.min(MAX_SLOTS) {
+            let done = SLOT_DONE_NS[slot].swap(0, Ordering::AcqRel);
+            if done != 0 {
+                SLOT_TAIL_NANOS[slot].fetch_add(at_nanos.saturating_sub(done), Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn reset() {
+        for counter in [&ROUNDS, &UNPARK_ROUNDS, &UNPARK_NANOS, &PARKS, &SPIN_HITS, &IMMEDIATE_HITS, &ARM_ABORTS] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for slot in 0..MAX_SLOTS {
+            SLOT_CHUNKS[slot].store(0, Ordering::Relaxed);
+            SLOT_FIRST_CLAIM_NANOS[slot].store(0, Ordering::Relaxed);
+            SLOT_COMPUTE_NANOS[slot].store(0, Ordering::Relaxed);
+            SLOT_TAIL_NANOS[slot].store(0, Ordering::Relaxed);
+            SLOT_ROUNDS[slot].store(0, Ordering::Relaxed);
+            SLOT_DONE_NS[slot].store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// index of one unit of work within a round. a newtype so `run_chunk`
 /// cannot be called with a raw `usize` meant for something else — the
 /// signature itself teaches the contract.
@@ -387,10 +473,20 @@ impl CohortSession<'_> {
         // difference is one instruction: rustc targets Apple silicon with
         // RCpc, so `load(Acquire)` lowers to `ldapr`, which may execute before
         // a preceding release store; `ldar` (RCsc) may not.
+        #[cfg(feature = "cohort-instrument")]
+        diag::open_round();
         control.round.fetch_add(1, Ordering::SeqCst);
         if control.parked_count.load(Ordering::SeqCst) > 0 {
+            #[cfg(feature = "cohort-instrument")]
+            let unpark_started = diag::now_nanos();
             for unparker in &control.unparkers {
                 unparker.unpark();
+            }
+            #[cfg(feature = "cohort-instrument")]
+            {
+                diag::UNPARK_ROUNDS.fetch_add(1, Ordering::Relaxed);
+                diag::UNPARK_NANOS
+                    .fetch_add(diag::now_nanos().saturating_sub(unpark_started), Ordering::Relaxed);
             }
         }
 
@@ -406,11 +502,13 @@ impl CohortSession<'_> {
         // `members` P-cores — measured +14.8 ms / +4.5% on a real forward
         // (`proxima-model-interop`'s openchat bind test), entirely from
         // that one extra runnable thread.
-        run_round(control);
+        run_round(control, 0);
 
         while control.done.load(Ordering::Acquire) < members as u64 {
             core::hint::spin_loop();
         }
+        #[cfg(feature = "cohort-instrument")]
+        diag::close_round(members, diag::now_nanos());
 
         // SAFETY: every member has reported done (just observed above via
         // Acquire), so no member can still be dereferencing `round_ptr`.
@@ -455,7 +553,7 @@ fn member_loop(control: &Control, member_index: usize, parker: &Parker, spin_pol
             return;
         };
         local_round = new_round;
-        run_round(control);
+        run_round(control, member_index + 1);
         control.progress[member_index].store(local_round, Ordering::Relaxed);
     }
 }
@@ -488,6 +586,8 @@ fn wait_for_round(
     loop {
         let current = control.round.load(Ordering::Acquire);
         if current != local_round {
+            #[cfg(feature = "cohort-instrument")]
+            diag::IMMEDIATE_HITS.fetch_add(1, Ordering::Relaxed);
             return Some(current);
         }
         if control.shutdown.load(Ordering::Acquire) {
@@ -497,6 +597,8 @@ fn wait_for_round(
             core::hint::spin_loop();
             let current = control.round.load(Ordering::Acquire);
             if current != local_round {
+                #[cfg(feature = "cohort-instrument")]
+                diag::SPIN_HITS.fetch_add(1, Ordering::Relaxed);
                 return Some(current);
             }
         }
@@ -516,10 +618,14 @@ fn wait_for_round(
         if current != local_round || shutting_down {
             control.parked_count.fetch_sub(1, Ordering::AcqRel);
             if current != local_round {
+                #[cfg(feature = "cohort-instrument")]
+                diag::ARM_ABORTS.fetch_add(1, Ordering::Relaxed);
                 return Some(current);
             }
             continue;
         }
+        #[cfg(feature = "cohort-instrument")]
+        diag::PARKS.fetch_add(1, Ordering::Relaxed);
         parker.park();
         control.parked_count.fetch_sub(1, Ordering::AcqRel);
     }
@@ -528,12 +634,25 @@ fn wait_for_round(
 /// claim and run chunks until the shared cursor exhausts `control.chunks`,
 /// then report done. a panicking chunk is caught, counted as abandoned, and
 /// does not stop the member from claiming the next chunk.
-fn run_round(control: &Control) {
+#[cfg_attr(not(feature = "cohort-instrument"), allow(unused_variables))]
+fn run_round(control: &Control, slot: usize) {
     let chunk_total = control.chunks.load(Ordering::Relaxed);
+    #[cfg(feature = "cohort-instrument")]
+    let mut claimed = 0_u64;
+    #[cfg(feature = "cohort-instrument")]
+    let mut compute_started = 0_u64;
     loop {
         let index = control.cursor.fetch_add(1, Ordering::Relaxed);
         if index >= chunk_total {
             break;
+        }
+        #[cfg(feature = "cohort-instrument")]
+        {
+            if claimed == 0 {
+                compute_started = diag::now_nanos();
+                diag::record_first_claim(slot, compute_started);
+            }
+            claimed += 1;
         }
         // SAFETY: the publication edge (`control.round`'s Release/Acquire
         // pair) was already crossed in `wait_for_round` before this
@@ -579,6 +698,12 @@ fn run_round(control: &Control) {
     // once the leader sees `done == members`. fired on both the normal
     // path above and the panic-caught path — a panicking member never
     // strands the leader.
+    #[cfg(feature = "cohort-instrument")]
+    {
+        let at = diag::now_nanos();
+        let compute = if claimed == 0 { 0 } else { at.saturating_sub(compute_started) };
+        diag::record_slot_done(slot, claimed, compute, at);
+    }
     control.done.fetch_add(1, Ordering::Release);
 }
 

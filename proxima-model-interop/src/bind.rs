@@ -611,6 +611,7 @@ mod real_openchat_file {
             instrument::reset_matmul_dispatch();
             instrument::reset_worker_cpu();
             instrument::reset_q4k_shape_buckets();
+            instrument::cohort::reset();
         }
         std::eprintln!("DIAG phase=forward_start t_ms={} pid={diag_pid}", diag_now_ms());
         // `forward_start`/`forward_elapsed` are the one clock read per
@@ -772,6 +773,41 @@ mod real_openchat_file {
             // 0.0462 vs 0.0332 gap is uniform across every matmul shape this
             // forward runs, or concentrated in the small (attn_k/attn_v,
             // rows=1024) shapes ggml's own t8 already regresses at.
+            std::println!(
+                "DIAG matmul_q4k_transpose_ms={:.3}",
+                instrument::ticks_to_nanos(matmul_dispatch.q4k_transpose_ticks) as f64 / 1_000_000.0,
+            );
+            // DIAGNOSTIC (proxima-debugger, remove before landing): the
+            // cohort's own view of a round -- how members wake (spin vs park),
+            // and per slot how long after the round opened it claimed its
+            // first chunk and how long it sat done before the leader closed.
+            {
+                use instrument::cohort;
+                use core::sync::atomic::Ordering;
+                std::println!(
+                    "DIAG cohort rounds={} parks={} spin_hits={} immediate_hits={} arm_aborts={} unpark_rounds={} unpark_ms={:.3}",
+                    cohort::ROUNDS.load(Ordering::Relaxed),
+                    cohort::PARKS.load(Ordering::Relaxed),
+                    cohort::SPIN_HITS.load(Ordering::Relaxed),
+                    cohort::IMMEDIATE_HITS.load(Ordering::Relaxed),
+                    cohort::ARM_ABORTS.load(Ordering::Relaxed),
+                    cohort::UNPARK_ROUNDS.load(Ordering::Relaxed),
+                    cohort::UNPARK_NANOS.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+                );
+                for slot in 0..cohort::MAX_SLOTS {
+                    let rounds = cohort::SLOT_ROUNDS[slot].load(Ordering::Relaxed);
+                    let chunks = cohort::SLOT_CHUNKS[slot].load(Ordering::Relaxed);
+                    if rounds == 0 && chunks == 0 {
+                        continue;
+                    }
+                    std::println!(
+                        "DIAG cohort_slot slot={slot} rounds={rounds} chunks={chunks} first_claim_ms={:.3} compute_ms={:.3} tail_ms={:.3}",
+                        cohort::SLOT_FIRST_CLAIM_NANOS[slot].load(Ordering::Relaxed) as f64 / 1_000_000.0,
+                        cohort::SLOT_COMPUTE_NANOS[slot].load(Ordering::Relaxed) as f64 / 1_000_000.0,
+                        cohort::SLOT_TAIL_NANOS[slot].load(Ordering::Relaxed) as f64 / 1_000_000.0,
+                    );
+                }
+            }
             std::println!("DIAG q4k_shape_table rows k calls macs ns_per_mac");
             for (rows, k, calls, macs, ticks) in instrument::q4k_shape_snapshot() {
                 let nanos = instrument::ticks_to_nanos(ticks);

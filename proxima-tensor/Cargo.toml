@@ -36,7 +36,7 @@ ggml-bench = ["std"]
 # than `std::time::Instant`/`Duration` — see `instrument::read_ticks`'s doc
 # for why: a `Duration` costs a multiply/divide per read on Darwin, exactly
 # the conversion `proxima-clock`'s own doc forbids on a hot path.
-instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc", "dep:proxima-clock"]
+instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc", "dep:proxima-clock", "prime?/cohort-instrument"]
 # routes `cpu::run_chunks_threaded`/`cpu::matmul_rows_threaded` through
 # `prime`'s `ProximaBackgroundPool` (crossbeam-deque work-stealing, built
 # once and reused) instead of spawning fresh `std::thread::scope` threads
