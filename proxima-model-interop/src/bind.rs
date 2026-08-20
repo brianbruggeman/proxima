@@ -458,14 +458,19 @@ mod real_openchat_file {
         std::eprintln!("DIAG phase=parse_complete t_ms={} pid={diag_pid}", diag_now_ms());
 
         // `resident_bytes` starts at the mapped file's own length: a full
-        // 32-layer forward pass reads essentially every `Q4_K` weight byte,
+        // 32-layer forward pass reads essentially every packed weight byte,
         // so the kernel demand-pages nearly the whole mapping into this
         // process's resident set even though nothing here copies it --
         // `MappedGguf` never allocates a second 3.94 GB buffer the way
         // `proxima_gguf::edge::read_file`'s `std::fs::read` did. Every
         // owned `f32` buffer `bind_dense`/`bind_matmul_weight` allocate
-        // (norms, `token_embd.weight`, and the 9 `Q5_K`/`Q6_K` tensors this
-        // crate has no packed kernel for) adds on top of that.
+        // (norms, plus `token_embd.weight`, which is an embedding lookup
+        // rather than a matmul and so has no packed kernel) adds on top.
+        //
+        // This is a DERIVED counter, not a measurement: it is the mmap
+        // length plus the owned buffers, and it tracked 1.42 GiB below the
+        // kernel's own `phys_footprint` even before `Q5_K`/`Q6_K` bound
+        // packed. Quote max RSS, not this, for what serving costs.
         let mut state = LoadState {
             resident_bytes: file_bytes.len(),
             owned: Vec::new(),
@@ -501,11 +506,11 @@ mod real_openchat_file {
             state.packed.len(),
             state.owned.len()
         );
-        // DIAGNOSTIC (proxima-debugger, remove before landing): names every
-        // Q5_K/Q6_K-packed weight -- `matmul_q5k_f32`/`matmul_q6k_f32`
-        // (`proxima-tensor/src/cpu.rs`) never dispatch through
-        // `quantized_matmul_workers`, so these specific tensors run their
-        // matmul fully single-threaded regardless of size.
+        // Names every Q5_K/Q6_K-packed weight. These ran single-threaded
+        // until `matmul_q5k_f32`/`matmul_q6k_f32` gained the shared
+        // `matmul_quantized_dispatch` -- 990ms of a 1595ms forward. They
+        // dispatch now; the listing stays because these 9 tensors are the
+        // ones whose codec differs from the other 216.
         for (name, block) in &state.packed {
             match block {
                 QuantizedBlock::Q5K(bytes) => {
