@@ -70,6 +70,9 @@ enum Phase {
 /// the not-yet-parsed tail of whatever's been fed.
 pub struct GgufParser {
     accumulator: Vec<u8>,
+    /// How far into `accumulator` the parser has consumed. Bytes before it
+    /// are dead but are not moved -- see [`GgufParser::commit`].
+    cursor: usize,
     phase: Phase,
     stream_pos: u64,
     pending_version: u32,
@@ -92,6 +95,7 @@ impl GgufParser {
     pub fn new() -> Self {
         Self {
             accumulator: Vec::new(),
+            cursor: 0,
             phase: Phase::Magic,
             stream_pos: 0,
             pending_version: 0,
@@ -121,7 +125,16 @@ impl GgufParser {
 
     /// Append bytes fed by the caller. Never blocks, never inspects the
     /// bytes — parsing happens in [`Self::poll`].
+    ///
+    /// Reclaims already-consumed bytes first, so a caller streaming many
+    /// small chunks does not grow the buffer without bound. That memmove is
+    /// O(unparsed tail) once per chunk, not once per field the way
+    /// [`Self::commit`]'s `drain` was.
     fn feed(&mut self, bytes: &[u8]) {
+        if self.cursor > 0 {
+            self.accumulator.drain(0..self.cursor);
+            self.cursor = 0;
+        }
         self.accumulator.extend_from_slice(bytes);
     }
 
@@ -169,13 +182,28 @@ impl GgufParser {
         }
     }
 
+    /// Advances past `consumed` bytes without moving the ones behind it.
+    ///
+    /// This was `accumulator.drain(0..consumed)`, which memmoves the entire
+    /// remaining tail forward on every field parsed. A caller that hands the
+    /// whole file as one chunk -- which `parse_complete` does, and which is
+    /// the only way to parse from an mmap -- therefore paid O(file_len) per
+    /// field: measured 318 commits moving 1.23 TB to read a directory of a
+    /// few hundred KB, 27.2s of a 29.6s load.
     fn commit(&mut self, consumed: usize) {
-        self.accumulator.drain(0..consumed);
+        self.cursor += consumed;
         self.stream_pos += consumed as u64;
     }
 
+    /// The not-yet-consumed tail. Every `poll_*` reads from here rather than
+    /// from the front of `accumulator`, which is what lets [`Self::commit`]
+    /// be a cursor bump instead of a memmove.
+    fn available(&self) -> &[u8] {
+        &self.accumulator[self.cursor..]
+    }
+
     fn poll_magic(&mut self) -> Result<Option<GgufEvent>, GgufError> {
-        let mut reader = Reader::new(self.accumulator.as_slice());
+        let mut reader = Reader::new(self.available());
         let Some(found) = reader.u32() else {
             return Ok(None);
         };
@@ -190,7 +218,7 @@ impl GgufParser {
     }
 
     fn poll_version(&mut self) -> Result<Option<GgufEvent>, GgufError> {
-        let mut reader = Reader::new(self.accumulator.as_slice());
+        let mut reader = Reader::new(self.available());
         let Some(version) = reader.u32() else {
             return Ok(None);
         };
@@ -205,7 +233,7 @@ impl GgufParser {
     }
 
     fn poll_tensor_count(&mut self) -> Result<Option<GgufEvent>, GgufError> {
-        let mut reader = Reader::new(self.accumulator.as_slice());
+        let mut reader = Reader::new(self.available());
         let Some(raw) = reader.i64() else {
             return Ok(None);
         };
@@ -219,7 +247,7 @@ impl GgufParser {
     }
 
     fn poll_kv_count(&mut self, tensor_count: u64) -> Result<Option<GgufEvent>, GgufError> {
-        let mut reader = Reader::new(self.accumulator.as_slice());
+        let mut reader = Reader::new(self.available());
         let Some(raw) = reader.i64() else {
             return Ok(None);
         };
@@ -253,7 +281,7 @@ impl GgufParser {
             return self.poll();
         }
 
-        let mut reader = Reader::new(self.accumulator.as_slice());
+        let mut reader = Reader::new(self.available());
         let Some(key_result) = reader.string() else {
             return Ok(None);
         };
@@ -332,7 +360,7 @@ impl GgufParser {
             }));
         }
 
-        let mut reader = Reader::new(self.accumulator.as_slice());
+        let mut reader = Reader::new(self.available());
         let Some(name_result) = reader.string() else {
             return Ok(None);
         };
