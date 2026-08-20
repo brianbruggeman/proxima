@@ -2207,6 +2207,116 @@ fn diag_node_kind_label(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId,
     }
 }
 
+#[cfg(feature = "q4k-int8-dot")]
+use crate::sized::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
+
+/// The `wide` (`[row][position]`) -> `output` (`[position][row]`) transpose
+/// copy-back the `Q4_K` wide-fold arm of [`run_reduce_quantized`] pays --
+/// dispatched across the cohort when a `session` is open and
+/// `rows * leading_total` clears [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`].
+/// Splits on `position`, the same outer axis [`run_elementwise_dispatch`]
+/// splits on: each position range writes a contiguous, disjoint
+/// `rows`-wide slice of `output` (safe [`slice::split_at_mut`], no raw
+/// pointer needed for the write side), reading a strided range of `wide`
+/// (a shared `&[f32]`, never mutated). Falls straight through to the plain
+/// serial loop whenever any gate fails: no session, too few elements, or
+/// fewer than two position chunks to split into.
+#[cfg(feature = "q4k-int8-dot")]
+fn transpose_wide_to_output(
+    wide: &[f32],
+    rows: usize,
+    leading_total: usize,
+    session: Option<&CohortSession<'_>>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let serial = |output: &mut [f32]| {
+        for row in 0..rows {
+            for position in 0..leading_total {
+                output[position * rows + row] = wide[row * leading_total + position];
+            }
+        }
+    };
+    let Some(session) = session else {
+        serial(output);
+        return Ok(());
+    };
+    if rows.saturating_mul(leading_total) < MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH {
+        serial(output);
+        return Ok(());
+    }
+    let workers = matmul_worker_count();
+    if workers <= 1 || leading_total < 2 {
+        serial(output);
+        return Ok(());
+    }
+    let chunk_count = (workers * OVERSUBSCRIBE).min(leading_total);
+    let chunk_len = leading_total.div_ceil(chunk_count);
+    let mut chunk_ranges = Vec::with_capacity(chunk_count);
+    let mut remaining = &mut *output;
+    let mut position_start = 0usize;
+    while !remaining.is_empty() {
+        let take = chunk_len.min(remaining.len() / rows);
+        let (slice, rest) = remaining.split_at_mut(take * rows);
+        remaining = rest;
+        chunk_ranges.push((position_start, slice.as_mut_ptr() as usize, slice.len()));
+        position_start += take;
+    }
+    if chunk_ranges.len() < 2 {
+        serial(output);
+        return Ok(());
+    }
+    let round = TransposeRound {
+        wide,
+        rows,
+        leading_total,
+        chunk_ranges: &chunk_ranges,
+    };
+    let report = session.run(&round);
+    if report.abandoned > 0 {
+        return Err(TensorError::ThreadedChunkFailed {
+            chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
+            reason: alloc::string::String::from("cohort member panicked while running this transpose chunk"),
+        });
+    }
+    Ok(())
+}
+
+/// [`transpose_wide_to_output`]'s cohort dispatch shape: one round over
+/// `(position_start, out_ptr, out_len)` ranges of `output`'s position axis,
+/// run through [`CohortSession::run`]. No error path -- pure data movement,
+/// nothing here can fail the way a matmul row's dot product can.
+#[cfg(feature = "q4k-int8-dot")]
+struct TransposeRound<'round> {
+    wide: &'round [f32],
+    rows: usize,
+    leading_total: usize,
+    chunk_ranges: &'round [(usize, usize, usize)],
+}
+
+#[cfg(feature = "q4k-int8-dot")]
+impl CohortRound for TransposeRound<'_> {
+    fn chunks(&self) -> usize {
+        self.chunk_ranges.len()
+    }
+
+    fn run_chunk(&self, chunk: ChunkIndex) {
+        let (position_start, out_ptr, out_len) = self.chunk_ranges[chunk.0];
+        // SAFETY: unique to this chunk by construction (`split_at_mut` in
+        // `transpose_wide_to_output` before the round starts); the parent
+        // `output` outlives every reconstructed slice because
+        // `CohortSession::run` does not return until every member has
+        // reported done.
+        let chunk_output = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut f32, out_len) };
+        let position_count = out_len / self.rows;
+        for local_position in 0..position_count {
+            let position = position_start + local_position;
+            for row in 0..self.rows {
+                chunk_output[local_position * self.rows + row] = self.wide[row * self.leading_total + position];
+            }
+        }
+    }
+}
+
 /// [`run_reduce`]'s quantized-weight branch: `resolved` is the fused
 /// `Reduce(Elementwise(Multiply))` matmul shape, `weight_node` one of its two
 /// operands, packed `Q4_K` bytes rather than a bound `f32` buffer. The other
@@ -2333,11 +2443,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // cheaper than the weight stream it replaces.
         #[cfg(feature = "instrument")]
         let diag_transpose_started = instrument::read_ticks();
-        for row in 0..rows {
-            for position in 0..leading_total {
-                output[position * rows + row] = wide[row * leading_total + position];
-            }
-        }
+        transpose_wide_to_output(&wide, rows, leading_total, session, output)?;
         #[cfg(feature = "instrument")]
         counter!(
             instrument::MATMUL_Q4K_TRANSPOSE_TICKS,
@@ -5172,6 +5278,111 @@ fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
 /// [`TensorError::QuantizedShapeMismatch`] if either length requirement
 /// above is not met.
 #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+use crate::sized::MIN_QUANTIZE_BLOCKS_FOR_DISPATCH;
+
+/// [`quantize_row_q8k`] dispatched across the cohort when a `session` is
+/// open and the call's super-block count clears
+/// [`MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`] -- the same shape
+/// [`run_elementwise_dispatch`] has to [`run_elementwise`]: every `Q8_K`
+/// super-block quantizes independently (this function's own doc), so a
+/// contiguous range of blocks is exactly as independent as
+/// [`ElementwiseRowRound`]'s outer-position ranges. Falls straight through
+/// to [`quantize_row_q8k`] whenever any gate fails: no session, too few
+/// blocks, or fewer than one worker.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+fn quantize_row_q8k_dispatch(
+    activation: &[f32],
+    output: &mut [u8],
+    session: Option<&CohortSession<'_>>,
+) -> Result<(), TensorError> {
+    let Some(session) = session else {
+        return quantize_row_q8k(activation, output);
+    };
+    if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length is not a whole multiple of the q8_k super-block size",
+        });
+    }
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    if output.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k output length does not match the activation block count",
+        });
+    }
+    if block_count < MIN_QUANTIZE_BLOCKS_FOR_DISPATCH {
+        return quantize_row_q8k(activation, output);
+    }
+    let workers = matmul_worker_count();
+    if workers <= 1 {
+        return quantize_row_q8k(activation, output);
+    }
+    let chunk_count = (workers * OVERSUBSCRIBE).min(block_count);
+    let block_chunk_len = block_count.div_ceil(chunk_count);
+    let mut chunk_ranges = Vec::with_capacity(chunk_count);
+    let mut remaining_in = activation;
+    let mut remaining_out = &mut *output;
+    while !remaining_out.is_empty() {
+        let take_blocks = block_chunk_len.min(remaining_out.len() / Q8K_BLOCK_BYTES);
+        let (in_slice, in_rest) = remaining_in.split_at(take_blocks * Q4K_BLOCK_ELEMENTS);
+        let (out_slice, out_rest) = remaining_out.split_at_mut(take_blocks * Q8K_BLOCK_BYTES);
+        remaining_in = in_rest;
+        remaining_out = out_rest;
+        chunk_ranges.push((
+            in_slice.as_ptr() as usize,
+            in_slice.len(),
+            out_slice.as_mut_ptr() as usize,
+            out_slice.len(),
+        ));
+    }
+    if chunk_ranges.len() < 2 {
+        return quantize_row_q8k(activation, output);
+    }
+    let round = QuantizeRound {
+        chunk_ranges: &chunk_ranges,
+    };
+    let report = session.run(&round);
+    if report.abandoned > 0 {
+        return Err(TensorError::ThreadedChunkFailed {
+            chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
+            reason: alloc::string::String::from("cohort member panicked while running this quantize chunk"),
+        });
+    }
+    Ok(())
+}
+
+/// [`quantize_row_q8k_dispatch`]'s cohort dispatch shape: one round over
+/// `(in_ptr, in_len, out_ptr, out_len)` block ranges, run through
+/// [`CohortSession::run`]. No error path -- every range's shape was already
+/// validated whole, by construction, before the round opens, so
+/// [`quantize_q8k_block`] cannot fail the way a matmul row's dot product can.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+struct QuantizeRound<'round> {
+    chunk_ranges: &'round [(usize, usize, usize, usize)],
+}
+
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+impl CohortRound for QuantizeRound<'_> {
+    fn chunks(&self) -> usize {
+        self.chunk_ranges.len()
+    }
+
+    fn run_chunk(&self, chunk: ChunkIndex) {
+        let (in_ptr, in_len, out_ptr, out_len) = self.chunk_ranges[chunk.0];
+        // SAFETY: unique to this chunk by construction (`split_at`/
+        // `split_at_mut` in `quantize_row_q8k_dispatch` before the round
+        // starts); the parent `activation`/`output` outlive every
+        // reconstructed slice because `CohortSession::run` does not return
+        // until every member has reported done.
+        let in_slice = unsafe { core::slice::from_raw_parts(in_ptr as *const f32, in_len) };
+        // SAFETY: same argument as `in_slice` above, mutable side.
+        let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
+        for (block, out_block) in in_slice.chunks_exact(Q4K_BLOCK_ELEMENTS).zip(out_slice.chunks_exact_mut(Q8K_BLOCK_BYTES)) {
+            quantize_q8k_block(block, out_block);
+        }
+    }
+}
+
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
 pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), TensorError> {
     if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -5778,7 +5989,7 @@ fn matmul_q4k_q8k_f32_impl(
     // time.
     #[cfg(feature = "instrument")]
     let diag_quantize_started = instrument::read_ticks();
-    quantize_row_q8k(activation, &mut activation_q8k)?;
+    quantize_row_q8k_dispatch(activation, &mut activation_q8k, session)?;
     #[cfg(feature = "instrument")]
     counter!(
         instrument::MATMUL_QUANTIZE_ACTIVATION_TICKS,
@@ -12123,6 +12334,65 @@ mod tests {
         let mut packed = vec![0xFFu8; Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut packed).expect("one well-formed super-block");
         assert!(packed.iter().all(|&byte| byte == 0), "zero activation must pack to an all-zero Q8_K block");
+    }
+
+    /// [`quantize_row_q8k_dispatch`]'s cohort split against
+    /// [`quantize_row_q8k`]'s serial reference, at a block count
+    /// (`4 * MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`) chosen to clear
+    /// [`MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`] with headroom so the dispatch
+    /// path (not the serial fallback) actually runs -- every `Q8_K`
+    /// super-block quantizes independently (`quantize_row_q8k`'s own doc),
+    /// so this must be bit-for-bit, not merely close.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn quantize_row_q8k_dispatch_is_bit_identical_to_the_serial_reference() {
+        let block_count = MIN_QUANTIZE_BLOCKS_FOR_DISPATCH * 4;
+        let activation: Vec<f32> =
+            (0..block_count * Q4K_BLOCK_ELEMENTS).map(|index| ((index % 251) as f32 - 125.0) * 0.037).collect();
+
+        let mut serial = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut serial).expect("well-formed activation quantizes serially");
+
+        let cohort = ThreadCohort::from_config(ThreadCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
+            .expect("test cohort with 4 members spawns");
+        let session = cohort.enter().expect("no other session open on a fresh cohort");
+        let mut dispatched = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+        quantize_row_q8k_dispatch(&activation, &mut dispatched, Some(&session))
+            .expect("well-formed activation quantizes through the cohort");
+        drop(session);
+
+        assert_eq!(dispatched, serial, "cohort-dispatched Q8_K packing must be bit-identical to the serial reference");
+    }
+
+    /// [`transpose_wide_to_output`]'s cohort split against its own serial
+    /// fallback, at `rows * leading_total` (`rows = 8000`,
+    /// `leading_total = 9`, 72,000 elements) chosen to clear
+    /// [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`] with headroom -- pure data
+    /// movement, so this must be bit-for-bit.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn transpose_wide_to_output_dispatch_is_bit_identical_to_the_serial_reference() {
+        let rows = 8000usize;
+        let leading_total = 9usize;
+        assert!(
+            rows * leading_total >= MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH,
+            "this shape must clear the threshold or this test proves nothing about the dispatch path"
+        );
+        let wide: Vec<f32> = (0..rows * leading_total).map(|index| index as f32 * 0.5 - 17.0).collect();
+
+        let mut serial = vec![0.0f32; rows * leading_total];
+        transpose_wide_to_output(&wide, rows, leading_total, None, &mut serial)
+            .expect("serial transpose never fails");
+
+        let cohort = ThreadCohort::from_config(ThreadCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
+            .expect("test cohort with 4 members spawns");
+        let session = cohort.enter().expect("no other session open on a fresh cohort");
+        let mut dispatched = vec![0.0f32; rows * leading_total];
+        transpose_wide_to_output(&wide, rows, leading_total, Some(&session), &mut dispatched)
+            .expect("cohort-dispatched transpose never fails");
+        drop(session);
+
+        assert_eq!(dispatched, serial, "cohort-dispatched transpose must be bit-identical to the serial reference");
     }
 
     /// [`dot_q4k_q8k`]'s shape-mismatch guard, mirroring
