@@ -55,4 +55,13 @@ pub enum InteropError {
     /// than propagating them).
     #[error("prefault: {0}")]
     PrefaultPoolUnavailable(String),
+
+    /// [`crate::bind::gguf_tensor_as_packed_block`] found `tensor` stored as
+    /// `F32` but its absolute file offset is not a multiple of
+    /// `align_of::<f32>()` -- reinterpreting the raw bytes as `&[f32]`
+    /// without copying would be unsound, so the caller must fall back to
+    /// [`crate::bind::gguf_tensor_as_f32`]'s owned, byte-at-a-time decode
+    /// instead.
+    #[error("tensor {tensor:?} is f32 but its file offset is not 4-byte aligned, cannot borrow as &[f32]")]
+    MisalignedFloat32Tensor { tensor: String },
 }

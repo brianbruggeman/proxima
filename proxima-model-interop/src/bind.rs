@@ -60,10 +60,11 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
     }
 }
 
-/// Zero-copy counterpart to [`gguf_tensor_as_f32`] for a k-quant tensor:
-/// borrows `name`'s raw packed bytes straight out of `file_bytes` and wraps
-/// them as the matching [`proxima_tensor::cpu::QuantizedBlock`] variant,
-/// instead of dequantizing into an owned `Vec<f32>` first. No copy, no
+/// Zero-copy counterpart to [`gguf_tensor_as_f32`] for a k-quant tensor, or
+/// an `F32` tensor whose file offset happens to be `f32`-aligned: borrows
+/// `name`'s raw bytes straight out of `file_bytes` and wraps them as the
+/// matching [`proxima_tensor::cpu::QuantizedBlock`] variant, instead of
+/// dequantizing (or copying) into an owned `Vec<f32>` first. No copy, no
 /// allocation -- exactly the bytes GGUF already stored.
 ///
 /// One function over `Q4_K`/`Q5_K`/`Q6_K` rather than three near-identical
@@ -83,14 +84,31 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// row-major `[out, in]` layout, the layout this function hands through
 /// unchanged.
 ///
+/// The `F32` arm reinterprets `bytes` as `&[f32]` in place rather than
+/// decoding through [`reinterpret_f32`]. This is sound only if `bytes.as_ptr()`
+/// is 4-byte aligned: [`proxima_gguf::parser`] validates every tensor's
+/// on-disk `offset` against a running total of `pad_to_alignment` sums (a
+/// mismatch is a parse error, `GgufError::TensorOffsetMismatch`), so the
+/// byte offset *within the file* is always a multiple of `parsed.alignment`
+/// (minimum default 32) -- but that says nothing about whether `file_bytes`'s
+/// own base pointer is aligned. A `Vec<u8>` from `std::fs::read` carries no
+/// pointer-alignment guarantee beyond `align_of::<u8>() == 1`; an `mmap`
+/// (page-aligned by the kernel) does. [`aligned_f32_view`] checks the
+/// *actual* runtime pointer, not the assumption, and this function returns
+/// [`InteropError::MisalignedFloat32Tensor`] rather than reinterpreting
+/// unaligned bytes -- callers fall back to [`gguf_tensor_as_f32`]'s owned,
+/// byte-at-a-time decode, which never assumes alignment.
+///
 /// # Errors
 ///
 /// [`InteropError::UnknownTensor`] if `name` isn't in `parsed.tensors`;
 /// [`InteropError::Gguf`] if the tensor's declared byte range doesn't fit
-/// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] if `name`'s
-/// tensor is not one of `Q4_K`/`Q5_K`/`Q6_K` -- callers route anything else
-/// through [`gguf_tensor_as_f32`] instead, which is what this crate has a
-/// decoder for.
+/// `file_bytes`; [`InteropError::MisalignedFloat32Tensor`] if `name`'s
+/// tensor is `F32` but `file_bytes`'s base pointer leaves its byte range
+/// unaligned for `&[f32]`; [`InteropError::UnrepresentableGgmlType`] if
+/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q6_K` -- callers route
+/// anything else through [`gguf_tensor_as_f32`] instead, which is what this
+/// crate has a decoder for.
 #[cfg(feature = "std")]
 pub fn gguf_tensor_as_packed_block<'a>(
     parsed: &ParsedGguf,
@@ -101,6 +119,11 @@ pub fn gguf_tensor_as_packed_block<'a>(
     let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
     let bytes = &file_bytes[range.start as usize..range.end as usize];
     match tensor.ggml_type {
+        GgmlType::F32 => aligned_f32_view(bytes)
+            .map(proxima_tensor::cpu::QuantizedBlock::Float32)
+            .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
+                tensor: tensor.name.clone(),
+            }),
         GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
         GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
         GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
@@ -109,6 +132,36 @@ pub fn gguf_tensor_as_packed_block<'a>(
             ggml_type: other,
         }),
     }
+}
+
+/// Reinterprets `bytes` as `&[f32]` with no copy, or returns `None` if
+/// `bytes.as_ptr()` is not 4-byte aligned or `bytes.len()` is not a whole
+/// number of `f32`s. The alignment check reads the pointer's own address
+/// (`as usize % align_of::<f32>()`), never assumes it from where `bytes`
+/// came from -- see [`gguf_tensor_as_packed_block`]'s doc for why the
+/// on-disk offset alone can't prove this.
+///
+/// # Safety argument for the `unsafe` block inside
+///
+/// `core::slice::from_raw_parts` requires the pointer be non-null,
+/// correctly aligned for `f32`, and valid for `len` reads of `f32` for the
+/// lifetime of the returned reference. Non-null and lifetime-valid hold
+/// because the pointer is `bytes.as_ptr()`, still borrowed from `bytes`.
+/// Alignment holds because the guard above just checked it. `len` reads of
+/// `f32` fit because `bytes.len() / 4 * 4 == bytes.len()` was also just
+/// checked, so the `f32` slice covers exactly `bytes`'s bytes with none
+/// left over.
+#[cfg(feature = "std")]
+fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
+    let float_size = core::mem::size_of::<f32>();
+    if bytes.len() % float_size != 0 {
+        return None;
+    }
+    if (bytes.as_ptr() as usize) % core::mem::align_of::<f32>() != 0 {
+        return None;
+    }
+    // SAFETY: see this function's doc.
+    Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), bytes.len() / float_size) })
 }
 
 fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
@@ -340,17 +393,28 @@ mod real_openchat_file {
     }
 
     /// A learned 1-D scale (RMSNorm weight) or `token_embd.weight` (indexed
-    /// by row via `embedding_lookup`, never projected) -- always dequantized
-    /// to owned `f32`, no `Q4_K` packed path: this checkpoint's norms are
-    /// `F32` on disk already, and even a quantized `token_embd.weight`
-    /// would not qualify for `reject_non_float32`'s matmul exemption
-    /// (`is_quantized_matmul_operand` requires feeding a `Multiply`-then-
-    /// `Add` reduce, which a gather is not).
-    fn bind_dense(parsed: &ParsedGguf, file_bytes: &[u8], name: alloc::string::String, state: &mut LoadState) {
-        let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
-            .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
-        state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-        state.owned.push((name, decoded));
+    /// by row via `embedding_lookup`, never projected; never a `Q4_K`
+    /// packed path even when quantized, since `is_quantized_matmul_operand`
+    /// requires feeding a `Multiply`-then-`Add` reduce, which a gather is
+    /// not). This checkpoint's norms and `token_embd.weight` are `F32` on
+    /// disk already, so `gguf_tensor_as_packed_block`'s `F32` arm borrows
+    /// straight out of `file_bytes` -- see that function's doc for the
+    /// alignment argument. Falls back to `gguf_tensor_as_f32`'s owned copy
+    /// only if the borrow is refused (misaligned base pointer) or the
+    /// tensor is some other decodable-but-not-borrowable `GgmlType`.
+    fn bind_dense<'file>(parsed: &ParsedGguf, file_bytes: &'file [u8], name: alloc::string::String, state: &mut LoadState<'file>) {
+        match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
+            Ok(block @ QuantizedBlock::Float32(borrowed)) => {
+                state.resident_bytes += borrowed.len() * core::mem::size_of::<f32>();
+                state.packed.push((name, block));
+            }
+            Ok(_) | Err(_) => {
+                let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
+                    .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
+                state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+                state.owned.push((name, decoded));
+            }
+        }
     }
 
     /// A 2-D projection weight `mistral_forward_program` uses as one
