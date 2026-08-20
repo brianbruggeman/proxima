@@ -603,6 +603,7 @@ mod real_openchat_file {
         instrument::reset_parallel();
         instrument::reset_matmul_dispatch();
         instrument::reset_worker_cpu();
+        instrument::reset_q4k_shape_buckets();
         std::eprintln!("DIAG phase=forward_start t_ms={} pid={diag_pid}", diag_now_ms());
         let forward_start = std::time::Instant::now();
         let main_thread_cpu_start = instrument::thread_cpu_nanos();
@@ -732,6 +733,19 @@ mod real_openchat_file {
             worker_cpu_sum_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
             parallel.chunk_nanos_sum as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
         );
+        // DIAGNOSTIC (proxima-debugger, remove before landing): per-shape
+        // breakdown of the exact same in-situ measurement the aggregate
+        // q4k ns_per_mac line above sums away -- settles whether the
+        // 0.0462 vs 0.0332 gap is uniform across every matmul shape this
+        // forward runs, or concentrated in the small (attn_k/attn_v,
+        // rows=1024) shapes ggml's own t8 already regresses at.
+        std::println!("DIAG q4k_shape_table rows k calls macs ns_per_mac");
+        for (rows, k, calls, macs, nanos) in instrument::q4k_shape_snapshot() {
+            std::println!(
+                "DIAG q4k_shape rows={rows} k={k} calls={calls} macs={macs} ns_per_mac={:.6}",
+                nanos as f64 / macs.max(1) as f64,
+            );
+        }
 
         let (logits, shape) = evaluated.get(root).expect("logits present in output");
         assert_eq!(shape, [sequence as u64, VOCAB as u64], "logits must be [seq, vocab]");
