@@ -1072,6 +1072,218 @@ mod real_openchat_file {
         assert!(!generated_text.is_empty(), "degenerate control: decode loop produced no text");
     }
 
+    /// Every per-call input [`mistral_cached_forward_program`] needs beyond
+    /// the model weights: `ids_f32`/RoPE `cos`/`sin` for only the `new`
+    /// positions this call introduces, at their true absolute angle
+    /// (`start_position`, not 0 -- a generated token's position is
+    /// `cached_len`, never the start of the sequence), plus the
+    /// reduce-broadcast `eps` vector sized to match. `inv_dim`/`ones`/
+    /// `group_ones` need no per-call rebuild here the way the uncached
+    /// loop's [`PositionInputs`] carries them: [`mistral_cached_forward_program`]
+    /// folds those into `Op::Constant` (`no_repeated_scalar_crosses_the_binding_surface`
+    /// in `proxima-tensor`'s own `spec.rs` asserts they never cross the
+    /// binding surface at all).
+    struct CachedPositionInputs {
+        ids_f32: Vec<f32>,
+        epsilon: Vec<f32>,
+        cos: Vec<f32>,
+        sin: Vec<f32>,
+    }
+
+    fn build_cached_position_inputs(new_ids: &[u32], start_position: usize) -> CachedPositionInputs {
+        let new_count = new_ids.len();
+        let ids_f32: Vec<f32> = new_ids.iter().map(|&id| id as f32).collect();
+        let epsilon = alloc::vec![RMS_EPSILON; new_count];
+
+        let mut cos = alloc::vec![0.0f32; new_count * PAIRS];
+        let mut sin = alloc::vec![0.0f32; new_count * PAIRS];
+        for offset in 0..new_count {
+            let position = (start_position + offset) as f32;
+            for pair in 0..PAIRS {
+                let theta = position * ROPE_FREQ_BASE.powf(-((2 * pair) as f32) / (HEAD_DIM as f32));
+                cos[offset * PAIRS + pair] = theta.cos();
+                sin[offset * PAIRS + pair] = theta.sin();
+            }
+        }
+
+        CachedPositionInputs { ids_f32, epsilon, cos, sin }
+    }
+
+    /// Every layer's growable key/value cache: `k_even`/`k_odd` are already
+    /// RoPE-rotated (`mistral_cached_forward_program`'s own doc), `v` is
+    /// the un-rotated projected value -- exactly [`proxima_tensor::spec::CachedLayerRoots`]'s
+    /// three roots, owned here and grown one call's worth of new positions
+    /// at a time via a plain `Vec::extend_from_slice` (axis 0 -- the newly
+    /// appended positions -- is the outermost row-major axis, so growing it
+    /// is concatenation, not a scatter). Caller-held, not `BucketTable`
+    /// (`proxima-primitives/src/pipe/bucket_table.rs`): this loop serves
+    /// exactly one sequence, so there is no eviction policy or multi-tenant
+    /// slot table to justify that primitive's extra machinery.
+    struct LayerCache {
+        k_even: Vec<f32>,
+        k_odd: Vec<f32>,
+        v: Vec<f32>,
+    }
+
+    /// The cached counterpart to `runs_a_greedy_decode_loop_and_reports_per_token_wall_clock`:
+    /// same real checkpoint, same prompt/token-count knobs, but every step
+    /// after the first evaluates [`mistral_cached_forward_program`] with
+    /// `new_positions == 1` instead of re-running the whole growing
+    /// sequence -- the direct fix for the O(n^2) growth that test's own doc
+    /// names. The first call (`step == 0`) prefills the cache with the
+    /// whole prompt at once (`new_positions == prompt_length`,
+    /// `cached_len == 0`); every call after appends its own
+    /// [`proxima_tensor::spec::CachedLayerRoots`] output into [`LayerCache`]
+    /// before the next step runs.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock() {
+        use proxima_tensor::spec::mistral_cached_forward_program;
+
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F16,
+            kv_cache_value_quant: GgmlType::F16,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: 0,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+        let path = std::path::Path::new(serving_config.model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                serving_config.model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        let state = bind_all_weights(&parsed, file_bytes);
+
+        let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from openchat gguf metadata");
+        let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+            VOCAB as u32,
+            EMBEDDING as u32,
+            FEED_FORWARD as u32,
+            QUERY_HEADS as u32,
+            KV_HEADS as u32,
+            HEAD_DIM as u32,
+            BLOCK_COUNT,
+        )
+        .expect("the cached forward pass lowers to a program");
+        assert_eq!(cache_roots.len(), BLOCK_COUNT as usize, "one cache root triple per layer");
+
+        let kv_cache_names: Vec<(alloc::string::String, alloc::string::String, alloc::string::String)> = (0..BLOCK_COUNT as usize)
+            .map(|layer| {
+                (
+                    alloc::format!("kv_cache.{layer}.k_even"),
+                    alloc::format!("kv_cache.{layer}.k_odd"),
+                    alloc::format!("kv_cache.{layer}.v"),
+                )
+            })
+            .collect();
+        let mut layer_caches: Vec<LayerCache> = (0..BLOCK_COUNT as usize)
+            .map(|_| LayerCache { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() })
+            .collect();
+
+        let prompt = decode_loop_prompt();
+        let max_tokens = decode_loop_max_tokens();
+        let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, true, false).expect("encode prompt");
+        let prompt_length = ids.len();
+
+        std::println!("prompt={prompt:?} prompt_tokens={prompt_length} max_tokens={max_tokens} (cached)");
+
+        let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
+        let mut step_wall_clocks: Vec<core::time::Duration> = Vec::with_capacity(max_tokens);
+        let mut cached_len = 0usize;
+        let mut next_ids = ids.clone();
+        let decode_start = std::time::Instant::now();
+
+        for step in 0..max_tokens {
+            let new_count = next_ids.len();
+            apply_serving_config(&serving_config, cached_len + new_count);
+            let inputs = build_cached_position_inputs(&next_ids, cached_len);
+
+            let mut named_blocks: Vec<(&str, QuantizedBlock)> =
+                Vec::with_capacity(state.owned.len() + state.packed.len() + 4 + BLOCK_COUNT as usize * 3);
+            named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+            for (name, data) in &state.owned {
+                named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+            }
+            for (name, block) in &state.packed {
+                named_blocks.push((name.as_str(), *block));
+            }
+            named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
+            named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
+            named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+            for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
+                named_blocks.push((k_even_name.as_str(), QuantizedBlock::Float32(layer_caches[layer].k_even.as_slice())));
+                named_blocks.push((k_odd_name.as_str(), QuantizedBlock::Float32(layer_caches[layer].k_odd.as_slice())));
+                named_blocks.push((v_name.as_str(), QuantizedBlock::Float32(layer_caches[layer].v.as_slice())));
+            }
+
+            let symbols = [new_count as u64, cached_len as u64];
+            let mut roots: Vec<proxima_tensor::op::NodeId> = Vec::with_capacity(1 + cache_roots.len() * 3);
+            roots.push(logits_root);
+            for (even, odd, value) in &cache_roots {
+                roots.push(*even);
+                roots.push(*odd);
+                roots.push(*value);
+            }
+
+            let step_start = std::time::Instant::now();
+            let evaluated = evaluate_quantized_named(&program, &symbols, &named_blocks, &roots)
+                .expect("evaluate_quantized_named binds one cached decode step by name, packed weights included");
+            let step_elapsed = step_start.elapsed();
+
+            for (layer, (even, odd, value)) in cache_roots.iter().enumerate() {
+                let (even_data, _) = evaluated.get(*even).expect("k_even root present");
+                let (odd_data, _) = evaluated.get(*odd).expect("k_odd root present");
+                let (value_data, _) = evaluated.get(*value).expect("v root present");
+                layer_caches[layer].k_even.extend_from_slice(even_data);
+                layer_caches[layer].k_odd.extend_from_slice(odd_data);
+                layer_caches[layer].v.extend_from_slice(value_data);
+            }
+            cached_len += new_count;
+
+            let (logits, shape) = evaluated.get(logits_root).expect("logits present in output");
+            assert_eq!(shape, [new_count as u64, VOCAB as u64], "logits must be [new_positions, vocab]");
+            let last_position = &logits[(new_count - 1) * VOCAB..new_count * VOCAB];
+
+            let token_id = greedy_pick(last_position).expect("logits are nonempty");
+            let token_text = proxima_tokenizer::decode(&[token_id], &vocab).expect("decode picked token id");
+
+            std::println!(
+                "step={step} cached_len={cached_len} new_positions={new_count} token_id={token_id} token={token_text:?} step_wall_clock_ms={:.3}",
+                step_elapsed.as_secs_f64() * 1000.0
+            );
+
+            step_wall_clocks.push(step_elapsed);
+            generated_ids.push(token_id);
+            next_ids = alloc::vec![token_id];
+        }
+
+        let total_elapsed = decode_start.elapsed();
+        let mean_ms_per_token = total_elapsed.as_secs_f64() * 1000.0 / max_tokens as f64;
+        let generated_text = proxima_tokenizer::decode(&generated_ids, &vocab).expect("decode full generated sequence");
+
+        let cache_bytes_per_layer =
+            (layer_caches[0].k_even.len() + layer_caches[0].k_odd.len() + layer_caches[0].v.len()) * core::mem::size_of::<f32>();
+        let cache_bytes_total = cache_bytes_per_layer * BLOCK_COUNT as usize;
+        std::println!(
+            "decode_summary tokens_generated={max_tokens} total_wall_clock_ms={:.3} mean_ms_per_token={mean_ms_per_token:.3} generated_text={generated_text:?} cache_bytes_total={cache_bytes_total} ({:.3} MiB)",
+            total_elapsed.as_secs_f64() * 1000.0,
+            cache_bytes_total as f64 / (1024.0 * 1024.0)
+        );
+
+        assert_eq!(step_wall_clocks.len(), max_tokens, "one wall-clock reading per generated token");
+        assert!(!generated_text.is_empty(), "degenerate control: decode loop produced no text");
+    }
+
     /// Row-major transpose from GGUF's native flat layout (`[out, in]`,
     /// `out` rows of contiguous `in` values, ggml's linear-weight layout)
     /// to `mistral_forward_program`'s expected `[in, out]` layout. See the
