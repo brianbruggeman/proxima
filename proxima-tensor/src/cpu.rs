@@ -139,6 +139,7 @@ use crate::instrument::{KernelCounters, Path};
 use crate::map::IndexMap;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
+use crate::sized::COHORT_SPIN_POLLS;
 
 /// The result of running a tensor program: every requested output's data
 /// and shape, plus the peak number of live intermediate buffers the run
@@ -1315,7 +1316,10 @@ fn nest_cohort() -> Option<&'static ThreadCohort> {
     COHORT
         .get_or_init(|| {
             let members = NonZeroUsize::new(matmul_worker_count())?;
-            let config = ThreadCohort::builder().members(members).build();
+            let config = ThreadCohort::builder()
+                .members(members)
+                .spin_polls(COHORT_SPIN_POLLS)
+                .build();
             ThreadCohort::from_config(config).ok()
         })
         .as_ref()

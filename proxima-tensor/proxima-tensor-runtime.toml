@@ -31,6 +31,15 @@ split_alignment = 1
 # was rejected).
 min_macs_per_chunk = 500000
 
+[cohort]
+# core::hint::spin_loop() polls a cohort member burns waiting for the next
+# round before it parks. prime's own default is 2000 (prime/src/os/cohort.rs
+# CohortConfig::default), sized for a cohort whose rounds are far apart; a
+# forward pass opens rounds back to back, so a member that parks pays a
+# futex wake the spin would have avoided. see
+# sized::COHORT_SPIN_POLLS.
+spin_polls = 2000
+
 [quantize]
 # floor on Q8_K super-blocks (256 elements each) before
 # quantize_row_q8k_dispatch splits a call's activation buffer across the
