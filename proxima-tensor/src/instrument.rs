@@ -7,15 +7,130 @@
 //! atomic increment inside a loop that can run ~1e9 times, or the
 //! instrument would perturb the thing it measures.
 
+use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::ThreadId;
 
+use proxima_clock::ticks::Ticks;
+use proxima_primitives::pipe::Pipe;
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
 
 use crate::op::NodeId;
+
+// No hardware tick source ships in `proxima-clock` itself (by design — see
+// that crate's module doc: "implement `Pipe` for your type, zero edits to
+// this crate") and none of the workspace's existing monotonic readers fit:
+// `prime::core::timer::Clock`'s production impl and
+// `proxima_core::time::drivers::std_thread::StdThreadDriver` both still
+// round-trip through `std::time::Instant`/`Duration` (the conversion this
+// module exists to avoid), and `prime::core::timer::Clock` is ms-resolution
+// besides. `raw_tick` below is the hardware read `TensorTickSource` (the
+// `Pipe` source form the doc names) wraps; hot-path call sites in `cpu.rs`
+// call [`read_ticks`] directly, a plain function, not the async `Pipe::call`
+// path, to keep the hot loop allocation- and `Future`-free.
+//
+// Darwin: `mach_absolute_time` is the raw hardware counter with NO
+// multiply/divide at read time — the conversion to nanoseconds
+// (`mach_timebase_info`'s numer/denom) happens once, lazily, in
+// [`ticks_to_nanos`], never per read. This is the actual saving over
+// `std::time::Instant::now()`, whose Apple implementation performs that
+// conversion on every read.
+#[cfg(target_os = "macos")]
+// `libc::mach_absolute_time` is deprecated in favor of the `mach2` crate;
+// this file already carries `libc` as its one direct-syscall dependency
+// (`thread_cpu_nanos`/`ru_minflt` below), so staying on it here avoids
+// adding a second FFI crate for one function pair.
+#[allow(deprecated)]
+fn raw_tick() -> u64 {
+    // SAFETY: `mach_absolute_time` takes no arguments and only reads a
+    // hardware register; always safe to call.
+    unsafe { libc::mach_absolute_time() }
+}
+
+// Non-Darwin: `clock_gettime(CLOCK_MONOTONIC)` is already ticksecond-native
+// (the kernel/vDSO does its own scaling once, not duplicated per caller), so
+// there is no separate timebase conversion to defer — [`ticks_to_nanos`] is
+// the identity function on this path.
+#[cfg(not(target_os = "macos"))]
+fn raw_tick() -> u64 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `now` is a valid out-pointer; `CLOCK_MONOTONIC` is supported
+    // on every target this crate builds for.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    (now.tv_sec as u64) * 1_000_000_000 + (now.tv_nsec as u64)
+}
+
+/// One hardware-clock reading, hot-path shape: a plain function returning
+/// [`Ticks`], not a method on a bespoke stopwatch type — every one of
+/// `cpu.rs`'s ~25,000-per-forward call sites wants exactly this and nothing
+/// more. Composes with [`elapsed_ticks`] the same way any two [`Ticks`]
+/// readings do (`Ticks::wrapping_sub`).
+#[must_use]
+pub fn read_ticks() -> Ticks {
+    Ticks::from_raw(raw_tick())
+}
+
+/// `read_ticks() - started`, in raw tick units — never converted to
+/// nanoseconds here. Store the result straight into a counter; convert with
+/// [`ticks_to_nanos`] once, at the print/export edge, not per call.
+#[must_use]
+pub fn elapsed_ticks(started: Ticks) -> u64 {
+    read_ticks().wrapping_sub(started)
+}
+
+#[cfg(target_os = "macos")]
+// same `libc`-over-`mach2` rationale as `raw_tick` above.
+#[allow(deprecated)]
+fn timebase() -> (u64, u64) {
+    static TIMEBASE: OnceLock<(u64, u64)> = OnceLock::new();
+    *TIMEBASE.get_or_init(|| {
+        let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: `info` is a valid out-pointer.
+        unsafe { libc::mach_timebase_info(&mut info) };
+        (u64::from(info.numer), u64::from(info.denom).max(1))
+    })
+}
+
+/// The one-time-per-export conversion [`Ticks`]'s own doc names as the only
+/// place this multiply/divide belongs. Identity on platforms whose raw tick
+/// unit is already nanoseconds (everywhere [`raw_tick`] is not
+/// `mach_absolute_time`).
+#[must_use]
+pub fn ticks_to_nanos(ticks: u64) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        let (numer, denom) = timebase();
+        u64::try_from(u128::from(ticks) * u128::from(numer) / u128::from(denom)).unwrap_or(u64::MAX)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ticks
+    }
+}
+
+/// The hardware tick source, expressed as the source-shaped [`Pipe`]
+/// `proxima-clock`'s own module doc names (`In = ()`, `Out = Ticks`,
+/// `Err = Infallible`) — see `proxima_clock::ticks` for why a tick source is
+/// a `Pipe` and not a bespoke clock trait. This is the composable handle for
+/// callers building a pipe chain (e.g. `.and_then` into
+/// `proxima_clock::anchor::ToUnixNanos`); `cpu.rs`'s hot loop calls
+/// [`read_ticks`] directly instead, the same raw read this type's `call`
+/// wraps, so a hot-path measurement never pays for a `Future`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TensorTickSource;
+
+impl Pipe for TensorTickSource {
+    type In = ();
+    type Out = Ticks;
+    type Err = core::convert::Infallible;
+
+    fn call(&self, (): ()) -> impl Future<Output = Result<Ticks, core::convert::Infallible>> {
+        core::future::ready(Ok(read_ticks()))
+    }
+}
 
 pub static BOUND_OPS: Counter = Counter::new("proxima_tensor.bound_ops");
 pub static MAC_OPS: Counter = Counter::new("proxima_tensor.mac_ops");
@@ -31,26 +146,26 @@ pub static KERNEL_CALLS: Counter = Counter::new("proxima_tensor.kernel_calls");
 // per-parallel-node wall-clock breakdown for `cpu::run_chunks_threaded` /
 // `cpu::evaluate_node_parallel`: where does thread::scope time actually go.
 pub static PARALLEL_NODES: Counter = Counter::new("proxima_tensor.parallel_nodes");
-pub static PARALLEL_NODE_NANOS: Counter = Counter::new("proxima_tensor.parallel_node_nanos");
-pub static PARALLEL_SPAWN_NANOS: Counter = Counter::new("proxima_tensor.parallel_spawn_nanos");
-pub static PARALLEL_JOIN_NANOS: Counter = Counter::new("proxima_tensor.parallel_join_nanos");
+pub static PARALLEL_NODE_TICKS: Counter = Counter::new("proxima_tensor.parallel_node_ticks");
+pub static PARALLEL_SPAWN_TICKS: Counter = Counter::new("proxima_tensor.parallel_spawn_ticks");
+pub static PARALLEL_JOIN_TICKS: Counter = Counter::new("proxima_tensor.parallel_join_ticks");
 pub static PARALLEL_CHUNK_COUNT: Counter = Counter::new("proxima_tensor.parallel_chunk_count");
-pub static PARALLEL_CHUNK_NANOS_SUM: Counter =
-    Counter::new("proxima_tensor.parallel_chunk_nanos_sum");
+pub static PARALLEL_CHUNK_TICKS_SUM: Counter =
+    Counter::new("proxima_tensor.parallel_chunk_ticks_sum");
 // Counter has no min/max form, so the extremes live in their own atomics,
 // updated with fetch_min/fetch_max — the same lock-free discipline the
 // counters use, just without a running sum.
-pub static PARALLEL_CHUNK_NANOS_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
-pub static PARALLEL_CHUNK_NANOS_MAX: AtomicU64 = AtomicU64::new(0);
+pub static PARALLEL_CHUNK_TICKS_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+pub static PARALLEL_CHUNK_TICKS_MAX: AtomicU64 = AtomicU64::new(0);
 
 /// Records one chunk's compute duration into the sum/count/min/max quartet.
 /// Called once per chunk after `run_node_into` returns — never inside the
 /// kernel loop itself.
-pub fn record_chunk_nanos(nanos: u64) {
-    counter!(PARALLEL_CHUNK_NANOS_SUM, nanos);
+pub fn record_chunk_ticks(ticks: u64) {
+    counter!(PARALLEL_CHUNK_TICKS_SUM, ticks);
     counter!(PARALLEL_CHUNK_COUNT, 1);
-    PARALLEL_CHUNK_NANOS_MIN.fetch_min(nanos, Ordering::Relaxed);
-    PARALLEL_CHUNK_NANOS_MAX.fetch_max(nanos, Ordering::Relaxed);
+    PARALLEL_CHUNK_TICKS_MIN.fetch_min(ticks, Ordering::Relaxed);
+    PARALLEL_CHUNK_TICKS_MAX.fetch_max(ticks, Ordering::Relaxed);
 }
 
 /// One process run's worth of parallel-dispatch timing, read back by the
@@ -60,29 +175,29 @@ pub fn record_chunk_nanos(nanos: u64) {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ParallelTotals {
     pub parallel_nodes: u64,
-    pub node_nanos: u64,
-    pub spawn_nanos: u64,
-    pub join_nanos: u64,
+    pub node_ticks: u64,
+    pub spawn_ticks: u64,
+    pub join_ticks: u64,
     pub chunk_count: u64,
-    pub chunk_nanos_sum: u64,
-    pub chunk_nanos_min: u64,
-    pub chunk_nanos_max: u64,
+    pub chunk_ticks_sum: u64,
+    pub chunk_ticks_min: u64,
+    pub chunk_ticks_max: u64,
 }
 
 #[must_use]
 pub fn parallel_totals() -> ParallelTotals {
     let chunk_count = PARALLEL_CHUNK_COUNT.get();
-    let observed_min = PARALLEL_CHUNK_NANOS_MIN.load(Ordering::Relaxed);
+    let observed_min = PARALLEL_CHUNK_TICKS_MIN.load(Ordering::Relaxed);
     ParallelTotals {
         parallel_nodes: PARALLEL_NODES.get(),
-        node_nanos: PARALLEL_NODE_NANOS.get(),
-        spawn_nanos: PARALLEL_SPAWN_NANOS.get(),
-        join_nanos: PARALLEL_JOIN_NANOS.get(),
+        node_ticks: PARALLEL_NODE_TICKS.get(),
+        spawn_ticks: PARALLEL_SPAWN_TICKS.get(),
+        join_ticks: PARALLEL_JOIN_TICKS.get(),
         chunk_count,
-        chunk_nanos_sum: PARALLEL_CHUNK_NANOS_SUM.get(),
+        chunk_ticks_sum: PARALLEL_CHUNK_TICKS_SUM.get(),
         // no chunk was ever recorded: report 0, not the u64::MAX sentinel.
-        chunk_nanos_min: if chunk_count == 0 { 0 } else { observed_min },
-        chunk_nanos_max: PARALLEL_CHUNK_NANOS_MAX.load(Ordering::Relaxed),
+        chunk_ticks_min: if chunk_count == 0 { 0 } else { observed_min },
+        chunk_ticks_max: PARALLEL_CHUNK_TICKS_MAX.load(Ordering::Relaxed),
     }
 }
 
@@ -91,13 +206,13 @@ pub fn parallel_totals() -> ParallelTotals {
 /// disturbing the kernel counters.
 pub fn reset_parallel() {
     let _ = PARALLEL_NODES.snapshot_and_reset();
-    let _ = PARALLEL_NODE_NANOS.snapshot_and_reset();
-    let _ = PARALLEL_SPAWN_NANOS.snapshot_and_reset();
-    let _ = PARALLEL_JOIN_NANOS.snapshot_and_reset();
+    let _ = PARALLEL_NODE_TICKS.snapshot_and_reset();
+    let _ = PARALLEL_SPAWN_TICKS.snapshot_and_reset();
+    let _ = PARALLEL_JOIN_TICKS.snapshot_and_reset();
     let _ = PARALLEL_CHUNK_COUNT.snapshot_and_reset();
-    let _ = PARALLEL_CHUNK_NANOS_SUM.snapshot_and_reset();
-    PARALLEL_CHUNK_NANOS_MIN.store(u64::MAX, Ordering::Relaxed);
-    PARALLEL_CHUNK_NANOS_MAX.store(0, Ordering::Relaxed);
+    let _ = PARALLEL_CHUNK_TICKS_SUM.snapshot_and_reset();
+    PARALLEL_CHUNK_TICKS_MIN.store(u64::MAX, Ordering::Relaxed);
+    PARALLEL_CHUNK_TICKS_MAX.store(0, Ordering::Relaxed);
 }
 
 // chunk duration (above) scatters by construction as chunk count grows past
@@ -106,18 +221,18 @@ pub fn reset_parallel() {
 // region is bottlenecked on one straggler is each PULLER's total busy time —
 // summed across every chunk that puller claimed — which is why this is
 // keyed by the calling thread, not by chunk index.
-static WORKER_BUSY_NANOS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
+static WORKER_BUSY_TICKS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
 
-/// Adds `nanos` to the current thread's running total. Called from the same
-/// per-chunk timing site as [`record_chunk_nanos`] — this is a second,
+/// Adds `ticks` to the current thread's running total. Called from the same
+/// per-chunk timing site as [`record_chunk_ticks`] — this is a second,
 /// orthogonal aggregation of the identical measurement, grouped by puller
 /// instead of by chunk.
-pub fn record_worker_busy_nanos(nanos: u64) {
+pub fn record_worker_busy_ticks(ticks: u64) {
     let thread_id = std::thread::current().id();
-    let mut totals = WORKER_BUSY_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_BUSY_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
     match totals.iter_mut().find(|(existing, _)| *existing == thread_id) {
-        Some((_, total)) => *total += nanos,
-        None => totals.push((thread_id, nanos)),
+        Some((_, total)) => *total += ticks,
+        None => totals.push((thread_id, ticks)),
     }
 }
 
@@ -126,17 +241,17 @@ pub fn record_worker_busy_nanos(nanos: u64) {
 /// thread that claimed at least one chunk. Order is not meaningful.
 #[must_use]
 pub fn worker_busy_snapshot() -> Vec<u64> {
-    let totals = WORKER_BUSY_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
-    totals.iter().map(|(_, nanos)| *nanos).collect()
+    let totals = WORKER_BUSY_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    totals.iter().map(|(_, ticks)| *ticks).collect()
 }
 
 pub fn reset_worker_busy() {
-    let mut totals = WORKER_BUSY_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_BUSY_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
     totals.clear();
 }
 
 // the busy total above is `Instant`-derived, so a worker the OS descheduled
-// keeps accruing "busy" nanos while off-core. on a box carrying any ambient
+// keeps accruing "busy" ticks while off-core. on a box carrying any ambient
 // load that turns the 1->8 scaling read into a measurement of the host: a
 // register-only fma control (zero memory traffic, so no scaling effect is
 // even possible) measured +41.2% wall growth 1->8 against +6.8% cpu growth,
@@ -159,7 +274,7 @@ pub fn thread_cpu_nanos() -> u64 {
 }
 
 /// Adds `nanos` of consumed CPU time to the current thread's running total,
-/// the deschedule-immune peer of [`record_worker_busy_nanos`].
+/// the deschedule-immune peer of [`record_worker_busy_ticks`].
 pub fn record_worker_cpu_nanos(nanos: u64) {
     let thread_id = std::thread::current().id();
     let mut totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -172,7 +287,7 @@ pub fn record_worker_cpu_nanos(nanos: u64) {
 #[must_use]
 pub fn worker_cpu_snapshot() -> Vec<u64> {
     let totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
-    totals.iter().map(|(_, nanos)| *nanos).collect()
+    totals.iter().map(|(_, ticks)| *ticks).collect()
 }
 
 pub fn reset_worker_cpu() {
@@ -196,7 +311,7 @@ pub fn ru_minflt() -> u64 {
 }
 
 // `matmul_rows_threaded`'s own dispatch-overhead breakdown (`cpu.rs`) --
-// distinct from `PARALLEL_SPAWN_NANOS`/`PARALLEL_JOIN_NANOS` above, which
+// distinct from `PARALLEL_SPAWN_TICKS`/`PARALLEL_JOIN_TICKS` above, which
 // only ever fire from `run_chunks_threaded`'s `BoundOp`-chunk path. The
 // quantized-matmul forward never reaches that path (`evaluate_quantized`'s
 // loop calls `run_node_into` directly, no `evaluate_node_parallel`), so
@@ -222,7 +337,7 @@ pub static MATMUL_DISPATCH_CALLS: Counter = Counter::new("proxima_tensor.matmul.
 // not tell "the dispatch chain is slow" apart from "the untimed setup
 // before it is slow" (`reduce_quantized_ms` minus spawn+own_chunk+recv_wait
 // is exactly this).
-pub static MATMUL_SETUP_NANOS: Counter = Counter::new("proxima_tensor.matmul.setup_nanos");
+pub static MATMUL_SETUP_TICKS: Counter = Counter::new("proxima_tensor.matmul.setup_ticks");
 // `std::thread::available_parallelism()` (`cpu.rs::quantized_matmul_workers`)
 // is called once per row-batch call (once per position, per matmul node --
 // 1296 times this forward), not cached anywhere. Unlike a libc `sysconf`
@@ -230,18 +345,18 @@ pub static MATMUL_SETUP_NANOS: Counter = Counter::new("proxima_tensor.matmul.set
 // this across calls on every platform, so a caller could not previously
 // tell "the per-call syscall/query cost is negligible" apart from "it is
 // the missing time" -- this is the direct witness.
-pub static MATMUL_AVAILABLE_PARALLELISM_NANOS: Counter =
-    Counter::new("proxima_tensor.matmul.available_parallelism_nanos");
-pub static MATMUL_SPAWN_NANOS: Counter = Counter::new("proxima_tensor.matmul.spawn_nanos");
-pub static MATMUL_OWN_CHUNK_NANOS: Counter = Counter::new("proxima_tensor.matmul.own_chunk_nanos");
-pub static MATMUL_RECV_WAIT_NANOS: Counter = Counter::new("proxima_tensor.matmul.recv_wait_nanos");
+pub static MATMUL_AVAILABLE_PARALLELISM_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.available_parallelism_ticks");
+pub static MATMUL_SPAWN_TICKS: Counter = Counter::new("proxima_tensor.matmul.spawn_ticks");
+pub static MATMUL_OWN_CHUNK_TICKS: Counter = Counter::new("proxima_tensor.matmul.own_chunk_ticks");
+pub static MATMUL_RECV_WAIT_TICKS: Counter = Counter::new("proxima_tensor.matmul.recv_wait_ticks");
 // the activation-quantize preamble every `matmul_q4k_q8k_f32` call pays
 // once, BEFORE `quantized_matmul_workers`/`matmul_rows_threaded` even run
 // (`quantize_row_q8k` in `cpu.rs`) -- not part of the row-chunk dispatch at
 // all, so it needed a separate timer once the spawn/own-chunk/recv-wait
 // trio above did not account for a node's full wall time on its own.
-pub static MATMUL_QUANTIZE_ACTIVATION_NANOS: Counter =
-    Counter::new("proxima_tensor.matmul.quantize_activation_nanos");
+pub static MATMUL_QUANTIZE_ACTIVATION_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.quantize_activation_ticks");
 // whole-function timer around `run_reduce_quantized` (once per matmul
 // NODE, same granularity as the per-node-kind table), to localize a gap
 // between a node's total wall time and the sum of
@@ -249,8 +364,8 @@ pub static MATMUL_QUANTIZE_ACTIVATION_NANOS: Counter =
 // total, the gap is inside the position loop (a codec path none of the
 // above four time); if it matches the four-way sum instead, the gap is
 // OUTSIDE `run_reduce_quantized` entirely.
-pub static MATMUL_REDUCE_QUANTIZED_NANOS: Counter =
-    Counter::new("proxima_tensor.matmul.reduce_quantized_nanos");
+pub static MATMUL_REDUCE_QUANTIZED_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.reduce_quantized_ticks");
 // `matmul_q5k_f32`/`matmul_q6k_f32` (`cpu.rs`) never call
 // `quantized_matmul_workers` at all -- they are a plain sequential
 // `chunks_exact().map().collect()` over every weight row, unconditionally,
@@ -260,11 +375,11 @@ pub static MATMUL_REDUCE_QUANTIZED_NANOS: Counter =
 // every `MATMUL_*` counter above (none of which this call path ever
 // reaches). These two counters are the only witness of that time.
 pub static MATMUL_Q5K_F32_CALLS: Counter = Counter::new("proxima_tensor.matmul.q5k_f32_calls");
-pub static MATMUL_Q5K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q5k_f32_nanos");
+pub static MATMUL_Q5K_F32_TICKS: Counter = Counter::new("proxima_tensor.matmul.q5k_f32_ticks");
 pub static MATMUL_Q6K_F32_CALLS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_calls");
-pub static MATMUL_Q6K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_nanos");
+pub static MATMUL_Q6K_F32_TICKS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_ticks");
 
-// per-call mac/nanos witness for `run_reduce_quantized`'s position loop
+// per-call mac/ticks witness for `run_reduce_quantized`'s position loop
 // (`cpu.rs`), split by codec -- `rows * contraction_width` is an element
 // count already at hand at the call site (`run_reduce_quantized`'s own
 // `rows`/`k` locals), not re-derived from tensor shape after the fact.
@@ -273,11 +388,11 @@ pub static MATMUL_Q6K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q
 // (0.0255 ns/mac) -- if one codec's in-situ ns/mac is far worse than the
 // other two, this is the only witness that names which.
 pub static MATMUL_Q4K_MACS: Counter = Counter::new("proxima_tensor.matmul.q4k_macs");
-pub static MATMUL_Q4K_CALL_NANOS: Counter = Counter::new("proxima_tensor.matmul.q4k_call_nanos");
+pub static MATMUL_Q4K_CALL_TICKS: Counter = Counter::new("proxima_tensor.matmul.q4k_call_ticks");
 pub static MATMUL_Q5K_MACS: Counter = Counter::new("proxima_tensor.matmul.q5k_macs");
-pub static MATMUL_Q5K_CALL_NANOS: Counter = Counter::new("proxima_tensor.matmul.q5k_call_nanos");
+pub static MATMUL_Q5K_CALL_TICKS: Counter = Counter::new("proxima_tensor.matmul.q5k_call_ticks");
 pub static MATMUL_Q6K_MACS: Counter = Counter::new("proxima_tensor.matmul.q6k_macs");
-pub static MATMUL_Q6K_CALL_NANOS: Counter = Counter::new("proxima_tensor.matmul.q6k_call_nanos");
+pub static MATMUL_Q6K_CALL_TICKS: Counter = Counter::new("proxima_tensor.matmul.q6k_call_ticks");
 // how many times `run_reduce_quantized`'s position loop ran a single
 // weight's matmul, and how many distinct nodes it ran across -- the
 // direct witness for whether a node's `leading_total` positions are
@@ -289,42 +404,42 @@ pub static MATMUL_REDUCE_QUANTIZED_CALLS: Counter =
     Counter::new("proxima_tensor.matmul.reduce_quantized_calls");
 
 // diagnostic-only, keyed by (rows, k) -- every aggregate MATMUL_Q4K_MACS/
-// MATMUL_Q4K_CALL_NANOS above sums across all 7 matmul shapes a real
+// MATMUL_Q4K_CALL_TICKS above sums across all 7 matmul shapes a real
 // forward pass runs per layer, so it cannot tell "attn_q's threading win
 // held" apart from "attn_k lost it and attn_q's win hid the loss in the
 // average." `run_reduce_quantized` (`cpu.rs`) already has `rows`/`k` at the
 // exact site the aggregate counters fire from; this bucket is the same
-// measurement (per-call nanos including the activation-quantize preamble,
+// measurement (per-call ticks including the activation-quantize preamble,
 // wrapping the whole `matmul_q4k_q8k_f32` call) split by shape instead of
 // summed away.
 type ShapeKey = (u64, u64);
 type ShapeTotals = (u64, u64, u64);
-static Q4K_SHAPE_NANOS: Mutex<BTreeMap<ShapeKey, ShapeTotals>> = Mutex::new(BTreeMap::new());
+static Q4K_SHAPE_TICKS: Mutex<BTreeMap<ShapeKey, ShapeTotals>> = Mutex::new(BTreeMap::new());
 
-/// Adds one `(rows, k)`-shaped call's macs and elapsed nanos to that
-/// shape's running `(calls, macs, nanos)` triple.
-pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, nanos: u64) {
-    let mut buckets = Q4K_SHAPE_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+/// Adds one `(rows, k)`-shaped call's macs and elapsed ticks to that
+/// shape's running `(calls, macs, ticks)` triple.
+pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, ticks: u64) {
+    let mut buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = buckets.entry((rows, k)).or_insert((0, 0, 0));
     entry.0 += 1;
     entry.1 += macs;
-    entry.2 += nanos;
+    entry.2 += ticks;
 }
 
 /// Every distinct `(rows, k)` shape recorded since the last
-/// [`reset_q4k_shape_buckets`], as `(rows, k, calls, macs, nanos)` — sorted
+/// [`reset_q4k_shape_buckets`], as `(rows, k, calls, macs, ticks)` — sorted
 /// by key (`BTreeMap` iteration order), not by any measured field.
 #[must_use]
 pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
-    let buckets = Q4K_SHAPE_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
     buckets
         .iter()
-        .map(|(&(rows, k), &(calls, macs, nanos))| (rows, k, calls, macs, nanos))
+        .map(|(&(rows, k), &(calls, macs, ticks))| (rows, k, calls, macs, ticks))
         .collect()
 }
 
 pub fn reset_q4k_shape_buckets() {
-    let mut buckets = Q4K_SHAPE_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
     buckets.clear();
 }
 
@@ -336,23 +451,23 @@ pub struct MatmulDispatchTotals {
     pub workers_calls: u64,
     pub workers_none: u64,
     pub calls: u64,
-    pub setup_nanos: u64,
-    pub available_parallelism_nanos: u64,
-    pub spawn_nanos: u64,
-    pub own_chunk_nanos: u64,
-    pub recv_wait_nanos: u64,
-    pub quantize_activation_nanos: u64,
-    pub reduce_quantized_nanos: u64,
+    pub setup_ticks: u64,
+    pub available_parallelism_ticks: u64,
+    pub spawn_ticks: u64,
+    pub own_chunk_ticks: u64,
+    pub recv_wait_ticks: u64,
+    pub quantize_activation_ticks: u64,
+    pub reduce_quantized_ticks: u64,
     pub q5k_f32_calls: u64,
-    pub q5k_f32_nanos: u64,
+    pub q5k_f32_ticks: u64,
     pub q6k_f32_calls: u64,
-    pub q6k_f32_nanos: u64,
+    pub q6k_f32_ticks: u64,
     pub q4k_macs: u64,
-    pub q4k_call_nanos: u64,
+    pub q4k_call_ticks: u64,
     pub q5k_macs: u64,
-    pub q5k_call_nanos: u64,
+    pub q5k_call_ticks: u64,
     pub q6k_macs: u64,
-    pub q6k_call_nanos: u64,
+    pub q6k_call_ticks: u64,
     pub position_loop_iters: u64,
     pub reduce_quantized_calls: u64,
 }
@@ -363,23 +478,23 @@ pub fn matmul_dispatch_totals() -> MatmulDispatchTotals {
         workers_calls: MATMUL_WORKERS_CALLS.get(),
         workers_none: MATMUL_WORKERS_NONE.get(),
         calls: MATMUL_DISPATCH_CALLS.get(),
-        setup_nanos: MATMUL_SETUP_NANOS.get(),
-        available_parallelism_nanos: MATMUL_AVAILABLE_PARALLELISM_NANOS.get(),
-        spawn_nanos: MATMUL_SPAWN_NANOS.get(),
-        own_chunk_nanos: MATMUL_OWN_CHUNK_NANOS.get(),
-        recv_wait_nanos: MATMUL_RECV_WAIT_NANOS.get(),
-        quantize_activation_nanos: MATMUL_QUANTIZE_ACTIVATION_NANOS.get(),
-        reduce_quantized_nanos: MATMUL_REDUCE_QUANTIZED_NANOS.get(),
+        setup_ticks: MATMUL_SETUP_TICKS.get(),
+        available_parallelism_ticks: MATMUL_AVAILABLE_PARALLELISM_TICKS.get(),
+        spawn_ticks: MATMUL_SPAWN_TICKS.get(),
+        own_chunk_ticks: MATMUL_OWN_CHUNK_TICKS.get(),
+        recv_wait_ticks: MATMUL_RECV_WAIT_TICKS.get(),
+        quantize_activation_ticks: MATMUL_QUANTIZE_ACTIVATION_TICKS.get(),
+        reduce_quantized_ticks: MATMUL_REDUCE_QUANTIZED_TICKS.get(),
         q5k_f32_calls: MATMUL_Q5K_F32_CALLS.get(),
-        q5k_f32_nanos: MATMUL_Q5K_F32_NANOS.get(),
+        q5k_f32_ticks: MATMUL_Q5K_F32_TICKS.get(),
         q6k_f32_calls: MATMUL_Q6K_F32_CALLS.get(),
-        q6k_f32_nanos: MATMUL_Q6K_F32_NANOS.get(),
+        q6k_f32_ticks: MATMUL_Q6K_F32_TICKS.get(),
         q4k_macs: MATMUL_Q4K_MACS.get(),
-        q4k_call_nanos: MATMUL_Q4K_CALL_NANOS.get(),
+        q4k_call_ticks: MATMUL_Q4K_CALL_TICKS.get(),
         q5k_macs: MATMUL_Q5K_MACS.get(),
-        q5k_call_nanos: MATMUL_Q5K_CALL_NANOS.get(),
+        q5k_call_ticks: MATMUL_Q5K_CALL_TICKS.get(),
         q6k_macs: MATMUL_Q6K_MACS.get(),
-        q6k_call_nanos: MATMUL_Q6K_CALL_NANOS.get(),
+        q6k_call_ticks: MATMUL_Q6K_CALL_TICKS.get(),
         position_loop_iters: MATMUL_POSITION_LOOP_ITERS.get(),
         reduce_quantized_calls: MATMUL_REDUCE_QUANTIZED_CALLS.get(),
     }
@@ -390,46 +505,46 @@ pub fn reset_matmul_dispatch() {
     let _ = MATMUL_WORKERS_CALLS.snapshot_and_reset();
     let _ = MATMUL_WORKERS_NONE.snapshot_and_reset();
     let _ = MATMUL_DISPATCH_CALLS.snapshot_and_reset();
-    let _ = MATMUL_SETUP_NANOS.snapshot_and_reset();
-    let _ = MATMUL_AVAILABLE_PARALLELISM_NANOS.snapshot_and_reset();
-    let _ = MATMUL_SPAWN_NANOS.snapshot_and_reset();
-    let _ = MATMUL_OWN_CHUNK_NANOS.snapshot_and_reset();
-    let _ = MATMUL_RECV_WAIT_NANOS.snapshot_and_reset();
-    let _ = MATMUL_QUANTIZE_ACTIVATION_NANOS.snapshot_and_reset();
-    let _ = MATMUL_REDUCE_QUANTIZED_NANOS.snapshot_and_reset();
+    let _ = MATMUL_SETUP_TICKS.snapshot_and_reset();
+    let _ = MATMUL_AVAILABLE_PARALLELISM_TICKS.snapshot_and_reset();
+    let _ = MATMUL_SPAWN_TICKS.snapshot_and_reset();
+    let _ = MATMUL_OWN_CHUNK_TICKS.snapshot_and_reset();
+    let _ = MATMUL_RECV_WAIT_TICKS.snapshot_and_reset();
+    let _ = MATMUL_QUANTIZE_ACTIVATION_TICKS.snapshot_and_reset();
+    let _ = MATMUL_REDUCE_QUANTIZED_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q5K_F32_CALLS.snapshot_and_reset();
-    let _ = MATMUL_Q5K_F32_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q5K_F32_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q6K_F32_CALLS.snapshot_and_reset();
-    let _ = MATMUL_Q6K_F32_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q6K_F32_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q4K_MACS.snapshot_and_reset();
-    let _ = MATMUL_Q4K_CALL_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q4K_CALL_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q5K_MACS.snapshot_and_reset();
-    let _ = MATMUL_Q5K_CALL_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q5K_CALL_TICKS.snapshot_and_reset();
     let _ = MATMUL_Q6K_MACS.snapshot_and_reset();
-    let _ = MATMUL_Q6K_CALL_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q6K_CALL_TICKS.snapshot_and_reset();
     let _ = MATMUL_POSITION_LOOP_ITERS.snapshot_and_reset();
     let _ = MATMUL_REDUCE_QUANTIZED_CALLS.snapshot_and_reset();
 }
 
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part
 // that is NOT inside `run_chunks_threaded`'s `thread::scope` (which
-// `PARALLEL_NODE_NANOS` above already measures, now scoped to start right
+// `PARALLEL_NODE_TICKS` above already measures, now scoped to start right
 // before `thread::scope`, after slice-carving — see `cpu::run_chunks_threaded`).
 // Each part is timed once per `evaluate_parallel` call (or once per resolved
 // node, for the per-node parts) and committed after the timed region, never
 // as a per-element accumulation.
-pub static SERIAL_PREPARE_NANOS: Counter = Counter::new("proxima_tensor.serial_prepare_nanos");
-pub static SERIAL_ALLOC_NANOS: Counter = Counter::new("proxima_tensor.serial_alloc_nanos");
-pub static SERIAL_SPLIT_NANOS: Counter = Counter::new("proxima_tensor.serial_split_nanos");
-pub static SERIAL_SLICE_CARVE_NANOS: Counter = Counter::new("proxima_tensor.serial_slice_carve_nanos");
-pub static SERIAL_FINISH_NANOS: Counter = Counter::new("proxima_tensor.serial_finish_nanos");
-pub static SERIAL_BOOKKEEPING_NANOS: Counter = Counter::new("proxima_tensor.serial_bookkeeping_nanos");
+pub static SERIAL_PREPARE_TICKS: Counter = Counter::new("proxima_tensor.serial_prepare_ticks");
+pub static SERIAL_ALLOC_TICKS: Counter = Counter::new("proxima_tensor.serial_alloc_ticks");
+pub static SERIAL_SPLIT_TICKS: Counter = Counter::new("proxima_tensor.serial_split_ticks");
+pub static SERIAL_SLICE_CARVE_TICKS: Counter = Counter::new("proxima_tensor.serial_slice_carve_ticks");
+pub static SERIAL_FINISH_TICKS: Counter = Counter::new("proxima_tensor.serial_finish_ticks");
+pub static SERIAL_BOOKKEEPING_TICKS: Counter = Counter::new("proxima_tensor.serial_bookkeeping_ticks");
 // only nonzero on the `workers == 1` (or below-threshold) arm, where
 // `evaluate_node_parallel` never reaches `run_chunks_threaded` at all.
-pub static SERIAL_SEQUENTIAL_COMPUTE_NANOS: Counter =
-    Counter::new("proxima_tensor.serial_sequential_compute_nanos");
-pub static SERIAL_EVALUATE_PARALLEL_NANOS: Counter =
-    Counter::new("proxima_tensor.serial_evaluate_parallel_nanos");
+pub static SERIAL_SEQUENTIAL_COMPUTE_TICKS: Counter =
+    Counter::new("proxima_tensor.serial_sequential_compute_ticks");
+pub static SERIAL_EVALUATE_PARALLEL_TICKS: Counter =
+    Counter::new("proxima_tensor.serial_evaluate_parallel_ticks");
 pub static SERIAL_EVALUATE_PARALLEL_CALLS: Counter =
     Counter::new("proxima_tensor.serial_evaluate_parallel_calls");
 
@@ -437,28 +552,28 @@ pub static SERIAL_EVALUATE_PARALLEL_CALLS: Counter =
 /// breakdown, read back the same way [`parallel_totals`] is.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SerialTotals {
-    pub prepare_nanos: u64,
-    pub alloc_nanos: u64,
-    pub split_nanos: u64,
-    pub slice_carve_nanos: u64,
-    pub finish_nanos: u64,
-    pub bookkeeping_nanos: u64,
-    pub sequential_compute_nanos: u64,
-    pub evaluate_parallel_nanos: u64,
+    pub prepare_ticks: u64,
+    pub alloc_ticks: u64,
+    pub split_ticks: u64,
+    pub slice_carve_ticks: u64,
+    pub finish_ticks: u64,
+    pub bookkeeping_ticks: u64,
+    pub sequential_compute_ticks: u64,
+    pub evaluate_parallel_ticks: u64,
     pub evaluate_parallel_calls: u64,
 }
 
 #[must_use]
 pub fn serial_totals() -> SerialTotals {
     SerialTotals {
-        prepare_nanos: SERIAL_PREPARE_NANOS.get(),
-        alloc_nanos: SERIAL_ALLOC_NANOS.get(),
-        split_nanos: SERIAL_SPLIT_NANOS.get(),
-        slice_carve_nanos: SERIAL_SLICE_CARVE_NANOS.get(),
-        finish_nanos: SERIAL_FINISH_NANOS.get(),
-        bookkeeping_nanos: SERIAL_BOOKKEEPING_NANOS.get(),
-        sequential_compute_nanos: SERIAL_SEQUENTIAL_COMPUTE_NANOS.get(),
-        evaluate_parallel_nanos: SERIAL_EVALUATE_PARALLEL_NANOS.get(),
+        prepare_ticks: SERIAL_PREPARE_TICKS.get(),
+        alloc_ticks: SERIAL_ALLOC_TICKS.get(),
+        split_ticks: SERIAL_SPLIT_TICKS.get(),
+        slice_carve_ticks: SERIAL_SLICE_CARVE_TICKS.get(),
+        finish_ticks: SERIAL_FINISH_TICKS.get(),
+        bookkeeping_ticks: SERIAL_BOOKKEEPING_TICKS.get(),
+        sequential_compute_ticks: SERIAL_SEQUENTIAL_COMPUTE_TICKS.get(),
+        evaluate_parallel_ticks: SERIAL_EVALUATE_PARALLEL_TICKS.get(),
         evaluate_parallel_calls: SERIAL_EVALUATE_PARALLEL_CALLS.get(),
     }
 }
@@ -467,14 +582,14 @@ pub fn serial_totals() -> SerialTotals {
 /// [`reset_parallel`] but kept separate so a caller can reset one family
 /// without disturbing the others.
 pub fn reset_serial() {
-    let _ = SERIAL_PREPARE_NANOS.snapshot_and_reset();
-    let _ = SERIAL_ALLOC_NANOS.snapshot_and_reset();
-    let _ = SERIAL_SPLIT_NANOS.snapshot_and_reset();
-    let _ = SERIAL_SLICE_CARVE_NANOS.snapshot_and_reset();
-    let _ = SERIAL_FINISH_NANOS.snapshot_and_reset();
-    let _ = SERIAL_BOOKKEEPING_NANOS.snapshot_and_reset();
-    let _ = SERIAL_SEQUENTIAL_COMPUTE_NANOS.snapshot_and_reset();
-    let _ = SERIAL_EVALUATE_PARALLEL_NANOS.snapshot_and_reset();
+    let _ = SERIAL_PREPARE_TICKS.snapshot_and_reset();
+    let _ = SERIAL_ALLOC_TICKS.snapshot_and_reset();
+    let _ = SERIAL_SPLIT_TICKS.snapshot_and_reset();
+    let _ = SERIAL_SLICE_CARVE_TICKS.snapshot_and_reset();
+    let _ = SERIAL_FINISH_TICKS.snapshot_and_reset();
+    let _ = SERIAL_BOOKKEEPING_TICKS.snapshot_and_reset();
+    let _ = SERIAL_SEQUENTIAL_COMPUTE_TICKS.snapshot_and_reset();
+    let _ = SERIAL_EVALUATE_PARALLEL_TICKS.snapshot_and_reset();
     let _ = SERIAL_EVALUATE_PARALLEL_CALLS.snapshot_and_reset();
 }
 

@@ -113,8 +113,6 @@ use core::ops::Deref;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::borrow::Cow;
 use std::thread;
-#[cfg(feature = "instrument")]
-use std::time::Instant;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, OnceLock};
@@ -470,9 +468,9 @@ pub fn evaluate_quantized(
     // portion of evaluate_quantized that is neither the per-node-kind loop
     // below nor run_node_into itself -- shape::infer, bind::bind,
     // node_retirement, and the buffers table setup all run here, none of
-    // it visible in the diag_kind_nanos table.
+    // it visible in the diag_kind_ticks table.
     #[cfg(feature = "instrument")]
-    let diag_setup_started = Instant::now();
+    let diag_setup_started = instrument::read_ticks();
     let shapes = shape::infer(program, symbols)?;
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
@@ -547,18 +545,18 @@ pub fn evaluate_quantized(
     // itself uses, so the bucket a node lands in matches the arm that
     // actually ran it.
     #[cfg(feature = "instrument")]
-    let mut diag_kind_nanos: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
+    let mut diag_kind_ticks: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
     // DIAGNOSTIC (proxima-debugger, remove before landing): everything in
     // this loop body OTHER than run_node_into -- the output Vec's zero-fill
     // allocation (ahead of diag_node_started so it is never in
-    // diag_kind_nanos) and the live-buffer/live-bytes bookkeeping after the
+    // diag_kind_ticks) and the live-buffer/live-bytes bookkeeping after the
     // call (diag_live_bytes rescans the whole buffers table every node).
     // Both run unconditionally today, gated build or not; this counter is
     // instrument-only so it costs nothing outside this run.
     #[cfg(feature = "instrument")]
-    let mut diag_loop_overhead_nanos: u64 = 0;
+    let mut diag_loop_overhead_ticks: u64 = 0;
     #[cfg(feature = "instrument")]
-    let diag_setup_nanos = diag_setup_started.elapsed().as_nanos() as u64;
+    let diag_setup_ticks = instrument::elapsed_ticks(diag_setup_started);
     // Entered ONCE, before the node loop -- not per matmul call -- so the
     // wake this session amortizes is paid once per forward pass, the same
     // amortization `prime/src/os/cohort.rs`'s own module doc measures
@@ -571,25 +569,25 @@ pub fn evaluate_quantized(
     let session = nest_cohort().and_then(|cohort| cohort.enter().ok());
     for (position, computed) in resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
-        let diag_alloc_started = Instant::now();
+        let diag_alloc_started = instrument::read_ticks();
         let mut output = vec![0.0f32; node_output_len(computed)];
         #[cfg(feature = "instrument")]
         {
-            diag_loop_overhead_nanos += diag_alloc_started.elapsed().as_nanos() as u64;
+            diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_alloc_started);
         }
         #[cfg(feature = "instrument")]
         let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
         #[cfg(feature = "instrument")]
-        let diag_node_started = Instant::now();
+        let diag_node_started = instrument::read_ticks();
         run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
         #[cfg(feature = "instrument")]
         {
-            let entry = diag_kind_nanos.entry(diag_node_label).or_insert((0, 0));
+            let entry = diag_kind_ticks.entry(diag_node_label).or_insert((0, 0));
             entry.0 += 1;
-            entry.1 += diag_node_started.elapsed().as_nanos() as u64;
+            entry.1 += instrument::elapsed_ticks(diag_node_started);
         }
         #[cfg(feature = "instrument")]
-        let diag_bookkeeping_started = Instant::now();
+        let diag_bookkeeping_started = instrument::read_ticks();
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         let current_bytes = diag_live_bytes(&buffers);
@@ -602,7 +600,7 @@ pub fn evaluate_quantized(
         }
         #[cfg(feature = "instrument")]
         {
-            diag_loop_overhead_nanos += diag_bookkeeping_started.elapsed().as_nanos() as u64;
+            diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
         }
     }
     std::eprintln!(
@@ -613,31 +611,31 @@ pub fn evaluate_quantized(
     );
     #[cfg(feature = "instrument")]
     {
-        let total_nanos: u64 = diag_kind_nanos.values().map(|(_, nanos)| *nanos).sum();
+        let total_ticks: u64 = diag_kind_ticks.values().map(|(_, ticks)| *ticks).sum();
         let mut ranked: Vec<(&str, u64, u64)> =
-            diag_kind_nanos.into_iter().map(|(label, (count, nanos))| (label, count, nanos)).collect();
+            diag_kind_ticks.into_iter().map(|(label, (count, ticks))| (label, count, ticks)).collect();
         ranked.sort_by_key(|entry| core::cmp::Reverse(entry.2));
-        for (label, count, nanos) in ranked {
+        for (label, count, ticks) in ranked {
             std::eprintln!(
                 "DIAG evaluate_quantized node_kind={label} count={count} total_ms={:.3} pct_of_forward={:.2}",
-                nanos as f64 / 1_000_000.0,
-                100.0 * nanos as f64 / total_nanos as f64,
+                ticks as f64 / 1_000_000.0,
+                100.0 * ticks as f64 / total_ticks as f64,
             );
         }
         std::eprintln!(
             "DIAG evaluate_quantized setup_ms={:.3} loop_overhead_ms={:.3}",
-            diag_setup_nanos as f64 / 1_000_000.0,
-            diag_loop_overhead_nanos as f64 / 1_000_000.0,
+            diag_setup_ticks as f64 / 1_000_000.0,
+            diag_loop_overhead_ticks as f64 / 1_000_000.0,
         );
     }
     #[cfg(feature = "instrument")]
-    let diag_finish_started = Instant::now();
+    let diag_finish_started = instrument::read_ticks();
 
     let result = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
     #[cfg(feature = "instrument")]
     std::eprintln!(
         "DIAG evaluate_quantized finish_ms={:.3}",
-        diag_finish_started.elapsed().as_nanos() as f64 / 1_000_000.0,
+        instrument::ticks_to_nanos(instrument::elapsed_ticks(diag_finish_started)) as f64 / 1_000_000.0,
     );
     Ok(result)
 }
@@ -662,7 +660,7 @@ pub fn evaluate_quantized_named<'block>(
     // reports -- a linear `find` over `named` per weight tensor, O(block
     // count * named count) string compares.
     #[cfg(feature = "instrument")]
-    let diag_resolve_started = Instant::now();
+    let diag_resolve_started = instrument::read_ticks();
     let block_nodes = block_node_ids(program);
     let mut blocks: Vec<QuantizedBlock<'block>> = Vec::with_capacity(block_nodes.len());
     for node in &block_nodes {
@@ -679,7 +677,7 @@ pub fn evaluate_quantized_named<'block>(
     #[cfg(feature = "instrument")]
     std::eprintln!(
         "DIAG evaluate_quantized_named resolve_ms={:.3} block_count={}",
-        diag_resolve_started.elapsed().as_nanos() as f64 / 1_000_000.0,
+        instrument::ticks_to_nanos(instrument::elapsed_ticks(diag_resolve_started)) as f64 / 1_000_000.0,
         block_nodes.len(),
     );
     evaluate_quantized(program, symbols, &blocks, outputs)
@@ -880,10 +878,10 @@ pub fn evaluate_parallel(
     workers: NonZeroUsize,
 ) -> Result<Evaluated, TensorError> {
     #[cfg(feature = "instrument")]
-    let evaluate_parallel_start = Instant::now();
+    let evaluate_parallel_start = instrument::read_ticks();
 
     #[cfg(feature = "instrument")]
-    let prepare_start = Instant::now();
+    let prepare_start = instrument::read_ticks();
     #[cfg(feature = "instrument")]
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
     let Prepared {
@@ -898,15 +896,15 @@ pub fn evaluate_parallel(
     drop(alloc_site_guard);
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::SERIAL_PREPARE_NANOS,
-        prepare_start.elapsed().as_nanos() as u64
+        instrument::SERIAL_PREPARE_TICKS,
+        instrument::elapsed_ticks(prepare_start)
     );
 
     let mut peak_live_buffers = live_count(&buffers);
     for (position, computed) in resolved.iter().enumerate() {
         let output = evaluate_node_parallel(computed, &buffers, workers)?;
         #[cfg(feature = "instrument")]
-        let bookkeeping_start = Instant::now();
+        let bookkeeping_start = instrument::read_ticks();
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         for retired in &retires[position] {
@@ -914,23 +912,23 @@ pub fn evaluate_parallel(
         }
         #[cfg(feature = "instrument")]
         counter!(
-            instrument::SERIAL_BOOKKEEPING_NANOS,
-            bookkeeping_start.elapsed().as_nanos() as u64
+            instrument::SERIAL_BOOKKEEPING_TICKS,
+            instrument::elapsed_ticks(bookkeeping_start)
         );
     }
 
     #[cfg(feature = "instrument")]
-    let finish_start = Instant::now();
+    let finish_start = instrument::read_ticks();
     let evaluated = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
     #[cfg(feature = "instrument")]
     {
         counter!(
-            instrument::SERIAL_FINISH_NANOS,
-            finish_start.elapsed().as_nanos() as u64
+            instrument::SERIAL_FINISH_TICKS,
+            instrument::elapsed_ticks(finish_start)
         );
         counter!(
-            instrument::SERIAL_EVALUATE_PARALLEL_NANOS,
-            evaluate_parallel_start.elapsed().as_nanos() as u64
+            instrument::SERIAL_EVALUATE_PARALLEL_TICKS,
+            instrument::elapsed_ticks(evaluate_parallel_start)
         );
         counter!(instrument::SERIAL_EVALUATE_PARALLEL_CALLS, 1);
     }
@@ -949,18 +947,18 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     #[cfg(feature = "instrument")]
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
     #[cfg(feature = "instrument")]
-    let alloc_start = Instant::now();
+    let alloc_start = instrument::read_ticks();
     let mut output = vec![0.0f32; node_output_len(resolved)];
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::SERIAL_ALLOC_NANOS,
-        alloc_start.elapsed().as_nanos() as u64
+        instrument::SERIAL_ALLOC_TICKS,
+        instrument::elapsed_ticks(alloc_start)
     );
     #[cfg(feature = "instrument")]
     drop(alloc_site_guard);
 
     #[cfg(feature = "instrument")]
-    let split_start = Instant::now();
+    let split_start = instrument::read_ticks();
     let above_threshold = element_count(&resolved.extents) >= PARALLEL_THRESHOLD;
     // oversubscribing at `workers == 1` would still spawn `OVERSUBSCRIBE - 1`
     // pool tasks (chunk count alone bounds pool concurrency — see
@@ -977,8 +975,8 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
         .flatten();
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::SERIAL_SPLIT_NANOS,
-        split_start.elapsed().as_nanos() as u64
+        instrument::SERIAL_SPLIT_TICKS,
+        instrument::elapsed_ticks(split_start)
     );
 
     match chunks {
@@ -994,12 +992,12 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
                 counter!(instrument::DISPATCH_SEQUENTIAL_BELOW_THRESHOLD, 1);
             }
             #[cfg(feature = "instrument")]
-            let sequential_start = Instant::now();
+            let sequential_start = instrument::read_ticks();
             run_node_into(resolved, buffers, None, None, &mut output)?;
             #[cfg(feature = "instrument")]
             counter!(
-                instrument::SERIAL_SEQUENTIAL_COMPUTE_NANOS,
-                sequential_start.elapsed().as_nanos() as u64
+                instrument::SERIAL_SEQUENTIAL_COMPUTE_TICKS,
+                instrument::elapsed_ticks(sequential_start)
             );
         }
     }
@@ -1057,7 +1055,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     workers: NonZeroUsize,
 ) -> Result<(), TensorError> {
     #[cfg(feature = "instrument")]
-    let slice_carve_start = Instant::now();
+    let slice_carve_start = instrument::read_ticks();
     #[cfg(feature = "instrument")]
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::ChunkSlices);
 
@@ -1072,8 +1070,8 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     drop(alloc_site_guard);
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::SERIAL_SLICE_CARVE_NANOS,
-        slice_carve_start.elapsed().as_nanos() as u64
+        instrument::SERIAL_SLICE_CARVE_TICKS,
+        instrument::elapsed_ticks(slice_carve_start)
     );
 
     if chunks.len() < 2 {
@@ -1116,7 +1114,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     let (result_sender, result_receiver) = sync_channel(chunks_len);
 
     #[cfg(feature = "instrument")]
-    let node_start = Instant::now();
+    let node_start = instrument::read_ticks();
 
     // `workers - 1` pool tasks — the puller count the caller actually asked
     // for, NOT `chunks_len - 1`. `nest_pool` is sized to `num_cpus`, shared
@@ -1153,7 +1151,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     }
 
     #[cfg(feature = "instrument")]
-    let spawn_elapsed = node_start.elapsed();
+    let spawn_ticks = instrument::elapsed_ticks(node_start);
 
     // the caller pulls from the same shared cursor as every pool task
     // instead of running one reserved chunk — see this function's doc
@@ -1186,19 +1184,17 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 
     #[cfg(feature = "instrument")]
     {
-        let total_elapsed = node_start.elapsed();
-        let spawn_nanos = spawn_elapsed.as_nanos() as u64;
-        let total_nanos = total_elapsed.as_nanos() as u64;
+        let total_ticks = instrument::elapsed_ticks(node_start);
         counter!(instrument::PARALLEL_NODES, 1);
-        counter!(instrument::PARALLEL_NODE_NANOS, total_nanos);
-        counter!(instrument::PARALLEL_SPAWN_NANOS, spawn_nanos);
+        counter!(instrument::PARALLEL_NODE_TICKS, total_ticks);
+        counter!(instrument::PARALLEL_SPAWN_TICKS, spawn_ticks);
         // join/teardown is whatever wall-clock the node spent that wasn't
         // already charged to spawning the pool tasks — includes the
         // caller's own claim_and_run loop, same as the thread::scope
         // sibling's join/teardown includes its own compute.
         counter!(
-            instrument::PARALLEL_JOIN_NANOS,
-            total_nanos.saturating_sub(spawn_nanos)
+            instrument::PARALLEL_JOIN_TICKS,
+            total_ticks.saturating_sub(spawn_ticks)
         );
     }
 
@@ -1259,16 +1255,16 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
             unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
 
         #[cfg(feature = "instrument")]
-        let chunk_start = Instant::now();
+        let chunk_start = instrument::read_ticks();
         #[cfg(feature = "instrument")]
         let cpu_start = instrument::thread_cpu_nanos();
         let outcome = run_node_into(chunk, chunk_buffers, None, None, chunk_output);
         #[cfg(feature = "instrument")]
         {
-            let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
+            let chunk_ticks = instrument::elapsed_ticks(chunk_start);
             let cpu_nanos = instrument::thread_cpu_nanos() - cpu_start;
-            instrument::record_chunk_nanos(chunk_nanos);
-            instrument::record_worker_busy_nanos(chunk_nanos);
+            instrument::record_chunk_ticks(chunk_ticks);
+            instrument::record_worker_busy_ticks(chunk_ticks);
             instrument::record_worker_cpu_nanos(cpu_nanos);
         }
 
@@ -2091,7 +2087,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // time and the sum of matmul_rows_threaded's own timers sits inside
     // this function's position loop or outside it entirely.
     #[cfg(feature = "instrument")]
-    let diag_reduce_quantized_started = Instant::now();
+    let diag_reduce_quantized_started = instrument::read_ticks();
     // `session` only reaches a call site when its codec's own `q{4,5,6}k-int8-dot`
     // feature is on (the arms below); a build with every one of those off
     // never reads it, so bind it unconditionally here rather than let a
@@ -2162,7 +2158,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // `leading_total` separate `matmul_rows_threaded` rounds (one per
         // position, never folded into a single wider row-batch).
         #[cfg(feature = "instrument")]
-        let diag_call_started = Instant::now();
+        let diag_call_started = instrument::read_ticks();
         let result = match weight_block {
             QuantizedBlock::Float32(_) => return Err(shape_error()),
             QuantizedBlock::Q4K(_) => {
@@ -2198,22 +2194,22 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         };
         #[cfg(feature = "instrument")]
         {
-            let diag_call_nanos = diag_call_started.elapsed().as_nanos() as u64;
+            let diag_call_ticks = instrument::elapsed_ticks(diag_call_started);
             let diag_call_macs = (rows as u64) * (k as u64);
             match weight_block {
                 QuantizedBlock::Float32(_) => {}
                 QuantizedBlock::Q4K(_) => {
                     counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
-                    counter!(instrument::MATMUL_Q4K_CALL_NANOS, diag_call_nanos);
-                    instrument::record_q4k_shape_call(rows as u64, k as u64, diag_call_macs, diag_call_nanos);
+                    counter!(instrument::MATMUL_Q4K_CALL_TICKS, diag_call_ticks);
+                    instrument::record_q4k_shape_call(rows as u64, k as u64, diag_call_macs, diag_call_ticks);
                 }
                 QuantizedBlock::Q5K(_) => {
                     counter!(instrument::MATMUL_Q5K_MACS, diag_call_macs);
-                    counter!(instrument::MATMUL_Q5K_CALL_NANOS, diag_call_nanos);
+                    counter!(instrument::MATMUL_Q5K_CALL_TICKS, diag_call_ticks);
                 }
                 QuantizedBlock::Q6K(_) => {
                     counter!(instrument::MATMUL_Q6K_MACS, diag_call_macs);
-                    counter!(instrument::MATMUL_Q6K_CALL_NANOS, diag_call_nanos);
+                    counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
                 }
             }
         }
@@ -2221,8 +2217,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     }
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::MATMUL_REDUCE_QUANTIZED_NANOS,
-        diag_reduce_quantized_started.elapsed().as_nanos() as u64
+        instrument::MATMUL_REDUCE_QUANTIZED_TICKS,
+        instrument::elapsed_ticks(diag_reduce_quantized_started)
     );
     Ok(())
 }
@@ -4301,7 +4297,7 @@ pub fn matmul_q5k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
     // kept as a whole-function wrap so this counter stays comparable to the
     // pre-fix baseline it was built to measure.
     #[cfg(feature = "instrument")]
-    let diag_q5k_started = Instant::now();
+    let diag_q5k_started = instrument::read_ticks();
     let result = matmul_quantized_dispatch(
         weights,
         rows,
@@ -4314,8 +4310,8 @@ pub fn matmul_q5k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
     {
         counter!(instrument::MATMUL_Q5K_F32_CALLS, 1);
         counter!(
-            instrument::MATMUL_Q5K_F32_NANOS,
-            diag_q5k_started.elapsed().as_nanos() as u64
+            instrument::MATMUL_Q5K_F32_TICKS,
+            instrument::elapsed_ticks(diag_q5k_started)
         );
     }
     result
@@ -4372,7 +4368,7 @@ pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
     // through the same `matmul_quantized_dispatch` pool dispatch, same
     // whole-function timer for baseline comparability.
     #[cfg(feature = "instrument")]
-    let diag_q6k_started = Instant::now();
+    let diag_q6k_started = instrument::read_ticks();
     let result = matmul_quantized_dispatch(
         weights,
         rows,
@@ -4385,8 +4381,8 @@ pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
     {
         counter!(instrument::MATMUL_Q6K_F32_CALLS, 1);
         counter!(
-            instrument::MATMUL_Q6K_F32_NANOS,
-            diag_q6k_started.elapsed().as_nanos() as u64
+            instrument::MATMUL_Q6K_F32_TICKS,
+            instrument::elapsed_ticks(diag_q6k_started)
         );
     }
     result
@@ -4499,12 +4495,12 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
         return None;
     }
     #[cfg(feature = "instrument")]
-    let diag_available_parallelism_started = Instant::now();
+    let diag_available_parallelism_started = instrument::read_ticks();
     let workers = matmul_worker_count();
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::MATMUL_AVAILABLE_PARALLELISM_NANOS,
-        diag_available_parallelism_started.elapsed().as_nanos() as u64
+        instrument::MATMUL_AVAILABLE_PARALLELISM_TICKS,
+        instrument::elapsed_ticks(diag_available_parallelism_started)
     );
     let decision = (workers > 1 && rows >= workers).then_some(workers);
     #[cfg(feature = "instrument")]
@@ -4630,11 +4626,11 @@ where
     // proxima-debugger diagnostic: everything this function does before its
     // own spawn/own_chunk/recv_wait timer chain starts -- the `output`
     // alloc, the `chunk_ranges` build, `nest_pool()`, and the `Arc`/
-    // `sync_channel` allocations. Named `MATMUL_SETUP_NANOS` so a caller can
+    // `sync_channel` allocations. Named `MATMUL_SETUP_TICKS` so a caller can
     // tell "the dispatch chain is slow" apart from "this untimed setup,
     // paid once per call, is slow" -- see that counter's doc.
     #[cfg(feature = "instrument")]
-    let diag_setup_started = Instant::now();
+    let diag_setup_started = instrument::read_ticks();
     let mut output = vec![0.0f32; rows];
     let chunk_count = row_chunk_count(rows, workers, contraction_width);
     let chunk_len = rows.div_ceil(chunk_count);
@@ -4653,7 +4649,7 @@ where
 
     if let Some(session) = session {
         #[cfg(feature = "instrument")]
-        counter!(instrument::MATMUL_SETUP_NANOS, diag_setup_started.elapsed().as_nanos() as u64);
+        counter!(instrument::MATMUL_SETUP_TICKS, instrument::elapsed_ticks(diag_setup_started));
         #[cfg(feature = "instrument")]
         counter!(instrument::PARALLEL_NODES, 1);
         let error_slot: OnceLock<TensorError> = OnceLock::new();
@@ -4666,18 +4662,18 @@ where
         // wait for the dedicated members into one call (`cohort.rs`'s
         // `run_round(control)` followed by the `done` spin) -- unlike the
         // pool path, it does not expose a separate claim-only timer, so
-        // this whole call is charged to `MATMUL_OWN_CHUNK_NANOS` rather
-        // than split against `MATMUL_RECV_WAIT_NANOS` (which stays 0 on
+        // this whole call is charged to `MATMUL_OWN_CHUNK_TICKS` rather
+        // than split against `MATMUL_RECV_WAIT_TICKS` (which stays 0 on
         // this path). Nonzero here is the direct witness that the leader
         // is claiming chunks, not spinning idle -- see `cohort.rs`'s
         // `CohortSession::run` doc for the +14.8 ms it cost while it was.
         #[cfg(feature = "instrument")]
-        let diag_own_chunk_started = Instant::now();
+        let diag_own_chunk_started = instrument::read_ticks();
         let report = session.run(&round);
         #[cfg(feature = "instrument")]
         counter!(
-            instrument::MATMUL_OWN_CHUNK_NANOS,
-            diag_own_chunk_started.elapsed().as_nanos() as u64
+            instrument::MATMUL_OWN_CHUNK_TICKS,
+            instrument::elapsed_ticks(diag_own_chunk_started)
         );
         if let Some(error) = error_slot.get() {
             return Err(error.clone());
@@ -4703,23 +4699,23 @@ where
     let (result_sender, result_receiver) = sync_channel(chunk_ranges_len);
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::MATMUL_SETUP_NANOS,
-        diag_setup_started.elapsed().as_nanos() as u64
+        instrument::MATMUL_SETUP_TICKS,
+        instrument::elapsed_ticks(diag_setup_started)
     );
 
     #[cfg(feature = "instrument")]
     counter!(instrument::PARALLEL_NODES, 1);
 
     // proxima-debugger diagnostic (this call's own dispatch-overhead
-    // breakdown, `instrument.rs::MATMUL_*_NANOS`): times the spawn loop,
+    // breakdown, `instrument.rs::MATMUL_*_TICKS`): times the spawn loop,
     // the caller's own claiming loop, and the `Receiver::recv` wait
     // separately so a caller can tell whether this dispatch is bottlenecked
     // on spawn (granularity too fine), recv (a straggler the cursor could
     // not route around fast enough), or neither (own-chunk + per-chunk
-    // compute already accounted by `record_chunk_nanos` dominates and
+    // compute already accounted by `record_chunk_ticks` dominates and
     // dispatch is not the ceiling).
     #[cfg(feature = "instrument")]
-    let diag_spawn_started = Instant::now();
+    let diag_spawn_started = instrument::read_ticks();
 
     for _ in 0..spawned_count {
         let sender = result_sender.clone();
@@ -4732,20 +4728,20 @@ where
     }
 
     #[cfg(feature = "instrument")]
-    let diag_spawn_nanos = diag_spawn_started.elapsed().as_nanos() as u64;
+    let diag_spawn_ticks = instrument::elapsed_ticks(diag_spawn_started);
 
     #[cfg(feature = "instrument")]
-    let diag_own_chunk_started = Instant::now();
+    let diag_own_chunk_started = instrument::read_ticks();
     // the caller pulls from the same shared cursor as every pool task
     // instead of running one reserved chunk: it never sits idle, since
     // finishing a chunk sends it straight back to `next_index` for another.
     claim_and_run_rows::<Row>(&next_index, dot_row_address, &chunk_ranges, &result_sender);
     drop(result_sender);
     #[cfg(feature = "instrument")]
-    let diag_own_chunk_nanos = diag_own_chunk_started.elapsed().as_nanos() as u64;
+    let diag_own_chunk_ticks = instrument::elapsed_ticks(diag_own_chunk_started);
 
     #[cfg(feature = "instrument")]
-    let diag_recv_started = Instant::now();
+    let diag_recv_started = instrument::read_ticks();
     let mut outcomes: Vec<Option<Result<(), TensorError>>> =
         (0..chunk_ranges_len).map(|_| None).collect();
     for _ in 0..chunk_ranges_len {
@@ -4759,11 +4755,11 @@ where
     }
     #[cfg(feature = "instrument")]
     {
-        let diag_recv_nanos = diag_recv_started.elapsed().as_nanos() as u64;
+        let diag_recv_ticks = instrument::elapsed_ticks(diag_recv_started);
         counter!(instrument::MATMUL_DISPATCH_CALLS, 1);
-        counter!(instrument::MATMUL_SPAWN_NANOS, diag_spawn_nanos);
-        counter!(instrument::MATMUL_OWN_CHUNK_NANOS, diag_own_chunk_nanos);
-        counter!(instrument::MATMUL_RECV_WAIT_NANOS, diag_recv_nanos);
+        counter!(instrument::MATMUL_SPAWN_TICKS, diag_spawn_ticks);
+        counter!(instrument::MATMUL_OWN_CHUNK_TICKS, diag_own_chunk_ticks);
+        counter!(instrument::MATMUL_RECV_WAIT_TICKS, diag_recv_ticks);
     }
     for (index, outcome) in outcomes.into_iter().enumerate() {
         match outcome {
@@ -4836,7 +4832,7 @@ where
     Row: Fn(usize) -> Result<f32, TensorError>,
 {
     #[cfg(feature = "instrument")]
-    let chunk_started = Instant::now();
+    let chunk_started = instrument::read_ticks();
     // proxima-debugger diagnostic: `Instant`-elapsed wall time (below) keeps
     // accruing while this worker is off-core, so on a box carrying ambient
     // load it cannot tell "the kernel is slower in situ" apart from "this
@@ -4854,7 +4850,7 @@ where
     }
     #[cfg(feature = "instrument")]
     {
-        instrument::record_chunk_nanos(chunk_started.elapsed().as_nanos() as u64);
+        instrument::record_chunk_ticks(instrument::elapsed_ticks(chunk_started));
         instrument::record_worker_cpu_nanos(instrument::thread_cpu_nanos() - chunk_cpu_started);
     }
     Ok(())
@@ -5518,12 +5514,12 @@ fn matmul_q4k_q8k_f32_impl(
     // between a matmul node's total wall time and its threaded-dispatch
     // time.
     #[cfg(feature = "instrument")]
-    let diag_quantize_started = Instant::now();
+    let diag_quantize_started = instrument::read_ticks();
     quantize_row_q8k(activation, &mut activation_q8k)?;
     #[cfg(feature = "instrument")]
     counter!(
-        instrument::MATMUL_QUANTIZE_ACTIVATION_NANOS,
-        diag_quantize_started.elapsed().as_nanos() as u64
+        instrument::MATMUL_QUANTIZE_ACTIVATION_TICKS,
+        instrument::elapsed_ticks(diag_quantize_started)
     );
 
     let row_bytes = weights.len() / rows;

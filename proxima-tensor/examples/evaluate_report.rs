@@ -132,25 +132,34 @@ fn report_for_threads(program: &[Op], lhs: &[f32], rhs_t: &[f32], threads: usize
     let serial = instrument::serial_totals();
     let path = instrument::path_totals();
 
-    let imbalance = if parallel.chunk_nanos_min == 0 {
-        0.0
-    } else {
-        parallel.chunk_nanos_max as f64 / parallel.chunk_nanos_min as f64
-    };
-    let spawn_percent = if parallel.node_nanos == 0 {
-        0.0
-    } else {
-        parallel.spawn_nanos as f64 / parallel.node_nanos as f64 * 100.0
-    };
+    // every `_ticks` field below is a raw `proxima_clock::Ticks` delta
+    // (`instrument::read_ticks`'s doc); converted to nanoseconds once here,
+    // not per element, matching `bind.rs`'s DIAG block.
+    let chunk_min_nanos = instrument::ticks_to_nanos(parallel.chunk_ticks_min);
+    let chunk_max_nanos = instrument::ticks_to_nanos(parallel.chunk_ticks_max);
+    let chunk_sum_nanos = instrument::ticks_to_nanos(parallel.chunk_ticks_sum);
+    let spawn_nanos = instrument::ticks_to_nanos(parallel.spawn_ticks);
+    let join_nanos = instrument::ticks_to_nanos(parallel.join_ticks);
+    let node_nanos = instrument::ticks_to_nanos(parallel.node_ticks);
+    let prepare_nanos = instrument::ticks_to_nanos(serial.prepare_ticks);
+    let alloc_nanos = instrument::ticks_to_nanos(serial.alloc_ticks);
+    let split_nanos = instrument::ticks_to_nanos(serial.split_ticks);
+    let slice_carve_nanos = instrument::ticks_to_nanos(serial.slice_carve_ticks);
+    let finish_nanos = instrument::ticks_to_nanos(serial.finish_ticks);
+    let bookkeeping_nanos = instrument::ticks_to_nanos(serial.bookkeeping_ticks);
+    let sequential_compute_nanos = instrument::ticks_to_nanos(serial.sequential_compute_ticks);
 
-    let stage_sum_ns = serial.prepare_nanos
-        + serial.alloc_nanos
-        + serial.split_nanos
-        + serial.slice_carve_nanos
-        + serial.finish_nanos
-        + serial.bookkeeping_nanos
-        + serial.sequential_compute_nanos
-        + parallel.node_nanos;
+    let imbalance = if chunk_min_nanos == 0 { 0.0 } else { chunk_max_nanos as f64 / chunk_min_nanos as f64 };
+    let spawn_percent = if node_nanos == 0 { 0.0 } else { spawn_nanos as f64 / node_nanos as f64 * 100.0 };
+
+    let stage_sum_ns = prepare_nanos
+        + alloc_nanos
+        + split_nanos
+        + slice_carve_nanos
+        + finish_nanos
+        + bookkeeping_nanos
+        + sequential_compute_nanos
+        + node_nanos;
     let residual_ns = wall_ns as i64 - stage_sum_ns as i64;
 
     println!("==== threads={threads} ====");
@@ -201,28 +210,24 @@ fn report_for_threads(program: &[Op], lhs: &[f32], rhs_t: &[f32], threads: usize
          imbalance={imbalance:.3}x spawn_ns={} spawn_percent={spawn_percent:.2}% join_ns={} node_ns={}",
         parallel.parallel_nodes,
         parallel.chunk_count,
-        parallel.chunk_nanos_min,
-        parallel.chunk_nanos_max,
-        if parallel.chunk_count == 0 {
-            0.0
-        } else {
-            parallel.chunk_nanos_sum as f64 / parallel.chunk_count as f64
-        },
-        parallel.spawn_nanos,
-        parallel.join_nanos,
-        parallel.node_nanos,
+        chunk_min_nanos,
+        chunk_max_nanos,
+        if parallel.chunk_count == 0 { 0.0 } else { chunk_sum_nanos as f64 / parallel.chunk_count as f64 },
+        spawn_nanos,
+        join_nanos,
+        node_nanos,
     );
     println!(
         "stages_ns: prepare={} alloc={} split={} slice_carve={} finish={} bookkeeping={} \
          sequential_compute={} parallel_node={} sum={stage_sum_ns} wall={wall_ns} residual={residual_ns}",
-        serial.prepare_nanos,
-        serial.alloc_nanos,
-        serial.split_nanos,
-        serial.slice_carve_nanos,
-        serial.finish_nanos,
-        serial.bookkeeping_nanos,
-        serial.sequential_compute_nanos,
-        parallel.node_nanos,
+        prepare_nanos,
+        alloc_nanos,
+        split_nanos,
+        slice_carve_nanos,
+        finish_nanos,
+        bookkeeping_nanos,
+        sequential_compute_nanos,
+        node_nanos,
     );
 }
 

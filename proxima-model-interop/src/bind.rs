@@ -264,6 +264,7 @@ mod real_openchat_file {
     use proxima_gguf::quant::q4_k;
     use proxima_tensor::DType;
     use proxima_tensor::cpu::{QuantizedBlock, evaluate_named, evaluate_quantized_named};
+    #[cfg(feature = "instrument")]
     use proxima_tensor::instrument;
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
@@ -534,19 +535,23 @@ mod real_openchat_file {
         // this module's own doc names: a caller serving many small models
         // should not pay to warm a mapping it will only read a slice of).
         let prefault_enabled = std::env::var("PROXIMA_PREFAULT").is_ok_and(|value| value == "1");
+        #[cfg(feature = "instrument")]
         let diag_minflt_prefault_before = instrument::ru_minflt();
         let prefault_start = std::time::Instant::now();
         if prefault_enabled {
             prefault(file_bytes).expect("prefault the host-local openchat gguf mapping");
         }
         let prefault_elapsed = prefault_start.elapsed();
+        #[cfg(feature = "instrument")]
         let diag_minflt_prefault_after = instrument::ru_minflt();
         std::eprintln!(
             "DIAG phase=prefault t_ms={} pid={diag_pid} enabled={prefault_enabled}",
             diag_now_ms()
         );
+        std::println!("prefault: enabled={prefault_enabled} wall_clock={prefault_elapsed:?}");
+        #[cfg(feature = "instrument")]
         std::println!(
-            "prefault: enabled={prefault_enabled} wall_clock={prefault_elapsed:?} minflt_delta={}",
+            "DIAG prefault_minflt_delta={}",
             diag_minflt_prefault_after.saturating_sub(diag_minflt_prefault_before)
         );
 
@@ -600,12 +605,20 @@ mod real_openchat_file {
         let root = op::NodeId(program.len() as u32 - 1);
         let symbols = [sequence as u64];
 
-        instrument::reset_parallel();
-        instrument::reset_matmul_dispatch();
-        instrument::reset_worker_cpu();
-        instrument::reset_q4k_shape_buckets();
+        #[cfg(feature = "instrument")]
+        {
+            instrument::reset_parallel();
+            instrument::reset_matmul_dispatch();
+            instrument::reset_worker_cpu();
+            instrument::reset_q4k_shape_buckets();
+        }
         std::eprintln!("DIAG phase=forward_start t_ms={} pid={diag_pid}", diag_now_ms());
+        // `forward_start`/`forward_elapsed` are the one clock read per
+        // forward this test always takes -- not under investigation, and
+        // required for `forward_wall_clock` below whether or not
+        // `instrument` (per-chunk/per-node reads) is compiled in.
         let forward_start = std::time::Instant::now();
+        #[cfg(feature = "instrument")]
         let main_thread_cpu_start = instrument::thread_cpu_nanos();
         // DIAGNOSTIC (proxima-debugger, remove before landing): minor-fault
         // delta across the forward call. `evaluate_quantized_named` reads
@@ -613,138 +626,160 @@ mod real_openchat_file {
         // no longer pre-faults it (established: load 1,473ms -> 1,605ms
         // when pre-fault was removed), first-touch page-in during the
         // forward should show up here as a nonzero minflt delta.
+        #[cfg(feature = "instrument")]
         let diag_minflt_before = instrument::ru_minflt();
         let evaluated = evaluate_quantized_named(&program, &symbols, &named_blocks, &[root])
             .expect("evaluate_quantized_named binds the whole forward pass by name, packed weights included");
+        #[cfg(feature = "instrument")]
         let diag_minflt_after = instrument::ru_minflt();
+        #[cfg(feature = "instrument")]
         let main_thread_cpu_nanos = instrument::thread_cpu_nanos() - main_thread_cpu_start;
         let forward_elapsed = forward_start.elapsed();
         std::eprintln!("DIAG phase=forward_complete t_ms={} pid={diag_pid}", diag_now_ms());
+        #[cfg(feature = "instrument")]
         let wall_ns = forward_elapsed.as_nanos() as u64;
+        #[cfg(feature = "instrument")]
         let parallel = instrument::parallel_totals();
+        #[cfg(feature = "instrument")]
         let matmul_dispatch = instrument::matmul_dispatch_totals();
+        #[cfg(feature = "instrument")]
         std::println!(
             "wall_ns={wall_ns}  main_thread_cpu_ns={main_thread_cpu_nanos}  ratio={:.4}",
             main_thread_cpu_nanos as f64 / wall_ns as f64
         );
-        std::println!(
-            "nodes={}  parallel_nodes={}  parallel_chunks={}",
-            program.len(),
-            parallel.parallel_nodes,
-            parallel.chunk_count
-        );
-        std::println!(
-            "DIAG minflt_delta={} (before={diag_minflt_before} after={diag_minflt_after})",
-            diag_minflt_after.saturating_sub(diag_minflt_before)
-        );
-        std::println!(
-            "DIAG matmul_dispatch workers_calls={} workers_none={} threaded_calls={} setup_ms={:.3} available_parallelism_ms={:.3} spawn_ms={:.3} own_chunk_ms={:.3} recv_wait_ms={:.3} quantize_activation_ms={:.3}",
-            matmul_dispatch.workers_calls,
-            matmul_dispatch.workers_none,
-            matmul_dispatch.calls,
-            matmul_dispatch.setup_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.available_parallelism_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.spawn_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.own_chunk_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.recv_wait_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.quantize_activation_nanos as f64 / 1_000_000.0,
-        );
-        std::println!(
-            "DIAG matmul_reduce_quantized_ms={:.3}",
-            matmul_dispatch.reduce_quantized_nanos as f64 / 1_000_000.0
-        );
-        std::println!(
-            "DIAG matmul_q5k_f32 calls={} total_ms={:.3}  matmul_q6k_f32 calls={} total_ms={:.3}",
-            matmul_dispatch.q5k_f32_calls,
-            matmul_dispatch.q5k_f32_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.q6k_f32_calls,
-            matmul_dispatch.q6k_f32_nanos as f64 / 1_000_000.0,
-        );
-        std::println!(
-            "DIAG matmul_chunk_compute chunk_count={} sum_ms={:.3} min_us={:.3} max_us={:.3}",
-            parallel.chunk_count,
-            parallel.chunk_nanos_sum as f64 / 1_000_000.0,
-            parallel.chunk_nanos_min as f64 / 1_000.0,
-            parallel.chunk_nanos_max as f64 / 1_000.0,
-        );
-        // DIAGNOSTIC (proxima-debugger, remove before landing): mac-count
-        // and per-codec ns/mac, directly comparable against the isolated
-        // single-threaded kernel bench (0.0334 ns/mac) and ggml's own
-        // (0.0255 ns/mac) -- see instrument.rs's MATMUL_Q4K_MACS/etc doc.
-        let total_matmul_macs = matmul_dispatch.q4k_macs + matmul_dispatch.q5k_macs + matmul_dispatch.q6k_macs;
-        std::println!(
-            "DIAG matmul_reduce_quantized_calls={} position_loop_iters={} total_macs={total_matmul_macs}",
-            matmul_dispatch.reduce_quantized_calls, matmul_dispatch.position_loop_iters,
-        );
-        std::println!(
-            "DIAG matmul_bucket_ns_per_mac={:.6}  (reduce_quantized_ms={:.3} / total_macs={total_matmul_macs})",
-            matmul_dispatch.reduce_quantized_nanos as f64 / total_matmul_macs as f64,
-            matmul_dispatch.reduce_quantized_nanos as f64 / 1_000_000.0,
-        );
-        std::println!(
-            "DIAG q4k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
-            matmul_dispatch.q4k_macs,
-            matmul_dispatch.q4k_call_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.q4k_call_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
-        );
-        std::println!(
-            "DIAG q5k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
-            matmul_dispatch.q5k_macs,
-            matmul_dispatch.q5k_call_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.q5k_call_nanos as f64 / matmul_dispatch.q5k_macs.max(1) as f64,
-        );
-        std::println!(
-            "DIAG q6k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
-            matmul_dispatch.q6k_macs,
-            matmul_dispatch.q6k_call_nanos as f64 / 1_000_000.0,
-            matmul_dispatch.q6k_call_nanos as f64 / matmul_dispatch.q6k_macs.max(1) as f64,
-        );
-        // spawn/own_chunk/recv_wait are timed as one sequential chain per
-        // `matmul_rows_threaded` call (`cpu.rs`'s `diag_spawn_started` ->
-        // `diag_own_chunk_started` -> `diag_recv_started`), so their sum
-        // across every call is the total wall-clock time this process spent
-        // inside that function across the whole forward pass -- the
-        // denominator `chunk_nanos_sum` (total compute work, summed across
-        // every chunk on every worker) needs to read achieved core count
-        // directly against the 10 physical cores this box has.
-        let dispatch_wall_ns = matmul_dispatch.setup_nanos
-            + matmul_dispatch.available_parallelism_nanos
-            + matmul_dispatch.spawn_nanos
-            + matmul_dispatch.own_chunk_nanos
-            + matmul_dispatch.recv_wait_nanos;
-        let achieved_parallel_cores = parallel.chunk_nanos_sum as f64 / dispatch_wall_ns.max(1) as f64;
-        std::println!(
-            "DIAG achieved_parallel_cores={achieved_parallel_cores:.3}  (chunk_compute_sum_ms={:.3} / dispatch_wall_ms={:.3})",
-            parallel.chunk_nanos_sum as f64 / 1_000_000.0,
-            dispatch_wall_ns as f64 / 1_000_000.0,
-        );
-        // DIAGNOSTIC (proxima-debugger, remove before landing): deschedule-
-        // immune peer of `matmul_chunk_compute`'s wall-clock sum -- every
-        // matmul row-chunk this run executed goes through Q4_K's
-        // `matmul_rows_threaded` alone (Q5_K/Q6_K's int8 paths never reach
-        // it, confirmed by `parallel_nodes == workers_calls`), so this sum
-        // divided by `q4k_macs` is directly comparable to the isolated
-        // single-threaded kernel bench's 0.0334 ns/mac WITHOUT host-load
-        // wall-clock contamination.
-        let worker_cpu_sum_nanos: u64 = instrument::worker_cpu_snapshot().iter().sum();
-        std::println!(
-            "DIAG matmul_chunk_cpu_sum_ms={:.3}  ns_per_mac_cpu={:.6}  (vs wall ns_per_mac={:.6}, isolated single-thread bench=0.0334)",
-            worker_cpu_sum_nanos as f64 / 1_000_000.0,
-            worker_cpu_sum_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
-            parallel.chunk_nanos_sum as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
-        );
-        // DIAGNOSTIC (proxima-debugger, remove before landing): per-shape
-        // breakdown of the exact same in-situ measurement the aggregate
-        // q4k ns_per_mac line above sums away -- settles whether the
-        // 0.0462 vs 0.0332 gap is uniform across every matmul shape this
-        // forward runs, or concentrated in the small (attn_k/attn_v,
-        // rows=1024) shapes ggml's own t8 already regresses at.
-        std::println!("DIAG q4k_shape_table rows k calls macs ns_per_mac");
-        for (rows, k, calls, macs, nanos) in instrument::q4k_shape_snapshot() {
+        #[cfg(feature = "instrument")]
+        {
             std::println!(
-                "DIAG q4k_shape rows={rows} k={k} calls={calls} macs={macs} ns_per_mac={:.6}",
-                nanos as f64 / macs.max(1) as f64,
+                "nodes={}  parallel_nodes={}  parallel_chunks={}",
+                program.len(),
+                parallel.parallel_nodes,
+                parallel.chunk_count
             );
+            std::println!(
+                "DIAG minflt_delta={} (before={diag_minflt_before} after={diag_minflt_after})",
+                diag_minflt_after.saturating_sub(diag_minflt_before)
+            );
+            // every `_ticks` field below is a raw `proxima_clock::Ticks` delta
+            // (`instrument::read_ticks`'s doc) -- converted to nanoseconds
+            // exactly once, here at the print edge, via `ticks_to_nanos`,
+            // never inside the loop that produced it.
+            std::println!(
+                "DIAG matmul_dispatch workers_calls={} workers_none={} threaded_calls={} setup_ms={:.3} available_parallelism_ms={:.3} spawn_ms={:.3} own_chunk_ms={:.3} recv_wait_ms={:.3} quantize_activation_ms={:.3}",
+                matmul_dispatch.workers_calls,
+                matmul_dispatch.workers_none,
+                matmul_dispatch.calls,
+                instrument::ticks_to_nanos(matmul_dispatch.setup_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(matmul_dispatch.available_parallelism_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(matmul_dispatch.spawn_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(matmul_dispatch.own_chunk_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(matmul_dispatch.recv_wait_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(matmul_dispatch.quantize_activation_ticks) as f64 / 1_000_000.0,
+            );
+            std::println!(
+                "DIAG matmul_reduce_quantized_ms={:.3}",
+                instrument::ticks_to_nanos(matmul_dispatch.reduce_quantized_ticks) as f64 / 1_000_000.0
+            );
+            std::println!(
+                "DIAG matmul_q5k_f32 calls={} total_ms={:.3}  matmul_q6k_f32 calls={} total_ms={:.3}",
+                matmul_dispatch.q5k_f32_calls,
+                instrument::ticks_to_nanos(matmul_dispatch.q5k_f32_ticks) as f64 / 1_000_000.0,
+                matmul_dispatch.q6k_f32_calls,
+                instrument::ticks_to_nanos(matmul_dispatch.q6k_f32_ticks) as f64 / 1_000_000.0,
+            );
+            std::println!(
+                "DIAG matmul_chunk_compute chunk_count={} sum_ms={:.3} min_us={:.3} max_us={:.3}",
+                parallel.chunk_count,
+                instrument::ticks_to_nanos(parallel.chunk_ticks_sum) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(parallel.chunk_ticks_min) as f64 / 1_000.0,
+                instrument::ticks_to_nanos(parallel.chunk_ticks_max) as f64 / 1_000.0,
+            );
+            // DIAGNOSTIC (proxima-debugger, remove before landing): mac-count
+            // and per-codec ns/mac, directly comparable against the isolated
+            // single-threaded kernel bench (0.0334 ns/mac) and ggml's own
+            // (0.0255 ns/mac) -- see instrument.rs's MATMUL_Q4K_MACS/etc doc.
+            let total_matmul_macs = matmul_dispatch.q4k_macs + matmul_dispatch.q5k_macs + matmul_dispatch.q6k_macs;
+            std::println!(
+                "DIAG matmul_reduce_quantized_calls={} position_loop_iters={} total_macs={total_matmul_macs}",
+                matmul_dispatch.reduce_quantized_calls, matmul_dispatch.position_loop_iters,
+            );
+            let reduce_quantized_nanos = instrument::ticks_to_nanos(matmul_dispatch.reduce_quantized_ticks);
+            std::println!(
+                "DIAG matmul_bucket_ns_per_mac={:.6}  (reduce_quantized_ms={:.3} / total_macs={total_matmul_macs})",
+                reduce_quantized_nanos as f64 / total_matmul_macs as f64,
+                reduce_quantized_nanos as f64 / 1_000_000.0,
+            );
+            let q4k_call_nanos = instrument::ticks_to_nanos(matmul_dispatch.q4k_call_ticks);
+            std::println!(
+                "DIAG q4k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
+                matmul_dispatch.q4k_macs,
+                q4k_call_nanos as f64 / 1_000_000.0,
+                q4k_call_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
+            );
+            let q5k_call_nanos = instrument::ticks_to_nanos(matmul_dispatch.q5k_call_ticks);
+            std::println!(
+                "DIAG q5k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
+                matmul_dispatch.q5k_macs,
+                q5k_call_nanos as f64 / 1_000_000.0,
+                q5k_call_nanos as f64 / matmul_dispatch.q5k_macs.max(1) as f64,
+            );
+            let q6k_call_nanos = instrument::ticks_to_nanos(matmul_dispatch.q6k_call_ticks);
+            std::println!(
+                "DIAG q6k macs={} call_ns_sum_ms={:.3} ns_per_mac={:.6}",
+                matmul_dispatch.q6k_macs,
+                q6k_call_nanos as f64 / 1_000_000.0,
+                q6k_call_nanos as f64 / matmul_dispatch.q6k_macs.max(1) as f64,
+            );
+            // spawn/own_chunk/recv_wait are timed as one sequential chain per
+            // `matmul_rows_threaded` call (`cpu.rs`'s `diag_spawn_started` ->
+            // `diag_own_chunk_started` -> `diag_recv_started`), so their sum
+            // across every call is the total wall-clock time this process spent
+            // inside that function across the whole forward pass -- the
+            // denominator `chunk_ticks_sum` (total compute work, summed across
+            // every chunk on every worker) needs to read achieved core count
+            // directly against the 10 physical cores this box has.
+            let dispatch_wall_ns = instrument::ticks_to_nanos(
+                matmul_dispatch.setup_ticks
+                    + matmul_dispatch.available_parallelism_ticks
+                    + matmul_dispatch.spawn_ticks
+                    + matmul_dispatch.own_chunk_ticks
+                    + matmul_dispatch.recv_wait_ticks,
+            );
+            let chunk_compute_sum_nanos = instrument::ticks_to_nanos(parallel.chunk_ticks_sum);
+            let achieved_parallel_cores = chunk_compute_sum_nanos as f64 / dispatch_wall_ns.max(1) as f64;
+            std::println!(
+                "DIAG achieved_parallel_cores={achieved_parallel_cores:.3}  (chunk_compute_sum_ms={:.3} / dispatch_wall_ms={:.3})",
+                chunk_compute_sum_nanos as f64 / 1_000_000.0,
+                dispatch_wall_ns as f64 / 1_000_000.0,
+            );
+            // DIAGNOSTIC (proxima-debugger, remove before landing): deschedule-
+            // immune peer of `matmul_chunk_compute`'s wall-clock sum -- every
+            // matmul row-chunk this run executed goes through Q4_K's
+            // `matmul_rows_threaded` alone (Q5_K/Q6_K's int8 paths never reach
+            // it, confirmed by `parallel_nodes == workers_calls`), so this sum
+            // divided by `q4k_macs` is directly comparable to the isolated
+            // single-threaded kernel bench's 0.0334 ns/mac WITHOUT host-load
+            // wall-clock contamination.
+            let worker_cpu_sum_nanos: u64 = instrument::worker_cpu_snapshot().iter().sum();
+            std::println!(
+                "DIAG matmul_chunk_cpu_sum_ms={:.3}  ns_per_mac_cpu={:.6}  (vs wall ns_per_mac={:.6}, isolated single-thread bench=0.0334)",
+                worker_cpu_sum_nanos as f64 / 1_000_000.0,
+                worker_cpu_sum_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
+                chunk_compute_sum_nanos as f64 / matmul_dispatch.q4k_macs.max(1) as f64,
+            );
+            // DIAGNOSTIC (proxima-debugger, remove before landing): per-shape
+            // breakdown of the exact same in-situ measurement the aggregate
+            // q4k ns_per_mac line above sums away -- settles whether the
+            // 0.0462 vs 0.0332 gap is uniform across every matmul shape this
+            // forward runs, or concentrated in the small (attn_k/attn_v,
+            // rows=1024) shapes ggml's own t8 already regresses at.
+            std::println!("DIAG q4k_shape_table rows k calls macs ns_per_mac");
+            for (rows, k, calls, macs, ticks) in instrument::q4k_shape_snapshot() {
+                let nanos = instrument::ticks_to_nanos(ticks);
+                std::println!(
+                    "DIAG q4k_shape rows={rows} k={k} calls={calls} macs={macs} ns_per_mac={:.6}",
+                    nanos as f64 / macs.max(1) as f64,
+                );
+            }
         }
 
         let (logits, shape) = evaluated.get(root).expect("logits present in output");
