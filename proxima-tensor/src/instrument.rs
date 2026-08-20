@@ -180,6 +180,125 @@ pub fn reset_worker_cpu() {
     totals.clear();
 }
 
+/// This process's cumulative minor-fault count (`getrusage`'s `ru_minflt`)
+/// at the moment of the call — monotonic for the process lifetime, so a
+/// caller diffs two readings to get the fault count over an interval.
+/// Used to test whether a measured wall-time change is first-touch page-in
+/// (mmap demand paging) rather than compute: a forward pass that walks a
+/// weight mapping for the first time pays one minor fault per page touched.
+#[must_use]
+pub fn ru_minflt() -> u64 {
+    let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return 0;
+    }
+    usage.ru_minflt as u64
+}
+
+// `matmul_rows_threaded`'s own dispatch-overhead breakdown (`cpu.rs`) --
+// distinct from `PARALLEL_SPAWN_NANOS`/`PARALLEL_JOIN_NANOS` above, which
+// only ever fire from `run_chunks_threaded`'s `BoundOp`-chunk path. The
+// quantized-matmul forward never reaches that path (`evaluate_quantized`'s
+// loop calls `run_node_into` directly, no `evaluate_node_parallel`), so
+// without these, the row-chunk pool dispatch inside a matmul node had no
+// spawn-vs-wait-vs-compute breakdown at all. Committed once per
+// `matmul_rows_threaded` call, never per chunk.
+// `quantized_matmul_workers`'s own call/decision counters -- the single
+// choke point every `Q4_K`/`Q5_K`/`Q6_K` row-batch call passes through
+// regardless of int8-dot vs f32-dot kernel. `MATMUL_WORKERS_CALLS` is the
+// true total row-batch count; `MATMUL_WORKERS_NONE` is how many of those
+// took the sequential (no thread pool) fallback -- their difference is
+// `MATMUL_DISPATCH_CALLS`'s expected value if every threaded decision
+// reaches `matmul_rows_threaded`.
+pub static MATMUL_WORKERS_CALLS: Counter = Counter::new("proxima_tensor.matmul.workers_calls");
+pub static MATMUL_WORKERS_NONE: Counter = Counter::new("proxima_tensor.matmul.workers_none");
+
+pub static MATMUL_DISPATCH_CALLS: Counter = Counter::new("proxima_tensor.matmul.dispatch_calls");
+pub static MATMUL_SPAWN_NANOS: Counter = Counter::new("proxima_tensor.matmul.spawn_nanos");
+pub static MATMUL_OWN_CHUNK_NANOS: Counter = Counter::new("proxima_tensor.matmul.own_chunk_nanos");
+pub static MATMUL_RECV_WAIT_NANOS: Counter = Counter::new("proxima_tensor.matmul.recv_wait_nanos");
+// the activation-quantize preamble every `matmul_q4k_q8k_f32` call pays
+// once, BEFORE `quantized_matmul_workers`/`matmul_rows_threaded` even run
+// (`quantize_row_q8k` in `cpu.rs`) -- not part of the row-chunk dispatch at
+// all, so it needed a separate timer once the spawn/own-chunk/recv-wait
+// trio above did not account for a node's full wall time on its own.
+pub static MATMUL_QUANTIZE_ACTIVATION_NANOS: Counter =
+    Counter::new("proxima_tensor.matmul.quantize_activation_nanos");
+// whole-function timer around `run_reduce_quantized` (once per matmul
+// NODE, same granularity as the per-node-kind table), to localize a gap
+// between a node's total wall time and the sum of
+// spawn/own-chunk/recv-wait/quantize-activation: if this matches the node
+// total, the gap is inside the position loop (a codec path none of the
+// above four time); if it matches the four-way sum instead, the gap is
+// OUTSIDE `run_reduce_quantized` entirely.
+pub static MATMUL_REDUCE_QUANTIZED_NANOS: Counter =
+    Counter::new("proxima_tensor.matmul.reduce_quantized_nanos");
+// `matmul_q5k_f32`/`matmul_q6k_f32` (`cpu.rs`) never call
+// `quantized_matmul_workers` at all -- they are a plain sequential
+// `chunks_exact().map().collect()` over every weight row, unconditionally,
+// regardless of size. Neither codec's `-int8-dot` feature is enabled by
+// this workspace's default features, so every `Q5_K`/`Q6_K` weight tensor
+// in a real checkpoint runs its matmul fully single-threaded, invisible to
+// every `MATMUL_*` counter above (none of which this call path ever
+// reaches). These two counters are the only witness of that time.
+pub static MATMUL_Q5K_F32_CALLS: Counter = Counter::new("proxima_tensor.matmul.q5k_f32_calls");
+pub static MATMUL_Q5K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q5k_f32_nanos");
+pub static MATMUL_Q6K_F32_CALLS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_calls");
+pub static MATMUL_Q6K_F32_NANOS: Counter = Counter::new("proxima_tensor.matmul.q6k_f32_nanos");
+
+/// One process run's worth of [`matmul_rows_threaded`](crate::cpu)'s own
+/// dispatch-overhead breakdown, read back the same way [`parallel_totals`]
+/// is.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatmulDispatchTotals {
+    pub workers_calls: u64,
+    pub workers_none: u64,
+    pub calls: u64,
+    pub spawn_nanos: u64,
+    pub own_chunk_nanos: u64,
+    pub recv_wait_nanos: u64,
+    pub quantize_activation_nanos: u64,
+    pub reduce_quantized_nanos: u64,
+    pub q5k_f32_calls: u64,
+    pub q5k_f32_nanos: u64,
+    pub q6k_f32_calls: u64,
+    pub q6k_f32_nanos: u64,
+}
+
+#[must_use]
+pub fn matmul_dispatch_totals() -> MatmulDispatchTotals {
+    MatmulDispatchTotals {
+        workers_calls: MATMUL_WORKERS_CALLS.get(),
+        workers_none: MATMUL_WORKERS_NONE.get(),
+        calls: MATMUL_DISPATCH_CALLS.get(),
+        spawn_nanos: MATMUL_SPAWN_NANOS.get(),
+        own_chunk_nanos: MATMUL_OWN_CHUNK_NANOS.get(),
+        recv_wait_nanos: MATMUL_RECV_WAIT_NANOS.get(),
+        quantize_activation_nanos: MATMUL_QUANTIZE_ACTIVATION_NANOS.get(),
+        reduce_quantized_nanos: MATMUL_REDUCE_QUANTIZED_NANOS.get(),
+        q5k_f32_calls: MATMUL_Q5K_F32_CALLS.get(),
+        q5k_f32_nanos: MATMUL_Q5K_F32_NANOS.get(),
+        q6k_f32_calls: MATMUL_Q6K_F32_CALLS.get(),
+        q6k_f32_nanos: MATMUL_Q6K_F32_NANOS.get(),
+    }
+}
+
+/// Resets the matmul dispatch-overhead counters — mirrors [`reset_parallel`].
+pub fn reset_matmul_dispatch() {
+    let _ = MATMUL_WORKERS_CALLS.snapshot_and_reset();
+    let _ = MATMUL_WORKERS_NONE.snapshot_and_reset();
+    let _ = MATMUL_DISPATCH_CALLS.snapshot_and_reset();
+    let _ = MATMUL_SPAWN_NANOS.snapshot_and_reset();
+    let _ = MATMUL_OWN_CHUNK_NANOS.snapshot_and_reset();
+    let _ = MATMUL_RECV_WAIT_NANOS.snapshot_and_reset();
+    let _ = MATMUL_QUANTIZE_ACTIVATION_NANOS.snapshot_and_reset();
+    let _ = MATMUL_REDUCE_QUANTIZED_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q5K_F32_CALLS.snapshot_and_reset();
+    let _ = MATMUL_Q5K_F32_NANOS.snapshot_and_reset();
+    let _ = MATMUL_Q6K_F32_CALLS.snapshot_and_reset();
+    let _ = MATMUL_Q6K_F32_NANOS.snapshot_and_reset();
+}
+
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part
 // that is NOT inside `run_chunks_threaded`'s `thread::scope` (which
 // `PARALLEL_NODE_NANOS` above already measures, now scoped to start right

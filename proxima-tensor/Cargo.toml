@@ -11,7 +11,12 @@ readme.workspace = true
 
 [features]
 default = ["std", "config", "q4k-int8-dot"]
-std = ["alloc", "thiserror/std"]
+# `tensor-bgpool` is implied, not opt-in: the pool path was previously
+# reachable only by naming a feature nothing else turned on, so it never
+# executed in any default build. `std` is the only tier that can hold
+# `prime` (threads, an OS-backed pool), so it is the natural place for the
+# implication to live — the `alloc`-only floor stays free of `dep:prime`.
+std = ["alloc", "thiserror/std", "tensor-bgpool"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
@@ -28,12 +33,16 @@ ggml-bench = ["std"]
 # committed ONCE per bound-op call (never per element), so the feature does
 # not perturb the thing it measures at any tier that has it off.
 instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc"]
-# routes `cpu::run_chunks_threaded` through `prime`'s `ProximaBackgroundPool`
-# (crossbeam-deque work-stealing, built once and reused) instead of spawning
-# fresh `std::thread::scope` threads per nest. Default-off so a normal build
-# never needs the `prime` dependency; the `thread::scope` path stays the
-# default behavior.
-tensor-bgpool = ["std", "dep:prime"]
+# routes `cpu::run_chunks_threaded`/`cpu::matmul_rows_threaded` through
+# `prime`'s `ProximaBackgroundPool` (crossbeam-deque work-stealing, built
+# once and reused) instead of spawning fresh `std::thread::scope` threads
+# per nest. Implied by `std` above (see that feature's doc), not a separate
+# opt-in — the per-call `thread::scope` fallbacks that used to sit next to
+# these two functions were removed once `std` made them unreachable in
+# every buildable configuration; the `alloc`-only floor never reaches
+# `cpu.rs` at all (`cpu` is `#[cfg(feature = "std")]` in `lib.rs`), so this
+# feature has no meaningful "off" state left to test.
+tensor-bgpool = ["dep:prime"]
 # shared test/example fixtures (`test_support::Lcg`) — default-off so a
 # normal build never carries them; enabled for this crate's own dev targets
 # via the self-referential `dev-dependencies` entry below, and by `omega`'s
@@ -51,6 +60,19 @@ test-support = []
 # routes through it. `dot_q4k_f32`/`matmul_q4k_f32` remain the codec path
 # for non-matmul consumers.
 q4k-int8-dot = []
+# `cpu::dot_q5k_q8k`/`cpu::matmul_q5k_q8k_f32`: `q4k-int8-dot`'s mechanism
+# applied to `Q5_K` (the same super-block/sub-block shape plus a `qh`
+# high-bit plane), against the same shared `Q8_K` activation. Default-OFF
+# (guiding-principles §3/§11): unlike `q4k-int8-dot`, this has not yet
+# earned the default-on switch with an e2e forward-pass bench of its own —
+# see `proxima-tensor/docs/discipline.md` for the row this landed under.
+# `cpu::dot_q5k_f32`/`cpu::matmul_q5k_f32` (dequantize-then-fold, always
+# compiled) remain the codec path when this feature is off.
+q5k-int8-dot = []
+# `cpu::dot_q6k_q8k`/`cpu::matmul_q6k_q8k_f32`: the same mechanism applied to
+# `Q6_K` (16 sub-blocks of 16, one signed 8-bit scale each, no `dmin` term).
+# Default-OFF for the same reason as `q5k-int8-dot` above.
+q6k-int8-dot = []
 
 [dependencies]
 arrayvec.workspace = true
@@ -100,6 +122,16 @@ required-features = ["ggml-bench"]
 name = "bench_q4k_matmul"
 harness = false
 required-features = ["ggml-bench"]
+
+[[bench]]
+name = "bench_q5k_matmul"
+harness = false
+required-features = ["ggml-bench", "q5k-int8-dot"]
+
+[[bench]]
+name = "bench_q6k_matmul"
+harness = false
+required-features = ["ggml-bench", "q6k-int8-dot"]
 
 [[example]]
 name = "q4k_ggml_fidelity"
