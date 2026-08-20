@@ -1827,7 +1827,6 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
     let body = resolved.element_body();
     let shape = body_shape(body);
     let mut operand_values = vec![0.0f32; raw.len()];
-    let mut step_values = vec![0.0f32; body.steps.len()];
     // loop-invariant: the innermost dim's stride never depends on the outer
     // coordinate, so it is computed once for the whole node, not once per
     // outer position (`proxima-tensor/docs/discipline.md` ROW 2).
@@ -1849,6 +1848,11 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
         BodyShape::Generic(generic_body) => generic_body_is_affine_fast_path(resolved, generic_body, &strides),
         _ => body_shape_is_affine_fast_path(resolved, &shape, &strides),
     };
+    // On the fast path, `elementwise_width_generic` needs one whole
+    // `inner_len`-wide row per step (`StepArg::Step` is backwards-only, so
+    // every earlier row must survive to the last step); the slow scalar path
+    // (`eval_body_shape`) only ever reads one value per step at a time.
+    let mut step_values = vec![0.0f32; body.steps.len() * if fast_path { inner_len } else { 1 }];
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
     #[cfg(feature = "instrument")]
@@ -6285,18 +6289,51 @@ fn elementwise_width_fast(
     }
 }
 
+/// One argument source for a [`BodyStep`], resolved once per step rather
+/// than re-read every position: either a pre-sliced contiguous run (an
+/// affine operand's own data, or an earlier step's whole output row) or a
+/// hoisted broadcast scalar (a stride-0 operand). Both `StepArg` cases
+/// collapse to the same two shapes, which is what lets the position loop in
+/// [`elementwise_width_generic_step`] stay a single 2-arm match instead of
+/// re-deriving "operand or step, contiguous or not" per element.
+#[derive(Clone, Copy)]
+enum ArgKind<'a> {
+    Contiguous(&'a [f32]),
+    Broadcast(f32),
+}
+
+impl ArgKind<'_> {
+    #[inline(always)]
+    fn at(self, position: usize) -> f32 {
+        match self {
+            ArgKind::Contiguous(slice) => slice[position],
+            ArgKind::Broadcast(value) => value,
+        }
+    }
+}
+
 /// The width-loop fast path for a fused multi-step [`ComposedBody`]
 /// (`BodyShape::Generic`) — the same straight-line shape
 /// [`elementwise_width_fast`]'s `Unary`/`Binary` arms already give a
 /// single-`ScalarOp` body, generalized to [`apply_body`]'s own step-by-step
-/// evaluation instead of a bespoke per-arity function. Per position, each
-/// `StepArg::Operand` reads straight out of its operand's contiguous slice
-/// or hoisted broadcast scalar (no `gather_cursors` `Option` check, no
+/// evaluation instead of a bespoke per-arity function.
+///
+/// Step-outer, position-inner (the reverse of the position-outer loop this
+/// replaced): each step's [`ScalarOp`] is matched to a monomorphized closure
+/// **once**, in [`elementwise_width_generic_step`], then that closure runs a
+/// branch-free pass over every position — the same "specialize once per
+/// call" discipline `elementwise_width_unary`/`elementwise_width_binary`
+/// already apply, extended to a step-by-step chain. `step_values` is now a
+/// `body.steps.len() * out.len()` flat row table (row `index` holds step
+/// `index`'s value at every position) instead of one scalar reused across
+/// steps, because `StepArg::Step` is backwards-only (`BodyStep`'s own doc)
+/// and every earlier row must survive until the last step reads it. Each
+/// `StepArg::Operand` still reads straight out of its operand's contiguous
+/// slice or hoisted broadcast scalar (no `gather_cursors` `Option` check, no
 /// per-element `running` mutation — both already ruled out by
-/// [`body_shape_is_affine_fast_path`]) and each `StepArg::Step` reads the
-/// current position's own `step_values` slot, so evaluation order and every
-/// `apply_scalar_op` call match [`apply_body`]'s scalar path exactly:
-/// output is bit-identical (`proxima-tensor/docs/discipline.md` ROW 5).
+/// [`body_shape_is_affine_fast_path`]), so evaluation order and every
+/// `apply_scalar_op` call match [`apply_body`]'s scalar path exactly: output
+/// is bit-identical (`proxima-tensor/docs/discipline.md` ROW 5).
 #[inline(always)]
 fn elementwise_width_generic(
     body: &ComposedBody,
@@ -6306,27 +6343,113 @@ fn elementwise_width_generic(
     out: &mut [f32],
     step_values: &mut [f32],
 ) {
-    for (position, slot) in out.iter_mut().enumerate() {
-        for (index, step) in body.steps.iter().enumerate() {
-            let mut args = [0.0f32; 3];
-            for (arg_slot, arg) in step.args.iter().enumerate() {
-                args[arg_slot] = match arg {
-                    StepArg::Operand(operand_index) => {
-                        let operand_index = *operand_index as usize;
-                        let data = raw[operand_index];
-                        let base = running[operand_index] as usize;
-                        if strides[operand_index] == 1 {
-                            data[base + position]
-                        } else {
-                            data[base]
-                        }
+    let width = out.len();
+    for (index, step) in body.steps.iter().enumerate() {
+        let (earlier, rest) = step_values.split_at_mut(index * width);
+        let row = &mut rest[..width];
+
+        let mut sources = [ArgKind::Broadcast(0.0); 3];
+        for (arg_slot, arg) in step.args.iter().enumerate() {
+            sources[arg_slot] = match *arg {
+                StepArg::Operand(operand_index) => {
+                    let operand_index = operand_index as usize;
+                    let data = raw[operand_index];
+                    let base = running[operand_index] as usize;
+                    if strides[operand_index] == 1 {
+                        ArgKind::Contiguous(&data[base..base + width])
+                    } else {
+                        ArgKind::Broadcast(data[base])
                     }
-                    StepArg::Step(step_index) => step_values[*step_index as usize],
-                };
-            }
-            step_values[index] = apply_scalar_op(step.op, &args[..step.args.len()]);
+                }
+                StepArg::Step(step_index) => {
+                    let step_index = step_index as usize;
+                    ArgKind::Contiguous(&earlier[step_index * width..(step_index + 1) * width])
+                }
+            };
         }
-        *slot = step_values[body.steps.len() - 1];
+        elementwise_width_generic_step(step.op, &sources[..step.args.len()], row);
+    }
+    let last = body.steps.len() - 1;
+    out.copy_from_slice(&step_values[last * width..(last + 1) * width]);
+}
+
+/// Picks `step`'s `ScalarOp` **once** and runs the resulting monomorphized
+/// closure over every position in `row` — the `Generic`-body counterpart of
+/// [`elementwise_width_unary`]/[`elementwise_width_binary`]'s own
+/// once-per-call dispatch, generalized over `args.len()` (1 to 3) instead of
+/// a fixed arity.
+#[inline(always)]
+fn elementwise_width_generic_step(op: ScalarOp, args: &[ArgKind], row: &mut [f32]) {
+    match op {
+        ScalarOp::Identity => elementwise_width_generic_unary(|a: f32| a, args, row),
+        ScalarOp::Negate => elementwise_width_generic_unary(|a: f32| -a, args, row),
+        ScalarOp::Reciprocal => elementwise_width_generic_unary(|a: f32| 1.0 / a, args, row),
+        ScalarOp::Exponential => elementwise_width_generic_unary(|a: f32| a.exp(), args, row),
+        ScalarOp::Logarithm => elementwise_width_generic_unary(|a: f32| a.ln(), args, row),
+        ScalarOp::SquareRoot => elementwise_width_generic_unary(|a: f32| a.sqrt(), args, row),
+        ScalarOp::Tanh => elementwise_width_generic_unary(|a: f32| a.tanh(), args, row),
+        ScalarOp::Erf => elementwise_width_generic_unary(erf_f32, args, row),
+        ScalarOp::Add => elementwise_width_generic_binary(|a: f32, b: f32| a + b, args, row),
+        ScalarOp::Subtract => elementwise_width_generic_binary(|a: f32, b: f32| a - b, args, row),
+        ScalarOp::Multiply => elementwise_width_generic_binary(|a: f32, b: f32| a * b, args, row),
+        ScalarOp::Divide => elementwise_width_generic_binary(|a: f32, b: f32| a / b, args, row),
+        ScalarOp::Maximum => elementwise_width_generic_binary(|a: f32, b: f32| a.max(b), args, row),
+        ScalarOp::Minimum => elementwise_width_generic_binary(|a: f32, b: f32| a.min(b), args, row),
+        ScalarOp::Greater => {
+            elementwise_width_generic_binary(|a: f32, b: f32| f32::from(u8::from(a > b)), args, row)
+        }
+        ScalarOp::Equal => elementwise_width_generic_binary(
+            |a: f32, b: f32| f32::from(u8::from((a - b).abs() == 0.0)),
+            args,
+            row,
+        ),
+        ScalarOp::Select => elementwise_width_generic_ternary(
+            |condition: f32, when_true: f32, when_false: f32| {
+                if condition != 0.0 {
+                    when_true
+                } else {
+                    when_false
+                }
+            },
+            args,
+            row,
+        ),
+    }
+}
+
+#[inline(always)]
+fn elementwise_width_generic_unary<F>(op: F, args: &[ArgKind], row: &mut [f32])
+where
+    F: Fn(f32) -> f32,
+{
+    let a = args[0];
+    for (position, slot) in row.iter_mut().enumerate() {
+        *slot = op(a.at(position));
+    }
+}
+
+#[inline(always)]
+fn elementwise_width_generic_binary<F>(op: F, args: &[ArgKind], row: &mut [f32])
+where
+    F: Fn(f32, f32) -> f32,
+{
+    let a = args[0];
+    let b = args[1];
+    for (position, slot) in row.iter_mut().enumerate() {
+        *slot = op(a.at(position), b.at(position));
+    }
+}
+
+#[inline(always)]
+fn elementwise_width_generic_ternary<F>(op: F, args: &[ArgKind], row: &mut [f32])
+where
+    F: Fn(f32, f32, f32) -> f32,
+{
+    let a = args[0];
+    let b = args[1];
+    let c = args[2];
+    for (position, slot) in row.iter_mut().enumerate() {
+        *slot = op(a.at(position), b.at(position), c.at(position));
     }
 }
 
@@ -7875,7 +7998,7 @@ mod tests {
         let expected = reference_generic_body(&body, &raw, &strides, width);
 
         let running = vec![0i64; raw.len()];
-        let mut step_values = vec![0.0f32; body.steps.len()];
+        let mut step_values = vec![0.0f32; body.steps.len() * width];
         let mut actual = vec![0.0f32; width];
         elementwise_width_generic(&body, &raw, &running, &strides, &mut actual, &mut step_values);
 
