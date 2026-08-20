@@ -2100,6 +2100,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 QuantizedBlock::Q4K(_) => {
                     counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q4K_CALL_NANOS, diag_call_nanos);
+                    instrument::record_q4k_shape_call(rows as u64, k as u64, diag_call_macs, diag_call_nanos);
                 }
                 QuantizedBlock::Q5K(_) => {
                     counter!(instrument::MATMUL_Q5K_MACS, diag_call_macs);
@@ -4120,7 +4121,7 @@ where
     }
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
             let start = row * row_bytes;
             dot_row(&weights[start..start + row_bytes], activation)
         }),
@@ -4332,7 +4333,7 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
     decision
 }
 
-use crate::sized::ROW_OVERSUBSCRIBE;
+use crate::sized::{MIN_MACS_PER_CHUNK, ROW_OVERSUBSCRIBE};
 
 /// Runs `rows` independent per-row computations (`dot_row`) through the
 /// shared [`nest_pool`], each writing its own contiguous sub-range of the
@@ -4347,7 +4348,7 @@ use crate::sized::ROW_OVERSUBSCRIBE;
 ///
 /// Chunk assignment is dynamic, the same shared-cursor mechanism
 /// `run_chunks_threaded`/`claim_and_run` use, applied to row ranges instead
-/// of `BoundOp`s ([`claim_and_run_rows`]): `rows` is split into
+/// of `BoundOp`s ([`claim_and_run_rows`]): `rows` is split into up to
 /// `workers * ROW_OVERSUBSCRIBE` ranges (more chunks than pullers), and both
 /// the `workers - 1` spawned pool tasks and the calling thread pull the next
 /// unclaimed chunk off a shared [`AtomicUsize`] cursor instead of each
@@ -4356,6 +4357,15 @@ use crate::sized::ROW_OVERSUBSCRIBE;
 /// though equal row counts do not mean equal wall-clock (measured 2.04x
 /// spread across 8 equal-row chunks of a 1024^3 GEMM, see [`OVERSUBSCRIBE`]'s
 /// doc) — a fast puller now claims another chunk instead of idling.
+///
+/// `contraction_width` (the per-row `k`, i.e. `activation.len()` at every
+/// call site) caps that split: `rows * contraction_width` total multiply-add
+/// work is floored against [`MIN_MACS_PER_CHUNK`] before the
+/// `workers * ROW_OVERSUBSCRIBE` oversubscription is applied, so a call
+/// carrying little total work (e.g. `attn_k`/`attn_v`'s narrow projection)
+/// gets fewer, larger chunks instead of the same fixed 40-way split a wide
+/// call like `ffn_up`/`ffn_gate` earns — see [`MIN_MACS_PER_CHUNK`]'s own
+/// doc for the measurement that picked the floor.
 ///
 /// # Safety (of the `unsafe` blocks inside)
 /// `dot_row`'s address crosses the pool's `'static` spawn bound the same way
@@ -4368,7 +4378,27 @@ use crate::sized::ROW_OVERSUBSCRIBE;
 /// any puller starts claiming), and `AtomicUsize::fetch_add` never hands the
 /// same chunk index to two pullers, so no two closures ever alias the same
 /// output range.
-fn matmul_rows_threaded<Row>(rows: usize, workers: usize, dot_row: Row) -> Result<Vec<f32>, TensorError>
+/// The chunk count [`matmul_rows_threaded`] splits `rows` into: capped at
+/// `workers * ROW_OVERSUBSCRIBE`, but never more than
+/// `rows * contraction_width` total macs supports at
+/// [`MIN_MACS_PER_CHUNK`] macs per chunk. A call carrying little total work
+/// (narrow `contraction_width`, few `rows`) gets fewer, coarser chunks
+/// instead of the fixed oversubscription split every shape used to pay --
+/// see [`MIN_MACS_PER_CHUNK`]'s own doc for the per-shape measurement that
+/// motivated this.
+fn row_chunk_count(rows: usize, workers: usize, contraction_width: usize) -> usize {
+    let oversubscribed = workers.saturating_mul(ROW_OVERSUBSCRIBE);
+    let total_macs = rows.saturating_mul(contraction_width);
+    let work_chunks = (total_macs / MIN_MACS_PER_CHUNK).max(1);
+    oversubscribed.min(work_chunks).clamp(1, rows.max(1))
+}
+
+fn matmul_rows_threaded<Row>(
+    rows: usize,
+    workers: usize,
+    contraction_width: usize,
+    dot_row: Row,
+) -> Result<Vec<f32>, TensorError>
 where
     Row: Fn(usize) -> Result<f32, TensorError> + Sync,
 {
@@ -4381,7 +4411,7 @@ where
     #[cfg(feature = "instrument")]
     let diag_setup_started = Instant::now();
     let mut output = vec![0.0f32; rows];
-    let chunk_count = (workers.saturating_mul(ROW_OVERSUBSCRIBE)).clamp(1, rows.max(1));
+    let chunk_count = row_chunk_count(rows, workers, contraction_width);
     let chunk_len = rows.div_ceil(chunk_count);
 
     let mut chunk_ranges = Vec::with_capacity(chunk_count);
@@ -5149,7 +5179,7 @@ pub fn matmul_q4k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
             let start = row * row_bytes;
             dot_q4k_q8k(&weights[start..start + row_bytes], &activation_q8k)
         }),
@@ -5484,7 +5514,7 @@ pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
             let start = row * row_bytes;
             dot_q5k_q8k(&weights[start..start + row_bytes], &activation_q8k)
         }),
@@ -5849,7 +5879,7 @@ pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
             let start = row * row_bytes;
             dot_q6k_q8k(&weights[start..start + row_bytes], &activation_q8k)
         }),
@@ -8542,6 +8572,39 @@ mod tests {
             "pool-dispatched rows must be bit-identical to the sequential per-row kernel: \
              each row is an independent reduction, so dispatch mechanism cannot move rounding"
         );
+    }
+
+    /// [`row_chunk_count`] must scale down with total work, not stay pinned
+    /// to `workers * ROW_OVERSUBSCRIBE` for every shape -- the defect this
+    /// session fixes: a narrow, low-mac call (`attn_k`/`attn_v`'s real
+    /// `rows=1024 k=4096` shape, 4.19M macs) was paying the same fixed
+    /// 40-way dispatch as a wide, high-mac call (`ffn_up`/`ffn_gate`'s
+    /// shape) despite carrying far less work. `rows` held fixed across both
+    /// cases so only `contraction_width` (the mac count) drives the
+    /// difference; the wide case's `contraction_width` is synthetic
+    /// (comfortably above `MIN_MACS_PER_CHUNK * oversubscribed_ceiling`)
+    /// purely to prove the cap still applies once a shape carries enough
+    /// work to earn the full oversubscribed split.
+    #[test]
+    fn row_chunk_count_scales_down_for_a_small_shape_and_stays_capped_for_a_large_one() {
+        let workers = 10;
+        let rows = 1024;
+
+        let small_shape_chunks = row_chunk_count(rows, workers, 4096); // attn_k/attn_v's real k
+        let large_shape_chunks = row_chunk_count(rows, workers, 100_000); // comfortably wide
+
+        let oversubscribed_ceiling = workers * ROW_OVERSUBSCRIBE;
+        assert!(
+            small_shape_chunks < large_shape_chunks,
+            "a low-mac shape must produce fewer chunks than a high-mac shape at the same row \
+             count: small={small_shape_chunks} large={large_shape_chunks}"
+        );
+        assert_eq!(
+            large_shape_chunks, oversubscribed_ceiling,
+            "a shape whose total work clears MIN_MACS_PER_CHUNK * oversubscribed_ceiling must \
+             still land on the full oversubscribed split"
+        );
+        assert!(small_shape_chunks >= 1, "chunk count must never be zero");
     }
 
     /// [`matmul_q5k_q8k_f32`] was unconditionally sequential (never called

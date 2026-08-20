@@ -25,7 +25,8 @@
 //!   not just aarch64 -- see its own doc for why it carries no
 //!   `target_arch` gate.
 //! - **Execution policy, currently build-time-only in practice**:
-//!   [`PARALLEL_THRESHOLD`], [`OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`] are
+//!   [`PARALLEL_THRESHOLD`], [`OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`],
+//!   [`MIN_MACS_PER_CHUNK`] are
 //!   plain runtime values (not const generics) read inside `cpu.rs`'s
 //!   hot-path functions (`evaluate_node_parallel`, `run_chunks_threaded`,
 //!   `BoundOp::split_aligned`) -- nothing about their *type* forbids a
@@ -117,6 +118,40 @@ pub const ROW_OVERSUBSCRIBE: usize = 4;
 /// currently build-time-only in practice, not by necessity.
 #[cfg(feature = "std")]
 pub const SPLIT_ALIGNMENT: u64 = 1;
+
+/// Floor on multiply-adds per chunk for `matmul_rows_threaded`'s row split
+/// (`cpu.rs`'s `row_chunk_count`) -- caps `workers * ROW_OVERSUBSCRIBE`
+/// chunks down to `(rows * contraction_width) / MIN_MACS_PER_CHUNK` when a
+/// call's total work is small, instead of always paying full oversubscribed
+/// dispatch. Execution policy (see this module's doc); currently
+/// build-time-only in practice, not by necessity.
+///
+/// Measured on this box (`proxima-model-interop`'s real openchat-3.5
+/// forward, `PROXIMA_PREFAULT=1`, `--features std`, 10 workers, token
+/// `2651`/`"known"` held fixed every run, `uptime` recorded alongside each
+/// number, 3 runs per candidate) against the fixed-40-chunk baseline's own
+/// per-shape table (`DIAG q4k_shape_table`): `attn_k`/`attn_v`
+/// (`rows=1024 k=4096`, 4.19M macs/call, 104,857 macs/chunk at the old
+/// fixed split) was the one shape paying a fixed 40-way dispatch for 14x
+/// less work than `ffn_up`/`ffn_gate` (`rows=14336 k=4096`, 58.7M
+/// macs/call, 1,468,006 macs/chunk) at the same chunk count.
+///
+/// `500_000` (8 chunks for `attn_k`/`attn_v`, unchanged 40 for
+/// `ffn_up`/`ffn_gate`): `attn_k`/`attn_v` dropped from the pre-fix
+/// 0.0244-0.0254 ns/mac to 0.0180-0.0185 ns/mac (n=3), `ffn_up`/`ffn_gate`
+/// unmoved at 0.0060-0.0062 ns/mac -- neither run ever left `token_id=2651`
+/// (`"known"`). `700_000` (5 chunks for `attn_k`/`attn_v`, still 40 for the
+/// wide shapes) was REJECTED: measured 0.0192-0.0194 ns/mac (n=3), worse
+/// than `500_000`'s 8 chunks -- 5 chunks under-fills the 10-worker pool
+/// (2 workers idle for the whole dispatch) where 8 chunks does not, and
+/// that idle cost outweighs the smaller per-chunk overhead. `500_000` is
+/// the floor between `attn_k`'s natural per-chunk work (so it drops well
+/// below the old fixed 40) and `ffn_up`'s (so wide shapes are untouched,
+/// still landing on `workers * ROW_OVERSUBSCRIBE`). See
+/// `proxima-model-interop/src/bind.rs`'s `runs_one_real_forward_pass_and_
+/// greedy_picks_a_real_token` for the harness this was measured against.
+#[cfg(feature = "std")]
+pub const MIN_MACS_PER_CHUNK: usize = 500_000;
 
 /// Output rows one call to `gemm_width_tile_neon` computes. Sizes a fixed
 /// `[[f32; _]; WIDTH_TILE_ROWS]` output array -- cannot be runtime config

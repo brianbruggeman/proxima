@@ -288,6 +288,46 @@ pub static MATMUL_POSITION_LOOP_ITERS: Counter =
 pub static MATMUL_REDUCE_QUANTIZED_CALLS: Counter =
     Counter::new("proxima_tensor.matmul.reduce_quantized_calls");
 
+// diagnostic-only, keyed by (rows, k) -- every aggregate MATMUL_Q4K_MACS/
+// MATMUL_Q4K_CALL_NANOS above sums across all 7 matmul shapes a real
+// forward pass runs per layer, so it cannot tell "attn_q's threading win
+// held" apart from "attn_k lost it and attn_q's win hid the loss in the
+// average." `run_reduce_quantized` (`cpu.rs`) already has `rows`/`k` at the
+// exact site the aggregate counters fire from; this bucket is the same
+// measurement (per-call nanos including the activation-quantize preamble,
+// wrapping the whole `matmul_q4k_q8k_f32` call) split by shape instead of
+// summed away.
+type ShapeKey = (u64, u64);
+type ShapeTotals = (u64, u64, u64);
+static Q4K_SHAPE_NANOS: Mutex<BTreeMap<ShapeKey, ShapeTotals>> = Mutex::new(BTreeMap::new());
+
+/// Adds one `(rows, k)`-shaped call's macs and elapsed nanos to that
+/// shape's running `(calls, macs, nanos)` triple.
+pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, nanos: u64) {
+    let mut buckets = Q4K_SHAPE_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = buckets.entry((rows, k)).or_insert((0, 0, 0));
+    entry.0 += 1;
+    entry.1 += macs;
+    entry.2 += nanos;
+}
+
+/// Every distinct `(rows, k)` shape recorded since the last
+/// [`reset_q4k_shape_buckets`], as `(rows, k, calls, macs, nanos)` — sorted
+/// by key (`BTreeMap` iteration order), not by any measured field.
+#[must_use]
+pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
+    let buckets = Q4K_SHAPE_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets
+        .iter()
+        .map(|(&(rows, k), &(calls, macs, nanos))| (rows, k, calls, macs, nanos))
+        .collect()
+}
+
+pub fn reset_q4k_shape_buckets() {
+    let mut buckets = Q4K_SHAPE_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets.clear();
+}
+
 /// One process run's worth of [`matmul_rows_threaded`](crate::cpu)'s own
 /// dispatch-overhead breakdown, read back the same way [`parallel_totals`]
 /// is.
