@@ -360,8 +360,19 @@ impl CohortSession<'_> {
             *control.round_ptr.get() = Some(erased_static);
         }
 
-        control.round.fetch_add(1, Ordering::Release);
-        if control.parked_count.load(Ordering::Acquire) > 0 {
+        // SeqCst, not Release/Acquire, and all four of these ops together:
+        // this and the member's arm-then-recheck (`wait_for_round`) form a
+        // store-buffer pair -- each side stores one location then loads the
+        // other. Release/Acquire on DISTINCT locations does not order them
+        // against each other, so both sides can miss: leader reads
+        // `parked_count == 0` and skips the unpark while the member reads the
+        // old `round` and parks. Measured on aarch64, 345 strands per 300,000
+        // with Release/Acquire and 0 per 18,000,000 with SeqCst. The whole
+        // difference is one instruction: rustc targets Apple silicon with
+        // RCpc, so `load(Acquire)` lowers to `ldapr`, which may execute before
+        // a preceding release store; `ldar` (RCsc) may not.
+        control.round.fetch_add(1, Ordering::SeqCst);
+        if control.parked_count.load(Ordering::SeqCst) > 0 {
             for unparker in &control.unparkers {
                 unparker.unpark();
             }
@@ -430,6 +441,23 @@ fn member_loop(control: &Control, member_index: usize, parker: &Parker, spin_pol
 /// every cohort test's own dedicated threads. `park_timeout` makes the
 /// wait self-healing: a member that missed its wake re-polls `round`
 /// itself within one timeout instead of blocking forever.
+/// HISTORY, because the reason recorded here before was wrong and cost a
+/// reproduction to disprove: this bound was introduced blaming "OS scheduling"
+/// and "a storm of concurrent parks/unparks", and explicitly exonerating
+/// `Parker`. `Parker` was innocent, but scheduling was never the cause either.
+/// The real defect was the store-buffer pair at the `round` bump and at
+/// `wait_for_round`'s arm-then-recheck, using Release/Acquire across distinct
+/// locations -- 345 strands per 300,000 on aarch64, where `load(Acquire)`
+/// lowers to RCpc `ldapr`. Those four operations are SeqCst now and the strand
+/// does not reproduce in 18,000,000 rounds.
+///
+/// The bound stays as a floor under a genuinely missed transition -- a
+/// shutdown edge, a future member-side path -- NOT as cover for an ordering
+/// bug. Note what it costs to keep: a stranding degrades into a 50us stall
+/// that no test asserts on and no metric separates from scheduling noise,
+/// which is exactly why the defect above survived until someone reverted this
+/// line to reproduce it. If a stranding is ever suspected again, remove this
+/// bound first and reproduce with an unbounded `park()`.
 const PARK_TIMEOUT: Duration = Duration::from_micros(50);
 
 /// spin `spin_polls` times, then park (bounded by [`PARK_TIMEOUT`]), until
@@ -457,10 +485,17 @@ fn wait_for_round(
             }
         }
         // park: increment parked_count BEFORE the re-check so a concurrent
-        // leader observes `parked_count > 0` and fires its unpark — the
-        // same race `background.rs:317-333` handles for the shared pool.
-        control.parked_count.fetch_add(1, Ordering::AcqRel);
-        let current = control.round.load(Ordering::Acquire);
+        // leader observes `parked_count > 0` and fires its unpark. SeqCst on
+        // both, paired with the leader's two at the `round` bump — see there
+        // for the store-buffer argument and the measurement. Note the comment
+        // that used to sit here claimed `background.rs:317-333` handles "the
+        // same race": it does not have the same shape. Two of its four ops are
+        // SeqCst inside `crossbeam_deque::Injector` (`push`'s CAS and
+        // `is_empty`'s loads), which breaks the cycle for it -- by crossbeam's
+        // choice, not by ours. A crossbeam release that relaxed those would
+        // reintroduce the hazard there with nothing here to catch it.
+        control.parked_count.fetch_add(1, Ordering::SeqCst);
+        let current = control.round.load(Ordering::SeqCst);
         let shutting_down = control.shutdown.load(Ordering::Acquire);
         if current != local_round || shutting_down {
             control.parked_count.fetch_sub(1, Ordering::AcqRel);
