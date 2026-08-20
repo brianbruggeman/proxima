@@ -1840,10 +1840,15 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
     let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
-    // Same fast-path gate `run_reduce` uses (ROW 3), reused verbatim here:
-    // every operand the body shape reads is gather-free and affine with a
-    // width-dim stride of 0 or 1 (`proxima-tensor/docs/discipline.md` ROW 5).
-    let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
+    // `Unary`/`Binary` share `run_reduce`'s own gate (ROW 3); `Generic`
+    // (a fused multi-step chain) gets its own, narrower gate that only
+    // `run_elementwise` acts on — every operand the body shape reads is
+    // gather-free and affine with a width-dim stride of 0 or 1
+    // (`proxima-tensor/docs/discipline.md` ROW 5).
+    let fast_path = match shape {
+        BodyShape::Generic(generic_body) => generic_body_is_affine_fast_path(resolved, generic_body, &strides),
+        _ => body_shape_is_affine_fast_path(resolved, &shape, &strides),
+    };
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
     #[cfg(feature = "instrument")]
@@ -1860,7 +1865,7 @@ fn run_elementwise<B: Deref<Target = [f32]>>(
 
         if fast_path {
             let out_slice = &mut output[out_base..out_base + inner_len];
-            elementwise_width_fast(&shape, &raw, &running, &strides, out_slice);
+            elementwise_width_fast(&shape, &raw, &running, &strides, out_slice, &mut step_values);
             #[cfg(feature = "instrument")]
             {
                 counters.kernel_calls += 1;
@@ -2868,23 +2873,47 @@ fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut 
     }
 }
 
+/// True when a physical operand at `index` is both gather-free and affine
+/// with a width-dim stride of 0 (broadcast) or 1 (contiguous) — the shared
+/// per-operand test [`body_shape_is_affine_fast_path`] and
+/// [`generic_body_is_affine_fast_path`] both apply, factored out once so the
+/// two eligibility gates cannot drift apart on what "affine" means.
+fn operand_is_affine(resolved: &BoundOp, strides: &[i64], index: u16) -> bool {
+    let (_, _, gather) = &resolved.operands()[index as usize];
+    gather.is_none() && matches!(strides[index as usize], 0 | 1)
+}
+
 /// True when every physical operand [`BodyShape`] actually reads (one for
-/// `Unary`, up to two for `Binary` — `Generic` never qualifies) is both
-/// gather-free and affine with a width-dim stride of 0 (broadcast) or 1
-/// (contiguous). Checked once per bound op, never per element — the same
-/// discipline [`body_shape`] already applies to the op/arity decision, now
-/// extended to the gather-vs-affine and stride-shape decision
-/// [`reduce_width_fast`]'s straight-line arms depend on.
+/// `Unary`, up to two for `Binary` — `Generic` never qualifies here) is
+/// affine ([`operand_is_affine`]). Checked once per bound op, never per
+/// element — the same discipline [`body_shape`] already applies to the
+/// op/arity decision, now extended to the gather-vs-affine and stride-shape
+/// decision [`reduce_width_fast`]'s and `run_scan`'s straight-line arms
+/// depend on. Shared by [`run_reduce`] and [`run_scan`], whose own
+/// straight-line arms have no `Generic` case, so `Generic` staying `false`
+/// here is load-bearing, not merely conservative — widening it would need a
+/// `Generic` arm in both of those too. [`run_elementwise`]'s own `Generic`
+/// fast path is a separate, narrower gate: [`generic_body_is_affine_fast_path`].
 fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides: &[i64]) -> bool {
-    let operand_qualifies = |index: u16| {
-        let (_, _, gather) = &resolved.operands()[index as usize];
-        gather.is_none() && matches!(strides[index as usize], 0 | 1)
-    };
     match *shape {
-        BodyShape::Unary(_, a) => operand_qualifies(a),
-        BodyShape::Binary(_, a, b) => operand_qualifies(a) && operand_qualifies(b),
+        BodyShape::Unary(_, a) => operand_is_affine(resolved, strides, a),
+        BodyShape::Binary(_, a, b) => operand_is_affine(resolved, strides, a) && operand_is_affine(resolved, strides, b),
         BodyShape::Generic(_) => false,
     }
+}
+
+/// [`run_elementwise`]'s own eligibility gate for its `Generic` fast path
+/// ([`elementwise_width_generic`]): every `StepArg::Operand` any step in
+/// `body` references must be affine ([`operand_is_affine`]). Kept separate
+/// from [`body_shape_is_affine_fast_path`] because `run_reduce` and
+/// `run_scan` share that predicate and neither has a `Generic` arm in its
+/// own width-fast function — widening the shared predicate would make it lie
+/// to those two callers (`proxima-tensor/docs/discipline.md` ROW 5).
+fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, strides: &[i64]) -> bool {
+    body.steps.iter().flat_map(|step| step.args.iter()).all(|arg| match arg {
+        StepArg::Operand(index) => operand_is_affine(resolved, strides, *index),
+        StepArg::Step(_) => true,
+    })
 }
 
 /// The width loop's straight-line fast path: reads each physical operand's
@@ -6229,9 +6258,18 @@ fn reduce_dot_binary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, a: Opera
 /// `out`. Same eligibility gate as `run_reduce`
 /// ([`body_shape_is_affine_fast_path`]), same [`OperandSpan`] reads, same
 /// monomorphized-closure-per-op dispatch technique as ROW 4
-/// (`proxima-tensor/docs/discipline.md` ROW 5).
+/// (`proxima-tensor/docs/discipline.md` ROW 5). `step_values` is only read
+/// by the `Generic` arm ([`elementwise_width_generic`]); `Unary`/`Binary`
+/// ignore it, same as [`eval_body_shape`]'s own split.
 #[inline(always)]
-fn elementwise_width_fast(shape: &BodyShape, raw: &[&[f32]], running: &[i64], strides: &[i64], out: &mut [f32]) {
+fn elementwise_width_fast(
+    shape: &BodyShape,
+    raw: &[&[f32]],
+    running: &[i64],
+    strides: &[i64],
+    out: &mut [f32],
+    step_values: &mut [f32],
+) {
     let span_of = |index: u16| {
         let index = index as usize;
         OperandSpan {
@@ -6243,7 +6281,52 @@ fn elementwise_width_fast(shape: &BodyShape, raw: &[&[f32]], running: &[i64], st
     match *shape {
         BodyShape::Unary(op, a) => elementwise_width_unary(op, span_of(a), out),
         BodyShape::Binary(op, a, b) => elementwise_width_binary(op, span_of(a), span_of(b), out),
-        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+        BodyShape::Generic(body) => elementwise_width_generic(body, raw, running, strides, out, step_values),
+    }
+}
+
+/// The width-loop fast path for a fused multi-step [`ComposedBody`]
+/// (`BodyShape::Generic`) — the same straight-line shape
+/// [`elementwise_width_fast`]'s `Unary`/`Binary` arms already give a
+/// single-`ScalarOp` body, generalized to [`apply_body`]'s own step-by-step
+/// evaluation instead of a bespoke per-arity function. Per position, each
+/// `StepArg::Operand` reads straight out of its operand's contiguous slice
+/// or hoisted broadcast scalar (no `gather_cursors` `Option` check, no
+/// per-element `running` mutation — both already ruled out by
+/// [`body_shape_is_affine_fast_path`]) and each `StepArg::Step` reads the
+/// current position's own `step_values` slot, so evaluation order and every
+/// `apply_scalar_op` call match [`apply_body`]'s scalar path exactly:
+/// output is bit-identical (`proxima-tensor/docs/discipline.md` ROW 5).
+#[inline(always)]
+fn elementwise_width_generic(
+    body: &ComposedBody,
+    raw: &[&[f32]],
+    running: &[i64],
+    strides: &[i64],
+    out: &mut [f32],
+    step_values: &mut [f32],
+) {
+    for (position, slot) in out.iter_mut().enumerate() {
+        for (index, step) in body.steps.iter().enumerate() {
+            let mut args = [0.0f32; 3];
+            for (arg_slot, arg) in step.args.iter().enumerate() {
+                args[arg_slot] = match arg {
+                    StepArg::Operand(operand_index) => {
+                        let operand_index = *operand_index as usize;
+                        let data = raw[operand_index];
+                        let base = running[operand_index] as usize;
+                        if strides[operand_index] == 1 {
+                            data[base + position]
+                        } else {
+                            data[base]
+                        }
+                    }
+                    StepArg::Step(step_index) => step_values[*step_index as usize],
+                };
+            }
+            step_values[index] = apply_scalar_op(step.op, &args[..step.args.len()]);
+        }
+        *slot = step_values[body.steps.len() - 1];
     }
 }
 
@@ -7672,6 +7755,7 @@ fn run_scan_generic<T: Element>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::bind::BodyStep;
     use crate::map::{self, AxisTerm, IndexMap};
     use crate::op::{Extent, Reduce, append};
     use rstest::rstest;
@@ -7683,6 +7767,186 @@ mod tests {
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
         (0..count).map(|_| lcg.next_unit()).collect()
+    }
+
+    /// The scalar reference [`run_elementwise`]'s own `Generic` arm takes:
+    /// per position, read each operand via its own running offset (advancing
+    /// by `strides` each step, mirroring [`fill_running_offsets`] plus the
+    /// per-element loop body), then [`apply_body`]. No gather in any of
+    /// these fixtures, so this omits [`GatherCursor`] entirely.
+    fn reference_generic_body(body: &ComposedBody, raw: &[&[f32]], strides: &[i64], width: usize) -> Vec<f32> {
+        let mut running = vec![0i64; raw.len()];
+        let mut operand_values = vec![0.0f32; raw.len()];
+        let mut step_values = vec![0.0f32; body.steps.len()];
+        let mut out = Vec::with_capacity(width);
+        for _ in 0..width {
+            for (index, data) in raw.iter().enumerate() {
+                operand_values[index] = data[running[index] as usize];
+                running[index] += strides[index];
+            }
+            out.push(apply_body(body, &operand_values, &mut step_values));
+        }
+        out
+    }
+
+    fn step(op: ScalarOp, args: &[StepArg]) -> BodyStep {
+        BodyStep {
+            op,
+            args: args.to_vec(),
+        }
+    }
+
+    /// A synthetic instance of the 6-step SwiGLU chain named in
+    /// `proxima-tensor/docs/discipline.md` ROW 5
+    /// (`[Negate, Exponential, Add, Reciprocal, Multiply, Multiply]`):
+    /// `silu(gate) * up` computed as `gate * sigmoid(gate) * up`, with
+    /// `sigmoid(gate) = 1 / (1 + exp(-gate))` unrolled into the same five
+    /// scalar steps a real fused body has. Operand 0 is `gate` (contiguous),
+    /// operand 1 is a broadcast `1.0` (stride 0, standing in for a
+    /// constant), operand 2 is `up` (contiguous) — exactly the affine
+    /// precondition [`generic_body_is_affine_fast_path`] checks.
+    fn swiglu_body() -> ComposedBody {
+        ComposedBody {
+            steps: vec![
+                step(ScalarOp::Negate, &[StepArg::Operand(0)]),
+                step(ScalarOp::Exponential, &[StepArg::Step(0)]),
+                step(ScalarOp::Add, &[StepArg::Step(1), StepArg::Operand(1)]),
+                step(ScalarOp::Reciprocal, &[StepArg::Step(2)]),
+                step(ScalarOp::Multiply, &[StepArg::Step(3), StepArg::Operand(0)]),
+                step(ScalarOp::Multiply, &[StepArg::Step(4), StepArg::Operand(2)]),
+            ],
+        }
+    }
+
+    /// A synthetic instance of the 6-step RMSNorm chain named in
+    /// `proxima-tensor/docs/discipline.md` ROW 5
+    /// (`[Multiply, Add, SquareRoot, Reciprocal, Multiply, Multiply]`):
+    /// `x * (1 / sqrt(x*x + eps)) * weight`. Operand 0 is `x` (contiguous),
+    /// operand 1 is a broadcast `eps` (stride 0), operand 2 is `weight`
+    /// (contiguous).
+    fn rmsnorm_body() -> ComposedBody {
+        ComposedBody {
+            steps: vec![
+                step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Operand(0)]),
+                step(ScalarOp::Add, &[StepArg::Step(0), StepArg::Operand(1)]),
+                step(ScalarOp::SquareRoot, &[StepArg::Step(1)]),
+                step(ScalarOp::Reciprocal, &[StepArg::Step(2)]),
+                step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Step(3)]),
+                step(ScalarOp::Multiply, &[StepArg::Step(4), StepArg::Operand(2)]),
+            ],
+        }
+    }
+
+    /// A synthetic instance of the 3-step RoPE chains named in
+    /// `proxima-tensor/docs/discipline.md` ROW 5
+    /// (`[Multiply, Multiply, Add]` / `[Multiply, Multiply, Subtract]`):
+    /// `x * cos <op> y * sin`. All four operands (`x`, `cos`, `y`, `sin`)
+    /// are contiguous.
+    fn rope_body(combine: ScalarOp) -> ComposedBody {
+        ComposedBody {
+            steps: vec![
+                step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Operand(1)]),
+                step(ScalarOp::Multiply, &[StepArg::Operand(2), StepArg::Operand(3)]),
+                step(combine, &[StepArg::Step(0), StepArg::Step(1)]),
+            ],
+        }
+    }
+
+    #[rstest]
+    #[case::swiglu(swiglu_body(), vec![1, 0, 1])]
+    #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 1])]
+    #[case::rope_add(rope_body(ScalarOp::Add), vec![1, 1, 1, 1])]
+    #[case::rope_subtract(rope_body(ScalarOp::Subtract), vec![1, 1, 1, 1])]
+    fn elementwise_width_generic_matches_scalar_apply_body(#[case] body: ComposedBody, #[case] strides: Vec<i64>) {
+        let width = 32;
+        let operand_len = |stride: i64| if stride == 0 { 1 } else { width };
+        let buffers: Vec<Vec<f32>> = strides
+            .iter()
+            .enumerate()
+            .map(|(index, &stride)| {
+                let values = random_vec(0x5eed_0000 + index as u64, operand_len(stride));
+                // keep divisor-side and sqrt-side operands away from zero so
+                // Reciprocal/SquareRoot stay finite and comparable exactly
+                values.into_iter().map(|value| value.abs() + 0.25).collect()
+            })
+            .collect();
+        let raw: Vec<&[f32]> = buffers.iter().map(Vec::as_slice).collect();
+
+        let expected = reference_generic_body(&body, &raw, &strides, width);
+
+        let running = vec![0i64; raw.len()];
+        let mut step_values = vec![0.0f32; body.steps.len()];
+        let mut actual = vec![0.0f32; width];
+        elementwise_width_generic(&body, &raw, &running, &strides, &mut actual, &mut step_values);
+
+        assert_eq!(actual, expected, "width-fast generic path must be bit-identical to the scalar apply_body path");
+    }
+
+    /// A minimal [`BoundOp`] carrying `body` and one operand per stride in
+    /// `strides` — `Layout`/`node` are placeholders `operand_is_affine`
+    /// never reads, only `strides` (passed separately, matching
+    /// `run_elementwise`'s own precomputed table) and `gather` matter.
+    fn bound_op_for_gate(body: ComposedBody, strides: &[i64], gather_operand: Option<usize>) -> BoundOp {
+        let operands = strides
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let gather = (Some(index) == gather_operand).then(|| bind::Lookup {
+                    indices: NodeId(0),
+                    index_layout: bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![0],
+                    },
+                    element_stride: 1,
+                    extent: 1,
+                });
+                (
+                    NodeId(index as u32),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![0],
+                    },
+                    gather,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(strides.len() as u32),
+            dtype: DType::Float32,
+            extents: vec![32],
+            kind: BoundOpKind::Elementwise { body, operands },
+        }
+    }
+
+    #[rstest]
+    #[case::swiglu(swiglu_body(), vec![1, 0, 1])]
+    #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 1])]
+    #[case::rope_add(rope_body(ScalarOp::Add), vec![1, 1, 1, 1])]
+    fn generic_body_is_affine_fast_path_accepts_gather_free_affine_operands(
+        #[case] body: ComposedBody,
+        #[case] strides: Vec<i64>,
+    ) {
+        let resolved = bound_op_for_gate(body.clone(), &strides, None);
+        assert!(generic_body_is_affine_fast_path(&resolved, &body, &strides));
+    }
+
+    #[rstest]
+    #[case::swiglu(swiglu_body(), vec![1, 0, 1])]
+    #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 1])]
+    fn generic_body_is_affine_fast_path_rejects_a_gathered_operand(#[case] body: ComposedBody, #[case] strides: Vec<i64>) {
+        let resolved = bound_op_for_gate(body.clone(), &strides, Some(0));
+        assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
+    }
+
+    #[rstest]
+    #[case::swiglu(swiglu_body(), vec![2, 0, 1])]
+    #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 2])]
+    fn generic_body_is_affine_fast_path_rejects_a_non_unit_non_broadcast_stride(
+        #[case] body: ComposedBody,
+        #[case] strides: Vec<i64>,
+    ) {
+        let resolved = bound_op_for_gate(body.clone(), &strides, None);
+        assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
     }
 
     /// Dispatches `rows` through the same `claim_and_run_rows` shared-cursor
