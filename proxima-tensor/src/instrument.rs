@@ -260,7 +260,23 @@ pub fn reset_worker_busy() {
 // measurement against a clock that stops when the thread does; carry BOTH,
 // because their ratio is the only in-band report of how much the host
 // interfered with the run.
-static WORKER_CPU_NANOS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
+//
+// the pool is shared by two structurally different workloads --
+// `matmul_rows_threaded`'s row-chunk path (`cpu.rs::run_row_chunk`) and
+// `claim_and_run`'s elementwise/node-chunk path -- and a bare `u64` cannot
+// say which one produced a given nanosecond. `CpuWorkload` is the
+// discriminant that keeps them separable at the point they are recorded,
+// rather than mixed in one pool and un-mixed downstream (a downstream
+// consumer has no way to recover the split once summed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuWorkload {
+    /// `matmul_rows_threaded`'s row-chunk dispatch (`cpu.rs::run_row_chunk`).
+    MatmulRow,
+    /// `claim_and_run`'s elementwise/reduce/scan node-chunk dispatch.
+    Elementwise,
+}
+
+static WORKER_CPU_NANOS: Mutex<Vec<(ThreadId, CpuWorkload, u64)>> = Mutex::new(Vec::new());
 
 /// This thread's consumed CPU time. Unlike an [`Instant`](std::time::Instant)
 /// delta, this does not advance while the thread is off-core.
@@ -273,21 +289,41 @@ pub fn thread_cpu_nanos() -> u64 {
     (now.tv_sec as u64) * 1_000_000_000 + (now.tv_nsec as u64)
 }
 
-/// Adds `nanos` of consumed CPU time to the current thread's running total,
-/// the deschedule-immune peer of [`record_worker_busy_ticks`].
-pub fn record_worker_cpu_nanos(nanos: u64) {
+/// Adds `nanos` of consumed CPU time to the current thread's running total
+/// for `workload`, the deschedule-immune peer of [`record_worker_busy_ticks`].
+pub fn record_worker_cpu_nanos(workload: CpuWorkload, nanos: u64) {
     let thread_id = std::thread::current().id();
     let mut totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
-    match totals.iter_mut().find(|(existing, _)| *existing == thread_id) {
-        Some((_, total)) => *total += nanos,
-        None => totals.push((thread_id, nanos)),
+    match totals.iter_mut().find(|(existing_thread, existing_workload, _)| {
+        *existing_thread == thread_id && *existing_workload == workload
+    }) {
+        Some((_, _, total)) => *total += nanos,
+        None => totals.push((thread_id, workload, nanos)),
     }
 }
 
+/// Every worker's accumulated CPU time across BOTH workloads -- the sum a
+/// caller wants when it does not need the matmul/elementwise split, kept
+/// available alongside [`worker_cpu_snapshot_for`] rather than forcing every
+/// existing all-workload consumer to add the two split snapshots back
+/// together itself.
 #[must_use]
 pub fn worker_cpu_snapshot() -> Vec<u64> {
     let totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
-    totals.iter().map(|(_, ticks)| *ticks).collect()
+    totals.iter().map(|(_, _, nanos)| *nanos).collect()
+}
+
+/// Every worker's accumulated CPU time for `workload` alone -- the split a
+/// caller needs to divide by a workload-specific denominator (e.g. matmul
+/// macs) without elementwise CPU time inflating the numerator.
+#[must_use]
+pub fn worker_cpu_snapshot_for(workload: CpuWorkload) -> Vec<u64> {
+    let totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    totals
+        .iter()
+        .filter(|(_, existing_workload, _)| *existing_workload == workload)
+        .map(|(_, _, nanos)| *nanos)
+        .collect()
 }
 
 pub fn reset_worker_cpu() {
