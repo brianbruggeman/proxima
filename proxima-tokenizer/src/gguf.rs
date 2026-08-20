@@ -33,12 +33,13 @@ use alloc::vec::Vec;
 use proxima_gguf::{MetadataArray, MetadataValue, ParsedGguf};
 
 use crate::error::TokenizerError;
-use crate::vocab::Vocab;
+use crate::vocab::{TokenType, Vocab};
 
 const MODEL_KEY: &str = "tokenizer.ggml.model";
 const TOKENS_KEY: &str = "tokenizer.ggml.tokens";
 const MERGES_KEY: &str = "tokenizer.ggml.merges";
 const SCORES_KEY: &str = "tokenizer.ggml.scores";
+const TOKEN_TYPE_KEY: &str = "tokenizer.ggml.token_type";
 const BOS_KEY: &str = "tokenizer.ggml.bos_token_id";
 const EOS_KEY: &str = "tokenizer.ggml.eos_token_id";
 const UNKNOWN_KEY: &str = "tokenizer.ggml.unknown_token_id";
@@ -67,20 +68,53 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
     let eos_token_id = u32_scalar(metadata, EOS_KEY)?;
     let unknown_token_id = u32_scalar(metadata, UNKNOWN_KEY)?;
     let model = string_scalar(metadata, MODEL_KEY)?.ok_or(TokenizerError::MissingMetadataKey { key: MODEL_KEY })?;
+    let token_types = token_type_array(metadata, tokens.len())?;
 
-    match model.as_str() {
+    let vocab = match model.as_str() {
         "gpt2" => {
             let merges =
                 string_array(metadata, MERGES_KEY)?.ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
-            Vocab::new(tokens, &merges, bos_token_id, eos_token_id, unknown_token_id)
+            Vocab::new(tokens, &merges, bos_token_id, eos_token_id, unknown_token_id)?
         }
         "llama" => {
             let scores =
                 f32_array(metadata, SCORES_KEY)?.ok_or(TokenizerError::MissingMetadataKey { key: SCORES_KEY })?;
-            Vocab::new_unigram(tokens, scores, bos_token_id, eos_token_id, unknown_token_id)
+            Vocab::new_unigram(tokens, scores, bos_token_id, eos_token_id, unknown_token_id)?
         }
-        other => Err(TokenizerError::UnsupportedTokenizerModel { model: String::from(other) }),
+        other => return Err(TokenizerError::UnsupportedTokenizerModel { model: String::from(other) }),
+    };
+
+    match token_types {
+        Some(token_types) => vocab.with_token_types(token_types),
+        None => Ok(vocab),
     }
+}
+
+/// Reads `tokenizer.ggml.token_type` (`array<i32>`, parallel to
+/// `tokenizer.ggml.tokens`) if present, mapping each raw value through
+/// [`TokenType::from_raw`]. `None` when the key is absent -- not every
+/// vocab family carries it (byte-level BPE vocabs work fine without it,
+/// since [`Vocab::with_token_types`] is purely additive), so this is not
+/// [`TokenizerError::MissingMetadataKey`].
+///
+/// # Errors
+///
+/// [`TokenizerError::TokenArrayLengthMismatch`] if the array's length
+/// disagrees with `tokens_len`; [`TokenizerError::WrongMetadataType`] if
+/// the key is present with the wrong GGUF value type.
+fn token_type_array(metadata: &ParsedGguf, tokens_len: usize) -> Result<Option<Vec<TokenType>>, TokenizerError> {
+    let raw = match metadata.metadata_value(TOKEN_TYPE_KEY) {
+        None => return Ok(None),
+        Some(MetadataValue::Array(MetadataArray::I32(values))) => values,
+        Some(_) => return Err(TokenizerError::WrongMetadataType { key: TOKEN_TYPE_KEY }),
+    };
+    if raw.len() != tokens_len {
+        return Err(TokenizerError::TokenArrayLengthMismatch {
+            tokens_len,
+            token_type_len: raw.len(),
+        });
+    }
+    Ok(Some(raw.iter().copied().map(TokenType::from_raw).collect()))
 }
 
 fn string_array(metadata: &ParsedGguf, key: &'static str) -> Result<Option<Vec<String>>, TokenizerError> {
@@ -375,5 +409,44 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    /// The root-cause regression this module's added-token pre-pass fixes:
+    /// the OpenChat-3.5 chat template embeds `<|end_of_turn|>` literally,
+    /// a `tokenizer.ggml.token_type = 3` (`TokenType::Control`) entry at id
+    /// 32000 in this fixture. Before the pre-pass, `crate::encode` shredded
+    /// the marker into ordinary BPE pieces (38 ids instead of 31) because
+    /// nothing consulted `token_type` -- see `vocab.rs`'s
+    /// `Vocab::with_token_types`/`Vocab::longest_added_token_match`.
+    ///
+    /// Reference ids captured directly from llama.cpp's own tokenizer
+    /// (`llama-tokenize -m <fixture> -p '<prompt>'`, same provenance as
+    /// `llama_cpp_oracle_openchat.rs`): BOS first, `<|end_of_turn|>`
+    /// resolving to the single id 32000 mid-sequence, not eight text
+    /// pieces.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn encode_with_bos_eos_matches_llama_cpp_oracle_end_of_turn_marker() {
+        let Some(vocab) = load_real_openchat_vocab() else { return };
+
+        let prompt =
+            "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:";
+        let expected_ids: [u32; 31] = [
+            1, 420, 6316, 28781, 3198, 3123, 1247, 28747, 12018, 264, 21366, 908, 369, 5723, 272, 307, 362, 401, 593,
+            266, 28127, 1474, 28723, 32000, 420, 6316, 28781, 3198, 3123, 21631, 28747,
+        ];
+
+        let ids = crate::encode_with_bos_eos(prompt, &vocab, true, false)
+            .unwrap_or_else(|error| panic!("encode_with_bos_eos failed: {error}"));
+        assert_eq!(
+            ids.as_slice(),
+            expected_ids.as_slice(),
+            "our ids for the chat-template prompt must match llama.cpp's own tokenization exactly (got {ids:?})"
+        );
+        assert_eq!(
+            ids.iter().filter(|&&id| id == 32000).count(),
+            1,
+            "the literal <|end_of_turn|> marker must resolve to its own id (32000) exactly once, not be shredded into text pieces"
+        );
     }
 }

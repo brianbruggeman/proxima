@@ -55,6 +55,28 @@ struct MergeRule {
     merged_id: u32,
 }
 
+/// One node of the byte-trie over "added token" markers (vocab entries
+/// [`TokenType::Control`]/[`TokenType::UserDefined`] -- see
+/// [`Vocab::with_token_types`]) -- built once, walked once per scan
+/// position by [`Vocab::longest_added_token_match`]. `token_id` is set
+/// exactly on nodes where a marker's bytes end, so a walk that passes
+/// through a node with `token_id: None` is mid-marker, not yet a match.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct AddedTokenNode {
+    children: BTreeMap<u8, AddedTokenNode>,
+    token_id: Option<u32>,
+}
+
+impl AddedTokenNode {
+    fn insert(&mut self, bytes: &[u8], token_id: u32) {
+        let mut node = self;
+        for &byte in bytes {
+            node = node.children.entry(byte).or_default();
+        }
+        node.token_id = Some(token_id);
+    }
+}
+
 /// A byte-level BPE vocabulary: every token's display-domain string, its
 /// decoded raw bytes, the merge table, and the handful of special token
 /// ids callers care about (BOS/EOS/unknown).
@@ -69,6 +91,8 @@ pub struct Vocab {
     bos_token_id: Option<u32>,
     eos_token_id: Option<u32>,
     unknown_token_id: Option<u32>,
+    token_types: Vec<TokenType>,
+    added_token_trie: AddedTokenNode,
 }
 
 impl Vocab {
@@ -213,7 +237,71 @@ impl Vocab {
             bos_token_id,
             eos_token_id,
             unknown_token_id,
+            token_types: Vec::new(),
+            added_token_trie: AddedTokenNode::default(),
         })
+    }
+
+    /// Attaches per-token [`TokenType`] tags (`tokenizer.ggml.token_type`),
+    /// and indexes every [`TokenType::Control`]/[`TokenType::UserDefined`]
+    /// entry's raw bytes into a trie so
+    /// [`Vocab::longest_added_token_match`] can recognize it literally in
+    /// input text -- see [`crate::pipe::encode`]'s added-token pre-pass.
+    /// Optional and additive: a [`Vocab`] built without this call behaves
+    /// exactly as before (no literal-marker scanning), matching every
+    /// existing caller.
+    ///
+    /// # Errors
+    ///
+    /// [`TokenizerError::TokenArrayLengthMismatch`] if `token_types.len()`
+    /// does not match the token count this vocab was built with.
+    pub fn with_token_types(mut self, token_types: Vec<TokenType>) -> Result<Self, TokenizerError> {
+        if token_types.len() != self.id_to_token.len() {
+            return Err(TokenizerError::TokenArrayLengthMismatch {
+                tokens_len: self.id_to_token.len(),
+                token_type_len: token_types.len(),
+            });
+        }
+        let mut added_token_trie = AddedTokenNode::default();
+        for (token_id, token_type) in token_types.iter().enumerate() {
+            if matches!(token_type, TokenType::Control | TokenType::UserDefined) {
+                added_token_trie.insert(&self.id_to_bytes[token_id], token_id as u32);
+            }
+        }
+        self.token_types = token_types;
+        self.added_token_trie = added_token_trie;
+        Ok(self)
+    }
+
+    /// The [`TokenType`] tag for `token_id`, if this vocab carries them
+    /// ([`Vocab::with_token_types`]) and `token_id` is in range.
+    #[must_use]
+    pub fn token_type(&self, token_id: u32) -> Option<TokenType> {
+        self.token_types.get(token_id as usize).copied()
+    }
+
+    /// The longest added-token marker ([`Vocab::with_token_types`]'s
+    /// `Control`/`UserDefined` entries) whose bytes prefix-match `bytes`,
+    /// as `(token_id, matched_byte_length)`. Walks the prebuilt trie one
+    /// byte at a time, so this costs `O(longest matching marker's byte
+    /// length)`, never a scan of the vocab. `None` when nothing matches at
+    /// all (the common case for ordinary text, and always the case for a
+    /// vocab that never called [`Vocab::with_token_types`], since its trie
+    /// is empty).
+    #[must_use]
+    pub(crate) fn longest_added_token_match(&self, bytes: &[u8]) -> Option<(u32, usize)> {
+        let mut node = &self.added_token_trie;
+        let mut longest_match = None;
+        for (offset, byte) in bytes.iter().enumerate() {
+            let Some(child) = node.children.get(byte) else {
+                break;
+            };
+            node = child;
+            if let Some(token_id) = node.token_id {
+                longest_match = Some((token_id, offset + 1));
+            }
+        }
+        longest_match
     }
 
     /// Number of tokens in the vocab.
