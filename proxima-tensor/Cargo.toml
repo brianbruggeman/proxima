@@ -16,7 +16,7 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 # executed in any default build. `std` is the only tier that can hold
 # `prime` (threads, an OS-backed pool), so it is the natural place for the
 # implication to live — the `alloc`-only floor stays free of `dep:prime`.
-std = ["alloc", "thiserror/std", "tensor-bgpool", "dep:libc"]
+std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "dep:libc"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
@@ -43,6 +43,17 @@ instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:l
 # `cpu.rs` at all (`cpu` is `#[cfg(feature = "std")]` in `lib.rs`), so this
 # feature has no meaningful "off" state left to test.
 tensor-bgpool = ["dep:prime"]
+# routes `cpu::matmul_rows_threaded` through `prime::os::cohort::ThreadCohort`
+# (fixed-cohort spin barrier, `runtime-prime-cohort` on the `prime` dep above)
+# instead of `ProximaBackgroundPool`'s per-call `Mutex`+`Condvar` wake --
+# measured 2492.7 ns/round vs the pool's 19305.5 ns/round
+# (`prime/src/os/cohort.rs`'s own module doc). Implied by `std`, same
+# reasoning as `tensor-bgpool`: `prime` is the only crate that can hold OS
+# threads, so `std` is the natural place for the implication to live. The
+# pool path (`tensor-bgpool`) stays compiled and reachable as the runtime
+# fallback for whenever the shared cohort session is already held by another
+# concurrent forward (`ThreadCohort::enter` returns `Err`).
+tensor-cohort = ["dep:prime"]
 # shared test/example fixtures (`test_support::Lcg`) — default-off so a
 # normal build never carries them; enabled for this crate's own dev targets
 # via the self-referential `dev-dependencies` entry below, and by `omega`'s
@@ -85,7 +96,7 @@ half = { version = "2.7.1", default-features = false }
 # — already audited, workspace-standard bindings (see `prime/src/os/reactor.rs`)
 # rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
 libc = { workspace = true, optional = true }
-prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par"], optional = true }
+prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par", "runtime-prime-cohort"], optional = true }
 # Q4_K block layout/dequant primitives for the quantized GEMM row source
 # (`cpu::dot_q4k_f32`/`cpu::matmul_q4k_f32`) — reuse-first: `proxima-gguf`
 # already ships and tests these against real weights, so this crate never

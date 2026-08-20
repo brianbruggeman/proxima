@@ -123,6 +123,7 @@ use proxima_primitives::pipe::Pipe;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::counter;
 use prime::os::background::ProximaBackgroundPool;
+use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
 
 use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
 use crate::dtype::DType;
@@ -558,6 +559,16 @@ pub fn evaluate_quantized(
     let mut diag_loop_overhead_nanos: u64 = 0;
     #[cfg(feature = "instrument")]
     let diag_setup_nanos = diag_setup_started.elapsed().as_nanos() as u64;
+    // Entered ONCE, before the node loop -- not per matmul call -- so the
+    // wake this session amortizes is paid once per forward pass, the same
+    // amortization `prime/src/os/cohort.rs`'s own module doc measures
+    // against `ProximaBackgroundPool`'s per-call wake. `None` whenever
+    // another forward already holds the process-wide cohort
+    // (`ThreadCohort::enter` returning `Err`) or the cohort itself failed
+    // to build; every one of the six signatures between here and
+    // `matmul_rows_threaded` falls back to the `nest_pool` dispatch path in
+    // that case, unchanged.
+    let session = nest_cohort().and_then(|cohort| cohort.enter().ok());
     for (position, computed) in resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
         let diag_alloc_started = Instant::now();
@@ -570,7 +581,7 @@ pub fn evaluate_quantized(
         let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
         #[cfg(feature = "instrument")]
         let diag_node_started = Instant::now();
-        run_node_into(computed, &buffers, Some(&quantized_weights), &mut output)?;
+        run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
         #[cfg(feature = "instrument")]
         {
             let entry = diag_kind_nanos.entry(diag_node_label).or_insert((0, 0));
@@ -719,7 +730,7 @@ fn evaluate_pooled(
         let mut output = take_or_allocate(free_buffers, node_output_len(computed));
         #[cfg(feature = "instrument")]
         drop(alloc_site_guard);
-        run_node_into(computed, &buffers, None, &mut output)?;
+        run_node_into(computed, &buffers, None, None, &mut output)?;
         #[cfg(feature = "instrument")]
         record_bound_op_operand_access(computed, &buffers);
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
@@ -984,7 +995,7 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             }
             #[cfg(feature = "instrument")]
             let sequential_start = Instant::now();
-            run_node_into(resolved, buffers, None, &mut output)?;
+            run_node_into(resolved, buffers, None, None, &mut output)?;
             #[cfg(feature = "instrument")]
             counter!(
                 instrument::SERIAL_SEQUENTIAL_COMPUTE_NANOS,
@@ -1067,7 +1078,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 
     if chunks.len() < 2 {
         return match (chunks.first(), slices.into_iter().next()) {
-            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, slice),
+            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, None, slice),
             _ => Ok(()),
         };
     }
@@ -1251,7 +1262,7 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
         let chunk_start = Instant::now();
         #[cfg(feature = "instrument")]
         let cpu_start = instrument::thread_cpu_nanos();
-        let outcome = run_node_into(chunk, chunk_buffers, None, chunk_output);
+        let outcome = run_node_into(chunk, chunk_buffers, None, None, chunk_output);
         #[cfg(feature = "instrument")]
         {
             let chunk_nanos = chunk_start.elapsed().as_nanos() as u64;
@@ -1286,6 +1297,27 @@ fn nest_pool() -> Result<Arc<ProximaBackgroundPool>, TensorError> {
 }
 
 static NEST_POOL: OnceLock<Arc<ProximaBackgroundPool>> = OnceLock::new();
+
+/// The fixed-cohort spin barrier backing [`matmul_rows_threaded`]'s cohort
+/// dispatch (see [`RowRound`]): dedicated member threads that stay parked on
+/// an atomic round counter between calls instead of paying
+/// `ProximaBackgroundPool`'s per-call `Mutex`+`Condvar` wake
+/// (`prime/src/os/cohort.rs`'s own module doc: 2492.7 ns/round vs 19305.5
+/// ns/round). Built once, on first use, sized to [`matmul_worker_count`] —
+/// the same worker count [`quantized_matmul_workers`] already resolves for
+/// the pool path, so a cohort round and a pool dispatch always claim the
+/// same number of workers. `None` if the cohort fails to build (e.g. thread
+/// spawn exhaustion); callers fall back to [`nest_pool`] in that case.
+fn nest_cohort() -> Option<&'static ThreadCohort> {
+    static COHORT: OnceLock<Option<ThreadCohort>> = OnceLock::new();
+    COHORT
+        .get_or_init(|| {
+            let members = NonZeroUsize::new(matmul_worker_count())?;
+            let config = ThreadCohort::builder().members(members).build();
+            ThreadCohort::from_config(config).ok()
+        })
+        .as_ref()
+}
 
 fn live_count<B>(buffers: &[Option<B>]) -> usize {
     buffers.iter().filter(|entry| entry.is_some()).count()
@@ -1526,7 +1558,7 @@ fn initial_value(init: ReduceInit) -> Option<f32> {
 #[cfg(test)]
 fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
-    run_node_into(resolved, buffers, None, &mut output)?;
+    run_node_into(resolved, buffers, None, None, &mut output)?;
     Ok(output)
 }
 
@@ -1539,6 +1571,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
+    session: Option<&CohortSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match &resolved.kind {
@@ -1554,7 +1587,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             instrument::record_op_kind(instrument::OpKind::Reduce);
             match quantized_weights {
                 Some(quantized_weights) => {
-                    run_reduce_with_quantized_weights(resolved, buffers, quantized_weights, output)
+                    run_reduce_with_quantized_weights(resolved, buffers, quantized_weights, session, output)
                 }
                 None => run_reduce(resolved, buffers, output),
             }
@@ -1672,7 +1705,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             let mut output = vec![0.0f32; node_output_len(resolved)];
             {
                 let buffers = self.buffers.borrow();
-                run_node_into(resolved, *buffers, None, &mut output)?;
+                run_node_into(resolved, *buffers, None, None, &mut output)?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
             }
@@ -2049,6 +2082,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     buffers: &[Option<B>],
     weight_block: QuantizedBlock,
     weight_node: NodeId,
+    session: Option<&CohortSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     // proxima-debugger diagnostic: whole-function timer, once per matmul
@@ -2058,6 +2092,11 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // this function's position loop or outside it entirely.
     #[cfg(feature = "instrument")]
     let diag_reduce_quantized_started = Instant::now();
+    // `session` only reaches a call site when its codec's own `q{4,5,6}k-int8-dot`
+    // feature is on (the arms below); a build with every one of those off
+    // never reads it, so bind it unconditionally here rather than let a
+    // rare feature combination trip an unused-parameter warning.
+    let _ = session;
     let activation_node = resolved
         .operands()
         .iter()
@@ -2129,7 +2168,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             QuantizedBlock::Q4K(_) => {
                 #[cfg(feature = "q4k-int8-dot")]
                 {
-                    matmul_q4k_q8k_f32(weights, rows, activation_row)?
+                    matmul_q4k_q8k_f32_impl(weights, rows, activation_row, session)?
                 }
                 #[cfg(not(feature = "q4k-int8-dot"))]
                 {
@@ -2139,7 +2178,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             QuantizedBlock::Q5K(_) => {
                 #[cfg(feature = "q5k-int8-dot")]
                 {
-                    matmul_q5k_q8k_f32(weights, rows, activation_row)?
+                    matmul_q5k_q8k_f32_impl(weights, rows, activation_row, session)?
                 }
                 #[cfg(not(feature = "q5k-int8-dot"))]
                 {
@@ -2149,7 +2188,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             QuantizedBlock::Q6K(_) => {
                 #[cfg(feature = "q6k-int8-dot")]
                 {
-                    matmul_q6k_q8k_f32(weights, rows, activation_row)?
+                    matmul_q6k_q8k_f32_impl(weights, rows, activation_row, session)?
                 }
                 #[cfg(not(feature = "q6k-int8-dot"))]
                 {
@@ -2205,6 +2244,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    session: Option<&CohortSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
@@ -2212,7 +2252,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
             node: weight_node,
             reason: "quantized weight node has no bound byte buffer",
         })?;
-        return run_reduce_quantized(resolved, buffers, weight_block, weight_node, output);
+        return run_reduce_quantized(resolved, buffers, weight_block, weight_node, session, output);
     }
     run_reduce(resolved, buffers, output)
 }
@@ -4187,7 +4227,11 @@ where
     }
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
+        // No shared cohort session at this call site — `matmul_quantized_dispatch`
+        // backs the dequantize-then-fold codecs (`matmul_q4k_f32`/`q5k_f32`/
+        // `q6k_f32`), called standalone by non-matmul consumers and tests, not
+        // through `evaluate_quantized`'s per-forward session.
+        Some(workers) => matmul_rows_threaded(rows, workers, None, activation.len(), |row| {
             let start = row * row_bytes;
             dot_row(&weights[start..start + row_bytes], activation)
         }),
@@ -4530,9 +4574,53 @@ fn row_chunk_count(rows: usize, workers: usize, contraction_width: usize) -> usi
     oversubscribed.min(work_chunks).clamp(1, rows.max(1))
 }
 
+/// [`matmul_rows_threaded`]'s cohort dispatch shape: one round over the same
+/// `(row_start, pointer, len)` chunk ranges the pool path carves via
+/// `split_at_mut`, run through [`CohortSession::run`] instead of
+/// `nest_pool`'s spawn/channel dance. No `'static` erasure is needed here —
+/// unlike the pool path, [`CohortSession::run`] blocks the calling thread
+/// until every member reports done, so `dot_row` and `chunk_ranges` can stay
+/// ordinary borrows for the round's whole lifetime, the same argument
+/// `std::thread::scope` relies on.
+///
+/// `dot_row` can fail (`Row: Fn(usize) -> Result<f32, TensorError>`), but
+/// [`CohortRound::run_chunk`] returns nothing — the first error any member
+/// observes is published through `error` (a `OnceLock`, lock-free on the
+/// write side: `set` either wins or loses a race, never blocks) instead of
+/// threading a `Result` back through the barrier itself.
+struct RowRound<'round, Row> {
+    dot_row: &'round Row,
+    chunk_ranges: &'round [(usize, usize, usize)],
+    error: &'round OnceLock<TensorError>,
+}
+
+impl<Row> CohortRound for RowRound<'_, Row>
+where
+    Row: Fn(usize) -> Result<f32, TensorError> + Sync,
+{
+    fn chunks(&self) -> usize {
+        self.chunk_ranges.len()
+    }
+
+    fn run_chunk(&self, chunk: ChunkIndex) {
+        let (chunk_start, slice_address, slice_len) = self.chunk_ranges[chunk.0];
+        // SAFETY: unique to this chunk by construction (`split_at_mut` in
+        // `matmul_rows_threaded` before the round starts); the parent
+        // `output` outlives every reconstructed slice because
+        // `CohortSession::run` does not return until every member has
+        // reported done, i.e. until this closure has returned.
+        let chunk_output =
+            unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
+        if let Err(error) = run_row_chunk(self.dot_row, chunk_start, chunk_output) {
+            let _ = self.error.set(error);
+        }
+    }
+}
+
 fn matmul_rows_threaded<Row>(
     rows: usize,
     workers: usize,
+    session: Option<&CohortSession<'_>>,
     contraction_width: usize,
     dot_row: Row,
 ) -> Result<Vec<f32>, TensorError>
@@ -4562,6 +4650,48 @@ where
         row_start += take;
     }
     let chunk_ranges_len = chunk_ranges.len();
+
+    if let Some(session) = session {
+        #[cfg(feature = "instrument")]
+        counter!(instrument::MATMUL_SETUP_NANOS, diag_setup_started.elapsed().as_nanos() as u64);
+        #[cfg(feature = "instrument")]
+        counter!(instrument::PARALLEL_NODES, 1);
+        let error_slot: OnceLock<TensorError> = OnceLock::new();
+        let round = RowRound {
+            dot_row: &dot_row,
+            chunk_ranges: &chunk_ranges,
+            error: &error_slot,
+        };
+        // `CohortSession::run` fuses the leader's own claim loop and its
+        // wait for the dedicated members into one call (`cohort.rs`'s
+        // `run_round(control)` followed by the `done` spin) -- unlike the
+        // pool path, it does not expose a separate claim-only timer, so
+        // this whole call is charged to `MATMUL_OWN_CHUNK_NANOS` rather
+        // than split against `MATMUL_RECV_WAIT_NANOS` (which stays 0 on
+        // this path). Nonzero here is the direct witness that the leader
+        // is claiming chunks, not spinning idle -- see `cohort.rs`'s
+        // `CohortSession::run` doc for the +14.8 ms it cost while it was.
+        #[cfg(feature = "instrument")]
+        let diag_own_chunk_started = Instant::now();
+        let report = session.run(&round);
+        #[cfg(feature = "instrument")]
+        counter!(
+            instrument::MATMUL_OWN_CHUNK_NANOS,
+            diag_own_chunk_started.elapsed().as_nanos() as u64
+        );
+        if let Some(error) = error_slot.get() {
+            return Err(error.clone());
+        }
+        if report.abandoned > 0 {
+            return Err(TensorError::ThreadedChunkFailed {
+                chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
+                reason: alloc::string::String::from(
+                    "cohort member panicked while running this row chunk",
+                ),
+            });
+        }
+        return Ok(output);
+    }
 
     let pool = nest_pool()?;
     // SAFETY-relevant: see this function's doc comment for why casting
@@ -5348,6 +5478,22 @@ unsafe fn dot_q4k_q8k_block_avx2(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q4k-int8-dot")]
 pub fn matmul_q4k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_q4k_q8k_f32_impl(weights, rows, activation, None)
+}
+
+/// [`matmul_q4k_q8k_f32`]'s body, plus the [`CohortSession`] a caller already
+/// inside a forward pass's session can supply so `matmul_rows_threaded`
+/// dispatches through the cohort instead of `nest_pool`. `matmul_q4k_q8k_f32`
+/// itself stays the stable 3-argument public entry point (`None`, unchanged
+/// call sites in every bench/test); [`run_reduce_quantized`] is the only
+/// caller that has a session to thread through.
+#[cfg(feature = "q4k-int8-dot")]
+fn matmul_q4k_q8k_f32_impl(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    session: Option<&CohortSession<'_>>,
+) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "matmul_q4k_q8k_f32 called with zero rows",
@@ -5382,7 +5528,7 @@ pub fn matmul_q4k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, session, activation.len(), |row| {
             let start = row * row_bytes;
             dot_q4k_q8k(&weights[start..start + row_bytes], &activation_q8k)
         }),
@@ -5696,6 +5842,19 @@ unsafe fn dot_q5k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q5k-int8-dot")]
 pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_q5k_q8k_f32_impl(weights, rows, activation, None)
+}
+
+/// [`matmul_q5k_q8k_f32`]'s body, plus the [`CohortSession`] a caller already
+/// inside a forward pass's session can supply — see [`matmul_q4k_q8k_f32_impl`]'s
+/// doc for why the public entry point stays 3-argument.
+#[cfg(feature = "q5k-int8-dot")]
+fn matmul_q5k_q8k_f32_impl(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    session: Option<&CohortSession<'_>>,
+) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "matmul_q5k_q8k_f32 called with zero rows",
@@ -5717,7 +5876,7 @@ pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, session, activation.len(), |row| {
             let start = row * row_bytes;
             dot_q5k_q8k(&weights[start..start + row_bytes], &activation_q8k)
         }),
@@ -6061,6 +6220,19 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q6k-int8-dot")]
 pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_q6k_q8k_f32_impl(weights, rows, activation, None)
+}
+
+/// [`matmul_q6k_q8k_f32`]'s body, plus the [`CohortSession`] a caller already
+/// inside a forward pass's session can supply — see [`matmul_q4k_q8k_f32_impl`]'s
+/// doc for why the public entry point stays 3-argument.
+#[cfg(feature = "q6k-int8-dot")]
+fn matmul_q6k_q8k_f32_impl(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    session: Option<&CohortSession<'_>>,
+) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "matmul_q6k_q8k_f32 called with zero rows",
@@ -6082,7 +6254,7 @@ pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Re
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, workers, activation.len(), |row| {
+        Some(workers) => matmul_rows_threaded(rows, workers, session, activation.len(), |row| {
             let start = row * row_bytes;
             dot_q6k_q8k(&weights[start..start + row_bytes], &activation_q8k)
         }),
@@ -10287,7 +10459,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
@@ -10317,7 +10489,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
