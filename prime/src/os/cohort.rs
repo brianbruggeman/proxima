@@ -75,6 +75,22 @@ use crossbeam_utils::sync::{Parker, Unparker};
 
 use proxima_core::ProximaError;
 
+// proxima-debugger DIAGNOSTIC (temporary): the park/unpark path is the
+// suspected serial fraction of a round -- `spin_polls` defaults to 2000,
+// and if the inter-round gap exceeds that budget every member parks and the
+// leader must issue one `unpark()` syscall per member, serially, at the top
+// of the next round. These count and time exactly that, lock-free.
+pub static DIAG_PARKS: AtomicU64 = AtomicU64::new(0);
+pub static DIAG_SPIN_HITS: AtomicU64 = AtomicU64::new(0);
+pub static DIAG_UNPARK_ROUNDS: AtomicU64 = AtomicU64::new(0);
+pub static DIAG_UNPARK_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static DIAG_PREAMBLE_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static DIAG_DRAIN_NANOS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_now() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// index of one unit of work within a round. a newtype so `run_chunk`
 /// cannot be called with a raw `usize` meant for something else — the
 /// signature itself teaches the contract.
@@ -349,6 +365,7 @@ impl CohortSession<'_> {
         let control = &self.cohort.control;
         let members = self.cohort.members();
         let chunk_total = round.chunks();
+        let diag_preamble_started = diag_now();
 
         control.chunks.store(chunk_total, Ordering::Relaxed);
         control.cursor.store(0, Ordering::Relaxed);
@@ -388,10 +405,16 @@ impl CohortSession<'_> {
         // RCpc, so `load(Acquire)` lowers to `ldapr`, which may execute before
         // a preceding release store; `ldar` (RCsc) may not.
         control.round.fetch_add(1, Ordering::SeqCst);
+        DIAG_PREAMBLE_NANOS
+            .fetch_add(diag_preamble_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if control.parked_count.load(Ordering::SeqCst) > 0 {
+            let diag_unpark_started = diag_now();
             for unparker in &control.unparkers {
                 unparker.unpark();
             }
+            DIAG_UNPARK_ROUNDS.fetch_add(1, Ordering::Relaxed);
+            DIAG_UNPARK_NANOS
+                .fetch_add(diag_unpark_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
 
         // the leader is the final participant, not a spectator: it claims
@@ -408,9 +431,12 @@ impl CohortSession<'_> {
         // that one extra runnable thread.
         run_round(control);
 
+        let diag_drain_started = diag_now();
         while control.done.load(Ordering::Acquire) < members as u64 {
             core::hint::spin_loop();
         }
+        DIAG_DRAIN_NANOS
+            .fetch_add(diag_drain_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         // SAFETY: every member has reported done (just observed above via
         // Acquire), so no member can still be dereferencing `round_ptr`.
@@ -497,6 +523,7 @@ fn wait_for_round(
             core::hint::spin_loop();
             let current = control.round.load(Ordering::Acquire);
             if current != local_round {
+                DIAG_SPIN_HITS.fetch_add(1, Ordering::Relaxed);
                 return Some(current);
             }
         }
@@ -520,6 +547,7 @@ fn wait_for_round(
             }
             continue;
         }
+        DIAG_PARKS.fetch_add(1, Ordering::Relaxed);
         parker.park();
         control.parked_count.fetch_sub(1, Ordering::AcqRel);
     }
