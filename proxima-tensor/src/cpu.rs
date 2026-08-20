@@ -4300,21 +4300,62 @@ pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
 /// a bound node), so it can chunk the one axis that is actually wide at
 /// batch-1: weight rows.
 ///
+/// Queries Apple's performance-core count (`hw.perflevel0.logicalcpu`) via
+/// `sysctlbyname`, so matmul dispatch spawns workers only across P-cores and
+/// skips the E-cores that add per-call dispatch cost without contributing
+/// matmul throughput (measured: 8 P-cores beats 10 logical cores on every
+/// shape, `docs/discipline.md`). On a homogeneous machine every core reports
+/// as perflevel0, so this returns the same count `available_parallelism`
+/// would — the fallback in [`matmul_worker_count`] is for when the sysctl is
+/// absent or answers something nonsensical, not a second code path for
+/// homogeneous boxes.
+#[cfg(target_vendor = "apple")]
+fn performance_core_count() -> Option<usize> {
+    let name = c"hw.perflevel0.logicalcpu";
+    let mut value: i32 = 0;
+    let mut size = core::mem::size_of::<i32>();
+    // FFI: sysctlbyname has no safe wrapper in libc; the output pointer and
+    // size are stack-local and sized to match the i32 the sysctl documents.
+    let status = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut size,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 || value <= 0 {
+        return None;
+    }
+    Some(value as usize)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn performance_core_count() -> Option<usize> {
+    None
+}
+
 /// Worker count for the row split, resolved once and cached for the process
 /// lifetime. `std::thread::available_parallelism` is a `sysctl` on macOS —
 /// measured at 3.53 us/call, 4.768 ms across the 1350 calls one real forward
 /// pass makes through [`quantized_matmul_workers`] — so calling it per
 /// matmul is pure waste on a value that never changes at runtime.
 ///
+/// Prefers [`performance_core_count`] over `available_parallelism` on Apple
+/// targets: `available_parallelism` returns P+E, but only the P cores run
+/// this workload at full speed (measured, see [`performance_core_count`]'s
+/// doc), so counting E-cores in the worker pool adds coordination overhead
+/// without adding throughput. Falls back to `available_parallelism()` when
+/// the sysctl is unavailable or answers something nonsensical (`<= 0` or
+/// larger than `available_parallelism()` itself).
+///
 /// `PROXIMA_MATMUL_WORKERS`, if set to a valid non-zero integer, overrides
-/// the OS-reported count; this exists to sweep worker counts on
-/// heterogeneous SoCs (e.g. Apple Silicon's P+E core split, where
-/// `available_parallelism` returns P+E but only the P cores run this
-/// workload at full speed) without a rebuild. The env var is read once via
-/// `OnceLock`, never per call — a per-call `std::env::var` allocates a
-/// `String` on every one of those 1350 calls and would contaminate the very
-/// cost this cache exists to remove. Default (unset) behavior is unchanged:
-/// `available_parallelism()`.
+/// both of the above; this exists to sweep worker counts without a rebuild.
+/// The env var is read once via `OnceLock`, never per call — a per-call
+/// `std::env::var` allocates a `String` on every one of those 1350 calls and
+/// would contaminate the very cost this cache exists to remove. Default
+/// (unset) behavior is unchanged otherwise.
 fn matmul_worker_count() -> usize {
     static WORKER_COUNT: OnceLock<usize> = OnceLock::new();
     *WORKER_COUNT.get_or_init(|| {
@@ -4322,7 +4363,10 @@ fn matmul_worker_count() -> usize {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&count| count > 0)
-            .unwrap_or_else(|| thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1))
+            .unwrap_or_else(|| {
+                let available = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+                performance_core_count().filter(|&count| count >= 1 && count <= available).unwrap_or(available)
+            })
     })
 }
 
@@ -8470,6 +8514,23 @@ mod tests {
         // the measured numbers, matching `q4_k.rs`'s own round-trip tests.
         assert!(max_diff < 1e-2, "max_diff={max_diff} exceeds parity tolerance");
         assert!(rms_diff < 1e-2, "rms_diff={rms_diff} exceeds parity tolerance");
+    }
+
+    /// [`matmul_worker_count`]'s only machine-independent invariant: the
+    /// selected count is never zero (nothing would run) and never more than
+    /// `available_parallelism()` (oversubscription past the OS-reported
+    /// core count). The exact value — P-core count on Apple, full logical
+    /// count elsewhere — is machine-dependent and deliberately not asserted
+    /// here.
+    #[test]
+    fn matmul_worker_count_is_between_one_and_available_parallelism() {
+        let available = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+        let workers = matmul_worker_count();
+        assert!(workers >= 1, "worker count must be at least 1, got {workers}");
+        assert!(
+            workers <= available,
+            "worker count {workers} exceeds available_parallelism {available}"
+        );
     }
 
     /// [`matmul_rows_threaded`]'s pool dispatch (through [`matmul_q4k_f32`])

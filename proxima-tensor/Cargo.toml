@@ -16,7 +16,7 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 # executed in any default build. `std` is the only tier that can hold
 # `prime` (threads, an OS-backed pool), so it is the natural place for the
 # implication to live — the `alloc`-only floor stays free of `dep:prime`.
-std = ["alloc", "thiserror/std", "tensor-bgpool"]
+std = ["alloc", "thiserror/std", "tensor-bgpool", "dep:libc"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
@@ -167,3 +167,12 @@ required-features = ["config"]
 [[example]]
 name = "operand_access_table"
 required-features = ["instrument", "config"]
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# `matmul_worker_count`'s P-core-only sizing (`sysctlbyname("hw.perflevel0.logicalcpu")`)
+# needs libc unconditionally at the `std` tier on Apple only. Gated by
+# `dep:libc` (below, via the `std` feature) rather than the `instrument`
+# feature above it shares a name with — a target-specific table entry only
+# ever applies on the matching platform, so the `alloc`-only floor and every
+# non-Apple target never see it.
+libc = { workspace = true, optional = true }
