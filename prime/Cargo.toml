@@ -90,6 +90,12 @@ runtime-prime-reactor     = ["runtime-prime", "std", "dep:libc", "dep:core_affin
 runtime-prime-reactor-harvest-io = ["runtime-prime-reactor"]
 runtime-prime-reactor-trace = ["runtime-prime-reactor"]
 runtime-prime-executor    = ["runtime-prime-timer"]
+# fixed-cohort spin-barrier (os/cohort.rs): dedicated member threads woken
+# once per round via an atomic counter, instead of once per unit of work
+# through the shared bgpool Injector. std-only (thread::Builder, Parker);
+# default-off, standalone stage-1 primitive, not wired into any other
+# feature or the tensor path yet.
+runtime-prime-cohort      = ["runtime-prime", "std"]
 runtime-prime-bgpool      = ["runtime-prime", "std", "dep:core_affinity"]
 runtime-prime-bgpool-rayon = ["runtime-prime-bgpool", "dep:rayon"]
 runtime-prime-bgpool-par   = ["runtime-prime-bgpool"]
@@ -207,6 +213,10 @@ required-features = ["runtime-prime-inbox-alloc", "runtime-prime-inbox-dynamic"]
 [[example]]
 name = "inbox_spike"
 required-features = ["runtime-prime-inbox-dynamic"]
+
+[[example]]
+name = "cohort_round_cost"
+required-features = ["runtime-prime-cohort", "runtime-prime-bgpool"]
 
 [lints]
 workspace = true
