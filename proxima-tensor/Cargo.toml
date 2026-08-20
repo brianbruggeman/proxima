@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std", "config", "q4k-int8-dot"]
+default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 # `tensor-bgpool` is implied, not opt-in: the pool path was previously
 # reachable only by naming a feature nothing else turned on, so it never
 # executed in any default build. `std` is the only tier that can hold

@@ -102,7 +102,7 @@ pub const OVERSUBSCRIBE: usize = 1;
 /// atomic/`SyncSender` overhead from any real imbalance) improved
 /// 1 -> 2304us -> 4 -> 1672us -> 8/16/32 -> 1624-1688us, i.e. flat past 4,
 /// so the gain past 4 in the imbalanced arm is real oversubscription payoff
-/// (matches [`run_chunks_threaded`]'s own `claim_and_run` mechanism) but
+/// (matches `run_chunks_threaded`'s own `claim_and_run` mechanism) but
 /// small relative to `1`'s idle-recv cost, while `chunk_count`'s
 /// `clamp(1, rows)` bounds worst case for small-`rows` call sites regardless
 /// of how high this constant goes. `4` is chosen over 8/16/32 as the point
