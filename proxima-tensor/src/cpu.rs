@@ -6125,7 +6125,19 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
         let qh_base = weight_block[Q6K_QH_OFFSET..].as_ptr();
         let q8_base = q8k_block[Q8K_QS_OFFSET..].as_ptr().cast::<i8>();
 
-        let mut sumi: i32 = 0;
+        // FOUR accumulators, not one. `Q6_K` is 16 sub-blocks of 16 (vs
+        // `Q4_K`/`Q5_K`'s 8 of 32), so a single `sumi` chains 16 dependent
+        // `madd`s per super-block against `Q4_K`'s 3 -- measured 0.0429 ns/mac
+        // here vs 0.0245 there, a 1.75x gap on only 1.33x the instructions
+        // (190 vs 143), which is the signature of dependency depth, not
+        // volume. Integer addition is associative, so splitting the chain is
+        // bit-identical rather than merely close. The same defect cost 3.2x in
+        // `dot_q4k_f32` in an earlier round, where the fix measured 5.68x --
+        // width and depth turned out not to be independent factors.
+        let mut sumi0: i32 = 0;
+        let mut sumi1: i32 = 0;
+        let mut sumi2: i32 = 0;
+        let mut sumi3: i32 = 0;
         for half in 0..2usize {
             let qhbits0 = vld1q_u8(qh_base.add(half * 32));
             let qhbits1 = vld1q_u8(qh_base.add(half * 32 + 16));
@@ -6163,10 +6175,10 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
             let q8_lo1 = vld1q_s8(q8_half_base.add(16));
             let q8_lo2 = vld1q_s8(q8_half_base.add(32));
             let q8_lo3 = vld1q_s8(q8_half_base.add(48));
-            sumi += vaddvq_s32(sdot_s32(mzero, low0, q8_lo0)) * i32::from(scale_half[0]);
-            sumi += vaddvq_s32(sdot_s32(mzero, low1, q8_lo1)) * i32::from(scale_half[1]);
-            sumi += vaddvq_s32(sdot_s32(mzero, low2, q8_lo2)) * i32::from(scale_half[2]);
-            sumi += vaddvq_s32(sdot_s32(mzero, low3, q8_lo3)) * i32::from(scale_half[3]);
+            sumi0 += vaddvq_s32(sdot_s32(mzero, low0, q8_lo0)) * i32::from(scale_half[0]);
+            sumi1 += vaddvq_s32(sdot_s32(mzero, low1, q8_lo1)) * i32::from(scale_half[1]);
+            sumi2 += vaddvq_s32(sdot_s32(mzero, low2, q8_lo2)) * i32::from(scale_half[2]);
+            sumi3 += vaddvq_s32(sdot_s32(mzero, low3, q8_lo3)) * i32::from(scale_half[3]);
 
             let high0 = vsubq_s8(
                 vreinterpretq_s8_u8(vorrq_u8(
@@ -6201,13 +6213,13 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
             let q8_hi1 = vld1q_s8(q8_half_base.add(80));
             let q8_hi2 = vld1q_s8(q8_half_base.add(96));
             let q8_hi3 = vld1q_s8(q8_half_base.add(112));
-            sumi += vaddvq_s32(sdot_s32(mzero, high0, q8_hi0)) * i32::from(scale_half[4]);
-            sumi += vaddvq_s32(sdot_s32(mzero, high1, q8_hi1)) * i32::from(scale_half[5]);
-            sumi += vaddvq_s32(sdot_s32(mzero, high2, q8_hi2)) * i32::from(scale_half[6]);
-            sumi += vaddvq_s32(sdot_s32(mzero, high3, q8_hi3)) * i32::from(scale_half[7]);
+            sumi0 += vaddvq_s32(sdot_s32(mzero, high0, q8_hi0)) * i32::from(scale_half[4]);
+            sumi1 += vaddvq_s32(sdot_s32(mzero, high1, q8_hi1)) * i32::from(scale_half[5]);
+            sumi2 += vaddvq_s32(sdot_s32(mzero, high2, q8_hi2)) * i32::from(scale_half[6]);
+            sumi3 += vaddvq_s32(sdot_s32(mzero, high3, q8_hi3)) * i32::from(scale_half[7]);
         }
 
-        activation_scale * d_weight * sumi as f32
+        activation_scale * d_weight * (sumi0 + sumi1 + sumi2 + sumi3) as f32
     }
 }
 
