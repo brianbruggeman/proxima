@@ -465,6 +465,13 @@ pub fn evaluate_quantized(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
+    // DIAGNOSTIC (proxima-debugger, remove before landing): brackets the
+    // portion of evaluate_quantized that is neither the per-node-kind loop
+    // below nor run_node_into itself -- shape::infer, bind::bind,
+    // node_retirement, and the buffers table setup all run here, none of
+    // it visible in the diag_kind_nanos table.
+    #[cfg(feature = "instrument")]
+    let diag_setup_started = Instant::now();
     let shapes = shape::infer(program, symbols)?;
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
@@ -540,8 +547,25 @@ pub fn evaluate_quantized(
     // actually ran it.
     #[cfg(feature = "instrument")]
     let mut diag_kind_nanos: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
+    // DIAGNOSTIC (proxima-debugger, remove before landing): everything in
+    // this loop body OTHER than run_node_into -- the output Vec's zero-fill
+    // allocation (ahead of diag_node_started so it is never in
+    // diag_kind_nanos) and the live-buffer/live-bytes bookkeeping after the
+    // call (diag_live_bytes rescans the whole buffers table every node).
+    // Both run unconditionally today, gated build or not; this counter is
+    // instrument-only so it costs nothing outside this run.
+    #[cfg(feature = "instrument")]
+    let mut diag_loop_overhead_nanos: u64 = 0;
+    #[cfg(feature = "instrument")]
+    let diag_setup_nanos = diag_setup_started.elapsed().as_nanos() as u64;
     for (position, computed) in resolved.iter().enumerate() {
+        #[cfg(feature = "instrument")]
+        let diag_alloc_started = Instant::now();
         let mut output = vec![0.0f32; node_output_len(computed)];
+        #[cfg(feature = "instrument")]
+        {
+            diag_loop_overhead_nanos += diag_alloc_started.elapsed().as_nanos() as u64;
+        }
         #[cfg(feature = "instrument")]
         let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
         #[cfg(feature = "instrument")]
@@ -553,6 +577,8 @@ pub fn evaluate_quantized(
             entry.0 += 1;
             entry.1 += diag_node_started.elapsed().as_nanos() as u64;
         }
+        #[cfg(feature = "instrument")]
+        let diag_bookkeeping_started = Instant::now();
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         peak_live_buffers = peak_live_buffers.max(live_count(&buffers));
         let current_bytes = diag_live_bytes(&buffers);
@@ -562,6 +588,10 @@ pub fn evaluate_quantized(
         }
         for retired in &retires[position] {
             buffers[retired.0 as usize] = None;
+        }
+        #[cfg(feature = "instrument")]
+        {
+            diag_loop_overhead_nanos += diag_bookkeeping_started.elapsed().as_nanos() as u64;
         }
     }
     std::eprintln!(
@@ -583,9 +613,22 @@ pub fn evaluate_quantized(
                 100.0 * nanos as f64 / total_nanos as f64,
             );
         }
+        std::eprintln!(
+            "DIAG evaluate_quantized setup_ms={:.3} loop_overhead_ms={:.3}",
+            diag_setup_nanos as f64 / 1_000_000.0,
+            diag_loop_overhead_nanos as f64 / 1_000_000.0,
+        );
     }
+    #[cfg(feature = "instrument")]
+    let diag_finish_started = Instant::now();
 
-    Ok(finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers))
+    let result = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
+    #[cfg(feature = "instrument")]
+    std::eprintln!(
+        "DIAG evaluate_quantized finish_ms={:.3}",
+        diag_finish_started.elapsed().as_nanos() as f64 / 1_000_000.0,
+    );
+    Ok(result)
 }
 
 /// [`evaluate_quantized`]'s counterpart for binding by name instead of
@@ -602,6 +645,13 @@ pub fn evaluate_quantized_named<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
+    // DIAGNOSTIC (proxima-debugger, remove before landing): this name
+    // resolution runs before evaluate_quantized's own diag_setup_started
+    // timer starts, so it is invisible to every counter that function
+    // reports -- a linear `find` over `named` per weight tensor, O(block
+    // count * named count) string compares.
+    #[cfg(feature = "instrument")]
+    let diag_resolve_started = Instant::now();
     let block_nodes = block_node_ids(program);
     let mut blocks: Vec<QuantizedBlock<'block>> = Vec::with_capacity(block_nodes.len());
     for node in &block_nodes {
@@ -615,6 +665,12 @@ pub fn evaluate_quantized_named<'block>(
             .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
         blocks.push(data);
     }
+    #[cfg(feature = "instrument")]
+    std::eprintln!(
+        "DIAG evaluate_quantized_named resolve_ms={:.3} block_count={}",
+        diag_resolve_started.elapsed().as_nanos() as f64 / 1_000_000.0,
+        block_nodes.len(),
+    );
     evaluate_quantized(program, symbols, &blocks, outputs)
 }
 
@@ -5122,10 +5178,16 @@ unsafe fn dot_q4k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// reduction, matching `sum(get_scale_min_k4(i, scales).1 as i32 *
 /// bsum_pair_sum(i) as i32)` for `i in 0..Q4K_SUB_BLOCKS`.
 ///
+/// `Q5_K` shares this exact 12-byte scale/min layout and the same
+/// [`Q4K_SUB_BLOCKS`]/`bsums` shape (`arch/arm/quants.c:2611-2622` mirrors
+/// `arch/arm/quants.c:2367-2381` byte for byte), so
+/// [`dot_q5k_q8k_block_neon_dotprod`] calls this same function directly
+/// rather than duplicating it.
+///
 /// # Safety
 /// Caller guarantees `FEAT_DotProd`; `bsums.len() == Q8K_BSUMS_COUNT * 2`
 /// (16 `i16`s) so the two 8-lane `vld1q_s16` loads stay in bounds.
-#[cfg(all(q4k_dotprod, feature = "q4k-int8-dot"))]
+#[cfg(all(q4k_dotprod, any(feature = "q4k-int8-dot", feature = "q5k-int8-dot")))]
 unsafe fn mins_correction_neon(scales: &[u8; Q4K_SCALE_BYTES], bsums: &[u8]) -> ([u8; Q4K_SUB_BLOCKS], i32) {
     // Same masks as `get_scale_min_k4`'s scalar bit-trick, applied once to
     // the whole 12-byte field instead of once per sub-block per call.
@@ -5543,7 +5605,12 @@ fn dot_q5k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 /// `vandq_u8`/`vshlq_n_u8` with `mone`/`mtwo` masks, ORs each into its
 /// nibble half, then two [`sdot_s32`] pairs per chunk (low nibble pair,
 /// high nibble pair) instead of [`dot_q5k_q8k_block_scalar`]'s
-/// 32-iteration scalar loop per sub-block.
+/// 32-iteration scalar loop per sub-block. Scale/min unpack routes through
+/// [`mins_correction_neon`] -- the same once-per-super-block NEON bit-trick
+/// [`dot_q4k_q8k_block_neon_dotprod`] uses, since `Q5_K`'s 12-byte
+/// scale/min field is byte-identical in layout -- in place of the 16 scalar
+/// `get_scale_min_k4` calls (8 for the mins correction, 8 more inside this
+/// loop for `scale_lo`/`scale_hi`) that path used to make per block.
 ///
 /// # Safety
 /// Caller guarantees `FEAT_DotProd`; `weight_block.len() ==
@@ -5562,13 +5629,10 @@ unsafe fn dot_q5k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
     let activation_scale = f32::from_le_bytes(d_bytes);
     let bsums = &q8k_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
 
-    let mut mins_correction = 0i32;
-    for sub_block in 0..Q4K_SUB_BLOCKS {
-        let (_, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
-        let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
-        let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
-        mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
-    }
+    // SAFETY: caller-guaranteed FEAT_DotProd (this fn's own doc);
+    // `mins_correction_neon`'s own preconditions (`scales`/`bsums` lengths)
+    // are met by the fixed-size array and the slice sized above.
+    let (scales_unpacked, mins_correction) = unsafe { mins_correction_neon(&scales, bsums) };
 
     // SAFETY: caller-guaranteed FEAT_DotProd; `q5_base` walks exactly
     // `Q4K_BLOCK_ELEMENTS / 2` bytes, `qh_base` is read once (32 bytes,
@@ -5609,13 +5673,11 @@ unsafe fn dot_q5k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
             let q8b2 = vld1q_s8(q8_base.add(j * 64 + 32));
             let q8b3 = vld1q_s8(q8_base.add(j * 64 + 48));
 
-            let scale_lo = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j, &scales).0;
             let partial_lo = sdot_s32(sdot_s32(mzero, q5bytes0, q8b0), q5bytes1, q8b1);
-            sumi += vaddvq_s32(partial_lo) * i32::from(scale_lo);
+            sumi += vaddvq_s32(partial_lo) * i32::from(scales_unpacked[2 * j]);
 
-            let scale_hi = proxima_gguf::quant::q4_k::get_scale_min_k4(2 * j + 1, &scales).0;
             let partial_hi = sdot_s32(sdot_s32(mzero, q5bytes2, q8b2), q5bytes3, q8b3);
-            sumi += vaddvq_s32(partial_hi) * i32::from(scale_hi);
+            sumi += vaddvq_s32(partial_hi) * i32::from(scales_unpacked[2 * j + 1]);
         }
 
         let d = activation_scale * d_weight;
@@ -11601,6 +11663,66 @@ mod tests {
         assert_eq!(
             actual_mins_correction, expected_mins_correction,
             "NEON mins_correction diverged from the scalar get_scale_min_k4 route -- nonzero delta, faster wrong kernel"
+        );
+    }
+
+    /// [`dot_q5k_q8k_block_neon_dotprod`]'s new [`mins_correction_neon`]
+    /// route (this landing) against the 16-scalar-call
+    /// `get_scale_min_k4` route it replaced (8 for the mins correction,
+    /// 8 more for `scale_lo`/`scale_hi` inside the SIMD dot loop) -- bit
+    /// exact, not approximate, same bar as
+    /// [`mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gguf_bytes`].
+    /// Uses the first `Q5_K` super-block of `blk.0.attn_v.weight` read
+    /// straight out of the real openchat-3.5-1210 GGUF file (principle 9:
+    /// real-world data), against a real quantized activation super-block.
+    #[cfg(all(q4k_dotprod, feature = "q5k-int8-dot"))]
+    #[test]
+    fn q5k_mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gguf_bytes() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, _in_dim, _out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "blk.0.attn_v.weight",
+            proxima_gguf::types::GgmlType::Q5_K,
+        ) else {
+            eprintln!("blk.0.attn_v.weight is not Q5_K in this file; test skipped, not faked");
+            return;
+        };
+
+        let mut scales = [0u8; Q4K_SCALE_BYTES];
+        scales.copy_from_slice(&weight_bytes[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+
+        let activation: Vec<f32> = random_vec(37, Q4K_BLOCK_ELEMENTS).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let mut activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation super-block");
+        let bsums = &activation_q8k[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
+
+        let mut expected_mins_correction = 0i32;
+        for sub_block in 0..Q4K_SUB_BLOCKS {
+            let (expected_scale, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+            assert_eq!(
+                // SAFETY: `q4k_dotprod` cfg guarantees `FEAT_DotProd`; `bsums` is
+                // exactly `Q8K_BSUMS_COUNT * 2` bytes from the fixed-size buffer above.
+                unsafe { mins_correction_neon(&scales, bsums) }.0[sub_block],
+                expected_scale,
+                "scales_unpacked[{sub_block}] diverged from the scalar get_scale_min_k4 route on Q5_K bytes"
+            );
+            let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
+            let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
+            expected_mins_correction += i32::from(bsum_lo + bsum_hi) * i32::from(min_code);
+        }
+
+        // SAFETY: `q4k_dotprod` cfg guarantees `FEAT_DotProd`; `bsums` is
+        // exactly `Q8K_BSUMS_COUNT * 2` bytes from the fixed-size buffer above.
+        let (_, actual_mins_correction) = unsafe { mins_correction_neon(&scales, bsums) };
+        assert_eq!(
+            actual_mins_correction, expected_mins_correction,
+            "Q5_K NEON mins_correction diverged from the scalar get_scale_min_k4 route -- nonzero delta, faster wrong kernel"
         );
     }
 
