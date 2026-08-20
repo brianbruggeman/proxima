@@ -4207,8 +4207,6 @@ name = "proxima-model-interop"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "bon",
- "conflaguration",
  "half",
  "prime",
  "proxima-core",
@@ -4217,10 +4215,7 @@ dependencies = [
  "proxima-tensor",
  "proxima-tokenizer",
  "rustix",
- "serde",
- "tempfile",
  "thiserror 2.0.19",
- "toml 0.8.23",
 ]
 
 [[package]]
