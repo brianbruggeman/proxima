@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use crate::byte_level::byte_to_char;
 use crate::error::TokenizerError;
-use crate::vocab::Vocab;
+use crate::vocab::{TokenType, Vocab};
 use crate::{decode, encode, encode_with_bos_eos};
 
 /// A vocab covering all 256 base byte tokens, three chained merges
@@ -100,6 +100,85 @@ fn decoding_an_unknown_token_id_is_a_typed_error_not_a_panic() {
     let vocab = synthetic_vocab();
     let error = decode(&[999_999], &vocab).expect_err("id far outside the vocab");
     assert!(matches!(error, TokenizerError::TokenIdOutOfRange { token_id: 999_999, .. }));
+}
+
+/// A vocab covering all 256 base byte tokens plus four `Control`-typed
+/// added-token markers (no merges, so plain text always falls back to
+/// one id per byte -- isolating the added-token pre-pass under test from
+/// BPE merge behavior): `"<start>"`, `"<end>"`, `"<tag>"`, and
+/// `"<tag>extra"` (the last two sharing `"<tag>"` as a literal byte
+/// prefix, for the longest-match cases).
+fn vocab_with_added_tokens() -> (Vocab, u32, u32, u32, u32) {
+    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+    let markers = ["<start>", "<end>", "<tag>", "<tag>extra"];
+    for marker in markers {
+        tokens.push(marker.to_string());
+    }
+    let vocab = Vocab::new(tokens, &[], None, None, None).expect("vocab builds");
+
+    let marker_ids: Vec<u32> = markers.iter().map(|marker| vocab.token_id(marker).expect("marker token present")).collect();
+    let mut token_types = vec![TokenType::Normal; vocab.len()];
+    for &id in &marker_ids {
+        token_types[id as usize] = TokenType::Control;
+    }
+    let vocab = vocab.with_token_types(token_types).expect("token types apply");
+
+    (vocab, marker_ids[0], marker_ids[1], marker_ids[2], marker_ids[3])
+}
+
+#[test]
+fn added_token_marker_at_string_start_is_emitted_as_its_own_id() {
+    let (vocab, start_id, ..) = vocab_with_added_tokens();
+    let ids = encode("<start>hi", &vocab).expect("encodes");
+    assert_eq!(ids.first().copied(), Some(start_id));
+    let expected_tail = encode("hi", &vocab).expect("plain encode of the trailing text");
+    assert_eq!(&ids[1..], expected_tail.as_slice());
+}
+
+#[test]
+fn added_token_marker_at_string_end_is_emitted_as_its_own_id() {
+    let (vocab, _, end_id, ..) = vocab_with_added_tokens();
+    let ids = encode("hi<end>", &vocab).expect("encodes");
+    assert_eq!(ids.last().copied(), Some(end_id));
+    let expected_head = encode("hi", &vocab).expect("plain encode of the leading text");
+    assert_eq!(&ids[..ids.len() - 1], expected_head.as_slice());
+}
+
+#[test]
+fn back_to_back_added_token_markers_produce_no_text_between_them() {
+    let (vocab, start_id, end_id, ..) = vocab_with_added_tokens();
+    let ids = encode("<start><end>", &vocab).expect("encodes");
+    assert_eq!(ids, [start_id, end_id]);
+}
+
+#[test]
+fn longest_added_token_match_wins_over_its_own_prefix_marker() {
+    let (vocab, .., tag_id, tag_extra_id) = vocab_with_added_tokens();
+
+    // "<tag>extra" is itself a registered marker: the longer one must
+    // win, not the shorter "<tag>" plus ordinary text "extra".
+    let ids = encode("<tag>extra", &vocab).expect("encodes");
+    assert_eq!(ids, [tag_extra_id]);
+
+    // when the longer marker's bytes are not actually present, the
+    // shorter "<tag>" marker still matches on its own.
+    let ids = encode("<tag>zzz", &vocab).expect("encodes");
+    assert_eq!(ids.first().copied(), Some(tag_id));
+    assert_ne!(ids.first().copied(), Some(tag_extra_id));
+    let expected_tail = encode("zzz", &vocab).expect("plain encode of the trailing text");
+    assert_eq!(&ids[1..], expected_tail.as_slice());
+}
+
+#[test]
+fn angle_brackets_and_pipes_outside_a_registered_marker_are_ordinary_text() {
+    let (vocab, start_id, end_id, tag_id, tag_extra_id) = vocab_with_added_tokens();
+    let text = "a < b | c </end unmatched>";
+    let ids = encode(text, &vocab).expect("encodes");
+    for marker_id in [start_id, end_id, tag_id, tag_extra_id] {
+        assert!(!ids.contains(&marker_id), "no registered marker id should appear for {text:?} (ids: {ids:?})");
+    }
+    let decoded = decode(&ids, &vocab).expect("decodes");
+    assert_eq!(decoded, text, "plain text with no marker present must still round-trip exactly");
 }
 
 #[test]

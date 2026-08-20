@@ -11,6 +11,18 @@ use crate::pretokenize::pretokenize;
 use crate::unigram;
 use crate::vocab::Vocab;
 
+/// Scans `text` for literal occurrences of an "added token" marker
+/// (`Vocab::with_token_types`'s `Control`/`UserDefined` entries -- e.g.
+/// `<|end_of_turn|>` in a chat template) via
+/// [`Vocab::longest_added_token_match`], emitting each marker's id
+/// directly and running [`encode_ordinary`] only on the plain-text spans
+/// between markers. Longest-match wins when two markers share a prefix
+/// (the trie walk in [`Vocab::longest_added_token_match`] always returns
+/// the deepest/longest node with an id, never the first). A vocab that
+/// never called `with_token_types` has an empty trie, so this degenerates
+/// to exactly one call to [`encode_ordinary`] over the whole input --
+/// identical to this function's behavior before markers existed.
+///
 /// Splits `text` into pretokens ([`crate::pretokenize::pretokenize`]) and
 /// BPE-merges each independently, concatenating the resulting ids in order
 /// -- for a merges-driven vocab. For a scores-driven ([`Vocab::is_unigram`])
@@ -24,6 +36,35 @@ use crate::vocab::Vocab;
 /// Any [`TokenizerError`] [`encode_pretoken`]/[`unigram::encode_fragment`]
 /// surfaces.
 pub fn encode(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
+    let mut ids = Vec::new();
+    let bytes = text.as_bytes();
+    let mut ordinary_start = 0usize;
+    let mut position = 0usize;
+    while position < bytes.len() {
+        match vocab.longest_added_token_match(&bytes[position..]) {
+            Some((token_id, matched_len)) => {
+                if ordinary_start < position {
+                    ids.extend(encode_ordinary(&text[ordinary_start..position], vocab)?);
+                }
+                ids.push(token_id);
+                position += matched_len;
+                ordinary_start = position;
+            }
+            None => {
+                let char_len = text[position..].chars().next().map_or(1, char::len_utf8);
+                position += char_len;
+            }
+        }
+    }
+    if ordinary_start < bytes.len() {
+        ids.extend(encode_ordinary(&text[ordinary_start..], vocab)?);
+    }
+    Ok(ids)
+}
+
+/// [`encode`]'s per-span encoder, run on the plain text between added-token
+/// markers (or the whole input, when there are none).
+fn encode_ordinary(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
     if vocab.is_unigram() {
         let normalized = unigram::escape(text);
         return unigram::encode_fragment(&normalized, vocab);
