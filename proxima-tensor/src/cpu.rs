@@ -1315,7 +1315,7 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
             let cpu_nanos = instrument::thread_cpu_nanos() - cpu_start;
             instrument::record_chunk_ticks(chunk_ticks);
             instrument::record_worker_busy_ticks(chunk_ticks);
-            instrument::record_worker_cpu_nanos(cpu_nanos);
+            instrument::record_worker_cpu_nanos(instrument::CpuWorkload::Elementwise, cpu_nanos);
         }
 
         let _ = sender.send((index, outcome));
@@ -5271,10 +5271,11 @@ where
     // thread got descheduled" (`instrument.rs`'s own doc on
     // `WORKER_CPU_NANOS` already established this for the 1->8 scaling
     // read). `thread_cpu_nanos` is the deschedule-immune peer, reused here
-    // via `record_worker_cpu_nanos` -- this row-chunk path is the only
-    // caller of that function during a quantized forward (the elementwise
-    // `claim_and_run` path is the other), so the two never mix within one
-    // matmul-only run.
+    // via `record_worker_cpu_nanos` -- this row-chunk path shares the same
+    // `WORKER_CPU_NANOS` pool as `claim_and_run`'s elementwise/node-chunk
+    // path (they DO mix within one forward pass), which is why the call
+    // below tags itself `CpuWorkload::MatmulRow` rather than leaving the
+    // two workloads to be summed together downstream.
     #[cfg(feature = "instrument")]
     let chunk_cpu_started = instrument::thread_cpu_nanos();
     for (offset, slot) in chunk_output.chunks_exact_mut(width).enumerate() {
@@ -5283,7 +5284,10 @@ where
     #[cfg(feature = "instrument")]
     {
         instrument::record_chunk_ticks(instrument::elapsed_ticks(chunk_started));
-        instrument::record_worker_cpu_nanos(instrument::thread_cpu_nanos() - chunk_cpu_started);
+        instrument::record_worker_cpu_nanos(
+            instrument::CpuWorkload::MatmulRow,
+            instrument::thread_cpu_nanos() - chunk_cpu_started,
+        );
     }
     Ok(())
 }
