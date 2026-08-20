@@ -218,5 +218,9 @@ required-features = ["runtime-prime-inbox-dynamic"]
 name = "cohort_round_cost"
 required-features = ["runtime-prime-cohort", "runtime-prime-bgpool"]
 
+[[example]]
+name = "cohort_chunk_sweep"
+required-features = ["runtime-prime-cohort"]
+
 [lints]
 workspace = true
