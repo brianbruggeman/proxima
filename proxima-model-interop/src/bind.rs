@@ -271,10 +271,9 @@ mod real_openchat_file {
     use proxima_tokenizer::greedy_pick;
 
     use crate::loader::prefault;
+    use crate::serving::{ServingConfig, apply_serving_config};
 
     use super::{gguf_tensor_as_f32, gguf_tensor_as_packed_block};
-
-    const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
     /// A read-only `mmap` of the fixture file (rustix, already a workspace
     /// dependency used the same way by `proxima-storage/src/dax/region.rs`
@@ -422,9 +421,25 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn runs_one_real_forward_pass_and_greedy_picks_a_real_token() {
-        let path = std::path::Path::new(FIXTURE_PATH);
+        // `ServingConfig::default()` is the TARGET invocation, so it trips the
+        // first `todo!` by design. the overrides below are exactly the knobs
+        // this forward does not implement yet -- the delta IS the gap list.
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F16,
+            kv_cache_value_quant: GgmlType::F16,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: 0,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+        let path = std::path::Path::new(serving_config.model_path);
         if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {FIXTURE_PATH}");
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                serving_config.model_path
+            );
             return;
         }
 
@@ -559,6 +574,7 @@ mod real_openchat_file {
         let prompt = "The capital of France is";
         let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &vocab, true, false).expect("encode prompt");
         let sequence = ids.len();
+        apply_serving_config(&serving_config, sequence);
 
         let ids_f32: Vec<f32> = ids.iter().map(|&id| id as f32).collect();
         let inv_dim = alloc::vec![1.0 / EMBEDDING as f32; sequence];
@@ -880,9 +896,10 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn binds_one_real_q4_k_block_and_matmuls_against_a_known_activation() {
-        let path = std::path::Path::new(FIXTURE_PATH);
+        let model_path = ServingConfig::default().model_path;
+        let path = std::path::Path::new(model_path);
         if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {FIXTURE_PATH}");
+            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
             return;
         }
 

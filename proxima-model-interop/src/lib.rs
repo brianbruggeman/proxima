@@ -24,6 +24,7 @@ mod dtype;
 mod error;
 #[cfg(feature = "std")]
 mod loader;
+mod serving;
 mod transform;
 
 pub use bind::gguf_tensor_as_f32;
@@ -33,4 +34,7 @@ pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
+pub use serving::{
+    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, REASONING_BUDGET_UNBOUNDED, ServingConfig, apply_serving_config,
+};
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};
