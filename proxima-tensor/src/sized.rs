@@ -24,23 +24,22 @@
 //!   sizes the portable scalar dot-fold lane array used by every target,
 //!   not just aarch64 -- see its own doc for why it carries no
 //!   `target_arch` gate.
-//! - **Execution policy, the compiled floor under a runtime surface**:
-//!   [`PARALLEL_THRESHOLD`], [`OVERSUBSCRIBE`], [`ROW_OVERSUBSCRIBE`],
-//!   [`SPLIT_ALIGNMENT`], [`MIN_MACS_PER_CHUNK`],
-//!   [`COLUMN_PANEL_BUDGET_BYTES`] and [`COHORT_SPIN_POLLS`] are plain
-//!   runtime values (not const generics) read inside `cpu.rs`'s hot-path
-//!   functions, so nothing about their type forbids a runtime override --
-//!   and since 2026-08-20 they no longer are one:
-//!   [`crate::policy::ExecutionPolicy::COMPILED`] is exactly this list, and
-//!   [`crate::policy::active`] resolves it once per process from a TOML file
-//!   and `PROXIMA_TENSOR_*` environment keys through `conflaguration`. The
-//!   constants below stay the single source of the *defaults*, which is why
-//!   the `no_std + alloc` floor -- which compiles neither `cpu` nor `policy`
-//!   -- keeps working with `sized` as its only configuration.
-//!   [`COLUMN_PANEL_BUDGET_BYTES`] lost its `target_arch = "aarch64"` gate to
-//!   join them: only the NEON tiled-GEMM pass reads it today, but a config
-//!   file written on one machine has to deserialize on another, so the
-//!   cross-platform policy struct needs a compiled default on every target.
+//! - **Execution policy, currently build-time-only in practice**:
+//!   [`PARALLEL_THRESHOLD`], [`OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`],
+//!   [`MIN_MACS_PER_CHUNK`] are
+//!   plain runtime values (not const generics) read inside `cpu.rs`'s
+//!   hot-path functions (`evaluate_node_parallel`, `run_chunks_threaded`,
+//!   `BoundOp::split_aligned`) -- nothing about their *type* forbids a
+//!   runtime override. There is no `config.rs` surface for them yet:
+//!   wiring a per-process override into those call sites is real cpu.rs
+//!   surgery (new parameters threaded through several private helpers),
+//!   which this session declines to do while another agent is
+//!   concurrently restructuring that file's tile operands and quantized
+//!   paths. [`NEON_COLUMN_PANEL_BUDGET_BYTES`] is the same policy
+//!   shape but additionally `target_arch = "aarch64"`-only, so it has no
+//!   build-time value on any other target to seed a cross-platform config
+//!   struct from -- staying `sized`-only is not just deferred here, it is
+//!   the only correct shape for an arch-conditional constant.
 
 /// Inline capacity for one bound op's per-iteration-axis buffers
 /// ([`crate::bind::Layout::strides`]). Sizes a `SmallVec` const generic --
@@ -190,20 +189,8 @@ pub const TILE_ROWS: usize = 6;
 pub const TILE_COLS: usize = 4;
 
 /// Bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
-/// pass. Execution policy, and the compiled default for
-/// [`crate::policy::ExecutionPolicy::column_panel_budget_bytes`]. Only the
-/// aarch64 tiled-GEMM pass reads it (`cpu::neon_column_panel_cols`), but the
-/// constant is no longer `target_arch`-gated: the runtime policy struct is
-/// one cross-platform value, so every target needs a compiled default for
-/// this key or a config file stops being portable between machines.
-#[cfg(feature = "std")]
-pub const COLUMN_PANEL_BUDGET_BYTES: usize = 2_621_440;
-
-/// Spin budget, in `core::hint::spin_loop()` polls, one cohort member burns
-/// waiting for the round counter before parking -- the compiled default for
-/// [`crate::policy::ExecutionPolicy::cohort_spin_polls`], which `cpu`
-/// hands to `prime::os::cohort::CohortBuilder::spin_polls`. Sourced from
-/// `prime` rather than re-typed here so the cohort keeps one default:
-/// `2_000` is measured (`prime/src/os/cohort.rs`), `200` measurably worse.
-#[cfg(feature = "std")]
-pub const COHORT_SPIN_POLLS: u32 = prime::os::cohort::CohortConfig::DEFAULT_SPIN_POLLS;
+/// pass. Execution policy in shape, but `target_arch = "aarch64"`-only:
+/// no other target has a build-time value for this constant to seed a
+/// cross-platform runtime config struct from, so it stays `sized`-only.
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
+pub const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = 2_621_440;

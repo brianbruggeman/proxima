@@ -124,7 +124,6 @@ use proxima_primitives::pipe::Pipe;
 use proxima_telemetry::counter;
 use prime::os::background::ProximaBackgroundPool;
 use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
-use crate::policy;
 
 use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
 use crate::dtype::DType;
@@ -788,8 +787,83 @@ fn take_or_allocate(pool: &mut Vec<Vec<f32>>, required: usize) -> Vec<f32> {
     }
 }
 
+/// Below this many iteration-space elements, a nest runs the plain
+/// sequential path even when `workers > 1`: `std::thread::scope`'s spawn
+/// and join overhead outweighs the work for a small nest.
+use crate::sized::PARALLEL_THRESHOLD;
 
+/// chunk count is `workers * OVERSUBSCRIBE`, not `workers`: equal row
+/// counts do not mean equal wall-clock (measured 2.04x spread across 8
+/// equal-row chunks of a 1024^3 GEMM), and one chunk per worker leaves no
+/// spare chunk for a worker that finishes early to pick up — more chunks
+/// than workers lets a fast worker absorb a slow chunk's slack. Only pays
+/// off under [`nest_pool`]'s dynamic claiming (see `claim_and_run`), the
+/// only chunk dispatch this module has: the puller count [`run_chunks_threaded`]
+/// spawns caps at `workers` regardless of `OVERSUBSCRIBE`, so raising this
+/// grows the number of chunks a fixed puller count can steal from, without
+/// growing the number of threads touching them.
+///
+/// A `4` was tried on this same mechanism: more chunks than workers gives a
+/// work-stealing pool room for a fast puller to absorb a slow chunk's slack,
+/// which is structural and not in dispute. The comparison that measured it —
+/// 274.75 vs 270.08 mean GFLOPS at 2048^3/4 workers, n=9, 5.9 sigma — never
+/// recorded the ambient load it ran under, and the 8-worker cells it was
+/// meant to help never cleared their own CoV gate at any sample size tried
+/// (n up to 30) under the load present when those cells were measured (5-10,
+/// against a stated 2.2 plateau). That is the same evidence shape that
+/// produced three false readings for `SPLIT_ALIGNMENT` on this same box:
+/// strong sigma inside an unvalidated run does not rule out noise correlated
+/// across that run rather than random within it. Left at `1`, the original
+/// value, until a re-measurement validates its own floor first — a
+/// same-code-path comparison, at a size and load where the two configurations
+/// provably execute identical instructions — and only then shows an
+/// oversubscription effect outside it.
+use crate::sized::OVERSUBSCRIBE;
 
+/// Row-alignment applied to every non-final chunk boundary via
+/// `BoundOp::split_aligned`. `1` is a no-op (see that method's doc): every
+/// chunk boundary lands wherever `extent / chunk_count` puts it, which is
+/// not necessarily a multiple of `TILE_ROWS` — so a chunk pays its own
+/// row-remainder through the kernel's narrower fallback path independently
+/// of every other chunk, and that per-chunk remainder count grows with
+/// chunk count even though the total row count did not change. That
+/// mechanism is structural and not in dispute; whether it moves
+/// busy-per-MAC by a measurable amount is.
+///
+/// Four measurements of this same `1` -> `TILE_ROWS` change exist, all
+/// against the column-panel blocking below (already landed and left on —
+/// see `NEON_COLUMN_PANEL_BUDGET_BYTES`). Three, run at system load
+/// 12-31, read as 3-10% busy-per-MAC improvements. None of the three
+/// established a noise floor before comparing — at that load level a
+/// handful of percent between two configurations is not distinguishable
+/// from scheduler contention, so those figures are retained here only as
+/// unverified prior readings, not as evidence.
+///
+/// The fourth run validated a floor first: at load 2.49-3.07, `neither` vs
+/// `panel` at 512^3 and 1024^3 — sizes where `neon_column_panel_cols`
+/// provably clamps the panel to one, i.e. the two configurations execute
+/// identical code — agreed to within +/-3.5%, sigma up to 3.1. That is the
+/// noise floor any real effect at this load has to clear. Against it,
+/// alignment (`1` -> `TILE_ROWS`) on top of the panel measured
+/// +2.03% / +0.31% / -0.72% at 512^3 / 1024^3 / 2048^3, 8 threads — inside
+/// the floor at every size. No measurable effect anywhere in the one
+/// comparison whose noise floor is known.
+///
+/// Set to `1` on that basis: the only measurement with a validated floor
+/// found nothing outside it, and the three load-12-31 figures were never
+/// shown to clear their own (unmeasured) noise, so they carry no weight
+/// against it. This changes only if a future re-measurement (a) validates
+/// its own floor the same way — a same-code-path comparison at a size
+/// where the panel is a no-op — and (b) then shows an alignment effect
+/// outside that floor.
+///
+/// Provenance: the three load-12-31 figures were not independently dated
+/// or sample-counted in the record available to this pass — treat them as
+/// unverified, not merely old. The load-2.49-3.07 measurement is this
+/// session's own, 2026-08-18; its sample count for the alignment
+/// comparison specifically is not broken out beyond the three-configuration
+/// grid it ran alongside.
+use crate::sized::SPLIT_ALIGNMENT;
 
 /// Same contract as [`evaluate`], including the exact same [`Evaluated`]
 /// and error variants — the only difference is that each large-enough nest
@@ -865,7 +939,7 @@ pub fn evaluate_parallel(
 }
 
 /// Runs one node, threaded across `workers` when [`BoundOp::split`] finds it
-/// sound and it clears [`crate::policy::ExecutionPolicy::parallel_threshold`]; otherwise the plain
+/// sound and it clears [`PARALLEL_THRESHOLD`]; otherwise the plain
 /// sequential path via [`run_node_into`].
 fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
@@ -887,23 +961,19 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
 
     #[cfg(feature = "instrument")]
     let split_start = Instant::now();
-    // one acquire load on an already-resolved `OnceLock`, bound above the
-    // split rather than inside it -- see `policy`'s module doc for the two
-    // measured regressions that came from resolving per call
-    let policy = policy::active();
-    let above_threshold = element_count(&resolved.extents) >= policy.parallel_threshold;
+    let above_threshold = element_count(&resolved.extents) >= PARALLEL_THRESHOLD;
     // oversubscribing at `workers == 1` would still spawn `OVERSUBSCRIBE - 1`
     // pool tasks (chunk count alone bounds pool concurrency — see
     // `run_chunks_threaded`'s doc), silently using more physical threads
     // than the caller asked for; only multiply once there is more than one
     // worker to spread chunks across.
     let chunk_count = if workers.get() > 1 {
-        workers.get() * policy.oversubscribe
+        workers.get() * OVERSUBSCRIBE
     } else {
         workers.get()
     };
     let chunks = above_threshold
-        .then(|| resolved.split_aligned(chunk_count, policy.split_alignment))
+        .then(|| resolved.split_aligned(chunk_count, SPLIT_ALIGNMENT))
         .flatten();
     #[cfg(feature = "instrument")]
     counter!(
@@ -1243,13 +1313,7 @@ fn nest_cohort() -> Option<&'static ThreadCohort> {
     COHORT
         .get_or_init(|| {
             let members = NonZeroUsize::new(matmul_worker_count())?;
-            // the cohort already owned this knob (`CohortConfig::spin_polls`,
-            // `CohortBuilder::spin_polls`); this crate simply never chose a
-            // value for it until `ExecutionPolicy` gave callers one to set
-            let config = ThreadCohort::builder()
-                .members(members)
-                .spin_polls(policy::active().cohort_spin_polls)
-                .build();
+            let config = ThreadCohort::builder().members(members).build();
             ThreadCohort::from_config(config).ok()
         })
         .as_ref()
@@ -3850,18 +3914,51 @@ use crate::sized::TILE_ROWS;
 #[cfg(target_arch = "aarch64")]
 use crate::sized::TILE_COLS;
 
+/// Bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
+/// pass below. M1 Max: 12 MiB shared L2 per performance cluster of 4 cores —
+/// about 3 MiB/core once every worker in the cluster streams its own panel,
+/// not 12 MiB as an 8 MiB budget implicitly assumed (one worker owning the
+/// whole cluster's L2). ggml's own combined panel footprint never exceeds
+/// ~2.5 MiB at any size or thread count, which is also where headroom for
+/// the row-strip's `a` tile, the output tile in flight, and set-associativity
+/// conflicts remains without the near-fit turning into a thrash.
+///
+/// Swept 8/4/3/2.5/2 MiB at 512/1024/2048^3, 1/2/4/8 threads, n=9,
+/// interleaved round-robin per budget, 2026-08-18, system load 1.8-3.4
+/// (mostly under 3.0, one late 8-thread cell drifted to 3.37). Only the
+/// 1-thread cells stayed under the 1.5% CoV resolvability bar; every
+/// 2+-thread cell exceeded it (up to 20% CoV, this session's shared-host
+/// contention) and is not usable for a budget comparison. Within the
+/// resolvable 1-thread cells: 512^3 and 1024^3 measured flat across every
+/// budget from 8 MiB down to 2 MiB (busy-per-MAC within ~1% of each other,
+/// GFLOPS parity vs ggml 89.57-90.17 for 1024^3 across 8/2.5 MiB, no
+/// resolvable win despite the panel becoming numerically "active" at
+/// 1024^3 below ~2.8 MiB) — the hypothesis that a lower budget would help
+/// 1024^3 did NOT hold up. 2048^3/1-thread did show a real, resolvable
+/// effect: busy-per-mac dropped ~1.7-2% for every budget at or below 4 MiB
+/// versus the 8 MiB control (0.02238 -> ~0.0220), and GFLOPS parity vs ggml
+/// rose from 0.999x to 1.026x at 2.5 MiB. 4/3/2.5/2 MiB were statistically
+/// indistinguishable from each other at 2048^3/1-thread (within ~0.5%, same
+/// order as the noise floor) — no single value in that range measured best.
+/// 2.5 MiB is landed here because it matches ggml's own measured combined
+/// footprint and never measured worse than the 8 MiB control in any
+/// resolvable cell; 4 MiB or 3 MiB would be an equally defensible pick on
+/// this data. checksums (135.87619/260.24106/513.10425) and the 1024^3
+/// allocation shape were unchanged across every budget tested.
+#[cfg(target_arch = "aarch64")]
+use crate::sized::NEON_COLUMN_PANEL_BUDGET_BYTES;
 
 /// Column-panel width for the tiled GEMM pass: the widest multiple of
 /// `TILE_COLS` whose panel of `b` (`panel_cols` columns, each a contiguous
 /// run of `reduction_len` `f32`s along the contraction dim) fits inside
-/// [`crate::policy::ExecutionPolicy::column_panel_budget_bytes`]. At `reduction_len = 2048` (2048^3's
+/// [`NEON_COLUMN_PANEL_BUDGET_BYTES`]. At `reduction_len = 2048` (2048^3's
 /// `k`): `2.5 MiB / (2048 * 4 bytes) = 640 -> 640` columns (rounds to a
 /// `TILE_COLS` multiple exactly), five-plus panels across 2048's tiled
 /// width — the cell this budget measurably helps. At `reduction_len = 1024`:
 /// `2.5 MiB / 4096 bytes = 640` columns against a 1024-wide tiled output,
 /// so the panel loop is numerically active (two panels, not the pre-2026-08
 /// no-op) but measured flat against every other budget swept, 1-thread,
-/// n=9 (`sized::COLUMN_PANEL_BUDGET_BYTES`'s doc has the full sweep). At
+/// n=9 (`NEON_COLUMN_PANEL_BUDGET_BYTES`'s doc has the full sweep). At
 /// `reduction_len = 512` the budget covers 1280 columns, wider than any
 /// tiled width a 512^3 call produces, so the `clamp` below still collapses
 /// to one panel spanning `tiled_width_cols` — an unconditional no-op there
@@ -3869,8 +3966,7 @@ use crate::sized::TILE_COLS;
 #[cfg(target_arch = "aarch64")]
 fn neon_column_panel_cols(reduction_len: u64, tiled_width_cols: usize) -> usize {
     let bytes_per_col = reduction_len as usize * 4;
-    let budget_cols = policy::active()
-        .column_panel_budget_bytes
+    let budget_cols = NEON_COLUMN_PANEL_BUDGET_BYTES
         .checked_div(bytes_per_col)
         .unwrap_or(tiled_width_cols);
     let rounded = budget_cols - budget_cols % TILE_COLS;
@@ -4299,7 +4395,7 @@ pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
 /// Below this many total multiply-accumulates (`rows * activation.len()`),
 /// a quantized matmul's row loop runs sequentially even when more than one
 /// hardware thread exists: `std::thread::scope`'s spawn/join overhead would
-/// outweigh the work. Reuses [`crate::policy::ExecutionPolicy::parallel_threshold`], the same element-count
+/// outweigh the work. Reuses [`PARALLEL_THRESHOLD`], the same element-count
 /// floor [`evaluate_node_parallel`] already gates its own per-node chunk
 /// dispatch on, rather than a second magic number for the same policy.
 /// `None` also covers `rows < workers`, where a per-row split would leave
@@ -4364,20 +4460,19 @@ fn performance_core_count() -> Option<usize> {
 /// the sysctl is unavailable or answers something nonsensical (`<= 0` or
 /// larger than `available_parallelism()` itself).
 ///
-/// [`crate::policy::ExecutionPolicy::workers`], when it resolves to `Some`, overrides both
-/// of the above; that is how a sweep changes the worker count without a
-/// rebuild (`PROXIMA_TENSOR_WORKERS=8`, or `workers = 8` in the config file).
-/// It replaces the hand-written `std::env::var("PROXIMA_MATMUL_WORKERS")`
-/// that used to sit in the closure below: the policy resolves once inside its
-/// own `OnceLock`, so neither that environment read nor the `String` it
-/// allocates can land on the per-call path this cache exists to keep empty.
-/// Default (`None`) behaviour is the detection above, unchanged.
+/// `PROXIMA_MATMUL_WORKERS`, if set to a valid non-zero integer, overrides
+/// both of the above; this exists to sweep worker counts without a rebuild.
+/// The env var is read once via `OnceLock`, never per call — a per-call
+/// `std::env::var` allocates a `String` on every one of those 1350 calls and
+/// would contaminate the very cost this cache exists to remove. Default
+/// (unset) behavior is unchanged otherwise.
 fn matmul_worker_count() -> usize {
     static WORKER_COUNT: OnceLock<usize> = OnceLock::new();
     *WORKER_COUNT.get_or_init(|| {
-        policy::active()
-            .workers
-            .map(NonZeroUsize::get)
+        std::env::var("PROXIMA_MATMUL_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&count| count > 0)
             .unwrap_or_else(|| {
                 let available = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
                 performance_core_count().filter(|&count| count >= 1 && count <= available).unwrap_or(available)
@@ -4398,7 +4493,7 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
     #[cfg(feature = "instrument")]
     counter!(instrument::MATMUL_WORKERS_CALLS, 1);
     let total_macs = rows.checked_mul(contraction_width)?;
-    if total_macs < policy::active().parallel_threshold {
+    if total_macs < PARALLEL_THRESHOLD {
         #[cfg(feature = "instrument")]
         counter!(instrument::MATMUL_WORKERS_NONE, 1);
         return None;
@@ -4419,6 +4514,7 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
     decision
 }
 
+use crate::sized::{MIN_MACS_PER_CHUNK, ROW_OVERSUBSCRIBE};
 
 /// Runs `rows` independent per-row computations (`dot_row`) through the
 /// shared [`nest_pool`], each writing its own contiguous sub-range of the
@@ -4434,22 +4530,22 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
 /// Chunk assignment is dynamic, the same shared-cursor mechanism
 /// `run_chunks_threaded`/`claim_and_run` use, applied to row ranges instead
 /// of `BoundOp`s ([`claim_and_run_rows`]): `rows` is split into up to
-/// `workers * crate::policy::active().row_oversubscribe` ranges (more chunks than pullers), and both
+/// `workers * ROW_OVERSUBSCRIBE` ranges (more chunks than pullers), and both
 /// the `workers - 1` spawned pool tasks and the calling thread pull the next
 /// unclaimed chunk off a shared [`AtomicUsize`] cursor instead of each
 /// owning one fixed range. A prior 1:1 static split left the calling thread
 /// idling in `Receiver::recv` for whichever spawned chunk ran longest even
 /// though equal row counts do not mean equal wall-clock (measured 2.04x
-/// spread across 8 equal-row chunks of a 1024^3 GEMM, see [`crate::policy::ExecutionPolicy::oversubscribe`]'s
+/// spread across 8 equal-row chunks of a 1024^3 GEMM, see [`OVERSUBSCRIBE`]'s
 /// doc) — a fast puller now claims another chunk instead of idling.
 ///
 /// `contraction_width` (the per-row `k`, i.e. `activation.len()` at every
 /// call site) caps that split: `rows * contraction_width` total multiply-add
-/// work is floored against [`crate::policy::ExecutionPolicy::min_macs_per_chunk`] before the
-/// `workers * crate::policy::active().row_oversubscribe` oversubscription is applied, so a call
+/// work is floored against [`MIN_MACS_PER_CHUNK`] before the
+/// `workers * ROW_OVERSUBSCRIBE` oversubscription is applied, so a call
 /// carrying little total work (e.g. `attn_k`/`attn_v`'s narrow projection)
 /// gets fewer, larger chunks instead of the same fixed 40-way split a wide
-/// call like `ffn_up`/`ffn_gate` earns — see [`crate::policy::ExecutionPolicy::min_macs_per_chunk`]'s own
+/// call like `ffn_up`/`ffn_gate` earns — see [`MIN_MACS_PER_CHUNK`]'s own
 /// doc for the measurement that picked the floor.
 ///
 /// # Safety (of the `unsafe` blocks inside)
@@ -4464,18 +4560,17 @@ fn quantized_matmul_workers(rows: usize, contraction_width: usize) -> Option<usi
 /// same chunk index to two pullers, so no two closures ever alias the same
 /// output range.
 /// The chunk count [`matmul_rows_threaded`] splits `rows` into: capped at
-/// `workers * crate::policy::active().row_oversubscribe`, but never more than
+/// `workers * ROW_OVERSUBSCRIBE`, but never more than
 /// `rows * contraction_width` total macs supports at
-/// [`crate::policy::ExecutionPolicy::min_macs_per_chunk`] macs per chunk. A call carrying little total work
+/// [`MIN_MACS_PER_CHUNK`] macs per chunk. A call carrying little total work
 /// (narrow `contraction_width`, few `rows`) gets fewer, coarser chunks
 /// instead of the fixed oversubscription split every shape used to pay --
-/// see [`crate::policy::ExecutionPolicy::min_macs_per_chunk`]'s own doc for the per-shape measurement that
+/// see [`MIN_MACS_PER_CHUNK`]'s own doc for the per-shape measurement that
 /// motivated this.
 fn row_chunk_count(rows: usize, workers: usize, contraction_width: usize) -> usize {
-    let policy = policy::active();
-    let oversubscribed = workers.saturating_mul(policy.row_oversubscribe);
+    let oversubscribed = workers.saturating_mul(ROW_OVERSUBSCRIBE);
     let total_macs = rows.saturating_mul(contraction_width);
-    let work_chunks = (total_macs / policy.min_macs_per_chunk).max(1);
+    let work_chunks = (total_macs / MIN_MACS_PER_CHUNK).max(1);
     oversubscribed.min(work_chunks).clamp(1, rows.max(1))
 }
 
@@ -8531,7 +8626,7 @@ mod tests {
 
     /// Dispatches `rows` through the same `claim_and_run_rows` shared-cursor
     /// mechanism [`matmul_rows_threaded`] uses, but with `oversubscribe`
-    /// passed in instead of hard-coded to [`crate::policy::ExecutionPolicy::row_oversubscribe`]
+    /// passed in instead of hard-coded to [`crate::sized::ROW_OVERSUBSCRIBE`]
     /// — lets [`bench_row_oversubscribe_picks_the_multiplier`] sweep the
     /// multiplier without a rebuild per value. Test-only duplication of
     /// `matmul_rows_threaded`'s body; not shipped (`#[cfg(test)]`).
@@ -8585,11 +8680,11 @@ mod tests {
         output
     }
 
-    /// Manual microbench picking [`crate::policy::ExecutionPolicy::row_oversubscribe`] —
+    /// Manual microbench picking [`crate::sized::ROW_OVERSUBSCRIBE`] —
     /// principle 18/19: a design constant needs a measurement artifact, not
     /// reasoning. Synthetic per-row cost is deliberately imbalanced (the
     /// last 1/8 of rows costs ~8x a normal row, echoing the 2.04x
-    /// equal-row-count spread [`crate::policy::ExecutionPolicy::oversubscribe`]'s own doc records for a real
+    /// equal-row-count spread [`OVERSUBSCRIBE`]'s own doc records for a real
     /// GEMM) so a static 1:1 split leaves the calling thread idling in
     /// `Receiver::recv` for whichever puller drew the straggler range.
     /// `#[ignore]`: manual, not part of the CI gate — run with
@@ -8745,7 +8840,7 @@ mod tests {
     /// [`matmul_rows_threaded`]'s pool dispatch (through [`matmul_q4k_f32`])
     /// against the same per-row kernel run sequentially in this test, no
     /// threading involved — 128 rows x 512 elements clears
-    /// [`crate::policy::ExecutionPolicy::parallel_threshold`] (65536 macs vs 4096) and is wide enough that
+    /// [`PARALLEL_THRESHOLD`] (65536 macs vs 4096) and is wide enough that
     /// `quantized_matmul_workers` returns `Some` on any machine with fewer
     /// than 128 hardware threads, so `matmul_q4k_f32` provably takes the
     /// pool path here. Each output row is an independent reduction with no
@@ -8872,7 +8967,7 @@ mod tests {
     }
 
     /// [`row_chunk_count`] must scale down with total work, not stay pinned
-    /// to `workers * crate::policy::active().row_oversubscribe` for every shape -- the defect this
+    /// to `workers * ROW_OVERSUBSCRIBE` for every shape -- the defect this
     /// session fixes: a narrow, low-mac call (`attn_k`/`attn_v`'s real
     /// `rows=1024 k=4096` shape, 4.19M macs) was paying the same fixed
     /// 40-way dispatch as a wide, high-mac call (`ffn_up`/`ffn_gate`'s
@@ -8890,7 +8985,7 @@ mod tests {
         let small_shape_chunks = row_chunk_count(rows, workers, 4096); // attn_k/attn_v's real k
         let large_shape_chunks = row_chunk_count(rows, workers, 100_000); // comfortably wide
 
-        let oversubscribed_ceiling = workers * crate::policy::active().row_oversubscribe;
+        let oversubscribed_ceiling = workers * ROW_OVERSUBSCRIBE;
         assert!(
             small_shape_chunks < large_shape_chunks,
             "a low-mac shape must produce fewer chunks than a high-mac shape at the same row \
@@ -9610,7 +9705,7 @@ mod tests {
         let resolved = bind::bind(&program, &shapes, &[]).expect("resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
-            element_count(&resolved[0].extents) >= crate::policy::active().parallel_threshold,
+            element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
             "this size must clear the threshold or this test proves nothing about the \
              threaded path"
         );
@@ -10606,7 +10701,7 @@ mod tests {
         let resolved = bind::bind(&program, &shapes, &[]).expect("64x64x64 matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
-            element_count(&resolved[0].extents) >= crate::policy::active().parallel_threshold,
+            element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
             "this size must clear the threshold or this test proves nothing about the \
              threaded path"
         );

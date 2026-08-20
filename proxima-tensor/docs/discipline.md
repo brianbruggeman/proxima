@@ -4524,12 +4524,12 @@ Checked both crates already in the dependency graph:
 
 **Re-prove command (this row's forward-wall and per-shape numbers):**
 ```
-PROXIMA_MODEL_PREFAULT=1 PROXIMA_TENSOR_WORKERS=8 cargo test -p proxima-model-interop \
-  --release --lib --features config -- --ignored --exact \
+PROXIMA_PREFAULT=1 PROXIMA_MATMUL_WORKERS=8 cargo test -p proxima-model-interop \
+  --release --lib --features std -- --ignored --exact \
   bind::real_openchat_file::runs_one_real_forward_pass_and_greedy_picks_a_real_token \
   --nocapture --test-threads=1
 ```
-Swap `PROXIMA_TENSOR_WORKERS` for `10`/`6`/`0` (0 = detect) to reproduce the other
+Swap `PROXIMA_MATMUL_WORKERS` for `10`/`6`/unset to reproduce the other
 arms. Token (`2651`/`"known"`), `forward_wall_clock`, `matmul_dispatch`
 line, and `q4k_shape_table` all print to stdout — same artifact this row's
 numbers were read from, nothing paraphrased.
@@ -4558,33 +4558,3 @@ platform); a rebench of the llama.cpp `-t 8` bar in this same session
 |---|---|---|---|---|
 | 2026-08-20 | cache `available_parallelism` in `OnceLock` | -98.9% on `MATMUL_AVAILABLE_PARALLELISM_NANOS` (4.768ms -> 0.052ms over 1350 calls) | measured every run, 9/9 | load avg 2.7-5.4, mediaanalysisd 52-95% |
 | 2026-08-20 | worker override, swept 6/8/10 | **8: -2.77% forward wall vs 10 (KEPT as override, default unchanged). 6: +11.63% vs 10 (documented, not landed as default)** | 0.69-1.79% CoV, 3 runs/arm | same as above |
-| 2026-08-20 | execution policy became runtime config (`proxima-tensor::policy`, `proxima-model-interop::policy`) | **defaults resolve to `sized.rs` verbatim, so no instruction changed**; gate 19/0, tensor suite 337 passed (was 331) | not a perf change; the real forward was deliberately not re-run | n/a |
-
-### 2026-08-20 -- execution policy is runtime-settable
-
-The two environment variables this file's sweeps used
-(`PROXIMA_MATMUL_WORKERS`, `PROXIMA_PREFAULT`) were measurement scaffolding
-read by hand at their call sites. They are **deleted**. Every knob they
-covered, plus the six execution constants in `src/sized.rs`, now resolves
-through one layered surface per crate:
-
-- `proxima_tensor::policy::ExecutionPolicy` -- `parallel_threshold`,
-  `oversubscribe`, `row_oversubscribe`, `min_macs_per_chunk`,
-  `split_alignment`, `column_panel_budget_bytes`, `workers`,
-  `cohort_spin_polls`, `device`.
-- `proxima_model_interop::policy::ModelPolicy` -- `prefault`, plus the
-  llama.cpp knobs this stack does not have (context length, batch/micro-batch,
-  flash attention, KV-cache dtypes, layer offload, reasoning budget), each an
-  explanatory `todo!` rather than an omission.
-
-Precedence per key: `sized.rs` -> TOML file -> `PROXIMA_TENSOR_*` /
-`PROXIMA_MODEL_*` environment key. Resolution happens once, inside a
-`OnceLock` behind `policy::active()`; the hot path pays one acquire load and
-no allocation, which is exactly the invariant the `available_parallelism` and
-`std::env::var` regressions recorded above exist to protect. The
-`no_std + alloc` tier compiles neither `cpu` nor `policy` and keeps
-`sized.rs` as its only configuration.
-
-Repro of the sweep arms changes only in spelling: `PROXIMA_TENSOR_WORKERS=8`
-where `PROXIMA_MATMUL_WORKERS=8` used to be, `--features config` where
-`--features std` used to be.

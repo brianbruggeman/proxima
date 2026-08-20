@@ -24,12 +24,6 @@ mod dtype;
 mod error;
 #[cfg(feature = "std")]
 mod loader;
-// model-level runtime policy (prefault, plus a compilable map of the llama.cpp
-// knobs this stack does not have yet). `std`-gated like `loader`, its one
-// wired consumer; the conflaguration file/env layering is `config`-gated
-// inside the module, mirroring proxima-tensor::policy.
-#[cfg(feature = "std")]
-pub mod policy;
 mod transform;
 
 pub use bind::gguf_tensor_as_f32;
@@ -39,6 +33,4 @@ pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
-#[cfg(feature = "std")]
-pub use policy::{CacheDType, ModelPolicy};
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};

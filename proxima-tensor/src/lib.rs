@@ -221,14 +221,6 @@ pub mod op;
 // pure over `&[Op]`/`NodeId`/`shape::infer`, so it lives at the same tier as
 // both — see the module's own doc for what it produces and why no new type
 // hosts it.
-// runtime execution policy over `sized`'s compiled floor. `std`-gated, not
-// `config`-gated: `cpu` reads it on every threaded dispatch and must compile
-// without a loader, so the struct plus its `COMPILED` value live at `std`
-// while the conflaguration file/env layering is `config`-only. The
-// `no_std + alloc` tier compiles neither this nor `cpu`, and keeps `sized`
-// as its only configuration.
-#[cfg(feature = "std")]
-pub mod policy;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod partition;
 #[cfg(any(feature = "std", feature = "alloc"))]
