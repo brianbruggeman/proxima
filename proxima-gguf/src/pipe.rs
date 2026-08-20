@@ -80,9 +80,23 @@ impl ParsedGguf {
     }
 }
 
+/// A GGUF header plus tensor directory is a few hundred KB even for a
+/// multi-gigabyte checkpoint, so [`parse_complete`] walks `input` a slice at
+/// a time and stops at [`GgufParser::is_complete`] rather than handing over
+/// the whole file. Feeding the whole thing copied every tensor byte into the
+/// parser's accumulator to read a directory that sits entirely at the front:
+/// measured 4.14 GB copied, which also forced the caller's whole mmap
+/// resident and set the process's peak RSS.
+const DIRECTORY_CHUNK_BYTES: usize = 1 << 20;
+
 /// Parses one complete, already-assembled byte slice in a single call.
 /// Stateless — a fresh [`GgufParser`] is built and driven internally on
 /// every call.
+///
+/// Only reads as far into `input` as the tensor directory extends; the
+/// tensor payload behind it is never touched. `input` still has to *be* the
+/// whole file, because [`ParsedGguf::tensor_data_range`] validates offsets
+/// against `input.len()`.
 ///
 /// # Errors
 ///
@@ -90,7 +104,17 @@ impl ParsedGguf {
 /// [`GgufError::TruncatedInput`] if `input` ends before the tensor
 /// directory is fully parsed.
 pub fn parse_complete(input: &[u8]) -> Result<ParsedGguf, GgufError> {
-    let (parser, events) = GgufParser::new().push(input)?;
+    let mut parser = GgufParser::new();
+    let mut events = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < input.len() && !parser.is_complete() {
+        let end = input.len().min(offset + DIRECTORY_CHUNK_BYTES);
+        let (advanced, unlocked) = parser.push(&input[offset..end])?;
+        parser = advanced;
+        events.extend(unlocked);
+        offset = end;
+    }
 
     let mut header = None;
     let mut metadata = Vec::new();
