@@ -2500,7 +2500,7 @@ mod tests {
         let pool = build_pool(4);
         let data: Vec<u32> = (0..10_000_u32).rev().collect();
         let mut expected = data.clone();
-        expected.sort_by(|a, b| a.cmp(b));
+        expected.sort();
         let sorted = par_sort_by(&pool, data, |a, b| a.cmp(b)).await;
         assert_eq!(sorted, expected);
     }
