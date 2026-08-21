@@ -223,12 +223,26 @@ pub fn execute(
 
     let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
     for (node, block) in prepared.block_nodes.iter().zip(blocks.iter()) {
-        let QuantizedBlock::Float32(data) = block else {
-            return Err(unsupported_gpu_codec(*node, block));
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => {
+                let dtype = gpu_dtype(program, &prepared.index_nodes, *node);
+                upload_block(&device, data, *node, dtype)?
+            }
+            QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes)?,
+            other => return Err(unsupported_gpu_codec(*node, other)),
         };
-        let dtype = gpu_dtype(program, &prepared.index_nodes, *node);
-        device_buffers.insert(*node, upload_block(&device, data, *node, dtype)?);
+        device_buffers.insert(*node, buffer);
     }
+    // which block nodes are packed, resolved once for the whole dispatch:
+    // the emitter needs it to type each operand binding and pick the read
+    // shape, and it is only knowable here, from the bound blocks.
+    let q4k_operands: BTreeSet<NodeId> = prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
+        .map(|(node, _)| *node)
+        .collect();
 
     let command_buffer = queue
         .commandBuffer()
@@ -252,6 +266,7 @@ pub fn execute(
             &mut pipeline_cache,
             &mut device_buffers,
             bound,
+            &q4k_operands,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -304,7 +319,14 @@ struct Prepared {
 fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
     match block {
         QuantizedBlock::Float32(data) => Ok(data.len()),
-        QuantizedBlock::Q4K(_) | QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) | QuantizedBlock::Q8_0(_) => {
+        // packed bytes and elements are NOT the same unit: a `Q4_K`
+        // super-block is 144 bytes carrying 256 elements, so the count the
+        // shape check compares against comes from block geometry, never
+        // from `bytes.len()`.
+        QuantizedBlock::Q4K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q4K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
+        }
+        QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) | QuantizedBlock::Q8_0(_) => {
             Err(unsupported_gpu_codec(node, block))
         }
     }
@@ -857,6 +879,29 @@ fn upload_block_as_float(
     upload_block_copy(device, pointer, byte_length)
 }
 
+/// Uploads a packed quantized weight buffer as raw BYTES — no dequantize on
+/// the host, which is the entire point. A 7B `Q4_K_S` checkpoint is 3.784 GB
+/// packed against 14.5 GB as `f16`; decode is a weight sweep, so that 3.56x
+/// in traffic IS the token rate. Reuses the same page-aligned no-copy path
+/// [`upload_block_as_float`] uses, since a memory-mapped GGUF tensor is very
+/// often already page-aligned.
+fn upload_packed_bytes(
+    device: &ProtocolObject<dyn MTLDevice>,
+    bytes: &[u8],
+) -> Result<MetalBuffer, MetalError> {
+    if bytes.is_empty() {
+        return allocate_buffer(device, 0, DType::Float32);
+    }
+    let byte_length = bytes.len();
+    let pointer = bytes.as_ptr().cast::<c_void>();
+    if is_page_aligned(pointer, byte_length) {
+        counter!(NOCOPY_BUFFER_UPLOADS, 1);
+        return upload_block_no_copy(device, pointer, byte_length);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    upload_block_copy(device, pointer, byte_length)
+}
+
 /// The zero-copy path: shares `pointer`'s memory directly with the GPU
 /// instead of duplicating it. Sound only because every caller of
 /// [`upload_block`] binds the returned buffer to a `device const float*`
@@ -1059,8 +1104,9 @@ fn encode_op(
     pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
     bound: &BoundOp,
+    q4k_operands: &BTreeSet<NodeId>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
-    let kernel = emit(bound)?;
+    let kernel = emit(bound, q4k_operands)?;
     let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
     let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
     let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
