@@ -2337,6 +2337,75 @@ where
     }
 }
 
+/// One cohort round holding an ORDERED sequence of parallel stages, so a
+/// whole run of graph nodes pays ONE round open/close instead of one each.
+///
+/// This exists because the per-node round is the measured binding constraint
+/// on decode (`proxima-tensor/docs/discipline.md` ROW 68): a decode
+/// elementwise node holds ~33 us of work and opening a round costs ~25 us, so
+/// splitting one node across the cohort measured 2x WORSE, while leaving it
+/// serial measured no thread scaling at all (`reduce_f32_dense` 3.859 ms at 1
+/// worker, 3.952 at 8). Neither end of that trade is acceptable; the way out
+/// is to stop paying per node. ggml's CPU backend runs its whole graph on a
+/// persistent team with a cheap barrier between nodes, which is the shape
+/// this reproduces.
+///
+/// No new `prime` primitive was needed. [`CohortRound`] hands out a flat
+/// chunk space off a monotonic `fetch_add` cursor (`prime/src/os/cohort.rs`
+/// `cursor`), so chunk `i` is always CLAIMED before chunk `i + 1`. Laying
+/// stages out consecutively in that space therefore means every chunk of
+/// stage `s - 1` has an owner before any chunk of stage `s` is claimed, and a
+/// member that reaches stage `s` can simply wait on a per-stage counter.
+///
+/// Deadlock-free by induction on stage index: a member waiting at stage `s`
+/// waits only on stage `s - 1` chunks, each of which has an owner that is
+/// either running it or waiting on a strictly earlier stage; the
+/// lowest-stage active member is therefore always running, never waiting.
+/// The counter is bumped even when a chunk FAILS, so one stage's error can
+/// never hang the members behind it — the error still propagates through
+/// `CohortSession`'s own report.
+///
+/// Requires the default all-chunks completion policy: a `FanInCompletion`
+/// that stops dispatch early would strand a stage's chunks unclaimed and
+/// hang the stage behind it.
+///
+/// Gated to `cfg(test)` until its consumer lands: the semantics below are
+/// the load-bearing, easy-to-get-wrong half (claim order, barrier,
+/// deadlock-freedom, error publication), so they are proven FIRST and
+/// separately from the graph-walking change that will use them. Wiring the
+/// executor onto this is what removes the gate.
+#[cfg(test)]
+struct StagedRound<'round, Run> {
+    stage_count: usize,
+    chunks_per_stage: usize,
+    /// completed-chunk count for each stage, indexed by stage.
+    completed: &'round [AtomicUsize],
+    run_stage_chunk: Run,
+}
+
+#[cfg(test)]
+impl<Run> CohortRound<TensorError> for StagedRound<'_, Run>
+where
+    Run: Fn(usize, usize) -> Result<(), TensorError> + Sync,
+{
+    fn chunks(&self) -> usize {
+        self.stage_count * self.chunks_per_stage
+    }
+
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
+        let stage = chunk.0 / self.chunks_per_stage;
+        let within_stage = chunk.0 % self.chunks_per_stage;
+        if let Some(previous) = stage.checked_sub(1) {
+            while self.completed[previous].load(Ordering::Acquire) < self.chunks_per_stage {
+                core::hint::spin_loop();
+            }
+        }
+        let outcome = (self.run_stage_chunk)(stage, within_stage);
+        self.completed[stage].fetch_add(1, Ordering::Release);
+        outcome
+    }
+}
+
 fn run_elementwise<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
@@ -9848,6 +9917,115 @@ mod tests {
 
     use crate::test_support::Lcg;
 
+
+    /// The property [`StagedRound`] exists for: a chunk in stage `s` never
+    /// observes stage `s - 1` incomplete. Driven from real threads against
+    /// the real `run_chunk`, with chunks handed out off a monotonic cursor
+    /// exactly the way `prime`'s cohort hands them out — that ordering is
+    /// the precondition the barrier's deadlock-freedom argument rests on, so
+    /// the test reproduces it rather than assuming it.
+    ///
+    /// Each stage's chunk asserts every earlier stage is fully published,
+    /// then publishes its own slot. A missing barrier shows up as a stage
+    /// reading a slot its predecessor had not written yet.
+    #[test]
+    fn staged_round_never_runs_a_stage_before_its_predecessor_completes() {
+        const STAGES: usize = 6;
+        const CHUNKS: usize = 4;
+        const MEMBERS: usize = 3;
+
+        let completed: Vec<AtomicUsize> = (0..STAGES).map(|_| AtomicUsize::new(0)).collect();
+        let published: Vec<AtomicUsize> = (0..STAGES * CHUNKS).map(|_| AtomicUsize::new(0)).collect();
+        let violations = AtomicUsize::new(0);
+
+        let round = StagedRound {
+            stage_count: STAGES,
+            chunks_per_stage: CHUNKS,
+            completed: &completed,
+            run_stage_chunk: |stage: usize, within: usize| {
+                for earlier in 0..stage {
+                    for slot in 0..CHUNKS {
+                        if published[earlier * CHUNKS + slot].load(Ordering::Acquire) != 1 {
+                            violations.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                published[stage * CHUNKS + within].store(1, Ordering::Release);
+                Ok(())
+            },
+        };
+
+        let cursor = AtomicUsize::new(0);
+        let total = round.chunks();
+        std::thread::scope(|scope| {
+            for _ in 0..MEMBERS {
+                scope.spawn(|| {
+                    loop {
+                        let claimed = cursor.fetch_add(1, Ordering::Relaxed);
+                        if claimed >= total {
+                            break;
+                        }
+                        round.run_chunk(ChunkIndex(claimed)).expect("staged chunk must not fail");
+                    }
+                });
+            }
+        });
+
+        assert_eq!(violations.load(Ordering::Relaxed), 0, "a stage ran before its predecessor completed");
+        assert_eq!(total, STAGES * CHUNKS, "flat chunk space must cover every stage");
+        for (index, slot) in published.iter().enumerate() {
+            assert_eq!(slot.load(Ordering::Relaxed), 1, "chunk {index} never ran");
+        }
+    }
+
+    /// Fewer members than stages is the case the deadlock-freedom argument
+    /// has to cover: a member that claims a late stage waits on chunks whose
+    /// owners may themselves be waiting. One member is the extreme.
+    #[test]
+    fn staged_round_completes_with_a_single_member() {
+        const STAGES: usize = 5;
+        const CHUNKS: usize = 2;
+
+        let completed: Vec<AtomicUsize> = (0..STAGES).map(|_| AtomicUsize::new(0)).collect();
+        let ran = AtomicUsize::new(0);
+        let round = StagedRound {
+            stage_count: STAGES,
+            chunks_per_stage: CHUNKS,
+            completed: &completed,
+            run_stage_chunk: |_stage: usize, _within: usize| {
+                ran.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        };
+        for chunk in 0..round.chunks() {
+            round.run_chunk(ChunkIndex(chunk)).expect("staged chunk must not fail");
+        }
+        assert_eq!(ran.load(Ordering::Relaxed), STAGES * CHUNKS);
+    }
+
+    /// A failing chunk must still publish, or every member behind it hangs
+    /// on the barrier instead of seeing the error through the round's report.
+    #[test]
+    fn staged_round_publishes_a_failed_chunk_so_later_stages_do_not_hang() {
+        const CHUNKS: usize = 2;
+        let completed: Vec<AtomicUsize> = (0..2).map(|_| AtomicUsize::new(0)).collect();
+        let round = StagedRound {
+            stage_count: 2,
+            chunks_per_stage: CHUNKS,
+            completed: &completed,
+            run_stage_chunk: |stage: usize, _within: usize| {
+                if stage == 0 {
+                    Err(TensorError::NotLowerable { node: NodeId(0), reason: "staged round error propagation fixture" })
+                } else {
+                    Ok(())
+                }
+            },
+        };
+        assert!(round.run_chunk(ChunkIndex(0)).is_err());
+        assert!(round.run_chunk(ChunkIndex(1)).is_err());
+        assert_eq!(completed[0].load(Ordering::Relaxed), CHUNKS, "a failed chunk must still publish");
+        assert!(round.run_chunk(ChunkIndex(2)).is_ok(), "stage 1 must not be blocked by stage 0's error");
+    }
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
         (0..count).map(|_| lcg.next_unit()).collect()
