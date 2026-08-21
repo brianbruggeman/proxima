@@ -151,13 +151,23 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) {
         );
     }
 
-    if config.kv_cache_key_quant != GgmlType::F16 || config.kv_cache_value_quant != GgmlType::F16 {
+    let key_quant_supported = config.kv_cache_key_quant == GgmlType::F32;
+    let value_quant_supported = config.kv_cache_value_quant == GgmlType::F32;
+    if !key_quant_supported || !value_quant_supported {
         todo!(
-            "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): there is no \
-             persistent KV cache to quantize at all -- this forward recomputes every \
-             position from the full prompt each call, so implementing this requires \
-             building an incremental KV cache store keyed by layer and head with a \
-             per-tensor storage dtype before a quant type on it means anything",
+            "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): the per-layer \
+             key/value context cache (`proxima-model-interop`'s cached decode loop, \
+             `proxima_tensor::spec::mistral_cached_forward_program`) stores F32 unquantized \
+             today; Q8_0 storage and its `matmul_q8_0_f32` kernel exist \
+             (`proxima_tensor::cpu::QuantizedBlock::Q8_0`) but the read path does not work \
+             end to end -- the quantized matmul dispatch only handles a flat \
+             `weight[rows, k] x activation[batch, k]` matmul, while the cached-attention \
+             reduces are batched reduces over a shared kv-head axis (the K-cache reduce \
+             keeps the cached-length axis as an output axis, the V-cache reduce contracts \
+             it), which the blocking check in \
+             `proxima_tensor::cpu::run_reduce_quantized` (`proxima-tensor/src/cpu.rs:2485`) \
+             rejects; F16/Q4_0/every other GgmlType has no packing or matmul kernel wired \
+             in at all",
             config.kv_cache_key_quant, config.kv_cache_value_quant
         );
     }
@@ -270,9 +280,11 @@ mod tests {
     }
 
     /// `apply_serving_config` on the owner's own default invocation still
-    /// reaches an unimplemented knob (`-ctk`/`-ctv` fire first, ahead of
-    /// `-fa`, `-ngl`, `--reasoning-budget`) -- the placeholders are real,
-    /// not decorative, even against the one config that matters most.
+    /// reaches an unimplemented knob -- the owner's invocation is `-ctk
+    /// q8_0 -ctv q8_0`, and only F32 is supported end to end, so
+    /// `kv_cache_key_quant`/`kv_cache_value_quant` fires first, ahead of
+    /// `-fa`, `-ngl`, `--reasoning-budget`. The placeholders are real, not
+    /// decorative, even against the one config that matters most.
     #[test]
     #[should_panic(expected = "kv_cache_key_quant")]
     fn owner_default_invocation_reaches_an_unimplemented_knob() {
@@ -288,8 +300,8 @@ mod tests {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -307,8 +319,8 @@ mod tests {
     #[should_panic(expected = "parallel_sequences")]
     fn multiple_parallel_sequences_reaches_its_todo() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -334,8 +346,8 @@ mod tests {
     #[should_panic(expected = "min_p")]
     fn nonzero_min_p_reaches_its_todo() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
