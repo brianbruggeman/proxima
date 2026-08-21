@@ -475,11 +475,65 @@ pub enum QuantizedBlock<'a> {
 /// output — which is exactly the shape `reject_non_float32`'s
 /// quantized-weight exemption carves out, not a program `evaluate_typed`
 /// would ever accept.
+///
+/// Every call starts and ends with an empty node-output pool and an
+/// unvalidated structure cache — see [`evaluate_quantized_with_scratch`]
+/// for the same contract with caller-carried state that survives across
+/// calls to the same `program`.
 pub fn evaluate_quantized(
     program: &[Op],
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
+    evaluate_quantized_with_scratch(program, symbols, blocks, outputs, &mut free_buffers, &mut validated_weight_nodes)
+}
+
+/// Same contract as [`evaluate_quantized`], plus two capabilities a caller
+/// cannot get from that function, both aimed at the same shape of caller: a
+/// decode loop that evaluates the *same* `program` once per generated
+/// token, where only `symbols` (`cached_len` growing by one) actually
+/// changes between calls and every weight stays put.
+///
+/// `free_buffers` is [`evaluate_with_scratch`]'s own reuse pool, applied to
+/// this evaluator's loop the same way this crate's internal `evaluate_pooled`
+/// already applies it to [`evaluate`]/[`evaluate_parallel`] — a private
+/// `take_or_allocate` helper hands a node its output storage from the pool
+/// instead of a fresh `vec![0.0; n]`, and a private `retire_into` helper
+/// returns a retired node's owned storage to the pool instead of dropping
+/// it. `evaluate_quantized` did neither: every one of a program's nodes
+/// paid a fresh heap allocation on every call, measured at 3.2-3.7 ms/step
+/// of a ~68 ms cached-decode step on the real checkpoint this crate's own
+/// `DIAG … loop_overhead_ms` reports.
+///
+/// `validated_weight_nodes` caches this module's private
+/// `reject_non_float32` gate's outcome across calls. That gate's cost is
+/// `O(quantized weight count * program.len())` — for every node this
+/// call's `blocks` tags as a packed weight, a private
+/// `is_quantized_matmul_operand` helper rescans the whole program to prove
+/// it is used in a matmul shape — and neither `program` nor which nodes are
+/// weight-typed changes between decode steps, so the same outcome is valid
+/// on every call after the first. Measured at 1.9-2.0 ms/step on the real
+/// checkpoint's 1196-node cached-forward program, roughly half of
+/// `DIAG … setup_ms`. A call whose `blocks` classifies a different set of
+/// nodes as weight-typed than the cached run (a genuinely different
+/// program shape, not a decode step) invalidates the cache and pays the
+/// full gate again — the comparison against the cached
+/// `BTreeSet<NodeId>` is what decides that,
+/// not a size or pointer check that a coincidental match could fool.
+///
+/// `evaluate_quantized` is exactly this function with `free_buffers` and
+/// `validated_weight_nodes` starting, and ending, empty — the same
+/// relationship [`evaluate`] has to [`evaluate_with_scratch`].
+pub fn evaluate_quantized_with_scratch(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     // DIAGNOSTIC (proxima-debugger, remove before landing): brackets the
     // portion of evaluate_quantized that is neither the per-node-kind loop
@@ -519,7 +573,10 @@ pub fn evaluate_quantized(
     }
 
     let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
-    reject_non_float32(program, &quantized_weight_nodes)?;
+    if validated_weight_nodes.as_ref() != Some(&quantized_weight_nodes) {
+        reject_non_float32(program, &quantized_weight_nodes)?;
+        *validated_weight_nodes = Some(quantized_weight_nodes);
+    }
 
     let root = program
         .len()
@@ -603,7 +660,7 @@ pub fn evaluate_quantized(
     for (position, computed) in resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
         let diag_alloc_started = instrument::read_ticks();
-        let mut output = vec![0.0f32; node_output_len(computed)];
+        let mut output = take_or_allocate(free_buffers, node_output_len(computed));
         #[cfg(feature = "instrument")]
         {
             diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_alloc_started);
@@ -636,11 +693,15 @@ pub fn evaluate_quantized(
             }
         }
         for retired in &retires[position] {
-            buffers[retired.0 as usize] = None;
             // symmetric `Some` -> `None` transition: `retired` was written
             // at its own computed position above and read (never retired
             // twice -- `node_retirement` records each node's LAST read
-            // position only), so it is always live here.
+            // position only), so it is always live here. `retire_into`
+            // additionally hands this evaluator's own owned storage back to
+            // `free_buffers` instead of dropping it -- a no-op for a
+            // caller-borrowed `Op::Input`/`Cow::Borrowed` slot, exactly as
+            // `evaluate_pooled`'s identical use of it already relies on.
+            retire_into(&mut buffers, *retired, free_buffers);
             live_now -= 1;
         }
         #[cfg(feature = "instrument")]
@@ -700,6 +761,31 @@ pub fn evaluate_quantized_named<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
+    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
+    evaluate_quantized_named_with_scratch(
+        program,
+        symbols,
+        named,
+        outputs,
+        &mut free_buffers,
+        &mut validated_weight_nodes,
+    )
+}
+
+/// [`evaluate_quantized_named`]'s counterpart to
+/// [`evaluate_quantized_with_scratch`] — the same name-to-[`Op::Input`]
+/// resolution loop, handing the resolved positional `blocks` and both
+/// caller-carried pools straight through rather than duplicating either
+/// evaluator's body a third time.
+pub fn evaluate_quantized_named_with_scratch<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+) -> Result<Evaluated, TensorError> {
     // DIAGNOSTIC (proxima-debugger, remove before landing): this name
     // resolution runs before evaluate_quantized's own diag_setup_started
     // timer starts, so it is invisible to every counter that function
@@ -726,7 +812,7 @@ pub fn evaluate_quantized_named<'block>(
         instrument::ticks_to_nanos(instrument::elapsed_ticks(diag_resolve_started)) as f64 / 1_000_000.0,
         block_nodes.len(),
     );
-    evaluate_quantized(program, symbols, &blocks, outputs)
+    evaluate_quantized_with_scratch(program, symbols, &blocks, outputs, free_buffers, validated_weight_nodes)
 }
 
 /// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only

@@ -316,7 +316,7 @@ mod real_openchat_file {
     use proxima_gguf::pipe::ParsedGguf;
     use proxima_gguf::quant::q4_k;
     use proxima_tensor::DType;
-    use proxima_tensor::cpu::{QuantizedBlock, evaluate_named, evaluate_quantized_named};
+    use proxima_tensor::cpu::{QuantizedBlock, evaluate_named, evaluate_quantized_named, evaluate_quantized_named_with_scratch};
     #[cfg(feature = "instrument")]
     use proxima_tensor::instrument;
     use proxima_tensor::map::{self, IndexMap};
@@ -1382,6 +1382,14 @@ mod real_openchat_file {
         let mut cached_len = 0usize;
         let mut next_ids = ids.clone();
         let decode_start = std::time::Instant::now();
+        // carried across every step of this loop -- the same `program` runs
+        // once per generated token, so `evaluate_quantized_named_with_scratch`'s
+        // node-output pool and weight-validation cache both stay warm from
+        // step 1 onward instead of paying a fresh allocation and a full
+        // `reject_non_float32` re-walk on every token (see that function's
+        // own doc for the measured cost each avoids).
+        let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+        let mut validated_weight_nodes: Option<alloc::collections::BTreeSet<proxima_tensor::op::NodeId>> = None;
 
         for step in 0..max_tokens {
             let new_count = next_ids.len();
@@ -1416,8 +1424,15 @@ mod real_openchat_file {
             }
 
             let step_start = std::time::Instant::now();
-            let evaluated = evaluate_quantized_named(&program, &symbols, &named_blocks, &roots)
-                .expect("evaluate_quantized_named binds one cached decode step by name, packed weights included");
+            let evaluated = evaluate_quantized_named_with_scratch(
+                &program,
+                &symbols,
+                &named_blocks,
+                &roots,
+                &mut free_buffers,
+                &mut validated_weight_nodes,
+            )
+            .expect("evaluate_quantized_named_with_scratch binds one cached decode step by name, packed weights included");
             let step_elapsed = step_start.elapsed();
 
             for (layer, (even, odd, value)) in cache_roots.iter().enumerate() {
