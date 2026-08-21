@@ -1482,16 +1482,27 @@ mod real_openchat_file {
     /// `kv_heads` axis between the cache operand and the activation
     /// operand, and (for `attended_cached`) contract the cache's own
     /// growing `cached_len` axis rather than the head-dimension axis a
-    /// weight matmul always contracts. `run_reduce_quantized`'s
-    /// `rows`/`k`/`leading_total` shape math
-    /// (`proxima-tensor/src/cpu.rs:2402`, gated by `leading_total !=
-    /// activation.len() / k` at `proxima-tensor/src/cpu.rs:2485`) assumes
-    /// a flat `weight[rows, k] x activation[batch, k] -> output[batch,
-    /// rows]` matmul -- exactly the shape a `Q4_K`/`Q5_K`/`Q6_K` GGUF
-    /// weight tensor has and the cache's own einsum does not, so this
-    /// call fails on its very first evaluation (`cached_len == 0`,
-    /// `new_count == prompt_length`), not merely late in a run. This is
-    /// reproduced directly rather than routed around with a new `Op`
+    /// weight matmul always contracts.
+    ///
+    /// `run_reduce_quantized`'s shape derivation (`proxima-tensor/src/cpu.rs:2402`)
+    /// used to divide raw packed-weight byte lengths to derive `rows`, which
+    /// disagreed with the activation's own element count by exactly the
+    /// `kv_heads` factor -- a shape-arithmetic bug, since fixed: the shape
+    /// is now read from the same resolved axis structure
+    /// (`resolve_reduce_axis_shape`, `proxima-tensor/src/cpu.rs`) `run_reduce`
+    /// itself reads, and it correctly identifies that `kv_heads` is
+    /// nonzero-stride on BOTH the packed weight and the activation operand
+    /// -- not a cardinality bug at all, but a real capability gap: this
+    /// interpreter's `[rows, k] x [k] -> [rows]` kernel call dots ONE
+    /// activation vector against every packed row, which only holds when
+    /// the activation is constant across whatever axes the weight's own
+    /// rows enumerate. Here it is not, so the reduce still fails on its
+    /// very first evaluation (`cached_len == 0`, `new_count ==
+    /// prompt_length`) -- now for that reason, not a division mismatch.
+    /// Closing this for real needs a per-position packed-weight byte offset
+    /// (batching the matmul call itself over `kv_heads`), which is a kernel
+    /// change out of this fix's scope, not a shape derivation one; it is
+    /// reproduced directly here rather than routed around with a new `Op`
     /// variant or a new type, per this task's own instruction.
     ///
     /// `serving.rs`'s own `apply_serving_config` gate now rejects every
@@ -1515,8 +1526,8 @@ mod real_openchat_file {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_cached_greedy_decode_loop(GgmlType::Q8_0, false)));
         let panic_payload = outcome.expect_err(
-            "expected the cached attention reduce's broadcast/contraction shape to be rejected \
-             by run_reduce_quantized's flat weight-matmul assumption -- see this test's own doc",
+            "expected the cached attention reduce's shared kv_heads axis to be rejected as a real \
+             matmul-capability gap -- see this test's own doc",
         );
         let message = panic_payload
             .downcast_ref::<alloc::string::String>()
@@ -1524,7 +1535,9 @@ mod real_openchat_file {
             .or_else(|| panic_payload.downcast_ref::<&str>().map(|value| alloc::string::String::from(*value)))
             .unwrap_or_default();
         assert!(
-            message.contains("quantized matmul batch shape does not evenly divide by its packed weight rows"),
+            message.contains(
+                "quantized matmul activation varies along an output axis its packed weight also varies along"
+            ),
             "unexpected panic message: {message}"
         );
     }
