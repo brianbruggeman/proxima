@@ -2446,14 +2446,62 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         unreachable!("run_reduce_quantized is only called for a Keep::Reduce fold")
     };
-    let reduction_dims: Vec<u16> =
-        (0..resolved.extents.len() as u16).filter(|dim| !output_axes.as_slice().contains(dim)).collect();
-    let contraction_width: u64 = reduction_dims.iter().map(|dim| resolved.extents[*dim as usize]).product();
+    // Single-sourced from the same resolved axis structure `run_reduce`
+    // reads (`resolve_reduce_axis_shape`), not a second, independent
+    // derivation from raw packed-weight byte lengths -- that second
+    // derivation is what let this shape drift out of step with the whole
+    // reduce's own `output_axes`/`extents` on a cached-attention fold (see
+    // `ReduceAxisShape`'s own doc).
+    let axis_shape = resolve_reduce_axis_shape(resolved, output_axes.as_slice());
+    let contraction_width: u64 = axis_shape.reduction_extents.iter().product();
     let shape_error = || TensorError::NotLowerable {
         node: resolved.node,
         reason: "quantized matmul batch shape does not evenly divide by its packed weight rows",
     };
+    let shared_axis_error = || TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "quantized matmul activation varies along an output axis its packed weight also \
+                 varies along -- not a flat weight matmul this interpreter can express",
+    };
     let k = usize::try_from(contraction_width).map_err(|_| shape_error())?;
+
+    let weight_layout = resolved
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == weight_node)
+        .map(|(_, layout, _)| layout)
+        .ok_or_else(shape_error)?;
+    let activation_layout = resolved
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == activation_node)
+        .map(|(_, layout, _)| layout)
+        .ok_or_else(shape_error)?;
+
+    // Every output axis the packed weight varies over (nonzero stride) is
+    // one of its own physical rows; every output axis it broadcasts over
+    // (stride 0) is a batch position the same rows are reused for across —
+    // `matmul_q4k_f32`'s target shape, `[rows, k] x [k] -> [rows]` called
+    // once per batch position, never a byte-length division. An axis the
+    // activation ALSO varies over while the weight does too cannot be
+    // folded into either bucket: the loop below dots ONE activation vector
+    // against every packed row, which only holds when the activation is
+    // constant across whichever axes the weight's own rows enumerate.
+    let mut rows_total: u64 = 1;
+    let mut leading_total_u64: u64 = 1;
+    for axis in output_axes.as_slice() {
+        let extent = resolved.extents[*axis as usize];
+        if weight_layout.stride(*axis) != 0 {
+            if activation_layout.stride(*axis) != 0 {
+                return Err(shared_axis_error());
+            }
+            rows_total *= extent;
+        } else {
+            leading_total_u64 *= extent;
+        }
+    }
+    let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
+    let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
 
     // Every K-quant weight codec this crate packs shares `Q4K_BLOCK_ELEMENTS`
     // (256) elements per super-block (`q5_k`/`q6_k`'s own module docs: same
@@ -2470,19 +2518,17 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
     };
-    if k == 0 || !weights.len().is_multiple_of(block_bytes) {
+    if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }
+    // The packed buffer's own byte length must hold exactly the
+    // structurally-derived `rows * k` elements -- still validated, just no
+    // longer the SOURCE `rows` is derived from.
     let total_weight_elements = (weights.len() / block_bytes) * block_elements;
-    if !total_weight_elements.is_multiple_of(k) {
+    if total_weight_elements != rows * k {
         return Err(shape_error());
     }
-    let rows = total_weight_elements / k;
-    if rows == 0 || !output.len().is_multiple_of(rows) || !activation.len().is_multiple_of(k) {
-        return Err(shape_error());
-    }
-    let leading_total = output.len() / rows;
-    if leading_total != activation.len() / k {
+    if output.len() != leading_total * rows || activation.len() != leading_total * k {
         return Err(shape_error());
     }
 
@@ -2701,6 +2747,43 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     run_reduce(resolved, buffers, output)
 }
 
+/// The axis structure one `Keep::Reduce` fold's own binding already carries:
+/// which of `resolved.extents`'s axes are reduced away versus kept in the
+/// output, and the extents on each side of that split. Both the dense f32
+/// path ([`run_reduce`]) and the quantized-weight path
+/// ([`run_reduce_quantized`]) need exactly this — the only shape a
+/// `Keep::Reduce` fold has — so it is derived once, here, rather than twice:
+/// [`run_reduce_quantized`] used to re-derive its own `k` by dividing raw
+/// packed-weight byte lengths instead of reading `output_axes` the way this
+/// does, which is what let its shape drift out of step with this one
+/// (`proxima-tensor` cached-attention quantized-seam fix).
+struct ReduceAxisShape<'op> {
+    reduction_dims: Vec<u16>,
+    leading_output_axes: &'op [u16],
+    last_output_dim: Option<u16>,
+    leading_extents: Vec<u64>,
+    reduction_extents: Vec<u64>,
+    width: usize,
+}
+
+fn resolve_reduce_axis_shape<'op>(resolved: &BoundOp, output_axes: &'op [u16]) -> ReduceAxisShape<'op> {
+    let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
+    let (leading_output_axes, last_output_dim) = output_axes_split(output_axes);
+
+    let leading_extents: Vec<u64> = leading_output_axes.iter().map(|dim| resolved.extents[*dim as usize]).collect();
+    let reduction_extents: Vec<u64> = reduction_dims.iter().map(|dim| resolved.extents[*dim as usize]).collect();
+    let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
+
+    ReduceAxisShape {
+        reduction_dims,
+        leading_output_axes,
+        last_output_dim,
+        leading_extents,
+        reduction_extents,
+        width,
+    }
+}
+
 /// The dense f32 GEMM interpreter: NEON dot/width tiles then a generic
 /// fallback. Never sees a quantized weight — [`run_node_into`] routes any
 /// call with `quantized_weights: Some(_)` through
@@ -2728,20 +2811,14 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     let mut operand_values = vec![0.0f32; raw.len()];
     let mut step_values = vec![0.0f32; body.steps.len()];
 
-    let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16)
-        .filter(|dim| !output_axes.as_slice().contains(dim))
-        .collect();
-    let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
-
-    let leading_extents: Vec<u64> = leading_output_axes
-        .iter()
-        .map(|dim| resolved.extents[*dim as usize])
-        .collect();
-    let reduction_extents: Vec<u64> = reduction_dims
-        .iter()
-        .map(|dim| resolved.extents[*dim as usize])
-        .collect();
-    let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
+    let ReduceAxisShape {
+        reduction_dims,
+        leading_output_axes,
+        last_output_dim,
+        leading_extents,
+        reduction_extents,
+        width,
+    } = resolve_reduce_axis_shape(resolved, output_axes.as_slice());
 
     // loop-invariant: neither `last_output_dim` nor the operand views change
     // across the whole node, so this stride table is built once instead of
@@ -12928,6 +13005,106 @@ mod tests {
             relative_max_diff < 0.01,
             "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
              exceeds loose sanity bound"
+        );
+    }
+
+    /// A small, synthetic stand-in for the cached-attention reduce shape
+    /// that trips the seam `q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam`
+    /// (`proxima-model-interop/src/bind.rs`) reaches on a real checkpoint:
+    /// one axis (`u`, the kv-head analog) that the packed weight operand
+    /// varies over AND the activation operand ALSO varies over, kept as an
+    /// OUTPUT axis (not the contracted one). Iteration space `[s, t, u, d]`
+    /// — `t` (cached-length analog) is the sole reduced axis; `s`, `u`, `d`
+    /// survive into the output. The packed weight varies over `t, u, d`
+    /// (broadcasts over `s`); the activation varies over `s, t, u`
+    /// (broadcasts over `d`) — `u` is the axis both share.
+    ///
+    /// Before this fix, `run_reduce_quantized`'s raw-byte division
+    /// (`cpu.rs:2476-2486`) derived `rows` from the packed weight's own byte
+    /// length alone (`u * d` here, 32), then checked `output.len() / rows`
+    /// against `activation.len() / k` — `64 / 32 = 2` (real leading axis
+    /// `s`) against `32 / 4 = 8` (a leading count that has already folded in
+    /// `u`, which `rows` also claimed) — an off-by-`u`-factor disagreement,
+    /// not a coincidence: this is the same "kv-head factor" mismatch the
+    /// real checkpoint reduce hits, rejected with the generic
+    /// "does not evenly divide" reason.
+    ///
+    /// After this fix, the rejection is structural rather than a cardinality
+    /// coincidence: `resolve_reduce_axis_shape` (shared with [`run_reduce`])
+    /// finds `u` nonzero-stride on BOTH the packed weight and the
+    /// activation, which is not a shape `run_reduce_quantized`'s one flat
+    /// `[rows, k] x [k]` matmul kernel can express (one activation vector
+    /// dotted against every packed row). Closing this for real needs a
+    /// per-position packed-weight byte offset the interpreter does not have
+    /// today — a capability gap, not a shape-arithmetic one — so this test
+    /// still asserts a rejection, now for the reason that is actually true.
+    #[test]
+    fn a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejected() {
+        use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, quantize};
+
+        let sequence_len: u32 = 2; // s -- leading, weight-broadcast
+        let cached_len: u32 = 4; // t -- the sole reduced axis
+        let kv_heads: u32 = 4; // u -- shared between weight and activation
+        let head_dim: u32 = 8; // d -- weight-only row axis
+
+        let mut program = Vec::new();
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(cached_len), Extent::Static(kv_heads), Extent::Static(head_dim)],
+        );
+        let activation = f32_block(
+            &mut program,
+            &[Extent::Static(sequence_len), Extent::Static(cached_len), Extent::Static(kv_heads)],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
+                    (activation, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 2, 3])),
+                keep: Keep::Reduce,
+                name: Some("cached_attention_shaped_reduce".into()),
+            }),
+        );
+
+        let weight_elements = (cached_len * kv_heads * head_dim) as usize;
+        assert_eq!(weight_elements % QK8_0, 0, "fixture dims must divide evenly into whole Q8_0 blocks");
+        let weight_f32: Vec<f32> = random_vec(29, weight_elements);
+        let mut weight_bytes = vec![0u8; (weight_elements / QK8_0) * BLOCK_BYTES];
+        quantize(&weight_f32, &mut weight_bytes).expect("fixture weight length is a whole multiple of QK8_0");
+
+        let activation_values: Vec<f32> = random_vec(31, (sequence_len * cached_len * kv_heads) as usize);
+
+        let blocks = [QuantizedBlock::Q8_0(&weight_bytes), QuantizedBlock::Float32(&activation_values)];
+        let outcome = evaluate_quantized(&program, &[], &blocks, &[sum]);
+
+        let error = outcome.expect_err(
+            "a packed weight operand and its activation sharing a kept output axis is not a flat \
+             matmul this interpreter can express -- see this test's own doc",
+        );
+        assert_eq!(
+            error,
+            TensorError::NotLowerable {
+                node: sum,
+                reason: "quantized matmul activation varies along an output axis its packed weight also \
+                         varies along -- not a flat weight matmul this interpreter can express",
+            }
         );
     }
 
