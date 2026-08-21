@@ -538,8 +538,8 @@ mod real_openchat_file {
         // first `todo!` by design. the overrides below are exactly the knobs
         // this forward does not implement yet -- the delta IS the gap list.
         let serving_config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -614,7 +614,7 @@ mod real_openchat_file {
                 QuantizedBlock::Q6K(bytes) => {
                     std::eprintln!("DIAG packed_tensor name={name} codec=Q6K bytes={}", bytes.len())
                 }
-                QuantizedBlock::Q4K(_) | QuantizedBlock::Float32(_) => {}
+                QuantizedBlock::Q4K(_) | QuantizedBlock::Float32(_) | QuantizedBlock::Q8_0(_) => {}
             }
         }
 
@@ -1032,8 +1032,8 @@ mod real_openchat_file {
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn runs_a_greedy_decode_loop_and_reports_per_token_wall_clock() {
         let serving_config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1177,16 +1177,117 @@ mod real_openchat_file {
     /// RoPE-rotated (`mistral_cached_forward_program`'s own doc), `v` is
     /// the un-rotated projected value -- exactly [`proxima_tensor::spec::CachedLayerRoots`]'s
     /// three roots, owned here and grown one call's worth of new positions
-    /// at a time via a plain `Vec::extend_from_slice` (axis 0 -- the newly
-    /// appended positions -- is the outermost row-major axis, so growing it
-    /// is concatenation, not a scatter). Caller-held, not `BucketTable`
+    /// at a time. Caller-held, not `BucketTable`
     /// (`proxima-primitives/src/pipe/bucket_table.rs`): this loop serves
     /// exactly one sequence, so there is no eviction policy or multi-tenant
     /// slot table to justify that primitive's extra machinery.
-    struct LayerCache {
-        k_even: Vec<f32>,
-        k_odd: Vec<f32>,
-        v: Vec<f32>,
+    ///
+    /// Two storage strategies, not two types with a shared trait: `Float32`
+    /// keeps every position's `f32` values as this crate always has;
+    /// `Q8_0` packs each call's newly computed rows through
+    /// [`proxima_gguf::quant::q8_0::quantize`] before appending, the same
+    /// codec [`gguf_tensor_as_packed_block`] already reads GGUF weight
+    /// tensors through, mirrored onto the cache's write path instead of a
+    /// checkpoint's read path. Every emitted row (`d = HEAD_DIM` for `v`,
+    /// `d = PAIRS` for `k_even`/`k_odd`) is a whole multiple of
+    /// [`proxima_gguf::quant::q8_0::QK8_0`] (32) elements and is written
+    /// once, never revisited -- a block never straddles two cached
+    /// positions, so appending new rows never needs to re-open an
+    /// already-packed block the way `Q4_K`'s 256-element super-block would
+    /// if it were used here instead (see [`proxima_tensor::cpu::QuantizedBlock::Q8_0`]'s
+    /// own doc for why that codec, not `Q4_K`/`Q5_K`/`Q6_K`, is what a
+    /// growable per-position cache can actually use).
+    enum LayerCache {
+        Float32 { k_even: Vec<f32>, k_odd: Vec<f32>, v: Vec<f32> },
+        Q8_0 { k_even: Vec<u8>, k_odd: Vec<u8>, v: Vec<u8> },
+    }
+
+    impl LayerCache {
+        fn new(precision: GgmlType) -> Self {
+            match precision {
+                GgmlType::Q8_0 => LayerCache::Q8_0 { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() },
+                _ => LayerCache::Float32 { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() },
+            }
+        }
+
+        /// Appends one call's worth of freshly computed rows -- quantizing
+        /// them first when this cache is [`LayerCache::Q8_0`].
+        fn append(&mut self, even: &[f32], odd: &[f32], value: &[f32]) {
+            match self {
+                LayerCache::Float32 { k_even, k_odd, v } => {
+                    k_even.extend_from_slice(even);
+                    k_odd.extend_from_slice(odd);
+                    v.extend_from_slice(value);
+                }
+                LayerCache::Q8_0 { k_even, k_odd, v } => {
+                    k_even.extend_from_slice(&quantize_q8_0_rows(even));
+                    k_odd.extend_from_slice(&quantize_q8_0_rows(odd));
+                    v.extend_from_slice(&quantize_q8_0_rows(value));
+                }
+            }
+        }
+
+        /// This cache's three [`QuantizedBlock`]s, named for
+        /// [`evaluate_quantized_named`]'s bind-by-name resolution -- `Q8_0`
+        /// packed bytes route through [`QuantizedBlock::Q8_0`] and
+        /// `proxima-tensor`'s own `matmul_q8_0_f32` kernel, exactly the
+        /// path a `Q4_K`/`Q5_K`/`Q6_K` weight tensor already takes through
+        /// [`QuantizedBlock`], never a second `&[&[f32]]`-shaped seam.
+        fn named_blocks<'cache>(
+            &'cache self,
+            k_even_name: &'cache str,
+            k_odd_name: &'cache str,
+            v_name: &'cache str,
+        ) -> [(&'cache str, QuantizedBlock<'cache>); 3] {
+            match self {
+                LayerCache::Float32 { k_even, k_odd, v } => [
+                    (k_even_name, QuantizedBlock::Float32(k_even.as_slice())),
+                    (k_odd_name, QuantizedBlock::Float32(k_odd.as_slice())),
+                    (v_name, QuantizedBlock::Float32(v.as_slice())),
+                ],
+                LayerCache::Q8_0 { k_even, k_odd, v } => [
+                    (k_even_name, QuantizedBlock::Q8_0(k_even.as_slice())),
+                    (k_odd_name, QuantizedBlock::Q8_0(k_odd.as_slice())),
+                    (v_name, QuantizedBlock::Q8_0(v.as_slice())),
+                ],
+            }
+        }
+
+        /// Resident bytes this one layer's cache holds right now -- `f32`
+        /// elements at 4 bytes each for [`LayerCache::Float32`], packed
+        /// `Q8_0` bytes directly for [`LayerCache::Q8_0`] (already the
+        /// on-wire byte count, no per-element multiply).
+        fn byte_len(&self) -> usize {
+            match self {
+                LayerCache::Float32 { k_even, k_odd, v } => {
+                    (k_even.len() + k_odd.len() + v.len()) * core::mem::size_of::<f32>()
+                }
+                LayerCache::Q8_0 { k_even, k_odd, v } => k_even.len() + k_odd.len() + v.len(),
+            }
+        }
+    }
+
+    /// Quantizes `rows` (a whole number of `HEAD_DIM`- or `PAIRS`-wide rows,
+    /// each itself a whole multiple of [`q8_0::QK8_0`]) into packed `Q8_0`
+    /// bytes -- the cache's own per-call quantize step, called once per
+    /// [`LayerCache::append`] on [`LayerCache::Q8_0`].
+    fn quantize_q8_0_rows(rows: &[f32]) -> Vec<u8> {
+        let block_count = rows.len() / proxima_gguf::quant::q8_0::QK8_0;
+        let mut packed = vec![0u8; proxima_gguf::quant::q8_0::bytes_for_blocks(block_count)];
+        proxima_gguf::quant::q8_0::quantize(rows, &mut packed).expect("cache row length is a whole multiple of the q8_0 block size");
+        packed
+    }
+
+    /// One [`run_cached_greedy_decode_loop`] run's report -- every number
+    /// the acceptance gate needs to compare across cache precisions,
+    /// carried together rather than left to five separate `println!`
+    /// captures.
+    #[derive(Debug)]
+    struct CachedDecodeReport {
+        generated_ids: Vec<u32>,
+        generated_text: alloc::string::String,
+        cache_bytes_total: usize,
+        mean_ms_per_token: f64,
     }
 
     /// The cached counterpart to `runs_a_greedy_decode_loop_and_reports_per_token_wall_clock`:
@@ -1199,14 +1300,30 @@ mod real_openchat_file {
     /// `cached_len == 0`); every call after appends its own
     /// [`proxima_tensor::spec::CachedLayerRoots`] output into [`LayerCache`]
     /// before the next step runs.
-    #[test]
-    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-    fn runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock() {
+    ///
+    /// `cache_precision` selects [`LayerCache::Float32`] or
+    /// [`LayerCache::Q8_0`] storage. `Float32` runs end to end
+    /// (`runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`);
+    /// `Q8_0` fails on its very first call, a real structural gap in the
+    /// quantized-matmul seam this crate's `run_reduce_quantized` implements
+    /// (`q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam`'s
+    /// own doc has the file:line and the shape it does not express).
+    ///
+    /// `enforce_serving_config_gate` runs [`apply_serving_config`] each step
+    /// when `true` (the normal path, unchanged for every `Float32` caller).
+    /// `serving.rs`'s own `kv_cache_key_quant`/`kv_cache_value_quant` gate
+    /// now rejects every non-`F32` value before a forward ever runs, which
+    /// would stop a `Q8_0` caller at that gate instead of at the tensor
+    /// seam this function exists to reach; passing `false` skips only that
+    /// per-step call so the seam test still reproduces the real
+    /// `run_reduce_quantized` panic. `serving.rs`'s own tests already cover
+    /// the gate itself, so this does not weaken that coverage.
+    fn run_cached_greedy_decode_loop(cache_precision: GgmlType, enforce_serving_config_gate: bool) -> Option<CachedDecodeReport> {
         use proxima_tensor::spec::mistral_cached_forward_program;
 
         let serving_config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: cache_precision,
+            kv_cache_value_quant: cache_precision,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1220,7 +1337,7 @@ mod real_openchat_file {
                 "skipping: no host-local openchat gguf fixture at {}",
                 serving_config.model_path
             );
-            return;
+            return None;
         }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
@@ -1250,16 +1367,15 @@ mod real_openchat_file {
                 )
             })
             .collect();
-        let mut layer_caches: Vec<LayerCache> = (0..BLOCK_COUNT as usize)
-            .map(|_| LayerCache { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() })
-            .collect();
+        let mut layer_caches: Vec<LayerCache> =
+            (0..BLOCK_COUNT as usize).map(|_| LayerCache::new(cache_precision)).collect();
 
         let prompt = decode_loop_prompt();
         let max_tokens = decode_loop_max_tokens();
         let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, true, false).expect("encode prompt");
         let prompt_length = ids.len();
 
-        std::println!("prompt={prompt:?} prompt_tokens={prompt_length} max_tokens={max_tokens} (cached)");
+        std::println!("prompt={prompt:?} prompt_tokens={prompt_length} max_tokens={max_tokens} cache_precision={cache_precision:?}");
 
         let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
         let mut step_wall_clocks: Vec<core::time::Duration> = Vec::with_capacity(max_tokens);
@@ -1269,7 +1385,9 @@ mod real_openchat_file {
 
         for step in 0..max_tokens {
             let new_count = next_ids.len();
-            apply_serving_config(&serving_config, cached_len + new_count);
+            if enforce_serving_config_gate {
+                apply_serving_config(&serving_config, cached_len + new_count);
+            }
             let inputs = build_cached_position_inputs(&next_ids, cached_len);
 
             let mut named_blocks: Vec<(&str, QuantizedBlock)> =
@@ -1285,9 +1403,7 @@ mod real_openchat_file {
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
             named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
             for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
-                named_blocks.push((k_even_name.as_str(), QuantizedBlock::Float32(layer_caches[layer].k_even.as_slice())));
-                named_blocks.push((k_odd_name.as_str(), QuantizedBlock::Float32(layer_caches[layer].k_odd.as_slice())));
-                named_blocks.push((v_name.as_str(), QuantizedBlock::Float32(layer_caches[layer].v.as_slice())));
+                named_blocks.extend(layer_caches[layer].named_blocks(k_even_name, k_odd_name, v_name));
             }
 
             let symbols = [new_count as u64, cached_len as u64];
@@ -1308,9 +1424,7 @@ mod real_openchat_file {
                 let (even_data, _) = evaluated.get(*even).expect("k_even root present");
                 let (odd_data, _) = evaluated.get(*odd).expect("k_odd root present");
                 let (value_data, _) = evaluated.get(*value).expect("v root present");
-                layer_caches[layer].k_even.extend_from_slice(even_data);
-                layer_caches[layer].k_odd.extend_from_slice(odd_data);
-                layer_caches[layer].v.extend_from_slice(value_data);
+                layer_caches[layer].append(even_data, odd_data, value_data);
             }
             cached_len += new_count;
 
@@ -1335,17 +1449,84 @@ mod real_openchat_file {
         let mean_ms_per_token = total_elapsed.as_secs_f64() * 1000.0 / max_tokens as f64;
         let generated_text = proxima_tokenizer::decode(&generated_ids, &vocab).expect("decode full generated sequence");
 
-        let cache_bytes_per_layer =
-            (layer_caches[0].k_even.len() + layer_caches[0].k_odd.len() + layer_caches[0].v.len()) * core::mem::size_of::<f32>();
+        let cache_bytes_per_layer = layer_caches[0].byte_len();
         let cache_bytes_total = cache_bytes_per_layer * BLOCK_COUNT as usize;
         std::println!(
-            "decode_summary tokens_generated={max_tokens} total_wall_clock_ms={:.3} mean_ms_per_token={mean_ms_per_token:.3} generated_text={generated_text:?} cache_bytes_total={cache_bytes_total} ({:.3} MiB)",
+            "decode_summary cache_precision={cache_precision:?} tokens_generated={max_tokens} total_wall_clock_ms={:.3} mean_ms_per_token={mean_ms_per_token:.3} generated_text={generated_text:?} cache_bytes_total={cache_bytes_total} ({:.3} MiB)",
             total_elapsed.as_secs_f64() * 1000.0,
             cache_bytes_total as f64 / (1024.0 * 1024.0)
         );
 
         assert_eq!(step_wall_clocks.len(), max_tokens, "one wall-clock reading per generated token");
         assert!(!generated_text.is_empty(), "degenerate control: decode loop produced no text");
+
+        Some(CachedDecodeReport { generated_ids, generated_text, cache_bytes_total, mean_ms_per_token })
+    }
+
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock() {
+        let Some(report) = run_cached_greedy_decode_loop(GgmlType::F32, true) else {
+            return;
+        };
+        assert_eq!(report.generated_ids.len(), decode_loop_max_tokens(), "one token id per generated step");
+        assert!(!report.generated_text.is_empty(), "degenerate control: decode loop produced no text");
+        assert!(report.cache_bytes_total > 0, "an f32 cache over a nonempty prompt must hold bytes");
+        assert!(report.mean_ms_per_token > 0.0, "wall-clock reading must be positive");
+    }
+
+    /// **Finding, not a pass/fail on generated text**: the growable
+    /// key/value cache's own attention [`proxima_tensor::op::Op::Reduce`]
+    /// nodes (`score_cached_even`/`score_cached_odd`/`attended_cached` in
+    /// [`proxima_tensor::spec`]'s cached-layer builder) share an extra
+    /// `kv_heads` axis between the cache operand and the activation
+    /// operand, and (for `attended_cached`) contract the cache's own
+    /// growing `cached_len` axis rather than the head-dimension axis a
+    /// weight matmul always contracts. `run_reduce_quantized`'s
+    /// `rows`/`k`/`leading_total` shape math
+    /// (`proxima-tensor/src/cpu.rs:2402`, gated by `leading_total !=
+    /// activation.len() / k` at `proxima-tensor/src/cpu.rs:2485`) assumes
+    /// a flat `weight[rows, k] x activation[batch, k] -> output[batch,
+    /// rows]` matmul -- exactly the shape a `Q4_K`/`Q5_K`/`Q6_K` GGUF
+    /// weight tensor has and the cache's own einsum does not, so this
+    /// call fails on its very first evaluation (`cached_len == 0`,
+    /// `new_count == prompt_length`), not merely late in a run. This is
+    /// reproduced directly rather than routed around with a new `Op`
+    /// variant or a new type, per this task's own instruction.
+    ///
+    /// `serving.rs`'s own `apply_serving_config` gate now rejects every
+    /// non-`F32` `kv_cache_key_quant`/`kv_cache_value_quant` before a
+    /// forward ever runs (`serving.rs`'s own tests cover that gate). This
+    /// test's whole point is the tensor seam below the gate, not the gate
+    /// itself, so it calls [`run_cached_greedy_decode_loop`] with
+    /// `enforce_serving_config_gate = false` to drive `Q8_0` storage
+    /// straight into `run_reduce_quantized` and reproduce the real panic.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_cached_greedy_decode_loop(GgmlType::Q8_0, false)));
+        let panic_payload = outcome.expect_err(
+            "expected the cached attention reduce's broadcast/contraction shape to be rejected \
+             by run_reduce_quantized's flat weight-matmul assumption -- see this test's own doc",
+        );
+        let message = panic_payload
+            .downcast_ref::<alloc::string::String>()
+            .cloned()
+            .or_else(|| panic_payload.downcast_ref::<&str>().map(|value| alloc::string::String::from(*value)))
+            .unwrap_or_default();
+        assert!(
+            message.contains("quantized matmul batch shape does not evenly divide by its packed weight rows"),
+            "unexpected panic message: {message}"
+        );
     }
 
     /// Row-major transpose from GGUF's native flat layout (`[out, in]`,

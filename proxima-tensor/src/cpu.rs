@@ -445,6 +445,16 @@ pub enum QuantizedBlock<'a> {
     /// [`proxima_gguf::quant::q6_k`] for the on-disk layout this borrows
     /// unchanged.
     Q6K(&'a [u8]),
+    /// Raw packed `Q8_0` bytes -- 32-element blocks, one `f16` scale per
+    /// block, no sub-block structure at all; see
+    /// [`proxima_gguf::quant::q8_0`] for the on-disk layout this borrows
+    /// unchanged. The one variant this enum carries that the growable
+    /// per-layer key/value context cache (`proxima-model-interop`'s
+    /// `LayerCache`) actually binds -- its rows are `HEAD_DIM / 2`
+    /// elements wide, small enough that `Q4_K`/`Q5_K`/`Q6_K`'s 256-element
+    /// super-blocks would straddle more than one cached position, while a
+    /// 32-element `Q8_0` block divides a typical head dimension evenly.
+    Q8_0(&'a [u8]),
 }
 
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
@@ -502,7 +512,7 @@ pub fn evaluate_quantized(
                 }
                 buffers[node.0 as usize] = Some(Cow::Borrowed(data));
             }
-            QuantizedBlock::Q4K(_) | QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) => {
+            QuantizedBlock::Q4K(_) | QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) | QuantizedBlock::Q8_0(_) => {
                 quantized_weights.insert(*node, block);
             }
         }
@@ -2409,6 +2419,16 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // never reads it, so bind it unconditionally here rather than let a
     // rare feature combination trip an unused-parameter warning.
     let _ = session;
+    // A growable cache (`Q8_0`, see `QuantizedBlock::Q8_0`'s own doc) binds
+    // a zero-length weight buffer on its very first call (`cached_len ==
+    // 0`), which makes this reduce's own output axes multiply out to zero
+    // elements too -- nothing to write, and no legal `rows` (weight rows /
+    // contraction width) to derive from an empty buffer. A static weight
+    // matmul (`Q4_K`/`Q5_K`/`Q6_K`) never binds an empty operand, so this
+    // is additive for that path, not a behavior change.
+    if output.is_empty() {
+        return Ok(());
+    }
     let activation_node = resolved
         .operands()
         .iter()
@@ -2437,18 +2457,23 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
 
     // Every K-quant weight codec this crate packs shares `Q4K_BLOCK_ELEMENTS`
     // (256) elements per super-block (`q5_k`/`q6_k`'s own module docs: same
-    // `QK_K`) -- only the per-superblock byte count differs, so `weights` and
-    // `block_bytes` are the only two things this match needs to select.
-    let (weights, block_bytes): (&[u8], usize) = match weight_block {
+    // `QK_K`); `Q8_0`'s block is a different, much smaller shape (32
+    // elements, no sub-block structure) -- the growable key/value context
+    // cache's rows are `HEAD_DIM / 2` wide, too narrow for a 256-element
+    // super-block to divide evenly without straddling more than one cached
+    // position, so `block_elements` varies per codec rather than being one
+    // shared constant.
+    let (weights, block_bytes, block_elements): (&[u8], usize, usize) = match weight_block {
         QuantizedBlock::Float32(_) => return Err(shape_error()),
-        QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES),
-        QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES),
-        QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES),
+        QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
     };
     if k == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }
-    let total_weight_elements = (weights.len() / block_bytes) * Q4K_BLOCK_ELEMENTS;
+    let total_weight_elements = (weights.len() / block_bytes) * block_elements;
     if !total_weight_elements.is_multiple_of(k) {
         return Err(shape_error());
     }
@@ -2612,6 +2637,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     matmul_q6k_f32(weights, rows, activation_row)?
                 }
             }
+            QuantizedBlock::Q8_0(_) => matmul_q8_0_f32(weights, rows, activation_row)?,
         };
         #[cfg(feature = "instrument")]
         {
@@ -2632,6 +2658,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     counter!(instrument::MATMUL_Q6K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
                 }
+                QuantizedBlock::Q8_0(_) => {}
             }
         }
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);
@@ -4808,6 +4835,84 @@ pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
         );
     }
     result
+}
+
+/// Packed bytes per `Q8_0` block -- needed unconditionally, same reasoning
+/// as [`Q5K_BLOCK_BYTES`].
+const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `Q8_0` block (`QK8_0`, 32) -- unlike the
+/// `Q4_K`/`Q5_K`/`Q6_K` family, `Q8_0` has no shared super-block constant
+/// with them; see [`QuantizedBlock::Q8_0`]'s own doc for why this codec's
+/// much smaller block is the one that fits the key/value context cache's
+/// row width.
+const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
+
+/// [`dot_q4k_f32`]'s mechanism applied to `Q8_0`: dequantizes one 32-element
+/// block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::q8_0::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. `Q8_0`'s block carries no sub-block scale structure at all -- one
+/// `f16` delta per 32 elements -- so this is a direct port of `q8_0.rs`'s
+/// own `dequantize_block`, not a variant of the K-quant super-block
+/// unpacking `dot_q4k_f32`/`dot_q5k_f32`/`dot_q6k_f32` share.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q8_0_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q8_0_BLOCK_ELEMENTS`].
+fn dot_q8_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q8_0_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q8_0 block size",
+        });
+    }
+    let block_count = weight_row.len() / Q8_0_BLOCK_BYTES;
+    if activation.len() != block_count * Q8_0_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q8_0_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .chunks_exact(Q8_0_BLOCK_BYTES)
+        .zip(activation.chunks_exact(Q8_0_BLOCK_ELEMENTS))
+    {
+        proxima_gguf::quant::q8_0::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold { len: Q8_0_BLOCK_ELEMENTS, init: acc, seeded: true },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q8_0`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_q8_0_f32`'s per-row kernel, the scalar
+/// dequantize-then-fold path only (no packed int8-dot wide fold the way
+/// `Q4_K`/`Q5_K`/`Q6_K` earn under their own `*-int8-dot` features): this is
+/// the growable key/value context cache's storage codec, appended one call's
+/// worth of new rows at a time, so the wide per-call fold those weight
+/// codecs use (streamed once, reused across every batch position) does not
+/// apply the same way here -- the cache itself IS the thing growing between
+/// calls.
+///
+/// # Errors
+/// Propagates `dot_q8_0_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q8_0_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q8_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q8_0_f32,
+    )
 }
 
 /// Below this many total multiply-accumulates (`rows * activation.len()`),
