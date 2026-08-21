@@ -154,10 +154,10 @@ pub fn gguf_tensor_as_packed_block<'a>(
 #[cfg(feature = "std")]
 fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
     let float_size = core::mem::size_of::<f32>();
-    if bytes.len() % float_size != 0 {
+    if !bytes.len().is_multiple_of(float_size) {
         return None;
     }
-    if (bytes.as_ptr() as usize) % core::mem::align_of::<f32>() != 0 {
+    if !(bytes.as_ptr() as usize).is_multiple_of(core::mem::align_of::<f32>()) {
         return None;
     }
     // SAFETY: see this function's doc.
@@ -405,7 +405,7 @@ mod real_openchat_file {
     fn bind_dense<'file>(parsed: &ParsedGguf, file_bytes: &'file [u8], name: alloc::string::String, state: &mut LoadState<'file>) {
         match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
             Ok(block @ QuantizedBlock::Float32(borrowed)) => {
-                state.resident_bytes += borrowed.len() * core::mem::size_of::<f32>();
+                state.resident_bytes += core::mem::size_of_val(borrowed);
                 state.packed.push((name, block));
             }
             Ok(_) | Err(_) => {
