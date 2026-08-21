@@ -1,7 +1,7 @@
 //! The IKE-style SA_INIT handshake as a sans-IO state machine.
 //!
 //! X25519 key agreement, BLAKE3 key derivation, two messages. This is the
-//! handshake the ragd relay runs today, rebuilt to the sans-IO contract: no
+//! handshake the relay runs today, rebuilt to the sans-IO contract: no
 //! clock, no entropy source, no key provider, no socket. The wire format and
 //! the derivation chain are byte-compatible with `csr-security`'s `IkeSa`,
 //! which is the behaviour oracle.

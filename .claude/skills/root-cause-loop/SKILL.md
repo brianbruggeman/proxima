@@ -7,7 +7,7 @@ description: Instrument-and-loop debugging methodology for hard bugs where the c
 
 Find the cause by making the system tell you, not by guessing. Add observability, reproduce, observe, narrow, repeat.
 
-This is the recursive owner of principle 19's evidence ladder: it repeats an atomic proof down the causal chain until every link is data-backed. For a single retrieval link, the atomic proof is a `/deep-dive` toggle via the `ragd-retrieval-forensic` agent — delegate the per-case dig, do not grind it inline. root-cause-loop is the loop that chains those proofs; deep-dive is one edge of the chain.
+This is the recursive owner of principle 19's evidence ladder: it repeats an atomic proof down the causal chain until every link is data-backed. For a single retrieval link, the atomic proof is a `/deep-dive` toggle via the retrieval-forensic agent — delegate the per-case dig, do not grind it inline. root-cause-loop is the loop that chains those proofs; deep-dive is one edge of the chain.
 
 ## When to use
 

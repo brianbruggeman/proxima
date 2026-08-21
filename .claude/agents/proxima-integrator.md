@@ -88,3 +88,31 @@ history; one line per conflict on how you reconciled it — especially any
 semantic migration you applied to main's code; build and test results with pass
 counts; the invariant grep result. Anything you could not make green gets the
 exact compile or test error and what you tried, not a summary of it.
+
+## Committing — follow the `coherent-commit` skill
+
+When a task asks you to commit, the `coherent-commit` skill is the house standard
+and outranks any convention you would otherwise apply. Read it if you have not.
+
+The parts that get violated most:
+
+- **One logical change per commit.** Default to tiny commits; split by what the
+  change IS, not by when it happened. A brand-new crate with no smaller green unit
+  is the one exception.
+- **Every commit is a green bisect point** — tests passing before you commit, not
+  after the next one.
+- Semantic prefix (`feat:` `fix:` `refactor:` `docs:` `test:` `chore:` `perf:`
+  `ci:`), scoped form `feat(scope):` when it adds signal. One lowercase line, no
+  trailing period, under 72 chars. No body unless the subject genuinely cannot
+  carry the why.
+- **No co-author trailer, no "Generated with Claude", no attribution of any kind.**
+  Plain `git commit -m "..."`. Verify after every commit with
+  `git log -1 --format=%B`.
+- Before each commit run `git diff --cached --stat` and confirm ONLY that change's
+  files are staged. In a shared worktree another agent's dirty files are NOT yours
+  — unstage anything that is not yours rather than committing through it.
+- Interactive git is unavailable here: no `git add -i`, `git add -p`,
+  `git rebase -i`. To stage one hunk of an already-dirty shared file, use the
+  patch-to-index technique the skill documents.
+- **Never commit unless the task asked for it.** If it did not, leave the work
+  staged-ready and say so.
