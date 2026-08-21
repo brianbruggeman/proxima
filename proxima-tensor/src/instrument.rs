@@ -587,6 +587,25 @@ pub static SERIAL_EVALUATE_PARALLEL_TICKS: Counter =
 pub static SERIAL_EVALUATE_PARALLEL_CALLS: Counter =
     Counter::new("proxima_tensor.serial_evaluate_parallel_calls");
 
+// `run_elementwise_range`'s own fixed-per-call breakdown, split at the same
+// three seams the decode-speed investigation measured against: everything
+// before `step_values` is carved (operand span resolution, stride/gather
+// scratch), the `step_values` allocation itself (sized for the `Generic`
+// fused-body table even when the node's body is `Unary`/`Binary` and never
+// reads it), and the position loop that follows. Committed once per node
+// call, never per element or per position.
+pub static ELEMENTWISE_SETUP_TICKS: Counter = Counter::new("proxima_tensor.elementwise_setup_ticks");
+pub static ELEMENTWISE_STEP_VALUES_TICKS: Counter =
+    Counter::new("proxima_tensor.elementwise_step_values_ticks");
+pub static ELEMENTWISE_LOOP_TICKS: Counter = Counter::new("proxima_tensor.elementwise_loop_ticks");
+pub static ELEMENTWISE_RANGE_CALLS: Counter = Counter::new("proxima_tensor.elementwise_range_calls");
+// `run_elementwise_dispatch`'s own cohort-round count -- how many of a
+// forward pass's elementwise nodes actually open a `CohortSession::run`
+// round (as opposed to falling straight through to the sequential
+// `run_elementwise` because `outer_len < 2`, `workers <= 1`, or the node is
+// below `PARALLEL_THRESHOLD`).
+pub static ELEMENTWISE_COHORT_ROUNDS: Counter = Counter::new("proxima_tensor.elementwise_cohort_rounds");
+
 /// One process run's worth of `evaluate_parallel`'s serial-remainder
 /// breakdown, read back the same way [`parallel_totals`] is.
 #[derive(Debug, Clone, Copy, Default)]

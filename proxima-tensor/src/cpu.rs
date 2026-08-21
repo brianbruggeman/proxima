@@ -734,6 +734,28 @@ pub fn evaluate_quantized_with_scratch(
             instrument::ticks_to_nanos(diag_setup_ticks) as f64 / 1_000_000.0,
             instrument::ticks_to_nanos(diag_loop_overhead_ticks) as f64 / 1_000_000.0,
         );
+        // DIAGNOSTIC (proxima-debugger, remove before landing): the fixed
+        // per-node cost inside `run_elementwise_range`, split at the seam
+        // this decode-speed investigation measured against -- setup (operand
+        // span resolution, stride/gather scratch), the `step_values`
+        // allocation, and the position loop. `snapshot_and_reset` so a caller
+        // running several `evaluate_quantized` calls back to back (a decode
+        // loop) gets one call's breakdown per printout, not a running total.
+        let elementwise_calls = instrument::ELEMENTWISE_RANGE_CALLS.snapshot_and_reset();
+        let elementwise_setup_ticks = instrument::ELEMENTWISE_SETUP_TICKS.snapshot_and_reset();
+        let elementwise_step_values_ticks = instrument::ELEMENTWISE_STEP_VALUES_TICKS.snapshot_and_reset();
+        let elementwise_loop_ticks = instrument::ELEMENTWISE_LOOP_TICKS.snapshot_and_reset();
+        let elementwise_cohort_rounds = instrument::ELEMENTWISE_COHORT_ROUNDS.snapshot_and_reset();
+        if elementwise_calls > 0 {
+            std::eprintln!(
+                "DIAG evaluate_quantized elementwise_breakdown calls={elementwise_calls} cohort_rounds={elementwise_cohort_rounds} setup_ms={:.3} step_values_ms={:.3} loop_ms={:.3} setup_ns_per_call={:.1} step_values_ns_per_call={:.1}",
+                instrument::ticks_to_nanos(elementwise_setup_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(elementwise_step_values_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(elementwise_loop_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(elementwise_setup_ticks) as f64 / elementwise_calls as f64,
+                instrument::ticks_to_nanos(elementwise_step_values_ticks) as f64 / elementwise_calls as f64,
+            );
+        }
     }
     #[cfg(feature = "instrument")]
     let diag_finish_started = instrument::read_ticks();
@@ -2113,6 +2135,29 @@ fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     // `evaluate_node_parallel`'s own chunk-count policy instead
     // (`workers * OVERSUBSCRIBE`, `evaluate_node_parallel`'s own doc),
     // capped at one row per chunk so `chunk_len` never rounds to zero.
+    //
+    // A per-node OR per-chunk element-count floor was tried here (three
+    // variants: a flat total-element cutoff, the same cutoff scoped to
+    // `Unary`/`Binary` bodies only, and a `MIN_MACS_PER_CHUNK`-shaped
+    // per-chunk floor) to stop the real openchat-3.5 decode loop's small
+    // elementwise nodes (4096/14336 total elements) from opening a
+    // `CohortSession::run` round for work this crate's own measured
+    // 0.38ns/element rate finishes before the round would even open. Every
+    // variant either left decode's round count unchanged (its actual
+    // splitting nodes turned out to be `Generic`-shaped, not `Unary`/
+    // `Binary`, so a shape-scoped floor missed them) or measurably regressed
+    // the real forward pass's (`runs_one_real_forward_pass_and_greedy_picks_
+    // a_real_token`) own comparably-sized `Generic` nodes, which DO benefit
+    // from splitting (`DIAG evaluate_quantized node_kind=elementwise
+    // total_ms`: 20.327ms baseline vs 25.570ms flat-floor vs 23.851ms
+    // per-chunk-floor, all worse). A per-chunk-sized `Generic` node in the
+    // forward pass and a whole small `Generic` node in decode land on
+    // IDENTICAL element counts (14336 either way), so no floor keyed on
+    // element count alone can tell them apart — the real discriminator
+    // (round-trip cost vs achievable parallelism for that specific node's
+    // shape) was not isolated within this investigation's budget. Left
+    // unchanged rather than shipped with a measured prefill regression;
+    // see this landing's own log for the full measurement trail.
     let chunk_count = (workers * OVERSUBSCRIBE).min(outer_len);
     let chunk_len = outer_len.div_ceil(chunk_count);
     let mut chunk_ranges = Vec::with_capacity(chunk_count);
@@ -2137,6 +2182,10 @@ fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
         chunk_ranges: &chunk_ranges,
         error: &error_slot,
     };
+    #[cfg(feature = "instrument")]
+    {
+        counter!(instrument::ELEMENTWISE_COHORT_ROUNDS, 1);
+    }
     let report = session.run(&round);
     if let Some(error) = error_slot.get() {
         return Err(error.clone());
@@ -2217,6 +2266,8 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     outer_end: usize,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    #[cfg(feature = "instrument")]
+    let diag_setup_started = instrument::read_ticks();
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
     let innermost_dim = outer_extents.len() as u16;
     let raw = operand_buffers(resolved, buffers)?;
@@ -2244,11 +2295,37 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
         BodyShape::Generic(generic_body) => generic_body_is_affine_fast_path(resolved, generic_body, &strides),
         _ => body_shape_is_affine_fast_path(resolved, &shape, &strides),
     };
-    // On the fast path, `elementwise_width_generic` needs one whole
-    // `inner_len`-wide row per step (`StepArg::Step` is backwards-only, so
-    // every earlier row must survive to the last step); the slow scalar path
-    // (`eval_body_shape`) only ever reads one value per step at a time.
-    let mut step_values = vec![0.0f32; body.steps.len() * if fast_path { inner_len } else { 1 }];
+    #[cfg(feature = "instrument")]
+    {
+        counter!(
+            instrument::ELEMENTWISE_SETUP_TICKS,
+            instrument::elapsed_ticks(diag_setup_started)
+        );
+    }
+    #[cfg(feature = "instrument")]
+    let diag_step_values_started = instrument::read_ticks();
+    // `elementwise_width_generic` is the only reader of `step_values`
+    // (`elementwise_width_fast`'s own doc: "`Unary`/`Binary` ignore it"), and
+    // the slow scalar path's `eval_body_shape` matches the same way — a
+    // `Unary`/`Binary` shape never touches it either. Sizing this for every
+    // shape at `body.steps.len() * inner_len` paid a real
+    // `inner_len`-element (4096/14336 `f32`) heap allocation per node even
+    // when nothing ever read it back; only `Generic` needs the fused
+    // per-step row table at all.
+    let mut step_values = match shape {
+        BodyShape::Generic(_) => vec![0.0f32; body.steps.len() * if fast_path { inner_len } else { 1 }],
+        BodyShape::Unary(..) | BodyShape::Binary(..) => Vec::new(),
+    };
+    #[cfg(feature = "instrument")]
+    {
+        counter!(
+            instrument::ELEMENTWISE_STEP_VALUES_TICKS,
+            instrument::elapsed_ticks(diag_step_values_started)
+        );
+        counter!(instrument::ELEMENTWISE_RANGE_CALLS, 1);
+    }
+    #[cfg(feature = "instrument")]
+    let diag_loop_started = instrument::read_ticks();
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
     #[cfg(feature = "instrument")]
@@ -2305,6 +2382,10 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     }
     #[cfg(feature = "instrument")]
     {
+        counter!(
+            instrument::ELEMENTWISE_LOOP_TICKS,
+            instrument::elapsed_ticks(diag_loop_started)
+        );
         let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
         counters.commit(path, distinct_operand_elements);
     }
