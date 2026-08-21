@@ -90,6 +90,40 @@ impl Default for OnnxParser {
     }
 }
 
+/// The same `&mut self` `feed`/`poll` contract [`Self::feed`]/[`Self::poll`]
+/// already establish, expressed against the shared
+/// [`proxima_primitives::pipe::sans_io::ByteStreamParser`] contract so a
+/// generic driver (`drive_to_completion`) can run `OnnxParser`,
+/// `proxima_gguf::GgufParser`, and `proxima_safetensors::SafetensorsParser`
+/// alike. `Event<'a> = ModelField<'a>` is a GAT (not a bare associated
+/// type) because `ModelField` borrows straight into this parser's own
+/// accumulation buffer -- the same reason `Self::poll`'s own signature
+/// already ties its return lifetime to `&mut self`.
+impl proxima_primitives::pipe::sans_io::ByteStreamParser for OnnxParser {
+    type Event<'a>
+        = ModelField<'a>
+    where
+        Self: 'a;
+    type Error = OnnxError;
+
+    fn feed(&mut self, bytes: &[u8]) {
+        Self::feed(self, bytes);
+    }
+
+    fn poll(
+        &mut self,
+    ) -> Result<proxima_primitives::pipe::sans_io::Outcome<ModelField<'_>>, OnnxError> {
+        Ok(match Self::poll(self)? {
+            Some(field) => proxima_primitives::pipe::sans_io::Outcome::Event(field),
+            None => proxima_primitives::pipe::sans_io::Outcome::NeedMore,
+        })
+    }
+
+    fn finish(&self) -> Result<(), OnnxError> {
+        Self::finish(self)
+    }
+}
+
 impl OnnxParser {
     #[must_use]
     pub fn new() -> Self {

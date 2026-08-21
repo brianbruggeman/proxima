@@ -90,6 +90,37 @@ impl Default for GgufParser {
     }
 }
 
+/// The same `&mut self` `feed`/`poll` contract [`Self::feed`]/[`Self::poll`]
+/// already establish (this module's own doc: `GgufParser` imitated
+/// `h1_connection::Connection`'s shape before this trait existed to name
+/// it), now expressed against the shared
+/// [`proxima_primitives::pipe::sans_io::ByteStreamParser`] contract so a
+/// generic driver (`drive_to_completion`) can run `GgufParser`,
+/// `proxima_onnx::OnnxParser`, and `proxima_safetensors::SafetensorsParser`
+/// alike.
+impl proxima_primitives::pipe::sans_io::ByteStreamParser for GgufParser {
+    type Event<'a>
+        = GgufEvent
+    where
+        Self: 'a;
+    type Error = GgufError;
+
+    fn feed(&mut self, bytes: &[u8]) {
+        Self::feed(self, bytes);
+    }
+
+    fn poll(&mut self) -> Result<proxima_primitives::pipe::sans_io::Outcome<GgufEvent>, GgufError> {
+        Ok(match Self::poll(self)? {
+            Some(event) => proxima_primitives::pipe::sans_io::Outcome::Event(event),
+            None => proxima_primitives::pipe::sans_io::Outcome::NeedMore,
+        })
+    }
+
+    fn finish(&self) -> Result<(), GgufError> {
+        Self::finish(self)
+    }
+}
+
 impl GgufParser {
     #[must_use]
     pub fn new() -> Self {
