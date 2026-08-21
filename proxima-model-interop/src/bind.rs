@@ -835,6 +835,25 @@ mod real_openchat_file {
                 quant.q6k_f32_calls,
                 quant.reduce_quantized_calls
             );
+            // is the matmul bucket actually KERNEL, or is it orchestration?
+            // reduce_quantized is the whole bucket; q4k/q5k/q6k_call are the
+            // packed kernels inside it; the rest is dispatch the bucket also
+            // pays for. printed cumulatively -- subtract a MAX_TOKENS=1 run
+            // to isolate decode.
+            let ms = |ticks: u64| proxima_tensor::instrument::ticks_to_nanos(ticks) as f64 / 1e6;
+            std::println!(
+                "matmul_split bucket_ms={:.3} kernel_ms={:.3} quantize_activation_ms={:.3} transpose_ms={:.3} setup_ms={:.3} spawn_ms={:.3} own_chunk_ms={:.3} recv_wait_ms={:.3} dispatch_calls={} position_loop_iters={}",
+                ms(quant.reduce_quantized_ticks),
+                ms(quant.q4k_call_ticks) + ms(quant.q5k_call_ticks) + ms(quant.q6k_call_ticks),
+                ms(quant.quantize_activation_ticks),
+                ms(quant.q4k_transpose_ticks),
+                ms(quant.setup_ticks),
+                ms(quant.spawn_ticks),
+                ms(quant.own_chunk_ticks),
+                ms(quant.recv_wait_ticks),
+                quant.calls,
+                quant.position_loop_iters
+            );
             let rounds = cohort_diag::ROUNDS.load(Ordering::Relaxed);
             let parks = cohort_diag::PARKS.load(Ordering::Relaxed);
             let unpark_rounds = cohort_diag::UNPARK_ROUNDS.load(Ordering::Relaxed);
