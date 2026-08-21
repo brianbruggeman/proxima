@@ -63,6 +63,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::collections::BTreeSet;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
@@ -228,17 +229,25 @@ pub const Q4K_BLOCK_BYTES: usize = 144;
 /// Elements one `Q4_K` super-block carries.
 pub const Q4K_BLOCK_ELEMENTS: usize = 256;
 
-pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
+pub fn emit(resolved: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
+    // one flag per operand, resolved ONCE here rather than re-asked at each
+    // of the five read sites: which of this op's operands is a packed
+    // `Q4_K` buffer rather than a flat element array.
+    let quantized: Vec<bool> = resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| q4k_operands.contains(node))
+        .collect();
     let source = match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry),
+        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry),
+        } => render_reduce(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
-        } => render_scan(resolved, &entry),
+        } => render_scan(resolved, &entry, &quantized),
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
     }?;
@@ -702,15 +711,21 @@ fn push_body_steps(
 
 fn kernel_signature(
     source: &mut String,
-    operand_count: usize,
+    quantized: &[bool],
     gather_count: usize,
     entry: &str,
     element_type: &str,
 ) {
+    let operand_count = quantized.len();
     source.push_str(&format!("kernel void {entry}(\n"));
-    for index in 0..operand_count {
+    for (index, &is_packed) in quantized.iter().enumerate() {
+        // a packed operand's buffer is BYTES, not elements — the shader
+        // turns an element offset into a super-block plus a position inside
+        // it at the read (`operand_read`), so the binding has to be typed
+        // for what is actually in the buffer.
+        let binding_type = if is_packed { "uchar" } else { element_type };
         source.push_str(&format!(
-            "    device const {element_type}* in{index} [[buffer({index})]],\n"
+            "    device const {binding_type}* in{index} [[buffer({index})]],\n"
         ));
     }
     for slot in 0..gather_count {
@@ -848,6 +863,30 @@ fn preamble(source: &mut String) {
     source.push_str("using namespace metal;\n\n");
     source.push_str(PROXIMA_ERF_FN);
     source.push('\n');
+    // emitted unconditionally, the same way `PROXIMA_ERF_FN` is: a
+    // `static inline` the kernel never calls costs nothing in the compiled
+    // AIR, and making it conditional would mean threading "does this kernel
+    // read a packed operand" into the preamble for no gain.
+    source.push_str(Q4K_UNPACK_MSL);
+    source.push('\n');
+}
+
+/// How operand `index` is READ, given the element-offset expression the
+/// caller already computed. A float operand is a direct index. A `Q4_K`
+/// operand's buffer is PACKED BYTES, so that same element offset splits into
+/// a super-block and a position inside it: element `n` lives in super-block
+/// `n / 256` at position `n % 256`, and that super-block starts at byte
+/// `(n / 256) * 144`. The uniforms stay in elements either way — only the
+/// read shape changes, which is the entire point of unpacking at the read
+/// instead of materializing a dequantized tensor first.
+fn operand_read(index: usize, offset: &str, quantized: bool) -> String {
+    if quantized {
+        format!(
+            "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
+        )
+    } else {
+        format!("in{index}[{offset}]")
+    }
 }
 
 /// [`BoundOpKind::Iota`]'s kernel: no operand buffers, no gather, no body —
@@ -867,7 +906,7 @@ fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, 0, 0, entry, element_type);
+    kernel_signature(&mut source, &[], 0, entry, element_type);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!("    out[gid] = ({element_type})gid;\n"));
     source.push_str("}\n");
@@ -890,7 +929,7 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, 0, 0, entry, element_type);
+    kernel_signature(&mut source, &[], 0, entry, element_type);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!(
         "    out[gid] = ({element_type}){};\n",
@@ -917,7 +956,7 @@ fn msl_literal(value: f32) -> String {
     format!("{value:?}")
 }
 
-fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -938,13 +977,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitErr
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(
-        &mut source,
-        operand_count,
-        gather_count,
-        entry,
-        element_type,
-    );
+    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -980,8 +1013,11 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitErr
         "    {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
-    for index in 0..operand_count {
-        source.push_str(&format!("    scratch[{index}] = in{index}[off{index}];\n"));
+    for (index, &is_packed) in quantized.iter().enumerate() {
+        source.push_str(&format!(
+            "    scratch[{index}] = {};\n",
+            operand_read(index, &format!("off{index}"), is_packed)
+        ));
     }
 
     let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
@@ -990,7 +1026,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str) -> Result<String, EmitErr
     Ok(source)
 }
 
-fn render_reduce(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+fn render_reduce(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1029,13 +1065,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(
-        &mut source,
-        operand_count,
-        gather_count,
-        entry,
-        element_type,
-    );
+    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
 
     if reduce_is_cooperative(resolved) {
         push_cooperative_reduce_body(
@@ -1046,6 +1076,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
             output_axes,
             &reduce_dims,
             rank,
+            quantized,
             element_type,
         );
     } else {
@@ -1064,6 +1095,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
             reduce_rank_len,
             operand_count,
             &gather_slots,
+            quantized,
             element_type,
         );
     }
@@ -1087,6 +1119,7 @@ fn push_serial_reduce_body(
     reduce_rank_len: usize,
     operand_count: usize,
     gather_slots: &[Option<usize>],
+    quantized: &[bool],
     element_type: &str,
 ) {
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
@@ -1157,9 +1190,10 @@ fn push_serial_reduce_body(
         "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
-    for index in 0..operand_count {
+    for (index, &is_packed) in quantized.iter().enumerate() {
         source.push_str(&format!(
-            "        scratch[{index}] = in{index}[off{index}];\n"
+            "        scratch[{index}] = {};\n",
+            operand_read(index, &format!("off{index}"), is_packed)
         ));
     }
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1202,6 +1236,7 @@ fn push_cooperative_reduce_body(
     output_axes: &[u16],
     reduce_dims: &[u16],
     rank: usize,
+    quantized: &[bool],
     element_type: &str,
 ) {
     let rank_len = rank.max(1);
@@ -1281,9 +1316,10 @@ fn push_cooperative_reduce_body(
         "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
-    for index in 0..operand_count {
+    for (index, &is_packed) in quantized.iter().enumerate() {
         source.push_str(&format!(
-            "        scratch[{index}] = in{index}[off{index}];\n"
+            "        scratch[{index}] = {};\n",
+            operand_read(index, &format!("off{index}"), is_packed)
         ));
     }
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1310,7 +1346,7 @@ fn push_cooperative_reduce_body(
     source.push_str("    }\n");
 }
 
-fn render_scan(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
     } = &resolved.kind
@@ -1343,13 +1379,7 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(
-        &mut source,
-        operand_count,
-        gather_count,
-        entry,
-        element_type,
-    );
+    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
     source.push_str("    if ((long)gid >= u.outer_total) { return; }\n");
 
     if outer_rank > 0 {
@@ -1417,14 +1447,16 @@ fn render_scan(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
                 "        long read_off{index} = running{index} + fetched{index} * u.gather_element_stride[{slot}];\n"
             ));
             source.push_str(&format!(
-                "        scratch[{index}] = in{index}[read_off{index}];\n"
+                "        scratch[{index}] = {};\n",
+                operand_read(index, &format!("read_off{index}"), quantized[index])
             ));
             source.push_str(&format!(
                 "        gather_running{index} += u.gather_index_strides[{slot}][{last_dim}];\n"
             ));
         } else {
             source.push_str(&format!(
-                "        scratch[{index}] = in{index}[running{index}];\n"
+                "        scratch[{index}] = {};\n",
+                operand_read(index, &format!("running{index}"), quantized[index])
             ));
         }
         source.push_str(&format!(
@@ -1629,7 +1661,7 @@ mod tests {
     #[test]
     fn a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound).expect("gather emits");
+        let kernel = emit(&bound, &BTreeSet::new()).expect("gather emits");
 
         assert_eq!(
             kernel.entry, "omega_elementwise_r2_n1_identity_g1",
@@ -1662,7 +1694,7 @@ mod tests {
     #[test]
     fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound).expect("gather emits");
+        let kernel = emit(&bound, &BTreeSet::new()).expect("gather emits");
 
         assert!(
             kernel.bindings.contains(&Binding::Fault),
@@ -1685,7 +1717,7 @@ mod tests {
     #[test]
     fn a_gather_free_op_names_and_binds_exactly_as_before_gather_existed() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound).expect("gather-free elementwise emits");
+        let kernel = emit(&bound, &BTreeSet::new()).expect("gather-free elementwise emits");
         assert!(
             !kernel.entry.contains("_g"),
             "a gather-free kernel's name must not grow a gather suffix"
@@ -1709,7 +1741,7 @@ mod tests {
     #[test]
     fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound).expect("elementwise emits");
+        let kernel = emit(&bound, &BTreeSet::new()).expect("elementwise emits");
 
         assert_eq!(kernel.entry, "omega_elementwise_r1_n1_tanh");
         assert_eq!(
@@ -1736,7 +1768,7 @@ mod tests {
             matches!(bound.kind, BoundOpKind::Reduce { .. }),
             "the elementwise op must have fused into the reduce"
         );
-        let kernel = emit(&bound).expect("matmul emits");
+        let kernel = emit(&bound, &BTreeSet::new()).expect("matmul emits");
 
         assert_eq!(kernel.entry, "omega_reduce_r3_n2_multiply_add_zero");
         assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
@@ -1769,7 +1801,7 @@ mod tests {
     #[test]
     fn cumsum_op_emits_a_scan_kernel_with_one_thread_per_line() {
         let bound = cumsum_op(8);
-        let kernel = emit(&bound).expect("cumsum emits");
+        let kernel = emit(&bound, &BTreeSet::new()).expect("cumsum emits");
 
         assert_eq!(kernel.entry, "omega_scan_r1_n1_identity_add_zero");
         assert!(kernel.source.contains("inner_len"));
@@ -1783,8 +1815,8 @@ mod tests {
     #[test]
     fn emit_is_deterministic_byte_equal() {
         let bound = matmul_op(4, 3, 5);
-        let first = emit(&bound).expect("first emit succeeds");
-        let second = emit(&bound).expect("second emit succeeds");
+        let first = emit(&bound, &BTreeSet::new()).expect("first emit succeeds");
+        let second = emit(&bound, &BTreeSet::new()).expect("second emit succeeds");
         assert_eq!(first, second);
     }
 
@@ -1793,8 +1825,8 @@ mod tests {
         let small = elementwise_tanh_op(4);
         let large = elementwise_tanh_op(4096);
 
-        let small_kernel = emit(&small).expect("small emits");
-        let large_kernel = emit(&large).expect("large emits");
+        let small_kernel = emit(&small, &BTreeSet::new()).expect("small emits");
+        let large_kernel = emit(&large, &BTreeSet::new()).expect("large emits");
 
         assert_eq!(small_kernel.source, large_kernel.source);
         assert_eq!(small_kernel.entry, large_kernel.entry);
@@ -1808,7 +1840,7 @@ mod tests {
             body.steps[0].op = ScalarOp::Add; // arity 2, but the step still carries 1 arg
         }
 
-        let error = emit(&bound).expect_err("mismatched arity is rejected");
+        let error = emit(&bound, &BTreeSet::new()).expect_err("mismatched arity is rejected");
         assert!(matches!(error, EmitError::ArityMismatch { .. }), "{error}");
     }
 
@@ -1819,7 +1851,7 @@ mod tests {
             *reduce_op = ScalarOp::Select;
         }
 
-        let error = emit(&bound).expect_err("select reduction body is rejected");
+        let error = emit(&bound, &BTreeSet::new()).expect_err("select reduction body is rejected");
         assert!(
             matches!(error, EmitError::ReductionBodyIsSelect { .. }),
             "{error}"
@@ -1834,7 +1866,7 @@ mod tests {
             output_axes.clear();
         }
 
-        let error = emit(&bound).expect_err("an empty scan is rejected");
+        let error = emit(&bound, &BTreeSet::new()).expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
     }
 }
