@@ -48,7 +48,10 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use omega::execute;
 use proxima_tensor::cpu::evaluate;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, map};
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, map,
+};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -193,9 +196,10 @@ fn bench_gemm_square(c: &mut Criterion) {
         let lhs = random_vec(1, (size * size) as usize);
         let rhs_t = random_vec(2, (size * size) as usize);
         let blocks: [&[f32]; 2] = [&lhs, &rhs_t];
+        let gpu_blocks: [QuantizedBlock<'_>; 2] = blocks.map(QuantizedBlock::Float32);
 
         let cpu = evaluate(&program, &[], &blocks, &[]).expect("cpu gemm evaluates");
-        let metal = execute(&program, &[], &blocks, &[]).expect("metal gemm executes on a real device");
+        let metal = execute(&program, &[], &gpu_blocks, &[]).expect("metal gemm executes on a real device");
         let cpu_checksum = cpu.root()[0];
         let metal_checksum = metal.root()[0];
         assert_checksum_agrees("gemm_square", cpu_checksum, metal_checksum, size);
@@ -216,7 +220,7 @@ fn bench_gemm_square(c: &mut Criterion) {
             bencher.iter(|| black_box(evaluate(&program, &[], &blocks, &[]).expect("cpu gemm evaluates")));
         });
         group.bench_with_input(BenchmarkId::new("metal", size), &size, |bencher, _| {
-            bencher.iter(|| black_box(execute(&program, &[], &blocks, &[]).expect("metal gemm executes")));
+            bencher.iter(|| black_box(execute(&program, &[], &gpu_blocks, &[]).expect("metal gemm executes")));
         });
     }
     group.finish();
@@ -236,9 +240,10 @@ fn bench_matvec_batch1(c: &mut Criterion) {
         let activation = random_vec(3, in_dim as usize);
         let weight = random_vec(4, (out_dim as u64 * in_dim as u64) as usize);
         let blocks: [&[f32]; 2] = [&activation, &weight];
+        let gpu_blocks: [QuantizedBlock<'_>; 2] = blocks.map(QuantizedBlock::Float32);
 
         let cpu = evaluate(&program, &[], &blocks, &[]).expect("cpu matvec evaluates");
-        let metal = execute(&program, &[], &blocks, &[]).expect("metal matvec executes on a real device");
+        let metal = execute(&program, &[], &gpu_blocks, &[]).expect("metal matvec executes on a real device");
         assert_checksum_agrees("matvec", cpu.root()[0], metal.root()[0], in_dim);
 
         // bandwidth-bound: the weight matrix is read exactly once per call
@@ -254,7 +259,7 @@ fn bench_matvec_batch1(c: &mut Criterion) {
             bencher.iter(|| black_box(evaluate(&program, &[], &blocks, &[]).expect("cpu matvec evaluates")));
         });
         group.bench_with_input(BenchmarkId::new("metal", label), &label, |bencher, _| {
-            bencher.iter(|| black_box(execute(&program, &[], &blocks, &[]).expect("metal matvec executes")));
+            bencher.iter(|| black_box(execute(&program, &[], &gpu_blocks, &[]).expect("metal matvec executes")));
         });
     }
     group.finish();

@@ -17,7 +17,19 @@ default = []
 # gguf-tensor-by-name bind can be driven end to end through evaluation.
 # The bind function itself (`bind::gguf_tensor_as_f32`) needs neither and
 # stays available at the no_std+alloc floor either way.
-std = ["proxima-gguf/std", "proxima-tensor/std", "interop-bgpool", "dep:proxima-tokenizer"]
+# `proxima-tensor/config` is not optional here: `generate.rs` is a LIB module
+# (`#[cfg(feature = "std")] mod generate`) and imports `proxima_tensor::spec`,
+# which is `config`-gated. Until this line, `config` only ever arrived through
+# [dev-dependencies], so `cargo build -p proxima-model-interop --features std`
+# failed while `cargo test` passed — the dev-dep unified the feature in and hid
+# it. A lib that only builds when its own tests are built is a broken lib.
+std = [
+    "proxima-gguf/std",
+    "proxima-tensor/std",
+    "proxima-tensor/config",
+    "interop-bgpool",
+    "dep:proxima-tokenizer",
+]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
 # stays out of the alloc-only floor even though every current `std` build
