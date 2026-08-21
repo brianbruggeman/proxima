@@ -65,7 +65,7 @@ fn real_manifest(path: &std::path::Path) -> Option<(Manifest, u64, std::fs::File
         parser = parser.push(&dummy_chunk[..take]).ok()?;
         remaining -= take as u64;
     }
-    let manifest = parser.finish().ok()?;
+    let manifest = parser.into_manifest().ok()?;
 
     // `data_offsets` are relative to the first byte after the 8-byte
     // length prefix AND the header JSON itself -- this is that base.

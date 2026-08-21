@@ -108,7 +108,7 @@ mod tests {
     }
 
     fn parse_whole(buf: &[u8]) -> Result<Manifest, SafetensorsError> {
-        SafetensorsParser::new().push(buf)?.finish()
+        SafetensorsParser::new().push(buf)?.into_manifest()
     }
 
     fn parse_in_chunks(buf: &[u8], split_points: &[usize]) -> Result<Manifest, SafetensorsError> {
@@ -119,7 +119,7 @@ mod tests {
             start = point;
         }
         parser = parser.push(&buf[start..])?;
-        parser.finish()
+        parser.into_manifest()
     }
 
     #[test]
