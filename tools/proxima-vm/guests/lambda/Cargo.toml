@@ -1,0 +1,18 @@
+[package]
+name = "proxima-vm-guest-lambda"
+description = "bare no_std, no_alloc guest binary proxima-vm's ELF loader boots: fixed-address entry point, no hypercall ABI wired yet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+
+[[bin]]
+name = "proxima-vm-guest-lambda"
+path = "src/main.rs"
+
+[lints]
+workspace = true
