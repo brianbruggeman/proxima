@@ -6,6 +6,11 @@
 //! [`transform::gguf_to_safetensors`] and [`transform::safetensors_to_gguf`]
 //! for exactly what each direction preserves and what it doesn't.
 //!
+//! [`generate::LoadedModel`] is this crate's other reachable capability:
+//! bind a checkpoint's weights once, then run greedy-decode text
+//! generation against them through `proxima_primitives::pipe::Pipe` --
+//! see that module's own doc for the load-once/generate-repeatedly shape.
+//!
 //! ONNX is out of scope here: it carries a computation graph, not just
 //! named tensors, so an ONNX leg of this transform is a different, larger
 //! job (serializing graph structure) than this crate does.
@@ -23,15 +28,19 @@ mod bind;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]
+mod generate;
+#[cfg(feature = "std")]
 mod loader;
 mod serving;
 mod transform;
 
-pub use bind::gguf_tensor_as_f32;
+pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
+#[cfg(feature = "std")]
+pub use generate::LoadedModel;
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use serving::{

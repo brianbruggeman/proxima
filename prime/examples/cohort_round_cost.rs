@@ -10,6 +10,7 @@
 // panicking immediately with a message is correct here, not a shortcut.
 #![allow(clippy::expect_used)]
 
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,18 +28,19 @@ struct TrivialRound {
     counter: AtomicUsize,
 }
 
-impl CohortRound for TrivialRound {
+impl CohortRound<Infallible> for TrivialRound {
     fn chunks(&self) -> usize {
         MEMBERS
     }
 
-    fn run_chunk(&self, _chunk: ChunkIndex) {
+    fn run_chunk(&self, _chunk: ChunkIndex) -> Result<(), Infallible> {
         self.counter.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
 fn cohort_round_cost_ns() -> f64 {
-    let config = ThreadCohort::builder()
+    let config = ThreadCohort::<Infallible>::builder()
         .members(NonZeroUsize::new(MEMBERS).expect("nonzero"))
         .spin_polls(2_000)
         .build();

@@ -17,7 +17,7 @@ default = []
 # gguf-tensor-by-name bind can be driven end to end through evaluation.
 # The bind function itself (`bind::gguf_tensor_as_f32`) needs neither and
 # stays available at the no_std+alloc floor either way.
-std = ["proxima-gguf/std", "proxima-tensor/std", "interop-bgpool"]
+std = ["proxima-gguf/std", "proxima-tensor/std", "interop-bgpool", "dep:proxima-tokenizer"]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
 # stays out of the alloc-only floor even though every current `std` build
@@ -34,8 +34,14 @@ arrayvec.workspace = true
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
+proxima-primitives = { workspace = true, default-features = false }
 proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+# `gguf` implies its own `std`, which is exactly the tier `generate::LoadedModel`
+# already requires (it evaluates through `proxima_tensor::cpu`, itself std-gated)
+# -- optional, wired on only by this crate's own `std` feature above, so the
+# alloc-only floor never pulls it in.
+proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["gguf"], optional = true }
 thiserror.workspace = true
 
 [lints]
@@ -44,5 +50,4 @@ workspace = true
 [dev-dependencies]
 half = { version = "2.7.1", default-features = false }
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "std"] }
-proxima-tokenizer = { path = "../proxima-tokenizer", features = ["gguf"] }
 rustix.workspace = true

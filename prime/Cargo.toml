@@ -227,5 +227,9 @@ required-features = ["runtime-prime-cohort", "runtime-prime-bgpool"]
 name = "cohort_chunk_sweep"
 required-features = ["runtime-prime-cohort"]
 
+[[example]]
+name = "cohort_empty_round_floor"
+required-features = ["runtime-prime-cohort"]
+
 [lints]
 workspace = true
