@@ -4814,3 +4814,99 @@ PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
 ```
 `matmul_split` and `quant_arm` print to stdout; subtract a
 `PROXIMA_MAX_TOKENS=1` run and divide by 23 to isolate decode.
+
+## ROW 68 — the kernel is NOT the gap: at 1 thread we equal llama.cpp exactly. Two fixes tried, both REFUTED, root cause is per-round dispatch cost
+
+**Host:** Apple M1 Max, 10 cores. **Incumbent:** llama.cpp b2534622, `-ngl 0`,
+same fixture/prompt/24 tokens, byte-identical output.
+**Repo:** `feat/tensor-consolidated` @ `34c7a40`.
+
+### Read the incumbent's source before optimizing against it — two hypotheses died
+
+- **`REPACK=1` does not repack Q4_K on this box.** `ggml/src/ggml-cpu/repack.cpp:1444`
+  gates Q4_K repack on `ggml_cpu_has_avx2()`; aarch64 is false. It applies to
+  Q4_0/IQ4_NL only.
+- **ggml's 2-row Q4_K dot never runs here.** `arch/arm/quants.c:2149` puts the
+  `nrc == 2` path behind `__ARM_FEATURE_MATMUL_INT8` (i8mm). M1 has dotprod,
+  not i8mm. And `ggml-cpu.c:1372` sets `num_rows_per_vec_dot = 1` for decode.
+
+So llama runs the SAME one-row `vdotq_s32` kernel we do. Reading both bodies
+(`arch/arm/quants.c:2370-2431` vs `cpu.rs:6332-6391`) they are the same
+16 `sdot` + 8 `vaddvq` + `bsums` mins-correction, hand-unrolled the same way.
+
+### The scaling curves settle it — decode ms/token
+
+| threads | llama.cpp **whole token** | ours **matmul only** | ours whole step |
+|---|---|---|---|
+| 1 | 177.70 | **178.1** | 187.6 |
+| 2 | 98.15 | **96.4** | 107.0 |
+| 4 | 56.85 | 64.96 | 76.06 |
+| 8 | 47.99 | 49.52 | 61.37 |
+
+**At 1 thread our matmul and llama's ENTIRE token are the same number.** At 2
+threads we are faster. The kernel is not the problem and no amount of kernel
+work will close this. The gap opens only as threads are added, and it lands
+almost entirely outside the matmul:
+
+at t=8, step 61.37 vs 47.99 = 13.38 ms gap — matmul 49.52 vs their ~46
+(3.5 ms), non-matmul 11.85 vs their ~2 (**9.85 ms, 74% of the gap**).
+
+**Our non-matmul does not scale at all**, measured across the same sweep:
+`reduce_f32_dense` 3.859 ms at 1 worker, 3.952 at 8. `elementwise` 2.644 at 1
+worker, **4.144 at 8** — it gets 1.5 ms WORSE, the parked matmul workers
+interfering with a phase that is entirely serial. Cause: `cpu.rs:2225`
+returns to the sequential path when `outer_len < 2`, and decode has exactly
+one outer position, so every one of the 547 elementwise and 385 f32 nodes
+runs single-threaded.
+
+### FIX 1 — stop the workers parking. REFUTED, 20-33% WORSE.
+
+`PROXIMA_COHORT_SPIN_POLLS`, n=3 per arm, interleaved:
+
+| spin_polls | parks/round | matmul ms/step | step ms |
+|---|---|---|---|
+| 2000 (default) | 6.5 | **48.7 / 48.3 / 49.6** | **60.5 / 60.1 / 61.5** |
+| 200,000 | 0.10 | 69.0 / 64.3 / 61.2 | 84.3 / 79.4 / 75.4 |
+| 5,000,000 | 0.00 | 65.6 / 59.8 / 58.4 | 80.5 / 74.8 / 71.6 |
+
+Decode is bandwidth-bound; idle members spinning contend for the bus and cost
+more than the park they avoid. Parking is the CHEAP option. The wake ramp
+visible in `cohort_slot` (first claim 9.6 us at slot 0 rising to 22.6 us at
+slot 7, ~34 us tail per slot, slot 7 present in only 5701 of 6972 rounds) is
+therefore NOT recoverable by spinning. Do not re-run this sweep.
+
+### FIX 2 — split the width axis so decode nodes parallelize. REFUTED, elementwise 2x WORSE.
+
+Implemented and gated green (354/354, clippy clean): `ElementwiseRowRound`
+gained a second chunking axis, splitting a single row's width when the outer
+axis has nothing to give. n=4 per arm, interleaved:
+
+| | step ms | elementwise ms | matmul ms |
+|---|---|---|---|
+| before | 57.21 / 56.75 / 57.22 / 57.10 | **3.99 / 3.98 / 4.00 / 4.03** | 45.61 / 45.09 / 45.56 / 45.48 |
+| width-split | 60.04 / 58.87 / 60.95 / 60.75 | **7.87 / 7.10 / 8.59 / 8.45** | 44.50 / 44.00 / 44.67 / 44.63 |
+
+Reverted. A decode elementwise node holds ~33 us of work (14336 elements at
+2.3 ns); opening a cohort round costs ~25 us. Splitting cannot pay at this
+granularity no matter where the threshold is set.
+
+### Root cause, stated once
+
+Two different execution models. ggml runs the WHOLE graph on a persistent
+team with a cheap spin barrier between nodes — every node, including every
+elementwise op, is split across all threads, and there is no per-node
+open/close. We run the graph on the main thread and open one cohort round per
+large node, so (a) small nodes cannot be parallelized because the round costs
+more than the work, and (b) between rounds the workers have nothing to do,
+park, and pay a 9.6-22.6 us wake ramp on the next round.
+
+Both refutations above are consequences of that shape, not independent bugs.
+The fix is the execution model, not a knob and not a threshold: threads must
+own the whole graph. Nothing smaller was found that moves it, and two things
+that looked like they would, measurably do not.
+
+### Standing, n=12 one window, `34c7a40`
+
+decode 59.83 vs 44.09 ms/token (**1.357x**); prefill 976.81 vs 749.81 ms
+(**1.303x**); 24-token wall 2385.33 vs 1767.74 ms (**1.349x**). Our spread
+2-6%, llama's 13-29%.
