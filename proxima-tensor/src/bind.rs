@@ -83,7 +83,7 @@ use crate::shape::{self, Shapes};
 /// headroom (e.g. a batch/heads/seq/dim attention iteration space) while
 /// staying inline; `SmallVec` spills to the heap past this instead of
 /// truncating, so a wider program still binds correctly.
-pub const MAX_INLINE_RANK: usize = 4;
+pub use crate::sized::MAX_INLINE_RANK;
 
 /// One operand's address into its own buffer, expressed directly in an
 /// [`BoundOp`]'s iteration-axis space: `strides[axis]` is how far the linear
@@ -144,7 +144,7 @@ type BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>;
 /// plus the reduce's own op (2). `push` and `materialize_if_held` return
 /// [`TensorError::NotLowerable`] rather than overflow this if a future
 /// higher-arity `ScalarOp` variant is ever added.
-const READY_BATCH_CAPACITY: usize = 3;
+pub use crate::sized::READY_BATCH_CAPACITY;
 
 /// The batch [`BoundOpBuilder::push`] readies for one `Op`: [`Pipe::Out`]
 /// for [`BoundOpBuilder`] and, by the composition law, [`Pipe::In`] for
