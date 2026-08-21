@@ -818,6 +818,23 @@ mod real_openchat_file {
         {
             use core::sync::atomic::Ordering;
             use proxima_tensor::instrument::cohort as cohort_diag;
+            // execution witness for WHICH quantized matmul arm ran: q4k_macs
+            // is only ever incremented inside the packed-int8 `Q4K` branch,
+            // so a nonzero count is proof the dequantize-then-fold codec did
+            // not carry the forward.
+            let quant = proxima_tensor::instrument::matmul_dispatch_totals();
+            let q4k_ns = proxima_tensor::instrument::ticks_to_nanos(quant.q4k_call_ticks);
+            std::println!(
+                "quant_arm q4k_macs={} q4k_ms={:.3} q4k_ns_per_mac={:.5} q5k_macs={} q6k_macs={} q5k_f32_calls={} q6k_f32_calls={} reduce_quantized_calls={}",
+                quant.q4k_macs,
+                q4k_ns as f64 / 1e6,
+                if quant.q4k_macs == 0 { 0.0 } else { q4k_ns as f64 / quant.q4k_macs as f64 },
+                quant.q5k_macs,
+                quant.q6k_macs,
+                quant.q5k_f32_calls,
+                quant.q6k_f32_calls,
+                quant.reduce_quantized_calls
+            );
             let rounds = cohort_diag::ROUNDS.load(Ordering::Relaxed);
             let parks = cohort_diag::PARKS.load(Ordering::Relaxed);
             let unpark_rounds = cohort_diag::UNPARK_ROUNDS.load(Ordering::Relaxed);
