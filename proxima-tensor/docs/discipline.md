@@ -4671,3 +4671,146 @@ claim is made about the llama.cpp ratio from these runs.
 runtime-prime-cohort` 156/156 - `proxima-primitives` 413/413 -
 `proxima-model-interop --features std` 24/24 - `clippy -p proxima-tensor
 --features std,instrument --all-targets` 0 warnings.
+
+## ROW 67 — head-to-head vs llama.cpp, re-measured; and the matmul ceiling is 26.5 ms, not 39.6
+
+**Repo:** worktree `agent-a585f8281e4851e98`, branch `feat/tensor-consolidated`,
+HEAD `65fbb8e` for the head-to-head, `8ea6015` for the bucket split.
+**Host:** Apple M1 Max, 10 logical cores, 64 GiB. Background load is the
+desktop (WindowServer + iTerm ~0.8 core), not killable; noted per run.
+**Incumbent:** llama.cpp b2534622 (build 5761),
+`/Users/brianbruggeman/repos/others/llama.cpp/bin/llama-cli`.
+Its fast CPU path is verified ON, not assumed:
+`NEON=1 ARM_FMA=1 FP16_VA=1 DOTPROD=1 LLAMAFILE=1 ACCELERATE=1 REPACK=1`,
+and `load_tensors: offloaded 0/33 layers to GPU` — CPU-to-CPU, no Metal.
+
+**Both sides, same everything:** same
+`openchat-3.5-1210.Q4_K_S.gguf`, same prompt (31 tokens on both — our
+prefill elementwise call sizes are exact multiples of 31: 961, 992, 1984,
+3844, 7936, 15872), 24 tokens generated, greedy. **Both emit byte-identical
+text** ("Here is a simple Python function that returns the nth Fibonacci
+number using recursion:"), so the incumbent is doing our work, not a
+cheaper one.
+
+### A to B, n=18 per arm, three arms interleaved in ONE window
+
+| decode, ms/token | min | median | max | spread |
+|---|---|---|---|---|
+| llama.cpp `-t 8` | **39.60** | **49.00** | 106.74 | **170%** |
+| proxima `w=8` | 60.57 | 66.29 | 77.97 | 29% |
+| proxima `w=10` | 61.11 | 66.32 | 72.00 | 18% |
+
+| prefill, ms | min | median | max | spread |
+|---|---|---|---|---|
+| llama.cpp `-t 8` | **725.72** | **806.17** | 983.37 | 36% |
+| proxima `w=8` | 935.10 | 1021.35 | 1305.16 | 40% |
+| proxima `w=10` | 940.58 | 1070.12 | 1393.06 | 48% |
+
+**The two estimators disagree and the row does not pick the flattering one.**
+decode min-vs-min **1.529x behind**; decode median-vs-median **1.353x**.
+prefill min-vs-min **1.289x**; median-vs-median **1.267x**. llama's decode
+spread is 170% against our 18-29%: it is far more sensitive to the desktop
+interference, so its median is inflated by its own tail and min-vs-min is
+the better estimate of a quiet-box gap. Against the prior standing figures
+(prefill 1.233x, decode 1.404x) the median says decode improved and the min
+says it regressed. **This box cannot resolve which.** The prior log's
+llama bar (205.7 ms, flagged DERIVED, never re-verified) is superseded.
+
+### Is the matmul bucket kernel, or orchestration? MEASURED: kernel.
+
+`matmul_split` counters, `PROXIMA_MAX_TOKENS=24` minus `=1`, divided by the
+23 decode steps that separates them (quiet box, load 1.01, n=3):
+
+| per decode step | ms | share of bucket |
+|---|---|---|
+| bucket (`reduce_quantized`) | 46.16 | 100% |
+| packed int8 kernel (q4k+q5k+q6k calls) | **45.06** | **97.6%** |
+| quantize activation to Q8_K | 1.82 | 3.9% |
+| q4k transpose | 0.98 | 2.1% |
+| dispatch setup | 0.23 | 0.5% |
+| spawn / recv_wait | 0.00 / 0.00 | 0% |
+| caller's own chunk | 42.52 | — (2.54 ms, 5.6%, waiting on cohort stragglers) |
+
+So the bucket is not hiding dispatch. It is the kernel. Separately, the arm
+is proven by execution witness, not by reading the feature flags:
+`q4k_macs=363,293,835,264` (incremented only inside the packed branch),
+`q5k_f32_calls=0`, `q6k_f32_calls=0` — the dequantize-then-fold codec never
+ran. `q4k_ns_per_mac=0.00500` against the crate's own 0.2534 for
+dequantize-then-fold.
+
+### The correction: our own overhead sets the matmul ceiling
+
+Full decode step, quiet box, `w=8`, n=3, median run — this accounts for
+100% of the step, nothing residual:
+
+| | ms/step | % of our step | % of llama's 39.60 ms token |
+|---|---|---|---|
+| matmul bucket | 49.881 | 79.2% | 126% |
+| elementwise | 5.494 | 8.7% | 13.9% |
+| `reduce_f32_dense` | 3.972 | 6.3% | 10.0% |
+| setup + loop overhead | 3.614 | 5.7% | 9.1% |
+| **total** | **62.961** | 100% | 159% |
+
+**Non-matmul = 13.08 ms/step = 33% of the incumbent's ENTIRE token budget.**
+
+The previous framing ("our matmul alone, 47.78 ms, is 1.21x llama's whole
+39.60 ms token") was the wrong comparison: it silently gave our own 13.08 ms
+of overhead a free pass. Corrected —
+
+- matmul budget to reach llama's **min**: 39.60 - 13.08 = **26.52 ms**.
+  We are at 49.88. Required speedup on the matmul: **1.88x**, not 1.21x.
+- matmul budget to reach llama's **median**: 49.00 - 13.08 = 35.92 ms.
+  Required: **1.39x**.
+
+And neither term alone reaches it: zeroing ALL non-matmul work still leaves
+49.88 ms against a 39.60 ms bar (1.26x behind). Both must move.
+
+### Where the non-matmul 13.08 ms actually is — measured, not derived
+
+The elementwise kernel time is instrumented directly:
+`fast_e=1,107,968 fast_ms=2.443`. Against a 5.494 ms elementwise node total,
+**3.05 ms/step of elementwise cost is OUTSIDE the kernel** — per-node setup,
+`step_values` allocation, dispatch. `reduce_f32_dense` by contrast is
+essentially all arithmetic (11.6M elements x 0.34 ns = 3.95 ms vs a 3.972 ms
+node total). Adding the 3.614 ms of graph setup + loop overhead:
+
+**~6.7 ms/step is neither matmul nor arithmetic. That is 17% of the
+incumbent's entire token budget, spent on graph execution.**
+
+A forward resolves 1196 nodes (225 `reduce_matmul_quantized`, 385
+`reduce_f32_dense`, 547 `elementwise`, 37 `constant`, 2 `iota`). 971 of them
+are non-matmul.
+
+### What this says about ROW 66
+
+ROW 66's 2.6 ms/step elementwise win is real and independently confirmed
+here (the whole elementwise node total is 5.494 ms with the slow-path
+element count at 0). It attacked the right region at the wrong level: the
+remaining elementwise cost is 2.44 ms of kernel against 3.05 ms of per-node
+overhead. Fusing the step chain (the ~1.86 ms lever) targets the 2.44; the
+3.05 needs the node count or the per-node cost to fall, which is a graph
+question, not a kernel one.
+
+### DERIVED, labelled as such, not measured here
+
+ROW 61 measured our packed kernel at 1.29-1.40x behind ggml t1 on isolated
+shapes. If that ratio transfers to this forward, llama's matmul is
+49.88/1.40 to 49.88/1.29 = 35.6-38.7 ms, leaving it 0.9-4.0 ms of
+non-matmul against our 13.08 — a 3-14x overhead gap. This rests on ROW 61's
+ratio transferring from isolated shapes to a real forward, which has not
+been shown. It is the hypothesis the next row should test directly, by
+instrumenting llama.cpp's own op-level split rather than inferring it.
+
+### Re-prove
+
+```
+# incumbent
+llama-cli -m openchat-3.5-1210.Q4_K_S.gguf -ngl 0 -t 8 -n 24 \
+  --temp 0 --top-k 1 -no-cnv --seed 1 -p "<the 31-token prompt>"
+# ours
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
+  <test-bin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+`matmul_split` and `quant_arm` print to stdout; subtract a
+`PROXIMA_MAX_TOKENS=1` run and divide by 23 to isolate decode.
