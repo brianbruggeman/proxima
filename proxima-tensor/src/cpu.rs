@@ -2409,7 +2409,9 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     // when nothing ever read it back; only `Generic` needs the fused
     // per-step row table at all.
     let mut step_values = match shape {
-        BodyShape::Generic(_) => vec![0.0f32; body.steps.len() * if fast_path { inner_len } else { 1 }],
+        BodyShape::Generic(_) => {
+            vec![0.0f32; body.steps.len() * if fast_path { inner_len.min(GENERIC_WIDTH_TILE) } else { 1 }]
+        }
         BodyShape::Unary(..) | BodyShape::Binary(..) => Vec::new(),
     };
     #[cfg(feature = "instrument")]
@@ -8077,6 +8079,50 @@ fn elementwise_width_generic(
     out: &mut [f32],
     step_values: &mut [f32],
 ) {
+    let mut tile_start = 0usize;
+    while tile_start < out.len() {
+        let tile_len = GENERIC_WIDTH_TILE.min(out.len() - tile_start);
+        elementwise_width_generic_tile(
+            body,
+            raw,
+            running,
+            strides,
+            tile_start,
+            &mut out[tile_start..tile_start + tile_len],
+            step_values,
+        );
+        tile_start += tile_len;
+    }
+}
+
+/// Width block one [`elementwise_width_generic`] pass evaluates the whole
+/// fused chain over. Step-outer/position-inner evaluation makes one full
+/// pass across the width PER STEP, so a 6-step body on a 14336-wide row
+/// streamed 6 x 56 KiB of intermediates through L2 and allocated a 344 KiB
+/// `step_values` table per node call — measured by this crate's own
+/// `ELEMENTWISE_STEP_VALUES_TICKS` at 1010.8 ns/call over 771 calls per
+/// decode step. Blocking the row caps that scratch at `steps * 512` floats
+/// whatever the row width, and keeps every intermediate the chain produces
+/// L1-resident between the step that writes it and the step that reads it.
+/// 512 `f32` is 2 KiB per step row, 12 KiB for the deepest body this
+/// program builds, against this core's 128 KiB L1D.
+const GENERIC_WIDTH_TILE: usize = 512;
+
+/// One [`GENERIC_WIDTH_TILE`] block of [`elementwise_width_generic`].
+/// `tile_start` offsets each operand's own width span by its own stride —
+/// the only thing blocking changes. Every output position is computed by
+/// the same steps in the same order against the same inputs it would have
+/// been at full width, so output is bit-identical.
+#[inline(always)]
+fn elementwise_width_generic_tile(
+    body: &ComposedBody,
+    raw: &[&[f32]],
+    running: &[i64],
+    strides: &[i64],
+    tile_start: usize,
+    out: &mut [f32],
+    step_values: &mut [f32],
+) {
     let width = out.len();
     let empty: &[f32] = &[];
     for (index, step) in body.steps.iter().enumerate() {
@@ -8092,10 +8138,11 @@ fn elementwise_width_generic(
             spans[arg_slot] = match *arg {
                 StepArg::Operand(operand_index) => {
                     let operand_index = operand_index as usize;
+                    let stride = strides[operand_index] as usize;
                     OperandSpan {
                         data: raw[operand_index],
-                        base: running[operand_index] as usize,
-                        stride: strides[operand_index] as usize,
+                        base: running[operand_index] as usize + tile_start * stride,
+                        stride,
                     }
                 }
                 StepArg::Step(step_index) => {
