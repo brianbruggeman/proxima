@@ -58,6 +58,19 @@
 //! resident cohort roughly 6,600 spurious wakes per 330ms forward pass (one
 //! per member per timeout), each contending the P-cores the leader needs.
 //! see [`wait_for_round`] for the SeqCst argument the unbounded park relies on.
+//!
+//! # completion is a dial, not a constant
+//!
+//! two questions look alike and are not the same question. "when has every
+//! member thread checked in for this round" is the join barrier: it is
+//! fixed at `done == members`, forever, because [`CohortSession::run`]'s
+//! erasure of `round`/`completion` to `'static` is only sound if no member
+//! can still be dereferencing either pointer once `run` returns — see the
+//! SAFETY comment at that erasure site. "when has this round's WORK stopped
+//! being dispatched" is a caller-specific policy — [`FanInCompletion`] —
+//! and has nothing to do with the join barrier: it only narrows which
+//! chunks a member is offered before it falls through to reporting `done`
+//! like every other member, working or not.
 
 #![cfg(feature = "runtime-prime-cohort")]
 
@@ -74,6 +87,7 @@ use crossbeam_utils::CachePadded;
 use crossbeam_utils::sync::{Parker, Unparker};
 
 use proxima_core::ProximaError;
+use proxima_primitives::pipe::fan_in::FanInCompletion;
 
 /// forensic counters for the matmul-cohort wall-time decomposition:
 /// where a round's wall goes between the leader publishing it and the
@@ -167,12 +181,19 @@ pub mod diag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkIndex(pub usize);
 
-/// one round of cohort work. object-safe by construction (no generics, no
-/// `Self`-returning methods) so a single fixed set of member threads can
-/// run an unbounded, unrecompiled sequence of concrete `CohortRound`
-/// implementations over the cohort's lifetime — the reference stored in
-/// the control block is `&dyn CohortRound`, never an owned `Box`.
-pub trait CohortRound: Sync {
+/// one round of cohort work. object-safe by construction (one type
+/// parameter fixed by the cohort, no `Self`-returning methods) so a single
+/// fixed set of member threads can run an unbounded, unrecompiled sequence
+/// of concrete `CohortRound` implementations over the cohort's lifetime —
+/// the reference stored in the control block is `&dyn CohortRound<Error>`,
+/// never an owned `Box`.
+///
+/// `run_chunk` returns `Result<(), Error>` — a chunk that can fail says so
+/// through its own return type, not a side-channel plus a counter. a panic
+/// is still caught separately by the runner and counted as `abandoned`:
+/// unwinding is the thread surviving something `Error` was never meant to
+/// carry, not normal control flow the round's own logic produced.
+pub trait CohortRound<Error>: Sync {
     /// number of disjoint chunks this round claims to have. members
     /// self-select chunk indices `0..chunks()` via a shared atomic cursor.
     fn chunks(&self) -> usize;
@@ -180,20 +201,78 @@ pub trait CohortRound: Sync {
     /// run exactly one chunk. called at most once per chunk index per
     /// round, from whichever member thread claims it — never assume which
     /// thread, or that chunks run in index order.
-    fn run_chunk(&self, chunk: ChunkIndex);
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), Error>;
 }
+
+// [`FanInCompletion`] (from `proxima_primitives::pipe::fan_in`) governs
+// when a round STOPS DISPATCHING new chunks to a claiming member — never
+// when [`CohortSession::run`] itself returns. the join barrier
+// (`done == members`, [`CohortSession::run_with_completion`]'s own wait)
+// is not a policy: every member thread must finish its last
+// `round_ptr`/`completion_ptr` dereference before `run` can null both
+// pointers and hand the borrowed round back to the caller — see the
+// SAFETY comment at the erasure site. the trait answers a narrower,
+// genuinely caller-specific question: once a member reaches the claim
+// loop, should it take the next chunk.
+//
+// `prime/Cargo.toml` already carries `proxima-primitives` as an
+// unconditional dependency (`proxima-primitives` carries no entry for
+// `prime` in the other direction), and the predicate `(done, total) ->
+// bool` here is identical to `FanIn`'s own stopping question — same
+// signature, same contract, only the caller's counted thing differs
+// (retired merge sources there, retired chunks here — a domain-meaning
+// difference the trait itself is deliberately blind to). `cohort` reuses
+// `FanInCompletion` rather than redeclaring it, so `(done, total) ->
+// bool` stays a single definition instead of two parallel ones that
+// happened to agree.
+//
+// (this module previously carried its own `CohortCompletion` trait,
+// declared here as a byte-for-byte duplicate of `FanInCompletion` under
+// the false premise that `prime` did not depend on `proxima-primitives`.
+// it does — see the paragraph above — so the duplicate is deleted and
+// every call site below now names `FanInCompletion` directly.)
+//
+// stop dispatching once `self.0` chunks have retired, leaving any
+// unclaimed chunks undispatched. a caller that only needs the first `N`
+// results (best-effort, speculative, or fail-fast-shaped rounds) is not
+// forced to pay for chunks nobody will read.
+//
+// "every chunk must retire before dispatch stops" is not a second type —
+// `Quorum(chunks)` (`chunks` the round's own total) is the identical
+// predicate: `retired >= chunks` either way. it is not spelled that way
+// here, though: the actual all-chunks default is
+// `CohortSession::run_with_completion`'s `None`, not `Some(&value)` of any
+// `FanInCompletion` — `None` skips the retired-count check (two atomic
+// loads plus a vtable call) every claim-loop iteration entirely, which
+// `Some(&Quorum(chunks))` cannot do, since it must still be consulted to
+// learn it is satisfied. a prior `AllChunks` unit type stood in front of
+// that `None` as "a concrete value to name instead of matching on
+// `Option`" — but nothing ever constructed it (not the non-test code, not
+// the tests), and had it been used it would have been strictly worse than
+// `None`: same predicate, extra atomics paid for nothing. deleted;
+// `proxima_primitives::pipe::fan_in::Quorum(chunks)` names the same policy
+// for any caller who genuinely needs a `FanInCompletion` value rather than
+// the zero-overhead `None` path — this module minted no local
+// `ChunkQuorum` type: it would have been the same `(done, total) -> bool`
+// predicate `Quorum` already names, under a second name.
 
 /// outcome of one [`CohortSession::run`] call.
 #[must_use]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoundReport {
-    /// chunks whose `run_chunk` returned without panicking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundReport<Error> {
+    /// chunks whose `run_chunk` returned `Ok`.
     pub completed: usize,
-    /// chunks whose `run_chunk` panicked. the panic is caught per-chunk —
-    /// one abandoned chunk never strands the round or the other members.
+    /// chunks whose `run_chunk` panicked or returned `Err`. either way the
+    /// failure is caught per-chunk — one abandoned chunk never strands the
+    /// round or the other members.
     pub abandoned: usize,
     /// the first abandoned chunk's index, if any. `None` iff `abandoned == 0`.
     pub first_abandoned: Option<ChunkIndex>,
+    /// the first `Err` any chunk returned this round, if any. `None` when
+    /// every abandoned chunk (if any) abandoned by panicking instead — a
+    /// panic's payload is not `Error`-shaped, so it is never surfaced here;
+    /// `abandoned`/`first_abandoned` already say a chunk was lost either way.
+    pub first_error: Option<Error>,
     /// member thread count the round ran against.
     pub members: usize,
 }
@@ -259,12 +338,13 @@ impl CohortBuilder {
 
 /// cache-line-padded shared state between the leader and every member
 /// thread. `round` is the single publication edge: the leader bumps it
-/// with `Release` after populating `chunks`/`round_ptr`; members observe
-/// the bump with `Acquire` before touching either. `done` is the join
-/// edge: members bump it with `Release` on every path (including a
-/// caught panic) so the leader's `Acquire` spin is guaranteed to observe
-/// every member's writes before returning.
-struct Control {
+/// with `Release` after populating `chunks`/`round_ptr`/`completion_ptr`;
+/// members observe the bump with `Acquire` before touching any of the
+/// three. `done` is the join edge: members bump it with `Release` on every
+/// path (including a caught panic) so the leader's `Acquire` spin is
+/// guaranteed to observe every member's writes — including `first_error` —
+/// before returning.
+struct Control<Error> {
     round: CachePadded<AtomicU64>,
     chunks: CachePadded<AtomicUsize>,
     /// ggml's `current_chunk` — members self-select disjoint work via
@@ -275,6 +355,12 @@ struct Control {
     completed: CachePadded<AtomicUsize>,
     lost: CachePadded<AtomicUsize>,
     first_abandoned: CachePadded<AtomicUsize>,
+    /// guards `first_error`: the member whose `compare_exchange` wins is the
+    /// sole writer for the round, exactly the same single-writer contract
+    /// `first_abandoned`'s own CAS already uses, just needing a companion
+    /// flag because `Error` cannot live inside an atomic the way a `usize`
+    /// index can.
+    error_claimed: CachePadded<AtomicBool>,
     session_open: CachePadded<AtomicBool>,
     parked_count: CachePadded<AtomicUsize>,
     shutdown: CachePadded<AtomicBool>,
@@ -286,37 +372,54 @@ struct Control {
     /// type-erased pointer to the round object currently in flight. valid
     /// exactly while `round` names an active round the leader has not yet
     /// observed `done == members` for. see the safety comment at the
-    /// write site in [`CohortSession::run`].
-    round_ptr: UnsafeCell<Option<NonNull<dyn CohortRound>>>,
+    /// write site in [`CohortSession::run_with_completion`].
+    round_ptr: UnsafeCell<Option<NonNull<dyn CohortRound<Error>>>>,
+    /// type-erased pointer to this round's [`FanInCompletion`] policy, or
+    /// `None` when the round was opened via [`CohortSession::run`] (the
+    /// zero-overhead default). published and retired in lockstep with
+    /// `round_ptr` — same publication edge, same join-barrier lifetime.
+    completion_ptr: UnsafeCell<Option<NonNull<dyn FanInCompletion>>>,
+    /// the first `Err` any chunk returned this round, written at most once
+    /// (guarded by `error_claimed`) and read by the leader only after the
+    /// join edge below has been crossed.
+    first_error: UnsafeCell<Option<Error>>,
 }
 
-// SAFETY: every field but `round_ptr` is already `Sync` (atomics,
-// `CachePadded` of atomics, boxed slices of `Sync` types). `round_ptr`'s
-// `UnsafeCell` is written exactly once per round by the leader (before the
-// `round` Release bump) and read only by members after they observe that
-// bump via Acquire — the same single-writer-then-many-readers contract
-// `core/inbox.rs`'s `Lane` uses for its `cached_head`/`cached_tail` cells,
-// just gated on `round` instead of `head`/`tail`.
-unsafe impl Sync for Control {}
+// SAFETY: every field but `round_ptr`/`completion_ptr`/`first_error` is
+// already `Sync` (atomics, `CachePadded` of atomics, boxed slices of `Sync`
+// types). `round_ptr`/`completion_ptr` are written exactly once per round by
+// the leader (before the `round` Release bump) and read only by members
+// after they observe that bump via Acquire — the same single-writer-then-
+// many-readers contract `core/inbox.rs`'s `Lane` uses for its
+// `cached_head`/`cached_tail` cells, just gated on `round` instead of
+// `head`/`tail`. `first_error` is written at most once per round by
+// whichever member's `error_claimed` CAS wins, strictly before that
+// member's own `done` Release bump, and read by the leader only after
+// observing `done == members` via Acquire — ordinary message-passing
+// through an already-established happens-before edge. `Error: Send` is
+// required because `first_error` genuinely crosses threads (written on a
+// member thread, read on the leader's).
+unsafe impl<Error: Send> Sync for Control<Error> {}
 // SAFETY: `Control` is only ever held behind `Arc` and moved into member
 // threads at spawn time, before any round is active (`round_ptr` is `None`
-// until the first `CohortSession::run`). the erased pointer type itself has
-// no thread affinity — it is `Send` in every respect but the auto-trait
-// deriver's blindness to `UnsafeCell<Option<NonNull<_>>>`.
-unsafe impl Send for Control {}
+// until the first `CohortSession::run`). the erased pointer types have no
+// thread affinity — they are `Send` in every respect but the auto-trait
+// deriver's blindness to `UnsafeCell<Option<NonNull<_>>>`. `Error: Send` for
+// the same reason `first_error` needs it in the `Sync` impl above.
+unsafe impl<Error: Send> Send for Control<Error> {}
 
 /// fixed-cohort spin-barrier: a pool of dedicated member threads that run
 /// disjoint chunks of one [`CohortRound`] per round, woken once per round
 /// via an atomic counter rather than once per unit of work. see the module
 /// docs for why this exists instead of `ProximaBackgroundPool`
 /// ([`super::background::ProximaBackgroundPool`]).
-pub struct ThreadCohort {
+pub struct ThreadCohort<Error> {
     config: CohortConfig,
-    control: Arc<Control>,
+    control: Arc<Control<Error>>,
     handles: Vec<Option<thread::JoinHandle<()>>>,
 }
 
-impl ThreadCohort {
+impl<Error: Send + 'static> ThreadCohort<Error> {
     #[must_use]
     pub fn builder() -> CohortBuilder {
         CohortBuilder::default()
@@ -348,12 +451,15 @@ impl ThreadCohort {
             completed: CachePadded::new(AtomicUsize::new(0)),
             lost: CachePadded::new(AtomicUsize::new(0)),
             first_abandoned: CachePadded::new(AtomicUsize::new(usize::MAX)),
+            error_claimed: CachePadded::new(AtomicBool::new(false)),
             session_open: CachePadded::new(AtomicBool::new(false)),
             parked_count: CachePadded::new(AtomicUsize::new(0)),
             shutdown: CachePadded::new(AtomicBool::new(false)),
             progress: progress.into_boxed_slice(),
             unparkers: unparkers.into_boxed_slice(),
             round_ptr: UnsafeCell::new(None),
+            completion_ptr: UnsafeCell::new(None),
+            first_error: UnsafeCell::new(None),
         });
 
         let mut handles = Vec::with_capacity(dedicated_count);
@@ -388,7 +494,7 @@ impl ThreadCohort {
     /// session is already open — `CohortSession` is `!Send + !Sync` so
     /// within one thread this only fires on a bug (nested `enter` before
     /// the prior session drops).
-    pub fn enter(&self) -> Result<CohortSession<'_>, ProximaError> {
+    pub fn enter(&self) -> Result<CohortSession<'_, Error>, ProximaError> {
         self.control
             .session_open
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -400,7 +506,7 @@ impl ThreadCohort {
     }
 }
 
-impl Drop for ThreadCohort {
+impl<Error> Drop for ThreadCohort<Error> {
     fn drop(&mut self) {
         self.control.shutdown.store(true, Ordering::Release);
         for unparker in &self.control.unparkers {
@@ -417,21 +523,48 @@ impl Drop for ThreadCohort {
 /// an open cohort session. `!Send + !Sync` (via the raw-pointer marker) so
 /// only the thread that opened it can drive rounds — `run` requires no
 /// internal locking because there is, by construction, exactly one caller.
-pub struct CohortSession<'cohort> {
-    cohort: &'cohort ThreadCohort,
+pub struct CohortSession<'cohort, Error> {
+    cohort: &'cohort ThreadCohort<Error>,
     _not_send_sync: PhantomData<*mut ()>,
 }
 
-impl CohortSession<'_> {
+impl<Error: Send + 'static> CohortSession<'_, Error> {
     #[must_use]
     pub fn members(&self) -> usize {
         self.cohort.members()
     }
 
-    /// run one round to completion: publish `round` to every member,
-    /// spin until all have reported `done`, and report what happened.
-    /// blocks the calling thread — this is the spin-barrier itself.
-    pub fn run<Round: CohortRound>(&self, round: &Round) -> RoundReport {
+    /// run one round to completion under the default policy — every chunk
+    /// dispatched, in full, exactly [`CohortSession::run`] always did.
+    /// blocks the calling thread — this is the spin-barrier itself. sugar
+    /// for [`CohortSession::run_with_completion`] with no dial, which is
+    /// also the zero-overhead path: see that method's doc.
+    pub fn run<Round: CohortRound<Error>>(&self, round: &Round) -> RoundReport<Error> {
+        self.run_with_completion(round, None)
+    }
+
+    /// run one round to completion under a caller-named [`FanInCompletion`]
+    /// policy, publish `round` to every member, spin until all have
+    /// reported `done`, and report what happened.
+    ///
+    /// `completion` governs when the claim loop stops handing out NEW chunk
+    /// indices — `None` (what [`run`](Self::run) passes) skips that check
+    /// entirely, so the default path pays no extra atomic loads per chunk
+    /// versus before this method existed.
+    ///
+    /// the `done == members` wait below is not part of this policy and
+    /// cannot be: it is the join barrier every member's last
+    /// `round_ptr`/`completion_ptr` dereference must cross before this
+    /// function can null both pointers and return `round`/`completion` to
+    /// the caller. `FanInCompletion` only ever narrows which chunks a
+    /// member is offered — it can end DISPATCH early, but it can never let
+    /// `run_with_completion` itself return before every member thread has
+    /// checked in, no matter what policy is named.
+    pub fn run_with_completion<Round: CohortRound<Error>>(
+        &self,
+        round: &Round,
+        completion: Option<&dyn FanInCompletion>,
+    ) -> RoundReport<Error> {
         let control = &self.cohort.control;
         let members = self.cohort.members();
         let chunk_total = round.chunks();
@@ -442,24 +575,33 @@ impl CohortSession<'_> {
         control.completed.store(0, Ordering::Relaxed);
         control.lost.store(0, Ordering::Relaxed);
         control.first_abandoned.store(usize::MAX, Ordering::Relaxed);
+        control.error_claimed.store(false, Ordering::Relaxed);
 
-        let round_dyn: &dyn CohortRound = round;
-        let erased: NonNull<dyn CohortRound> = NonNull::from(round_dyn);
-        // SAFETY: erase the borrow's lifetime to 'static so the fat pointer
-        // fits `Control::round_ptr`. sound because this function does not
-        // return until the spin loop below observes `done == members` —
-        // i.e. until every member thread has returned from its last
-        // `round_ptr` dereference — so `round` cannot go out of scope while
-        // any member could still read through the erased pointer. same
-        // argument `std::thread::scope` relies on for its scoped borrows.
-        let erased_static: NonNull<dyn CohortRound + 'static> =
-            unsafe { std::mem::transmute(erased) };
+        let round_dyn: &dyn CohortRound<Error> = round;
+        let erased: NonNull<dyn CohortRound<Error>> = NonNull::from(round_dyn);
+        let completion_erased: Option<NonNull<dyn FanInCompletion>> = completion.map(NonNull::from);
+        // SAFETY: erase both borrows' lifetimes to 'static so the fat
+        // pointers fit `Control::round_ptr`/`completion_ptr`. sound because
+        // this function does not return until the spin loop below observes
+        // `done == members` — i.e. until every member thread has returned
+        // from its last dereference of EITHER pointer — so neither `round`
+        // nor `completion` can go out of scope while any member could still
+        // read through them. same argument `std::thread::scope` relies on
+        // for its scoped borrows. `FanInCompletion` narrows WHEN a member
+        // stops asking for new chunks; it has no bearing on this join wait,
+        // which stays hard-coded to `members` regardless of policy — this
+        // is the re-established soundness argument the completion dial was
+        // required to preserve by construction, not weaken.
+        let erased_static: NonNull<dyn CohortRound<Error> + 'static> = unsafe { std::mem::transmute(erased) };
+        let completion_static: Option<NonNull<dyn FanInCompletion + 'static>> =
+            completion_erased.map(|pointer| unsafe { std::mem::transmute(pointer) });
         // SAFETY: single-writer (this session, per its `!Send + !Sync`
         // contract) write before the `round` Release bump below, which is
         // the publication edge members Acquire-read before ever touching
-        // `round_ptr`.
+        // either pointer.
         unsafe {
             *control.round_ptr.get() = Some(erased_static);
+            *control.completion_ptr.get() = completion_static;
         }
 
         // SeqCst, not Release/Acquire, and all four of these ops together:
@@ -511,9 +653,10 @@ impl CohortSession<'_> {
         diag::close_round(members, diag::now_nanos());
 
         // SAFETY: every member has reported done (just observed above via
-        // Acquire), so no member can still be dereferencing `round_ptr`.
+        // Acquire), so no member can still be dereferencing either pointer.
         unsafe {
             *control.round_ptr.get() = None;
+            *control.completion_ptr.get() = None;
         }
 
         let completed = control.completed.load(Ordering::Relaxed);
@@ -524,17 +667,23 @@ impl CohortSession<'_> {
         } else {
             Some(ChunkIndex(first_abandoned_raw))
         };
+        // SAFETY: same join edge as the pointer-nulling above — whichever
+        // member's CAS won `error_claimed` (if any) has already returned
+        // from `run_chunk` and bumped `done` by the time this line runs, so
+        // no writer to `first_error` remains.
+        let first_error = unsafe { (*control.first_error.get()).take() };
 
         RoundReport {
             completed,
             abandoned,
             first_abandoned,
+            first_error,
             members,
         }
     }
 }
 
-impl Drop for CohortSession<'_> {
+impl<Error> Drop for CohortSession<'_, Error> {
     fn drop(&mut self) {
         self.cohort
             .control
@@ -546,7 +695,7 @@ impl Drop for CohortSession<'_> {
 /// per-member thread body. loops forever: wait for the round counter to
 /// advance (spin then park), run every chunk it can claim, report done,
 /// repeat. returns only on `shutdown`.
-fn member_loop(control: &Control, member_index: usize, parker: &Parker, spin_polls: u32) {
+fn member_loop<Error>(control: &Control<Error>, member_index: usize, parker: &Parker, spin_polls: u32) {
     let mut local_round = 0_u64;
     loop {
         let Some(new_round) = wait_for_round(control, local_round, parker, spin_polls) else {
@@ -577,8 +726,8 @@ fn member_loop(control: &Control, member_index: usize, parker: &Parker, spin_pol
 /// noise — exactly why the ordering bug survived. Removing it turns any
 /// future stranding back into a hang a stress test can catch, instead of
 /// absorbing it silently.
-fn wait_for_round(
-    control: &Control,
+fn wait_for_round<Error>(
+    control: &Control<Error>,
     local_round: u64,
     parker: &Parker,
     spin_polls: u32,
@@ -631,17 +780,34 @@ fn wait_for_round(
     }
 }
 
-/// claim and run chunks until the shared cursor exhausts `control.chunks`,
-/// then report done. a panicking chunk is caught, counted as abandoned, and
-/// does not stop the member from claiming the next chunk.
+/// claim and run chunks until [`FanInCompletion`] says dispatch is done (or
+/// the shared cursor exhausts `control.chunks`, its default), then report
+/// done. a panicking or `Err`-returning chunk is caught, counted as
+/// abandoned, and does not stop the member from claiming the next chunk —
+/// `FanInCompletion` decides whether dispatch continues, not the failure.
 #[cfg_attr(not(feature = "cohort-instrument"), allow(unused_variables))]
-fn run_round(control: &Control, slot: usize) {
+fn run_round<Error>(control: &Control<Error>, slot: usize) {
     let chunk_total = control.chunks.load(Ordering::Relaxed);
     #[cfg(feature = "cohort-instrument")]
     let mut claimed = 0_u64;
     #[cfg(feature = "cohort-instrument")]
     let mut compute_started = 0_u64;
     loop {
+        // SAFETY: the publication edge (`control.round`'s Release/Acquire
+        // pair) was already crossed in `wait_for_round` before this
+        // function runs, so `completion_ptr` is populated (or `None`) for
+        // the duration of this round under the same contract `round_ptr`
+        // documents below.
+        let completion_ref = unsafe { *control.completion_ptr.get() };
+        if let Some(completion_ref) = completion_ref {
+            let retired = control.completed.load(Ordering::Relaxed) + control.lost.load(Ordering::Relaxed);
+            // SAFETY: same publication/lifetime argument as `round_ptr`'s
+            // dereference below — the round (and hence its completion
+            // policy) stays valid until every member reports `done`.
+            if unsafe { completion_ref.as_ref().satisfied(retired, chunk_total) } {
+                break;
+            }
+        }
         let index = control.cursor.fetch_add(1, Ordering::Relaxed);
         if index >= chunk_total {
             break;
@@ -675,11 +841,33 @@ fn run_round(control: &Control, slot: usize) {
         // published for this round; it stays valid until every member
         // reports `done`, which this member has not yet done.
         let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
-            round_ref.as_ref().run_chunk(ChunkIndex(index));
+            round_ref.as_ref().run_chunk(ChunkIndex(index))
         }));
         match outcome {
-            Ok(()) => {
+            Ok(Ok(())) => {
                 control.completed.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(Err(error)) => {
+                control.lost.fetch_add(1, Ordering::Relaxed);
+                let _ = control.first_abandoned.compare_exchange(
+                    usize::MAX,
+                    index,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                if control
+                    .error_claimed
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    // SAFETY: this thread just won the claim CAS, so it is
+                    // the only writer to `first_error` for this round; the
+                    // leader will not read it until the join edge this
+                    // function's own `done` bump (below) contributes to.
+                    unsafe {
+                        *control.first_error.get() = Some(error);
+                    }
+                }
             }
             Err(_) => {
                 control.lost.fetch_add(1, Ordering::Relaxed);
@@ -693,11 +881,11 @@ fn run_round(control: &Control, slot: usize) {
         }
     }
     // Release: this is the join edge the leader's Acquire spin observes,
-    // guaranteeing every write above (completed/lost/first_abandoned, and
-    // every side effect `run_chunk` had on caller-owned state) is visible
-    // once the leader sees `done == members`. fired on both the normal
-    // path above and the panic-caught path — a panicking member never
-    // strands the leader.
+    // guaranteeing every write above (completed/lost/first_abandoned/
+    // first_error, and every side effect `run_chunk` had on caller-owned
+    // state) is visible once the leader sees `done == members`. fired on
+    // both the normal path above and the panic-caught path — a panicking
+    // member never strands the leader.
     #[cfg(feature = "cohort-instrument")]
     {
         let at = diag::now_nanos();
@@ -712,6 +900,8 @@ fn run_round(control: &Control, slot: usize) {
 mod tests {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::AtomicUsize as CountAtomicUsize;
+
+    use proxima_primitives::pipe::fan_in::Quorum;
 
     use super::*;
 
@@ -741,6 +931,14 @@ mod tests {
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+    /// the only error type the test module needs — deliberately not `Copy`
+    /// (`usize` alone would be) so `RoundReport<TestChunkError>` exercises
+    /// the same non-`Copy`-error path `TensorError` exercises in
+    /// `proxima-tensor`, rather than a shape that happens to work only
+    /// because it is trivially copyable.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestChunkError(usize);
+
     struct CountingRound {
         chunk_count: usize,
         seen: Vec<AtomicUsize>,
@@ -755,13 +953,14 @@ mod tests {
         }
     }
 
-    impl CohortRound for CountingRound {
+    impl CohortRound<TestChunkError> for CountingRound {
         fn chunks(&self) -> usize {
             self.chunk_count
         }
 
-        fn run_chunk(&self, chunk: ChunkIndex) {
+        fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TestChunkError> {
             self.seen[chunk.0].fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
     }
 
@@ -770,20 +969,41 @@ mod tests {
         panic_at: usize,
     }
 
-    impl CohortRound for PanicOnRound {
+    impl CohortRound<TestChunkError> for PanicOnRound {
         fn chunks(&self) -> usize {
             self.chunk_count
         }
 
-        fn run_chunk(&self, chunk: ChunkIndex) {
+        fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TestChunkError> {
             if chunk.0 == self.panic_at {
                 panic!("intentional cohort chunk panic");
             }
+            Ok(())
         }
     }
 
-    fn cohort_with_members(members: usize) -> ThreadCohort {
-        let config = ThreadCohort::builder()
+    /// a chunk that fails through the return channel instead of unwinding —
+    /// the shape invariant (B) requires: `run_chunk` says so itself.
+    struct ErrOnRound {
+        chunk_count: usize,
+        err_at: usize,
+    }
+
+    impl CohortRound<TestChunkError> for ErrOnRound {
+        fn chunks(&self) -> usize {
+            self.chunk_count
+        }
+
+        fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TestChunkError> {
+            if chunk.0 == self.err_at {
+                return Err(TestChunkError(chunk.0));
+            }
+            Ok(())
+        }
+    }
+
+    fn cohort_with_members(members: usize) -> ThreadCohort<TestChunkError> {
+        let config = ThreadCohort::<TestChunkError>::builder()
             .members(NonZeroUsize::new(members).expect("nonzero member count"))
             .spin_polls(64)
             .build();
@@ -799,6 +1019,7 @@ mod tests {
             let report = session.run(&round);
             assert_eq!(report.completed, 97, "every chunk should complete");
             assert_eq!(report.abandoned, 0);
+            assert_eq!(report.first_error, None);
             for (index, seen) in round.seen.iter().enumerate() {
                 assert_eq!(
                     seen.load(Ordering::Relaxed),
@@ -822,12 +1043,65 @@ mod tests {
         assert_eq!(report.abandoned, 1, "exactly one chunk should panic");
         assert_eq!(report.first_abandoned, Some(ChunkIndex(7)));
         assert_eq!(report.completed, 19);
+        assert_eq!(report.first_error, None, "a panic carries no Error payload");
 
         // leader must still be usable for a subsequent, clean round.
         let clean_round = CountingRound::new(10);
         let clean_report = session.run(&clean_round);
         assert_eq!(clean_report.completed, 10);
         assert_eq!(clean_report.abandoned, 0);
+    }
+
+    /// invariant (B): a chunk that fails must be able to say so through its
+    /// own return type, not a side-channel plus a counter. this asserts the
+    /// `Err` itself — not just a count — comes back out of `RoundReport`.
+    #[test]
+    fn chunk_error_surfaces_through_report_return_type() {
+        let cohort = cohort_with_members(4);
+        let session = cohort.enter().expect("open session");
+        let round = ErrOnRound {
+            chunk_count: 20,
+            err_at: 11,
+        };
+        let report = session.run(&round);
+        assert_eq!(report.abandoned, 1, "exactly one chunk should error");
+        assert_eq!(report.completed, 19);
+        assert_eq!(report.first_abandoned, Some(ChunkIndex(11)));
+        assert_eq!(
+            report.first_error,
+            Some(TestChunkError(11)),
+            "the chunk's Err must surface through RoundReport itself"
+        );
+
+        // leader must still be usable for a subsequent, clean round.
+        let clean_round = CountingRound::new(10);
+        let clean_report = session.run(&clean_round);
+        assert_eq!(clean_report.completed, 10);
+        assert_eq!(clean_report.first_error, None);
+    }
+
+    /// invariant (A): completion is a policy a caller names, not a constant.
+    /// `members(1)` (no dedicated threads, only the leader) makes the claim
+    /// loop fully sequential, so the quorum's stopping point is exact and
+    /// deterministic rather than racing dedicated threads for the last few
+    /// chunks.
+    #[test]
+    fn chunk_quorum_stops_dispatch_before_all_chunks_run() {
+        let cohort = cohort_with_members(1);
+        let session = cohort.enter().expect("open session");
+
+        let round = CountingRound::new(10);
+        let report = session.run_with_completion(&round, Some(&Quorum(3)));
+        assert_eq!(report.completed, 3, "quorum should stop dispatch after 3 retirements");
+        assert_eq!(report.abandoned, 0);
+        let claimed: usize = round.seen.iter().map(|count| count.load(Ordering::Relaxed)).sum();
+        assert_eq!(claimed, 3, "only the quorum's worth of chunks should ever have been claimed");
+
+        // the dial is per-call, not per-cohort: the same session, unforced,
+        // still runs every chunk by default.
+        let full_round = CountingRound::new(10);
+        let full_report = session.run(&full_round);
+        assert_eq!(full_report.completed, 10, "run() without a dial must still run every chunk");
     }
 
     #[test]
@@ -861,11 +1135,11 @@ mod tests {
 
     #[test]
     fn config_and_builder_round_trip() {
-        let config = ThreadCohort::builder()
+        let config = ThreadCohort::<TestChunkError>::builder()
             .members(NonZeroUsize::new(6).expect("nonzero"))
             .spin_polls(500)
             .build();
-        let cohort = ThreadCohort::from_config(config).expect("build cohort");
+        let cohort = ThreadCohort::<TestChunkError>::from_config(config).expect("build cohort");
         assert_eq!(cohort.config(), config);
     }
 
@@ -926,7 +1200,7 @@ mod tests {
     /// missed `unpark()`.
     #[test]
     fn high_round_count_low_spin_never_strands_with_unbounded_park() {
-        let config = ThreadCohort::builder()
+        let config = ThreadCohort::<TestChunkError>::builder()
             .members(NonZeroUsize::new(8).expect("nonzero member count"))
             .spin_polls(0)
             .build();

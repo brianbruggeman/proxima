@@ -3112,6 +3112,170 @@ value = 1.0
         );
     }
 
+    /// Node-count budget for the chunked key/value fold, established
+    /// BEFORE that fold is built. [`mistral_cached_forward_program`] binds
+    /// ONE cache buffer per layer sized by `Extent::Symbolic(1)`, so it is
+    /// already the one-chunk case of an N-chunk fold. Splitting the cache
+    /// into N fixed chunks replicates, per layer per chunk, the twelve
+    /// cache-reading nodes in `append_mistral_cached_layer`
+    /// (`score_cached_even_product`, `score_cached_even`,
+    /// `score_cached_odd_product`, `score_cached_odd`, `score_cached`,
+    /// `score_cached_scaled`, `score_max_cached`, `shifted_cached`,
+    /// `weights_cached`, `sum_cached`, `attended_cached_product`,
+    /// `attended_cached`), plus that chunk's own three `kv_cache.*`
+    /// `Op::Input` leaves, plus three combine nodes -- one `Maximum` into
+    /// `global_max`, one `Add` into `weight_sum`, one `Add` into
+    /// `attended_sum`. Eighteen nodes per chunk per layer.
+    ///
+    /// The printed `per_chunk_per_model` figure is what a caller multiplies
+    /// by its chunk count to decide whether an N-chunk fold can be flat
+    /// graph nodes at all. It cannot, past a low N: the fold has to iterate
+    /// chunks inside one reduce rather than have the program name each one.
+    #[test]
+    fn the_chunked_cache_fold_node_budget_is_measured_before_it_is_built() {
+        let nodes_of = |block_count: u32| {
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
+                .expect("the cached forward pass lowers to a program")
+                .0
+                .len()
+        };
+        let per_layer = nodes_of(2) - nodes_of(1);
+        let full = nodes_of(32);
+        let uncached = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+            .expect("the whole forward pass lowers to a program")
+            .len();
+        // a built `Op` is not an executed op: `crate::bind` fuses
+        // elementwise chains, so the graph the evaluator walks is smaller
+        // than the program. Both counts are printed because the chunk
+        // budget is built in program nodes and paid in bound ops.
+        let (cached_program, cached_logits, cached_roots) =
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+                .expect("the cached forward pass lowers to a program");
+        let mut cached_outputs = alloc::vec![cached_logits];
+        for (even, odd, value) in &cached_roots {
+            cached_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let cached_shapes =
+            crate::shape::infer(&cached_program, &[1, 71]).expect("one new position against a 71-position cache infers");
+        let bound = crate::bind::bind(&cached_program, &cached_shapes, &cached_outputs)
+            .expect("the cached program binds")
+            .len();
+
+        const CACHE_READING_NODES: usize = 12;
+        const CACHE_INPUT_LEAVES: usize = 3;
+        const COMBINE_NODES: usize = 3;
+        const PER_CHUNK_PER_LAYER: usize = CACHE_READING_NODES + CACHE_INPUT_LEAVES + COMBINE_NODES;
+        const LAYERS: usize = 32;
+
+        std::println!(
+            "cached_fold_budget uncached_nodes={uncached} cached_nodes={full} cached_per_layer={per_layer} bound_ops_at_ctx71={bound} reduces_per_chunk_per_layer=5 per_chunk_per_layer={PER_CHUNK_PER_LAYER} per_chunk_per_model={}",
+            PER_CHUNK_PER_LAYER * LAYERS
+        );
+        for chunks in [1_usize, 4, 16, 64, 256, 1024, 4096] {
+            std::println!(
+                "cached_fold_budget chunks={chunks} context_at_chunk_256={} added_nodes={} total_nodes={}",
+                chunks * 256,
+                (chunks - 1) * PER_CHUNK_PER_LAYER * LAYERS,
+                full + (chunks - 1) * PER_CHUNK_PER_LAYER * LAYERS
+            );
+        }
+
+        assert!(
+            PER_CHUNK_PER_LAYER < per_layer,
+            "a chunk replicates only the cache-reading part of a layer, never the whole {per_layer}-node layer"
+        );
+    }
+
+    /// The interpreter's per-node dispatch floor: how long a node costs
+    /// when the node does essentially no arithmetic. This is the number the
+    /// chunked-cache node budget above has to be multiplied by, because a
+    /// chunk's own cache-reading nodes are tiny -- one 256-position slice
+    /// of one head -- so what a chunk costs is dispatch, not math.
+    ///
+    /// Shaped as a balanced `Add` tree over `[1]`-shaped tensors, not a
+    /// chain: `PROXIMA_CHAIN_DEPTH` below records that a linear chain
+    /// overflows this evaluator's stack, and a balanced tree is what an
+    /// N-way associative combine wants anyway.
+    #[test]
+    fn the_interpreter_per_node_dispatch_floor_is_measured() {
+        const LEAVES: usize = 2_048;
+        const REPEATS: usize = 20;
+
+        let mut program = Vec::new();
+        let seed = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "seed");
+        let mut level: Vec<NodeId> = (0..LEAVES)
+            .map(|_| {
+                elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(seed, "a->a"), (seed, "a->a")])
+                    .expect("a scalar add lowers")
+            })
+            .collect();
+        while level.len() > 1 {
+            level = level
+                .chunks(2)
+                .map(|pair| match pair {
+                    [left, right] => {
+                        elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(*left, "a->a"), (*right, "a->a")])
+                            .expect("a scalar add lowers")
+                    }
+                    [only] => *only,
+                    _ => unreachable!("chunks(2) yields one or two"),
+                })
+                .collect();
+        }
+        let root = level[0];
+        let total = program.len();
+
+        let seed_data = alloc::vec![1.0f32];
+        let named: [(&str, &[f32]); 1] = [("seed", seed_data.as_slice())];
+
+        let mut samples: Vec<f64> = Vec::with_capacity(REPEATS);
+        for _ in 0..REPEATS {
+            let started = std::time::Instant::now();
+            crate::cpu::evaluate_named(&program, &[1], &named, &[root]).expect("the tree evaluates");
+            samples.push(started.elapsed().as_secs_f64() * 1e9 / total as f64);
+        }
+        samples.sort_by(|left, right| left.partial_cmp(right).expect("no nan timings"));
+
+        std::println!(
+            "per_node_floor nodes={total} repeats={REPEATS} median_ns={:.1} min_ns={:.1} max_ns={:.1}",
+            samples[REPEATS / 2],
+            samples[0],
+            samples[REPEATS - 1]
+        );
+        assert_eq!(samples.len(), REPEATS, "one timing per repeat");
+    }
+
+    /// How deep a dependency chain this evaluator survives. A flat N-chunk
+    /// cache fold that combines chunks pairwise left-to-right builds a
+    /// chain exactly N long, so this bounds that shape independently of the
+    /// node-count budget. Depth comes from `PROXIMA_CHAIN_DEPTH` so a
+    /// caller can walk it upward across separate processes -- a stack
+    /// overflow aborts, it does not unwind, so one process cannot bisect it.
+    #[test]
+    #[ignore = "probes the evaluator's stack depth; aborts by design past the limit"]
+    fn the_evaluator_survives_a_dependency_chain_of_a_given_depth() {
+        let depth: usize = std::env::var("PROXIMA_CHAIN_DEPTH")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(256);
+
+        let mut program = Vec::new();
+        let seed = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "seed");
+        let mut tip = seed;
+        for _ in 0..depth {
+            tip = elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(tip, "a->a"), (seed, "a->a")])
+                .expect("a scalar add chains");
+        }
+
+        let seed_data = alloc::vec![1.0f32];
+        let named: [(&str, &[f32]); 1] = [("seed", seed_data.as_slice())];
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[tip]).expect("the chain evaluates");
+        let (data, _) = evaluated.get(tip).expect("chain tip present");
+
+        std::println!("chain_depth depth={depth} nodes={} value={}", program.len(), data[0]);
+        assert_eq!(data[0], 1.0 + depth as f32, "each link adds one seed");
+    }
+
     /// Wall-clock probe for the whole forward pass, `SEQUENCE=4`, RANDOM
     /// weights, at the model's real dimensions — the 32-layer analogue of
     /// `a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions`

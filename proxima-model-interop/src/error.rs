@@ -64,4 +64,43 @@ pub enum InteropError {
     /// instead.
     #[error("tensor {tensor:?} is f32 but its file offset is not 4-byte aligned, cannot borrow as &[f32]")]
     MisalignedFloat32Tensor { tensor: String },
+
+    /// [`crate::bind::architecture_from_metadata`] needed `key` (either
+    /// `general.architecture` itself, or one of that architecture's own
+    /// `{architecture}.*` dimension keys) and the parsed gguf metadata had
+    /// no such key, or the key was present with the wrong `MetadataValue`
+    /// variant.
+    #[error("gguf metadata is missing required key {key:?}")]
+    MissingMetadataKey { key: String },
+
+    /// [`crate::bind::architecture_from_metadata`]'s vocab derivation: the
+    /// `token_embd.weight` tensor's element count did not divide evenly by
+    /// `embedding_length`.
+    #[error("token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}")]
+    VocabShapeMismatch { elements: u64, embedding: u32 },
+
+    /// [`crate::generate`]'s cached forward program failed to build or
+    /// evaluate -- propagated from `proxima_tensor` rather than re-derived.
+    #[error(transparent)]
+    Tensor(#[from] proxima_tensor::TensorError),
+
+    /// [`crate::generate`]'s prompt encode/decode step failed --
+    /// propagated from `proxima_tokenizer` rather than re-derived.
+    #[cfg(feature = "std")]
+    #[error(transparent)]
+    Tokenizer(#[from] proxima_tokenizer::TokenizerError),
+
+    /// [`crate::generate::LoadedModel`]'s evaluator ran but `node` (one of
+    /// the logits root or a per-layer cache root) is absent from its
+    /// output -- an interpreter/program-construction invariant violation
+    /// rather than a caller mistake, surfaced instead of panicking.
+    #[cfg(feature = "std")]
+    #[error("evaluator output is missing node {node:?}")]
+    MissingEvaluatedNode { node: proxima_tensor::op::NodeId },
+
+    /// [`crate::generate::LoadedModel`]'s greedy pick step ran against an
+    /// empty logits slice.
+    #[cfg(feature = "std")]
+    #[error("greedy_pick: logits slice is empty")]
+    EmptyLogits,
 }

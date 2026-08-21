@@ -124,10 +124,14 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, OnceLock};
 
 use proxima_primitives::pipe::Pipe;
+use proxima_primitives::pipe::fan_in::Quorum;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::counter;
 use prime::os::background::ProximaBackgroundPool;
 use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
+
+type MatmulCohort = ThreadCohort<TensorError>;
+type MatmulSession<'a> = CohortSession<'a, TensorError>;
 
 use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
 use crate::dtype::DType;
@@ -718,6 +722,13 @@ pub fn evaluate_quantized_with_scratch(
     );
     #[cfg(feature = "instrument")]
     {
+        // captured before `diag_kind_ticks.into_iter()` below consumes the
+        // map -- `nsper` task (2026-08-21): pairs with `MAC_OPS` (only
+        // `run_reduce`'s dense f32 path increments it; `run_reduce_quantized`
+        // uses its own `MATMUL_Q4K_MACS`/etc counters and `run_elementwise`
+        // never touches it, so this map's "reduce_f32_dense" ticks and
+        // `MAC_OPS`'s snapshot are the SAME node population).
+        let reduce_dense_entry = diag_kind_ticks.get("reduce_f32_dense").copied();
         let total_ticks: u64 = diag_kind_ticks.values().map(|(_, ticks)| *ticks).sum();
         let mut ranked: Vec<(&str, u64, u64)> =
             diag_kind_ticks.into_iter().map(|(label, (count, ticks))| (label, count, ticks)).collect();
@@ -754,6 +765,88 @@ pub fn evaluate_quantized_with_scratch(
                 instrument::ticks_to_nanos(elementwise_loop_ticks) as f64 / 1_000_000.0,
                 instrument::ticks_to_nanos(elementwise_setup_ticks) as f64 / elementwise_calls as f64,
                 instrument::ticks_to_nanos(elementwise_step_values_ticks) as f64 / elementwise_calls as f64,
+            );
+        }
+        // achieved ns/element (nsper task, 2026-08-21): `MAC_OPS` is the
+        // exact element denominator for `reduce_f32_dense` (see the comment
+        // on `reduce_dense_entry` above); `reduce_dense_entry`'s ticks are
+        // the SAME per-node wall time the `node_kind=reduce_f32_dense` row
+        // above already printed, just paired with an element count here.
+        let reduce_dense_mac_ops = instrument::MAC_OPS.snapshot_and_reset();
+        if let Some((reduce_dense_count, reduce_dense_ticks)) = reduce_dense_entry {
+            let reduce_dense_ns = instrument::ticks_to_nanos(reduce_dense_ticks) as f64;
+            let ns_per_element = if reduce_dense_mac_ops > 0 {
+                reduce_dense_ns / reduce_dense_mac_ops as f64
+            } else {
+                0.0
+            };
+            std::eprintln!(
+                "DIAG nsper reduce_f32_dense calls={reduce_dense_count} mac_ops={reduce_dense_mac_ops} total_ms={:.3} ns_per_element={:.4}",
+                reduce_dense_ns / 1_000_000.0,
+                ns_per_element,
+            );
+        }
+        // achieved ns/element split by `BodyShape` (nsper task, 2026-08-21):
+        // `Unary`/`Binary` (monomorphic) versus `Generic` (fused multi-step)
+        // -- a DIFFERENT axis from `Path::WidthFast`/`Path::Generic` (the
+        // affine-operand fast-path gate) already printed via
+        // `elementwise_breakdown` above. Compares directly against this
+        // crate's own 0.38ns/element monomorphic figure (`cpu.rs:2159`).
+        let monomorphic_ticks = instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC.snapshot_and_reset();
+        let monomorphic_elements = instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC.snapshot_and_reset();
+        let generic_ticks = instrument::ELEMENTWISE_LOOP_TICKS_GENERIC.snapshot_and_reset();
+        let generic_elements = instrument::ELEMENTWISE_ELEMENTS_GENERIC.snapshot_and_reset();
+        if monomorphic_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_monomorphic elements={monomorphic_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(monomorphic_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(monomorphic_ticks) as f64 / monomorphic_elements as f64,
+            );
+        }
+        if generic_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_generic elements={generic_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(generic_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(generic_ticks) as f64 / generic_elements as f64,
+            );
+        }
+        // fast_path-vs-slow-path split within `Generic` (A-vs-B task,
+        // 2026-08-21): answers whether `Generic`'s 14.9x-slower-than-
+        // monomorphic figure is (A) almost all elements falling to the
+        // per-element `apply_body` gather loop (`fast_path=false`) or (B)
+        // the affine fast path itself running ~15x off the monomorphic
+        // rate. Same ticks/elements the `elementwise_generic` row above
+        // already summed, split by the `fast_path` bool computed once per
+        // call in `run_elementwise_range`.
+        let generic_fast_ticks = instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST.snapshot_and_reset();
+        let generic_fast_elements = instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST.snapshot_and_reset();
+        let generic_slow_ticks = instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW.snapshot_and_reset();
+        let generic_slow_elements = instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW.snapshot_and_reset();
+        if generic_fast_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_generic_fast_path elements={generic_fast_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(generic_fast_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(generic_fast_ticks) as f64 / generic_fast_elements as f64,
+            );
+        }
+        if generic_slow_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_generic_slow_path elements={generic_slow_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(generic_slow_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(generic_slow_ticks) as f64 / generic_slow_elements as f64,
+            );
+        }
+        // call-size distribution (nsper task, 2026-08-21): how many
+        // `run_elementwise_range` calls landed at each element count this
+        // step -- answers "numerous small calls" vs "few large ones"
+        // without guessing from a median call count alone.
+        let mut call_sizes = instrument::elementwise_call_size_snapshot_and_reset();
+        call_sizes.sort_by_key(|(size, _)| *size);
+        let total_size_calls: u64 = call_sizes.iter().map(|(_, count)| *count).sum();
+        for (size, count) in &call_sizes {
+            std::eprintln!(
+                "DIAG nsper elementwise_call_size elements={size} calls={count} pct_of_calls={:.2}",
+                100.0 * *count as f64 / total_size_calls.max(1) as f64,
             );
         }
     }
@@ -1472,14 +1565,24 @@ static NEST_POOL: OnceLock<Arc<ProximaBackgroundPool>> = OnceLock::new();
 /// the pool path, so a cohort round and a pool dispatch always claim the
 /// same number of workers. `None` if the cohort fails to build (e.g. thread
 /// spawn exhaustion); callers fall back to [`nest_pool`] in that case.
-fn nest_cohort() -> Option<&'static ThreadCohort> {
-    static COHORT: OnceLock<Option<ThreadCohort>> = OnceLock::new();
+///
+/// `PROXIMA_COHORT_SPIN_POLLS`, if set to a valid integer, overrides
+/// [`COHORT_SPIN_POLLS`]; this exists to sweep the spin budget without a
+/// rebuild. Read once, inside this same `get_or_init` that already builds
+/// the cohort a single time for the process -- no separate `OnceLock` needed.
+/// Default (unset) behavior is unchanged.
+fn nest_cohort() -> Option<&'static MatmulCohort> {
+    static COHORT: OnceLock<Option<MatmulCohort>> = OnceLock::new();
     COHORT
         .get_or_init(|| {
             let members = NonZeroUsize::new(matmul_worker_count())?;
-            let config = ThreadCohort::builder()
+            let spin_polls = std::env::var("PROXIMA_COHORT_SPIN_POLLS")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(COHORT_SPIN_POLLS);
+            let config = MatmulCohort::builder()
                 .members(members)
-                .spin_polls(COHORT_SPIN_POLLS)
+                .spin_polls(spin_polls)
                 .build();
             ThreadCohort::from_config(config).ok()
         })
@@ -1738,7 +1841,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match &resolved.kind {
@@ -2107,7 +2210,7 @@ fn fill_running_offsets(resolved: &BoundOp, coordinate: &[u64], running: &mut [i
 fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let Some(session) = session else {
@@ -2174,21 +2277,19 @@ fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
         return run_elementwise(resolved, buffers, output);
     }
 
-    let error_slot: OnceLock<TensorError> = OnceLock::new();
     let round = ElementwiseRowRound {
         resolved,
         buffers,
         inner_len,
         chunk_ranges: &chunk_ranges,
-        error: &error_slot,
     };
     #[cfg(feature = "instrument")]
     {
         counter!(instrument::ELEMENTWISE_COHORT_ROUNDS, 1);
     }
     let report = session.run(&round);
-    if let Some(error) = error_slot.get() {
-        return Err(error.clone());
+    if let Some(error) = report.first_error {
+        return Err(error);
     }
     if report.abandoned > 0 {
         return Err(TensorError::ThreadedChunkFailed {
@@ -2212,10 +2313,9 @@ struct ElementwiseRowRound<'round, B> {
     buffers: &'round [Option<B>],
     inner_len: usize,
     chunk_ranges: &'round [(usize, usize, usize)],
-    error: &'round OnceLock<TensorError>,
 }
 
-impl<B> CohortRound for ElementwiseRowRound<'_, B>
+impl<B> CohortRound<TensorError> for ElementwiseRowRound<'_, B>
 where
     B: Deref<Target = [f32]> + Sync,
 {
@@ -2223,7 +2323,7 @@ where
         self.chunk_ranges.len()
     }
 
-    fn run_chunk(&self, chunk: ChunkIndex) {
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
         let (outer_start, slice_address, slice_len) = self.chunk_ranges[chunk.0];
         // SAFETY: unique to this chunk by construction (`split_at_mut` in
         // `run_elementwise_dispatch` before the round starts); the parent
@@ -2233,11 +2333,7 @@ where
         let chunk_output =
             unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
         let outer_end = outer_start + slice_len / self.inner_len;
-        if let Err(error) =
-            run_elementwise_range(self.resolved, self.buffers, outer_start, outer_end, chunk_output)
-        {
-            let _ = self.error.set(error);
-        }
+        run_elementwise_range(self.resolved, self.buffers, outer_start, outer_end, chunk_output)
     }
 }
 
@@ -2348,7 +2444,7 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
                 counters.kernel_calls += 1;
                 counters.output_writes += inner_len as u64;
                 for &stride in &strides {
-                    counters.operand_loads += if stride == 1 { inner_len as u64 } else { 1 };
+                    counters.operand_loads += if stride == 0 { 1 } else { inner_len as u64 };
                 }
             }
             continue;
@@ -2382,11 +2478,34 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     }
     #[cfg(feature = "instrument")]
     {
-        counter!(
-            instrument::ELEMENTWISE_LOOP_TICKS,
-            instrument::elapsed_ticks(diag_loop_started)
-        );
+        let diag_loop_ticks = instrument::elapsed_ticks(diag_loop_started);
+        counter!(instrument::ELEMENTWISE_LOOP_TICKS, diag_loop_ticks);
         let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+        // achieved-ns/element split by `BodyShape` (nsper task, 2026-08-21):
+        // `Unary`/`Binary` is the monomorphic kernel this crate's own
+        // 0.38ns/element figure (`cpu.rs:2159`) was measured against;
+        // `Generic` is the fused multi-step body. Both axes read
+        // `counters.output_writes`, the exact element count this call wrote
+        // (identical whether `fast_path` did or didn't fire -- see the loop
+        // above), never re-derived from extents.
+        match shape {
+            BodyShape::Generic(_) => {
+                counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC, diag_loop_ticks);
+                counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC, counters.output_writes);
+                if fast_path {
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST, counters.output_writes);
+                } else {
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW, counters.output_writes);
+                }
+            }
+            BodyShape::Unary(..) | BodyShape::Binary(..) => {
+                counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC, diag_loop_ticks);
+                counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC, counters.output_writes);
+            }
+        }
+        instrument::record_elementwise_call_size(counters.output_writes);
         counters.commit(path, distinct_operand_elements);
     }
     Ok(())
@@ -2451,7 +2570,7 @@ fn transpose_wide_to_output(
     wide: &[f32],
     rows: usize,
     leading_total: usize,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let serial = |output: &mut [f32]| {
@@ -2519,12 +2638,12 @@ struct TransposeRound<'round> {
 }
 
 #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
-impl CohortRound for TransposeRound<'_> {
+impl CohortRound<TensorError> for TransposeRound<'_> {
     fn chunks(&self) -> usize {
         self.chunk_ranges.len()
     }
 
-    fn run_chunk(&self, chunk: ChunkIndex) {
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
         let (position_start, out_ptr, out_len) = self.chunk_ranges[chunk.0];
         // SAFETY: unique to this chunk by construction (`split_at_mut` in
         // `transpose_wide_to_output` before the round starts); the parent
@@ -2539,6 +2658,7 @@ impl CohortRound for TransposeRound<'_> {
                 chunk_output[local_position * self.rows + row] = self.wide[row * self.leading_total + position];
             }
         }
+        Ok(())
     }
 }
 
@@ -2571,7 +2691,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     buffers: &[Option<B>],
     weight_block: QuantizedBlock,
     weight_node: NodeId,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     // proxima-debugger diagnostic: whole-function timer, once per matmul
@@ -2901,7 +3021,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
@@ -3003,23 +3123,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     let mut full_coordinate = vec![0u64; resolved.extents.len()];
     let reduction_total = odometer_len(&reduction_extents);
 
-    // Resolved ONCE per bound op, never per element: whether every physical
-    // operand the body shape actually reads is gather-free and affine with
-    // a width-dim stride of 0 (broadcast) or 1 (contiguous). When it holds,
-    // the width loop below skips `gather_cursors`'s per-element `Option`
-    // check and `operand_values`'s per-element copy entirely, reading
-    // straight-line out of `raw`'s own contiguous subslices instead
-    // (`proxima-tensor/docs/discipline.md` ROW 3). `Generic` bodies and any
-    // non-unit stride or gathered operand fall back to the loop unchanged.
-    let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
-
     // A matmul with a transposed right-hand operand (ggml's own `mul_mat`
-    // layout) has a bad width-dim stride on one operand (`fast_path` above
-    // is false) but a GOOD stride on the contraction dim `k` — both
-    // operands read `k` contiguously. `reduction_strides` is `strides`'s
-    // sibling table for the single contraction dim, computed once per bound
-    // op the same way; `body_shape_is_affine_fast_path` is reused verbatim,
-    // just handed a different dim's stride table (`proxima-tensor/docs/discipline.md`
+    // layout) has a bad width-dim stride on one operand but a GOOD stride on
+    // the contraction dim `k` — both operands read `k` contiguously.
+    // `reduction_strides` is `strides`'s sibling table for the single
+    // contraction dim, computed once per bound op the same way;
+    // `body_shape_is_affine_fast_path` is reused verbatim, just handed a
+    // different dim's stride table (`proxima-tensor/docs/discipline.md`
     // ROW 10). Scoped to exactly one contraction dim — a multi-dim
     // contraction falls back to the generic loop below unchanged.
     let reduction_strides: Vec<i64> = if reduction_dims.len() == 1 {
@@ -3028,6 +3138,17 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     } else {
         Vec::new()
     };
+
+    // Resolved ONCE per bound op, never per element: whether every physical
+    // operand the body shape actually reads is gather-free with a width-dim
+    // stride of 0 or 1. When it holds, the width loop below skips
+    // `gather_cursors`'s per-element `Option` check and `operand_values`'s
+    // per-element copy entirely, reading straight-line out of `raw`'s own
+    // subslices instead (`proxima-tensor/docs/discipline.md` ROW 3).
+    // `Generic` bodies and any gathered operand fall back to the loop
+    // unchanged. The width path wins the tie against the dot path below,
+    // the ordering every ROW 3/10 measurement was taken under.
+    let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
     let reduction_fast_path =
         !fast_path && reduction_dims.len() == 1 && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
 
@@ -3456,7 +3577,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                         counters.kernel_calls += 1;
                         counters.mac_ops += reduction_total;
                         for &operand_stride in &reduction_strides {
-                            counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                            counters.operand_loads += if operand_stride == 0 { 1 } else { reduction_total };
                         }
                     }
                     for (offset, stride) in running.iter_mut().zip(&strides) {
@@ -3482,7 +3603,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                             counters.kernel_calls += 1;
                             counters.mac_ops += width as u64;
                             for &stride in &strides {
-                                counters.operand_loads += if stride == 1 { width as u64 } else { 1 };
+                                counters.operand_loads += if stride == 0 { 1 } else { width as u64 };
                             }
                         }
                         seeded = true;
@@ -3704,42 +3825,57 @@ fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut 
     }
 }
 
-/// True when a physical operand at `index` is both gather-free and affine
-/// with a width-dim stride of 0 (broadcast) or 1 (contiguous) — the shared
-/// per-operand test [`body_shape_is_affine_fast_path`] and
-/// [`generic_body_is_affine_fast_path`] both apply, factored out once so the
-/// two eligibility gates cannot drift apart on what "affine" means.
+/// True when a physical operand at `index` is gather-free and has a
+/// non-negative constant width-dim stride. Negative strides are rejected
+/// because every [`OperandSpan`] is built with `stride as usize`, and a
+/// negative value would wrap.
 fn operand_is_affine(resolved: &BoundOp, strides: &[i64], index: u16) -> bool {
     let (_, _, gather) = &resolved.operands()[index as usize];
-    gather.is_none() && matches!(strides[index as usize], 0 | 1)
+    gather.is_none() && strides[index as usize] >= 0
+}
+
+/// [`operand_is_affine`] narrowed to the strides [`reduce_width_fast`] and
+/// `scan_width_fast` should actually take. Their strided arms are correct
+/// for any stride, but correctness is not the question this gate answers.
+/// Unlike [`run_elementwise`], whose alternative is the per-element
+/// interpreter at 16.2 ns/element, a reduce that fails this gate falls
+/// through to the contraction-dim dot path and its NEON tile — a faster
+/// kernel, not a slower one. Admitting stride > 1 here stole those nodes
+/// into a scalar width walk and measured `reduce_f32_dense` at 180.1 ms of
+/// prefill against 81.0 ms for the same nodes on the dot path
+/// (`proxima-tensor/docs/discipline.md` ROW 66). The two gates genuinely
+/// disagree on which strides they accept, and the disagreement is a
+/// measurement.
+fn operand_is_unit_or_broadcast(resolved: &BoundOp, strides: &[i64], index: u16) -> bool {
+    operand_is_affine(resolved, strides, index) && strides[index as usize] <= 1
 }
 
 /// True when every physical operand [`BodyShape`] actually reads (one for
-/// `Unary`, up to two for `Binary` — `Generic` never qualifies here) is
-/// affine ([`operand_is_affine`]). Checked once per bound op, never per
-/// element — the same discipline [`body_shape`] already applies to the
-/// op/arity decision, now extended to the gather-vs-affine and stride-shape
-/// decision [`reduce_width_fast`]'s and `run_scan`'s straight-line arms
-/// depend on. Shared by [`run_reduce`] and [`run_scan`], whose own
-/// straight-line arms have no `Generic` case, so `Generic` staying `false`
-/// here is load-bearing, not merely conservative — widening it would need a
-/// `Generic` arm in both of those too. [`run_elementwise`]'s own `Generic`
-/// fast path is a separate, narrower gate: [`generic_body_is_affine_fast_path`].
+/// `Unary`, up to two for `Binary` — `Generic` never qualifies here) has a
+/// width-dim stride of 0 or 1 ([`operand_is_unit_or_broadcast`]). Checked
+/// once per bound op, never per element — the same discipline [`body_shape`]
+/// already applies to the op/arity decision. Shared by [`run_reduce`] and
+/// [`run_scan`], whose own straight-line arms have no `Generic` case, so
+/// `Generic` staying `false` here is load-bearing, not merely conservative.
+/// [`run_elementwise`]'s own `Generic` fast path is a separate, WIDER gate:
+/// [`generic_body_is_affine_fast_path`].
 fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides: &[i64]) -> bool {
     match *shape {
-        BodyShape::Unary(_, a) => operand_is_affine(resolved, strides, a),
-        BodyShape::Binary(_, a, b) => operand_is_affine(resolved, strides, a) && operand_is_affine(resolved, strides, b),
+        BodyShape::Unary(_, a) => operand_is_unit_or_broadcast(resolved, strides, a),
+        BodyShape::Binary(_, a, b) => {
+            operand_is_unit_or_broadcast(resolved, strides, a) && operand_is_unit_or_broadcast(resolved, strides, b)
+        }
         BodyShape::Generic(_) => false,
     }
 }
 
 /// [`run_elementwise`]'s own eligibility gate for its `Generic` fast path
 /// ([`elementwise_width_generic`]): every `StepArg::Operand` any step in
-/// `body` references must be affine ([`operand_is_affine`]). Kept separate
-/// from [`body_shape_is_affine_fast_path`] because `run_reduce` and
-/// `run_scan` share that predicate and neither has a `Generic` arm in its
-/// own width-fast function — widening the shared predicate would make it lie
-/// to those two callers (`proxima-tensor/docs/discipline.md` ROW 5).
+/// `body` references must be gather-free with a non-negative constant
+/// stride ([`operand_is_affine`]) — ANY constant stride, not only 0 or 1.
+/// A stride-2 RoPE body (`specs/rope.toml`'s `s,2*i->si`) is what this
+/// width exists for: it used to fail here and fall to the per-element
+/// interpreter at 16.2 ns/element, against 2.2 ns/element on this path.
 fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, strides: &[i64]) -> bool {
     body.steps.iter().flat_map(|step| step.args.iter()).all(|arg| match arg {
         StepArg::Operand(index) => operand_is_affine(resolved, strides, *index),
@@ -3760,17 +3896,38 @@ fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, str
 /// does, combining via the same `apply_scalar_op` calls in the same order,
 /// so output is bit-identical (`proxima-tensor/docs/discipline.md` ROW 3).
 /// One operand's width-span read shape for [`reduce_width_fast`]'s
-/// straight-line arms: `contiguous` means `stride == 1` (read
-/// `data[base..base+width]` as a real subslice), otherwise `stride == 0`
-/// (read `data[base]` once and broadcast) — [`body_shape_is_affine_fast_path`]
-/// already proved no other stride reaches here. Bundling the three fields
-/// keeps `reduce_width_binary` under clippy's argument-count lint without
-/// reaching for `#[allow]`.
+/// straight-line arms: `stride == 1` reads `data[base..base+width]` as a real
+/// subslice, `stride == 0` reads `data[base]` once and broadcasts it across
+/// every position, and any other value walks `base, base + stride,
+/// base + 2 * stride, ...` — [`operand_is_affine`] admits any non-negative
+/// stride, so all three shapes reach here. A bare `contiguous: bool` used to
+/// stand in for this field: it could only ever distinguish "stride 1 or not",
+/// which made a stride-2 body (RoPE's `x[2*i]`/`x[2*i+1]` reads) unrepresentable
+/// in every accelerated kernel and forced it onto the per-element interpreter
+/// for good. Bundling the three fields keeps `reduce_width_binary` under
+/// clippy's argument-count lint without reaching for `#[allow]`.
 #[derive(Clone, Copy)]
 struct OperandSpan<'a> {
     data: &'a [f32],
     base: usize,
-    contiguous: bool,
+    stride: usize,
+}
+
+impl OperandSpan<'_> {
+    /// distinguishes a real walk from the stride-0/1 shapes the existing
+    /// monomorphic arms already handle, so those arms stay untouched.
+    #[inline(always)]
+    fn is_strided(self) -> bool {
+        self.stride > 1
+    }
+
+    /// collapses broadcast (`position * 0 == 0`) and contiguous
+    /// (`position * 1 == position`) into the same expression as any other
+    /// constant stride, so the strided fallback needs no separate broadcast arm.
+    #[inline(always)]
+    fn at(self, position: usize) -> f32 {
+        self.data[self.base + position * self.stride]
+    }
 }
 
 #[inline(always)]
@@ -3788,7 +3945,7 @@ fn reduce_width_fast(
         OperandSpan {
             data: raw[index],
             base: running[index] as usize,
-            contiguous: strides[index] == 1,
+            stride: strides[index] as usize,
         }
     };
     match *shape {
@@ -3864,14 +4021,20 @@ fn reduce_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, accu
 /// element) — the loop bodies below each contain exactly one call to `op`
 /// and, in the seeded case, one call to `reduce`, both of which are
 /// non-capturing closures the compiler inlines directly into the loop,
-/// leaving a single concrete arithmetic operation per element.
+/// leaving a single concrete arithmetic operation per element. A strided
+/// span (stride > 1) delegates to [`reduce_width_unary_monomorphic_strided`]
+/// before either arm below runs, so the stride-0/stride-1 arms here never
+/// see anything but the two shapes they were always tuned for.
 #[inline(always)]
 fn reduce_width_unary_monomorphic<F, R>(op: F, reduce: R, span: OperandSpan, accumulator: &mut [f32], seeded: bool)
 where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
 {
-    if span.contiguous {
+    if span.is_strided() {
+        return reduce_width_unary_monomorphic_strided(op, reduce, span, accumulator, seeded);
+    }
+    if span.stride == 1 {
         let slice = &span.data[span.base..span.base + accumulator.len()];
         if seeded {
             for (slot, &raw_value) in accumulator.iter_mut().zip(slice) {
@@ -3896,10 +4059,35 @@ where
     }
 }
 
+/// Mirrors the stride-1 arm of [`reduce_width_unary_monomorphic`] one
+/// position at a time via [`OperandSpan::at`] instead of a contiguous slice
+/// read, so a stride > 1 body folds in the exact same left-to-right order as
+/// the stride-1 case — never routed through a reassociating multi-accumulator
+/// fold, which would silently change output for this newly-widened case.
+#[inline(always)]
+fn reduce_width_unary_monomorphic_strided<F, R>(op: F, reduce: R, span: OperandSpan, accumulator: &mut [f32], seeded: bool)
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if seeded {
+        for (position, slot) in accumulator.iter_mut().enumerate() {
+            *slot = reduce(*slot, op(span.at(position)));
+        }
+    } else {
+        for (position, slot) in accumulator.iter_mut().enumerate() {
+            *slot = op(span.at(position));
+        }
+    }
+}
+
 /// The pre-ROW-4 (ROW 3) implementation, kept as the fallback for a
 /// `reduce_op` outside {Add, Multiply, Maximum, Minimum} — same numerical
 /// result as [`reduce_width_unary_monomorphic`], dispatched per element via
 /// [`apply_scalar_op`]/[`combine_reduction`] instead of an inlined closure.
+/// [`OperandSpan::at`] already generalizes over every stride, so this needs
+/// no separate strided sibling — one loop over positions covers stride 0, 1,
+/// and any wider constant stride alike.
 fn reduce_width_unary_scalar_dispatch(
     op: ScalarOp,
     reduce_op: ScalarOp,
@@ -3907,18 +4095,9 @@ fn reduce_width_unary_scalar_dispatch(
     accumulator: &mut [f32],
     seeded: bool,
 ) {
-    if span.contiguous {
-        let slice = &span.data[span.base..span.base + accumulator.len()];
-        for (slot, &raw_value) in accumulator.iter_mut().zip(slice) {
-            let value = apply_scalar_op(op, &[raw_value]);
-            *slot = combine_reduction(reduce_op, *slot, value, seeded);
-        }
-    } else {
-        let raw_value = span.data[span.base];
-        let value = apply_scalar_op(op, &[raw_value]);
-        for slot in accumulator.iter_mut() {
-            *slot = combine_reduction(reduce_op, *slot, value, seeded);
-        }
+    for (position, slot) in accumulator.iter_mut().enumerate() {
+        let value = apply_scalar_op(op, &[span.at(position)]);
+        *slot = combine_reduction(reduce_op, *slot, value, seeded);
     }
 }
 
@@ -3938,13 +4117,18 @@ fn reduce_width_binary(
     // the width-accumulating twin of `reduce_dot_binary`'s multiply-add arm.
     // For a `[k,n]`-laid-out matmul this is the inner loop: `a` is one scalar
     // at the current `(m, k)`, `b` is a contiguous row of `n` — an axpy, and
-    // the single densest multiply-accumulate in the crate.
+    // the single densest multiply-accumulate in the crate. `!a.is_strided()
+    // && !b.is_strided()` keeps a real stride (e.g. 2) out of this block
+    // explicitly — its own `(false, false)` arm below would otherwise read a
+    // strided operand once and silently treat it as a broadcast.
     if FUSED_MULTIPLY_ADD
         && seeded
         && matches!((op, reduce_op), (ScalarOp::Multiply, ScalarOp::Add))
+        && !a.is_strided()
+        && !b.is_strided()
     {
         let width = accumulator.len();
-        match (a.contiguous, b.contiguous) {
+        match (a.stride == 1, b.stride == 1) {
             (true, true) => {
                 let slice_a = &a.data[a.base..a.base + width];
                 let slice_b = &b.data[b.base..b.base + width];
@@ -4016,8 +4200,11 @@ fn reduce_width_binary_monomorphic<F, R>(
     F: Fn(f32, f32) -> f32,
     R: Fn(f32, f32) -> f32,
 {
+    if a.is_strided() || b.is_strided() {
+        return reduce_width_binary_monomorphic_strided(op, reduce, a, b, accumulator, seeded);
+    }
     let width = accumulator.len();
-    match (a.contiguous, b.contiguous) {
+    match (a.stride == 1, b.stride == 1) {
         (true, true) => {
             let slice_a = &a.data[a.base..a.base + width];
             let slice_b = &b.data[b.base..b.base + width];
@@ -4074,8 +4261,37 @@ fn reduce_width_binary_monomorphic<F, R>(
     }
 }
 
+/// Mirrors [`reduce_width_binary_monomorphic`]'s fold order one position at a
+/// time via [`OperandSpan::at`], for the case at least one of `a`/`b` has a
+/// stride > 1 — never reassociated, so output stays bit-identical to what the
+/// scalar interpreter would produce for the same body.
+#[inline(always)]
+fn reduce_width_binary_monomorphic_strided<F, R>(
+    op: F,
+    reduce: R,
+    a: OperandSpan,
+    b: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if seeded {
+        for (position, slot) in accumulator.iter_mut().enumerate() {
+            *slot = reduce(*slot, op(a.at(position), b.at(position)));
+        }
+    } else {
+        for (position, slot) in accumulator.iter_mut().enumerate() {
+            *slot = op(a.at(position), b.at(position));
+        }
+    }
+}
+
 /// The pre-ROW-4 (ROW 3) implementation, kept as the fallback for a
-/// `reduce_op` outside {Add, Multiply, Maximum, Minimum}.
+/// `reduce_op` outside {Add, Multiply, Maximum, Minimum}. [`OperandSpan::at`]
+/// already generalizes over every stride, so one loop over positions covers
+/// stride 0, 1, and any wider constant stride alike.
 fn reduce_width_binary_scalar_dispatch(
     op: ScalarOp,
     reduce_op: ScalarOp,
@@ -4084,40 +4300,9 @@ fn reduce_width_binary_scalar_dispatch(
     accumulator: &mut [f32],
     seeded: bool,
 ) {
-    let width = accumulator.len();
-    match (a.contiguous, b.contiguous) {
-        (true, true) => {
-            let slice_a = &a.data[a.base..a.base + width];
-            let slice_b = &b.data[b.base..b.base + width];
-            for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
-                let value = apply_scalar_op(op, &[value_a, value_b]);
-                *slot = combine_reduction(reduce_op, *slot, value, seeded);
-            }
-        }
-        (true, false) => {
-            let slice_a = &a.data[a.base..a.base + width];
-            let value_b = b.data[b.base];
-            for (slot, &value_a) in accumulator.iter_mut().zip(slice_a) {
-                let value = apply_scalar_op(op, &[value_a, value_b]);
-                *slot = combine_reduction(reduce_op, *slot, value, seeded);
-            }
-        }
-        (false, true) => {
-            let value_a = a.data[a.base];
-            let slice_b = &b.data[b.base..b.base + width];
-            for (slot, &value_b) in accumulator.iter_mut().zip(slice_b) {
-                let value = apply_scalar_op(op, &[value_a, value_b]);
-                *slot = combine_reduction(reduce_op, *slot, value, seeded);
-            }
-        }
-        (false, false) => {
-            let value_a = a.data[a.base];
-            let value_b = b.data[b.base];
-            let value = apply_scalar_op(op, &[value_a, value_b]);
-            for slot in accumulator.iter_mut() {
-                *slot = combine_reduction(reduce_op, *slot, value, seeded);
-            }
-        }
+    for (position, slot) in accumulator.iter_mut().enumerate() {
+        let value = apply_scalar_op(op, &[a.at(position), b.at(position)]);
+        *slot = combine_reduction(reduce_op, *slot, value, seeded);
     }
 }
 
@@ -5341,6 +5526,22 @@ fn row_chunk_count(rows: usize, workers: usize, contraction_width: usize) -> usi
     oversubscribed.min(work_chunks).clamp(1, rows.max(1))
 }
 
+/// `PROXIMA_COHORT_QUORUM=1` routes the matmul row-cohort round through
+/// `CohortSession::run_with_completion(round, Some(&Quorum(chunk_total)))`
+/// instead of the zero-overhead `CohortSession::run` default -- exercises
+/// the `FanInCompletion` dial `cohort.rs` added (landed, never called from
+/// this crate) without changing what gets computed: `Quorum(chunk_total)`
+/// is satisfied only once every chunk has retired, the same point cursor
+/// exhaustion already stops dispatch at, so the two paths compute the same
+/// output. What differs is cost: one extra `completion_ptr` load plus two
+/// more atomic loads and a vtable call per claimed chunk, paid by every
+/// cohort member on every chunk. Read once and cached, so toggling the env
+/// var mid-process has no effect after the first call.
+fn cohort_quorum_completion_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("PROXIMA_COHORT_QUORUM").is_ok_and(|value| value == "1"))
+}
+
 /// [`matmul_rows_threaded`]'s cohort dispatch shape: one round over the same
 /// `(row_start, pointer, len)` chunk ranges the pool path carves via
 /// `split_at_mut`, run through [`CohortSession::run`] instead of
@@ -5354,19 +5555,17 @@ fn row_chunk_count(rows: usize, workers: usize, contraction_width: usize) -> usi
 /// the second argument one row's `width`-wide output slot — `width` is 1 for
 /// every caller except [`matmul_q4k_q8k_f32_wide_impl`], which folds every
 /// sequence position into that slot so the row's weight bytes are read once
-/// and reused across all of them), but [`CohortRound::run_chunk`] returns
-/// nothing — the first error any member observes is published through
-/// `error` (a `OnceLock`, lock-free on the write side: `set` either wins or
-/// loses a race, never blocks) instead of threading a `Result` back through
-/// the barrier itself.
+/// and reused across all of them). [`CohortRound::run_chunk`] returns that
+/// `Result` directly — [`CohortSession::run`]'s own `RoundReport::first_error`
+/// carries the first `Err` any member observes back to the caller, replacing
+/// the hand-rolled `OnceLock` this dispatch used to publish through itself.
 struct RowRound<'round, Row> {
     dot_row: &'round Row,
     width: usize,
     chunk_ranges: &'round [(usize, usize, usize)],
-    error: &'round OnceLock<TensorError>,
 }
 
-impl<Row> CohortRound for RowRound<'_, Row>
+impl<Row> CohortRound<TensorError> for RowRound<'_, Row>
 where
     Row: Fn(usize, &mut [f32]) -> Result<(), TensorError> + Sync,
 {
@@ -5374,7 +5573,7 @@ where
         self.chunk_ranges.len()
     }
 
-    fn run_chunk(&self, chunk: ChunkIndex) {
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
         let (chunk_start, slice_address, slice_len) = self.chunk_ranges[chunk.0];
         // SAFETY: unique to this chunk by construction (`split_at_mut` in
         // `matmul_rows_threaded` before the round starts); the parent
@@ -5383,9 +5582,7 @@ where
         // reported done, i.e. until this closure has returned.
         let chunk_output =
             unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
-        if let Err(error) = run_row_chunk(self.dot_row, self.width, chunk_start, chunk_output) {
-            let _ = self.error.set(error);
-        }
+        run_row_chunk(self.dot_row, self.width, chunk_start, chunk_output)
     }
 }
 
@@ -5393,7 +5590,7 @@ fn matmul_rows_threaded<Row>(
     rows: usize,
     width: usize,
     workers: usize,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
     contraction_width: usize,
     dot_row: Row,
 ) -> Result<Vec<f32>, TensorError>
@@ -5429,12 +5626,10 @@ where
         counter!(instrument::MATMUL_SETUP_TICKS, instrument::elapsed_ticks(diag_setup_started));
         #[cfg(feature = "instrument")]
         counter!(instrument::PARALLEL_NODES, 1);
-        let error_slot: OnceLock<TensorError> = OnceLock::new();
         let round = RowRound {
             dot_row: &dot_row,
             width,
             chunk_ranges: &chunk_ranges,
-            error: &error_slot,
         };
         // `CohortSession::run` fuses the leader's own claim loop and its
         // wait for the dedicated members into one call (`cohort.rs`'s
@@ -5447,14 +5642,18 @@ where
         // `CohortSession::run` doc for the +14.8 ms it cost while it was.
         #[cfg(feature = "instrument")]
         let diag_own_chunk_started = instrument::read_ticks();
-        let report = session.run(&round);
+        let report = if cohort_quorum_completion_enabled() {
+            session.run_with_completion(&round, Some(&Quorum(chunk_ranges_len)))
+        } else {
+            session.run(&round)
+        };
         #[cfg(feature = "instrument")]
         counter!(
             instrument::MATMUL_OWN_CHUNK_TICKS,
             instrument::elapsed_ticks(diag_own_chunk_started)
         );
-        if let Some(error) = error_slot.get() {
-            return Err(error.clone());
+        if let Some(error) = report.first_error {
+            return Err(error);
         }
         if report.abandoned > 0 {
             return Err(TensorError::ThreadedChunkFailed {
@@ -5753,7 +5952,7 @@ use crate::sized::MIN_QUANTIZE_BLOCKS_FOR_DISPATCH;
 fn quantize_row_q8k_dispatch(
     activation: &[f32],
     output: &mut [u8],
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
 ) -> Result<(), TensorError> {
     let Some(session) = session else {
         return quantize_row_q8k(activation, output);
@@ -5821,12 +6020,12 @@ struct QuantizeRound<'round> {
 }
 
 #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
-impl CohortRound for QuantizeRound<'_> {
+impl CohortRound<TensorError> for QuantizeRound<'_> {
     fn chunks(&self) -> usize {
         self.chunk_ranges.len()
     }
 
-    fn run_chunk(&self, chunk: ChunkIndex) {
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
         let (in_ptr, in_len, out_ptr, out_len) = self.chunk_ranges[chunk.0];
         // SAFETY: unique to this chunk by construction (`split_at`/
         // `split_at_mut` in `quantize_row_q8k_dispatch` before the round
@@ -5839,6 +6038,7 @@ impl CohortRound for QuantizeRound<'_> {
         for (block, out_block) in in_slice.chunks_exact(Q4K_BLOCK_ELEMENTS).zip(out_slice.chunks_exact_mut(Q8K_BLOCK_BYTES)) {
             quantize_q8k_block(block, out_block);
         }
+        Ok(())
     }
 }
 
@@ -6415,7 +6615,7 @@ fn matmul_q4k_q8k_f32_impl(
     rows: usize,
     activation: &[f32],
     leading_total: usize,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -6802,7 +7002,7 @@ fn matmul_q5k_q8k_f32_impl(
     rows: usize,
     activation: &[f32],
     leading_total: usize,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -7215,7 +7415,7 @@ fn matmul_q6k_q8k_f32_impl(
     rows: usize,
     activation: &[f32],
     leading_total: usize,
-    session: Option<&CohortSession<'_>>,
+    session: Option<&MatmulSession<'_>>,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -7524,7 +7724,7 @@ fn reduce_dot_fast(
         OperandSpan {
             data: raw[index],
             base: running[index] as usize,
-            contiguous: reduction_strides[index] == 1,
+            stride: reduction_strides[index] as usize,
         }
     };
     match *shape {
@@ -7563,14 +7763,18 @@ fn reduce_dot_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: 
 /// `seeded` is branched on ONCE, outside the fold loop, same discipline as
 /// [`reduce_width_unary_monomorphic`] — the loop body below contains exactly
 /// one call to `op` and, past the first term, one call to `reduce`, both
-/// inlined non-capturing closures.
+/// inlined non-capturing closures. A strided span delegates to
+/// [`reduce_dot_unary_monomorphic_strided`] before the stride-0/1 arms run.
 #[inline(always)]
 fn reduce_dot_unary_monomorphic<F, R>(op: F, reduce: R, span: OperandSpan, fold: DotFold) -> f32
 where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
 {
-    if span.contiguous {
+    if span.is_strided() {
+        return reduce_dot_unary_monomorphic_strided(op, reduce, span, fold);
+    }
+    if span.stride == 1 {
         let slice = &span.data[span.base..span.base + fold.len];
         dot_fold_multi_accumulator_unary(op, reduce, slice, fold)
     } else {
@@ -7593,16 +7797,44 @@ where
     }
 }
 
+/// Mirrors [`reduce_dot_unary_monomorphic`]'s `seeded`/`fold.len == 0`
+/// handling for a stride > 1 span, reading each term with
+/// [`OperandSpan::at`] instead of a hoisted broadcast scalar — never routed
+/// through [`dot_fold_multi_accumulator_unary`], which deliberately
+/// reassociates and would silently change output for this newly-widened case.
+#[inline(always)]
+fn reduce_dot_unary_monomorphic_strided<F, R>(op: F, reduce: R, span: OperandSpan, fold: DotFold) -> f32
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if fold.seeded {
+        let mut acc = fold.init;
+        for position in 0..fold.len {
+            acc = reduce(acc, op(span.at(position)));
+        }
+        acc
+    } else if fold.len == 0 {
+        fold.init
+    } else {
+        let mut acc = op(span.at(0));
+        for position in 1..fold.len {
+            acc = reduce(acc, op(span.at(position)));
+        }
+        acc
+    }
+}
+
 /// The unaccelerated fallback for a `reduce_op` outside {Add, Multiply,
 /// Maximum, Minimum} — same numerical result as
 /// [`reduce_dot_unary_monomorphic`], dispatched per term via
-/// [`apply_scalar_op`]/[`combine_reduction`].
+/// [`apply_scalar_op`]/[`combine_reduction`]. [`OperandSpan::at`] already
+/// generalizes over every stride.
 fn reduce_dot_unary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: DotFold) -> f32 {
     let mut acc = fold.init;
     let mut seeded = fold.seeded;
     for step in 0..fold.len {
-        let raw_value = if span.contiguous { span.data[span.base + step] } else { span.data[span.base] };
-        let value = apply_scalar_op(op, &[raw_value]);
+        let value = apply_scalar_op(op, &[span.at(step)]);
         acc = combine_reduction(reduce_op, acc, value, seeded);
         seeded = true;
     }
@@ -7614,12 +7846,14 @@ fn reduce_dot_unary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, span: Ope
 fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
     // the multiply-accumulate case — every contraction in every matmul —
     // taken before the generic closure dispatch, because `mul_add` has to be
-    // asked for by name (see `dot_fold_fused_multiply_add`).
+    // asked for by name (see `dot_fold_fused_multiply_add`). `a.stride == 1
+    // && b.stride == 1` already excludes any stride > 1 literally, so this
+    // gate does not need widening alongside `operand_is_affine`.
     if FUSED_MULTIPLY_ADD
         && fold.seeded
         && fold.len >= DOT_LANES
-        && a.contiguous
-        && b.contiguous
+        && a.stride == 1
+        && b.stride == 1
         && matches!((op, reduce_op), (ScalarOp::Multiply, ScalarOp::Add))
     {
         let slice_a = &a.data[a.base..a.base + fold.len];
@@ -7654,14 +7888,19 @@ fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: Opera
 /// (`DOT_LANES` independent partial sums, reassociated relative to the
 /// naive triple loop — ROW 12) instead of one strict left-to-right chain.
 /// This is the exact shape a transposed-B GEMM's per-output-element dot
-/// product takes (`proxima-tensor/docs/discipline.md` ROW 10/11/12).
+/// product takes (`proxima-tensor/docs/discipline.md` ROW 10/11/12). A
+/// strided operand delegates to [`reduce_dot_binary_monomorphic_strided`]
+/// before this match runs.
 #[inline(always)]
 fn reduce_dot_binary_monomorphic<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
 where
     F: Fn(f32, f32) -> f32,
     R: Fn(f32, f32) -> f32,
 {
-    match (a.contiguous, b.contiguous) {
+    if a.is_strided() || b.is_strided() {
+        return reduce_dot_binary_monomorphic_strided(op, reduce, a, b, fold);
+    }
+    match (a.stride == 1, b.stride == 1) {
         (true, true) => {
             let slice_a = &a.data[a.base..a.base + fold.len];
             let slice_b = &b.data[b.base..b.base + fold.len];
@@ -7728,15 +7967,41 @@ where
     }
 }
 
+/// Mirrors [`reduce_dot_binary_monomorphic`]'s `seeded`/`fold.len == 0`
+/// handling one position at a time via [`OperandSpan::at`], for the case at
+/// least one of `a`/`b` has a stride > 1 — never routed through
+/// [`dot_fold_multi_accumulator_binary`], which reassociates.
+#[inline(always)]
+fn reduce_dot_binary_monomorphic_strided<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
+where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    if fold.seeded {
+        let mut acc = fold.init;
+        for position in 0..fold.len {
+            acc = reduce(acc, op(a.at(position), b.at(position)));
+        }
+        acc
+    } else if fold.len == 0 {
+        fold.init
+    } else {
+        let mut acc = op(a.at(0), b.at(0));
+        for position in 1..fold.len {
+            acc = reduce(acc, op(a.at(position), b.at(position)));
+        }
+        acc
+    }
+}
+
 /// The unaccelerated fallback for a `reduce_op` outside {Add, Multiply,
-/// Maximum, Minimum}.
+/// Maximum, Minimum}. [`OperandSpan::at`] already generalizes over every
+/// stride, so both reads collapse to one expression regardless of stride.
 fn reduce_dot_binary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
     let mut acc = fold.init;
     let mut seeded = fold.seeded;
     for step in 0..fold.len {
-        let value_a = if a.contiguous { a.data[a.base + step] } else { a.data[a.base] };
-        let value_b = if b.contiguous { b.data[b.base + step] } else { b.data[b.base] };
-        let value = apply_scalar_op(op, &[value_a, value_b]);
+        let value = apply_scalar_op(op, &[a.at(step), b.at(step)]);
         acc = combine_reduction(reduce_op, acc, value, seeded);
         seeded = true;
     }
@@ -7765,7 +8030,7 @@ fn elementwise_width_fast(
         OperandSpan {
             data: raw[index],
             base: running[index] as usize,
-            contiguous: strides[index] == 1,
+            stride: strides[index] as usize,
         }
     };
     match *shape {
@@ -7821,7 +8086,7 @@ fn elementwise_width_generic(
         let mut spans = [OperandSpan {
             data: empty,
             base: 0,
-            contiguous: true,
+            stride: 1,
         }; 3];
         for (arg_slot, arg) in step.args.iter().enumerate() {
             spans[arg_slot] = match *arg {
@@ -7830,7 +8095,7 @@ fn elementwise_width_generic(
                     OperandSpan {
                         data: raw[operand_index],
                         base: running[operand_index] as usize,
-                        contiguous: strides[operand_index] == 1,
+                        stride: strides[operand_index] as usize,
                     }
                 }
                 StepArg::Step(step_index) => {
@@ -7838,7 +8103,7 @@ fn elementwise_width_generic(
                     OperandSpan {
                         data: &earlier[step_index * width..(step_index + 1) * width],
                         base: 0,
-                        contiguous: true,
+                        stride: 1,
                     }
                 }
             };
@@ -7913,7 +8178,10 @@ fn elementwise_width_generic_step(op: ScalarOp, spans: &[OperandSpan; 3], row: &
 /// with no per-element branch. A fully-broadcast step (all three operands
 /// stride-0) computes `op` exactly once and splats the single result, same
 /// as the all-broadcast arm of the binary/unary cases — never re-evaluated
-/// per position, since none of its inputs vary by position.
+/// per position, since none of its inputs vary by position. Any operand with
+/// a stride > 1 delegates to [`elementwise_width_ternary_monomorphic_strided`]
+/// before this match runs, so the eight combinations below still only ever
+/// see stride 0 or 1.
 #[inline(always)]
 fn elementwise_width_ternary_monomorphic<F>(
     op: F,
@@ -7924,8 +8192,11 @@ fn elementwise_width_ternary_monomorphic<F>(
 ) where
     F: Fn(f32, f32, f32) -> f32,
 {
+    if condition.is_strided() || when_true.is_strided() || when_false.is_strided() {
+        return elementwise_width_ternary_monomorphic_strided(op, condition, when_true, when_false, row);
+    }
     let width = row.len();
-    match (condition.contiguous, when_true.contiguous, when_false.contiguous) {
+    match (condition.stride == 1, when_true.stride == 1, when_false.stride == 1) {
         (true, true, true) => {
             let condition_slice = &condition.data[condition.base..condition.base + width];
             let when_true_slice = &when_true.data[when_true.base..when_true.base + width];
@@ -8006,6 +8277,24 @@ fn elementwise_width_ternary_monomorphic<F>(
     }
 }
 
+/// Independent per-position writes, no accumulator to reorder — reads each
+/// operand with [`OperandSpan::at`], which already generalizes over stride 0,
+/// 1, or any wider constant stride.
+#[inline(always)]
+fn elementwise_width_ternary_monomorphic_strided<F>(
+    op: F,
+    condition: OperandSpan,
+    when_true: OperandSpan,
+    when_false: OperandSpan,
+    row: &mut [f32],
+) where
+    F: Fn(f32, f32, f32) -> f32,
+{
+    for (position, slot) in row.iter_mut().enumerate() {
+        *slot = op(condition.at(position), when_true.at(position), when_false.at(position));
+    }
+}
+
 fn elementwise_width_unary(op: ScalarOp, span: OperandSpan, out: &mut [f32]) {
     match op {
         ScalarOp::Identity => elementwise_width_unary_monomorphic(|a: f32| a, span, out),
@@ -8033,7 +8322,10 @@ fn elementwise_width_unary_monomorphic<F>(op: F, span: OperandSpan, out: &mut [f
 where
     F: Fn(f32) -> f32,
 {
-    if span.contiguous {
+    if span.is_strided() {
+        return elementwise_width_unary_monomorphic_strided(op, span, out);
+    }
+    if span.stride == 1 {
         let slice = &span.data[span.base..span.base + out.len()];
         for (slot, &raw_value) in out.iter_mut().zip(slice) {
             *slot = op(raw_value);
@@ -8043,6 +8335,18 @@ where
         for slot in out.iter_mut() {
             *slot = value;
         }
+    }
+}
+
+/// Independent per-position writes, no accumulator to reorder — one
+/// [`OperandSpan::at`] read per position covers any stride > 1.
+#[inline(always)]
+fn elementwise_width_unary_monomorphic_strided<F>(op: F, span: OperandSpan, out: &mut [f32])
+where
+    F: Fn(f32) -> f32,
+{
+    for (position, slot) in out.iter_mut().enumerate() {
+        *slot = op(span.at(position));
     }
 }
 
@@ -8080,8 +8384,11 @@ fn elementwise_width_binary_monomorphic<F>(op: F, a: OperandSpan, b: OperandSpan
 where
     F: Fn(f32, f32) -> f32,
 {
+    if a.is_strided() || b.is_strided() {
+        return elementwise_width_binary_monomorphic_strided(op, a, b, out);
+    }
     let width = out.len();
-    match (a.contiguous, b.contiguous) {
+    match (a.stride == 1, b.stride == 1) {
         (true, true) => {
             let slice_a = &a.data[a.base..a.base + width];
             let slice_b = &b.data[b.base..b.base + width];
@@ -8109,6 +8416,18 @@ where
                 *slot = value;
             }
         }
+    }
+}
+
+/// Independent per-position writes, no accumulator to reorder — one
+/// [`OperandSpan::at`] read per operand per position covers any stride > 1.
+#[inline(always)]
+fn elementwise_width_binary_monomorphic_strided<F>(op: F, a: OperandSpan, b: OperandSpan, out: &mut [f32])
+where
+    F: Fn(f32, f32) -> f32,
+{
+    for (position, slot) in out.iter_mut().enumerate() {
+        *slot = op(a.at(position), b.at(position));
     }
 }
 
@@ -8150,7 +8469,7 @@ fn scan_width_fast(
         OperandSpan {
             data: raw[index],
             base: running[index] as usize,
-            contiguous: strides[index] == 1,
+            stride: strides[index] as usize,
         }
     };
     match *shape {
@@ -8211,13 +8530,16 @@ where
     let mut acc = accumulator;
     let mut start = 0usize;
     if !seeded && width > 0 {
-        // position 0 reads `data[base]` whether the span is contiguous or
-        // broadcast -- the two shapes only diverge starting at position 1.
-        acc = op(span.data[span.base]);
+        // position 0 is `.at(0)` regardless of stride (`0 * stride == 0`
+        // for any stride) -- the shapes only diverge starting at position 1.
+        acc = op(span.at(0));
         out[0] = acc;
         start = 1;
     }
-    if span.contiguous {
+    if span.is_strided() {
+        return scan_width_unary_monomorphic_strided(op, reduce, span, out, start, acc);
+    }
+    if span.stride == 1 {
         let slice = &span.data[span.base..span.base + width];
         for (slot, &raw_value) in out[start..].iter_mut().zip(&slice[start..]) {
             acc = reduce(acc, op(raw_value));
@@ -8229,6 +8551,31 @@ where
             acc = reduce(acc, value);
             *slot = acc;
         }
+    }
+    acc
+}
+
+/// Continues [`scan_width_unary_monomorphic`]'s fold from `start` via
+/// [`OperandSpan::at`], for a stride > 1 span — same strict left-to-right
+/// combine order, just read position by position instead of through a
+/// contiguous slice or a hoisted broadcast scalar.
+#[inline(always)]
+fn scan_width_unary_monomorphic_strided<F, R>(
+    op: F,
+    reduce: R,
+    span: OperandSpan,
+    out: &mut [f32],
+    start: usize,
+    accumulator: f32,
+) -> f32
+where
+    F: Fn(f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    let mut acc = accumulator;
+    for (position, slot) in out.iter_mut().enumerate().skip(start) {
+        acc = reduce(acc, op(span.at(position)));
+        *slot = acc;
     }
     acc
 }
@@ -8245,12 +8592,7 @@ fn scan_width_unary_scalar_dispatch(
     let mut acc = accumulator;
     let mut seeded = seeded;
     for (index, slot) in out.iter_mut().enumerate().take(width) {
-        let raw_value = if span.contiguous {
-            span.data[span.base + index]
-        } else {
-            span.data[span.base]
-        };
-        let value = apply_scalar_op(op, &[raw_value]);
+        let value = apply_scalar_op(op, &[span.at(index)]);
         acc = combine_reduction(reduce_op, acc, value, seeded);
         seeded = true;
         *slot = acc;
@@ -8316,19 +8658,15 @@ where
     let width = out.len();
     let mut acc = accumulator;
     let mut start = 0usize;
-    let read = |span: &OperandSpan, index: usize| {
-        if span.contiguous {
-            span.data[span.base + index]
-        } else {
-            span.data[span.base]
-        }
-    };
     if !seeded && width > 0 {
-        acc = op(read(&a, 0), read(&b, 0));
+        acc = op(a.at(0), b.at(0));
         out[0] = acc;
         start = 1;
     }
-    match (a.contiguous, b.contiguous) {
+    if a.is_strided() || b.is_strided() {
+        return scan_width_binary_monomorphic_strided(op, reduce, a, b, out, start, acc);
+    }
+    match (a.stride == 1, b.stride == 1) {
         (true, true) => {
             let slice_a = &a.data[a.base..a.base + width];
             let slice_b = &b.data[b.base..b.base + width];
@@ -8365,6 +8703,31 @@ where
     acc
 }
 
+/// Continues [`scan_width_binary_monomorphic`]'s fold from `start` via
+/// [`OperandSpan::at`], for the case at least one of `a`/`b` has a stride > 1
+/// — same strict left-to-right combine order as every other arm here.
+#[inline(always)]
+fn scan_width_binary_monomorphic_strided<F, R>(
+    op: F,
+    reduce: R,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+    start: usize,
+    accumulator: f32,
+) -> f32
+where
+    F: Fn(f32, f32) -> f32,
+    R: Fn(f32, f32) -> f32,
+{
+    let mut acc = accumulator;
+    for (position, slot) in out.iter_mut().enumerate().skip(start) {
+        acc = reduce(acc, op(a.at(position), b.at(position)));
+        *slot = acc;
+    }
+    acc
+}
+
 fn scan_width_binary_scalar_dispatch(
     op: ScalarOp,
     reduce_op: ScalarOp,
@@ -8378,9 +8741,7 @@ fn scan_width_binary_scalar_dispatch(
     let mut acc = accumulator;
     let mut seeded = seeded;
     for (index, slot) in out.iter_mut().enumerate().take(width) {
-        let value_a = if a.contiguous { a.data[a.base + index] } else { a.data[a.base] };
-        let value_b = if b.contiguous { b.data[b.base + index] } else { b.data[b.base] };
-        let value = apply_scalar_op(op, &[value_a, value_b]);
+        let value = apply_scalar_op(op, &[a.at(index), b.at(index)]);
         acc = combine_reduction(reduce_op, acc, value, seeded);
         seeded = true;
         *slot = acc;
@@ -9558,6 +9919,152 @@ mod tests {
         assert_eq!(actual, expected, "width-fast generic path must be bit-identical to the scalar apply_body path");
     }
 
+    /// The exact shape `specs/rope.toml` maps against operand `x`
+    /// (`"s,2*i->si"` / `"s,2*i+1->si"`): two views of the SAME underlying
+    /// buffer, one reading even positions (stride 2, base 0), one reading odd
+    /// positions (stride 2, base 1) — `x * cos + y * sin` with `x`/`y` both
+    /// drawn from one physical buffer via [`OperandSpan::at`]. The reference
+    /// pre-slices each view into its own contiguous buffer instead of relying
+    /// on `reference_generic_body`'s hardcoded zero starting offset, so the
+    /// two calls read identical values through different addressing.
+    #[test]
+    fn elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand() {
+        let width = 16;
+        let x: Vec<f32> = random_vec(0x50fe_0000, 2 * width).into_iter().map(|value| value.abs() + 0.25).collect();
+        let cos = random_vec(0x50fe_0001, width);
+        let sin = random_vec(0x50fe_0002, width);
+
+        let body = rope_body(ScalarOp::Add);
+        let strides = vec![2i64, 1, 2, 1];
+        let raw: Vec<&[f32]> = vec![x.as_slice(), cos.as_slice(), x.as_slice(), sin.as_slice()];
+        let running = vec![0i64, 0, 1, 0];
+
+        let x_even: Vec<f32> = (0..width).map(|position| x[2 * position]).collect();
+        let x_odd: Vec<f32> = (0..width).map(|position| x[2 * position + 1]).collect();
+        let reference_raw: Vec<&[f32]> = vec![x_even.as_slice(), cos.as_slice(), x_odd.as_slice(), sin.as_slice()];
+        let reference_strides = vec![1i64, 1, 1, 1];
+        let expected = reference_generic_body(&body, &reference_raw, &reference_strides, width);
+
+        let mut step_values = vec![0.0f32; body.steps.len() * width];
+        let mut actual = vec![0.0f32; width];
+        elementwise_width_generic(&body, &raw, &running, &strides, &mut actual, &mut step_values);
+
+        assert_eq!(
+            actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            "width-fast generic path must be bit-identical to the scalar apply_body path for a stride-2 operand"
+        );
+    }
+
+    /// [`reduce_dot_binary_monomorphic_strided`]'s load-bearing invariant:
+    /// a strided dot fold must combine in the same strict left-to-right order
+    /// [`Iterator::sum`] does, never reassociated the way the contiguous
+    /// `DOT_LANES` path is. `x` is read at stride 2 (`x[2*k]`), `y` at stride
+    /// 1 — the same shape a RoPE-adjacent contraction over an interleaved
+    /// buffer would take.
+    #[test]
+    fn reduce_dot_binary_stride_two_matches_a_scalar_reference() {
+        let k = 6usize;
+        let mut program = Vec::new();
+        let x = f32_block(&mut program, &[Extent::Static((2 * k) as u32)]);
+        let y = f32_block(&mut program, &[Extent::Static(k as u32)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (x, IndexMap::Affine(map::affine(1, &[(&[AxisTerm::scaled(0, 2)], 0)]))),
+                    (y, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let x_data = random_vec(0x51de_0000, 2 * k);
+        let y_data = random_vec(0x51de_0001, k);
+        let evaluated = evaluate(&program, &[], &[&x_data, &y_data], &[]).expect("stride-2 dot reduce evaluates");
+
+        let expected: f32 = (0..k).map(|position| x_data[2 * position] * y_data[position]).sum();
+        assert_eq!(
+            evaluated.root()[0].to_bits(),
+            expected.to_bits(),
+            "fast path must be bit-identical to the scalar reference for a stride-2 operand"
+        );
+    }
+
+    /// [`scan_width_unary_monomorphic_strided`]'s equivalent invariant: a
+    /// running sum over a stride-2 read must land on the exact same running
+    /// total, position by position, as the plain scalar accumulation below.
+    /// Built as a direct [`BoundOp`] (mirroring [`bound_op_for_gate`], for a
+    /// `Reduce`/`Scan` shape instead of an `Elementwise` one) and run through
+    /// [`run_scan`] directly, rather than through [`evaluate`]'s shape
+    /// inference — a single scaled operand with no plain-projection sibling
+    /// leaves iteration axis 0's extent unconstrained for inference to solve.
+    #[test]
+    fn scan_width_unary_stride_two_matches_a_running_sum_reference() {
+        let k = 6usize;
+        let data = random_vec(0x5ca4_0000, 2 * k);
+
+        let resolved = BoundOp {
+            node: NodeId(1),
+            dtype: DType::Float32,
+            extents: alloc::vec![k as u64],
+            kind: BoundOpKind::Reduce {
+                element_body: ComposedBody {
+                    steps: alloc::vec![step(ScalarOp::Identity, &[StepArg::Operand(0)])],
+                },
+                reduce_op: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                keep: Keep::Scan,
+                operands: alloc::vec![(
+                    NodeId(0),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![2],
+                    },
+                    None,
+                )],
+                output_axes: smallvec::smallvec![0],
+                out_layout: bind::Layout {
+                    base: 0,
+                    strides: smallvec::smallvec![1],
+                },
+            },
+        };
+
+        let mut actual = vec![0.0f32; k];
+        run_scan(&resolved, &[Some(data.as_slice())], &mut actual).expect("stride-2 cumsum runs");
+
+        let mut running = 0.0f32;
+        let reference: Vec<f32> = (0..k)
+            .map(|position| {
+                running += data[2 * position];
+                running
+            })
+            .collect();
+
+        assert_eq!(
+            actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            reference.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            "fast path must be bit-identical to the scalar reference for a stride-2 operand"
+        );
+    }
+
+
     /// A minimal [`BoundOp`] carrying `body` and one operand per stride in
     /// `strides` — `Layout`/`node` are placeholders `operand_is_affine`
     /// never reads, only `strides` (passed separately, matching
@@ -9617,10 +10124,18 @@ mod tests {
     #[rstest]
     #[case::swiglu(swiglu_body(), vec![2, 0, 1])]
     #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 2])]
-    fn generic_body_is_affine_fast_path_rejects_a_non_unit_non_broadcast_stride(
+    fn generic_body_is_affine_fast_path_accepts_a_non_negative_constant_stride(
         #[case] body: ComposedBody,
         #[case] strides: Vec<i64>,
     ) {
+        let resolved = bound_op_for_gate(body.clone(), &strides, None);
+        assert!(generic_body_is_affine_fast_path(&resolved, &body, &strides));
+    }
+
+    #[rstest]
+    #[case::swiglu(swiglu_body(), vec![-1, 0, 1])]
+    #[case::rmsnorm(rmsnorm_body(), vec![1, 0, -1])]
+    fn generic_body_is_affine_fast_path_rejects_a_negative_stride(#[case] body: ComposedBody, #[case] strides: Vec<i64>) {
         let resolved = bound_op_for_gate(body.clone(), &strides, None);
         assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
     }
@@ -12857,7 +13372,7 @@ mod tests {
         let mut serial = vec![0u8; block_count * Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut serial).expect("well-formed activation quantizes serially");
 
-        let cohort = ThreadCohort::from_config(ThreadCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
+        let cohort = MatmulCohort::from_config(MatmulCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
             .expect("test cohort with 4 members spawns");
         let session = cohort.enter().expect("no other session open on a fresh cohort");
         let mut dispatched = vec![0u8; block_count * Q8K_BLOCK_BYTES];
@@ -12888,7 +13403,7 @@ mod tests {
         transpose_wide_to_output(&wide, rows, leading_total, None, &mut serial)
             .expect("serial transpose never fails");
 
-        let cohort = ThreadCohort::from_config(ThreadCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
+        let cohort = MatmulCohort::from_config(MatmulCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
             .expect("test cohort with 4 members spawns");
         let session = cohort.enter().expect("no other session open on a fresh cohort");
         let mut dispatched = vec![0.0f32; rows * leading_total];

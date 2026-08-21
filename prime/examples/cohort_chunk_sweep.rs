@@ -20,6 +20,7 @@
 // shortcut. matches this crate's own `cohort_round_cost.rs` precedent.
 #![allow(clippy::expect_used)]
 
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::time::Instant;
 
@@ -103,14 +104,15 @@ impl ChunkWork {
     }
 }
 
-impl CohortRound for ChunkWork {
+impl CohortRound<Infallible> for ChunkWork {
     fn chunks(&self) -> usize {
         self.iters.len()
     }
 
-    fn run_chunk(&self, chunk: ChunkIndex) {
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), Infallible> {
         let iterations = self.iters[chunk.0];
         std::hint::black_box(do_work(iterations));
+        Ok(())
     }
 }
 
@@ -122,7 +124,7 @@ struct CellResult {
 }
 
 fn run_cell(members: usize, chunks: usize, profile: Profile, ns_per_iter: f64) -> CellResult {
-    let config = ThreadCohort::builder()
+    let config = ThreadCohort::<Infallible>::builder()
         .members(NonZeroUsize::new(members).expect("nonzero"))
         .spin_polls(2_000)
         .build();

@@ -4211,6 +4211,7 @@ dependencies = [
  "prime",
  "proxima-core",
  "proxima-gguf",
+ "proxima-primitives",
  "proxima-safetensors",
  "proxima-tensor",
  "proxima-tokenizer",

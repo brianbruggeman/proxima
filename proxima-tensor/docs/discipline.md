@@ -4558,3 +4558,116 @@ platform); a rebench of the llama.cpp `-t 8` bar in this same session
 |---|---|---|---|---|
 | 2026-08-20 | cache `available_parallelism` in `OnceLock` | -98.9% on `MATMUL_AVAILABLE_PARALLELISM_NANOS` (4.768ms -> 0.052ms over 1350 calls) | measured every run, 9/9 | load avg 2.7-5.4, mediaanalysisd 52-95% |
 | 2026-08-20 | worker override, swept 6/8/10 | **8: -2.77% forward wall vs 10 (KEPT as override, default unchanged). 6: +11.63% vs 10 (documented, not landed as default)** | 0.69-1.79% CoV, 3 runs/arm | same as above |
+
+## ROW 66 — `OperandSpan` carries a stride, not a `contiguous` flag; the elementwise `Generic` gate widens, the reduce/scan gate does NOT
+
+**Repo:** worktree `agent-a585f8281e4851e98`, branch `feat/tensor-consolidated`,
+tree dirty across nine unrelated efforts before this row's edit (nothing was
+reverted or stashed).
+**Host:** Apple M1 Max, macOS, 10 logical cores, 64 GiB.
+**Driver:** `bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`,
+`--release --features std,instrument`, `PROXIMA_PREFAULT=1`,
+`PROXIMA_MAX_TOKENS=24`, openchat-3.5-1210 Q4_K_S. Generated text held the
+required prefix ("Here is a simple Python function that returns the nth
+Fibonacci number using recursion:") on every run of every arm.
+
+### The defect
+
+`OperandSpan` stored `contiguous: bool`, computed as `stride == 1`. That is a
+rich-to-poor boundary: an operand's real width-dim stride was thrown away at
+span construction, so `operand_is_affine` could only admit the two strides the
+flag could still represent (`0 | 1`). RoPE binds stride 2
+(`specs/rope.toml:42,50,67`, `s,2*i->si` / `s,2*i+1->si`), so every fused RoPE
+body failed `generic_body_is_affine_fast_path` and fell to the per-element
+interpreter.
+
+**Measured before, per decode step, `instrument` counters:**
+
+| path | elements | ms | ns/element |
+|---|---|---|---|
+| `elementwise` Generic fast | 944,128 | 2.18 | 2.31 |
+| `elementwise` Generic slow | 163,840 | 2.65 | 16.18 |
+
+14.8% of Generic elements were taking 55% of its wall time.
+
+### The change
+
+`OperandSpan { data, base, stride: usize }`. `1` reads a real subslice, `0`
+reads `data[base]` once and broadcasts, anything else walks
+`base + position * stride`. Every kernel that reads a span takes a
+once-per-call `is_strided()` early exit into a `*_strided` sibling; the
+existing stride-0/1 arms are byte-for-byte unchanged, and no cartesian match
+was widened. The six `*_scalar_dispatch` fallbacks got SHORTER — their
+per-element `if contiguous { .. } else { .. }` collapsed into `span.at(step)`.
+Strided arms fold strictly left-to-right, never through
+`dot_fold_multi_accumulator_*`, so a body that moves off the interpreter keeps
+the interpreter's exact arithmetic order.
+
+### The two gates DISAGREE, and the disagreement is a measurement, not an oversight
+
+The first attempt widened the shared `operand_is_affine` to
+`stride >= 0`, which widened BOTH gates. `n=3`, A/B/A/B interleaved, quiet box
+(load 0.8-2.6):
+
+| | narrow both | wide both |
+|---|---|---|
+| prefill `reduce_f32_dense` | 81.0 ms | **180.6 ms** |
+| decode `reduce_f32_dense` /step | 3.99 ms | **7.93 ms** |
+| decode `elementwise` /step | 7.88 ms | 5.37 ms |
+
+The elementwise win was real and the reduce regression was larger. Mechanism:
+`run_elementwise`'s alternative to its fast path is the per-element
+interpreter at 16.2 ns/element, so a strided width walk at ~2.3 ns/element
+wins. `run_reduce`'s alternative is NOT an interpreter — it is
+`reduce_dot_fast`'s contraction-dim path and its NEON tile, a FASTER kernel.
+Admitting stride > 1 stole those nodes into a scalar width walk. So
+`body_shape_is_affine_fast_path` keeps `operand_is_unit_or_broadcast`
+(`stride <= 1`) and only `generic_body_is_affine_fast_path` uses the widened
+`operand_is_affine`. The strided arms in the reduce/scan kernels stay: they
+are correct, unit-tested for bit-identity, and are what a future widening of
+that gate would need — but nothing in production reaches them today.
+
+### Result, n=6 per arm, A/B/A/B interleaved in one window
+
+A = narrow both gates. B = widened elementwise `Generic` gate only. Box under
+concurrent load (1-min avg 4.1 rising to 14.8) — both arms saw the same load,
+and the `elementwise` effect is far outside the spread.
+
+| metric | A median | A min | A range | B median | B min | B range |
+|---|---|---|---|---|---|---|
+| decode `elementwise` ms/step | 8.200 | 7.995 | 7.995-9.365 | **5.594** | **5.407** | 5.407-6.688 |
+| decode `reduce_f32_dense` ms/step | 3.994 | 3.967 | 3.967-4.198 | 4.032 | 3.935 | 3.935-4.113 |
+| prefill `elementwise` ms | 47.60 | 39.2 | 39.2-56.4 | **32.35** | **29.2** | 29.2-73.8 |
+| prefill `reduce_f32_dense` ms | 79.10 | 78.3 | 78.3-80.3 | 79.20 | 78.3 | 78.3-80.3 |
+| 24-token wall ms | 2665.4 | 2607.2 | 2607-3266 | 2591.7 | 2451.8 | 2452-2906 |
+
+Deterministic counter, every run, no spread at all:
+
+| per decode step | A | B |
+|---|---|---|
+| `ELEMENTWISE_ELEMENTS_GENERIC_SLOW` | 163,840 | **0** |
+| `ELEMENTWISE_ELEMENTS_GENERIC_FAST` | 944,128 | **1,107,968** |
+
+`944,128 + 163,840 == 1,107,968` exactly: every element that was on the
+interpreter moved to the fast path, and no element was created or lost.
+
+`elementwise` decode is -2.606 ms/step at the median, -2.588 ms/step
+min-vs-min. Predicted from the counters was 163,840 x (16.18 - 2.31) ns =
+2.27 ms/step; measured is slightly better because the whole node also stops
+paying `operand_values`/`gather_cursors` bookkeeping.
+
+### What this row does NOT claim
+
+The 24-token wall delta (-73.7 ms median, -155.4 ms min-vs-min) is 2.8% on a
+number whose A-arm range spans 25%; `reduce_matmul_quantized` dominates the
+step and moves by more than this between runs. The `elementwise` node total
+and the `GENERIC_SLOW` counter are the two numbers this row stands on. No
+claim is made about the llama.cpp ratio from these runs.
+
+### Gates
+
+`proxima-tensor --features std` 350/350 - `--features std,instrument` 354/354
+(345/349 before this row; +5 new bit-identity tests) - `prime --features
+runtime-prime-cohort` 156/156 - `proxima-primitives` 413/413 -
+`proxima-model-interop --features std` 24/24 - `clippy -p proxima-tensor
+--features std,instrument --all-targets` 0 warnings.

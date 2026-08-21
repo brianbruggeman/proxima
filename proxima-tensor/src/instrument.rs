@@ -1074,3 +1074,69 @@ pub static MATMUL_Q4K_TRANSPOSE_TICKS: Counter =
 /// own `prime` dependency.
 #[cfg(feature = "tensor-cohort")]
 pub use prime::os::cohort::diag as cohort;
+
+// achieved-ns/element investigation (nsper task, 2026-08-21): `body_shape`
+// (`cpu.rs`'s `BodyShape` enum) is a DIFFERENT axis from `Path`
+// (`WidthFast`/`Generic`, the affine-operand fast-path gate) -- a `Generic`
+// body can still take the affine fast path, and a `Unary`/`Binary` body can
+// still fall to the gather loop. `ELEMENTWISE_LOOP_TICKS`/`OUTPUT_WRITES`
+// mix every shape together, so neither can answer "is `Generic` slower per
+// element than the monomorphic `Unary`/`Binary` kernel this crate's own
+// 0.38ns/element figure (`cpu.rs:2159`) was measured against". These four
+// split `run_elementwise_range`'s own loop ticks and elements-written count
+// by `shape` alone, committed once per call from the `shape` already in
+// scope -- never per element.
+pub static ELEMENTWISE_LOOP_TICKS_MONOMORPHIC: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_monomorphic");
+pub static ELEMENTWISE_ELEMENTS_MONOMORPHIC: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_monomorphic");
+pub static ELEMENTWISE_LOOP_TICKS_GENERIC: Counter = Counter::new("proxima_tensor.elementwise_loop_ticks_generic");
+pub static ELEMENTWISE_ELEMENTS_GENERIC: Counter = Counter::new("proxima_tensor.elementwise_elements_generic");
+
+// fast_path-vs-slow-path split within `Generic` (A-vs-B task, 2026-08-21):
+// `Generic`'s own 14.9x-slower-than-monomorphic figure mixes two different
+// code paths -- `generic_body_is_affine_fast_path` gating whether a call
+// takes `elementwise_width_generic` (per-step monomorphic dispatch, no
+// per-element `apply_body` interpreter) or falls to the per-element
+// `apply_body`/`apply_scalar_op` gather loop. These four split the same
+// loop ticks and element count `ELEMENTWISE_LOOP_TICKS_GENERIC`/
+// `ELEMENTWISE_ELEMENTS_GENERIC` already carry, by the `fast_path` bool
+// already computed once per call at `cpu.rs`'s `run_elementwise_range` --
+// never re-derived, never sampled per element.
+pub static ELEMENTWISE_LOOP_TICKS_GENERIC_FAST: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_generic_fast");
+pub static ELEMENTWISE_ELEMENTS_GENERIC_FAST: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_generic_fast");
+pub static ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_generic_slow");
+pub static ELEMENTWISE_ELEMENTS_GENERIC_SLOW: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_generic_slow");
+
+// call-size distribution: how many `run_elementwise_range` calls processed
+// how many elements, this process run. A `Counter` can only sum, so the
+// histogram itself needs a map -- kept as a plain `size -> call_count` table
+// rather than per-call log lines (547 calls/decode step would flood stderr).
+// Committed once per call, read back and cleared by
+// `elementwise_call_size_snapshot_and_reset` the same `snapshot_and_reset`
+// shape every other per-step counter here uses.
+static ELEMENTWISE_CALL_SIZES: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+
+/// Records one `run_elementwise_range` call's total elements written
+/// (`counters.output_writes`, already the exact per-call count the caller
+/// computed for its own commit -- never re-derived from extents here).
+pub fn record_elementwise_call_size(elements: u64) {
+    let mut table = ELEMENTWISE_CALL_SIZES.lock().unwrap_or_else(PoisonError::into_inner);
+    *table.entry(elements).or_insert(0) += 1;
+}
+
+/// Reads back every distinct call size seen since the last reset, paired
+/// with how many calls landed at that size, and clears the table -- one
+/// decode step's distribution per call, matching every other
+/// `snapshot_and_reset` in this module.
+#[must_use]
+pub fn elementwise_call_size_snapshot_and_reset() -> Vec<(u64, u64)> {
+    let mut table = ELEMENTWISE_CALL_SIZES.lock().unwrap_or_else(PoisonError::into_inner);
+    let sizes: Vec<(u64, u64)> = table.iter().map(|(size, count)| (*size, *count)).collect();
+    table.clear();
+    sizes
+}
