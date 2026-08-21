@@ -35,7 +35,7 @@ use crate::op::NodeId;
 /// crate ever exceeds 2. `SmallVec` spills past this on a wider pattern
 /// instead of truncating it, so a caller that legitimately needs more still
 /// gets a correct (just heap-backed) result.
-pub const MAX_INLINE_TERMS: usize = 2;
+pub use crate::sized::MAX_INLINE_TERMS;
 
 /// One `coeff * iter[axis]` contribution to an operand index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

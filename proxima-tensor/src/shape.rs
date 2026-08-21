@@ -39,7 +39,7 @@ use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 /// [`IndexMap::Computed`](crate::map::IndexMap::Computed) and `cpu.rs`'s
 /// module docs), so a gathered axis wider than this could silently address
 /// the wrong row once an index value loses precision.
-const GATHER_EXTENT_EXACT_FLOAT_LIMIT: u64 = 1 << 24;
+pub use crate::sized::GATHER_EXTENT_EXACT_FLOAT_LIMIT;
 
 /// Every node's resolved output extents, in `u64` regardless of how the
 /// program spelled them (`Extent::Static` or a bound `Extent::Symbolic`).
