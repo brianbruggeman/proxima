@@ -2917,6 +2917,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-metal",
+ "proxima-gguf",
  "proxima-telemetry",
  "proxima-tensor",
  "tempfile",

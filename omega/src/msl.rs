@@ -160,6 +160,74 @@ pub struct GridSpec {
 /// assert_eq!(kernel.grid.threads, 4);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+/// MSL source for unpacking one element of a `Q4_K` super-block, straight
+/// out of the packed GGUF bytes with no `f32` weight tensor ever
+/// materialized.
+///
+/// This is the whole GPU story for decode, not a convenience. Decode is a
+/// weight sweep, so bytes-per-weight is the only variable that moves the
+/// number: `f16` is 2.0 B/weight and `Q4_K` is 0.5625, a 3.56x difference in
+/// traffic. Measured on an M1 Max, llama.cpp's Metal backend runs this same
+/// 7B checkpoint at 17.62 ms/token (56.8 tok/s, 214.7 GB/s achieved) reading
+/// packed `Q4_K`; the same sweep in `f16` is 14.5 GB per token, which at that
+/// bandwidth is 67.4 ms/token — slower than our own CPU path. A float-only
+/// GPU backend is not worth having (`proxima-tensor/docs/discipline.md`
+/// ROW 69).
+///
+/// Ports [`proxima_gguf::quant::q4_k::dequantize_block`] exactly, including
+/// the two details that are easy to get wrong and silently plausible:
+/// `get_scale_min_k4`'s 6-bit scale/min unpacking (sub-blocks 4..8 take
+/// their high bits from a DIFFERENT byte than their low bits), and the
+/// nibble order — a `qs` byte's low and high nibbles land 32 elements apart,
+/// not adjacent, so element `i`'s byte is NOT `qs[i / 2]`.
+///
+/// Layout, 144 bytes per 256 elements: `d` f16 at 0, `dmin` f16 at 2,
+/// 12 packed scale/min bytes at 4, 128 nibble bytes at 16.
+pub const Q4K_UNPACK_MSL: &str = r#"
+// ports proxima_gguf::quant::q4_k::get_scale_min_k4
+static inline uchar2 q4k_scale_min(device const uchar *scales, uint sub_block) {
+    if (sub_block < 4u) {
+        return uchar2(scales[sub_block] & 63, scales[sub_block + 4u] & 63);
+    }
+    uchar scale = (scales[sub_block + 4u] & 0x0F) | ((scales[sub_block - 4u] >> 6) << 4);
+    uchar minimum = (scales[sub_block + 4u] >> 4) | ((scales[sub_block] >> 6) << 4);
+    return uchar2(scale, minimum);
+}
+
+// element `index` (0..256) of one Q4_K super-block, byte-for-byte the value
+// proxima_gguf::quant::q4_k::dequantize_block writes at the same index.
+static inline float q4k_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+
+    device const uchar *scales = block + 4;
+    device const uchar *qs = block + 16;
+
+    uint group = index / 64u;
+    uint within = index % 64u;
+    bool low_nibble = within < 32u;
+    uint sub_block = 2u * group + (low_nibble ? 0u : 1u);
+    uint byte_index = group * 32u + (within % 32u);
+
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    float scale = d * (float)scale_min.x;
+    float minimum = dmin * (float)scale_min.y;
+    uchar nibble = low_nibble ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return scale * (float)nibble - minimum;
+}
+"#;
+
+/// Bytes one `Q4_K` super-block occupies, and elements it carries — the two
+/// numbers a caller needs to index a packed weight row. Mirrors
+/// `proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K}`; omega does not depend on
+/// `proxima-gguf` at build time, so they are restated here and pinned by a
+/// test that does.
+pub const Q4K_BLOCK_BYTES: usize = 144;
+/// Elements one `Q4_K` super-block carries.
+pub const Q4K_BLOCK_ELEMENTS: usize = 256;
+
 pub fn emit(resolved: &BoundOp) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
