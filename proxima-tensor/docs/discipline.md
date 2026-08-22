@@ -6454,3 +6454,182 @@ If the three slow families reached the fast path's measured in-situ 96-108 GB/s,
 5.87 GB would sweep in ~60 ms. That is a projection from measured rates, not a
 result, and this log has already been burned once by reading a projection as a
 number (ROW 83).
+
+## ROW 88 — the gate printed, and ROW 87's own "65" was wrong by a third: it is 41, and the fix closes 32 of them, `attn_output` 294.0 -> ~7.9 ms
+
+### The gate, printed per family, from the REAL bound program — not inferred
+
+`omega::msl::diagnose_packed_row_block` (new, `#[cfg(feature = "instrument")]`,
+delegates to a new `classify_packed_row_block` that `packed_row_block` itself
+now calls — one place the seven conditions are spelled out, not two) is wired
+into `execute_plan_op_timed`'s `OpGpuTiming` and `report_op_timings`'s
+per-family aggregate. Real steady decode step (`new_count=1`, pre-fix build):
+
+```
+family="blk.attn_output.weight" op_count=32 row_blocked_count=0  rejected_count=32 gate=NotExactlyOneReduceDim { reduce_dims: [1, 2, 3] }
+family="output.weight"          op_count=1  row_blocked_count=0  rejected_count=1  gate=NotExactlyOnePackedOperand
+family="blk.ffn_down.weight"    op_count=32 row_blocked_count=28 rejected_count=4  gates={NotExactlyOnePackedOperand, PASS}
+family="blk.attn_v.weight"      op_count=32 row_blocked_count=28 rejected_count=4  gates={NotExactlyOnePackedOperand, PASS}
+```
+
+**ROW 87 asserted 65 = 32 (`attn_output`) + 32 (`ffn_down`) + 1 (`output.weight`)
+— that "32" was never printed and it was wrong.** The real count, printed per
+op: `attn_output` 32/32, `output.weight` 1/1, `ffn_down` **4/32**, `attn_v`
+**4/32** (a family ROW 87 never named at all). **Total rejected: 32+1+4+4 = 41,
+not 65.** ROW 87 read "this family has some rejections" as "this family fails
+uniformly" — the identical shape of error this log's own ROW 82/83 already
+named once ("a flat average is not evidence of a flat distribution") and it
+recurred one row later, on a count instead of a mean.
+
+### Why the 9 non-`attn_output` rejections are a real "cannot", not a punt
+
+`NotExactlyOnePackedOperand` on these 9 means `quantized = [false, false]` —
+neither operand is in `q4k_operands`, which `omega::metal::prepare` populates
+**only from blocks that are literally `QuantizedBlock::Q4K`** (`metal.rs:823`).
+Cross-checked against `proxima-gguf`'s own ground truth
+(`quant/policy.rs`'s docstring, read off the real file's metadata):
+`openchat-3.5-1210.Q4_K_S.gguf` carries **291 tensors: Q4_K x217, F32 x65, Q5_K
+x8, Q6_K x1** — `output.weight` is the lone `Q6_K` tensor, and 8 of the 64
+`attn_v`/`ffn_down` tensors are `Q5_K` (llama.cpp's own per-layer quality bump).
+`4 (attn_v) + 4 (ffn_down) + 1 (output.weight) = 9`, exactly the measured
+count. `proxima-model-interop::generate::dequantize_unsupported_metal_weights`
+already converts every `Q5_K`/`Q6_K` weight to `Float32` before it reaches
+Metal, because **Metal has no `Q5_K`/`Q6_K` unpack kernel at all** —
+`omega::metal`'s own error strings say so
+(`"metal has no q5_k/q6_k unpack kernel yet"`). These 9 ops are not eligible
+for `packed_row_block` under ANY reduce-dim predicate; they are F32×F32
+elementwise-reduced, bandwidth-bound on 4x the bytes a packed read would need.
+**Cannot, with the condition and the shape — not "did not get to it."** Closing
+this gap is a Q5_K/Q6_K unpack-kernel project, out of scope here.
+
+### The fix: fold contiguous reduce dims, don't special-case three
+
+`attn_output`'s reduce folds THREE axes (`extents=[1,8,4,128,4096]`,
+`output_axes=[0,4]` -> `reduce_dims=[1,2,3]`, extents `[8,4,128]`) — the
+row-major decomposition of one 4096-wide embedding axis. Weight strides at
+those dims: `[512, 128, 1]`; `4*128=512` and `128*1=128` — each outer dim's
+stride equals the product of every dim nested inside it, for BOTH operands.
+`classify_packed_row_block` now checks exactly that (`reduce_dims.windows(2)`,
+both operands) and, when it holds, treats the dims as one flattened reduction:
+innermost dim's stride must be 1 (unchanged check, now over the flattened
+range), extent is the PRODUCT across every folded dim (was a single
+`extents[reduce_dim]`) and must still be a `Q4K_BLOCK_ELEMENTS` multiple.
+`push_packed_row_blocked_body`'s output-coordinate loop already had the
+generalization for free: `output_axes` (not `0..rank` minus one excluded dim)
+is the correct base-offset set regardless of how many reduce dims there are.
+No new kernel path, no new type — one predicate widened, reusing the SAME
+`q4k_run8`/row-blocked emitter every other Q4_K matmul already takes.
+
+### Correctness — the incumbent (CPU oracle) still agrees, byte for byte
+
+`cargo nextest run -p omega --features metal,instrument` -> **53 passed, 1
+skipped** (unchanged before/after). `metal_real_forward` (bit-exact vs
+`proxima_tensor::cpu`) is in that count. Real 24-token greedy decode, same
+prompt, same checkpoint, before AND after the fix:
+
+```
+generated_text="Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"
+```
+
+Byte-identical to itself across both builds and to ROW 81's earlier 16-token
+CPU-parity prefix.
+
+### The numbers — real steady decode step, `new_count=1`, per-op `MTLCommandBuffer` GPU time
+
+Host loadout: shared box, a sibling agent's own build/test load moved
+1-minute `uptime` between 4.5 and 62 across these runs (pasted per run below);
+GPU wall time itself tracked closely with load quiet-vs-loaded on the
+`attn_output` family specifically but the UNCHANGED families (`output.weight`,
+`ffn_down`, `ffn_gate`) show the SAME noise band before and after, which is
+the degenerate control that the delta is real and not contamination (see
+below).
+
+**`attn_output` family, 3 runs each, debug profile:**
+
+| | run1 (quiet, load 4.5-7.3) | run2 | run3 | median | CoV |
+|---|---|---|---|---|---|
+| BEFORE (ms) | 330.623 | 515.417 (load 9-25) | 499.864 (load 26-23) | 499.864 | **18.7%** |
+| AFTER (ms) | 8.528 | 7.916 (load 62) | 7.653 (load 60-49) | 7.916 | **4.56%** |
+
+BEFORE's CoV exceeds 5% — the load ramped mid-sweep, so report the range,
+**330.6-515.4 ms**, not a point estimate. AFTER's CoV is under the 5% floor.
+**Quiet-box-matched pair (both runs at comparable load, the most trustworthy
+single comparison): 330.623 -> 8.528 ms, 38.8x, -97.4%.** Median-to-median
+across all 6 runs: 499.864 -> 7.916 ms, **63.1x, -98.4%** (the larger ratio
+here is BEFORE's own load contamination inflating the numerator, not an
+additional win — the quiet-box figure is the one to cite).
+
+**`gpu_exec` — the PRODUCTION batched metric (`execute_plan`, one command
+buffer for the whole 1196-op program), read from the SAME test runs' step=4
+(a steady decode step untouched by the diagnostic per-op path):**
+
+| | run1 (quiet) | run2 | run3 | median (steps 1,2,4 pooled, n=9) | CoV |
+|---|---|---|---|---|---|
+| BEFORE (ms) | 519.558 | 627.146 | 603.301 | 532.421 | 6.87% |
+| AFTER (ms) | 250.663 | 243.910 | 352.015 | 259.525 | 24.5%* |
+
+\*AFTER's pooled CoV is inflated by ONE contaminated sample
+(`after_run3` step=2, 459.689 ms, captured at load 49-60); excluding it, the
+remaining 8 samples range 235.0-369.6 ms, median 255.1 ms. **Quiet-box pair:
+519.558 -> 250.663 ms, 2.07x, -51.7%.** This is the number the task's own
+baseline (`gpu_exec` 507.15 ms median, CoV 1.10%, a quieter host) cross-checks
+against: 519.558 ms here is 2.4% off that baseline on a noisier box — same
+ballpark, not the same host state, reported as such rather than asserting
+false precision.
+
+**Degenerate control — unaffected families did not move (proof the delta is
+attn_output-specific, not load-driven):** `output.weight` before {125.6, 144.8,
+133.1} vs after {142.0, 141.0} ms — same band. `blk.ffn_down.weight` before
+{62.4, 70.3, 66.9} vs after {74.0, 102.0} ms — same band (its own noise is
+higher because its 4 already-F32 ops are pure bandwidth reads, more
+load-sensitive than a compute kernel, but the band does not shift structurally
+between before/after).
+
+**Bucket reclassification (quiet-box pair, run1 vs run1):**
+
+| bucket | before | after |
+|---|---|---|
+| reduce-cooperative | 426 ops / 519.396 ms | 394 ops / 224.068 ms |
+| reduce-packed-row-blocked | 184 ops / 37.548 ms | 216 ops / 67.785 ms |
+
+32 ops moved buckets, exactly `attn_output`'s count. `attn_output`'s own
+ns/byte: **1.05-1.70 (before) -> 0.0246-0.0282 (after)**, a 43-63x per-byte
+improvement depending which before-sample it is measured against (the range
+reflects BEFORE's own CoV, not AFTER's).
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p omega --features metal,instrument` | **53 passed, 1 skipped** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** |
+| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p omega --features std,cpu,metal,instrument -- -D warnings` | clean |
+| generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
+
+`cargo clippy -p proxima-model-interop --features metal,instrument -- -D
+warnings` still fails on two PRE-EXISTING `clippy::expect_used` sites in
+`BackendRuntime::evaluate`/`evaluate_op_timed`'s plan-cache lookup (not
+introduced by this row — the first predates this row entirely, the second is
+inherited scaffolding this row builds diagnostics on top of, not the family
+fix). Named here rather than silently left; not fixed in this row because it
+is a different function's error-handling shape, not this row's claim.
+
+### Re-provable now
+
+```
+cargo run -p omega --example real_forward_packed_probe --features metal,instrument
+cargo nextest run -p proxima-model-interop --features metal,instrument --run-ignored ignored-only \
+  -E 'test(profiles_one_real_decode_step_by_per_op_gpu_time)' --success-output immediate
+```
+
+The second command's `op_profile_family` lines carry `row_blocked_count`,
+`rejected_count` and `packed_row_block_gates` per family — the exact table
+this row reports, regenerable from the artifact alone.
+
+### Rollback rows
+
+None — the fold-widening measured a clean win on its one affected family and a
+no-op on every other family (see the degenerate control above), so nothing was
+reverted.
