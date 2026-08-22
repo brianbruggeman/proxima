@@ -1,0 +1,12 @@
+{
+  "dimension": 768,
+  "top_k": 20,
+  "timed_queries": 50,
+  "tolerance": 0.0001,
+  "sizes": [
+    {"rows": 10000, "gemv_p50_ms": 0.451958, "gemv_p99_ms": 0.693042, "gemv_cov_pct": 8.156, "full_sort_p50_ms": 0.259167, "full_sort_cov_pct": 4.662, "partial_select_p50_ms": 0.025625, "partial_select_cov_pct": 7.787, "total_full_sort_p50_ms": 0.711125, "total_partial_select_p50_ms": 0.477583, "eff_gbs_full_sort": 43.199, "eff_gbs_partial_select": 64.324, "peak_rss_gib": 0.039, "nocopy_attempts": 56, "nocopy_reuses": 55, "real_wires": 1},
+    {"rows": 100000, "gemv_p50_ms": 1.631417, "gemv_p99_ms": 2.080041, "gemv_cov_pct": 9.160, "full_sort_p50_ms": 2.920917, "full_sort_cov_pct": 3.699, "partial_select_p50_ms": 0.298375, "partial_select_cov_pct": 13.996, "total_full_sort_p50_ms": 4.552334, "total_partial_select_p50_ms": 1.929792, "eff_gbs_full_sort": 67.482, "eff_gbs_partial_select": 159.188, "peak_rss_gib": 0.339, "nocopy_attempts": 56, "nocopy_reuses": 55, "real_wires": 1},
+    {"rows": 1000000, "gemv_p50_ms": 10.632792, "gemv_p99_ms": 13.890375, "gemv_cov_pct": 10.736, "full_sort_p50_ms": 35.705500, "full_sort_cov_pct": 1.023, "partial_select_p50_ms": 2.341833, "partial_select_cov_pct": 12.502, "total_full_sort_p50_ms": 46.338292, "total_partial_select_p50_ms": 12.974625, "eff_gbs_full_sort": 66.295, "eff_gbs_partial_select": 236.770, "peak_rss_gib": 3.271, "nocopy_attempts": 56, "nocopy_reuses": 55, "real_wires": 1}
+  ],
+  "any_gate_failed": true
+}
