@@ -408,6 +408,50 @@ pub(crate) fn transpose_out_in_to_in_out(flat: &[f32], out_dim: usize, in_dim: u
     transposed
 }
 
+/// `Some(owned f32 buffer)` if `block` is `Q5_K`/`Q6_K` -- the two codecs
+/// [`bind_matmul_weight`] packs zero-copy that `omega::metal`'s driver has
+/// no unpack kernel for (`unsupported_gpu_codec`, `omega/src/metal.rs`) --
+/// `None` for every other variant, which a caller already has a device path
+/// for (`Float32` uploads directly, `Q4_K` has a Metal kernel). Element
+/// count comes from `bytes.len()` alone via each codec's own
+/// `blocks_for_bytes`/`elements_for_blocks`, never from the tensor's
+/// logical shape, since this function never sees a [`proxima_gguf::tensor::TensorInfo`].
+///
+/// # Errors
+///
+/// [`InteropError::Quant`] if `bytes.len()` is not a whole multiple of the
+/// codec's own block size.
+#[cfg(feature = "metal")]
+pub(crate) fn dequantize_packed_for_metal(
+    block: &proxima_tensor::cpu::QuantizedBlock<'_>,
+) -> Result<Option<Vec<f32>>, InteropError> {
+    use proxima_gguf::quant::{q5_k, q6_k};
+
+    match block {
+        proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => {
+            let block_count = q5_k::blocks_for_bytes(bytes.len()).ok_or(proxima_gguf::quant::QuantError::InputNotBlockMultiple {
+                codec: "q5_k",
+                found: bytes.len(),
+                block_bytes: q5_k::BLOCK_BYTES,
+            })?;
+            let mut output = vec![0.0f32; q5_k::elements_for_blocks(block_count)];
+            q5_k::dequantize(bytes, &mut output)?;
+            Ok(Some(output))
+        }
+        proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => {
+            let block_count = q6_k::blocks_for_bytes(bytes.len()).ok_or(proxima_gguf::quant::QuantError::InputNotBlockMultiple {
+                codec: "q6_k",
+                found: bytes.len(),
+                block_bytes: q6_k::BLOCK_BYTES,
+            })?;
+            let mut output = vec![0.0f32; q6_k::elements_for_blocks(block_count)];
+            q6_k::dequantize(bytes, &mut output)?;
+            Ok(Some(output))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -895,6 +939,84 @@ mod real_openchat_file {
             assert_eq!(tokens_generated, max_tokens, "budget exhaustion must produce exactly one id per step");
         }
         assert!(!generated.1.is_empty(), "degenerate control: decode loop produced no text");
+    }
+
+    /// Same cached decode loop, on the Metal backend instead of CPU:
+    /// `gpu_layers: GPU_LAYERS_ALL` (`-ngl all`) makes `generate::select_backend`
+    /// resolve `Backend::Metal`, so `LoadedModel::run_decode_loop` (`pub(crate)`,
+    /// same loop `LoadedModel::call` runs) drives `BackendRuntime`'s Metal arm.
+    /// Called directly instead of through `Pipe::call` because this test also
+    /// needs `runtime`'s plan-cache hit/miss counters, which
+    /// `(Vec<u32>, String, bool)` has no room for.
+    ///
+    /// **Finding, not a pass/fail on generated text**: `mistral_cached_forward_program`'s
+    /// key/value-cache read extent bakes `cached_len` into a `Plan`'s concrete
+    /// shapes (`omega::backend::plan_named`'s own doc), and `cached_len` grows
+    /// by `new_count` every decode step -- so within one autoregressive decode
+    /// call, `(new_count, cached_len)` is a different pair every single step,
+    /// and the plan cache cannot hit even once. This test asserts exactly
+    /// that (`plan_hits == 0`, `plan_misses == one per forward step taken`)
+    /// rather than hoping for reuse the shape itself rules out.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
+    fn runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        prefault_if_requested(file_bytes);
+
+        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let prompt = decode_loop_prompt();
+        let max_tokens = decode_loop_max_tokens();
+
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+
+        let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+        let decode_start = std::time::Instant::now();
+        let generated = model
+            .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
+            .expect("generate through the metal backend");
+        let total_elapsed = decode_start.elapsed();
+
+        std::println!(
+            "metal_decode_summary tokens_generated={} stopped_by_eos={} total_wall_clock_ms={:.3} plan_hits={} plan_misses={} generated_text={:?}",
+            generated.0.len(),
+            generated.2,
+            total_elapsed.as_secs_f64() * 1000.0,
+            runtime.plan_hits,
+            runtime.plan_misses,
+            generated.1
+        );
+
+        let forward_calls_taken = generated.0.len() + usize::from(generated.2);
+        assert_eq!(
+            runtime.plan_hits, 0,
+            "cached_len grows every decode step, so no (new_count, cached_len) shape can repeat within one call"
+        );
+        assert_eq!(
+            runtime.plan_misses, forward_calls_taken,
+            "every forward step builds exactly one new plan when none can ever be reused"
+        );
+        assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
     }
 
     /// Every real openchat weight this checkpoint's cached forward program

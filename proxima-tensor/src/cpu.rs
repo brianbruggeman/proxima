@@ -116,7 +116,15 @@ use core::future::Future;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
+// `#[cfg(test)]` staged-round scaffolding (`StagedRound`, `evaluate_parallel`'s
+// ordering tests) uses `Ordering` regardless of `target_arch`/`instrument`,
+// unlike `AtomicU64` above which only backs the aarch64+instrument tile
+// counters -- gated on `any(test, ..)` rather than left unconditional so a
+// non-test, non-aarch64-instrument build (nothing left to use it) does not
+// pick up an unused-import warning under this workspace's deny(warnings).
+#[cfg(any(test, all(target_arch = "aarch64", feature = "instrument")))]
+use core::sync::atomic::Ordering;
 use std::borrow::Cow;
 use std::thread;
 use std::sync::atomic::AtomicUsize;
@@ -697,16 +705,19 @@ pub fn evaluate_quantized_with_scratch(
             }
         }
         for retired in &retires[position] {
-            // symmetric `Some` -> `None` transition: `retired` was written
-            // at its own computed position above and read (never retired
-            // twice -- `node_retirement` records each node's LAST read
-            // position only), so it is always live here. `retire_into`
-            // additionally hands this evaluator's own owned storage back to
-            // `free_buffers` instead of dropping it -- a no-op for a
-            // caller-borrowed `Op::Input`/`Cow::Borrowed` slot, exactly as
-            // `evaluate_pooled`'s identical use of it already relies on.
-            retire_into(&mut buffers, *retired, free_buffers);
-            live_now -= 1;
+            // NOT always a `Some` -> `None` transition, unlike
+            // `evaluate_pooled`/`evaluate_parallel`'s identical loop: a
+            // `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` weight node is scheduled for
+            // retirement here exactly like any other operand (`node_retirement`
+            // builds its schedule from the generic program graph, with no
+            // knowledge of the quantized/float32 split), but it never occupied
+            // a `buffers` slot in the first place -- it lives in
+            // `quantized_weights` instead (see the `QuantizedBlock` match
+            // above). `retire_into` reports whether the slot was actually
+            // live so `live_now` only counts a real retirement.
+            if retire_into(&mut buffers, *retired, free_buffers) {
+                live_now -= 1;
+            }
         }
         #[cfg(feature = "instrument")]
         {
@@ -1008,8 +1019,15 @@ fn evaluate_pooled(
         live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
-            retire_into(&mut buffers, *retired, free_buffers);
-            live_now -= 1;
+            // `blocks: &[&[f32]]` means every node this evaluator ever
+            // touches is float32 and lands in `buffers` -- no quantized-weight
+            // split to trip over, unlike `evaluate_quantized` -- but the
+            // decrement is still gated on `retire_into`'s liveness report
+            // rather than assumed, so this loop stays correct if that ever
+            // changes rather than relying on an invariant nothing enforces.
+            if retire_into(&mut buffers, *retired, free_buffers) {
+                live_now -= 1;
+            }
         }
     }
 
@@ -1026,9 +1044,24 @@ fn evaluate_pooled(
 /// only retires after `run_node_into` for that position has returned) — the
 /// buffer is out of `buffers` and not yet read by anything else before it
 /// lands in `pool`, so no live reference to it survives the swap.
-fn retire_into(buffers: &mut [Option<Cow<'_, [f32]>>], node: NodeId, pool: &mut Vec<Vec<f32>>) {
-    if let Some(Cow::Owned(buffer)) = buffers[node.0 as usize].take() {
-        pool.push(buffer);
+///
+/// Returns whether `node`'s slot actually held a buffer. `node_retirement`
+/// schedules a retirement for every operand the program graph reads, with no
+/// knowledge of `evaluate_quantized`'s split storage: a `Q4_K`/`Q5_K`/`Q6_K`/
+/// `Q8_0` weight node never occupies a `buffers` slot at all (it lives in the
+/// separate `quantized_weights` map instead — see the `QuantizedBlock`
+/// match in `evaluate_quantized_with_scratch`), so its "retirement" here is a
+/// no-op on an already-`None` slot. A caller that decremented a running live
+/// count unconditionally on every retirement (as this evaluator's `live_now`
+/// used to) drifted low by one per quantized weight and could underflow.
+fn retire_into(buffers: &mut [Option<Cow<'_, [f32]>>], node: NodeId, pool: &mut Vec<Vec<f32>>) -> bool {
+    match buffers[node.0 as usize].take() {
+        Some(Cow::Owned(buffer)) => {
+            pool.push(buffer);
+            true
+        }
+        Some(Cow::Borrowed(_)) => true,
+        None => false,
     }
 }
 
@@ -1188,8 +1221,13 @@ pub fn evaluate_parallel(
         live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
-            buffers[retired.0 as usize] = None;
-            live_now -= 1;
+            // same liveness-gated decrement as `evaluate_pooled`'s identical
+            // loop -- `blocks: &[&[f32]]` means no quantized-weight split
+            // exists here today, but the decrement stays conditioned on the
+            // slot actually having held a buffer rather than assumed.
+            if buffers[retired.0 as usize].take().is_some() {
+                live_now -= 1;
+            }
         }
         #[cfg(feature = "instrument")]
         counter!(
@@ -13932,6 +13970,116 @@ mod tests {
             relative_max_diff < 0.01,
             "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
              exceeds loose sanity bound"
+        );
+    }
+
+    /// `evaluate_quantized`'s `live_now` running count treats every operand
+    /// `node_retirement` schedules for retirement as "always live here" (see
+    /// the comment above `live_now -= 1` in that loop) -- true for an
+    /// `Op::Input` float32 block and for a computed node, both of which are
+    /// written into `buffers`, but FALSE for a `Q4_K`-packed weight node: the
+    /// `QuantizedBlock::Q4K` match arm in `evaluate_quantized_with_scratch`
+    /// routes it into the separate `quantized_weights` map instead of
+    /// `buffers`, so its slot is `None` the whole time. `node_retirement`
+    /// does not know about that split -- it schedules the weight's
+    /// retirement from the generic program graph like any other operand --
+    /// so every quantized-weight retirement decrements `live_now` for a slot
+    /// that was never live. One layer only drifts the running count by one
+    /// (silently wrong, not yet negative); two independent layers combined
+    /// by a plain `Add` accumulate two such spurious decrements ahead of the
+    /// real ones and drive the last, legitimate retirement negative --
+    /// `attempt to subtract with overflow` in a debug build, silent
+    /// wraparound to a huge `usize` in release (this session's
+    /// `peak_live_buffers=18446744073709551614` == `2^64 - 2`).
+    #[test]
+    fn evaluate_quantized_two_layers_does_not_underflow_live_now() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows: u32 = 3;
+        let blocks_per_row = 1;
+        let k = QK_K as u32 * blocks_per_row as u32;
+
+        fn quantized_weight_blocks(seed: u64, rows: u32, k: u32, blocks_per_row: usize) -> Vec<u8> {
+            let weight_f32: Vec<f32> =
+                random_vec(seed, rows as usize * k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+            let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            {
+                quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            }
+            weight_blocks
+        }
+
+        fn append_layer(program: &mut Vec<Op>, rows: u32, k: u32) -> NodeId {
+            let weight = block(program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+            let activation = f32_block(program, &[Extent::Static(k), Extent::Static(1)]);
+            let product = append(
+                program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                        (activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                    ],
+                    name: None,
+                },
+            );
+            append(
+                program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                    out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            )
+        }
+
+        let mut program = Vec::new();
+        let sum1 = append_layer(&mut program, rows, k);
+        let sum2 = append_layer(&mut program, rows, k);
+        let total = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (sum1, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (sum2, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+
+        let weight1_blocks = quantized_weight_blocks(101, rows, k, blocks_per_row);
+        let weight2_blocks = quantized_weight_blocks(202, rows, k, blocks_per_row);
+        let activation1: Vec<f32> = random_vec(303, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation2: Vec<f32> = random_vec(404, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let blocks = [
+            QuantizedBlock::Q4K(&weight1_blocks),
+            QuantizedBlock::Float32(&activation1),
+            QuantizedBlock::Q4K(&weight2_blocks),
+            QuantizedBlock::Float32(&activation2),
+        ];
+
+        let evaluated = evaluate_quantized(&program, &[], &blocks, &[total])
+            .expect("two chained quantized layers evaluate without panicking");
+
+        let peak_live_buffers =
+            evaluated.peak_live_buffers().expect("evaluate_quantized always reports peak_live_buffers");
+        assert!(
+            peak_live_buffers <= program.len(),
+            "peak_live_buffers={peak_live_buffers} exceeds program.len()={} -- a live-buffer count can never \
+             exceed the node count, so this value proves live_now underflowed and wrapped rather than being \
+             merely large",
+            program.len(),
         );
     }
 

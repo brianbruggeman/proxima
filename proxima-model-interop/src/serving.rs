@@ -192,12 +192,20 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) {
         );
     }
 
-    if config.gpu_layers != 0 {
+    if config.gpu_layers != 0 && config.gpu_layers != GPU_LAYERS_ALL {
         todo!(
-            "gpu_layers={} (-ngl): this forward path only ever dispatches through \
-             proxima-tensor's CPU interpreter; implementing this requires a GPU op \
-             dispatch backend and a per-layer placement decision, not just a count",
+            "gpu_layers={} (-ngl): partial per-layer GPU offload needs a per-layer \
+             placement decision this forward path does not make; only 0 (cpu-only) \
+             and {GPU_LAYERS_ALL} (-ngl all, whole-model offload through \
+             `omega::backend::Backend::Metal`) are supported",
             config.gpu_layers
+        );
+    }
+    if config.gpu_layers == GPU_LAYERS_ALL && !cfg!(feature = "metal") {
+        todo!(
+            "gpu_layers={GPU_LAYERS_ALL} (-ngl all): this build was not compiled with \
+             proxima-model-interop's `metal` feature, so there is no GPU backend to \
+             offload onto"
         );
     }
 
