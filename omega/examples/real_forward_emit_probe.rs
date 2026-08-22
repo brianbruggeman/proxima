@@ -75,9 +75,23 @@ fn main() {
     let mut emitted = 0usize;
     let mut failures: BTreeMap<String, usize> = BTreeMap::new();
     let mut first_failure: Option<String> = None;
+    // ROW 93: `source_len`/`entry_len` are the measured evidence behind
+    // `kernel_cache_key` (`msl.rs`) keying the Metal pipeline cache on the
+    // cheap `entry`-shaped fingerprint instead of the full MSL `source` --
+    // the ~236x size gap below is what made the OLD `BTreeMap<String,
+    // Pipeline>` lookup (`log2(1196)` string comparisons per call, each up
+    // to `source_len_max` bytes) real, measured cost, not a guess.
+    let mut source_len_total = 0usize;
+    let mut entry_len_total = 0usize;
+    let mut source_len_max = 0usize;
     for op in &bound {
         match omega::emit(op, &no_packed) {
-            Ok(_) => emitted += 1,
+            Ok(kernel) => {
+                emitted += 1;
+                source_len_total += kernel.source.len();
+                entry_len_total += kernel.entry.len();
+                source_len_max = source_len_max.max(kernel.source.len());
+            }
             Err(error) => {
                 let reason = format!("{error}");
                 *failures.entry(reason.clone()).or_insert(0) += 1;
@@ -90,6 +104,12 @@ fn main() {
 
     let failed: usize = failures.values().sum();
     println!("emit: {emitted} ok, {failed} failed, of {} bound ops", bound.len());
+    println!(
+        "source_len avg={:.1} max={} entry_len avg={:.1} (over {emitted} emitted kernels)",
+        source_len_total as f64 / emitted.max(1) as f64,
+        source_len_max,
+        entry_len_total as f64 / emitted.max(1) as f64,
+    );
     for (reason, count) in &failures {
         println!("  {count:>5}x  {reason}");
     }
