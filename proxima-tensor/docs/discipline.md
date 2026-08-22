@@ -5000,3 +5000,76 @@ Metal one. Four peephole rows were spent before reading
 does: **read the incumbent's kernel STRUCTURE before writing any
 optimization against it, on every backend separately — a lesson recorded
 for one target is not transferred to another for free.**
+
+## ROW 70 — RETRACTION of ROW 69's conclusion. The Metal gap is 2.0x, not 143x; the cost was our own per-call buffer wiring
+
+**Host:** Apple M1 Max. **Repo:** `feat/tensor-consolidated`.
+
+### What ROW 69 got wrong, and how
+
+ROW 69 concluded "the Metal gap is ARCHITECTURE, not tuning: 143x". That
+conclusion is **retracted**. It was reached by a tautology: four peephole
+fixes each measured ~zero, therefore the cause must be architectural. That
+is fitting a conclusion to the shape of my own failures, not deriving it
+from evidence. A fix measuring zero is evidence about that fix and nothing
+else.
+
+Worse, ROW 69's own probe printed `every execute re-uploads every block`,
+and I dismissed it after reading `nocopy=66 copying=66` — reasoning that a
+"no-copy" wrapper is free. It is not.
+`newBufferWithBytesNoCopy` creates a fresh `MTLBuffer` and Metal must wire
+those pages for GPU access on every call, a cost that scales with BYTES.
+That is exactly why it hid inside a bytes-normalized metric, and why BOTH
+arms of the f32-vs-packed control paid it. **The control was confounded and
+the kernel was never measured.**
+
+Second confound: the probe reported a MEDIAN while a sibling process on
+this box ran at 171.9% CPU. Under interference the median tracks the
+interferer. The probe now reports min-of-N.
+
+### Corrected measurement — same probe, buffers reused, min of 21
+
+| | ROW 69 (median, per-call wiring) | corrected (min, wiring removed) | speedup |
+|---|---|---|---|
+| packed Q4_K 4096x4096 | 6.273 ms | **1.380 ms** | 4.5x |
+| f32 control, same space | 2.570 ms | **0.623 ms** | 4.1x |
+| f32 achieved bandwidth | 26.1 GB/s | **107.7 GB/s** | 4.1x |
+
+Reuse witness: `nocopy_attempts=66 of which REUSED=63 (so 3 real wires)` —
+three distinct weight buffers wired once each instead of 66 times.
+
+### Where it actually stands
+
+| | achieved | bar (llama.cpp Metal, 214.7 GB/s) |
+|---|---|---|
+| omega f32 kernel | **107.7 GB/s** | **2.0x off** |
+| omega packed Q4_K | 12.16 G elem/s vs f32's 26.93 | **2.2x slower per element than f32** |
+
+Two live, ordinary defects — not an architecture wall:
+
+1. **2.0x on the f32 kernel.** Real, and the register-blocking comparison in
+   ROW 69's table is still the best lead: ggml carries 4 output rows per
+   thread (`float sumf[nr0]`, `N_R0_Q4_K 4`) and holds the activation in
+   registers across those rows; omega does one row per simdgroup and
+   re-reads the activation per element.
+2. **Packed is 2.2x slower per element than f32.** `q4k_element` decodes
+   `d`, `dmin`, and the 6-bit scale/min per ELEMENT where ggml decodes them
+   once per super-block. Still true, still worth fixing, and now correctly
+   sized as ~2x rather than as the whole gap.
+
+### The unsound edge this fix currently carries
+
+The buffer cache keys on `(pointer, len)` and `newBufferWithBytesNoCopy`
+does not own the memory. If a caller drops the backing allocation between
+calls, the cached wrapper aliases freed pages. That holds fine for mmap'd
+GGUF weights (the case this exists for) and NOT in general. The sound
+version is a resident-blocks handle whose lifetime borrows the caller's
+data, which is also the API a serving loop wants; until then the precondition
+is documented on the cache itself and is a caller obligation.
+
+### Method note, which is the actual lesson
+
+ROW 69 spent four rows peepholing before reading `ggml-metal.metal`, then
+concluded "architecture" from the peepholes' failure. Both halves were
+wrong. Read the incumbent's kernel structure FIRST — and when a fix measures
+zero, that is a fact about the fix, never a syllogism about the cause.

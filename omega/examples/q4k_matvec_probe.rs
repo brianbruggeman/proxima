@@ -116,7 +116,10 @@ fn run() {
             assert_eq!(out.root().len(), rows as usize, "degenerate probe: no output");
         }
         samples.sort_by(f64::total_cmp);
-        (samples[samples.len() / 2], packed.len() as f64)
+        // min, not median: a sibling process on this box interferes, and
+        // the minimum is the least-interfered sample. Under contention the
+        // median tracks the interferer, not the kernel.
+        (samples[0], packed.len() as f64)
     }
 
     // is the `Reduce(Elementwise)` fusion firing? If it is not, omega
@@ -231,7 +234,7 @@ fn run() {
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         samples.sort_by(f64::total_cmp);
-        samples[samples.len() / 2]
+        samples[0]
     }
 
     let f32_ms = measure_f32(4096, K, RUNS);
@@ -243,8 +246,10 @@ fn run() {
         elements / (large_ms / 1000.0) / 1e9
     );
     println!(
-        "  uploads over the whole probe: nocopy={} copying={} (every execute re-uploads every block)",
+        "  uploads: nocopy_attempts={} of which REUSED={} (so {} real wires), copying={}",
         omega::metal::NOCOPY_BUFFER_UPLOADS.get(),
+        omega::metal::NOCOPY_BUFFER_REUSES.get(),
+        omega::metal::NOCOPY_BUFFER_UPLOADS.get() - omega::metal::NOCOPY_BUFFER_REUSES.get(),
         omega::metal::COPYING_BUFFER_UPLOADS.get()
     );
     println!("  bar: llama.cpp Metal on 7B Q4_K_S = 214.7 GB/s (3.784 GB in 17.62 ms/token)");
