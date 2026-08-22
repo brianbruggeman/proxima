@@ -356,7 +356,13 @@ fn prepare(
     outputs: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
-    reject_unsupported_gpu_dtype(program)?;
+    let q4k_operands: BTreeSet<NodeId> = block_node_ids(program)
+        .iter()
+        .zip(blocks.iter())
+        .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
+        .map(|(node, _)| *node)
+        .collect();
+    reject_unsupported_gpu_dtype(program, &q4k_operands)?;
 
     let root = program
         .len()
@@ -418,11 +424,19 @@ fn prepare(
 // `half`-typed kernel for a `Float16` node instead of assuming `float`
 // unconditionally (see `msl.rs`'s own dtype doc). Any other dtype is still
 // rejected exactly as before.
-fn reject_unsupported_gpu_dtype(program: &[Op]) -> Result<(), TensorError> {
+fn reject_unsupported_gpu_dtype(
+    program: &[Op],
+    packed_nodes: &BTreeSet<NodeId>,
+) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        if index_nodes.contains(&node) {
+        // a gather's indices are exempt (see this function's doc); so is a
+        // packed quantized weight, whose declared dtype is the marker for
+        // "these are bytes" and never the element type the kernel computes
+        // in — the same exemption `cpu::reject_non_float32` makes via
+        // `is_quantized_matmul_operand`.
+        if index_nodes.contains(&node) || packed_nodes.contains(&node) {
             continue;
         }
         if !matches!(expr.dtype(), DType::Float32 | DType::Float16) {
