@@ -6299,3 +6299,71 @@ guard, N==0 would be RED). Re-provable now:
 ```
 cargo run -p omega --example real_forward_packed_probe --features metal
 ```
+
+## ROW 86 — CORRECTION to ROW 84's read: `gpu_exec` did NOT move. The experiment answered, and the answer was "no".
+
+### The statistic, restated honestly
+
+ROW 84 reports `gpu_exec` 590.03 -> 570.65 ms and describes it as "moved but
+did not close". **That is a 3.3% delta against a 15.0% CoV** (range 498-807,
+one outlier in run 2). The gate this initiative runs under is explicit: *a delta
+smaller than the noise floor measured nothing.* This one is 4.5x smaller than
+its own noise.
+
+**`gpu_exec` did not move.** Write it that way, because the negative is the
+whole result.
+
+### Why the negative is the valuable half
+
+The experiment was designed to separate two coupled terms. ROW 82 could not say
+whether 590 ms was real device time or an artifact of the command buffer having
+to make 381 freshly-created buffers totalling 5.84 GB resident on every submit.
+ROW 84's fix removed 5.84 GB/token of buffer creation — `resident_uploads=281`
+once, `resident_reuses=281` every steady token thereafter — and `gpu_exec` sat
+still.
+
+**Therefore the 570 ms is real device time and residency was never its cause.**
+That eliminates an entire family of fixes (buffer pooling, allocation reuse,
+heap placement, residency hints) in one measurement. Nobody should retry them.
+
+Recording it as "moved 3.3%" would have left that family alive and invited a
+second attempt at the same dead end — the exact function ROW 75's zero-result
+rollback row serves.
+
+### What ROW 84 DID win, and it is large
+
+`block_upload` **376.08 -> 2.454 ms, 153x**, and `step_wall` **985.79 -> 588.56
+ms, -40.3%**, text byte-identical. That is a real result with a named mechanism
+and it stands. The correction is only to the second term's read.
+
+Standing token rate: **1.01 -> 1.70 tok/s**. llama.cpp Metal is 56.8.
+
+### The gap, recomputed against our own measured kernel rates
+
+| | bytes | our measured rate | predicted |
+|---|---|---|---|
+| 193 fast-path Q4_K matmuls (ROW 85) | ~3.77 GB | 143.5 GB/s (ROW 77) | 26.3 ms |
+| 32 `attn_output` scalar fallbacks (ROW 85) | ~302 MB | 12.3 GB/s (ROW 72) | 24.6 ms |
+| **predicted `gpu_exec`** | | | **~51 ms** |
+| **measured `gpu_exec`** | | | **570 ms** |
+
+**~11x unexplained.** ROW 85's scalar-fallback finding is real and buys back at
+most ~22 ms of it; it is not the gap.
+
+Both sides of that ratio are MEASURED, which is what makes the comparison
+admissible. Contrast the claim struck from ROW 82's first draft — a
+"low-tens-of-ms floor at this device's bandwidth" — which was derived by
+dividing an assumed working set by the incumbent's time and then stated as a
+hardware fact. This box's memory bandwidth has still never been measured, and no
+row may lean on it until it is.
+
+### Two candidates remain, and neither is a guess about mechanism
+
+1. **Operands re-read rather than swept once.** Sum operand bytes across all
+   1196 encoded ops; if it far exceeds 4.07 GB the gap is in the graph.
+2. **The 1196 ops are not flat at 0.48 ms each.** A handful likely dominate.
+   Needs a per-op GPU attribution, not an average.
+
+Dispatched. The bucket table must sum to 570 ms with the residual as its own
+row — if it attributes 200 of 570, the finding is a 370 ms hole and the hole is
+the headline.
