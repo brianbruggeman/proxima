@@ -8357,3 +8357,264 @@ CoV 0.46-1.02%, 5x the noise) and `PACKED_ROWS_PER_GROUP = 8` (measured +6.36%
 net regression, CoV 0.87-1.02%, 6x the noise). Neither was ever committed —
 edited, built, measured, reverted in the working tree, same session. `git
 diff --stat` and `git status --porcelain` both empty at this row's close.
+
+## ROW 96 — `StagedRound` wired into `evaluate_quantized`'s non-matmul nodes: `rounds` INCREASES 85%, not the diagnosed fall; decode +1.6%, prefill +1.8%, both real. ROLLED BACK.
+
+**Headline, stated first: this is a net loss on both regimes that matter, and
+the direct-evidence counter the task specified (`rounds` falling sharply)
+moved the OPPOSITE direction — up 85%, not down.** Host: Apple M1 Max, quiet
+box, `uptime` load averages 1.8-5.6 across the session (recorded per run
+below). Repo: `feat/tensor-consolidated` @ `dadc63e` + this row's own two
+commits, release profile throughout (`cargo test --release`, never a debug
+build compared against a release one).
+
+### What was reused vs added
+
+Reused, unmodified: `prime::os::cohort::{StagedRound, CohortRound, CohortSession}`
+(only its `#[cfg(test)]` gate widened to `cfg(any(test, feature =
+"cohort-staged-graph"))` per this row's own instruction — no change to its
+barrier/claim/error-publication logic, all three of its own unit tests pass
+unchanged), `bind::bind`'s existing topological order (`resolved: Vec<BoundOp>`,
+walked exactly as `evaluate_quantized_with_scratch` already did — no new DAG
+or depth computation), `take_or_allocate`/`retire_into` (the same free-list
+buffer pool the per-node path already draws from), and `run_node_into` itself
+(called with `session: None` for every batched node — every node kind this
+row batches already takes that serial path today regardless: dense reduce
+has no session parameter at all, and elementwise's own dispatch always falls
+through to serial when `outer_len < 2`, decode's only shape).
+
+Added: `is_staged_batch_eligible`/`staged_batch_run_end` (grouping — every
+`BoundOpKind` except a quantized-weight matmul fold, restricted further to
+runs with no in-run operand dependency, see the correctness finding below)
+and `run_staged_batch` (one `StagedRound` per qualifying run, `chunks_per_stage
+= 1` — this row does not attempt to split any one node's own work across
+workers; ROW 68 already measured both axes of that as net losses for
+exactly this node shape). All net-new code lives behind a new,
+default-off Cargo feature, `cohort-staged-graph` (`proxima-tensor/Cargo.toml`),
+implying `std` + `dep:prime` the same way `tensor-cohort` already does.
+**No new type was minted to host this** — `StagedRound`'s existing generic
+`Run: Fn(usize, usize) -> Result<(), TensorError> + Sync` closure shape was
+sufficient; the "component" is two grouping functions plus one dispatch
+function, not a new struct.
+
+### Scope this session explicitly did NOT cover, and why
+
+The megaround spans only nodes where `quantized_operand(..).is_none()` —
+elementwise, dense f32 reduce, scan, iota, constant. Quantized-matmul reduce
+nodes (`reduce_matmul_quantized`, 87% of forward wall time) keep their own
+existing `matmul_rows_threaded` -> `RowRound` -> `session.run` path,
+untouched. Reason: `matmul_rows_threaded`'s `dot_row` closures are
+constructed per quantized codec (`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`, each with its
+own wide-fold variant) at the call site inside `run_reduce_quantized`, and
+are not addressable by an external chunk index without threading a chunk
+parameter through every one of those constructions — a materially larger,
+higher-correctness-risk refactor than this session's remaining budget could
+land and bit-exact-verify safely. This is the reason the `rounds` metric
+below moves the wrong way: the design that could plausibly show `rounds`
+falling (one round covering matmul stages too, so the ~225
+`reduce_matmul_quantized` rounds per run collapse into the SAME round as the
+batched non-matmul nodes) was assessed and explicitly not attempted this
+session. What was attempted instead — batching the nodes that previously
+opened ZERO rounds at all — can only ever ADD rounds, never remove them,
+which the measurement below confirms.
+
+### Correctness — one bug found and fixed before any bench number was trusted
+
+Initial version (commit-worktree only, not yet correct) committed each
+stage's output to the real `buffers` table only after the whole round
+returned, matching "same final state as running serially" — but a node
+`resolved[j]` whose OPERAND is another node ALSO earlier in the same batched
+run reads `buffers[operand]` while it is still the stale `None` from before
+the round opened, since the real commit had not happened yet. Caught
+immediately by
+`spec::tests::a_cached_decode_step_matches_the_uncached_forward_pass_exactly`
+(`TensorError::NotLowerable { node: NodeId(2), reason: "operand buffer
+missing at evaluation time" }`) the first time `--features
+cohort-staged-graph` was exercised against the FULL test suite, before any
+bench was run. Fix: `staged_batch_run_end` now also refuses to extend a run
+past a node that reads an operand PRODUCED earlier in that same run
+(`resolved[start..end].iter().any(|produced| produced.node == *operand)`),
+so every node placed in a batch reads only already-committed, externally
+produced data — the aliasing hazard of writing into and reading from
+`buffers` at overlapping raw-pointer lifetimes never arises, because no
+in-batch read of a not-yet-committed slot is ever attempted. Full suite
+green after the fix (`363 passed` below); this reduces batch yield somewhat
+(shorter runs whenever a real in-batch chain exists) but was not re-measured
+separately from the final numbers below, since the final numbers already
+include this fix.
+
+Float reduction order: unaffected by design — `chunks_per_stage = 1` means
+every batched node still runs its ENTIRE computation on one worker via the
+unmodified `run_node_into`/`run_reduce`/`run_elementwise`, in the same
+program order the per-node loop already walked. Bit-exact assertions
+(`spec::tests::a_cached_decode_step_matches_the_uncached_forward_pass_exactly`
+and every other `evaluate_quantized`-vs-`evaluate` parity test in the suite)
+pass unchanged.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **359 passed** (unchanged — new code is entirely behind `cohort-staged-graph`, off here) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed** (unchanged, same reason) |
+| `cargo nextest run -p proxima-tensor --features std,instrument,cohort-staged-graph` | **363 passed** — same count as the feature-off run above: no test is gated behind `cohort-staged-graph` alone (`StagedRound`'s 3 unit tests were already `cfg(test)` and now additionally compile under the feature; the widened cfg is `any(test, feature = ...)`, so they run in both configurations) |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** (unaffected — different crate, feature off) |
+| `cargo nextest run -p omega` | **73 passed** (unaffected; one unrelated pre-existing clippy lint fixed in `omega/tests/q6k_unpack.rs`, see below) |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
+
+One pre-existing, unrelated clippy failure was fixed in the course of this
+row: `omega/tests/q6k_unpack.rs:70`, `manual_is_multiple_of` — a toolchain/
+clippy-version-drift lint on a line this session never otherwise touched
+(`git diff --stat` before this row's edits confirms the file was clean of
+any staged-graph change). Fixed inline (`lane % 2 == 0` ->
+`lane.is_multiple_of(2)`) since it blocked a required gate and the fix is a
+one-line, zero-risk lint satisfaction, not a design change.
+
+### Bench — decode and prefill, `w=1` and `w=8`, quiet box
+
+`PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24`, release profile,
+`bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`,
+BEFORE = `cohort-staged-graph` off, AFTER = on. Decode = mean of
+`token_breakdown` steps 1-23 `step_wall_ms` (matches ROW 68/90's own
+methodology); prefill = step 0's `evaluate_ms`.
+
+**`w=8` (the target regime), n=3 each, interleaved runs, load 1.8-5.6:**
+
+| | BEFORE | AFTER | delta |
+|---|---|---|---|
+| decode (ms/token) | 58.452, 58.553, 58.535 — median 58.535, CoV 0.07% | 58.898, 59.751, 59.486 — median 59.486, CoV 0.60% | **+0.951 ms median, +1.62%** — clears combined noise (~0.7%) by ~2x |
+| prefill (ms) | 937.888, 934.823, 928.780 — median 934.823, CoV 0.40% | 959.341, 951.268, 948.820 — median 951.268, CoV 0.47% | **+16.445 ms median, +1.76%** — clears combined noise (~0.9%) by ~2x |
+
+**`w=1` (fix's own dispatch still engages — unlike ROW 90's fix, this one is
+not gated on `workers > 1`), n=1 each (time-boxed, directional only, no CoV):**
+
+| | BEFORE | AFTER | delta |
+|---|---|---|---|
+| decode (ms/token) | 188.187 | 188.967 | +0.780 ms, +0.41% (single sample, near noise floor of the 3-run w=8 CoVs — not asserted as a real effect) |
+| prefill (ms) | 5950.856 | 5945.436 | -5.42 ms, -0.09% (single sample, no signal) |
+
+### `cohort_summary` — the direct-evidence counter, and it moved the wrong way
+
+`w=8`, mean over the 3 runs each side:
+
+| counter | BEFORE | AFTER | delta |
+|---|---|---|---|
+| `rounds` | 6972 (identical across all 3 runs) | 12915 (identical across all 3 runs) | **+5943, +85.2% — INCREASE, not the fall the task named as the fix-engaged signal** |
+| `parks` | 44185 | 56981 | +28.9% |
+| `unpark_rounds` | 6444 | 8732 | +35.5% |
+| `spin_hits` | 15779 | 52765 | **+234.4%** |
+| `immediate_hits` | 32961 | 37433 | +13.6% |
+
+Mechanism: `rounds` rising confirms the wiring DID engage (per-node-kind
+table below shows most `elementwise`/`reduce_f32_dense` nodes now route
+through a new `staged_batch` bucket rather than the old serial call) — it is
+not moot. But every node this row batches previously opened ZERO cohort
+rounds at all (dense reduce has no session path; decode's `outer_len < 2`
+always serial-shortcuts elementwise) — so batching them can only ADD
+round-opens where none existed, never remove existing ones, since the
+dominant matmul rounds (the ones actually worth collapsing) are untouched by
+design (see scope section above). `spin_hits` more than tripling shows most
+of the NEW rounds are being caught by a member already spinning rather than
+parked, i.e. the barrier itself is cheap — but there are simply many more of
+them, and the net is still a measured loss on both regimes.
+
+### Per-node-kind breakdown, `w=8` run 1 of 3, one representative decode step each
+
+| node_kind | BEFORE ms | AFTER ms | note |
+|---|---|---|---|
+| `reduce_matmul_quantized` | ~45.7-46.3 (steady across steps) | ~44.9-46.6 (steady) | untouched code path, unmoved either side, as expected |
+| `elementwise` | 3.87-4.3 (rising slightly over steps as KV cache grows) | 2.7-3.3 (fewer nodes left unbatched: 289 of 547) | not a fair kind-for-kind compare — most of this node kind moved into `staged_batch` below |
+| `reduce_f32_dense` | 3.0-4.8 | 0.11-0.15 (only 97 of 385 left unbatched) | same caveat |
+| `staged_batch` (new bucket) | n/a | 4.8-7.8, rising over the run | **this bucket's own cost (elementwise + reduce_f32_dense nodes it absorbed) is HIGHER than the BEFORE combined cost of the same node population (~3.9-4.7 ms/step before vs ~4.8-7.8 ms/step after) — the round overhead this row adds is not paid for by any recovered parallelism, because `chunks_per_stage = 1` recovers none** |
+
+### Honest read
+
+Batching engaged almost everywhere it could (258 of 547 elementwise nodes
+and 288 of 385 reduce_f32_dense nodes per step moved into `staged_batch`,
+limited only by the in-run-dependency restriction the correctness fix
+added) — this is not a case of the wiring failing to fire. It fired, and
+the thing it does (fold many small ALREADY-FREE serial calls into
+round-barrier-synchronized stages with `chunks_per_stage = 1`, i.e. zero
+recovered parallelism) has a real, small, positive cost with no offsetting
+benefit, because there was no round-open cost to amortize away in the first
+place for this specific node population — only for the `reduce_matmul_quantized`
+population this row's own scope excluded. ROW 68's diagnosis ("threads must
+own the whole graph... nothing smaller was found that moves it") is not
+refuted by this row; it is reinforced by a different angle: a mega-round
+that does not also carry the dominant-cost matmul stages inside it does not
+reach the wake-ramp-elimination effect the diagnosis describes, because the
+leader still closes this round, does its own bookkeeping, and opens a
+SEPARATE round for the next matmul node — the members still have a
+park-eligible gap between the two, just as before.
+
+### Decision: ROLLBACK
+
+Per this initiative's own standing instruction and this session's own
+brief ("if it regresses, roll it back and write the row"): `feat(tensor):
+wire StagedRound into evaluate_quantized behind cohort-staged-graph` is
+reverted via `git revert` in this same session, its own commit, so the
+attempt and its refutation both stay in bisectable history (matching ROW
+90's own precedent) while the tree returns to `dadc63e`'s behavior. The
+`omega/tests/q6k_unpack.rs` clippy fix is NOT reverted — it is an
+independent, unrelated correctness-of-the-gate fix, not part of this row's
+own claim.
+
+### Against the incumbent
+
+llama.cpp CPU `-ngl 0 -t 8`, this initiative's own standing figure: **44.09
+ms/token** (ROW 68). This row's BEFORE (unchanged baseline): 58.535 ms/token
+median, **1.328x behind**. AFTER (this row's attempt, before rollback):
+59.486 ms/token median, **1.349x behind** — the gap widens, not closes. Do
+we beat llama.cpp: **no, neither before nor after this row's attempt**, and
+this row's own contribution moves the wrong direction.
+
+### What remains open for the next attempt
+
+The design that could plausibly show `rounds` falling and close ROW 68's
+gap requires the matmul stages to share the SAME round as the batched
+non-matmul stages, with `chunks_per_stage = worker_count` real row-splitting
+for the matmul stage (reusing `row_chunk_count`/`run_row_chunk`, the same
+granular unit `RowRound::run_chunk` already calls) — not the `chunks_per_stage
+= 1` shape this row used. That requires threading an external chunk index
+through `matmul_rows_threaded`'s `dot_row` construction for every quantized
+codec (`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`, dequantize-fallback, and each codec's
+wide-fold variant), so `run_stage_chunk` can call a chunk-of-N row range
+directly instead of `matmul_rows_threaded` opening its own nested round —
+assessed this session as too large and too correctness-risky (this crate is
+the Metal-parity oracle) to attempt and bit-exact-verify inside the
+remaining budget. Named here, not attempted, per this session's own
+instruction to report the number that hurts and the exact gap that remains.
+
+### Gates verified again after the revert
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **359 passed** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed** |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo nextest run -p omega
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
+  cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+The last command reproduces the BEFORE column at the revert commit (or
+`dadc63e`); adding `,proxima-tensor/cohort-staged-graph` to `--features`
+reproduces the AFTER column at the pre-revert commit this row names.
+
+### Rollback rows
+
+**This row's own rollback**: the `cohort-staged-graph` feature and its two
+new functions (`run_staged_batch`, plus the grouping helpers) — measured a
+net loss on both regimes that matter (decode +1.62%, prefill +1.76%,
+`rounds` +85.2% instead of the diagnosed fall) with the dominant-cost
+matmul path deliberately untouched (see scope section). Reverted via `git
+revert`, its own commit, this session.
