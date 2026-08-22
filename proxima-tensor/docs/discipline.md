@@ -5706,3 +5706,237 @@ which is a DRAM number. Those two would pay on PREFILL or not at all.
 
 No driver is written for any of the four, because nothing has measured a
 reason yet.
+
+## ROW 81 — two layout defects made the GPU forward WRONG, not slow; both invisible to a 45-test suite that only ever bound `Float32`
+
+**Correctness first, and it is the whole point of the row.** Before these two
+fixes the Metal path emitted `"ixerixer..."` and `"開開開..."`. After them:
+
+```
+metal_decode_summary tokens_generated=16 stopped_by_eos=false
+  total_wall_clock_ms=64299.209 plan_hits=0 plan_misses=16
+  generated_text="Here is a simple Python function that returns the nth Fibonacci number"
+```
+
+### Defect 1 — a weight bound in one layout and read in another
+
+`65c3582`. A packed Q4_K matmul weight was bound as `[out,in]` while the
+`IndexMap` reading it described `[in,out]`. Fix is
+`correct_packed_matmul_layouts` (`proxima-tensor/src/bind.rs:1081`), a
+post-pass over resolved `BoundOp`s that rewrites a packed operand's `Layout`
+to `native_packed_layout` for the reduce's own `output_axes`.
+
+The asymmetry it corrects is at `proxima-model-interop/src/bind.rs:335-352`:
+`bind_matmul_weight` pushes packed blocks **untransposed** in `[out,in]`,
+while the f32 fallback transposes to `[in,out]` via
+`transpose_out_in_to_in_out`. Two shapes down one code path.
+
+**Why no test caught it, and this is the reusable part:** the CPU never
+noticed because `run_reduce_quantized` **bypasses the declared `Layout`
+entirely** and addresses packed blocks by its own arithmetic. So the declared
+`Layout` was decorative on the CPU and load-bearing on the GPU. A field that
+one consumer ignores is a field that will be wrong for every other consumer,
+and nothing will report it. Same class as ROW 66's `contiguous: bool` — the
+information is present at the boundary and one side chose not to read it.
+
+### Defect 2 — the emitter narrowed a value that was exact in float
+
+`6b58dd5`. `omega/src/msl.rs` emitted `{element_type} levels[8]`, which is
+`half[8]` in an f16 kernel, but `q4k_run8` takes `thread float *out`. Raw
+4-bit levels (0..15) are exact in float regardless of the kernel's element
+type; the narrowing belongs where levels combine into scratch, as it does for
+every other operand read. Red cell was `q4k_at_float16`.
+
+### Why both hid
+
+Every one of the 45 tests bound `Float32` operands. The codec x dtype matrix
+(`b48c643`) is the fix for the class, not the instances: `omega/tests/
+q4k_matmul_layout.rs` plus matrix cases in `metal_parity.rs` and
+`proxima-tensor/src/cpu.rs`.
+
+### Gate — counts asserted, because a run that executes ZERO tests exits 0
+
+| unit | features | N |
+|---|---|---|
+| omega | `std,metal,cpu` (default) | **53 passed** |
+| proxima-tensor | `std` | **359 passed** |
+| proxima-tensor | `std,instrument` | **363 passed** |
+| proxima-model-interop | `std` | **24 passed** |
+
+clippy `-D warnings` clean on `omega --features std,cpu,metal` and
+`proxima-tensor --features std,instrument`.
+
+**Re-prove command (gate 16), today, from the artifact alone:**
+
+```
+cargo nextest run -p omega
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features std
+```
+
+### Two corrections to what I believed going in
+
+1. **I claimed `metal_parity.rs:21`'s `rstest` import was unused.** It was
+   not — it backs `#[rstest]` at :1436 and :1520, and the crate compiled with
+   zero warnings before anything was touched. The log I was reading predated
+   those cases. An unverified negative, and it was wrong.
+2. The file now uses `#[proxima::test(runtime = "tokio")]`, which is what the
+   slot-0 rules require in place of `rstest`. `proxima-tensor/src/cpu.rs` was
+   deliberately left on `rstest` — 15 pre-existing cases sit in that same
+   module and converting one of sixteen fragments a local convention; that is
+   the tracked `proxima-test` migration, not this row.
+
+### A tooling hazard worth recording
+
+`cargo add` / `cargo remove` run against `omega/Cargo.toml` **silently deleted
+two unrelated lines** (`proxima-tokenizer`, `proxima-onnx`) from the
+workspace-root `Cargo.toml`'s `[workspace.dependencies]`. Restored, and
+verified against the artifact rather than the claim:
+`git diff 65c3582~1 HEAD -- Cargo.toml` is empty, and both tables are 119
+lines byte-identical. After any `cargo add`/`remove` in a workspace member,
+diff the ROOT manifest.
+
+### What this row does NOT claim
+
+Nothing about speed. The GPU path is correct and measured at **4019 ms/token**
+against llama.cpp Metal's **17.62** and our own CPU's **59.71** — 228x and 67x
+respectively. That 4019 is a TOTAL and no term of it has been attributed yet.
+Three costs named confidently in this initiative each measured ~zero once
+instrumented (ROWs 70, 73, 75), so the split comes before any fix.
+
+## ROW 82 — the split. "4019 ms/token" was an arithmetic error of mine; steady decode is 985 ms, and the plan-rebuild suspect measured 0.31%
+
+### First, retract the number this step was named after
+
+**4019 ms/token was `64299 / 16`** — total wall clock divided by token count. That
+divisor folded a 31-position PREFILL and a 2389 ms one-time setup into a
+"per-token" figure. There is no such token. The three terms are:
+
+| term | value | shape |
+|---|---|---|
+| one-time setup (tokenize + `dequantize_unsupported_metal_weights` + detokenize) | 2389.5 ms | once per `generate()`, O(1) |
+| first token (prefill, `new_count=31`) | 16052 ms | once |
+| **steady decode token (`new_count=1`)** | **985.79 ms median** | **x15, and the only per-token number** |
+
+`2389 + 16052 + 15*985 = 33.2 s`. Measured totals were 33125–33683 ms across
+three release runs, CoV 0.73%.
+
+**A second, unexplained gap remains and is NOT resolved:** the original capture
+was 64299 ms; today's is 33.2 s. **1.94x, unaccounted for.** Candidates are host
+load (this box ran load 20–27 earlier the same day; today's runs held 5–6) and a
+cold, non-prefaulted mmap on the original. Neither was verified. It stays an open
+residual rather than being explained away — the same trap ROW 67 documents, where
+a single sample on a loaded box was treated as a measurement.
+
+### The steady-state token, attributed (n=45 records: tokens 1-15 x 3 release runs)
+
+| term | ms/token min / **median** / range | N processed | share |
+|---|---|---|---|
+| **gpu_exec** (`commit` -> `waitUntilCompleted`) | 578.18 / **590.03** / 578–604 | 1 submit, 1196 ops | **59.9%** |
+| **block_upload** (host->device) | 367.37 / **376.08** / 367–433 | **391 blocks: 381 COPYING + 10 no-copy** | **38.2%** |
+| emit (BoundOp -> MSL) | 5.95 / 6.27 / 5.95–7.37 | 1196 ops | 0.64% |
+| op_setup (output buf + uniforms + fault buf) | 4.28 / 4.51 / 4.28–5.40 | 1196 ops | 0.46% |
+| inside-backend residual (`resolve_named_blocks` x2 + BTreeMap insert) | 2.98 / 3.44 / 2.98–3.99 | n/a | 0.35% |
+| **prepare (infer + bind — the plan-rebuild suspect)** | 1.94 / **3.07** / 1.94–3.81 | 1 Plan built | **0.31%** |
+| readback (device->host) | 0.175 / 0.275 / 0.175–1.05 | 97 (1 logits + 96 KV) | 0.03% |
+| outside-backend residual (named_blocks build, `LayerCache::append`, greedy_pick) | 0.08 / 0.09 / 0.08–3.75 | n/a | 0.01% |
+| pipeline compile (MSL -> PSO) | 0 / **0** / 0 | **0 misses, 1196 HITS** | 0% |
+| **sum** | **983.77** vs measured **985.79** | — | **residual 0.2%** |
+
+CoV across the three runs: step_wall 0.45%, block_upload 0.83%, gpu_exec 0.22%.
+`uptime` 1-min held 5.2–5.9 before and after every timed run.
+
+The pipeline-compile row reports **N=0 misses against 1196 hits**, not a bare
+zero. A counter that processed nothing and a counter that processed 1196 and
+found nothing to do emit the same `0`, and only the second is evidence.
+
+### The plan-rebuild suspect is REFUTED as a cost
+
+`plan_hits=0, plan_misses=16` is real — every token builds a fresh `Plan`,
+because `Extent::Symbolic(1) == cached_len` grows every step and the cache key
+at `generate.rs:301` never repeats. **It costs 3.07 ms of 985.79, or 0.31%.**
+
+Bucketing the cache extent, incremental re-bind, and every other plan-reuse
+design were sized against this number and are worth **at most 0.3%**. They are
+off the table until something else changes.
+
+That is the **fourth** confidently-named dominant cost in this initiative to
+measure ~zero once instrumented (MSL recompile ROW 70, per-element div/mod, the
+per-`execute` round trip ROW 73, and now plan rebuild). The pattern is not that
+the guesses were unlucky; it is that a total divided by a count is not a
+measurement.
+
+### Mechanism for block_upload — a named cause, not a share
+
+`nocopy_uploads=10, copying_uploads=381, nocopy_reuses=10`, identical every
+steady token. **381 of 391 blocks take a real `newBufferWithBytes` host->device
+copy every single token, moving ~5.84 GB per token.** 5.84 GB / 376 ms = 15.5
+GB/s, which is memcpy bandwidth, so the term is doing exactly what its byte count
+says.
+
+Those bytes are almost entirely STATIC WEIGHTS. `metal.rs`'s own doc names the
+reason a narrowed weight always copies: the `Vec<f16>` it narrows into is freshly
+allocated and dropped every call, so the `(pointer, len)` no-copy cache can never
+match it. The 10 that do hit are the only buffers whose backing pointer survives.
+
+**The incumbent uploads weights once at model load and leaves them resident. We
+re-upload the model on every token.**
+
+### KV cache — the coordinator's split, answered
+
+- **KV upload host->device: GROWS LINEARLY, exactly +262144 bytes/token**, all 15
+  steady steps (8126464 -> 11796480). The cached-attention program re-sends the
+  entire history every step.
+- **KV readback device->host: FLAT at 262144 bytes/token.** The forward emits only
+  the new K/V and `LayerCache::append` extends onto it. Correct and O(1).
+
+At 16 tokens the KV traffic is ~8–12 MB against block_upload's 5.84 GB, so its
+growth is real, is not the cost today, and will matter at long context. Recorded,
+not acted on.
+
+### Debug-vs-release cross-check — the two dominant terms are not compiler-bound
+
+Single debug run, same 16 tokens: steady median 1026 ms vs release 985, only 4%
+apart. `prepare` scales 8x (24.4 vs 3.07 ms) and emit/op_setup 2–3x, as
+unoptimized Rust should. **`block_upload` (359 ms) and `gpu_exec` (569–573 ms)
+land within noise of release** — both are driver/memcpy/GPU-bound, not
+optimization-sensitive. Build profile does not explain any of this.
+
+### Prefill, for completeness
+
+First token, `new_count=31`: 16052 ms, of which **gpu_exec is 15341.85 ms
+(95.6%)** and block_upload 631.77. Pipeline compile shows its only misses here —
+29 of them, mean 124.05 ms — which is warmup, a cold-path cost by definition and
+never a headline.
+
+### Instrumentation
+
+Behind the EXISTING `instrument` feature, default-off, using
+`proxima-telemetry` counters and the `read_ticks`/`elapsed_ticks` pattern already
+in `cpu.rs` and `metal.rs`. No new feature, no env-gated `eprintln` dump.
+`cargo check` on default `omega` and on `proxima-model-interop --features metal`
+both clean, so the flag costs nothing off.
+
+Gates: omega **53 passed**, proxima-tensor `std,instrument` **363 passed**,
+proxima-model-interop `metal,instrument` **24 passed**.
+
+**Re-prove command:**
+
+```
+export CARGO_TARGET_DIR=<isolated-dir>
+PROXIMA_MAX_TOKENS=16 cargo test -p proxima-model-interop \
+  --release --features metal,instrument --lib -- --ignored --nocapture \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+
+### What this row does NOT conclude
+
+`gpu_exec` at 59.9% is the largest term and it has **no mechanism yet** — 590 ms
+across 1196 ops is 0.49 ms/op and nothing has said which ops. A 7B q4 decode
+reads ~4 GB of weights, which at this device's bandwidth is a low-tens-of-ms
+floor, so 590 ms is roughly 40–60x above that floor. Whether that is real kernel
+time or an artifact of the command buffer having to make 381 freshly-created
+buffers totalling 5.84 GB resident on every submit is **untested**. Those two
+terms are not independent, and the next row is the experiment that separates
+them.
