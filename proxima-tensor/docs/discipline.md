@@ -6367,3 +6367,90 @@ row may lean on it until it is.
 Dispatched. The bucket table must sum to 570 ms with the residual as its own
 row — if it attributes 200 of 570, the finding is a 370 ms hole and the hole is
 the headline.
+
+## ROW 87 — the per-op split. My "1196 pipeline drains" prediction was WRONG by 7.5x; the gap is 65 matmuls on a 104x-slower kernel path
+
+### The prediction, and what it actually measured
+
+I read `encode_op` (`omega/src/metal.rs:1631`), saw it open and `endEncoding()` a
+fresh `MTLComputeCommandEncoder` per op, computed 570/1196 = 0.48 ms/op flat, and
+predicted **~478 ms** of the 570 was per-dispatch drain cost.
+
+**Measured: 63.5 ms.** Merging 1196 encoders into one moved `gpu_exec`
+570.65 -> 507.15 ms, **-11.1%**, and collapsed CoV **14.96% -> 1.10%**. Real, kept,
+mechanism-backed — and **7.5x smaller than I called it.**
+
+The arithmetic that misled me was `total / count`, the identical error that
+produced "4019 ms/token" in ROW 82. A flat average is not evidence of a flat
+distribution, and I used it as if it were, twice, in one day.
+
+Elementwise + constant + iota together total **under 8 ms** across 586 ops. Per-op
+dispatch overhead is real and it is small. It cannot be the gap and never could
+have been.
+
+### Candidate 1 also refuted, with a number
+
+**5.87 GB swept vs 4.07 GB declared = 1.44x**, not 11x. That ratio is ordinary
+intermediate traffic — elementwise chains reading each other's outputs — not
+duplication of the weight sweep. Operand re-reads are dead.
+
+### What the gap actually is
+
+Per-op GPU timing (`MTLCommandBuffer::GPUStartTime`/`GPUEndTime`), real steady
+decode token, `new_count=1`:
+
+| family | ops | GPU ms | operand bytes | **ns/byte** | |
+|---|---|---|---|---|---|
+| `blk.attn_output.weight` | 32 | **294.0** | 302 MB | **0.972** | SLOW |
+| `output.weight` | 1 | **149-159** | 524 MB | **0.284** | SLOW |
+| `blk.ffn_down.weight` | 32 | **63.3** | 1866 MB | **0.034** | SLOW |
+| `blk.ffn_gate.weight` | 32 | 9.87 | 1057 MB | **0.0093** | fast |
+| `blk.ffn_up.weight` | 32 | 9.80 | 1057 MB | **0.0093** | fast |
+| `blk.attn_q.weight` | 32 | 4.97 | 302 MB | 0.016 | fast |
+| `token_embd.weight` | 1 | 0.011 | 524 MB | 0.00002 | gather, not matmul |
+
+Buckets: reduce-cooperative **426 ops / 519.15 ms / 1.85 GB / 0.281 ns/byte**;
+reduce-packed-row-blocked **184 ops / 35.92 ms / 3.49 GB / 0.0103 ns/byte**;
+elementwise 547 / 7.48 ms. Sum 562.73 ms against a 570.65 baseline — **residual
+1.4%**, so this is attributed, not a hole.
+
+**`attn_output` is 104x worse per byte than `ffn_gate`.** Same codec, same op
+kind, same 302 MB as `attn_q` — which runs 59x faster. Three families are
+**517 of 563 ms = 91.9% of all GPU time**.
+
+The fast path in situ measures **96-108 GB/s**, against ROW 77's synthetic
+143.5 GB/s. The fallback measures **1.0-3.8 GB/s**.
+
+### ROW 85 was too small, and that is a correction not an absorption
+
+ROW 85 reported 32 matmuls falling back, all `attn_output`. It is **65 of 225**:
+`attn_output` (32), `ffn_down` (32), `output.weight` (1). ROW 85's probe answered
+the question it was asked and the question was too narrow.
+
+The agent also refuted its OWN hypothesis with data rather than shipping it:
+`ffn_down`/`output.weight` were suspected of failing `quantized.len() != 2` via a
+fused third operand; measured `operand_count == 2` for all three families. Dead.
+
+### Still not printed, after being asked twice
+
+**Which of `packed_row_block`'s seven conditions rejects each of the 65.**
+Conditions 3 and 4 are eliminated by measurement; 6 was verified satisfiable by
+reading `native_packed_layout`. That leaves 1, 2, 5 and 7 undistinguished. A
+prior row asserted "condition 5, three-axis reduce" for `attn_output` — that was
+never printed and must not be inherited.
+
+The probe that answers it needs no GGUF, no weights and no GPU. It is seconds of
+work and it has now been deferred twice; that is the gate for the next row.
+
+### Standing
+
+| arm | ms/token | tok/s |
+|---|---|---|
+| llama.cpp Metal `-ngl 99` | 17.62 | 56.8 |
+| ours CPU, 8 workers | 59.71 | 16.7 |
+| ours Metal | **~525** (DERIVED: 588.56 measured minus the 63.5 ms encoder win; `step_wall` not re-measured) | ~1.90 |
+
+If the three slow families reached the fast path's measured in-situ 96-108 GB/s,
+5.87 GB would sweep in ~60 ms. That is a projection from measured rates, not a
+result, and this log has already been burned once by reading a projection as a
+number (ROW 83).
