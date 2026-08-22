@@ -45,6 +45,16 @@ metal = [
     "dep:block2",
     "proxima-tensor/std",
 ]
+# Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
+# every variant exists regardless of which of these are on, so a caller can
+# name and select a backend that has no execution arm yet and get a real
+# "not implemented" error instead of the type not existing. No dependencies:
+# there is no driver behind any of these four yet, only the name and the
+# feature-gated branch in `backend::plan_named` that reports so.
+vulkan = []
+cuda = []
+npu = []
+ane = []
 
 [dependencies]
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
