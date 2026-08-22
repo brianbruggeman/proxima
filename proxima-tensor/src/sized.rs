@@ -29,8 +29,9 @@
 //! - **Execution policy, build-time-configurable**: [`PARALLEL_THRESHOLD`],
 //!   [`OVERSUBSCRIBE`], [`ROW_OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`],
 //!   [`MIN_MACS_PER_CHUNK`], [`MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`],
-//!   [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`], and (aarch64-only)
-//!   [`NEON_COLUMN_PANEL_BUDGET_BYTES`] are plain runtime values (not const
+//!   [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`], (aarch64-only)
+//!   [`NEON_COLUMN_PANEL_BUDGET_BYTES`], and (`cohort-staged-graph`-only)
+//!   [`STAGED_BATCH_MIN_LEN`] are plain runtime values (not const
 //!   generics) read inside `cpu.rs`'s hot-path functions
 //!   (`evaluate_node_parallel`, `run_chunks_threaded`,
 //!   `BoundOp::split_aligned`). These now trace to
@@ -40,7 +41,12 @@
 //!   pointer, this module keeps the doc comment carrying the full
 //!   measurement record (sweeps, rejected candidates, degenerate
 //!   controls) since intra-doc links like `[`MIN_MACS_PER_CHUNK`]` only
-//!   resolve in a Rust doc comment, not TOML. `toml` is a
+//!   resolve in a Rust doc comment, not TOML. Every key in this family can
+//!   also be overridden per-build via a `PROXIMA_TENSOR_<SECTION>_<KEY>`
+//!   env var (`build.rs`'s `resolve_int`, mirroring `prime/build.rs`'s own
+//!   function of the same name over `PRIME_<SECTION>_<KEY>`); each
+//!   override consulted emits its own `cargo:rerun-if-env-changed` line.
+//!   `toml` is a
 //!   `[build-dependencies]`-only crate -- it runs inside `build.rs` and
 //!   never links into the compiled artifact (a *runtime* conflaguration
 //!   surface over these same constants was built and reverted: linking
@@ -276,6 +282,24 @@ pub const TILE_COLS: usize = 4;
 #[cfg(all(feature = "std", target_arch = "aarch64"))]
 pub const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = generated::NEON_COLUMN_PANEL_BUDGET_BYTES;
 
+/// Below this many consecutive `cpu::is_staged_batch_eligible` nodes,
+/// `cpu::run_staged_batch` is not worth calling: a run of one node has
+/// nothing to amortize a round-open against, so
+/// `cpu::evaluate_quantized_with_scratch` falls through to the plain
+/// per-node call for it, exactly as `cohort-staged-graph` off always does.
+/// Execution policy (see this module's doc), `cohort-staged-graph`-only --
+/// the const has no meaning without the feature that gives `StagedRound`
+/// a cohort to run on.
+///
+/// `2`: not yet swept against alternatives (ROW 98, this module's own
+/// residual named in ROW 97) -- the value simply encodes the smallest run
+/// length for which batching is even definable (a run of exactly 1 node
+/// has nothing to fold against). Moved from a bare `cpu.rs` `const` into
+/// this build-time sizing config (principle 12) without changing the
+/// value.
+#[cfg(all(feature = "std", feature = "cohort-staged-graph"))]
+pub const STAGED_BATCH_MIN_LEN: usize = generated::STAGED_BATCH_MIN_LEN;
+
 /// Asserts every execution-policy const still equals the value on record
 /// (this module's own doc comments) after `build.rs`'s
 /// `emit_sizing_consts` started sourcing them from
@@ -303,5 +327,11 @@ mod tests {
     #[test]
     fn neon_column_panel_budget_matches_the_measurement_record() {
         assert_eq!(NEON_COLUMN_PANEL_BUDGET_BYTES, 2_621_440);
+    }
+
+    #[cfg(feature = "cohort-staged-graph")]
+    #[test]
+    fn staged_batch_min_len_matches_the_measurement_record() {
+        assert_eq!(STAGED_BATCH_MIN_LEN, 2);
     }
 }

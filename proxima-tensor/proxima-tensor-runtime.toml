@@ -2,7 +2,10 @@
 # read by build.rs, emitted as consts into OUT_DIR/proxima_tensor_sized.rs.
 # every execution-policy constant in src/sized.rs traces back to here --
 # mirrors prime/prime-runtime.toml's shape (prime/build.rs's
-# emit_sizing_consts).
+# emit_sizing_consts). every key below can also be overridden per-build via
+# a `PROXIMA_TENSOR_<SECTION>_<KEY>` env var (uppercased) -- mirrors
+# prime/build.rs's `resolve_int`; each override consulted emits its own
+# `cargo:rerun-if-env-changed` line so a cached build never ignores it.
 #
 # the full measurement record behind each value (sweeps, rejected
 # candidates, degenerate controls) lives on the consuming const's doc
@@ -58,3 +61,13 @@ min_elements_for_dispatch = 64000
 # pass. aarch64-only -- see sized::NEON_COLUMN_PANEL_BUDGET_BYTES; emitted
 # only when CARGO_CFG_TARGET_ARCH is aarch64.
 column_panel_budget_bytes = 2621440
+
+[staged_batch]
+# below this many consecutive is_staged_batch_eligible nodes,
+# run_staged_batch is not worth calling -- a run of one node has nothing to
+# amortize a round-open against. `cohort-staged-graph`-only -- see
+# sized::STAGED_BATCH_MIN_LEN; emitted only when the feature is active.
+# not yet swept against alternatives (ROW 98): the value simply encodes
+# "a run of length 1 has nothing to batch against", the smallest run length
+# for which batching is even definable.
+min_len = 2
