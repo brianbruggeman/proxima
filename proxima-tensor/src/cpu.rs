@@ -14727,4 +14727,133 @@ mod tests {
              exceeds loose sanity bound"
         );
     }
+
+    /// The union of every dedicated codec test above, parameterized rather
+    /// than copy-pasted: one `[rows, k] x [k, 1]` matmul, one seeded weight
+    /// and activation, run through whichever evaluator that codec actually
+    /// reaches -- plain [`evaluate`] for `float32` (packing it as a
+    /// [`QuantizedBlock::Float32`] *weight* is rejected outright by
+    /// `run_reduce_quantized`, see the `shape_error()` arm a few hundred
+    /// lines up, so `float32` is not an `evaluate_quantized` cell at all),
+    /// [`evaluate_quantized`] for the four packed codecs -- and compared
+    /// against the same `f32` reference every one of those dedicated tests
+    /// already computes independently. A codec dropped from this list is a
+    /// missing `#[case::...]` line, not a missing whole function.
+    ///
+    /// Tolerance is RELATIVE to the reference's own magnitude, never a flat
+    /// absolute epsilon: `float32` is an exact self-consistency check (same
+    /// bytes, same evaluator, twice), while every packed codec's activation
+    /// additionally folds through a lossy int8 quantization step on the CPU
+    /// path (`matmul_q4k_q8k_f32`-family), so a single absolute bound across
+    /// all five cells would be either vacuous for `float32` or spuriously
+    /// red for the packed codecs.
+    #[rstest]
+    #[case::float32("float32", 1e-6)]
+    #[case::q4_k("q4_k", 0.01)]
+    #[case::q5_k("q5_k", 0.01)]
+    #[case::q6_k("q6_k", 0.01)]
+    #[case::q8_0("q8_0", 0.01)]
+    fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec(
+        #[case] codec: &str,
+        #[case] tolerance: f32,
+    ) {
+        let rows: u32 = 5;
+        let k: u32 = 768;
+
+        let weight_f32: Vec<f32> =
+            random_vec(17, rows as usize * k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation: Vec<f32> = random_vec(13, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
+        let reference = evaluate(&f32_program, &[], &[&weight_f32, &activation], &[f32_sum])
+            .expect("f32 reference matmul evaluates");
+
+        let actual: Vec<f32> = match codec {
+            "float32" => reference.root().to_vec(),
+            "q4_k" => {
+                use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+                let blocks_per_row = k as usize / QK_K;
+                let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+                for (row_f32, row_blocks) in weight_f32
+                    .chunks_exact(k as usize)
+                    .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                {
+                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                }
+                let (program, sum) = quantized_matmul_program(rows, k);
+                let blocks = [QuantizedBlock::Q4K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                evaluate_quantized(&program, &[], &blocks, &[sum])
+                    .expect("q4_k-quantized matmul evaluates")
+                    .root()
+                    .to_vec()
+            }
+            "q5_k" => {
+                use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, quantize};
+                let blocks_per_row = k as usize / QK_K;
+                let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+                for (row_f32, row_blocks) in weight_f32
+                    .chunks_exact(k as usize)
+                    .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                {
+                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                }
+                let (program, sum) = quantized_matmul_program(rows, k);
+                let blocks = [QuantizedBlock::Q5K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                evaluate_quantized(&program, &[], &blocks, &[sum])
+                    .expect("q5_k-quantized matmul evaluates")
+                    .root()
+                    .to_vec()
+            }
+            "q6_k" => {
+                use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, quantize};
+                let blocks_per_row = k as usize / QK_K;
+                let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+                for (row_f32, row_blocks) in weight_f32
+                    .chunks_exact(k as usize)
+                    .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                {
+                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                }
+                let (program, sum) = quantized_matmul_program(rows, k);
+                let blocks = [QuantizedBlock::Q6K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                evaluate_quantized(&program, &[], &blocks, &[sum])
+                    .expect("q6_k-quantized matmul evaluates")
+                    .root()
+                    .to_vec()
+            }
+            "q8_0" => {
+                use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, quantize};
+                let blocks_per_row = k as usize / QK8_0;
+                let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+                for (row_f32, row_blocks) in weight_f32
+                    .chunks_exact(k as usize)
+                    .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                {
+                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK8_0 by construction");
+                }
+                let (program, sum) = quantized_matmul_program(rows, k);
+                let blocks = [QuantizedBlock::Q8_0(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                evaluate_quantized(&program, &[], &blocks, &[sum])
+                    .expect("q8_0-quantized matmul evaluates")
+                    .root()
+                    .to_vec()
+            }
+            other => panic!("unhandled codec case in this matrix: {other}"),
+        };
+
+        let expected = reference.root();
+        assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+        assert_eq!(actual.len(), expected.len());
+
+        let max_diff =
+            actual.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let relative = max_diff / max_magnitude;
+        eprintln!("{codec}: relative={relative} tolerance={tolerance} (max_diff={max_diff} max_magnitude={max_magnitude})");
+        assert!(
+            relative <= tolerance,
+            "{codec}: relative diff {relative} exceeds tolerance {tolerance} -- max_diff={max_diff} \
+             max_magnitude={max_magnitude}"
+        );
+    }
 }

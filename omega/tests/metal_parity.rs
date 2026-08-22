@@ -1359,3 +1359,191 @@ fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeI
     );
     (program, sum)
 }
+
+/// `[rows, k] x [k, 1] -> [rows, 1]`, the same shape [`q4k_matmul_program`]
+/// builds, but with the compute dtype (activation, the elementwise product,
+/// and the reduce) as its own axis independent of the weight operand's
+/// declared dtype -- `weight_dtype` stays the packed-bytes marker
+/// (`DType::UInt8`) for every packed codec regardless of `compute_dtype`,
+/// the same way `reject_unsupported_gpu_dtype` treats it, and is
+/// `DType::Float32` only for the plain (unpacked) `float32` cell.
+fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: compute_dtype,
+            shape: vec![Extent::Static(k), Extent::Static(1)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: compute_dtype,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: compute_dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("codec_matmul".into()),
+        }),
+    );
+    (program, sum)
+}
+
+/// The stratified matrix the coordinator asked for: [`QuantizedBlock`]'s
+/// codec axis crossed with the compute dtype axis, one parameterized body
+/// instead of one test per cell. `float32`/`q4_k` are the only two codecs
+/// with a real Metal unpack kernel today (see `unsupported_gpu_codec`'s doc
+/// in `omega::metal`) -- `q5_k`/`q6_k`/`q8_0` have no successful cell to
+/// compare here at all, so they get their own dedicated error-path test
+/// below instead of a case that can never pass.
+///
+/// The oracle is always the plain-`f32` CPU path, weight dequantized first
+/// when the cell's codec is packed -- the same reasoning
+/// `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`
+/// gives for isolating the unpack/dtype error from `Q8_K` activation
+/// quantization noise. Tolerance is RELATIVE to the reference's own
+/// magnitude and keyed to `compute_dtype`: `Float32` compounds only
+/// summation-order float noise (tight bound), `Float16` additionally rounds
+/// every intermediate through 10 mantissa bits, the same
+/// `matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle` measured at
+/// `~1.6e-3` worst case over a 23-term dot product — this test's dot
+/// product is deeper (768 terms), so its `Float16` epsilon is looser still.
+#[proxima::test(runtime = "tokio")]
+#[case::float32_at_float32("float32", DType::Float32, 1e-5)]
+#[case::float32_at_float16("float32", DType::Float16, 1e-2)]
+#[case::q4k_at_float32("q4_k", DType::Float32, 1e-5)]
+#[case::q4k_at_float16("q4_k", DType::Float16, 1e-2)]
+async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case] compute_dtype: DType, #[case] epsilon: f32) {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    let rows: u32 = 5;
+    let blocks_per_row = 3usize;
+    let k = QK_K as u32 * blocks_per_row as u32;
+
+    let weight_f32: Vec<f32> = random_vec(17, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let activation: Vec<f32> = random_vec(13, k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let packed_weight_blocks: Option<Vec<u8>> = match codec {
+        "float32" => None,
+        "q4_k" => {
+            let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            {
+                quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+            }
+            Some(weight_blocks)
+        }
+        other => panic!("unhandled codec case in this matrix: {other}"),
+    };
+
+    let weight_dtype = if packed_weight_blocks.is_some() { DType::UInt8 } else { DType::Float32 };
+    let (program, sum) = codec_matmul_program(rows, k, weight_dtype, compute_dtype);
+    let weight_block = match &packed_weight_blocks {
+        Some(bytes) => QuantizedBlock::Q4K(bytes),
+        None => QuantizedBlock::Float32(&weight_f32),
+    };
+    let metal = omega::execute(&program, &[], &[weight_block, QuantizedBlock::Float32(&activation)], &[sum])
+        .unwrap_or_else(|error| panic!("{codec}@{compute_dtype:?}: metal executes on a real device: {error}"));
+
+    let cpu_weight: Vec<f32> = match &packed_weight_blocks {
+        None => weight_f32.clone(),
+        Some(bytes) => {
+            let mut dequantized = vec![0.0f32; rows as usize * k as usize];
+            for (row_blocks, row_f32) in bytes
+                .chunks_exact(blocks_per_row * BLOCK_BYTES)
+                .zip(dequantized.chunks_exact_mut(k as usize))
+            {
+                dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
+            }
+            dequantized
+        }
+    };
+    let (f32_program, f32_sum) = codec_matmul_program(rows, k, DType::Float32, DType::Float32);
+    let cpu = evaluate(&f32_program, &[], &[&cpu_weight, &activation], &[f32_sum]).expect("f32 cpu oracle evaluates");
+
+    let actual = metal.root();
+    let expected = cpu.root();
+    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(actual.len(), expected.len());
+
+    let max_diff = actual.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude;
+    eprintln!("{codec}@{compute_dtype:?}: relative={relative} epsilon={epsilon} (max_diff={max_diff} max_magnitude={max_magnitude})");
+    assert!(
+        relative <= epsilon,
+        "{codec}@{compute_dtype:?}: relative diff {relative} exceeds {epsilon} -- max_diff={max_diff} \
+         max_magnitude={max_magnitude}"
+    );
+}
+
+/// The other half of the matrix: [`QuantizedBlock`] codecs Metal has NO
+/// unpack kernel for yet must fail loud and NAME the codec -- never silent
+/// garbage, and never a silent CPU fallback. This is `unsupported_gpu_codec`
+/// pinned as a tested contract rather than an assumption: a silent wrong
+/// answer at exactly this boundary is what produced this session's 24
+/// tokens of `"開開開..."` garbage from a Metal decode the omega suite's own
+/// 45/45-green run never caught.
+#[proxima::test(runtime = "tokio")]
+#[case::q5_k("q5_k")]
+#[case::q6_k("q6_k")]
+#[case::q8_0("q8_0")]
+async fn metal_rejects_a_codec_with_no_unpack_kernel_and_names_it(#[case] codec: &str) {
+    let rows: u32 = 3;
+    let k: u32 = 32;
+    let weight_bytes = vec![0u8; 64];
+    let activation = vec![0.0f32; k as usize];
+
+    let (program, sum) = codec_matmul_program(rows, k, DType::UInt8, DType::Float32);
+    let weight_block = match codec {
+        "q5_k" => QuantizedBlock::Q5K(&weight_bytes),
+        "q6_k" => QuantizedBlock::Q6K(&weight_bytes),
+        "q8_0" => QuantizedBlock::Q8_0(&weight_bytes),
+        other => panic!("unhandled codec case in this matrix: {other}"),
+    };
+
+    let error = omega::execute(&program, &[], &[weight_block, QuantizedBlock::Float32(&activation)], &[sum])
+        .expect_err(&format!("{codec}: metal has no unpack kernel for this codec and must reject it, not fall back"));
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(codec),
+        "{codec}: error does not name the rejected codec -- rendered: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("unpack kernel"),
+        "{codec}: error does not explain WHY the codec is rejected -- rendered: {rendered:?}"
+    );
+}
