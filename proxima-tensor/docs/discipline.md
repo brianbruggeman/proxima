@@ -5132,3 +5132,75 @@ direction. Only two sizes per arm separated kernel from overhead. **A
 performance number taken at one problem size is not a kernel measurement —
 it is a kernel measurement plus an unknown intercept, and the intercept has
 now been the dominant term twice.**
+
+## ROW 72 — Q4 was COMPUTE-bound, not bandwidth-bound. Super-block tiling: 5x on the packed kernel, 17x gap -> 3.5x
+
+**Host:** Apple M1 Max. **Method:** two problem sizes per arm so the per-call
+intercept cancels; sizes raised to 9.44/37.75 MB (packed) and 67.1/268.4 MB
+(f32) so the KERNEL dominates that intercept — at the previous sizes both
+arms ran in ~0.3 ms against a ~0.25 ms intercept and the marginal figure
+swung 3x between runs.
+
+### The question that found it
+
+Q4_K reads 0.5625 bytes/weight against f32's 4.0 — 7.1x less traffic. On a
+bandwidth-bound sweep it should have been several times FASTER per element.
+It was 2.8x slower:
+
+| | bytes/element | marginal | elements/s |
+|---|---|---|---|
+| f32 | 4.0 | 242 GB/s | 60.5 G |
+| packed Q4_K (before) | 0.5625 | 12.3 GB/s | **21.9 G** |
+| llama.cpp Metal Q4_K | 0.5625 | 214.7 GB/s | **381 G** |
+
+Reading less and running slower is not a memory problem. `q4k_element`
+derived `d`, `dmin` and the 6-bit scale/min PER ELEMENT — two f16 loads plus
+bit-assembly and converts, a branch and several byte loads for the scale/min,
+group/sub-block/byte-index arithmetic, a `/256` and `%256` — roughly 40
+instructions to produce one weight, and every one of those values is
+constant across the whole 256-element super-block. We turned a bandwidth win
+into a compute loss.
+
+### The fix, which is ggml's shape
+
+Split `q4k_element` into `q4k_header_for` (decode once) and `q4k_value`
+(one byte load, one mask-or-shift, one fma). Then give each lane a
+CONTIGUOUS run of `Q4K_BLOCK_ELEMENTS / SIMD_WIDTH` = 8 elements instead of a
+32-strided walk. `lane*8 .. lane*8+7` never crosses a 32-element sub-block
+boundary, so one header serves the whole run — the same amortization as
+ggml's `for (short i = 0; i < 8; ++i)`.
+
+Gated at EMIT time, not runtime, from the bound layout: exactly one packed
+operand, contiguous along the reduction dim, reduction extent a whole number
+of super-blocks.
+
+### Measured, 3 runs, 51 samples each, min
+
+| | before | after |
+|---|---|---|
+| packed 4096x4096 wall | 1.152 ms | **0.353 ms** (3.3x) |
+| packed MARGINAL bandwidth | 12.3 GB/s | **~61 GB/s** (95.6 / 58.6 / 61.2) |
+| packed element rate | 21.9 G elem/s | **~109 G elem/s** (5x) |
+| gap to llama.cpp's 381 G elem/s | 17x | **3.5x** |
+
+Parity unchanged: 38/38, and the packed-vs-dequantized-f32 device parity
+test still holds. The tiling changes lane->element assignment, so the
+per-lane partial sums are reassociated; the fold was already reassociated by
+`simd_sum`, and the parity bound is relative.
+
+### And the f32 kernel is not slow at all
+
+f32 MARGINAL measured **355.6 / 366.4 / 355.9 GB/s** — stable, and 1.66x
+ABOVE the 214.7 GB/s llama.cpp achieves on packed bytes. ROW 71's "f32
+kernel 1.42x off" is retracted; that was a 21-sample artifact. The machine
+delivers 356 GB/s to this kernel, so llama's 214.7 GB/s of PACKED bytes is
+not a bandwidth ceiling either — it is a compute rate (381 G elem/s), which
+is what the remaining 3.5x is against.
+
+### Still open, correctly sized
+
+Per-call fixed cost of **0.23-0.45 ms**, unmoved by taking `infer`/`bind` out
+of the timed region (ROW 71 predicted that would be the cost; it was not).
+What remains in it: command buffer creation, submit, `waitUntilCompleted`
+round-trip, readback, and a per-op output and uniforms buffer allocation. At
+1196 nodes per forward this is still the dominant serving-path term.

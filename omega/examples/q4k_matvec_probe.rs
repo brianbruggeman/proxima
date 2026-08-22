@@ -154,10 +154,13 @@ fn run() {
     // either one is amplified. 21 samples produced a 5.7x swing between
     // consecutive runs of this probe; this is the count that makes the
     // difference readable rather than the noise.
-    const RUNS: usize = 201;
+    const RUNS: usize = 51;
     const K: u32 = 4096;
-    let (small_ms, small_bytes) = measure(1024, K, RUNS);
-    let (large_ms, large_bytes) = measure(4096, K, RUNS);
+    // sizes chosen so the KERNEL dominates the ~0.2-0.3 ms per-call
+    // intercept. At 1024/4096 rows both arms ran in ~0.3 ms, i.e. mostly
+    // intercept, and the marginal figure swung 3x between runs.
+    let (small_ms, small_bytes) = measure(4096, K, RUNS);
+    let (large_ms, large_bytes) = measure(16384, K, RUNS);
 
     let delta_ms = large_ms - small_ms;
     let delta_bytes = large_bytes - small_bytes;
@@ -165,12 +168,12 @@ fn run() {
 
     println!("q4k_matvec_probe runs={RUNS} k={K}");
     println!(
-        "  rows=1024  packed={:.2} MB  median={small_ms:.3} ms  end_to_end={:.1} GB/s",
+        "  small  packed={:.2} MB  median={small_ms:.3} ms  end_to_end={:.1} GB/s",
         small_bytes / 1e6,
         (small_bytes / 1e9) / (small_ms / 1000.0)
     );
     println!(
-        "  rows=4096  packed={:.2} MB  median={large_ms:.3} ms  end_to_end={:.1} GB/s",
+        "  large  packed={:.2} MB  median={large_ms:.3} ms  end_to_end={:.1} GB/s",
         large_bytes / 1e6,
         (large_bytes / 1e9) / (large_ms / 1000.0)
     );
@@ -251,10 +254,10 @@ fn run() {
     // waitUntilCompleted, readback) is comparable to the kernel itself, so a
     // single-size number cannot tell them apart. Two sizes per arm cancel it:
     // the DIFFERENCE is marginal cost, which is the kernel.
-    let f32_small_ms = measure_f32(1024, K, RUNS);
-    let f32_large_ms = measure_f32(4096, K, RUNS);
-    let f32_small_bytes = 1024.0 * f64::from(K) * 4.0;
-    let f32_large_bytes = 4096.0 * f64::from(K) * 4.0;
+    let f32_small_ms = measure_f32(4096, K, RUNS);
+    let f32_large_ms = measure_f32(16384, K, RUNS);
+    let f32_small_bytes = 4096.0 * f64::from(K) * 4.0;
+    let f32_large_bytes = 16384.0 * f64::from(K) * 4.0;
     let f32_marginal_gbs = ((f32_large_bytes - f32_small_bytes) / 1e9)
         / ((f32_large_ms - f32_small_ms) / 1000.0);
     // fixed cost, extrapolated back to zero bytes from the two points
