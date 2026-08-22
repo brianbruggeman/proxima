@@ -534,9 +534,45 @@ struct PackedRowBlock {
     reduce_dim: usize,
 }
 
-fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowBlock> {
+/// Why a given [`BoundOp`] did NOT take the row-blocked packed kernel —
+/// [`classify_packed_row_block`]'s error arm, one variant per gate in that
+/// function's own condition order. `#[non_exhaustive]` so a new gate added
+/// later is a compile error at every match site instead of a silently
+/// unmatched `_`. Always compiled (not feature-gated itself) so
+/// [`classify_packed_row_block`] — called from the unconditional emit path
+/// — never needs a second copy of these seven conditions; only the public
+/// accessor [`diagnose_packed_row_block`] is gated behind `instrument`, this
+/// crate's diagnostic-only feature (see
+/// [`crate::metal::execute_plan_op_timed`]'s own doc for why diagnostics
+/// live behind that gate).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackedRowBlockRejection {
+    /// [`reduce_is_cooperative`] is false — not `Add`/`Multiply`/`Maximum`/
+    /// `Minimum`, or the op gathers.
+    NotCooperativeReduce,
+    /// Not a `Reduce { keep: Keep::Reduce, .. }` at all.
+    NotReduceKeepReduce,
+    /// `quantized.len() != 2` — not a two-operand (weight, activation) op.
+    OperandCountNotTwo,
+    /// Neither exactly zero nor exactly one operand is packed.
+    NotExactlyOnePackedOperand,
+    /// The reduce folds more than one axis (or zero) into its output.
+    NotExactlyOneReduceDim { reduce_dims: Vec<u16> },
+    /// The packed operand's stride at the one reduce dim is not 1.
+    NonUnitWeightStride { stride: i64 },
+    /// The reduce dim's extent is not a whole multiple of
+    /// [`Q4K_BLOCK_ELEMENTS`].
+    ExtentNotBlockMultiple { extent: u64 },
+}
+
+/// The one decision [`packed_row_block`] and [`diagnose_packed_row_block`]
+/// both need — this function is the single source of truth;
+/// `packed_row_block` is `.ok()` over it so there is exactly one place the
+/// seven conditions are spelled out, never two copies that could drift.
+fn classify_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<PackedRowBlock, PackedRowBlockRejection> {
     if !reduce_is_cooperative(resolved) {
-        return None;
+        return Err(PackedRowBlockRejection::NotCooperativeReduce);
     }
     let BoundOpKind::Reduce {
         keep: Keep::Reduce,
@@ -544,10 +580,10 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowB
         ..
     } = &resolved.kind
     else {
-        return None;
+        return Err(PackedRowBlockRejection::NotReduceKeepReduce);
     };
     if quantized.len() != 2 {
-        return None;
+        return Err(PackedRowBlockRejection::OperandCountNotTwo);
     }
     let packed: Vec<usize> = quantized
         .iter()
@@ -555,28 +591,47 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowB
         .filter_map(|(index, &is_packed)| is_packed.then_some(index))
         .collect();
     let [weight] = packed[..] else {
-        return None;
+        return Err(PackedRowBlockRejection::NotExactlyOnePackedOperand);
     };
     let other = 1 - weight;
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
         .collect();
     let [reduce_dim] = reduce_dims[..] else {
-        return None;
+        return Err(PackedRowBlockRejection::NotExactlyOneReduceDim { reduce_dims });
     };
     // the packed operand must be contiguous along the reduction dim (its
     // super-blocks run along `k`), and the extent must be whole super-blocks
-    if resolved.operands()[weight].1.stride(reduce_dim) != 1 {
-        return None;
+    let stride = resolved.operands()[weight].1.stride(reduce_dim);
+    if stride != 1 {
+        return Err(PackedRowBlockRejection::NonUnitWeightStride { stride });
     }
-    if !(resolved.extents[reduce_dim as usize] as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS) {
-        return None;
+    let extent = resolved.extents[reduce_dim as usize];
+    if !(extent as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(PackedRowBlockRejection::ExtentNotBlockMultiple { extent });
     }
-    Some(PackedRowBlock {
+    Ok(PackedRowBlock {
         weight,
         other,
         reduce_dim: reduce_dim as usize,
     })
+}
+
+fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowBlock> {
+    classify_packed_row_block(resolved, quantized).ok()
+}
+
+/// Public diagnostic seam: which condition, if any, rejected `resolved`
+/// from the row-blocked packed kernel. `Ok(())` means it WOULD take (or
+/// does take) the fast path. Behind `instrument` — see
+/// [`PackedRowBlockRejection`]'s own doc for why.
+///
+/// # Errors
+/// Returns the specific [`PackedRowBlockRejection`] gate that rejected this
+/// op.
+#[cfg(feature = "instrument")]
+pub fn diagnose_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<(), PackedRowBlockRejection> {
+    classify_packed_row_block(resolved, quantized).map(drop)
 }
 
 fn grid_threads(resolved: &BoundOp, quantized: &[bool]) -> u64 {

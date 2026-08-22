@@ -25,6 +25,18 @@ use std::collections::BTreeSet;
 use proxima_tensor::spec::mistral_cached_forward_program;
 use proxima_tensor::{BoundOpKind, Keep, NodeId, bind, correct_packed_matmul_layouts, infer};
 
+/// One row of step 1's rejection table: how many ops in this (tensor family,
+/// gate) bucket share this shape, and the shape itself -- printed rather than
+/// inferred, per `proxima-tensor/docs/discipline.md`'s own ask.
+#[cfg(feature = "instrument")]
+struct RejectionShape {
+    count: usize,
+    extents: Vec<u64>,
+    output_axes: Vec<u16>,
+    reduce_dims: Vec<u16>,
+    weight_strides_at_reduce_dims: Vec<i64>,
+}
+
 fn main() {
     // openchat-3.5-1210 / Mistral-7B
     const VOCAB: u32 = 32000;
@@ -100,6 +112,14 @@ fn main() {
     let mut first_generic_source: Option<String> = None;
     let mut first_row_blocked_source: Option<String> = None;
 
+    // step 1's own ask: WHICH gate rejects each op, printed, not inferred.
+    // One row per (tensor family, rejection reason) pair rather than one per
+    // node -- 225 near-identical per-layer lines would bury the seven-way
+    // structural finding under repetition the family already carries once.
+    #[cfg(feature = "instrument")]
+    let mut rejection_table: std::collections::BTreeMap<(String, String), RejectionShape> =
+        std::collections::BTreeMap::new();
+
     for op in &bound {
         let is_reduce_keep_reduce = matches!(op.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. });
         let has_packed_operand = op.operands().iter().any(|(node, _, _)| q4k_operands.contains(node));
@@ -118,6 +138,45 @@ fn main() {
                 packed_operand_count,
                 op.kind
             );
+        }
+
+        #[cfg(feature = "instrument")]
+        {
+            let quantized: Vec<bool> = op.operands().iter().map(|(node, _, _)| q4k_operands.contains(node)).collect();
+            let weight_node = op
+                .operands()
+                .iter()
+                .find_map(|(node, _, _)| q4k_operands.contains(node).then_some(*node));
+            let weight_name = weight_node
+                .and_then(|node| program[node.0 as usize].name())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("node{}", op.node.0));
+            let family = strip_layer_index(&weight_name);
+
+            let output_axes: Vec<u16> = match &op.kind {
+                BoundOpKind::Reduce { output_axes, .. } => output_axes.to_vec(),
+                _ => Vec::new(),
+            };
+            let reduce_dims: Vec<u16> =
+                (0..op.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
+            let weight_strides: Vec<i64> = weight_node
+                .and_then(|node| op.operands().iter().find(|(candidate, _, _)| *candidate == node))
+                .map(|(_, layout, _)| reduce_dims.iter().map(|&dim| layout.stride(dim)).collect())
+                .unwrap_or_default();
+
+            let reason = match omega::msl::diagnose_packed_row_block(op, &quantized) {
+                Ok(()) => "PASS (row-blocked)".to_string(),
+                Err(rejection) => format!("{rejection:?}"),
+            };
+
+            let entry = rejection_table.entry((family, reason)).or_insert_with(|| RejectionShape {
+                count: 0,
+                extents: op.extents.clone(),
+                output_axes: output_axes.clone(),
+                reduce_dims: reduce_dims.clone(),
+                weight_strides_at_reduce_dims: weight_strides.clone(),
+            });
+            entry.count += 1;
         }
 
         let kernel = omega::emit(op, &q4k_operands).expect("the real forward's own bound ops emit");
@@ -155,6 +214,21 @@ fn main() {
         "reduce ops with a packed operand: {reduce_with_packed_operand} (row_blocked={row_blocked} generic_scalar={generic_scalar})"
     );
 
+    // step 1's deliverable: WHICH gate rejects each family, printed from the
+    // library's own `diagnose_packed_row_block`, not re-derived by reading
+    // `msl.rs` and guessing.
+    #[cfg(feature = "instrument")]
+    {
+        println!("\n=== rejection table: tensor family, extents, output_axes, reduce_dims, weight strides at reduce_dims, gate ===");
+        for ((family, reason), shape) in &rejection_table {
+            println!(
+                "family={family:?} count={} extents={:?} output_axes={:?} \
+                 reduce_dims={:?} weight_strides_at_reduce_dims={:?} gate={reason}",
+                shape.count, shape.extents, shape.output_axes, shape.reduce_dims, shape.weight_strides_at_reduce_dims,
+            );
+        }
+    }
+
     if let Some(source) = &first_generic_source {
         println!("\n=== first GENERIC SCALAR kernel body (q4k_element path) ===");
         println!("{source}");
@@ -165,4 +239,19 @@ fn main() {
     }
 
     assert_ne!(reduce_with_packed_operand, 0, "degenerate probe: no reduce op ever saw a packed operand");
+}
+
+/// `blk.7.ffn_down.weight` -> `ffn_down.weight`: drops exactly one
+/// `.`-delimited numeric segment (the layer index every `blk.N.*` weight
+/// name carries) so the rejection table sums one matmul KIND across all 32
+/// layers instead of reporting 32 near-identical lines. Same shape as
+/// `proxima-model-interop::generate::strip_layer_index`; duplicated here
+/// because this is a standalone example binary in a different crate and the
+/// helper is four lines -- not worth a shared dependency for.
+#[cfg(feature = "instrument")]
+fn strip_layer_index(name: &str) -> String {
+    name.split('.')
+        .filter(|segment| segment.parse::<u32>().is_err())
+        .collect::<Vec<&str>>()
+        .join(".")
 }

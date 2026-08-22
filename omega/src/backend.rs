@@ -397,6 +397,28 @@ fn execute_plan_named_metal(
     Ok(evaluated)
 }
 
+/// Diagnostic counterpart of [`execute_plan_named`], reachable only when a
+/// caller already holds a [`Plan::Metal`] -- see [`metal::execute_plan_op_timed`]'s
+/// own doc for why this must never replace [`execute_plan_named`] on the
+/// serving loop. Returns [`BackendError::NotImplemented`] for any other
+/// `Plan` variant rather than panicking: a caller asking this of a CPU plan
+/// asked the wrong question, not an unreachable one.
+///
+/// # Errors
+/// Propagates the Metal driver's per-op timing failures; reports a non-Metal
+/// plan as [`BackendError::NotImplemented`].
+#[cfg(all(feature = "metal", target_os = "macos", feature = "instrument"))]
+pub fn execute_plan_named_metal_op_timed(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<(Evaluated, Vec<metal::OpGpuTiming>), BackendError> {
+    match plan {
+        Plan::Metal(metal_plan) => Ok(metal::execute_plan_named_op_timed(metal_plan, named)?),
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
+    }
+}
+
 #[cfg(test)]
 // test fixtures below are hand-built to succeed; an expect/unwrap failure IS
 // the test failing, same convention as every `omega/tests/*.rs` file.
