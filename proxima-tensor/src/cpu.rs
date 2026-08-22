@@ -3121,7 +3121,28 @@ fn build_matmul_stage_plan<'weights>(
     // unbatched call exactly (same function, same session), so a wide
     // (prefill-shaped) activation keeps its existing parallel quantize
     // instead of losing it just because this node got folded.
+    //
+    // instrumentation-only: a DEDICATED counter (`STAGED_MATMUL_QUANTIZE_TICKS`),
+    // not a second call site into `MATMUL_QUANTIZE_ACTIVATION_TICKS` -- see
+    // that counter's own doc for why sharing it across both call sites broke
+    // `matmul_split`'s own nested-subset arithmetic. Before this counter
+    // existed, this call site had no attribution at all: the staged path's
+    // own quantize cost (160/225 matmul nodes per step, ROW97/98's dominant
+    // bucket) was invisible.
+    #[cfg(feature = "instrument")]
+    let diag_staged_quantize_started = instrument::read_ticks();
     quantize_row_q8k_dispatch(activation, &mut activation_q8k, Some(session))?;
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::STAGED_MATMUL_QUANTIZE_TICKS,
+        instrument::elapsed_ticks(diag_staged_quantize_started)
+    );
+    #[cfg(feature = "instrument")]
+    {
+        let macs = (rows as u64).saturating_mul(k as u64).saturating_mul(leading_total as u64);
+        counter!(instrument::STAGED_MATMUL_MACS, macs);
+        counter!(instrument::STAGED_MATMUL_NODES, 1);
+    }
 
     let row_bytes = weights.len() / rows;
     let chunk_count = row_chunk_count(rows, workers, k.saturating_mul(leading_total));
@@ -3243,7 +3264,22 @@ fn run_staged_batch(
         },
     };
 
+    // instrumentation-only: times `session.run(&round)` as a whole, the
+    // same granularity `matmul_rows_threaded`'s own `MATMUL_OWN_CHUNK_TICKS`
+    // uses for the unbatched leader-claim-and-wait call -- not per-chunk
+    // (that would perturb the very thing being measured, see this module's
+    // own doc) and not folded into `MATMUL_OWN_CHUNK_TICKS` itself, since
+    // that counter's own denominator (`MATMUL_DISPATCH_CALLS`/per-node call
+    // count) means something different for a run that folds several matmul
+    // nodes into one round.
+    #[cfg(feature = "instrument")]
+    let diag_staged_round_started = instrument::read_ticks();
     let report = session.run(&round);
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::STAGED_MATMUL_ROUND_TICKS,
+        instrument::elapsed_ticks(diag_staged_round_started)
+    );
     if let Some(error) = report.first_error {
         return Err(error);
     }
@@ -3259,11 +3295,18 @@ fn run_staged_batch(
     // strictly AFTER `session.run(&round)` above has already returned, so
     // the round this session was driving is closed before any of these
     // transpose calls open a new one.
+    #[cfg(feature = "instrument")]
+    let diag_staged_transpose_started = instrument::read_ticks();
     for (offset, node_output) in run_outputs.iter_mut().enumerate() {
         if let Some(plan) = &plans[offset] {
             transpose_wide_to_output(&plan.wide, plan.rows, plan.width, Some(session), node_output)?;
         }
     }
+    #[cfg(feature = "instrument")]
+    counter!(
+        instrument::STAGED_MATMUL_TRANSPOSE_TICKS,
+        instrument::elapsed_ticks(diag_staged_transpose_started)
+    );
 
     for (offset, node_output) in run_outputs.into_iter().enumerate() {
         let node = run[offset].node;

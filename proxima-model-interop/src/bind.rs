@@ -866,6 +866,29 @@ mod real_openchat_file {
                 quant.calls,
                 quant.position_loop_iters
             );
+            // `matmul_split` above is the UNBATCHED population only
+            // (`node_kind=reduce_matmul_quantized`, `dispatch_calls`'s own
+            // denominator, every field a nested subset of that line's own
+            // `bucket_ms`); this line is the `cohort-staged-graph` folded
+            // population (`node_kind=staged_batch`) -- ROW97/98's dominant
+            // bucket, previously invisible below its own outer wall-clock
+            // total. Its own `quantize_ms` is a dedicated counter
+            // (`STAGED_MATMUL_QUANTIZE_TICKS`), not shared with the line
+            // above's `quantize_activation_ms`, so each line's fields stay
+            // internally additive.
+            std::println!(
+                "matmul_split_staged round_ms={:.3} quantize_ms={:.3} transpose_ms={:.3} macs={} nodes={} ns_per_mac={:.5}",
+                ms(quant.staged_round_ticks),
+                ms(quant.staged_quantize_ticks),
+                ms(quant.staged_transpose_ticks),
+                quant.staged_macs,
+                quant.staged_nodes,
+                if quant.staged_macs == 0 {
+                    0.0
+                } else {
+                    proxima_tensor::instrument::ticks_to_nanos(quant.staged_round_ticks) as f64 / quant.staged_macs as f64
+                },
+            );
             let rounds = cohort_diag::ROUNDS.load(Ordering::Relaxed);
             let parks = cohort_diag::PARKS.load(Ordering::Relaxed);
             let unpark_rounds = cohort_diag::UNPARK_ROUNDS.load(Ordering::Relaxed);
