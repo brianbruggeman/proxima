@@ -343,11 +343,11 @@ impl BoundOp {
         if parts < 2 {
             return None;
         }
-        let split_axis = self
-            .split_axis_candidates()
-            .into_iter()
-            .find(|&axis| self.extents[axis as usize] >= parts as u64)?;
+        let split_axis = self.split_axis()?;
         let extent = self.extents[split_axis as usize];
+        if extent < parts as u64 {
+            return None;
+        }
 
         Some(
             chunk_ranges(extent, parts, alignment)
@@ -358,77 +358,21 @@ impl BoundOp {
         )
     }
 
-    /// Ordered candidate axes `split_aligned` tries, first match wins. A
-    /// `Keep::Reduce` fold's outermost surviving axis
-    /// (`output_axes.first()`) is tried first — unchanged from before this
-    /// method existed, so every shape that already split on it (`extent >=
-    /// parts`) keeps splitting on exactly that axis, byte-for-byte.
-    ///
-    /// The second candidate, `output_axes.last()` (the reduce's *width*
-    /// axis — e.g. 4096/14336 for a real forward's projections), is only
-    /// ever tried when every leading axis (every entry of `output_axes`
-    /// except the last) has extent exactly 1. That is not a tuning choice,
-    /// it is the soundness boundary: chunk `k`'s output is handed to the
-    /// caller as one *contiguous* `split_at_mut` sub-slice (this method's
-    /// own doc), and the interpreter writes a reduce's output in
-    /// leading-major order — `[leading0: full width][leading1: full
-    /// width]...`. Splitting the width axis while more than one leading
-    /// position exists would make each chunk cover a *narrow slice of every
-    /// leading position's row*, so concatenating the chunks back to back
-    /// (chunk 0's data for every leading position, then chunk 1's, ...)
-    /// would not reproduce the parent's leading-major layout at all — the
-    /// same output position would land at the wrong offset. With exactly
-    /// one leading position (decode: one sequence position) that hazard is
-    /// vacuous, because "every leading position's row" is one row, and a
-    /// contiguous width range for it is a contiguous range of the whole
-    /// output by construction.
-    ///
-    /// At decode a reduce's leading axis is exactly this singleton case
-    /// (one sequence position), so `output_axes.first()` can never clear
-    /// `parts` and every dense f32 reduce fell through to the sequential
-    /// path regardless of worker count
-    /// (`proxima-tensor/docs/discipline.md` ROW 68 — `reduce_f32_dense`
-    /// measured 3.859ms at 1 worker, 3.952ms at 8, no scaling at all). This
-    /// gives that case a second axis to try instead of giving up.
-    ///
-    /// Every leading axis having extent 1 also means the reduce's own
-    /// output element count is exactly `extents[last]`, so a chunk's
-    /// (already-shrunk) width IS its whole output, with nothing to
-    /// interleave against — the general hazard above cannot arise here by
-    /// construction, not merely by absence of a currently-known counterexample.
-    fn split_axis_candidates(&self) -> ArrayVec<u16, 2> {
-        let mut candidates = ArrayVec::new();
+    fn split_axis(&self) -> Option<u16> {
         match &self.kind {
-            BoundOpKind::Elementwise { .. } => {
-                if !self.extents.is_empty() {
-                    candidates.push(0);
-                }
-            }
+            BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
             BoundOpKind::Reduce {
                 keep, output_axes, ..
-            } => {
-                if matches!(keep, Keep::Reduce) {
-                    if let Some(&first) = output_axes.first() {
-                        candidates.push(first);
-                    }
-                    let leading_axes = &output_axes[..output_axes.len().saturating_sub(1)];
-                    let leading_is_singleton =
-                        leading_axes.iter().all(|&axis| self.extents[axis as usize] == 1);
-                    if let Some(&last) = output_axes.last()
-                        && leading_is_singleton
-                        && !candidates.contains(&last)
-                    {
-                        candidates.push(last);
-                    }
-                }
-            }
+            } => match keep {
+                Keep::Scan => None,
+                Keep::Reduce => output_axes.first().copied(),
+            },
             // an `Iota` is cheap enough (one write per element, no operand
             // reads) that splitting it across workers is not worth the
-            // bookkeeping; no candidates here just means a caller runs it
-            // as one chunk, the same as any other unsplittable op.
-            BoundOpKind::Iota | BoundOpKind::Constant { .. } => {}
+            // bookkeeping; `None` here just means a caller runs it as one
+            // chunk, the same as any other unsplittable op.
+            BoundOpKind::Iota | BoundOpKind::Constant { .. } => None,
         }
-        candidates
     }
 
     fn rebase_chunk(&self, split_axis: u16, chunk_start: u64, chunk_len: u64) -> BoundOp {
@@ -1973,116 +1917,8 @@ mod tests {
     #[case::keep_scan_scan(scan_op(), 2)]
     #[case::too_few_parts(elementwise_op(), 1)]
     #[case::extent_smaller_than_parts(elementwise_op(), 999)]
-    #[case::decode_shape_neither_axis_has_room(decode_shaped_matmul_reduction_op(), 4096)]
     fn split_returns_none_when_unsound_or_unhelpful(#[case] op: BoundOp, #[case] parts: usize) {
         assert!(op.split(parts).is_none());
-    }
-
-    /// `matmul_program`'s reduce with `m` (the leading/output-row axis)
-    /// bound to 1 — the exact shape a real forward's decode step produces
-    /// (`proxima-tensor/docs/discipline.md` ROW 68: one sequence position).
-    fn decode_shaped_matmul_reduction_op() -> BoundOp {
-        let (program, _product, _sum, _lhs) = matmul_program();
-        let shapes = shape::infer(&program, &[1]).expect("matmul infers with m=1");
-        bind(&program, &shapes, &[])
-            .expect("matmul builds ops")
-            .into_iter()
-            .next()
-            .expect("one fused op emitted")
-    }
-
-    /// Before `split_axis_candidates` existed, `m == 1` made
-    /// `output_axes.first()` (the row axis) unsplittable at any `parts >=
-    /// 2`, and there was no second axis to try — every decode-shaped dense
-    /// reduce fell all the way back to the sequential path regardless of
-    /// worker count. The `n` axis (3072, `output_axes.last()`) has plenty
-    /// of room and is exactly as independent across output positions as
-    /// `m` is, so it is now the fallback split axis.
-    #[test]
-    fn split_falls_back_to_the_width_axis_when_the_leading_axis_is_a_decode_singleton() {
-        let op = decode_shaped_matmul_reduction_op();
-        assert_eq!(op.extents[0], 1, "m is the decode-shaped singleton");
-        assert_eq!(op.extents[1], 3072, "n is the width axis with room");
-
-        let chunks = op.split(4).expect("the width axis clears 4 parts even though m does not");
-        assert_eq!(chunks.len(), 4);
-
-        let leading_extents: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
-        assert_eq!(
-            leading_extents,
-            alloc::vec![1, 1, 1, 1],
-            "the leading (m) axis is untouched by this split"
-        );
-        let widths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[1]).collect();
-        assert_eq!(widths, alloc::vec![768, 768, 768, 768], "3072 / 4 splits evenly");
-        for chunk in &chunks {
-            assert_eq!(
-                chunk.extents[2], op.extents[2],
-                "the contracted axis (k) is untouched by a split on an output axis"
-            );
-        }
-
-        // rhs (operand 1) varies along n (the split axis): chunk 1 starts
-        // reading it at column 768. lhs (operand 0) does not vary along n
-        // at all (its own map never reads that axis), so its base is
-        // identical across every chunk — the same broadcast argument
-        // `rebase_layout`'s stride(split_axis) == 0 case already makes.
-        let rhs_col_stride = op.operands()[1].1.stride(1);
-        assert_eq!(chunks[0].operands()[1].1.base, op.operands()[1].1.base);
-        assert_eq!(
-            chunks[1].operands()[1].1.base,
-            op.operands()[1].1.base + rhs_col_stride * 768
-        );
-        for chunk in &chunks {
-            assert_eq!(
-                chunk.operands()[0].1.base,
-                op.operands()[0].1.base,
-                "lhs does not vary along the split (n) axis"
-            );
-        }
-
-        // out_layout is unchanged, same invariant the leading-axis split
-        // case already relies on (see `split`'s own doc).
-        let BoundOpKind::Reduce {
-            out_layout: parent_out,
-            ..
-        } = &op.kind
-        else {
-            unreachable!("checked above")
-        };
-        for chunk in &chunks {
-            let BoundOpKind::Reduce {
-                out_layout: chunk_out,
-                ..
-            } = &chunk.kind
-            else {
-                panic!("chunk reduction");
-            };
-            assert_eq!(chunk_out, parent_out);
-        }
-    }
-
-    /// The pre-existing behavior (split on the leading/row axis) is
-    /// unchanged whenever that axis already has room — `m == 512` never
-    /// reaches the new fallback candidate at all, so this locks in that
-    /// `split_axis_candidates` did not reorder anything for the case every
-    /// other test in this module already exercises.
-    #[test]
-    fn split_still_prefers_the_leading_axis_when_it_has_room() {
-        let (program, _product, sum, _lhs) = matmul_program();
-        let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-        let op = bind(&program, &shapes, &[])
-            .expect("matmul builds ops")
-            .into_iter()
-            .next()
-            .expect("one fused op emitted");
-        assert_eq!(op.node, sum);
-
-        let chunks = op.split(2).expect("512 rows over 2 parts splits");
-        let leading_extents: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[0]).collect();
-        assert_eq!(leading_extents, alloc::vec![256, 256], "still splits m, not n");
-        let widths: Vec<u64> = chunks.iter().map(|chunk| chunk.extents[1]).collect();
-        assert_eq!(widths, alloc::vec![3072, 3072], "n is untouched");
     }
 
     /// A ternary `ScalarOp::Select` node (arity 3, the crate's current

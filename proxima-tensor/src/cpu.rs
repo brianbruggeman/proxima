@@ -12318,47 +12318,6 @@ mod tests {
         assert_eq!(split_output, unsplit);
     }
 
-    /// The decode-shaped counterpart of the test directly above: `m == 1`
-    /// (one sequence position, matching a real forward's decode step —
-    /// `proxima-tensor/docs/discipline.md` ROW 68), so the row axis has no
-    /// room to split and `BoundOp::split` now falls back to the width (`n`)
-    /// axis instead of returning `None`. Splitting `n` and running each
-    /// chunk's own `run_reduce` matches the fully sequential run
-    /// bit-for-bit, the same `assert_eq!` (not a tolerance) the row-axis
-    /// version above uses — every output element accumulates over `k`
-    /// independently of every other, so which axis a caller happened to
-    /// chunk on cannot change a single bit of any one element's value.
-    #[test]
-    fn splitting_a_decode_shaped_fused_matmul_reduction_on_its_width_axis_matches_the_unsplit_result() {
-        let (m, k, n) = (1usize, 3usize, 8usize);
-        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
-        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
-        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
-
-        let shapes = shape::infer(&program, &[]).expect("matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("matmul resolves");
-        assert_eq!(resolved.len(), 1, "fused into one reduction node");
-        let node = &resolved[0];
-
-        let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
-        buffers[0] = Some(lhs);
-        buffers[1] = Some(rhs);
-
-        let unsplit = run_node(node, &buffers).expect("unsplit runs");
-
-        let chunks = node.split(2).expect("m==1 falls back to splitting n (8) over 2 parts");
-        assert_eq!(chunks[0].extents[0], 1, "the leading (m) axis is untouched");
-        let mut split_output = vec![0.0f32; unsplit.len()];
-        let mut remaining = split_output.as_mut_slice();
-        for chunk in &chunks {
-            let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, this_chunk).expect("chunk runs");
-            remaining = rest;
-        }
-
-        assert_eq!(split_output, unsplit);
-    }
-
     // -- evaluate_parallel proof tests: same programs, workers in {1, 2, 3, 8},
     // -- bitwise-equal to `evaluate`.
 
