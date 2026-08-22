@@ -5471,3 +5471,59 @@ reason that did not land.
 | + wide 32-bit level loads (ROW 76) | ~131 | ~233 G | 1.64x |
 | + lane spread (this row) | ~143.5 | ~255 G | **1.49x** |
 | `dmin` factoring (ROW 75) | ZERO, reverted | | |
+
+## ROW 78 — omega EMITS the whole real 7B forward: 1196/1196 ops, 0 failures. The blocker is wiring, not the backend.
+
+**Host:** Apple M1 Max. **Probe:** `omega/examples/real_forward_emit_probe.rs`
+— needs no GGUF and no weights, because `mistral_cached_forward_program`
+builds the program from architecture parameters alone and `bind`/`emit` are
+pure functions of it.
+
+### The assumption this kills
+
+Every GPU number in ROWS 72-77 came from a synthetic 4096x4096 matvec.
+Nothing outside the workspace root depends on omega —
+`proxima-model-interop`, the crate that runs a token, has no reference to
+it — so those numbers describe a microbenchmark, not a forward. ROWS 69-71
+then reasoned about what omega structurally could not do, without ever
+handing it the real graph.
+
+Handed the real graph:
+
+```
+program nodes=3066 roots=97
+bound ops=1196
+emit: 1196 ok, 0 failed, of 1196 bound ops
+inputs=391 total_elements=7241732226 (= 28.97 GB as f32, 4.07 GB as q4_k)
+     131072000  token_embd.weight
+     131072000  output.weight
+      58720256  blk.0.ffn_gate.weight
+```
+
+**The emitter produces a kernel for every op of a real 7B forward.** It was
+never the blocker, and one cheap probe would have said so before four rows
+of architectural speculation.
+
+### What the numbers say about feasibility
+
+4.07 GB of packed weights against 64 GiB of unified memory, matching the
+4.14 GB checkpoint on disk. Peak live intermediates on the CPU path measure
+~0.5 GiB. Memory is not a blocker either.
+
+216 of 225 matmul weights are `Q4_K`, which omega now reads packed; the
+other 9 are `Q5_K`/`Q6_K`, which `unsupported_gpu_codec` rejects. But the
+loader ALREADY dequantizes every non-packed weight to `f32`, and omega takes
+`QuantizedBlock::Float32` — so those 9 cost 1 GB of extra residency and
+block nothing.
+
+**So omega can run the real forward today, and no one has called it.** The
+gap between "1.49x off llama.cpp on a matvec" and "runs a token" is a
+dependency edge and a block-name mapping, not a backend capability.
+
+### Method
+
+The probe is a gate, not a report: it asserts `failed == 0` over a nonzero
+bound-op count. It also prints the input set by size, so the residency
+question is answered from the graph rather than estimated. Three rows of
+this file have now recorded a number the instrument could not have produced;
+this one produces the number that decides the next move.
