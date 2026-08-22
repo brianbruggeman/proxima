@@ -90,6 +90,16 @@ q5k-int8-dot = []
 # `Q6_K` (16 sub-blocks of 16, one signed 8-bit scale each, no `dmin` term).
 # Default-ON for the same reason as `q5k-int8-dot` above.
 q6k-int8-dot = []
+# `cpu::evaluate_quantized`'s decode/prefill node loop dispatches a run of
+# consecutive non-matmul nodes (elementwise, dense f32 reduce, scan, iota,
+# constant) through ONE `prime::os::cohort::StagedRound` per run instead of
+# leaving the cohort idle between per-node calls -- ROW 96
+# (`docs/discipline.md`): the diagnosed cost is not any one node kind's own
+# compute, it is `CohortSession::run`'s per-round open/wake paid once per
+# node when nothing amortizes it. Default-off: the wiring is new and its
+# win/loss is still being measured against the unwired baseline: see that
+# row for the numbers before this earns the switch.
+cohort-staged-graph = ["std", "dep:prime"]
 
 [dependencies]
 arrayvec.workspace = true
