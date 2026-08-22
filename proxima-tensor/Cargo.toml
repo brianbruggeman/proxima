@@ -90,6 +90,21 @@ q5k-int8-dot = []
 # `Q6_K` (16 sub-blocks of 16, one signed 8-bit scale each, no `dmin` term).
 # Default-ON for the same reason as `q5k-int8-dot` above.
 q6k-int8-dot = []
+# `cpu::evaluate_quantized`'s decode/prefill node loop dispatches a run of
+# consecutive independent nodes -- elementwise, dense f32 reduce, scan, iota,
+# constant, AND quantized-matmul-reduce (the ~87% of forward wall time ROW 96
+# left out) -- through ONE `StagedRound` per run instead of leaving the
+# cohort idle between per-node calls and opening a fresh round per matmul
+# node (`docs/discipline.md` ROW 96's own "what remains open": ~225
+# `matmul_rows_threaded` rounds/token, one per quantized-matmul-reduce node,
+# with everything else in between opening zero). A matmul node's own
+# row-chunks become a many-chunk stage in the SAME round (real cross-worker
+# parallelism preserved via `StagedRound`'s variable-width stages); every
+# other eligible node kind stays a one-chunk stage exactly as ROW 96 wired
+# it. Default-off: the wiring is new and its win/loss is still being
+# measured against the unwired baseline — see ROW 97 for the numbers before
+# this earns the switch.
+cohort-staged-graph = ["std", "dep:prime"]
 
 [dependencies]
 arrayvec.workspace = true
