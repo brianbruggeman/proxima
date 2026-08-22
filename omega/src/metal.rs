@@ -118,6 +118,27 @@
 //! what fraction of real uploads actually took the no-copy path instead of
 //! assuming it from the code alone.
 //!
+//! # Resident blocks — the copying path's own cache
+//!
+//! "Copying uploads are deliberately not cached" (see [`NOCOPY_BUFFERS`]'s own
+//! doc) is right for a block whose bytes genuinely change every call --
+//! `ids`/`rope_cos`/`rope_sin`/the KV cache's own blocks -- because a stale
+//! copy would silently serve last token's data forever. It is wrong for a
+//! model's own weights: `proxima-model-interop`'s `BoundWeights::owned`/
+//! `packed` are bound once at load and never mutated again, so their
+//! `(pointer, len)` is stable for the caller's whole process, and re-copying
+//! them every token moves ~5.84 GB/token for data that never changed
+//! (`proxima-tensor/docs/discipline.md` ROW 82). That distinction -- which
+//! names are the caller's own static weights versus which change every step
+//! -- is known to the CALLER (`generate.rs` builds `named_blocks` from two
+//! structurally different sources) and destroyed the moment they flatten
+//! into one `&[(&str, QuantizedBlock)]`. [`Plan::mark_resident`] hands that
+//! knowledge back in: a caller-supplied name set, checked once per [`Plan`]
+//! build against the program's own declared [`Op::name`]s, never against raw
+//! bytes -- see that method's own doc for why NAME is safe to classify
+//! against here even though [`NOCOPY_BUFFERS`]-style caching must never be
+//! keyed on name.
+//!
 //! # dtype and device-buffer marshalling
 //!
 //! `execute`'s own host contract stays f32 in and f32 out — `blocks:
@@ -274,6 +295,49 @@ pub struct Plan {
     prepared: Prepared,
     q4k_operands: BTreeSet<NodeId>,
     block_dtypes: Vec<DType>,
+    /// Every block-input node a caller has told this plan, via
+    /// [`Plan::mark_resident`], is bound to data that never changes across
+    /// calls -- empty until that method runs, since [`plan`] itself has no
+    /// way to know a caller's residency intent from codecs/shapes alone.
+    resident_nodes: BTreeSet<NodeId>,
+}
+
+impl Plan {
+    /// Tells this plan which of its named block inputs are the CALLER's own
+    /// static data -- model weights bound once at load and never mutated
+    /// again -- so [`execute_plan`]'s upload loop may cache and reuse their
+    /// device buffer on the copying path instead of re-copying every call.
+    /// See the module doc's "Resident blocks" section for the full argument.
+    ///
+    /// `resident_names` is checked against each block-input node's own
+    /// declared [`Op::name`] -- a one-time string compare over the program's
+    /// declared inputs, off the per-token upload path -- never against the
+    /// block's bytes or pointer. That is the necessary half of the
+    /// invariant this driver's [`NOCOPY_BUFFERS`] cache cannot provide on its
+    /// own: an address match alone cannot distinguish a weight buffer that
+    /// never moves from a freshly reallocated `ids`/KV-cache buffer that
+    /// coincidentally lands at a freed address of the same size. The NAME
+    /// check happens here, once per plan, specifically so the per-token
+    /// upload path never has to trust an address by itself.
+    ///
+    /// Safe and cheap to call every token even though [`plan`]/[`plan_named`]
+    /// currently rebuild a fresh [`Plan`] every step (`plan_hits=0`,
+    /// `proxima-tensor/docs/discipline.md` ROW 82): this is a scan over the
+    /// block-input node list matching each node's name against
+    /// `resident_names`, not a device operation.
+    pub fn mark_resident(&mut self, resident_names: &BTreeSet<&str>) {
+        self.resident_nodes = self
+            .prepared
+            .block_nodes
+            .iter()
+            .filter(|node| {
+                self.program[node.0 as usize]
+                    .name()
+                    .is_some_and(|name| resident_names.contains(name))
+            })
+            .copied()
+            .collect();
+    }
 }
 
 /// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
@@ -313,6 +377,7 @@ pub fn plan(
         prepared,
         q4k_operands,
         block_dtypes,
+        resident_nodes: BTreeSet::new(),
     })
 }
 
@@ -358,9 +423,10 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             counter!(BLOCK_UPLOAD_CALLS, 1);
             counter!(BLOCK_UPLOAD_BYTES, block_byte_len(block) as u64);
         }
+        let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype)?,
-            QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes)?,
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
             other => return Err(unsupported_gpu_codec(*node, other)),
         };
         device_buffers.insert(*node, buffer);
@@ -1088,6 +1154,15 @@ pub struct MetalStageTotals {
     pub nocopy_uploads: u64,
     pub copying_uploads: u64,
     pub nocopy_reuses: u64,
+    /// How many of `block_upload_calls` were a caller-declared-static weight
+    /// -- see [`Plan::mark_resident`] and [`upload_resident_copy`]. A resident
+    /// upload happens once per distinct weight buffer; a resident reuse
+    /// happens every token after that. `resident_reuses` growing while
+    /// `resident_uploads` stays flat at the weight count is the direct
+    /// witness that the ~5.84 GB/token copy `proxima-tensor/docs/discipline.md`
+    /// ROW 82 measured moved exactly once, not every step.
+    pub resident_uploads: u64,
+    pub resident_reuses: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -1116,6 +1191,8 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         nocopy_uploads: NOCOPY_BUFFER_UPLOADS.snapshot_and_reset(),
         copying_uploads: COPYING_BUFFER_UPLOADS.snapshot_and_reset(),
         nocopy_reuses: NOCOPY_BUFFER_REUSES.snapshot_and_reset(),
+        resident_uploads: RESIDENT_BUFFER_UPLOADS.snapshot_and_reset(),
+        resident_reuses: RESIDENT_BUFFER_REUSES.snapshot_and_reset(),
     }
 }
 
@@ -1161,8 +1238,14 @@ fn upload_block(
     data: &[f32],
     node: NodeId,
     dtype: DType,
+    resident: bool,
 ) -> Result<MetalBuffer, MetalError> {
     match dtype {
+        // unreached by every program this driver compiles today (none
+        // declares a `Float16` block input -- `proxima-tensor/src/spec.rs`'s
+        // `mistral_cached_forward_program` is `Float32` throughout), so it is
+        // not worth the residency cache's extra bookkeeping: the narrowed
+        // `Vec<f16>` this allocates is dropped every call regardless.
         DType::Float16 => upload_block_as_half(device, data),
         DType::Float32
         | DType::BFloat16
@@ -1170,7 +1253,7 @@ fn upload_block(
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => upload_block_as_float(device, data),
+        | DType::UInt32 => upload_block_as_float(device, data, resident),
         DType::Int16
         | DType::UInt16
         | DType::Int64
@@ -1187,10 +1270,14 @@ fn upload_block(
 /// included) before that borrow can end, so handing the GPU the caller's
 /// own pointer is sound whenever it is page-aligned. See the module doc's
 /// "Host buffer upload" section for why [`upload_block_as_half`] can never
-/// take this path.
+/// take this path. `resident` is [`Plan::mark_resident`]'s classification of
+/// this block's own node -- see the module doc's "Resident blocks" section
+/// for why a misaligned RESIDENT block still gets a cache, just a different
+/// one than the no-copy path's.
 fn upload_block_as_float(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
+    resident: bool,
 ) -> Result<MetalBuffer, MetalError> {
     if data.is_empty() {
         return allocate_buffer(device, 0, DType::Float32);
@@ -1201,6 +1288,9 @@ fn upload_block_as_float(
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         return upload_block_no_copy(device, pointer, byte_length);
     }
+    if resident {
+        return upload_resident_copy(device, pointer, byte_length);
+    }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length)
 }
@@ -1210,10 +1300,13 @@ fn upload_block_as_float(
 /// packed against 14.5 GB as `f16`; decode is a weight sweep, so that 3.56x
 /// in traffic IS the token rate. Reuses the same page-aligned no-copy path
 /// [`upload_block_as_float`] uses, since a memory-mapped GGUF tensor is very
-/// often already page-aligned.
+/// often already page-aligned. `resident` is the same "caller's own static
+/// weight" classification [`upload_block_as_float`] takes; a packed weight
+/// too misaligned for the no-copy path takes the same resident-copy cache.
 fn upload_packed_bytes(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
+    resident: bool,
 ) -> Result<MetalBuffer, MetalError> {
     if bytes.is_empty() {
         return allocate_buffer(device, 0, DType::Float32);
@@ -1223,6 +1316,9 @@ fn upload_packed_bytes(
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         return upload_block_no_copy(device, pointer, byte_length);
+    }
+    if resident {
+        return upload_resident_copy(device, pointer, byte_length);
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length)
@@ -1319,6 +1415,54 @@ fn upload_block_copy(
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused to allocate a shared buffer for a block input".to_string(),
     })
+}
+
+thread_local! {
+    /// Copied device buffers for blocks [`Plan::mark_resident`] classified as
+    /// the caller's own static weights -- a SEPARATE map from
+    /// [`NOCOPY_BUFFERS`], not a shared one, because the two caches rest on
+    /// different soundness arguments: a no-copy entry is safe to reuse
+    /// unconditionally because it aliases whatever is CURRENTLY at that
+    /// address (never stale by construction); this cache instead reuses a
+    /// SNAPSHOT taken at first upload, which is sound only because the
+    /// caller already proved -- by name, once, in `mark_resident` -- that
+    /// the address holds a model weight nothing overwrites again. Keeping
+    /// them apart keeps that distinction visible at the call site instead of
+    /// folding two different proofs into one lookup.
+    static RESIDENT_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// How many resident (caller-declared-static) blocks took a real copy versus
+/// how many were served from [`RESIDENT_BUFFERS`] instead -- the direct
+/// witness that the ~5.84 GB/token `proxima-tensor/docs/discipline.md` ROW 82
+/// measured moving through [`upload_block_copy`] on every step now moves
+/// exactly once per distinct weight buffer, never once per token.
+pub static RESIDENT_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.resident_upload");
+pub static RESIDENT_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_block.resident_reuse");
+
+/// The copy-path counterpart to [`upload_block_no_copy`]: called only for a
+/// block [`upload_block_as_float`]/[`upload_packed_bytes`] already found
+/// misaligned AND [`Plan::mark_resident`] already classified as static, so
+/// unlike [`upload_block_copy`] this one is allowed to remember the buffer it
+/// creates and hand the SAME one back next time the SAME `(pointer, len)`
+/// shows up -- sound only because that classification, not an address guess,
+/// is what proves the bytes behind `pointer` never change again.
+fn upload_resident_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    let key = (pointer as usize, byte_length);
+    if let Some(existing) = RESIDENT_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+        counter!(RESIDENT_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    counter!(RESIDENT_BUFFER_UPLOADS, 1);
+    let buffer = upload_block_copy(device, pointer, byte_length)?;
+    RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    Ok(buffer)
 }
 
 /// Always copies — see the module doc's "Host buffer upload" section for

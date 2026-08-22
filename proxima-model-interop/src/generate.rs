@@ -52,7 +52,6 @@
 //! never see a turn-boundary marker reappear as if it were generated
 //! content.
 
-#[cfg(not(feature = "metal"))]
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -69,7 +68,7 @@ use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program};
 use proxima_tokenizer::Vocab;
 
 #[cfg(feature = "metal")]
-use omega::backend::{Backend, Plan, execute_plan_named, plan_named};
+use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
 #[cfg(all(feature = "instrument", feature = "metal"))]
 use omega::metal::metal_stage_totals;
 #[cfg(feature = "instrument")]
@@ -322,27 +321,35 @@ impl BackendRuntime {
         self.backend
     }
 
+    /// `resident_names` -- the caller's own model-weight names, fixed for
+    /// the whole [`LoadedModel::generate_with_serving_config`] call -- is
+    /// handed to [`mark_resident`] exactly once per distinct [`Plan`] (right
+    /// after it is built, never on a cache hit, since a hit reuses the SAME
+    /// `Plan` object that was already marked). See `omega::metal::Plan::mark_resident`'s
+    /// own doc for why this needs a name set the tensor program itself
+    /// cannot derive.
     fn evaluate(
         &mut self,
         program: &[Op],
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
-        match self.plans.get_mut(&shape) {
-            Some(plan) => {
-                self.plan_hits += 1;
-                Ok(execute_plan_named(plan, named)?)
-            }
-            None => {
-                self.plan_misses += 1;
-                let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
-                let evaluated = execute_plan_named(&mut plan, named)?;
-                self.plans.insert(shape, plan);
-                Ok(evaluated)
-            }
+        if self.plans.contains_key(&shape) {
+            self.plan_hits += 1;
+        } else {
+            self.plan_misses += 1;
+            let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+            mark_resident(&mut plan, resident_names);
+            self.plans.insert(shape, plan);
         }
+        let plan = self
+            .plans
+            .get_mut(&shape)
+            .expect("just inserted on miss, found on hit, above");
+        Ok(execute_plan_named(plan, named)?)
     }
 }
 
@@ -366,12 +373,17 @@ impl BackendRuntime {
         Self { free_buffers: Vec::new(), validated_weight_nodes: None }
     }
 
+    /// `resident_names` is unused on this backend: the CPU evaluator has no
+    /// device buffer to cache, so there is nothing to mark resident. Carried
+    /// anyway so both `BackendRuntime::evaluate` impls share one signature
+    /// and the decode loop's call site never needs a `cfg` of its own.
     fn evaluate(
         &mut self,
         program: &[Op],
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
+        _resident_names: &BTreeSet<&str>,
     ) -> Result<Evaluated, InteropError> {
         Ok(evaluate_quantized_named_with_scratch(
             program,
@@ -499,6 +511,23 @@ impl<'file> LoadedModel<'file> {
         #[cfg(not(feature = "metal"))]
         let metal_converted_weights: Vec<(String, Vec<f32>)> = Vec::new();
 
+        // The caller's own knowledge of which named blocks are STATIC --
+        // bound once in `LoadedModel::load` and never mutated again -- fixed
+        // for this whole call, unlike `ids`/`eps`/`rope_cos`/`rope_sin` and
+        // the KV cache's own blocks below, which change every step. This is
+        // exactly the distinction `BackendRuntime::evaluate` hands to
+        // `mark_resident` so the Metal driver's device-buffer cache can tell
+        // "same name, same bytes" apart from "same name, new bytes" without
+        // ever keying on name itself (`omega::metal::Plan::mark_resident`'s
+        // own doc). Computed once, not per token: these names never change.
+        let resident_names: BTreeSet<&str> = self
+            .weights
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
+            .collect();
+
         let mut cached_len = 0usize;
         let mut next_ids = ids;
         let vocab_size = self.architecture.vocab as usize;
@@ -569,7 +598,7 @@ impl<'file> LoadedModel<'file> {
 
             #[cfg(feature = "instrument")]
             let evaluate_started = read_ticks();
-            let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots)?;
+            let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?;
             #[cfg(feature = "instrument")]
             let evaluate_ticks = elapsed_ticks(evaluate_started);
             #[cfg(all(feature = "instrument", feature = "metal"))]
@@ -642,7 +671,8 @@ impl<'file> LoadedModel<'file> {
                      block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
                      op_setup_calls={} op_setup_ms={:.3} gpu_exec_calls={} gpu_exec_ms={:.3} \
                      readback_calls={} readback_ms={:.3} readback_bytes={} \
-                     nocopy_uploads={} copying_uploads={} nocopy_reuses={}",
+                     nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
+                     resident_uploads={} resident_reuses={}",
                     metal_stage.prepare_calls,
                     ms(metal_stage.prepare_ticks),
                     metal_stage.emit_calls,
@@ -663,6 +693,8 @@ impl<'file> LoadedModel<'file> {
                     metal_stage.nocopy_uploads,
                     metal_stage.copying_uploads,
                     metal_stage.nocopy_reuses,
+                    metal_stage.resident_uploads,
+                    metal_stage.resident_reuses,
                 );
             }
 
