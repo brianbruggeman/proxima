@@ -4910,3 +4910,93 @@ that looked like they would, measurably do not.
 decode 59.83 vs 44.09 ms/token (**1.357x**); prefill 976.81 vs 749.81 ms
 (**1.303x**); 24-token wall 2385.33 vs 1767.74 ms (**1.349x**). Our spread
 2-6%, llama's 13-29%.
+
+## ROW 69 — the Metal gap is ARCHITECTURE, not tuning: 143x, and ROW 13's lesson recurred on the other backend
+
+**Host:** Apple M1 Max. **Incumbent:** llama.cpp b2534622, `-ngl 99`.
+**Repo:** `feat/tensor-consolidated` @ `c5aac28`.
+
+### Measured first
+
+| | bytes read | median | elem/s | GB/s |
+|---|---|---|---|---|
+| omega, **f32** weight, 4096x4096 | 67.1 MB | 2.570 ms | 6.53 G | **26.1** |
+| omega, **packed Q4_K**, same space | 9.44 MB | 6.273 ms | 2.67 G | **1.5** |
+| llama.cpp Metal, 7B Q4_K_S decode | 3.784 GB/token | 17.62 ms | — | **214.7** |
+
+Two separate facts. Packed is **2.4x SLOWER than f32 while reading 7x fewer
+bytes** — the unpack costs more than the traffic it saves. And the plain f32
+kernel is already **8x** off the incumbent with no quantization involved,
+so Q4_K is not the problem.
+
+Correctness is not in question: the packed path matches a dequantized-f32
+CPU oracle to **9.4e-7** relative (`metal_parity.rs`).
+
+### Four peephole hypotheses, all measured, all essentially zero
+
+| change | before -> after | verdict |
+|---|---|---|
+| MSL recompiled per `execute` call (was true) | 8.18 -> 6.82 ms | not the cost |
+| per-element 64-bit `%` and `/` on a runtime extent (was true) | 6.39 -> 6.20 ms | not the cost |
+| 64-bit walk offsets in the inner loop (was true) | 6.20 -> ~6.2 ms | not the cost |
+| weights re-uploaded per call | counters: `nocopy=66 copying=66` over 66 calls — the 9.44 MB weight is no-copy | never true |
+
+Every one of those was a real defect and every one was irrelevant. That is
+the signature of an architecture gap, and it is what finally forced the
+right question.
+
+### What the incumbent's kernel actually is (`ggml-metal.metal:5087`)
+
+`kernel_mul_mv_q4_K_f32_impl`, with `N_R0_Q4_K 4` / `N_SG_Q4_K 2`
+(`ggml-metal-impl.h:32-33`):
+
+| | ggml | omega |
+|---|---|---|
+| output rows per thread | **4** (`float sumf[nr0]`); 2 simdgroups/tg = 8 rows/threadgroup | **1** |
+| activation | `float yl[16]; yh[16]` in REGISTERS, loaded once per super-block, reused across all 4 rows | re-read from device per (row, element) |
+| nibble extract | **4 nibbles per `uint16_t` load**, shift folded into `1/256` and `1/16` constants at the end | one nibble/element, explicit shift+mask |
+| scale/min decode | once per super-block per row (3 `uint16_t` loads -> `sc16[0..3]`) | **per element** |
+| `d`/`dmin` | once per super-block per row | 2 f16 loads + converts **per element** |
+| `dmin` correction | via `sumy`, accumulated during the register load: 4 MACs per super-block | applied **per element** |
+| inner-loop indexing | none; pointers step `q1 += args.nb01/2` per row | offset add per element |
+
+Roughly **1.6 ops per element against ~40**. That is the 143x, derived from
+the source, not fitted to the measurement.
+
+### The architecture, stated plainly
+
+`ggml-metal` is a **hand-written kernel library with a dispatcher**: 121
+`kernel void` entry points in the `.metal`, 1134 kernel-type references in
+`ggml-metal.m`, selected per (op x dtype), each carrying its own register
+blocking constants, its own memory staging, and its own dispatch geometry.
+
+`omega` is a **generic code generator**: one `emit(BoundOp)`, one thread per
+output element, every operand read an affine index map evaluated per
+element. `BoundOp` carries extents and layouts — it describes WHAT, and each
+backend improvises HOW.
+
+Those are not two points on one axis. Register blocking, activation reuse,
+and per-super-block amortization are all statements about a SCHEDULE, and
+there is no schedule anywhere in this IR to state them in.
+
+### This is the same finding as the CPU one
+
+ROW 68: at ONE thread our CPU matmul equals llama exactly (178.1 vs 177.70
+ms/token) and the entire gap opens with threading — per-node cohort rounds,
+no persistent team. Same shape here: the arithmetic is right (bit-exact
+unpack, 9.4e-7 parity) and the structure around it is wrong. Both backends
+are missing the same thing, and it is not a kernel.
+
+### Recurrence against a lesson this log already carries
+
+ROW 13 recorded: *"reading an incumbent's loop nest is not reading its
+kernel. The register allocation IS the design, and it lives in the
+accumulator's TYPE, not in the loop structure."* ggml's design is literally
+`float sumf[nr0]`.
+
+That lesson was learned on the aarch64 CPU kernel and not applied to the
+Metal one. Four peephole rows were spent before reading
+`ggml-metal.metal`. The generalization the log should have carried, and now
+does: **read the incumbent's kernel STRUCTURE before writing any
+optimization against it, on every backend separately — a lesson recorded
+for one target is not transferred to another for free.**
