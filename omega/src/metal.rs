@@ -957,6 +957,38 @@ fn upload_packed_bytes(
     upload_block_copy(device, pointer, byte_length)
 }
 
+thread_local! {
+    /// No-copy block buffers, keyed by the exact host range they wrap.
+    ///
+    /// `newBufferWithBytesNoCopy` does not copy, but it is NOT free: every
+    /// call creates a fresh `MTLBuffer` and Metal has to wire those pages
+    /// for GPU access. `execute` rebuilt every block buffer on every call,
+    /// so a serving loop re-wired the entire weight set per token — a cost
+    /// that scales with BYTES, which is exactly what made it invisible in a
+    /// bytes-normalized probe.
+    ///
+    /// CALLER PRECONDITION, not yet enforced by a type: a cached wrapper
+    /// aliases the caller's pages and Metal does NOT own them, so the host
+    /// range `(pointer, len)` must stay mapped for as long as this thread
+    /// keeps using omega. That holds for mmap'd GGUF weights, which is the
+    /// case this exists for; it does NOT hold for a `Vec` the caller drops
+    /// between calls, where the wrapper would alias freed pages. The sound
+    /// version of this is a resident-blocks handle whose lifetime borrows
+    /// the caller's data — see `proxima-tensor/docs/discipline.md` ROW 70.
+    ///
+    /// Reuse is otherwise safe on the data-freshness axis precisely BECAUSE
+    /// it is no-copy: writes through the caller's own slice are visible to
+    /// the GPU, so a wrapper never goes stale. Copying uploads are
+    /// deliberately NOT cached — those snapshot the data, and reuse would
+    /// serve a stale snapshot.
+    static NOCOPY_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// Counts the no-copy wrappers this thread reused instead of recreating —
+/// the direct witness that a serving loop stops re-wiring its weights.
+pub static NOCOPY_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_block.nocopy_reuse");
+
 /// The zero-copy path: shares `pointer`'s memory directly with the GPU
 /// instead of duplicating it. Sound only because every caller of
 /// [`upload_block`] binds the returned buffer to a `device const float*`
@@ -975,8 +1007,13 @@ fn upload_block_no_copy(
     // — `newBufferWithBytesNoCopy`'s documented precondition. Passing `None`
     // as the deallocator tells Metal it never owns this memory, so it is
     // never freed or written out from under the caller.
+    let key = (pointer as usize, byte_length);
+    if let Some(existing) = NOCOPY_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+        counter!(NOCOPY_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
     let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
-    unsafe {
+    let buffer = unsafe {
         device.newBufferWithBytesNoCopy_length_options_deallocator(
             pointer,
             byte_length,
@@ -986,7 +1023,9 @@ fn upload_block_no_copy(
     }
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused a no-copy shared buffer for a page-aligned block input".to_string(),
-    })
+    })?;
+    NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    Ok(buffer)
 }
 
 fn upload_block_copy(
