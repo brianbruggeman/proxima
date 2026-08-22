@@ -40,9 +40,22 @@ interop-bgpool = ["dep:prime", "dep:proxima-core"]
 # WITHOUT the per-chunk/per-node tick counters compiled in at all, to answer
 # whether the instrumentation itself is part of what gets measured.
 instrument = ["proxima-tensor/instrument"]
+# Metal decode path (macOS + Metal only), dependency wiring ONLY as of this
+# commit -- no `.rs` file in this crate references `omega` yet (see this
+# task's own report for why). Intended consumer: `generate.rs` running the
+# cached forward through `omega::plan_named`/`execute_plan_named` instead of
+# `proxima_tensor::cpu::evaluate_quantized_named_with_scratch`, selected at
+# runtime via `ServingConfig::gpu_layers` (`serving.rs`). `omega`'s own
+# `metal` feature already confines every objc2/Metal dependency to a
+# `target_os = "macos"` section, so this feature alone never links a Metal
+# framework off Apple hardware; any future call site into `omega::metal`
+# must additionally gate on `target_os = "macos"` directly, matching how
+# `omega` gates its own re-exports.
+metal = ["dep:omega", "std"]
 
 [dependencies]
 arrayvec.workspace = true
+omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
