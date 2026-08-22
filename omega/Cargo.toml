@@ -15,9 +15,20 @@ readme.workspace = true
 # 13 `metal_parity` cases compiled to zero on an ordinary test run — and
 # nextest's "0 skipped" reads exactly like "everything passed". They sat
 # broken and uncompiled behind that flag.
-default = ["std", "metal"]
+default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std"]
 alloc = []
+# Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
+# `runtime-tokio` take at the workspace root (`Cargo.toml`): both may be
+# compiled in at once and the choice made at runtime, rather than one
+# excluding the other. That is what lets one binary measure CPU against
+# Metal on the same program and the same blocks — the comparison this whole
+# backend exists to win.
+#
+# `cpu` is the `proxima_tensor::cpu` evaluator reached through omega's own
+# entry points, so a caller depends on omega alone and never on a specific
+# backend crate.
+cpu = ["std", "proxima-tensor/std"]
 # Runtime Metal execution driver (src/metal.rs, macOS-only via
 # `target_os = "macos"` on the module itself). `proxima-tensor/std` is turned
 # on here because the parity test binary links proxima-tensor's

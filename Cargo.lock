@@ -4209,6 +4209,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "half",
+ "omega",
  "prime",
  "proxima-core",
  "proxima-gguf",
