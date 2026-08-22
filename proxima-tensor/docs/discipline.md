@@ -6781,3 +6781,154 @@ elementwise's width-split, just not yet shown to apply or not apply here.
 That would point straight at `StagedRound` (this row's audit table, last
 infrastructure row) as the next thing to actually wire, not another
 threshold tweak on this row's mechanism.
+
+## ROW 90 — ROW 89's timing swept: `reduce_f32_dense` itself is UNMOVED (confirms ROW 68's "no scaling"), and the fix REGRESSES prefill 14.9% and decode 6.15% anyway. ROLLED BACK.
+
+**This is the headline, stated first per this session's own instructions:
+prefill regressed.** Quiet-box, matched host state, 5 runs each, `PROXIMA_MATMUL_WORKERS=8`:
+
+| | BEFORE (`dbcaf19`) | AFTER (`4bdbc93`, ROW 89's two commits in) | delta |
+|---|---|---|---|
+| prefill (step 0, `m=31`) | median 961.602 ms, mean 959.559, sd 4.135, **CoV 0.43%**, range 952.211-963.425 | median 1105.325 ms, mean 1109.327, sd 10.481, **CoV 0.94%**, range 1100.325-1129.664 | **+143.7 ms median, +14.9%** |
+| decode (steps 1-23 mean, `m=1`) | median 59.887 ms, mean 60.097, sd 0.558, **CoV 0.93%**, range 59.701-61.197 | median 63.573 ms, mean 63.500, sd 0.159, **CoV 0.25%**, range 63.227-63.688 | **+3.686 ms median, +6.15%** |
+
+Both deltas are several multiples of either side's own CoV (0.25-0.94%), so
+this is a real, reproducible regression, not noise. **BEFORE's decode number
+(59.887-60.097) matches this initiative's own recorded baseline, 59.71
+ms/token, within 0.6-0.65% — the quiet-box methodology cross-checks against
+the prior session's own figure**, which is why the AFTER delta above is
+trusted rather than re-litigated.
+
+### `PROXIMA_MATMUL_WORKERS=1` — the fix's own dispatch never engages below the worker threshold, and neither arm moves (null result, as designed)
+
+| | BEFORE (n=3, quiet) | AFTER (n=3, quiet) | delta |
+|---|---|---|---|
+| prefill | median 5993.644, CoV 0.39% | median 6061.968, CoV 0.11% | +68.3 ms, +1.14% (near noise, not this row's claim) |
+| decode | median 192.842, CoV 1.32% | median 191.027, CoV 0.76% | -1.815 ms, -0.94% (within combined noise — no signal) |
+
+### Per-node-kind breakdown — the regression is NOT in the node kind the fix touched
+
+Decode steps, `workers=8`, mean ms/step pooled over 5 runs x 23 steps (n=115 each):
+
+| node_kind | BEFORE | AFTER | delta |
+|---|---|---|---|
+| `reduce_f32_dense` (the fix's own target) | 3.9868 | 3.9897 | **+0.0029 ms, +0.07% — unmoved** |
+| `reduce_matmul_quantized` (untouched code, `matmul_rows_threaded`) | 47.2973 | 50.6354 | **+3.338 ms, +7.06% — the regression** |
+| `elementwise` (untouched code) | 4.1285 | 4.1108 | -0.018 ms, -0.4% (noise) |
+
+Prefill, `workers=8`, mean total ms per run (n=5 each):
+
+| node_kind | BEFORE | AFTER | delta |
+|---|---|---|---|
+| `reduce_f32_dense` | 81.7138 | 80.3934 | -1.32 ms, -1.6% (noise, slightly better) |
+| `reduce_matmul_quantized` | 834.2406 | 977.9334 | **+143.69 ms, +17.2% — 96% of the total +149.77 ms prefill regression by itself** |
+| `elementwise` | 27.0686 | 34.2772 | +7.21 ms, +26.6% (same direction, smaller magnitude) |
+
+`reduce_f32_dense` is the ONLY node kind `run_reduce_dispatch`
+(`6d024f5`)/`split_axis_candidates` (`a3ad87f`) touch. Its own measured time
+is flat before/after in BOTH regimes — **ROW 68's "no scaling" finding
+stands, unchanged by this fix.** The measured cost lands entirely on
+`reduce_matmul_quantized`, code this row's two commits never edited
+(`cpu.rs`'s `run_reduce_quantized` -> `matmul_rows_threaded`, ROW 89's own
+audit table calls this a "reference model, no fix needed").
+
+### Mechanism, traced to the code and a shared counter — not asserted
+
+`run_reduce_dispatch` (`cpu.rs`, `6d024f5`) takes the identical `session:
+Option<&MatmulSession<'_>>` handle `run_reduce_quantized`'s
+`matmul_rows_threaded` already threads through, and calls `session.run(&round)`
+on it when the node clears `PARALLEL_THRESHOLD` and `split_aligned` finds
+`>= 2` chunks — the two share one cohort object per `evaluate_quantized`
+call, not two independent ones. The `instrument`-gated `cohort_summary`
+line (`bind.rs`'s own diagnostic print, entered once per test run) settles
+whether the new dispatch is opening EXTRA rounds:
+
+```
+BEFORE: cohort_summary rounds=6972 parks=44717-44905 unpark_rounds=6492-6515 spin_hits=14258-14907 immediate_hits=33832-34493
+AFTER:  cohort_summary rounds=6972 parks=47543-47781 unpark_rounds=6858-6881 spin_hits=9969-10206  immediate_hits=38561-38794
+```
+
+**`rounds=6972` is IDENTICAL before and after.** `run_reduce_dispatch`'s
+parallel arm is NOT firing for this real model's dense-reduce shapes — every
+one of the 385 `reduce_f32_dense` calls per step still falls back to
+`run_reduce` directly (consistent with that node kind's own flat timing
+above). What changed is how the SAME 6972 rounds got serviced: `parks` +6.3%,
+`unpark_rounds` +5.6%, `immediate_hits` +13.5%, **`spin_hits` -31%** — fewer
+follower threads catch the next round by spinning, more of them give up and
+actually park (a syscall-cost sleep/wake round trip, far more expensive than
+a spin-hit). The mechanism this points to: `run_reduce_dispatch`'s own guard
+evaluation (`element_count`, `matmul_worker_count()`, a `split_aligned`
+attempt) now runs on the calling thread for every one of those 385 nodes
+before falling back to `run_reduce` — added CPU work on the thread that
+would otherwise open the NEXT cohort round sooner. That delay is long
+enough, over many nodes per step, to push a measurable share of the
+cohort's other threads past their spin budget into an actual park — and
+`reduce_matmul_quantized`'s rounds, opened later in the same step through
+the SAME session, inherit that cost. This is a cross-node-kind cohort
+contention effect from added per-node guard overhead, not a slowdown in the
+code this row's commits changed, and not more parallel work being done.
+**Residual: the guard-check cost itself was not directly cycle-counted this
+session** (would need a dedicated tick counter around
+`run_reduce_dispatch`'s pre-`session.run` guards specifically) — the
+park/spin/round evidence supports this reading but does not, on its own,
+fully rule out a second contributing effect. Flagged as residual, not
+asserted as fully closed.
+
+### Against the incumbent
+
+Baseline (ROW 68, this initiative's own prior measurement): llama.cpp CPU
+`-ngl 0 -t 8` **44.09 ms/token**. BEFORE this row's fix: 59.71-60.10
+ms/token measured, **1.36-1.363x behind llama.cpp** (matches ROW 68 within
+0.6%). AFTER: 63.50-63.573 ms/token, **1.441x behind** — the fix widens the
+gap to the incumbent rather than closing it. Neither before nor after beats
+llama.cpp on decode; this row does not change that verdict, it makes it
+worse.
+
+### Decision: ROLLBACK
+
+Per this initiative's own standing instruction ("if the fix does not help,
+say so and roll it back with a log row" — and this is worse than "does not
+help", it measurably hurts on both regimes that matter) — `a3ad87f` and
+`6d024f5` are reverted in this session, as their own commits
+(`git revert`, not a squash, so the revert is itself bisectable and the
+original attempt stays in history for anyone who wants to re-open it once
+`StagedRound` — the actual architecture fix ROW 68/89 both point at — is
+wired). ROW 89's docs commit is NOT reverted: it stands as the accurate
+record of what was tried, why, and the audit that motivated it — this row
+is the measurement ROW 89 explicitly deferred, and the correction on top of
+it, not a retraction of ROW 89's own (correctness-only) claims.
+
+### Gates, actual numbers, after the revert
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **359 passed** (366 minus the 7 tests the two reverted commits added) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed** (370 minus 7) |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** (unaffected — different crate) |
+| `cargo nextest run -p omega` | **53 passed** (unaffected) |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
+  cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+The second command's `token_breakdown`/`DIAG evaluate_quantized
+node_kind=`/`cohort_summary` lines are exactly this row's own artifact —
+re-run at `4bdbc93` before the revert (or against the revert's parent) to
+regenerate the AFTER column; at the revert commit itself (or `dbcaf19`) for
+BEFORE.
+
+### Rollback rows
+
+**This row's own rollback**: `a3ad87f` (`fix(tensor): split a dense reduce
+on its width axis when decode leaves m=1`) and `6d024f5` (`feat(tensor):
+dispatch dense reduce nodes across the cohort in evaluate_quantized`) —
+measured a net loss on both regimes that matter (prefill +14.9%, decode
++6.15%) with zero measured gain on the node kind they targeted. Reverted via
+`git revert`, own commits, this session.
