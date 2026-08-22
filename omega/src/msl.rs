@@ -290,7 +290,7 @@ pub fn emit(resolved: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> Result<Kerne
         entry,
         bindings: bindings(resolved),
         grid: GridSpec {
-            threads: grid_threads(resolved),
+            threads: grid_threads(resolved, &quantized),
             threadgroup_width: reduce_is_cooperative(resolved).then_some(SIMD_WIDTH),
         },
     })
@@ -484,7 +484,73 @@ pub(crate) fn gather_count(resolved: &BoundOp) -> usize {
 /// Total independent units of work `resolved` needs — see [`GridSpec`]'s doc
 /// for why this, unlike [`Kernel::source`], is genuinely a function of
 /// `resolved`'s concrete extents.
-fn grid_threads(resolved: &BoundOp) -> u64 {
+/// Output rows one SIMD group folds at once in the packed path — ggml's
+/// `N_R0_Q4_K`. The point is the ACTIVATION: its run of
+/// [`Q4K_BLOCK_ELEMENTS`]/[`SIMD_WIDTH`] values is loaded into registers
+/// once and reused across all four rows, so activation traffic falls 4x and
+/// the per-row work becomes one header decode plus the nibble extracts.
+const PACKED_ROWS_PER_GROUP: usize = 4;
+
+/// The one decision that both [`grid_threads`] and
+/// [`push_cooperative_reduce_body`] must reach identically: whether this
+/// bound op takes the row-blocked packed path. They compute different things
+/// from it (dispatch geometry, kernel body), and a disagreement would not
+/// fail to compile — it would silently fold the wrong rows. So it is decided
+/// once, here, from the bound layout.
+struct PackedRowBlock {
+    /// operand index of the packed weight
+    weight: usize,
+    /// operand index of the single non-packed operand (the activation)
+    other: usize,
+    reduce_dim: usize,
+}
+
+fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowBlock> {
+    if !reduce_is_cooperative(resolved) {
+        return None;
+    }
+    let BoundOpKind::Reduce {
+        keep: Keep::Reduce,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return None;
+    };
+    if quantized.len() != 2 {
+        return None;
+    }
+    let packed: Vec<usize> = quantized
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_packed)| is_packed.then_some(index))
+        .collect();
+    let [weight] = packed[..] else {
+        return None;
+    };
+    let other = 1 - weight;
+    let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
+        .filter(|dim| !output_axes.contains(dim))
+        .collect();
+    let [reduce_dim] = reduce_dims[..] else {
+        return None;
+    };
+    // the packed operand must be contiguous along the reduction dim (its
+    // super-blocks run along `k`), and the extent must be whole super-blocks
+    if resolved.operands()[weight].1.stride(reduce_dim) != 1 {
+        return None;
+    }
+    if !(resolved.extents[reduce_dim as usize] as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return None;
+    }
+    Some(PackedRowBlock {
+        weight,
+        other,
+        reduce_dim: reduce_dim as usize,
+    })
+}
+
+fn grid_threads(resolved: &BoundOp, quantized: &[bool]) -> u64 {
     match &resolved.kind {
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
@@ -496,7 +562,10 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
                 .iter()
                 .map(|dim| resolved.extents[*dim as usize])
                 .product();
-            if reduce_is_cooperative(resolved) {
+            if packed_row_block(resolved, quantized).is_some() {
+                // one SIMD group per PACKED_ROWS_PER_GROUP outputs
+                output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64) * SIMD_WIDTH
+            } else if reduce_is_cooperative(resolved) {
                 // one SIMD-group (SIMD_WIDTH lanes) per output element, not
                 // one thread — see `reduce_is_cooperative`'s doc.
                 output_total * SIMD_WIDTH
@@ -1261,6 +1330,141 @@ fn push_serial_reduce_body(
 /// Gather is out of scope here: [`reduce_is_cooperative`] never selects this
 /// path when the op gathers, so operand offsets are read straight off
 /// `operand_base`/`operand_strides` with no fetch/fault machinery.
+/// See [`PackedRowBlock`]. Emits the whole body for the row-blocked packed
+/// path; the caller has already emitted `output_index` (a GROUP index here)
+/// and `lane`.
+#[allow(clippy::too_many_arguments)]
+fn push_packed_row_blocked_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    rank: usize,
+    quantized: &[bool],
+    element_type: &str,
+) {
+    let Some(block) = packed_row_block(resolved, quantized) else {
+        unreachable!("push_packed_row_blocked_body is only called when packed_row_block matched")
+    };
+    let PackedRowBlock {
+        weight,
+        other,
+        reduce_dim,
+    } = block;
+    let rank_len = rank.max(1);
+    let operand_count = resolved.operands().len();
+    // seeded on lane 0 only, exactly as the general cooperative path does:
+    // the true seed folds in once and every other lane starts at the
+    // algebraic identity, so `simd_*` can combine them unconditionally.
+    let (init_expr, _) = fold_init_tokens(init);
+    let identity = cooperative_identity_token(reduce_op);
+    // ROW-BLOCKED PACKED PATH. One SIMD group folds PACKED_ROWS_PER_GROUP
+    // output rows at once so the activation's run of 8 values is loaded into
+    // registers ONCE and reused across all of them — ggml's `float
+    // sumf[nr0]` with `N_R0_Q4_K 4`. Combined with the super-block header
+    // amortization below, the per-element cost becomes one byte load, one
+    // mask, one fma (`docs/discipline.md` ROW 74).
+    {
+        let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
+        let rows = PACKED_ROWS_PER_GROUP;
+        source.push_str(&format!("    long group_first = output_index * {rows};\n"));
+        source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
+        source.push_str(&format!(
+            "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = (lane == 0u) ? ({init_expr}) : ({identity}); }}\n"
+        ));
+        source.push_str(&format!("    long weight_base[{rows}];\n"));
+        source.push_str(&format!("    long other_base[{rows}];\n"));
+        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str("        long flat = group_first + q;\n");
+        source.push_str("        long remaining_q = flat;\n");
+        source.push_str(&format!("        long coord_q[{rank_len}];\n"));
+        source.push_str(&format!("        for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"));
+        for (index, dim) in output_axes.iter().enumerate().rev() {
+            source.push_str(&format!(
+                "        coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
+            ));
+        }
+        source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
+        source.push_str(&format!("        long ob = u.operand_base[{other}];\n"));
+        for dim in 0..rank {
+            if dim == reduce_dim {
+                continue;
+            }
+            source.push_str(&format!(
+                "        wb += coord_q[{dim}] * u.operand_strides[{weight}][{dim}];\n"
+            ));
+            source.push_str(&format!(
+                "        ob += coord_q[{dim}] * u.operand_strides[{other}][{dim}];\n"
+            ));
+        }
+        source.push_str("        weight_base[q] = wb;\n");
+        source.push_str("        other_base[q] = ob;\n");
+        source.push_str("    }\n");
+        source.push_str(&format!(
+            "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
+        ));
+        source.push_str(&format!("    uint slot = (uint)lane * {run}u;\n"));
+        source.push_str(&format!("    {element_type} acts[{run}];\n"));
+        source.push_str(&format!(
+            "    for (int block_start = 0; block_start < (int)u.reduction_total; block_start += {Q4K_BLOCK_ELEMENTS}) {{\n"
+        ));
+        source.push_str(&format!("        for (int j = 0; j < {run}; ++j) {{\n"));
+        source.push_str(&format!(
+            "            acts[j] = in{other}[other_base[0] + (long)(block_start + (int)slot + j) * other_stride];\n"
+        ));
+        source.push_str("        }\n");
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str(&format!(
+            "            device const uchar *blk = in{weight} + (((int)weight_base[q] + block_start) / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES};\n"
+        ));
+        source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
+        source.push_str(&format!("            for (int j = 0; j < {run}; ++j) {{\n"));
+        source.push_str(&format!(
+            "                {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        source.push_str(&format!(
+            "                scratch[{weight}] = q4k_value(blk, slot + (uint)j, hdr);\n"
+        ));
+        source.push_str(&format!("                scratch[{other}] = acts[j];\n"));
+        let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
+        source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+        let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+        source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+        source.push_str("            }\n");
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+        let combine_fn = simd_combine_fn(reduce_op);
+        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str(&format!(
+            "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
+        ));
+        source.push_str("        long flat = group_first + q;\n");
+        source.push_str("        if (lane == 0u && flat < u.output_total) {\n");
+        source.push_str("            long remaining_q = flat;\n");
+        source.push_str(&format!("            long coord_q[{rank_len}];\n"));
+        source.push_str(&format!("            for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"));
+        for (index, dim) in output_axes.iter().enumerate().rev() {
+            source.push_str(&format!(
+                "            coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
+            ));
+        }
+        source.push_str("            long out_offset = u.out_base;\n");
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "            out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
+            ));
+        }
+        source.push_str("            out[out_offset] = reduced;\n");
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+    }
+}
+
+// the emitter threads a bound op's full shape (rank, axes, reduce op, init,
+// element type, codec flags) into one kernel body; splitting that into a
+// struct would relocate the arguments, not remove them.
 #[allow(clippy::too_many_arguments)]
 fn push_cooperative_reduce_body(
     source: &mut String,
@@ -1279,6 +1483,25 @@ fn push_cooperative_reduce_body(
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
     let operand_count = resolved.operands().len();
+
+    // the row-blocked packed path owns its own preamble: `output_index` is a
+    // GROUP index there, not an output index, so the guard below would be
+    // wrong for it.
+    if packed_row_block(resolved, quantized).is_some() {
+        source.push_str(&format!("    long output_index = (long)gid / {SIMD_WIDTH};\n"));
+        source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+        push_packed_row_blocked_body(
+            source,
+            resolved,
+            reduce_op,
+            init,
+            output_axes,
+            rank,
+            quantized,
+            element_type,
+        );
+        return;
+    }
 
     source.push_str(&format!("    long output_index = (long)gid / {SIMD_WIDTH};\n"));
     source.push_str("    if (output_index >= u.output_total) { return; }\n");

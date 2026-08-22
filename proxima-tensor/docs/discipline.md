@@ -5259,3 +5259,55 @@ number the instrument could not have produced.**
 
 One live defect: the packed kernel's remaining 3.5x. Nothing else measured
 above noise.
+
+## ROW 74 — row-blocking the packed kernel: 17x -> 3.5x -> 2.0x off llama.cpp Metal
+
+**Host:** Apple M1 Max. **Method:** ROW 71's, two sizes per arm at
+9.44/37.75 MB so the kernel dominates the ~0.28 ms per-forward intercept.
+
+### The arc, one defect at a time
+
+| packed Q4_K kernel | marginal bandwidth | element rate | vs llama.cpp's 381 G elem/s |
+|---|---|---|---|
+| per-element header decode (ROW 72 start) | 12.3 GB/s | 21.9 G | **17x** |
+| + super-block tiling (ROW 72) | ~61 GB/s | ~109 G | **3.5x** |
+| + 4-row blocking (this row) | **~108 GB/s** (90.4/108.5/132.1) | **~193 G** | **2.0x** |
+
+Wall on the 37.75 MB arm: 0.845/0.871/0.864 ms -> **0.634/0.650/0.654 ms**.
+
+### What row-blocking is
+
+One SIMD group now folds `PACKED_ROWS_PER_GROUP` = 4 output rows at once
+(`float sumf[4]`, ggml's `N_R0_Q4_K`). The activation's 8-value run is loaded
+into registers ONCE per super-block and reused across all four rows, so
+activation traffic falls 4x and each row costs one header decode plus eight
+nibble extracts.
+
+### The seam that made it safe
+
+`grid_threads` and the kernel body must agree on the blocking factor or the
+dispatch silently folds the wrong rows — it would not fail to compile, it
+would produce wrong numbers. So `packed_row_block(resolved, quantized)` is
+the single predicate both call: cooperative reduce, exactly two operands,
+exactly one packed, packed operand contiguous along the reduction dim,
+reduction extent a whole number of super-blocks. All decided at EMIT time
+from the bound layout, none at runtime.
+
+The device parity test caught the first attempt (a clobbered `sumf`
+declaration emitted two init loops and no declaration) as an MSL compile
+failure inside `execute`, which is exactly the failure mode a
+"looks-like-MSL" gate would have missed.
+
+### Where the GPU now stands
+
+| | measured | vs llama.cpp Metal |
+|---|---|---|
+| f32 kernel marginal | 336-385 GB/s | 1.6x FASTER than its 214.7 GB/s |
+| packed Q4_K element rate | ~193 G elem/s | **2.0x** off its 381 G elem/s |
+| per-forward intercept | ~0.28 ms | 1.6% of a 17.62 ms token |
+
+Remaining known amortization ggml has and this does not: the `dmin`
+correction. ggml accumulates `sumy` (the activation sums) during the
+register load and applies the min term as 4 MACs per super-block; this
+kernel still subtracts `header.minimum` once per element inside
+`q4k_value`.
