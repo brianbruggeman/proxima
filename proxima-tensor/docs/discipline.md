@@ -5934,9 +5934,368 @@ PROXIMA_MAX_TOKENS=16 cargo test -p proxima-model-interop \
 
 `gpu_exec` at 59.9% is the largest term and it has **no mechanism yet** — 590 ms
 across 1196 ops is 0.49 ms/op and nothing has said which ops. A 7B q4 decode
-reads ~4 GB of weights, which at this device's bandwidth is a low-tens-of-ms
-floor, so 590 ms is roughly 40–60x above that floor. Whether that is real kernel
+reads ~4 GB of weights. **RETRACTED from this row's first draft: a claim that
+this implies a "low-tens-of-ms floor at this device's bandwidth."** This box's
+memory bandwidth was never measured; that figure was derived by dividing an
+assumed working set by llama's token time and then reported as a hardware fact.
+A derived number may not carry a mechanism claim. What remains is ROW 83's
+comparison against our OWN measured kernel rate, which is admissible because it
+is a measurement. Whether that 590 ms is real kernel
 time or an artifact of the command buffer having to make 381 freshly-created
 buffers totalling 5.84 GB resident on every submit is **untested**. Those two
 terms are not independent, and the next row is the experiment that separates
 them.
+
+## ROW 83 — "we were close" was this log's own projection, not a measurement; and our kernel bench disagrees with our forward by 21x
+
+### The owner said we were nowhere near 1 tok/s. The record was opened rather than argued with.
+
+**Verified negative, across ALL branches and all history, not only HEAD:**
+
+```
+git log --all -S "metal_decode_summary" --oneline   -> 661a96c, 63c2f8b (both today)
+git log --all -S "tokens_generated=" -p             -> only today's additions
+git log --all -p | grep -B10 "stopped_by_eos"       -> only today's additions
+git log --all --diff-filter=A --name-only | grep -E "criterion|estimates|benchmark"
+                                                    -> omega/benches/metal_vs_cpu.rs, "Left UNRUN"
+```
+
+**No end-to-end Metal token rate exists anywhere in this repository's history
+before 2026-08-22.** ROW 82's 985.79 ms/token is the first and only one.
+
+- **ROWs 70-77 are ALL micro.** This file says so twice, itself, at line 5484
+  and line 5551: *"Every GPU number in ROWS 72-77 came from a synthetic
+  4096x4096 matvec."* The 17x -> 3.5x -> 2.0x -> 1.64x -> 1.49x chain is a
+  kernel arm race on a 37.75 MB synthetic matmul.
+- **ROW 78 contains no timing.** It is an emission gate: 1196/1196 ops, 0 failed.
+- **ROW 79 contains no timing.** It is a correctness gate: 3.1e-7 relative error
+  on a 2-layer 64-wide scaled model. A relative error is not a millisecond.
+
+### So where did "close" come from? From this file's own framing.
+
+ROW 79's closing table (line 5575-5582) reads:
+
+| | measured | vs llama.cpp Metal |
+|---|---|---|
+| f32 kernel marginal | 336-385 GB/s | 1.6x FASTER than its 214.7 |
+| packed Q4_K element rate | ~255 G elem/s | **1.49x** off its 381 |
+| per-forward intercept | ~0.28 ms | **1.6% of a 17.62 ms token** |
+
+Every cell is a micro number. The COLUMN HEADING is "vs llama.cpp Metal", and
+the last cell expresses our overhead as a percentage of a real llama token. A
+reader carries away "a token should land near 17.62 ms." It landed at 985.79.
+
+The caveat and the framing sit in the same document, a few lines apart, and
+contradict each other. **The caveat lost, because the table is what gets read.**
+Writing "this is synthetic" in prose does not undo putting the number in a
+column headed with the incumbent's name.
+
+**Rule this earns: a number may not appear in a column headed `vs <incumbent>`
+unless it was produced by the same KIND of run as the incumbent's number.** A
+kernel rate compares to a kernel rate; a token compares to a token. If the
+matching run does not exist, the cell reads `not measured` — never a ratio.
+
+### The 21x inside `gpu_exec`, from two of our own measured numbers
+
+- ROW 77 (line 5451): our packed Q4_K kernel, **143.5 GB/s marginal**,
+  two-size dissection, 3 runs.
+- ROW 78 (line 5497): the real forward's input set is **4.07 GB as q4_K**.
+- 4.07 / 143.5 = **~28 ms** predicted for a token's weight sweep.
+- ROW 82 measured `gpu_exec` at **590 ms**.
+
+**Our kernel benchmark and our forward disagree by ~21x**, before the 376 ms of
+upload — which no micro-bench ever included, because no micro-bench ever
+uploaded the same bytes twice.
+
+Both sides of that ratio are MEASURED, which is what makes the comparison
+admissible where the retracted bandwidth claim was not.
+
+Three candidates, none tested, named so the next row can kill them individually:
+
+1. Operands are re-read rather than swept once — total encoded operand bytes
+   would then far exceed 4.07 GB.
+2. The 1196 ops are not flat at 0.49 ms each; a few dominate, and they may not
+   be the matmuls.
+3. **The real forward emits a DIFFERENT kernel for its 216 `Q4_K` matmuls than
+   the one ROW 77 benchmarked.** If so, 1.49x never described this code path,
+   and every row from 72 to 77 measured something the forward does not run.
+
+Candidate 3 is settled by reading the emitted MSL for one real
+`blk.N.ffn_gate.weight` matmul and naming which kernel shape it got. That is a
+read, not a run, and it is the cheapest of the three.
+
+### A fifth instance of the N==0 class
+
+`omega/benches/metal_vs_cpu.rs` is committed and registered in
+`omega/Cargo.toml` under `required-features = ["metal"]`, and is marked
+**"Left UNRUN"**. It is the one artifact in the tree built to compare our
+forward against the CPU on this axis, and it has never executed. Prior
+instances: `cargo test --doc` exiting 0 on an empty match; `nextest -p <crate>`
+running 0 tests behind features; 180 tutorial snippets no harness compiled; an
+orchestration loop over an empty array returning success. **A bench that exists
+and never ran emits the same signal as a bench that ran and passed: none.**
+
+## ROW 84 — resident blocks: the caller's own "this weight never changes" knowledge, handed back to the driver. `block_upload` 376 -> 2.5 ms/token; `gpu_exec` moved too, modestly
+
+**Host:** Apple M1 Max, release profile. **Repo:** `feat/tensor-consolidated`.
+**Load:** 1-min 4.75-9.15 across the three runs (elevated vs ROW 82's 5-6 —
+flagged, see CoV below).
+
+### Where the information was destroyed
+
+`proxima-model-interop/src/generate.rs`'s decode loop builds
+`named_blocks: Vec<(&str, QuantizedBlock)>` by pushing `self.weights.owned`
+and `self.weights.packed` (fixed for the caller's whole process — bound once
+in `LoadedModel::load`, never mutated again) FIRST, then `ids`/`eps`/
+`rope_cos`/`rope_sin` and the 96 KV-cache blocks (mutated every step) into
+the SAME flat vec (`generate.rs:523-537`, pre-fix line numbers). By the time
+that vec crosses into `omega::metal::execute_plan(plan, blocks:
+&[QuantizedBlock<'_>])`, every block is an anonymous `(NodeId, QuantizedBlock)`
+pair — the caller's own static/dynamic distinction is gone, and
+`upload_block_copy`'s per-call comment ("copying uploads are deliberately
+NOT cached") was applying a correctness rule that is right for KV/position
+data and wrong for weights, uniformly, because nothing at that point could
+tell the two apart.
+
+### The fix, and which binary question justified its shape
+
+**Reuse question 1 — can an existing primitive express this?** Yes, almost
+entirely: `omega::metal`'s own `NOCOPY_BUFFERS` thread_local (keyed by
+`(pointer, len)`, already caching the no-copy upload path across tokens) is
+the exact mechanism a copy-path cache needs. The only thing that did not
+exist was the CLASSIFICATION — nothing told the copy path which addresses
+were safe to trust past one call. That classification is the one new
+surface: [`Plan::mark_resident`] (`omega/src/metal.rs`), a method on the
+ALREADY-EXISTING `Plan` type, not a new type — it takes a caller-supplied
+`BTreeSet<&str>` of names and marks the matching block-input `NodeId`s,
+checked once per `Plan` against the program's own `Op::name`, never against
+bytes. A SEPARATE `RESIDENT_BUFFERS` map (not the shared `NOCOPY_BUFFERS`
+one) holds the copy-path cache, because the two rest on different soundness
+arguments (see the module doc's new "Resident blocks" section) and collapsing
+them into one lookup would have hidden that difference at the call site.
+
+**Reuse question 2 — what can a caller do that they could not before?**
+Before: `runtime.evaluate(&self.program, &symbols, &named_blocks, &roots)` —
+every block re-copied every token, no way to say otherwise. After:
+`runtime.evaluate(&self.program, &symbols, &named_blocks, &roots,
+&resident_names)` — the caller now tells the driver which named inputs are
+its own static weights, and the driver skips re-copying them. The two call
+sites are NOT the same line; this is a real capability, not a relocation.
+
+**Why NOT key on name, per this task's binding constraint:** the 96 KV-cache
+blocks keep stable NAMES across tokens while their CONTENT changes every
+step (`LayerCache::append` only grows). `mark_resident` uses name only to
+decide, ONCE per `Plan`, whether a `NodeId` is EVER eligible; the actual
+per-token cache key is still `(pointer, len)` on the ALREADY-EXISTING
+`Plan::mark_resident`/`RESIDENT_BUFFERS` pair. For `self.weights.owned`/
+`packed`, `(pointer, len)` is invariant for the process's whole life —
+sound by construction, not by luck. For anything NOT in `resident_names`
+(`ids`/`eps`/`rope_cos`/`rope_sin`/KV blocks), the resident cache is never
+even consulted — behavior there is BYTE-IDENTICAL to before this row.
+
+Blast radius, by design: zero existing call sites of `metal::plan`/
+`metal::execute`/`metal::plan_named`/`metal::execute_plan_named`/
+`backend::plan_named`/`backend::execute_plan_named` changed signature —
+`Plan` gained a field defaulted to empty and a new method; every existing
+test in `omega/tests/*.rs` compiles unchanged. Only `generate.rs`'s own
+`BackendRuntime::evaluate` (both `metal` and non-`metal` cfg arms, to keep
+one shared signature) gained the `resident_names` parameter, and only its
+one call site changed.
+
+### Allocation budget
+
+Setup path (once per `Plan`): `mark_resident`'s `BTreeSet<NodeId>` -- O(number
+of block-input nodes), bounded by the program (391). Hot path (steady token):
+**zero new allocations** -- a resident HIT is a `BTreeMap::get` + `Retained`
+clone (refcount bump, no heap alloc); a resident MISS (paid exactly once per
+weight, ever) is the same `newBufferWithBytes_length_options` copy the code
+already made unconditionally before this row.
+
+### Before / after — `block_upload` and `gpu_exec`, steady decode token (`new_count=1`), n=45 (15 tokens x 3 release runs)
+
+| term | BEFORE (ROW 82) | AFTER | delta |
+|---|---|---|---|
+| `block_upload_ms` min/**median**/max | 367.37 / **376.08** / 433 | 0.390 / **2.454** / 4.520 | **-153x** |
+| `gpu_exec_ms` min/**median**/max | 578.18 / **590.03** / 604 | 498.46 / **570.65** / 807.48 | **-3.3% median** |
+| `step_wall_ms` min/**median**/max | — / **985.79** / — | 518.02 / **588.56** / 825.67 | **-40.3% median** |
+
+CoV: `block_upload_ms` 38.57% (absolute values near a millisecond, so
+percentage noise is large on a small base — the 153x reduction itself is
+not in question, every one of the 45 samples is under 5 ms against a 367+ ms
+floor). `gpu_exec_ms` 14.96%, `step_wall_ms` 14.54% — both ABOVE the 5%
+threshold, so the range is reported, not the point estimate. One outlier
+drives most of it: run2's step=3 read 825.67 ms against that run's own
+median of 598.14 (run1: 518-528 ms tight; run3: 587-606 ms tight) — box load
+was 4.75-9.15 across the three runs, higher than ROW 82's quiet 5-6, and is
+the most likely explanation. Flagged, not explained away.
+
+### Which outcome happened for `gpu_exec`: it MOVED, modestly, and did not close the 21x
+
+`gpu_exec` dropped from a 590.03 ms median to 570.65 ms — real, present in
+every run's own median (run1 ~505, run2 ~540-560 outside the one spike, run3
+~590), consistent with the brief's hypothesis that part of the 590 ms was
+the command buffer making 381 freshly-created buffers resident on every
+submit. It is NOT the dominant effect: `gpu_exec` remains 400-450 ms above
+the ROW 83 kernel-bench-derived ~28 ms floor even after upload collapsed to
+near-zero. That gap is ROW 85's subject, not this row's — this row's scope is
+the upload path, and it is now, honestly, a small piece of the 985 ms total,
+not the dominant one `gpu_exec` still is.
+
+### The three upload counters, and bytes/token
+
+Steady-token pattern, 33 of 45 samples exactly (the other 12 differ only by
+how many of the 96 growing KV-cache blocks happened to land on a page
+boundary at their current length — itself a real, harmless no-copy hit, not
+a resident one):
+
+```
+nocopy_uploads=10 copying_uploads=100 nocopy_reuses=10 resident_uploads=0 resident_reuses=281
+```
+
+`resident_uploads=0, resident_reuses=281` on EVERY steady token after the
+first (N=45/45, zero exceptions) is the direct witness the fix engaged: all
+281 misaligned static-weight blocks are served from `RESIDENT_BUFFERS`
+without a single re-copy. The FIRST token (prefill, `new_count=31`, cold
+cache) shows the one-time cost instead: `resident_uploads=281,
+resident_reuses=0, block_upload_ms=8229.715` — paid once, not per token,
+folded into the one-time setup cost this initiative already tracks
+separately (ROW 82's "one-time setup" row).
+
+`block_upload_bytes` still reports ~5.85 GB on every token (`5848777224` at
+step=1) — that counter is a NOMINAL per-position byte count
+(`block_byte_len` times one call per named block), not a measurement of
+bytes physically copied, and it does not change with this fix by design (it
+is the same total the program declares regardless of cache hits). The REAL
+bytes moved is what `resident_uploads`/`resident_reuses` report: 0 blocks
+copied, 281 blocks reused, every steady token.
+
+**KV-cache upload bytes/token still grows, exactly as it must:**
+`8126464 -> 8388608 -> ... -> 11796480`, `+262144` every one of the 15
+steady tokens in run1 (and identically in run2/run3) — unchanged from ROW
+82, because KV names are deliberately never in `resident_names`. If this had
+gone flat, the cache would be serving stale K/V and the generated text would
+have drifted; it did not.
+
+### Generated text — byte-identical across all three runs and against ROW 81's CPU-parity baseline
+
+```
+"Here is a simple Python function that returns the nth Fibonacci number"
+```
+
+### Gates
+
+| unit | features | N |
+|---|---|---|
+| omega | default (`std,metal,cpu`) | **53 passed** |
+| proxima-tensor | `std,instrument` | **363 passed** |
+| proxima-model-interop | `metal,instrument` | **24 passed** |
+
+clippy `-D warnings` clean on `omega --features std,cpu,metal` (all targets,
+including the new `real_forward_packed_probe` example).
+
+**Re-prove command (gate 16):**
+
+```
+cargo nextest run -p omega
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features metal,instrument
+PROXIMA_MAX_TOKENS=16 cargo test -p proxima-model-interop \
+  --release --features metal,instrument --lib -- --ignored --nocapture \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+
+### Rollback log
+
+None. One tweak (the resident-block cache), measured, kept. No prior attempt
+in this row was tried and reverted — the design questions in the brief
+(reuse-question 1/2, the name-vs-address soundness argument) were resolved
+by reading and reasoning about the existing `NOCOPY_BUFFERS` cache BEFORE
+writing code, not by trying and rolling back an unsound version. That is a
+choice to record honestly, not a discipline shortcut: the unsound
+alternative (cache the copy path keyed on address alone, no residency
+classification) was never implemented or measured, because the KV-cache
+address-reuse hazard it would create was provable by inspection (a fresh
+`ids_f32`/`Vec` allocation can legitimately land at a freed same-size
+address between tokens) rather than needing a run to discover.
+
+## ROW 85 — settling ROW 83's candidate 3: 193 of 225 real Q4_K matmuls DO take the row-blocked kernel; the 32 that don't are `attn_output`, not "everything"
+
+**Method:** `omega/examples/real_forward_packed_probe.rs` (new, read+emit
+only — no GPU, no GGUF file, mirrors `metal::prepare`'s exact `bind` ->
+`correct_packed_matmul_layouts` sequence before calling the same public
+`omega::emit` the driver calls) marks every one of the 225 real matmul-weight
+names (`attn_q`/`attn_k`/`attn_v`/`attn_output`/`ffn_gate`/`ffn_up`/
+`ffn_down` x 32 layers + `output.weight`) as `Q4_K`, then greps each emitted
+kernel's SOURCE for the row-blocked call site (`q4k_run8(blk`) versus the
+generic scalar call site (`q4k_element(in`) — the call sites, not the bare
+function names, since both helper functions' DEFINITIONS are always part of
+the emitted prelude regardless of which one a given reduce body calls.
+
+### A retraction, inside the same investigation
+
+My own first run of this probe, WITHOUT `correct_packed_matmul_layouts`
+applied, reported **0 of 225 row-blocked, 225 generic** — every packed
+operand's stride at its own reduce dimension was un-corrected (e.g. `4096`
+instead of `1`), which `packed_row_block`'s condition 6 rejects. That result
+was **wrong**, not because the code was mismeasured but because the probe
+skipped a post-pass `omega::metal::prepare` always runs. Fixed by reading
+`metal.rs:664-665` and mirroring it exactly; retracted here rather than
+reported, per this file's own "a fixed bug is not a footnote" standard.
+
+### The corrected result
+
+```
+matmul weight names=225 resolved to q4k_operands=225
+reduce ops with a packed operand: 225 (row_blocked=193 generic_scalar=32)
+```
+
+**193 of 225 (85.8%) DO take the row-blocked `q4k_run8` kernel** ROW 77
+measured at 143.5 GB/s. The 32 that fall back are structurally identified,
+not a sample: `attn_output` (`wo`) is the only matmul per layer whose reduce
+FOLDS THREE axes into one output (`extents=[1,8,4,128,4096]`,
+`output_axes=[0,4]` -> reduce dims `[1,2,3]` = kv-head-group x query-group x
+head_dim), and `packed_row_block`'s condition 5 (`reduce_dims.len() == 1`)
+rejects any reduce that is not a single axis. 32 layers x 1 `attn_output`
+each = 32 — exactly the count observed; `attn_q`/`attn_k`/`attn_v` (single
+reduce dim each, 96 ops) and `ffn_gate`/`ffn_up`/`ffn_down` (single reduce
+dim each, 96 ops) plus `output.weight` (1 op) = 193, also exact.
+
+First generic-scalar kernel body confirmed the per-element read the
+row-blocked path exists to avoid:
+
+```
+scratch[1] = q4k_element(in1 + (walk1 / 256) * 144, (uint)(walk1 % 256));
+```
+
+inside the reduce's inner loop — one super-block header decode PER ELEMENT,
+the ROW 72 "before" shape, for every `attn_output` matmul in the real
+forward.
+
+### What this does and does not settle about the 21x
+
+**Settled:** candidate 3 from ROW 83 is FALSE AS STATED ("the real forward
+emits a different kernel... for its 216 Q4_K matmuls" — plural, all of
+them). It is true for exactly one matmul kind out of seven, 32 of 225 ops.
+ROW 77's 143.5 GB/s DOES describe most of this code path.
+
+**Not settled:** `attn_output`'s weight tensor is the SAME size as
+`attn_q`'s (embedding x embedding, 4096x4096 each) and only 1 of 7 matmul
+kinds per layer — a back-of-envelope byte share of roughly 7-8% of one
+layer's matmul weight bytes (`attn_q`+`attn_output` at 4096x4096 each,
+`attn_k`+`attn_v` at 4096x1024 each, `ffn_gate`+`ffn_up`+`ffn_down` at
+4096x14336 each) — so a 32/225 op-count share is NOT the same number as its
+BYTE or TIME share, and neither was measured here. Candidates 1 (operand
+re-read) and 2 (per-op time bucketing) from ROW 83 remain fully open; this
+row narrows candidate 3 from "the whole forward" to "one specific matmul
+shape," it does not close the 21x.
+
+### Gate
+
+Read-plus-emit only; no existing test suite exercises this new example.
+`cargo run -p omega --example real_forward_packed_probe --features metal`
+exits 0 and asserts `reduce_with_packed_operand != 0` (a degenerate-probe
+guard, N==0 would be RED). Re-provable now:
+
+```
+cargo run -p omega --example real_forward_packed_probe --features metal
+```
