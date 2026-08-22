@@ -192,7 +192,7 @@ use proxima_tensor::{
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 
 use crate::error::EmitError;
-use crate::msl::{gather_count, reduction_dims};
+use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reduction_dims};
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
 use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
@@ -231,8 +231,10 @@ type DeviceAndQueue = (
 );
 
 thread_local! {
-    /// Compiled pipelines, keyed by kernel source, for the lifetime of the
-    /// thread rather than of one [`execute`] call.
+    /// Compiled pipelines, keyed by [`kernel_cache_key`]'s cheap structural
+    /// fingerprint (not [`Kernel::source`] — deriving that string is exactly
+    /// the cost this cache exists to avoid on a hit), for the lifetime of
+    /// the thread rather than of one [`execute`] call.
     ///
     /// This was per-call, which meant EVERY `execute` compiled every kernel
     /// from MSL source before dispatching it. A serving loop runs the same
@@ -1290,25 +1292,34 @@ fn compile_pipeline(
         })
 }
 
+/// Resolves `bound`'s compiled pipeline against `cache_key`
+/// ([`kernel_cache_key`]) rather than [`Kernel::source`] — a hit never builds
+/// the MSL source text at all, only a genuine miss calls [`emit`] to render
+/// it and compile. See this module's `ROW 92`/`ROW 93` discipline-log entries
+/// for the measured cost `emit` paid on every call, hit or miss, before this
+/// split existed.
 fn pipeline_for(
     device: &ProtocolObject<dyn MTLDevice>,
-    kernel: &Kernel,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    cache_key: &str,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(&kernel.source).cloned()) {
+    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
         return Ok(pipeline);
     }
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
-    let pipeline = compile_pipeline(device, kernel)?;
+    let kernel = emit(bound, packed_operands)?;
+    let pipeline = compile_pipeline(device, &kernel)?;
     #[cfg(feature = "instrument")]
     {
         counter!(PIPELINE_MISSES, 1);
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
     }
     PIPELINE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(kernel.source.clone(), pipeline.clone());
+        cache.borrow_mut().insert(cache_key.to_string(), pipeline.clone());
     });
     Ok(pipeline)
 }
@@ -1355,6 +1366,21 @@ pub static BLOCK_UPLOAD_BYTES: Counter = Counter::new("omega.metal.block_upload_
 pub static OP_SETUP_CALLS: Counter = Counter::new("omega.metal.op_setup_calls");
 #[cfg(feature = "instrument")]
 pub static OP_SETUP_TICKS: Counter = Counter::new("omega.metal.op_setup_ticks");
+/// ROW 93's split of ROW 92's "inside-backend residual": the whole
+/// [`pipeline_for`] call (cache lookup on a hit, lookup+compile on a miss),
+/// distinct from `EMIT_TICKS` (now the cheap `kernel_cache_key`/
+/// `kernel_dispatch_shape` pair, no MSL text) and from
+/// `PIPELINE_COMPILE_TICKS` (the compile-only sub-span that fires on a miss).
+#[cfg(feature = "instrument")]
+pub static PIPELINE_LOOKUP_CALLS: Counter = Counter::new("omega.metal.pipeline_lookup_calls");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_LOOKUP_TICKS: Counter = Counter::new("omega.metal.pipeline_lookup_ticks");
+/// ROW 93's split of ROW 92's residual, part two: `setComputePipelineState`
+/// + `bind_buffers` + `dispatch`, `encode_op`'s three remaining calls.
+#[cfg(feature = "instrument")]
+pub static ENCODE_DISPATCH_CALLS: Counter = Counter::new("omega.metal.encode_dispatch_calls");
+#[cfg(feature = "instrument")]
+pub static ENCODE_DISPATCH_TICKS: Counter = Counter::new("omega.metal.encode_dispatch_ticks");
 #[cfg(feature = "instrument")]
 pub static GPU_EXEC_CALLS: Counter = Counter::new("omega.metal.gpu_exec_calls");
 #[cfg(feature = "instrument")]
@@ -1385,6 +1411,10 @@ pub struct MetalStageTotals {
     pub block_upload_bytes: u64,
     pub op_setup_calls: u64,
     pub op_setup_ticks: u64,
+    pub pipeline_lookup_calls: u64,
+    pub pipeline_lookup_ticks: u64,
+    pub encode_dispatch_calls: u64,
+    pub encode_dispatch_ticks: u64,
     pub gpu_exec_calls: u64,
     pub gpu_exec_ticks: u64,
     pub readback_calls: u64,
@@ -1431,6 +1461,10 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         block_upload_bytes: BLOCK_UPLOAD_BYTES.snapshot_and_reset(),
         op_setup_calls: OP_SETUP_CALLS.snapshot_and_reset(),
         op_setup_ticks: OP_SETUP_TICKS.snapshot_and_reset(),
+        pipeline_lookup_calls: PIPELINE_LOOKUP_CALLS.snapshot_and_reset(),
+        pipeline_lookup_ticks: PIPELINE_LOOKUP_TICKS.snapshot_and_reset(),
+        encode_dispatch_calls: ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+        encode_dispatch_ticks: ENCODE_DISPATCH_TICKS.snapshot_and_reset(),
         gpu_exec_calls: GPU_EXEC_CALLS.snapshot_and_reset(),
         gpu_exec_ticks: GPU_EXEC_TICKS.snapshot_and_reset(),
         readback_calls: READBACK_CALLS.snapshot_and_reset(),
@@ -1815,13 +1849,13 @@ fn buffer_for(
 
 fn bind_buffers(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    kernel: &Kernel,
+    bindings: &[Binding],
     device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
     output: &Retained<ProtocolObject<dyn MTLBuffer>>,
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
     fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<(), MetalError> {
-    for (index, binding) in kernel.bindings.iter().enumerate() {
+    for (index, binding) in bindings.iter().enumerate() {
         let buffer = match binding {
             Binding::Input(node) | Binding::Indices(node) => buffer_for(device_buffers, *node)?,
             Binding::Output(_) => output.clone(),
@@ -1889,13 +1923,26 @@ fn encode_op(
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
-    let kernel = emit(bound, packed_operands)?;
+    // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
+    // `emit`'s work -- structural fingerprint, bindings, grid -- with no MSL
+    // body text rendered. On a pipeline-cache HIT (the steady-decode case,
+    // `plan_hits`/`gpu_exec`'s own row) `emit` itself is never called; only a
+    // genuine miss inside `pipeline_for` pays for the full render + compile.
+    let cache_key = kernel_cache_key(bound, packed_operands)?;
+    let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands)?;
     #[cfg(feature = "instrument")]
     {
         counter!(EMIT_CALLS, 1);
         counter!(EMIT_TICKS, elapsed_ticks(emit_started));
     }
-    let pipeline = pipeline_for(device, &kernel)?;
+    #[cfg(feature = "instrument")]
+    let pipeline_started = read_ticks();
+    let pipeline = pipeline_for(device, bound, packed_operands, &cache_key)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(PIPELINE_LOOKUP_CALLS, 1);
+        counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
+    }
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
     let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
@@ -1910,9 +1957,23 @@ fn encode_op(
         counter!(OP_SETUP_TICKS, elapsed_ticks(op_setup_started));
     }
 
+    // ROW 92 named this residual (`omega/src/metal.rs:1873-1908` at that
+    // row's line numbers) as four uncounted Metal API calls: `pipeline_for`'s
+    // own lookup (now `PIPELINE_LOOKUP_TICKS` above), `setComputePipelineState`,
+    // `bind_buffers`, `dispatch` -- the three below, wrapped together since
+    // none does per-op device work heavy enough to need its own counter, and
+    // splitting them finer would cost more ticks reading the clock than the
+    // calls themselves take.
+    #[cfg(feature = "instrument")]
+    let encode_dispatch_started = read_ticks();
     encoder.setComputePipelineState(&pipeline);
-    bind_buffers(encoder, &kernel, device_buffers, &output, &uniforms, fault.as_ref())?;
-    dispatch(encoder, &pipeline, kernel.grid);
+    bind_buffers(encoder, &bindings, device_buffers, &output, &uniforms, fault.as_ref())?;
+    dispatch(encoder, &pipeline, grid);
+    #[cfg(feature = "instrument")]
+    {
+        counter!(ENCODE_DISPATCH_CALLS, 1);
+        counter!(ENCODE_DISPATCH_TICKS, elapsed_ticks(encode_dispatch_started));
+    }
 
     device_buffers.insert(bound.node, output);
     Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))

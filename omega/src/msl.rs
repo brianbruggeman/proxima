@@ -481,17 +481,22 @@ impl PackedCodec {
 /// before Q6_K support existed.
 pub type PackedOperands = BTreeMap<NodeId, PackedCodec>;
 
-pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kernel, EmitError> {
-    validate(resolved)?;
-    let entry = entry_name(resolved);
-    // one codec slot per operand, resolved ONCE here rather than re-asked at
-    // each of the five read sites: which of this op's operands is a packed
-    // buffer (and which codec) rather than a flat element array.
-    let quantized: Vec<Option<PackedCodec>> = resolved
+/// One codec slot per operand: which of `resolved`'s operands is a packed
+/// buffer (and which [`PackedCodec`]) rather than a flat element array.
+/// Shared by [`emit`] and the cheap pre-compile helpers below so the three
+/// never re-derive it differently.
+fn operand_codecs(resolved: &BoundOp, packed_operands: &PackedOperands) -> Vec<Option<PackedCodec>> {
+    resolved
         .operands()
         .iter()
         .map(|(node, _, _)| packed_operands.get(node).copied())
-        .collect();
+        .collect()
+}
+
+pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kernel, EmitError> {
+    validate(resolved)?;
+    let entry = entry_name(resolved);
+    let quantized = operand_codecs(resolved, packed_operands);
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
@@ -512,6 +517,82 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
             threadgroup_width: reduce_is_cooperative(resolved).then_some(SIMD_WIDTH),
         },
     })
+}
+
+/// Cheap structural identity for the kernel [`emit`] would produce from
+/// `resolved` — built without ever rendering the MSL body text, so a caller
+/// can decide whether a pipeline compile is needed before paying for one.
+/// Must distinguish anything [`emit`]'s `source` could differ on:
+/// [`entry_name`] already carries rank / output-rank / operand-count / body /
+/// reduce-op / keep / init / gather shape; this adds three axes `entry_name`
+/// does NOT cover:
+///
+/// - [`type_token`]'s "half" vs "float" split — every dtype `emit` accepts
+///   collapses to one of those two declarations.
+/// - Per operand, which [`PackedCodec`] (if any) it reads through, AND
+///   whether the op takes the row-blocked packed-matmul path
+///   ([`packed_row_block`]) — that gate reads CONCRETE extents/strides, not
+///   just op structure, so two ops agreeing on every field above can still
+///   emit different bodies if only one of them clears it.
+/// - For a `Reduce`, `output_axes`' own EXACT ORDERED sequence, not just its
+///   length: `render_reduce`/`render_scan` bake the literal axis index tied
+///   to each `output_extents`/`operand_strides` uniform slot straight into
+///   the source text (e.g. `coord_q[{dim}] = ... u.output_extents[{index}]`),
+///   so two folds sharing every field above but keeping a DIFFERENT axis SET
+///   (or the same set in a different order) still emit different source.
+///   `reduce_dims` needs no separate entry: it is `(0..rank)` minus
+///   `output_axes` as a SET, always ascending, so `rank` + this exact
+///   sequence already pins it down.
+///
+/// # Errors
+/// Propagates [`type_token`]'s unsupported-dtype rejection — the same gate
+/// [`emit`] enforces before ever building a kernel.
+pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<String, EmitError> {
+    let quantized = operand_codecs(resolved, packed_operands);
+    let mut key = entry_name(resolved);
+    key.push('_');
+    key.push_str(type_token(resolved.node, resolved.dtype)?);
+    for codec in &quantized {
+        key.push(match codec {
+            Some(PackedCodec::Q4K) => '4',
+            Some(PackedCodec::Q5K) => '5',
+            Some(PackedCodec::Q6K) => '6',
+            None => 'f',
+        });
+    }
+    key.push(if packed_row_block(resolved, &quantized).is_some() { 'B' } else { 'S' });
+    if let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind {
+        key.push_str("_ax");
+        for axis in output_axes {
+            key.push('_');
+            key.push_str(&axis.to_string());
+        }
+    }
+    Ok(key)
+}
+
+/// The dispatch-time shape of `resolved`'s kernel — buffer bindings and
+/// thread count — without rendering any MSL body text. Cheap on every call
+/// regardless of pipeline-cache hit or miss: [`emit`]'s `source`/`entry`
+/// fields are needed only on a genuine cache miss (see
+/// `crate::metal::encode_op`).
+///
+/// # Errors
+/// Propagates [`validate`]'s structural rejection — the same gate [`emit`]
+/// enforces before ever building a kernel.
+pub(crate) fn kernel_dispatch_shape(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Result<(Vec<Binding>, GridSpec), EmitError> {
+    validate(resolved)?;
+    let quantized = operand_codecs(resolved, packed_operands);
+    Ok((
+        bindings(resolved),
+        GridSpec {
+            threads: grid_threads(resolved, &quantized),
+            threadgroup_width: reduce_is_cooperative(resolved).then_some(SIMD_WIDTH),
+        },
+    ))
 }
 
 // `SIMD_WIDTH` moved to `crate::sized::SIMD_WIDTH` (the build-time floor's
@@ -1035,13 +1116,22 @@ fn entry_name(resolved: &BoundOp) -> String {
             reduce_op,
             init,
             keep,
+            output_axes,
             ..
         } => {
             let body = body_token(resolved.element_body());
             let kind = keep_token(*keep);
             let reduce_body = op_token(*reduce_op);
             let init = init_token(*init);
-            format!("omega_{kind}_r{rank}_n{operand_count}_{body}_{reduce_body}_{init}")
+            // `rank` alone does not fix the output/reduce split -- two folds
+            // over the same total rank can keep a different number of axes
+            // (e.g. one output axis folding three vs one folding one), which
+            // sizes `output_extents`/`reduction_extents` differently in
+            // `render_reduce`'s own uniform struct. Without `output_rank`
+            // here, two such ops would share this name despite emitting
+            // different source -- see `distinct_output_rank_at_same_total_rank_yields_distinct_entry_names`.
+            let output_rank = output_axes.len();
+            format!("omega_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}")
         }
         // no operand count, no body: an `Iota`'s whole structure is its
         // rank (always 1 in practice, since `Op::Iota` resolves one
@@ -2620,6 +2710,229 @@ mod tests {
         assert_eq!(kernel.grid.threads, 10);
     }
 
+    /// A plain, unfused `Reduce` (identity element body, `Add`/`Zero`) over a
+    /// 3D input, keeping exactly `output_rank_axes` of its 3 iteration axes
+    /// and folding the rest — the minimal-pair generator ROW 93's
+    /// `kernel_cache_key` regression test needs: two calls with the SAME
+    /// `rank` (3) and operand count (1) but a DIFFERENT `output_rank_axes.len()`
+    /// share every field `entry_name` recorded before this row (rank, operand
+    /// count, body, reduce op, keep, init) while `render_reduce` still sizes
+    /// `output_extents`/`reduction_extents` differently for each — proving
+    /// `output_axes.len()` had to join the key, not just decorate a doc-comment.
+    fn rank3_identity_sum_op(output_rank_axes: &[u16]) -> BoundOp {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(2), Extent::Static(2), Extent::Static(2)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, output_rank_axes)),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("rank3 identity sum infers");
+        bind(&program, &shapes, &[])
+            .expect("rank3 identity sum lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted")
+    }
+
+    #[test]
+    fn distinct_output_rank_at_same_total_rank_yields_distinct_cache_keys_and_source() {
+        let keeps_two_axes = rank3_identity_sum_op(&[0, 1]);
+        let keeps_one_axis = rank3_identity_sum_op(&[0]);
+
+        assert_eq!(keeps_two_axes.extents.len(), keeps_one_axis.extents.len(), "same total rank");
+        assert_eq!(
+            keeps_two_axes.operands().len(),
+            keeps_one_axis.operands().len(),
+            "same operand count"
+        );
+
+        let empty = BTreeMap::new();
+        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty).expect("cache key builds");
+        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty).expect("cache key builds");
+        assert_ne!(
+            key_two_axes, key_one_axis,
+            "a coarser key would let a 1-output-axis fold hit the 2-output-axis pipeline"
+        );
+
+        let source_two_axes = emit(&keeps_two_axes, &empty).expect("emits").source;
+        let source_one_axis = emit(&keeps_one_axis, &empty).expect("emits").source;
+        assert_ne!(
+            source_two_axes, source_one_axis,
+            "output_extents/reduction_extents array sizes must differ in the rendered source"
+        );
+    }
+
+    /// The regression this row's first cut of `kernel_cache_key` actually
+    /// shipped with (caught by `omega::metal_parity
+    /// attention_block_spec_parity_matches_within_epsilon` and
+    /// `omega::backend_parity the_wrapper_agrees_with_itself_across_cpu_and_metal`
+    /// going from PASS to FAIL against a real, unrelated forward): two folds
+    /// can share `rank` AND `output_axes.len()` (so the SAME "how many axes
+    /// this key" check the prior test guards would still pass both) while
+    /// keeping a DIFFERENT axis SET or the same set in a DIFFERENT ORDER --
+    /// `render_reduce`/`push_cooperative_reduce_body` bake the literal `dim`
+    /// tied to each `u.output_extents[index]` slot straight into the source,
+    /// so either change alone must also change the key.
+    #[test]
+    fn distinct_output_axis_set_at_the_same_output_rank_yields_distinct_cache_keys_and_source() {
+        let keeps_first_and_second = rank3_identity_sum_op(&[0, 1]);
+        let keeps_first_and_third = rank3_identity_sum_op(&[0, 2]);
+        let empty = BTreeMap::new();
+
+        assert_eq!(
+            keeps_first_and_second.extents.len(),
+            keeps_first_and_third.extents.len(),
+            "same total rank"
+        );
+        let key_first_second = kernel_cache_key(&keeps_first_and_second, &empty).expect("cache key builds");
+        let key_first_third = kernel_cache_key(&keeps_first_and_third, &empty).expect("cache key builds");
+        assert_ne!(
+            key_first_second, key_first_third,
+            "output_axes.len() alone cannot tell {{0,1}} from {{0,2}}"
+        );
+
+        let source_first_second = emit(&keeps_first_and_second, &empty).expect("emits").source;
+        let source_first_third = emit(&keeps_first_and_third, &empty).expect("emits").source;
+        assert_ne!(
+            source_first_second, source_first_third,
+            "the reduce dim, and every operand_strides[..][dim] read, must differ"
+        );
+    }
+
+    #[test]
+    fn output_axis_order_at_the_same_axis_set_yields_distinct_cache_keys_and_source() {
+        let ascending = rank3_identity_sum_op(&[0, 1]);
+        let descending = rank3_identity_sum_op(&[1, 0]);
+        let empty = BTreeMap::new();
+
+        let key_ascending = kernel_cache_key(&ascending, &empty).expect("cache key builds");
+        let key_descending = kernel_cache_key(&descending, &empty).expect("cache key builds");
+        assert_ne!(
+            key_ascending, key_descending,
+            "the SEQUENCE order of output_axes selects which u.output_extents slot each dim reads"
+        );
+
+        let source_ascending = emit(&ascending, &empty).expect("emits").source;
+        let source_descending = emit(&descending, &empty).expect("emits").source;
+        assert_ne!(
+            source_ascending, source_descending,
+            "reversing output_axes must reverse which dim each output_extents index feeds"
+        );
+    }
+
+    #[test]
+    fn distinct_packed_codec_on_the_same_shape_yields_distinct_cache_keys_and_source() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let mut q6k = BTreeMap::new();
+        q6k.insert(weight_node, PackedCodec::Q6K);
+
+        let key_q4k = kernel_cache_key(&bound, &q4k).expect("cache key builds");
+        let key_q6k = kernel_cache_key(&bound, &q6k).expect("cache key builds");
+        assert_ne!(
+            key_q4k, key_q6k,
+            "entry_name alone cannot see which codec an operand reads through"
+        );
+
+        let source_q4k = emit(&bound, &q4k).expect("emits").source;
+        let source_q6k = emit(&bound, &q6k).expect("emits").source;
+        assert_ne!(source_q4k, source_q6k, "Q4_K and Q6_K unpack through different MSL functions");
+    }
+
+    #[test]
+    fn distinct_dtype_on_the_same_shape_yields_distinct_cache_keys_and_source() {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("f32 elementwise infers");
+        let f32_bound = bind(&program, &shapes, &[])
+            .expect("f32 elementwise lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted");
+
+        let mut half_program = Vec::new();
+        let half_source = append(
+            &mut half_program,
+            Op::Input {
+                dtype: DType::Float16,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut half_program,
+            Op::Elementwise {
+                dtype: DType::Float16,
+                body: ScalarOp::Tanh,
+                operands: vec![(half_source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let half_shapes = infer(&half_program, &[]).expect("f16 elementwise infers");
+        let f16_bound = bind(&half_program, &half_shapes, &[])
+            .expect("f16 elementwise lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted");
+
+        let empty = BTreeMap::new();
+        let key_f32 = kernel_cache_key(&f32_bound, &empty).expect("cache key builds");
+        let key_f16 = kernel_cache_key(&f16_bound, &empty).expect("cache key builds");
+        assert_ne!(key_f32, key_f16, "entry_name does not encode dtype on its own");
+
+        let source_f32 = emit(&f32_bound, &empty).expect("emits").source;
+        let source_f16 = emit(&f16_bound, &empty).expect("emits").source;
+        assert_ne!(source_f32, source_f16, "float vs half declarations must differ in source");
+    }
+
+    #[test]
+    fn same_structure_different_extents_share_one_cache_key() {
+        let small = elementwise_tanh_op(4);
+        let large = elementwise_tanh_op(4096);
+        let empty = BTreeMap::new();
+
+        assert_eq!(
+            kernel_cache_key(&small, &empty).expect("cache key builds"),
+            kernel_cache_key(&large, &empty).expect("cache key builds"),
+            "a cache keyed on structure must still hit across concrete extents"
+        );
+    }
+
     #[test]
     fn fused_matmul_op_emits_two_inputs_a_reduction_loop_and_a_row_by_col_grid() {
         let bound = matmul_op(4, 3, 5);
@@ -2629,14 +2942,14 @@ mod tests {
         );
         let kernel = emit(&bound, &BTreeMap::new()).expect("matmul emits");
 
-        assert_eq!(kernel.entry, "omega_reduce_r3_n2_multiply_add_zero");
+        assert_eq!(kernel.entry, "omega_reduce_r3_o2_n2_multiply_add_zero");
         assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
         assert!(matches!(kernel.bindings[2], Binding::Output(_)));
         assert!(matches!(kernel.bindings[3], Binding::Uniforms));
         assert!(
             kernel
                 .source
-                .contains("kernel void omega_reduce_r3_n2_multiply_add_zero")
+                .contains("kernel void omega_reduce_r3_o2_n2_multiply_add_zero")
         );
         assert!(kernel.source.contains("reduction_total"));
         assert!(kernel.source.contains("(scratch[0] * scratch[1])"));
@@ -2662,7 +2975,7 @@ mod tests {
         let bound = cumsum_op(8);
         let kernel = emit(&bound, &BTreeMap::new()).expect("cumsum emits");
 
-        assert_eq!(kernel.entry, "omega_scan_r1_n1_identity_add_zero");
+        assert_eq!(kernel.entry, "omega_scan_r1_o1_n1_identity_add_zero");
         assert!(kernel.source.contains("inner_len"));
         assert!(kernel.source.contains("out_running"));
         assert_eq!(
