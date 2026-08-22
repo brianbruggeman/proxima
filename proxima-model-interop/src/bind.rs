@@ -444,11 +444,15 @@ pub(crate) fn matmul_weight_dims(name: &str, architecture: &ModelArchitecture) -
     None
 }
 
-/// `Some(owned f32 buffer)` if `block` is `Q5_K`/`Q6_K` -- the two codecs
-/// [`bind_matmul_weight`] packs zero-copy that `omega::metal`'s driver has
-/// no unpack kernel for (`unsupported_gpu_codec`, `omega/src/metal.rs`) --
-/// `None` for every other variant, which a caller already has a device path
-/// for (`Float32` uploads directly, `Q4_K` has a Metal kernel).
+/// `Some(owned f32 buffer)` if `block` is `Q5_K` -- the one remaining codec
+/// [`bind_matmul_weight`] packs zero-copy that `omega::metal`'s driver still
+/// has no unpack kernel for (`unsupported_gpu_codec`, `omega/src/metal.rs`)
+/// -- `None` for every other variant, which a caller already has a device
+/// path for (`Float32` uploads directly, `Q4_K`/`Q6_K` each have a Metal
+/// kernel). `Q6_K` was in this same "dequantize before Metal" bucket until
+/// omega's row-blocked packed kernel widened to cover it
+/// (`omega/src/msl.rs`'s `Q6K_UNPACK_MSL`) -- it now stays packed all the
+/// way to the GPU like `Q4_K` does, at roughly a quarter the bytes.
 ///
 /// The dequantized bytes come back in GGUF's on-disk `[out, in]` row-major
 /// order, the same as every other packed codec -- `bind_matmul_weight`'s
@@ -475,7 +479,7 @@ pub(crate) fn dequantize_packed_for_metal(
     block: &proxima_tensor::cpu::QuantizedBlock<'_>,
     architecture: &ModelArchitecture,
 ) -> Result<Option<Vec<f32>>, InteropError> {
-    use proxima_gguf::quant::{q5_k, q6_k};
+    use proxima_gguf::quant::q5_k;
 
     let flat = match block {
         proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => {
@@ -488,16 +492,8 @@ pub(crate) fn dequantize_packed_for_metal(
             q5_k::dequantize(bytes, &mut output)?;
             output
         }
-        proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => {
-            let block_count = q6_k::blocks_for_bytes(bytes.len()).ok_or(proxima_gguf::quant::QuantError::InputNotBlockMultiple {
-                codec: "q6_k",
-                found: bytes.len(),
-                block_bytes: q6_k::BLOCK_BYTES,
-            })?;
-            let mut output = vec![0.0f32; q6_k::elements_for_blocks(block_count)];
-            q6_k::dequantize(bytes, &mut output)?;
-            output
-        }
+        // `Q6_K` stays packed -- omega's Metal driver has a row-blocked
+        // unpack kernel for it now, the same as `Q4_K`.
         _ => return Ok(None),
     };
 

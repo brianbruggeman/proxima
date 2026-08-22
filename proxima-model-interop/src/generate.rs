@@ -410,9 +410,12 @@ fn select_backend(config: &ServingConfig) -> Backend {
     if config.gpu_layers == GPU_LAYERS_ALL { Backend::Metal } else { Backend::Cpu }
 }
 
-/// The 9-or-so `Q5_K`/`Q6_K` weights [`bind_all_weights`] packs zero-copy
+/// The 8-or-so `Q5_K` weights [`bind_all_weights`] packs zero-copy
 /// (`bind_matmul_weight`) cannot cross to Metal packed -- `omega::metal`'s
-/// driver has no unpack kernel for either codec. Converted once per
+/// driver still has no unpack kernel for that codec (`Q6_K`'s lone weight,
+/// `output.weight`, DOES cross packed now -- `dequantize_packed_for_metal`
+/// returns `None` for it, and `resolve_packed_block` below leaves it
+/// unchanged). Converted once per
 /// [`LoadedModel::generate_with_serving_config`] call, before the decode
 /// loop starts, rather than once per token: the packed bytes never change
 /// across a call, so re-dequantizing them every step would pay real,
