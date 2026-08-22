@@ -165,7 +165,7 @@ use proxima_telemetry::metric::Counter;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
-    Shapes, TensorError, bind, infer, resolve_named_blocks,
+    Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -496,7 +496,20 @@ fn prepare(
         .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
         .map(|(node, _)| *node)
         .collect();
-    reject_unsupported_gpu_dtype(program, &q4k_operands)?;
+    // every packed codec's declared dtype is the "these are bytes" marker
+    // `reject_unsupported_gpu_dtype`'s own doc already claims as its
+    // exemption's rationale -- not just `Q4_K`'s. Using `q4k_operands` alone
+    // here would reject a `Q5_K`/`Q6_K`/`Q8_0` weight on a dtype mismatch
+    // before it ever reaches `unsupported_gpu_codec`'s codec-naming error,
+    // which is the wrong reason to fail: the real gap is "no unpack kernel",
+    // not "not float".
+    let packed_operand_nodes: BTreeSet<NodeId> = block_node_ids(program)
+        .iter()
+        .zip(blocks.iter())
+        .filter(|(_, block)| !matches!(block, QuantizedBlock::Float32(_)))
+        .map(|(node, _)| *node)
+        .collect();
+    reject_unsupported_gpu_dtype(program, &packed_operand_nodes)?;
 
     let root = program
         .len()
@@ -535,7 +548,15 @@ fn prepare(
         }
     }
 
-    let resolved = bind(program, &shapes, &effective_outputs)?;
+    let mut resolved = bind(program, &shapes, &effective_outputs)?;
+    // `bind`'s own `layout_of` assumes every operand is stored row-major in
+    // its DECLARED axis order -- true for every f32 buffer this driver reads
+    // (bound-time-transposed to match, `bind_matmul_weight`'s own doc), but
+    // never true for a packed `Q4_K` weight, whose bytes are GGUF's native
+    // `[out, in]` regardless of what the declared shape says. Left
+    // uncorrected, every quantized matmul reads its weight through the wrong
+    // stride -- see `correct_packed_matmul_layouts`'s own doc.
+    correct_packed_matmul_layouts(&mut resolved, &q4k_operands);
     let retires = bound_op_retirement(&resolved, &effective_outputs);
     let index_nodes = index_node_ids(program);
 
