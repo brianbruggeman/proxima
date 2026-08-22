@@ -1218,3 +1218,144 @@ fn upload_path_totals_report_after_the_full_parity_suite() {
         "no real upload_block call was observed by this binary at all"
     );
 }
+
+/// The claim the shader landed without: that Metal, handed PACKED `Q4_K`
+/// bytes, computes the same matmul the CPU computes from those same bytes
+/// dequantized to `f32` first.
+///
+/// The oracle is deliberately the DEQUANTIZED-then-`f32` CPU path, not
+/// `evaluate_quantized`. The CPU's quantized path routes through
+/// `matmul_q4k_q8k_f32`, which quantizes the ACTIVATION to `Q8_K` as a
+/// second lossy step; the shader does an exact unpack against an untouched
+/// `f32` activation. Comparing against `evaluate_quantized` would fold that
+/// unrelated activation-quantization error into this gate and force a
+/// tolerance loose enough to hide a real unpack bug.
+///
+/// The weight buffer is never materialized as `f32` on the GPU side: the
+/// bytes go up as bytes and `q4k_element` unpacks at the read. That is the
+/// whole reason this path is worth having — a 7B `Q4_K_S` sweep is 3.784 GB
+/// against 14.5 GB as `f16`, and decode is bandwidth-bound.
+#[test]
+fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    let rows: u32 = 5;
+    let blocks_per_row = 3usize;
+    let k = QK_K as u32 * blocks_per_row as u32;
+
+    let activation: Vec<f32> = random_vec(13, k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let weight_f32: Vec<f32> = random_vec(17, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+    for (row_f32, row_blocks) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+    }
+
+    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
+    for (row_blocks, row_f32) in weight_blocks
+        .chunks_exact(blocks_per_row * BLOCK_BYTES)
+        .zip(dequantized.chunks_exact_mut(k as usize))
+    {
+        dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
+    }
+
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let metal = omega::execute(
+        &packed_program,
+        &[],
+        &[
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ],
+        &[packed_sum],
+    )
+    .expect("metal executes a packed q4_k matmul on a real device");
+
+    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::Float32);
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu matmul evaluates");
+
+    let actual = metal.root();
+    let expected = cpu.root();
+    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "metal produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude;
+    eprintln!(
+        "packed-q4k metal vs dequantized-f32 cpu: rows={rows} k={k} \
+         max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    // both sides fold the SAME dequantized values; the only spread is f32
+    // summation order across 768 terms, so this is a float-noise bound, not
+    // a quantization-error bound. A wrong unpack moves it by orders of
+    // magnitude, not by ulps.
+    assert!(
+        relative < 1e-5,
+        "packed unpack disagrees with the dequantized reference: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// `[rows, k] x [k, 1] -> [rows, 1]`, with the weight operand's declared
+/// dtype as a parameter: `UInt8` marks "this operand arrives as packed
+/// bytes" (the same marker `cpu::quantized_matmul_program` uses), `Float32`
+/// builds the identical program for the dequantized oracle.
+fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(1)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("q4k_matmul".into()),
+        }),
+    );
+    (program, sum)
+}
