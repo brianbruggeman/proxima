@@ -54,6 +54,7 @@
 //! [`BoundOpBuilder::finish`] flushes it).
 
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -1045,6 +1046,102 @@ fn row_major_strides(shape: &[u64]) -> Vec<i64> {
         accumulator *= *extent as i64;
     }
     strides
+}
+
+/// Rewrites a packed matmul weight operand's [`Layout`] from `layout_of`'s
+/// default -- row-major over the operand's own DECLARED axis order -- to the
+/// layout its packed bytes actually have on disk.
+///
+/// `layout_of` has no way to get this right on its own: it sees only the
+/// operand's declared shape, the axis order every OTHER consumer of that
+/// node agrees the buffer is stored in. For a plain `f32` operand that
+/// agreement is real, because the buffer was transposed at bind time to
+/// match it (`proxima-model-interop::bind_matmul_weight`'s `F32` fallback,
+/// `transpose_out_in_to_in_out`). A packed `Q4_K`/`Q5_K`/`Q6_K` weight is the
+/// one case that cannot be transposed to match: a k-quant super-block spans
+/// 256 contiguous elements of the contraction axis, so transposing it would
+/// mean dequantizing first -- defeating the entire reason to keep it packed.
+/// So its declared shape and its physical bytes disagree, and the `Layout`
+/// must be rebuilt to describe the bytes, not the declaration.
+///
+/// GGUF's own on-disk convention for any 2-D weight is `[out_dim, in_dim]`
+/// row-major (`out_dim` rows, each a contiguous run of `in_dim` elements) --
+/// true of a packed operand regardless of how many logical axes either side
+/// is split into on the consuming einsum (`wq`'s `heads`/`head_dim` split is
+/// still one flat `embedding x (heads*head_dim)` buffer underneath).
+/// `output_axes` on a bound reduce already names which of `extents`'s
+/// iteration axes are the "out" side; the complement is "in". Within each
+/// side, relative axis order is preserved from the declared shape -- only
+/// which side sits inside (contiguous) and which sits outside flips.
+///
+/// A no-op for any operand not in `packed_operands`, and for any `BoundOp`
+/// that is not a `Reduce` (a packed weight only ever reaches this crate as
+/// one operand of a `Multiply`-then-`Add` fold -- see
+/// `proxima-model-interop::bind_matmul_weight`'s own doc).
+pub fn correct_packed_matmul_layouts(resolved: &mut [BoundOp], packed_operands: &BTreeSet<NodeId>) {
+    for bound in resolved.iter_mut() {
+        let extents = bound.extents.clone();
+        let BoundOpKind::Reduce {
+            operands, output_axes, ..
+        } = &mut bound.kind
+        else {
+            continue;
+        };
+        for (node, layout, _lookup) in operands.iter_mut() {
+            if packed_operands.contains(node) {
+                *layout = native_packed_layout(&extents, output_axes.as_slice(), layout);
+            }
+        }
+    }
+}
+
+/// The stride computation [`correct_packed_matmul_layouts`] applies per
+/// operand: `extents`/`output_axes` come from the containing `Reduce`, and
+/// `declared` is `layout_of`'s original (wrong-for-packed) `Layout`, read
+/// only for its `base` and for which axes it left at stride 0 (a batch axis
+/// this operand broadcasts across, e.g. sequence position -- must stay
+/// broadcast rather than gain a stride from this reconstruction).
+fn native_packed_layout(extents: &[u64], output_axes: &[u16], declared: &Layout) -> Layout {
+    let rank = extents.len();
+    let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, rank);
+
+    let mut in_dim = 1i64;
+    for axis in 0..rank as u16 {
+        if !output_axes.contains(&axis) {
+            in_dim *= extents[axis as usize] as i64;
+        }
+    }
+
+    // the reduction ("in") axes: innermost group, relative order preserved,
+    // the LAST one contiguous -- exactly `row_major_strides` restricted to
+    // this axis subset.
+    let mut accumulator = 1i64;
+    for axis in (0..rank as u16).rev() {
+        if output_axes.contains(&axis) {
+            continue;
+        }
+        strides[axis as usize] = accumulator;
+        accumulator *= extents[axis as usize] as i64;
+    }
+
+    // the output axes: outermost group, relative order preserved, scaled by
+    // the whole reduction group's flat width since it sits inside them.
+    let mut accumulator = in_dim;
+    for axis in output_axes.iter().rev() {
+        strides[*axis as usize] = accumulator;
+        accumulator *= extents[*axis as usize] as i64;
+    }
+
+    for axis in 0..rank {
+        if declared.stride(axis as u16) == 0 {
+            strides[axis] = 0;
+        }
+    }
+
+    Layout {
+        base: declared.base,
+        strides,
+    }
 }
 
 /// Batch driver: computes liveness once, then streams every expression
