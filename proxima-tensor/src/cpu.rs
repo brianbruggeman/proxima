@@ -2850,11 +2850,12 @@ impl CohortRound<TensorError> for TransposeRound<'_> {
 /// [`run_staged_batch`] is not worth calling: a run of one node has nothing
 /// to amortize a round-open against, so [`evaluate_quantized_with_scratch`]
 /// falls through to the plain per-node call for it, exactly as
-/// `cohort-staged-graph` off always does. Not yet threaded through a
-/// build-time sizing config (principle 12) — recorded as a residual in
-/// `docs/discipline.md` ROW 97 rather than left silent.
+/// `cohort-staged-graph` off always does. Threaded through the build-time
+/// sizing config (principle 12) as of ROW 98 -- see
+/// `crate::sized::STAGED_BATCH_MIN_LEN`'s own doc for the measurement
+/// record.
 #[cfg(feature = "cohort-staged-graph")]
-const STAGED_BATCH_MIN_LEN: usize = 2;
+use crate::sized::STAGED_BATCH_MIN_LEN;
 
 /// One codec's row-dot kernel: `(weight_row, activation_q8k) -> dot`. Every
 /// `Q4_K`/`Q5_K`/`Q6_K` kernel (`dot_q4k_q8k`/`dot_q5k_q8k`/`dot_q6k_q8k`)
