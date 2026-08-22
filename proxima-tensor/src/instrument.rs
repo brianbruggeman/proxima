@@ -507,6 +507,11 @@ pub struct MatmulDispatchTotals {
     pub position_loop_iters: u64,
     pub reduce_quantized_calls: u64,
     pub q4k_transpose_ticks: u64,
+    pub staged_round_ticks: u64,
+    pub staged_transpose_ticks: u64,
+    pub staged_macs: u64,
+    pub staged_nodes: u64,
+    pub staged_quantize_ticks: u64,
 }
 
 #[must_use]
@@ -535,6 +540,11 @@ pub fn matmul_dispatch_totals() -> MatmulDispatchTotals {
         position_loop_iters: MATMUL_POSITION_LOOP_ITERS.get(),
         reduce_quantized_calls: MATMUL_REDUCE_QUANTIZED_CALLS.get(),
         q4k_transpose_ticks: MATMUL_Q4K_TRANSPOSE_TICKS.get(),
+        staged_round_ticks: STAGED_MATMUL_ROUND_TICKS.get(),
+        staged_transpose_ticks: STAGED_MATMUL_TRANSPOSE_TICKS.get(),
+        staged_macs: STAGED_MATMUL_MACS.get(),
+        staged_nodes: STAGED_MATMUL_NODES.get(),
+        staged_quantize_ticks: STAGED_MATMUL_QUANTIZE_TICKS.get(),
     }
 }
 
@@ -563,6 +573,11 @@ pub fn reset_matmul_dispatch() {
     let _ = MATMUL_Q6K_CALL_TICKS.snapshot_and_reset();
     let _ = MATMUL_POSITION_LOOP_ITERS.snapshot_and_reset();
     let _ = MATMUL_REDUCE_QUANTIZED_CALLS.snapshot_and_reset();
+    let _ = STAGED_MATMUL_ROUND_TICKS.snapshot_and_reset();
+    let _ = STAGED_MATMUL_TRANSPOSE_TICKS.snapshot_and_reset();
+    let _ = STAGED_MATMUL_MACS.snapshot_and_reset();
+    let _ = STAGED_MATMUL_NODES.snapshot_and_reset();
+    let _ = STAGED_MATMUL_QUANTIZE_TICKS.snapshot_and_reset();
 }
 
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part
@@ -1067,6 +1082,43 @@ pub fn gather_distinct_rows(node: NodeId) -> u64 {
 /// dispatch counter sees it.
 pub static MATMUL_Q4K_TRANSPOSE_TICKS: Counter =
     Counter::new("proxima_tensor.matmul.q4k_transpose_ticks");
+
+// `cpu::run_staged_batch`'s own coverage of the matmul dispatch story
+// above: `run_reduce_quantized`'s counters (this whole section) only ever
+// see the unbatched matmul population (`node_kind=reduce_matmul_quantized`,
+// ROW98's own 65/225 per step) -- `MatmulStagePlan`'s dot calls run inside
+// a `StagedRound` chunk closure and never call `run_reduce_quantized` at
+// all, so before this counter existed the 160/225 folded matmul nodes
+// (ROW97, the DOMINANT node_kind bucket) had zero sub-attribution: only
+// `node_kind=staged_batch`'s own outer wall time, no split of quantize vs
+// kernel vs transpose inside it. `build_matmul_stage_plan`'s own quantize
+// call reuses `MATMUL_QUANTIZE_ACTIVATION_TICKS` directly (same semantic,
+// same call shape, just a second call site) so that counter's own meaning
+// stays "activation-quantize time across every matmul node this process
+// ran," not "...across only the unbatched ones." Round and transpose get
+// their own counters below rather than folding into the unbatched-only
+// `MATMUL_OWN_CHUNK_TICKS`/`MATMUL_Q4K_TRANSPOSE_TICKS` (Q4K-only by name)
+// because a staged round always contains only quantized-matmul stages
+// (ROW97's landed `is_staged_batch_eligible` restriction) but may mix
+// Q4K/Q5K/Q6K within one run, so a codec-specific name would misrepresent
+// what is inside it.
+pub static STAGED_MATMUL_ROUND_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_round_ticks");
+pub static STAGED_MATMUL_TRANSPOSE_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_transpose_ticks");
+pub static STAGED_MATMUL_MACS: Counter = Counter::new("proxima_tensor.matmul.staged_macs");
+pub static STAGED_MATMUL_NODES: Counter = Counter::new("proxima_tensor.matmul.staged_nodes");
+// deliberately its OWN counter, not a second call site into
+// `MATMUL_QUANTIZE_ACTIVATION_TICKS` -- an earlier version of this
+// instrumentation shared that counter across both call sites, and it broke
+// `matmul_split`'s own arithmetic: `bucket_ms` (`MATMUL_REDUCE_QUANTIZED_TICKS`)
+// is scoped to the unbatched population only, so a quantize counter mixing
+// in the staged population's calls no longer nests inside it, and
+// `quantize_ms + kernel_ms + transpose_ms` stopped summing anywhere near
+// `bucket_ms`. Keeping the two call sites' ticks in separate counters keeps
+// each of `matmul_split`'s own fields internally consistent (nested subsets
+// of that same line's own `bucket_ms`) and makes `matmul_split_staged`'s
+// quantize time an honest, separately-attributed figure instead of a silent
+// reinterpretation of what `quantize_activation_ms` used to mean.
+pub static STAGED_MATMUL_QUANTIZE_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_quantize_ticks");
 
 /// The cohort's own round-level forensics (`prime::os::cohort::diag`),
 /// re-exported so a consumer of this crate's `instrument` feature reads

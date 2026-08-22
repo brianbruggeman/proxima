@@ -8803,3 +8803,140 @@ The last command now reproduces the AFTER column by default (no extra feature fl
 ### Against the incumbent
 
 llama.cpp CPU `-ngl 0 -t 8`: **44.09 ms/token** (ROW 68, standing figure). This row's default-build decode: 55.553 ms/token mean (n=8) -- **1.260x behind** (previous default, feature off: 58.609 ms/token, 1.329x behind). The gap narrows by the same amount ROW 97 measured; production callers now get that narrowing without an opt-in flag. We still do not beat llama.cpp.
+
+## ROW 99 — full per-term attribution of the 55.5 ms token; the naive w1/w8 Amdahl fit is FALSIFIED by w2/w4; the 9.4 ms unowned gap is the non-matmul residual, unchanged since ROW 68
+
+**Headline, stated first: the unowned ~9.4 ms has a name and it is not new — it is ROW 68's own non-matmul residual (elementwise + per-node bookkeeping), measured today at ~9.9-11.5 ms across w=1..8, essentially the same absolute size ROW 68 found (11.85 ms) before any of ROW 91-98's matmul-side folding landed. Every ms of improvement since ROW 68 came from the matmul side; the non-matmul residual has not moved. No new fix is attempted this row: the split reconfirms ROW 68's already-twice-refuted root cause with fresh, 4-point, post-fold data — it does not name a new mechanism.** Host: Apple M1 Max, `uptime` 1-min load ranged 1.67-9.90 across this session's many short runs (each recorded per command; a sibling agent's own parallel `cargo nextest` run spiked the box to 1-min 80.03 mid-session — that window is excluded from every reported figure, verified by `ps aux` at the time). Repo: `feat/tensor-consolidated` @ `ee3f92f` + this row's own commit, release profile for every timed run (`cargo build --release --tests`), debug profile for build/clippy/nextest gates only.
+
+### What was added: three counters closing a real coverage gap, not a parallel mechanism
+
+Read before design (principle 6): `MATMUL_REDUCE_QUANTIZED_CALLS`/`_TICKS`, `MATMUL_Q4K_MACS`/`_CALL_TICKS`, `MATMUL_QUANTIZE_ACTIVATION_TICKS`, `MATMUL_Q4K_TRANSPOSE_TICKS` (`instrument.rs`, all pre-existing) are incremented ONLY inside `run_reduce_quantized` (`cpu.rs`) — the UNBATCHED matmul path, `node_kind=reduce_matmul_quantized`, 65/225 matmul nodes per step. `MatmulStagePlan`/`run_staged_batch` (ROW 97's own staged-fold path, `node_kind=staged_batch`, the DOMINANT 160/225 matmul nodes per step) calls `dot_fn_for`'s dot functions and `quantize_row_q8k_dispatch`/`transpose_wide_to_output` directly, through none of those counters — verified by grep, not assumed. Before this row, 71% of a step's own matmul-node population (by count) and ~63% of its own matmul-node wall time had ZERO sub-attribution: only the outer `node_kind=staged_batch` total, no split of quantize vs kernel vs transpose inside it.
+
+Reused: the exact `read_ticks`/`elapsed_ticks`/`counter!` mechanism every neighboring counter in the file already uses — same call shape, same "time once per call, never inside a ~1e9-iteration loop" discipline the module's own doc states. Added: `STAGED_MATMUL_ROUND_TICKS` (times `session.run(&round)` as a whole, the same granularity `MATMUL_OWN_CHUNK_TICKS` uses for the unbatched leader-claim call), `STAGED_MATMUL_TRANSPOSE_TICKS` (the post-round transpose loop), `STAGED_MATMUL_QUANTIZE_TICKS` (the per-node quantize call inside `build_matmul_stage_plan`), `STAGED_MATMUL_MACS`/`STAGED_MATMUL_NODES` (denominators for an ns/mac figure comparable to the unbatched arm's). **One design correction found by measurement, not reasoning about it:** the first version reused `MATMUL_QUANTIZE_ACTIVATION_TICKS` for the staged call site too (a "why mint two counters for the same semantic" instinct) — this broke `matmul_split`'s own nested-subset arithmetic (`quantize_ms` no longer summed anywhere near `bucket_ms`, since `bucket_ms` stayed unbatched-only while `quantize_ms` became a two-population mixture). `STAGED_MATMUL_QUANTIZE_TICKS` is its own counter for that reason, documented at the site so nobody re-tries the sharing.
+
+All four new counters are `#[cfg(feature = "instrument")]`-gated inside `#[cfg(feature = "cohort-staged-graph")]` code, identical to every neighboring diagnostic in the same function — zero cost in a non-instrument build, confirmed below by measuring that exact binary.
+
+### Task 1 — the attribution table, quiet cohort n=10 (23 decode steps each = 230 node-timed forward passes), summing to the measured step_wall_ms
+
+`PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8`, `--features std,instrument`, decode = mean of `token_breakdown` steps 1-23. Runs 6,8,9,10,11,12,13,14,15,16 of this session (load 1.72-8.14 throughout; one run at load ~10 in an earlier, separately-reported cohort was excluded here, not silently — see "what did NOT make the cut" below).
+
+| term | N/step | mean ms | min | max | CoV | % of step_wall |
+|---|---|---|---|---|---|---|
+| `staged_batch` (folded matmul, ROW97/98) | 160 | 29.0388 | 27.1070 | 31.9111 | 5.88% | 50.09% |
+| `reduce_matmul_quantized` (unbatched matmul) | 65 | 16.7465 | 16.3767 | 17.3481 | 2.30% | 28.89% |
+| `elementwise` | 547-771 (grows with `w`, see Task 2) | 4.1279 | 4.0733 | 4.2069 | 1.19% | 7.12% |
+| `reduce_f32_dense` | 385 | 3.9639 | 3.9502 | 3.9820 | 0.30% | 6.84% |
+| `loop_setup_ms` (cohort/session resolve, once/forward) | 1 | 1.6341 | 1.6153 | 1.6570 | 0.70% | 2.82% |
+| `loop_overhead_ms` (per-node alloc+bookkeeping outside `run_node_into`) | 1 | 1.4948 | 1.4830 | 1.5029 | 0.48% | 2.58% |
+| **residual A** (evaluate_ms - sum of the 7 rows above) | -- | 0.7020 | -- | -- | -- | 1.21% |
+| `resolve_ms` (`evaluate_quantized_named` preamble) | 1 | 0.0702 | 0.0691 | 0.0720 | 1.28% | 0.12% |
+| `constant`+`iota` | 39 | 0.0013 | -- | -- | -- | 0.002% |
+| `finish_ms` | 1 | 0.0485 | 0.0202 | 0.0960 | 50.0% | 0.08% |
+| `layer_cache_append_ms` (KV-cache host memcpy) | 1 | 0.0966 | 0.0680 | 0.1263 | 20.3% | 0.17% |
+| `greedy_pick_ms` | 1 | 0.0412 | 0.0404 | 0.0429 | 1.89% | 0.07% |
+| `build_position_inputs_ms`+`named_blocks_weights_ms`+`named_blocks_kv_ms`+`apply_serving_config_ms` | 1 each | 0.0064 | -- | -- | -- | 0.011% |
+| **residual B** (step_wall_ms - evaluate_ms - the 5 token_breakdown rows above) | -- | 0.0021 | -- | -- | -- | 0.004% |
+| **step_wall_ms (measured)** | -- | **57.9733** | 55.6490 | 61.5738 | 3.69% | **100%** |
+
+**N asserted, not RED**: every row above is the mean of 10 runs x 23 decode steps = 230 forward passes' own DIAG lines; `staged_batch`/`reduce_matmul_quantized`/`reduce_f32_dense`/`elementwise`/`constant`/`iota` counts are printed per step and verified constant across every one of the 230 (`count=160`/`65`/`385`/`547` respectively at `w=8`, confirmed by the parser asserting a single value across all 10 files, not averaged over a varying N).
+
+**Residual A** (0.702 ms, 1.21% of `evaluate_ms`) is present and of similar size (0.706-0.788 ms) at every one of `w=1,2,4,8` in Task 2's own sweep below — a small, structurally stable cost inside `evaluate_quantized_with_scratch` before its own `diag_setup_started` timer starts (buffer-table/free-list allocation, `quantized_weights` lookup construction) that this row did not further instrument, named rather than absorbed into an adjacent bucket. **Residual B** (0.002 ms) is noise-floor rounding across ~13 printed 3-decimal fields per step and is not treated as a finding.
+
+**What did NOT make the cut, reported not buried:** an earlier 5-run cohort this session (`decode_w8_n1..5`) was captured while the host briefly carried a WakaTime process at 94-97% CPU and 1-min load 9.6-10.4; its own decode mean was 68.6-78.7 ms/token, 20-40% above every other cohort this row measured. It is real data from a real run, but it is a different regime (a foreground process actively contending for cores, not the "quiet-ish desktop" this file's other rows measure against) and mixing it into the n=10 table above would inflate the mean without adding signal about the CODE's own behavior. Excluded from the table; not deleted from the session's own raw log.
+
+### Task 1, continued — inside the two matmul buckets: quantize / kernel / transpose
+
+The new counters expose this split, but only via a cross-run subtraction (`24-token cumulative - 1-token/prefill-only cumulative, /23`) since none of `matmul_split`'s fields reset per-step — the SAME fragile technique ROW 94 flagged for its own two-size marginal-difference probe. Measured directly, the **absolute** per-token figures from this subtraction carry high CoV (staged round: 5 runs, load 4.8-8.1, CoV 21.1%; unbatched bucket: CoV 9.19%) — both **above the 5% trust floor, reported as a finding, not rounded up.** The subtraction's own **proportions** (quantize/kernel/transpose as a fraction of their own three-way sum, computed per run before averaging) are far more stable (range under 1.5 percentage points across the same 5 runs) because host jitter affects all three terms inside one run together. Applying those stable proportions to this row's own robust absolute totals (the direct-measurement table above) gives an internally-consistent, honestly-labeled split:
+
+| bucket | quantize-activation | kernel/round compute | transpose |
+|---|---|---|---|
+| `staged_batch` (29.0388 ms) | ~0.82 ms (2.83%, range 2.20-3.67%) | ~27.57 ms (94.92%, range 93.53-95.98%) | ~0.66 ms (2.26%, range 1.82-2.81%) |
+| `reduce_matmul_quantized` (16.7465 ms) | ~0.71 ms (4.21%, range 3.95-4.48%) | ~15.87 ms (94.78%, range 94.48-95.11%) | ~0.17 ms (1.01%, range 0.93-1.06%) |
+| **combined** | **~1.53 ms (2.63% of step_wall)** | **~43.44 ms (74.94% of step_wall)** | **~0.82 ms (1.42% of step_wall)** |
+
+**Reading this honestly:** quantize-activation and transpose together are ~2.4 ms/token, 4.1% of the token — not a target. Kernel/round compute (~43.4 ms, 75% of the token) is genuine dot-product work already root-caused as compute-bound-on-unpack by ROW69-77; this row does not reopen that.
+
+### Task 2 — the scaling question, w=1/2/4/8, all four FRESH this session (none reused from ROW 68)
+
+**Every number below was measured this row, interleaved (`w=1,2,4,8` repeated x3, not blocked), `uptime` before every run (1.72-9.90 across the sweep, printed per run in the artifact).** ROW 68's own w=1 figure (192.8/187.6-188.9 ms) is NOT reused here — per this session's own instruction to treat any unrefreshed number as suspect, it was re-measured (189.36 ms in an earlier single sample, 190.53 ms mean in this sweep's own n=3 — both close to, but not identical to, ROW 68's own 187.6-188.9, a small but real difference: **the staged-round fold (`2ba55a2`/`a8ce8a8`) measurably touches w=1 too**, `node_staged_batch_ms` at w=1 being nonzero and nontrivial (113.6 ms) even though `build_matmul_stage_plan` returns `None` for every node at w=1 — the fold still wraps every matmul node's plain `run_node_into` call in a `StagedRound` container that does no real splitting, and that container is not free).
+
+| worker count (w) | step_wall_ms mean (n=3) | range | staged_batch | reduce_matmul_quantized | reduce_f32_dense | elementwise | loop_overhead |
+|---|---|---|---|---|---|---|---|
+| 1 | 190.5283 | 188.71-191.47 | 113.6349 | 66.2094 | 3.9681 | **2.7771** | 1.1684 |
+| 2 | 107.9707 | 107.01-109.76 | 61.1235 | 35.7866 | 3.9027 | 3.3578 | 1.1737 |
+| 4 | 76.6088 | 74.78-78.39 | 40.8651 | 24.1139 | 3.9548 | 3.7619 | 1.2955 |
+| 8 | 60.6000 | 57.05-65.17 | 31.3443 | 17.0519 | 3.9593 | **4.1306** | 1.4893 |
+
+**Per-term classification:**
+
+- **FLAT (pure serial, confirmed at all 4 points, not just the endpoints):** `reduce_f32_dense` (3.9027-3.9681 ms, a 1.7% spread across an 8x thread change — noise, not scaling), `loop_setup_ms` (1.61-1.65 ms flat), `resolve_ms` (0.070-0.072 ms flat). Combined flat cost: **~5.67 ms, present in full at every worker count.**
+- **SCALING but NOT cleanly 1/w (diminishing marginal return, not a clean halving):** `staged_batch` (113.63 -> 61.12 -> 40.87 -> 31.34; per-doubling ratios 1.859x, 1.496x, 1.304x — falling further from the ideal 2x at every step) and `reduce_matmul_quantized` (66.21 -> 35.79 -> 24.11 -> 17.05; ratios 1.850x, 1.484x, 1.414x). Whole-token matmul (both combined): 179.84 -> 96.91 -> 64.98 -> 48.40 ms, **3.716x over an 8x thread increase** — the dominant recoverable term, but never close to linear.
+- **WORSE with more workers (its own category, independently reconfirmed at 4 points, not just ROW 68's own 2):** `elementwise` rises MONOTONICALLY at every step (2.7771 -> 3.3578 -> 3.7619 -> 4.1306 ms, +48.7% from w=1 to w=8) and `loop_overhead_ms` also rises monotonically (1.1684 -> 1.1737 -> 1.2955 -> 1.4893 ms, +27.5%). Combined, these two terms cost **1.35 ms more at w=8 than at w=1** — the opposite of what adding threads should do to a fixed amount of work, exactly ROW 68's own "parked matmul workers interfering with a phase that is entirely serial" diagnosis, now independently reconfirmed with 2 additional interior points and post-fold code.
+
+**Whole-token scaling, this row's own fresh numbers:** 190.5283 / 60.6000 = **3.146x** over an 8x thread increase (vs the brief's stated 3.47x, itself computed from a mix of a fresh w=8 number and a stale w=1 number — this row's own fully-fresh ratio is lower still, meaning the gap to llama's own 4.03x, ROW 68's historical figure, not re-measured this session, is if anything WIDER than the brief assumed once both our own endpoints are refreshed).
+
+### The Amdahl two-point fit is FALSIFIED by the interior points
+
+Fitting `t(w) = S + P/w` from `w=1` (190.5283) and `w=8` (60.6000) alone: `S = 42.039 ms`, `P = 148.489 ms`. **This fit has zero degrees of freedom and cannot be tested by construction — exactly the trap named in this session's own correction.** Checked against the two points NOT used to fit it:
+
+| w | model prediction (`S+P/w`) | measured | residual | residual % |
+|---|---|---|---|---|
+| 2 | 116.284 | 107.971 | **-8.313** | **-7.7%** |
+| 4 | 79.161 | 76.609 | **-2.552** | **-3.3%** |
+
+**Both interior points are FASTER than the two-point model predicts, in the same direction, at both w=2 and w=4.** The naive `S=42.04 ms / P=148.49 ms` split is therefore not a trustworthy decomposition of this system's own behavior — the real curve bows below the two-point line, meaning some of what the endpoint-only fit calls "serial" actually gets partial benefit from additional threads between w=2 and w=8 (consistent with the per-term table: `staged_batch`+`reduce_matmul_quantized` do shrink somewhat at every step, just not at a clean 1/w rate, while only ~5.67 ms is genuinely flat). **By the same logic, llama's own `S=25.00/P=152.70` split (computed by the coordinator from its own two historical points, `w=1` 177.70 / `w=8` 44.09, ROW 68, not re-measured this session and with no interior points available to test it) is equally unfalsified and should not be treated as ground truth either** — it may be exactly as wrong as ours turned out to be, in either direction, and this row has no data to say which.
+
+### Where the 9.4 ms with no named owner actually lives
+
+Non-matmul total (`reduce_f32_dense` + `elementwise` + `loop_overhead_ms` + `loop_setup_ms` + `resolve_ms` + `finish_ms` + the small token_breakdown-level terms + residual A), this row's own fresh sweep:
+
+| w | non-matmul total (ms) | matmul total (ms) | step_wall (ms) |
+|---|---|---|---|
+| 1 | 9.90 | 179.84 | 190.53 (sum + residual B, matches within 0.8 ms) |
+| 8 | 11.47 | 48.40 | 60.60 (sum + residual B, matches within 0.7 ms) |
+
+**Non-matmul GREW by 1.57 ms going from 1 to 8 threads (driven entirely by `elementwise`+`loop_overhead`'s own "worse" category above), while matmul shrank 3.716x.** ROW 68 estimated llama's own equivalent non-matmul residual at "~2 ms" (its own row, an estimate stated there, **NOT re-measured this session — llama.cpp was not run this row, flagged as ASSUMED per principle 18**). Taking that figure at face value: our own non-matmul residual (11.47 ms at w=8, using this sweep's own host-loaded numbers, or ~12.19 ms using the quieter n=10 cohort's own figures — both in the same 11-12 ms band) minus llama's own assumed ~2 ms is **~9.5-10.2 ms** — the same order of magnitude as the stated 9.4 ms unowned gap, using the SAME mechanism ROW 68 already named (non-matmul residual), not a new one. **This is a re-confirmation with fresh, 4-point, post-ROW91-98 data that the unowned gap is not hiding inside the matmul kernel — the matmul kernel's own in-situ rate has been repeatedly measured and root-caused in ROW69-77/94; the unowned residual is where ROW 68 already said it was, and it has not moved.**
+
+### Task 3 — no fix attempted, per this row's own gate
+
+Per the task's own instruction ("do not fix anything the split has not named... if the remaining cost is genuine... say that and stop"): this row's split does not name a new mechanism. `elementwise` and `loop_overhead` getting WORSE with more workers is ROW 68's own root cause (parked-worker interference on a purely serial phase), and ROW 68's own two candidate fixes for exactly this (stop-parking via `PROXIMA_COHORT_SPIN_POLLS`, split-the-width-axis) are BOTH already REFUTED in this same file, 20-33% and 2x worse respectively — re-trying either is explicitly against this file's own precedent. ROW 96 additionally refuted the adjacent idea of folding non-matmul nodes into shared rounds the way ROW 97 folded matmul nodes (`rounds` rose 85%, not fell). **No new candidate survives this row's own evidence; nothing was attempted.**
+
+### Correctness
+
+Bit-exact across every one of this row's 20 timed runs (5 non-instrument, 3 prefill-only instrument, 5 24-token instrument at `w=8`, 12 in the `w=1/2/4/8` sweep, plus the 10-run quiet cohort): `generated_text` identical, `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` — one value across every run, verified by `sort -u` over all captured `decode_summary` lines returning exactly one line. Float reduction order unaffected: no arithmetic changed, only tick-timer reads and atomic counter increments around already-existing call boundaries.
+
+### Production (non-instrument) headline, separately confirmed
+
+The exact non-instrument release binary (`--features std`, no `instrument`), quiet host (load 1.67-2.87), n=5 24-token runs + n=3 prefill-only runs for subtraction: decode-only mean **53.854 ms/token** (CoV 1.21%, range 53.207-54.900) — **1.221x behind llama.cpp's 44.09 ms/token (gap 9.76 ms)**, slightly BETTER than the stated 55.553 ms baseline (itself an instrument-build measurement). This is not claimed as an improvement: no production code changed this row (the diff is instrument-gated counters only), and the difference is attributable to host loadout (this measurement's own quiet window vs whatever window produced 55.553) — reported because principle 18 requires the number, not the round-up.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **361 passed, 4 skipped** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed, 4 skipped** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** |
+| `cargo nextest run -p omega` | **73 passed, 1 skipped** |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
+
+### Rollback rows
+
+None. Every change this row is an additive, `instrument`-feature-gated counter (four new statics, four new struct fields, two new call-site timers, one new printed diagnostic line) — no production code path, allocation, or arithmetic changed. Confirmed by the non-instrument production measurement above showing no regression.
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings
+cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings
+cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings
+cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -- -D warnings
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo nextest run -p omega
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS={1,2,4,8} \
+  cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+The last command, swept over `PROXIMA_MATMUL_WORKERS` and with `PROXIMA_MAX_TOKENS=1` for the prefill-only subtraction baseline, reproduces every table in this row from `token_breakdown`/`DIAG evaluate_quantized`/`matmul_split`/`matmul_split_staged` lines. Dropping `,instrument` from `--features` reproduces the production headline (no `matmul_split`/`token_breakdown` output, `decode_summary`'s own `total_wall_clock_ms` only).
