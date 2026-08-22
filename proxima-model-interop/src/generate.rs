@@ -905,7 +905,10 @@ impl<'file> LoadedModel<'file> {
                     "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
                      emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
                      block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
-                     op_setup_calls={} op_setup_ms={:.3} gpu_exec_calls={} gpu_exec_ms={:.3} \
+                     op_setup_calls={} op_setup_ms={:.3} \
+                     pipeline_lookup_calls={} pipeline_lookup_ms={:.3} \
+                     encode_dispatch_calls={} encode_dispatch_ms={:.3} \
+                     gpu_exec_calls={} gpu_exec_ms={:.3} \
                      readback_calls={} readback_ms={:.3} readback_bytes={} \
                      nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
                      resident_uploads={} resident_reuses={}",
@@ -921,6 +924,10 @@ impl<'file> LoadedModel<'file> {
                     metal_stage.block_upload_bytes,
                     metal_stage.op_setup_calls,
                     ms(metal_stage.op_setup_ticks),
+                    metal_stage.pipeline_lookup_calls,
+                    ms(metal_stage.pipeline_lookup_ticks),
+                    metal_stage.encode_dispatch_calls,
+                    ms(metal_stage.encode_dispatch_ticks),
                     metal_stage.gpu_exec_calls,
                     ms(metal_stage.gpu_exec_ticks),
                     metal_stage.readback_calls,
