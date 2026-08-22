@@ -408,99 +408,17 @@ pub(crate) fn transpose_out_in_to_in_out(flat: &[f32], out_dim: usize, in_dim: u
     transposed
 }
 
-/// `bind_matmul_weight`'s own per-call-site `(out_dim, in_dim)` pair,
-/// recomputed here from `name` alone -- [`BoundWeights::packed`] keeps only
-/// the tensor's name and its packed bytes, not the shape that produced it,
-/// so a caller dequantizing one of those bytes back into a plain `f32`
-/// buffer (`dequantize_packed_for_metal`) needs its own way to recover the
-/// dims `transpose_out_in_to_in_out` requires. `None` for any name that is
-/// not one of [`bind_all_weights`]'s own `bind_matmul_weight` call sites
-/// (every `blk.{n}.attn_*`/`blk.{n}.ffn_*` weight, plus `output.weight`) --
-/// the only names [`dequantize_packed_for_metal`] ever sees, since
-/// `bind_dense`'s tensors never bind through the packed-Q5_K/Q6_K path
-/// (see that function's own doc).
-#[cfg(feature = "metal")]
-pub(crate) fn matmul_weight_dims(name: &str, architecture: &ModelArchitecture) -> Option<(usize, usize)> {
-    let embedding = architecture.embedding as usize;
-    let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
-    let feed_forward = architecture.feed_forward as usize;
-    let vocab = architecture.vocab as usize;
-
-    if name == "output.weight" {
-        return Some((vocab, embedding));
-    }
-    if name.ends_with("attn_q.weight") || name.ends_with("attn_output.weight") {
-        return Some((embedding, embedding));
-    }
-    if name.ends_with("attn_k.weight") || name.ends_with("attn_v.weight") {
-        return Some((kv_dim, embedding));
-    }
-    if name.ends_with("ffn_gate.weight") || name.ends_with("ffn_up.weight") {
-        return Some((feed_forward, embedding));
-    }
-    if name.ends_with("ffn_down.weight") {
-        return Some((embedding, feed_forward));
-    }
-    None
-}
-
-/// `Some(owned f32 buffer)` if `block` is `Q5_K` -- the one remaining codec
-/// [`bind_matmul_weight`] packs zero-copy that `omega::metal`'s driver still
-/// has no unpack kernel for (`unsupported_gpu_codec`, `omega/src/metal.rs`)
-/// -- `None` for every other variant, which a caller already has a device
-/// path for (`Float32` uploads directly, `Q4_K`/`Q6_K` each have a Metal
-/// kernel). `Q6_K` was in this same "dequantize before Metal" bucket until
-/// omega's row-blocked packed kernel widened to cover it
-/// (`omega/src/msl.rs`'s `Q6K_UNPACK_MSL`) -- it now stays packed all the
-/// way to the GPU like `Q4_K` does, at roughly a quarter the bytes.
-///
-/// The dequantized bytes come back in GGUF's on-disk `[out, in]` row-major
-/// order, the same as every other packed codec -- `bind_matmul_weight`'s
-/// own doc is explicit that ONLY its `F32` fallback branch transposes
-/// (`transpose_out_in_to_in_out`) into the `[in, out]` layout the cached
-/// forward program's generic elementwise maps expect; a packed operand
-/// normally never needs that transpose because its own matmul kernel walks
-/// the native layout directly. Once dequantized to `Float32` for Metal,
-/// though, this buffer stops being a packed operand with its own kernel and
-/// becomes an ordinary generic elementwise operand -- so it needs the exact
-/// transpose `bind_matmul_weight`'s `F32` branch applies, via
-/// [`matmul_weight_dims`], or every downstream matmul reads it through the
-/// wrong stride and silently scrambles the projection (worst on
-/// `output.weight`, feeding straight into the logits).
-///
-/// # Errors
-///
-/// [`InteropError::Quant`] if `bytes.len()` is not a whole multiple of the
-/// codec's own block size. [`InteropError::UnknownMatmulWeightName`] if
-/// `name` is not one of [`matmul_weight_dims`]'s known suffixes.
-#[cfg(feature = "metal")]
-pub(crate) fn dequantize_packed_for_metal(
-    name: &str,
-    block: &proxima_tensor::cpu::QuantizedBlock<'_>,
-    architecture: &ModelArchitecture,
-) -> Result<Option<Vec<f32>>, InteropError> {
-    use proxima_gguf::quant::q5_k;
-
-    let flat = match block {
-        proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => {
-            let block_count = q5_k::blocks_for_bytes(bytes.len()).ok_or(proxima_gguf::quant::QuantError::InputNotBlockMultiple {
-                codec: "q5_k",
-                found: bytes.len(),
-                block_bytes: q5_k::BLOCK_BYTES,
-            })?;
-            let mut output = vec![0.0f32; q5_k::elements_for_blocks(block_count)];
-            q5_k::dequantize(bytes, &mut output)?;
-            output
-        }
-        // `Q6_K` stays packed -- omega's Metal driver has a row-blocked
-        // unpack kernel for it now, the same as `Q4_K`.
-        _ => return Ok(None),
-    };
-
-    let (out_dim, in_dim) = matmul_weight_dims(name, architecture)
-        .ok_or_else(|| InteropError::UnknownMatmulWeightName { name: name.into() })?;
-    Ok(Some(transpose_out_in_to_in_out(&flat, out_dim, in_dim)))
-}
+// `matmul_weight_dims`/`dequantize_packed_for_metal` (the "dequantize this
+// packed weight back to f32 because Metal has no unpack kernel for it yet"
+// seam `Q5_K` used, and `Q6_K` used before its own row-blocked kernel
+// landed) were deleted here: once `Q5_K` joined `Q4_K`/`Q6_K` in staying
+// packed all the way to the GPU (`omega::msl::Q5K_UNPACK_MSL`), every
+// packed codec this checkpoint's weights actually carry
+// (`Q4_K`/`Q5_K`/`Q6_K`) has its own kernel, so the "convert back to f32"
+// branch had zero remaining callers -- not narrowed, deleted, the same
+// call this repo makes on any mechanism a landing empties out completely.
+// A future codec needing this exact shape again can restore it from
+// history; it is a small, well-documented pattern, not lost work.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

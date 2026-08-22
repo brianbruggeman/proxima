@@ -79,8 +79,6 @@ use omega::metal::metal_stage_totals;
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
-#[cfg(feature = "metal")]
-use crate::bind::dequantize_packed_for_metal;
 use crate::error::InteropError;
 use crate::serving::ServingConfig;
 use crate::serving::apply_serving_config;
@@ -170,8 +168,8 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         entry.min_operand_count = entry.min_operand_count.min(timing.operand_count);
         entry.max_operand_count = entry.max_operand_count.max(timing.operand_count);
         match timing.packed_row_block_rejection.as_deref() {
-            Some("PASS") => stats_pass(entry),
-            Some(rejection) => stats_reject(entry, rejection),
+            Some("PASS") => stats_pass(entry, timing.gpu_ns, timing.operand_bytes),
+            Some(rejection) => stats_reject(entry, rejection, timing.gpu_ns, timing.operand_bytes),
             None => {}
         }
     }
@@ -192,18 +190,52 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
             stats.rejected_count,
             stats.packed_row_block_gates,
         );
+        // A family with BOTH a row-blocked verdict AND a rejected verdict
+        // (`ffn_down`/`attn_v`: 28 already-packed `Q4_K` ops PASS, 4
+        // still-dequantized `Q5_K` ops reject) is exactly the case the
+        // aggregate line above cannot answer on its own -- "how much of
+        // this family's cost is the codec gap, not the family" -- so print
+        // the split explicitly rather than making a reader subtract two
+        // numbers from a set that does not carry counts.
+        if stats.row_blocked_count > 0 && stats.rejected_count > 0 {
+            std::println!(
+                "op_profile_family_split step={step} family={family:?} \
+                 passed_op_count={} passed_gpu_ms={:.3} passed_operand_bytes={} passed_gpu_ns_per_byte={:.6} \
+                 rejected_op_count={} rejected_gpu_ms={:.3} rejected_operand_bytes={} rejected_gpu_ns_per_byte={:.6}",
+                stats.row_blocked_count,
+                stats.passed_gpu_ns as f64 / 1e6,
+                stats.passed_operand_bytes,
+                if stats.passed_operand_bytes == 0 {
+                    0.0
+                } else {
+                    stats.passed_gpu_ns as f64 / stats.passed_operand_bytes as f64
+                },
+                stats.rejected_count,
+                stats.rejected_gpu_ns as f64 / 1e6,
+                stats.rejected_operand_bytes,
+                if stats.rejected_operand_bytes == 0 {
+                    0.0
+                } else {
+                    stats.rejected_gpu_ns as f64 / stats.rejected_operand_bytes as f64
+                },
+            );
+        }
     }
 }
 
 #[cfg(all(feature = "instrument", feature = "metal"))]
-fn stats_pass(entry: &mut FamilyGpuStats) {
+fn stats_pass(entry: &mut FamilyGpuStats, gpu_ns: u64, operand_bytes: u64) {
     entry.row_blocked_count += 1;
+    entry.passed_gpu_ns += gpu_ns;
+    entry.passed_operand_bytes += operand_bytes;
     entry.packed_row_block_gates.insert("PASS".to_string());
 }
 
 #[cfg(all(feature = "instrument", feature = "metal"))]
-fn stats_reject(entry: &mut FamilyGpuStats, rejection: &str) {
+fn stats_reject(entry: &mut FamilyGpuStats, rejection: &str, gpu_ns: u64, operand_bytes: u64) {
     entry.rejected_count += 1;
+    entry.rejected_gpu_ns += gpu_ns;
+    entry.rejected_operand_bytes += operand_bytes;
     entry.packed_row_block_gates.insert(rejection.to_string());
 }
 
@@ -223,6 +255,22 @@ struct FamilyGpuStats {
     max_operand_count: usize,
     row_blocked_count: u64,
     rejected_count: u64,
+    /// Sum of `gpu_ns`/`operand_bytes` over exactly this family's
+    /// row-blocked (`PASS`) ops -- the already-packed slice, isolated from
+    /// [`Self::rejected_gpu_ns`] so a mixed family's aggregate `gpu_ns`
+    /// (which sums both) is never mistaken for either codec's own cost.
+    passed_gpu_ns: u64,
+    passed_operand_bytes: u64,
+    /// Sum of `gpu_ns`/`operand_bytes` over exactly this family's rejected
+    /// ops. Before `Q5_K`'s own row-blocked kernel landed, `ffn_down`/
+    /// `attn_v` each carried 4 rejected ops (`NotExactlyOnePackedOperand`
+    /// on a weight the loader had already dequantized back to plain
+    /// `f32`) -- this field is what isolated that codec's own cost from
+    /// the 28 already-fast `Q4_K` ops sharing its family (ROW 92). Kept
+    /// as a general split rather than a one-off measurement: any future
+    /// codec gap in a mixed family reproduces this exact shape.
+    rejected_gpu_ns: u64,
+    rejected_operand_bytes: u64,
     packed_row_block_gates: BTreeSet<String>,
 }
 
@@ -237,6 +285,10 @@ impl Default for FamilyGpuStats {
             operand_bytes: 0,
             min_operand_count: usize::MAX,
             max_operand_count: 0,
+            passed_gpu_ns: 0,
+            passed_operand_bytes: 0,
+            rejected_gpu_ns: 0,
+            rejected_operand_bytes: 0,
             packed_row_block_gates: BTreeSet::new(),
         }
     }
@@ -410,46 +462,15 @@ fn select_backend(config: &ServingConfig) -> Backend {
     if config.gpu_layers == GPU_LAYERS_ALL { Backend::Metal } else { Backend::Cpu }
 }
 
-/// The 8-or-so `Q5_K` weights [`bind_all_weights`] packs zero-copy
-/// (`bind_matmul_weight`) cannot cross to Metal packed -- `omega::metal`'s
-/// driver still has no unpack kernel for that codec (`Q6_K`'s lone weight,
-/// `output.weight`, DOES cross packed now -- `dequantize_packed_for_metal`
-/// returns `None` for it, and `resolve_packed_block` below leaves it
-/// unchanged). Converted once per
-/// [`LoadedModel::generate_with_serving_config`] call, before the decode
-/// loop starts, rather than once per token: the packed bytes never change
-/// across a call, so re-dequantizing them every step would pay real,
-/// avoidable cost for a value that is already fixed.
-#[cfg(feature = "metal")]
-fn dequantize_unsupported_metal_weights(
-    packed: &[(alloc::string::String, QuantizedBlock<'_>)],
-    architecture: &ModelArchitecture,
-) -> Result<Vec<(alloc::string::String, Vec<f32>)>, InteropError> {
-    let mut converted = Vec::new();
-    for (name, block) in packed {
-        if let Some(floats) = dequantize_packed_for_metal(name, block, architecture)? {
-            converted.push((name.clone(), floats));
-        }
-    }
-    Ok(converted)
-}
-
-/// `block` unchanged unless `name` is one of `dequantize_unsupported_metal_weights`'s
-/// converted entries, in which case its owned `f32` buffer takes over as
-/// [`QuantizedBlock::Float32`]. `metal_converted_weights` is empty whenever
-/// the `metal` feature is off or the selected backend is the CPU one, so
-/// this always returns `*block` unchanged in both of those cases -- the
-/// same value the decode loop pushed before this function existed.
-fn resolve_packed_block<'weights>(
-    name: &str,
-    block: &QuantizedBlock<'weights>,
-    metal_converted_weights: &'weights [(alloc::string::String, Vec<f32>)],
-) -> QuantizedBlock<'weights> {
-    metal_converted_weights
-        .iter()
-        .find(|(converted_name, _)| converted_name == name)
-        .map_or(*block, |(_, floats)| QuantizedBlock::Float32(floats.as_slice()))
-}
+// `dequantize_unsupported_metal_weights`/`resolve_packed_block` (the
+// per-call "convert this packed weight back to f32 because Metal has no
+// unpack kernel for it yet" step) were deleted here: `Q4_K`/`Q5_K`/`Q6_K`
+// -- every packed codec this checkpoint's weights actually carry -- now
+// all stay packed straight to the GPU (`omega::msl::Q5K_UNPACK_MSL` is the
+// row-blocked kernel `Q5_K` was still missing), so the conversion step had
+// zero remaining callers. `named_blocks` below pushes `*block` directly,
+// the same value this mechanism always resolved to once its lookup found
+// nothing to convert.
 
 /// Everything a decode step needs to actually run the program that is
 /// backend-specific: which [`Backend`] to run it on, and the reusable state
@@ -486,10 +507,6 @@ impl BackendRuntime {
             plan_hits: 0,
             plan_misses: 0,
         }
-    }
-
-    pub(crate) fn backend(&self) -> Backend {
-        self.backend
     }
 
     /// `resident_names` -- the caller's own model-weight names, fixed for
@@ -707,15 +724,6 @@ impl<'file> LoadedModel<'file> {
             .collect();
         let mut layer_caches: Vec<LayerCache> = (0..block_count).map(|_| LayerCache::new()).collect();
 
-        #[cfg(feature = "metal")]
-        let metal_converted_weights: Vec<(String, Vec<f32>)> = if runtime.backend() == Backend::Metal {
-            dequantize_unsupported_metal_weights(&self.weights.packed, &self.architecture)?
-        } else {
-            Vec::new()
-        };
-        #[cfg(not(feature = "metal"))]
-        let metal_converted_weights: Vec<(String, Vec<f32>)> = Vec::new();
-
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
         // for this whole call, unlike `ids`/`eps`/`rope_cos`/`rope_sin` and
@@ -764,7 +772,7 @@ impl<'file> LoadedModel<'file> {
                 named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
             }
             for (name, block) in &self.weights.packed {
-                named_blocks.push((name.as_str(), resolve_packed_block(name, block, &metal_converted_weights)));
+                named_blocks.push((name.as_str(), *block));
             }
             named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
