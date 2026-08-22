@@ -5587,3 +5587,66 @@ existing dequantize — 1 GB of extra residency, blocking nothing.
 
 What remains before a GPU token is a dependency edge from
 `proxima-model-interop` to omega and a block-name map, not backend work.
+
+## ROW 80 — omega becomes the backend wrapper: `cpu` and `metal` mix and match, and REACHABILITY LIES about which is compiled
+
+**Direction (owner, 2026-08-22):** omega is the wrapper, with a feature of
+`metal` or `cpu`, and "just like prime and tokio, we ought to be able to mix
+and match". So both backends may be compiled in at once and the choice made
+at RUNTIME — the shape `runtime-prime` / `runtime-tokio` already take at the
+workspace root, where the comments are explicit that the features COMPOSE
+rather than exclude.
+
+### Landed
+
+`omega/Cargo.toml`: `cpu = ["std", "proxima-tensor/std"]` alongside `metal`,
+both in `default`. Gates: `--no-default-features --features std,cpu` builds,
+`-p proxima-model-interop --features std` still builds, omega 39/39, clippy
+clean at `std,cpu,metal`.
+
+### The trap, verified before it shaped the implementation
+
+`proxima_tensor::cpu` is gated on `feature = "std"` ALONE
+(`proxima-tensor/src/lib.rs:204`). Both omega features declare
+`proxima-tensor/std` — `cpu` at `omega/Cargo.toml:31`, and `metal` at `:46`
+because the Metal driver itself uses `Evaluated`, `QuantizedBlock` and
+`resolve_named_blocks`, all of which are std-gated. That coupling is real
+and cannot be removed.
+
+Consequence: **in a `--features std,metal` build with omega's `cpu` feature
+OFF, `proxima_tensor::cpu` is still importable.** Reachability of the CPU
+evaluator therefore says nothing about whether the CPU BACKEND is compiled
+in. A wrapper that keys its CPU arm on "can I see `proxima_tensor::cpu`"
+would make the CPU backend silently selectable in a Metal-only build, which
+is precisely the invariant a mix-and-match design has to hold: a backend
+that is not compiled must not be selectable, and asking for it must fail
+naming the missing feature rather than falling back.
+
+**Rule: gate each arm on omega's OWN feature (`#[cfg(feature = "cpu")]`,
+`#[cfg(feature = "metal")]`), never on the reachability of the backend
+crate.** Feature unification flows upward through the dependency graph and
+will hand you a type you were not supposed to have.
+
+### Not landed, and exactly why
+
+`omega/src/backend.rs` and its parity test are unwritten. Two dispatched
+sonnet agents were blocked from editing any `.rs` by
+`~/.claude/hooks/main-loop-tier`, which identifies the main loop by
+`basename(transcript_path) == f"{session_id}.jsonl"`. That test is TRUE for
+dispatched subagents as well, because this harness attributes a subagent's
+tool events to the PARENT session — confirmed from the hook's own block-path
+log, where the blocked event carries the parent's `session_id` and
+transcript AND an `agent_id`/`agent_type` the main loop does not have. Both
+agents reported and stopped rather than routing around it, which is the
+correct outcome and the opposite of what two earlier agents did the previous
+day.
+
+The design is settled and the implementation is mechanical once that hook
+distinguishes subagents: `Backend { Cpu, Metal }` with both variants always
+present; a `Plan` whose variants are cfg-gated per arm; `plan_named` /
+`execute_plan_named` mirroring the Metal shape already landed; the CPU arm
+calling `evaluate_quantized_named_with_scratch` directly, threading the
+caller's `free_buffers` and validated-node cache through so the per-call
+allocation the CPU path already avoids does not come back; selection via an
+env var read once into a `OnceLock`, the idiom `matmul_worker_count`
+(`proxima-tensor/src/cpu.rs`) already establishes.
