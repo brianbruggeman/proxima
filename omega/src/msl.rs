@@ -218,6 +218,40 @@ static inline float q4k_element(device const uchar *block, uint index) {
     uchar nibble = low_nibble ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
     return scale * (float)nibble - minimum;
 }
+
+// A super-block's per-sub-block scale and min, decoded ONCE for a run of
+// elements inside that sub-block. `d`, `dmin` and the 6-bit scale/min pair
+// are constant across all 32 elements of a sub-block, so deriving them per
+// element (what `q4k_element` does) is 8-40x the arithmetic of the nibble
+// extract it feeds. ggml decodes once per super-block and spends ~1.6 ops
+// per weight; this is the same amortization.
+struct q4k_header { float scale; float minimum; };
+
+static inline q4k_header q4k_header_for(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint sub_block = 2u * group + (within < 32u ? 0u : 1u);
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    q4k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header. This is the
+// whole per-element cost in the tiled loop: one byte load, one mask or
+// shift, one fma.
+static inline float q4k_value(device const uchar *block, uint index, q4k_header header) {
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint byte_index = group * 32u + (within % 32u);
+    uchar nibble = (within < 32u) ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return header.scale * (float)nibble - header.minimum;
+}
 "#;
 
 /// Bytes one `Q4_K` super-block occupies, and elements it carries — the two
@@ -1296,6 +1330,87 @@ fn push_cooperative_reduce_body(
     // of it: the probe measured 1.6 GB/s against llama.cpp Metal's 214.7.
     if reduce_rank == 1 {
         let reduce_dim = reduce_dims[0] as usize;
+    // SUPER-BLOCK TILED PACKED READ. `q4k_element` derives `d`, `dmin` and
+    // the 6-bit scale/min per ELEMENT, but all three are constant across a
+    // 32-element sub-block, so the strided walk above pays that decode 256
+    // times per super-block. Measured: packed marginal 12.3 GB/s = 21.9 G
+    // elem/s against llama.cpp Metal's 381 G elem/s, while the f32 kernel on
+    // the SAME loop hits 60.5 G elem/s reading 7.1x more bytes — Q4 was
+    // compute-bound, not bandwidth-bound (`docs/discipline.md` ROW 72).
+    //
+    // Giving each lane a CONTIGUOUS run of `Q4K_BLOCK_ELEMENTS / SIMD_WIDTH`
+    // elements keeps that run inside one sub-block (lane*8 .. lane*8+7 never
+    // crosses a 32 boundary), so the header decodes once per run. Same shape
+    // as ggml's `for (short i = 0; i < 8; ++i)`.
+    //
+    // Requires: exactly one packed operand, contiguous along the reduction
+    // dim, and a reduction extent that is a whole number of super-blocks —
+    // all known here, from the bound layout, not at runtime.
+    let packed: Vec<usize> = quantized
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_packed)| is_packed.then_some(index))
+        .collect();
+    let reduce_extent = resolved.extents[reduce_dim] as usize;
+    let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
+    let tiled = packed.len() == 1
+        && resolved.operands()[packed[0]].1.stride(reduce_dims[0]) == 1
+        && reduce_extent.is_multiple_of(Q4K_BLOCK_ELEMENTS);
+    if tiled {
+        let weight = packed[0];
+        for index in 0..operand_count {
+            source.push_str(&format!("    long base{index} = u.operand_base[{index}];\n"));
+            for dim in 0..rank {
+                if dim == reduce_dim {
+                    continue;
+                }
+                source.push_str(&format!(
+                    "    base{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                ));
+            }
+            if index != weight {
+                source.push_str(&format!(
+                    "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
+                ));
+            }
+        }
+        source.push_str(&format!("    uint slot = (uint)lane * {run}u;\n"));
+        source.push_str(&format!(
+            "    for (int block_start = 0; block_start < (int)u.reduction_total; block_start += {Q4K_BLOCK_ELEMENTS}) {{\n"
+        ));
+        source.push_str(&format!(
+            "        device const uchar *blk = in{weight} + (((int)base{weight} + block_start) / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES};\n"
+        ));
+        source.push_str("        q4k_header hdr = q4k_header_for(blk, slot);\n");
+        source.push_str(&format!("        for (int j = 0; j < {run}; ++j) {{\n"));
+        source.push_str(&format!(
+            "            {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        source.push_str(&format!(
+            "            scratch[{weight}] = q4k_value(blk, slot + (uint)j, hdr);\n"
+        ));
+        for index in 0..operand_count {
+            if index == weight {
+                continue;
+            }
+            source.push_str(&format!(
+                "            scratch[{index}] = in{index}[base{index} + (long)(block_start + (int)slot + j) * stride{index}];\n"
+            ));
+        }
+        let value_expr = push_body_steps(source, resolved.element_body(), "            ", element_type);
+        source.push_str(&format!("            {element_type} value = {value_expr};\n"));
+        let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+        source.push_str(&format!(
+            "            accumulator = seeded ? {combine_expr} : value;\n"
+        ));
+        source.push_str("            seeded = true;\n");
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+        push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
+        return;
+    }
+
         for index in 0..operand_count {
             source.push_str(&format!(
                 "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
