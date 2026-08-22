@@ -5311,3 +5311,54 @@ correction. ggml accumulates `sumy` (the activation sums) during the
 register load and applies the min term as 4 MACs per super-block; this
 kernel still subtracts `header.minimum` once per element inside
 `q4k_value`.
+
+## ROW 75 — NEGATIVE: factoring the `dmin` correction out of the dot measured ZERO. Reverted.
+
+**Host:** Apple M1 Max. **Method:** ROW 71's two-size dissection, 3 runs.
+
+### The change
+
+ROW 74 closed with the one amortization ggml has that this kernel did not:
+the min term. For a `weight * other` body folded with `Add`, the per-sub-block
+scale and min factor straight out of the dot product —
+
+```
+sum_i (scale*n_i - min) * a_i  ==  scale * sum_i(n_i * a_i) - min * sum_i(a_i)
+```
+
+— turning one subtract PER ELEMENT into one multiply-subtract per
+sub-block run, with `sum_i(a_i)` (`sumy`) computed once and shared across all
+4 rows in the group. Implemented: a `q4k_nibble` MSL helper returning the raw
+unscaled level, an `is_scaled_dot` recognizer for the exact
+`Multiply`-body/`Add`-reduce shape, and a second emitter branch.
+
+### Measured
+
+| packed MARGINAL, 3 runs | median |
+|---|---|
+| ROW 74 (min per element) | 90.4 / 108.5 / 132.1 GB/s | ~108.5 |
+| with `sumy` factoring | 101.3 / 115.8 / 107.5 GB/s | ~107.5 |
+
+**Zero, inside the spread.** Parity 38/38 on both. Reverted: 80 lines and a
+second emitter branch that buys nothing is complexity, not a fix, whatever
+the incumbent does with it.
+
+### What the negative result tells us
+
+The subtract was not a binding instruction, so the packed kernel is no
+longer instruction-bound on that axis. It is also not bandwidth-bound: at
+~108 GB/s of packed bytes the 37.75 MB arm takes 0.63 ms, where the SAME
+loop shape on f32 sustains 356 GB/s and would take 0.106 ms. So the kernel
+sits between the two, and the next candidate has to be argued from what is
+left per element rather than from ggml's feature list.
+
+What is left per element in `q4k_value`: one byte load, a `/64` and `%64` and
+`%32` (all powers of two), a select between mask and shift, one fma. ggml
+reads FOUR nibbles per `uint16_t` load and folds the shift into `1/256` and
+`1/16` scale constants applied once at the end, so its per-element cost is
+closer to one load per four values plus an fma.
+
+**Do not port the incumbent's optimizations by inventory.** Two of ggml's
+three amortizations paid here (super-block header ROW 72, row blocking
+ROW 74) and the third measured zero. The list is not the argument; the
+per-element instruction count is.
