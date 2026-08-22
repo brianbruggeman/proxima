@@ -7178,3 +7178,376 @@ measured a clean win on the one family it changes
 (`output.weight`) and a no-op everywhere else (degenerate control above), so
 nothing was reverted. `Q5_K` is a deferral (see above), not a rollback: no
 `Q5_K` code was written and reverted this row.
+
+## ROW 92 — the whole token attributed, then `Q5_K` isolated and landed: `gpu_exec` 109.83 -> 55.20 ms median (1.99x); Metal still loses to our own CPU, 74.96 vs 59.71 ms/token
+
+**The number that hurts first, stated before anything else: after this row, our
+Metal decode step (74.96 ms/token, steady state) is still 1.26x SLOWER than our
+own CPU path (59.71 ms/token, prior row's own figure) and 4.26x slower than
+llama.cpp Metal (17.62 ms/token).** The GPU path narrowed the gap from 2.17x
+slower-than-CPU to 1.26x slower-than-CPU this row, and that is real progress,
+but "Metal beats CPU" is NOT yet true on this checkpoint and this row does not
+claim it is.
+
+### Task 1 — the whole token, split, residual named
+
+`token_breakdown`/`token_breakdown_metal` (`generate.rs`) already carry every
+term this task asked for; nothing needed adding to get the split, only to run
+it and sum it. Steady decode (`step=1..23`, `new_count=1`, excludes the
+one-time `step=0` prefill+pipeline-warm-up step), 3 runs x 23 steps = 69
+samples/side, same host, same session, paired via rebuild (BEFORE = this
+session's own starting commit `fabcdcc`; AFTER = this row's landing):
+
+**Outer split (`step_wall_ms`, the harness's own wall-clock per token):**
+
+| term | BEFORE avg (ms) | AFTER avg (ms) | share of step_wall (AFTER) |
+|---|---|---|---|
+| `apply_serving_config` | 0.0000 | 0.0000 | 0.0% |
+| `build_position_inputs` | 0.0024 | ~0.002 | 0.0% |
+| `named_blocks_weights` | 0.0033 | ~0.003 | 0.0% |
+| `named_blocks_kv` | 0.0024 | ~0.002 | 0.0% |
+| `evaluate` (the whole Metal backend call, split below) | 129.222 | 74.793 | 99.78% |
+| `layer_cache_append` | 0.1172 | ~0.09 | 0.12% |
+| `greedy_pick` | 0.0426 | ~0.042 | 0.06% |
+| **outer residual** (`step_wall` minus the six terms above) | **0.0018** | **~0.02** | **0.03%** |
+| **`step_wall` (sum, measured directly)** | **129.392** | **74.958** | **100%** |
+
+The outer residual is negligible both sides (<0.03% of `step_wall`) — the six
+named terms already account for essentially the entire token. `evaluate` (the
+Metal backend call) is 99.7-99.8% of the token both before and after; this is
+where Task 1's real attribution work is, and it splits further:
+
+**Inner split (`evaluate_ms`, everything inside the Metal backend call):**
+
+| term | BEFORE avg (ms) | AFTER avg (ms) | delta |
+|---|---|---|---|
+| `prepare` (bind+plan-cache lookup) | 1.988 | 1.953 | flat |
+| `emit` (MSL source assembly, cache-hit path) | 6.305 | 6.495 | flat (noise) |
+| `pipeline_compile` (steady state: 0 misses) | 0.000 | 0.000 | flat |
+| `block_upload` | 2.656 | 2.428 | flat |
+| `op_setup` (buffer+uniform alloc per op) | 5.117 | 4.789 | flat |
+| `gpu_exec` (the production batched metric) | **109.834** | **55.196** | **-54.638, -49.75%, 1.99x** |
+| `readback` | 0.217 | 0.238 | flat |
+| **metal_stage_sum** (sum of the six terms above) | **126.117** | **71.100** | |
+| **inside-backend residual** (`evaluate` minus `metal_stage_sum`) | **3.105 (2.40%)** | **3.694 (4.94%)** | +0.59 pp share |
+
+The inside-backend residual is real and named, not hand-waved: `op_setup_ticks`
+(`omega/src/metal.rs`) wraps only `allocate_buffer`+`upload_uniforms`+gather-fault
+alloc — it does NOT wrap `pipeline_for`'s cache lookup, `setComputePipelineState`,
+`bind_buffers`, or `dispatch` (`encode_op`'s own body, `metal.rs:1873-1908`), and
+none of those four calls has its own counter. At 1196 ops/token, a residual of
+3.1-3.7 ms is ~2.6-3.1 microseconds/op of uncounted per-op driver overhead —
+plausible for four uncounted Metal API calls per op, but NOT separately
+instrumented this row. **This is the one open item Task 1 leaves: the residual
+is bounded and named, not further decomposed.** Adding per-call counters to
+`encode_op`'s remaining four lines is the direct follow-up if a future session
+needs the split finer than this.
+
+CoV, both sides, 3 runs (n=23/run): `step_wall` BEFORE 0.37%, AFTER 0.22%;
+`gpu_exec` BEFORE 0.48%, AFTER 0.05% — all comfortably under the 5% trust
+floor, point estimates are safe to report.
+
+**Host loadout:** BEFORE runs captured while a sibling agent's `h2`-target
+rustc build was finishing (1-min load 22.94 -> 1.63 across the BEFORE window,
+per-run `uptime` pasted at each step in this session's own shell log); AFTER
+runs captured on a quiet box (1-min load 2.5-3.4 throughout). The BEFORE
+window's elevated 5/15-min load trails the earlier spike and does not
+contaminate the 1-min-quiet BEFORE samples themselves (each BEFORE run's own
+1-min figure was already <5 before it started).
+
+### Task 2 — fresh per-op split of the 110 ms (BEFORE), top 20 ops, N asserted
+
+`PROXIMA_METAL_OP_PROFILE_STEP=3`, single diagnostic sample
+(`execute_plan_op_timed`, one command buffer PER op — pays its own fixed cost
+per op, ROW 71/73, so this is NOT pooled with the multi-run `gpu_exec` claim
+above; it exists to attribute, not to re-measure the headline).
+
+`op_profile step=3 op_count=1196 total_gpu_ns=152036013 total_gpu_ms=152.036
+total_operand_bytes=5454741460` — **N=1196, asserted, not RED.**
+
+By kind: `constant` 37 ops/0.206ms, `elementwise` 547/10.796ms, `iota` 2/0.008ms,
+`reduce-cooperative` (generic SIMD, includes every still-dequantized-to-f32
+matmul) 393/69.770ms, `reduce-packed-row-blocked` (the amortized-header kernel)
+217/71.257ms.
+
+Top 20 ops by GPU time (full table re-provable via the command below); the
+headline: **ranks 1-4 are ALL `blk.{0,1,2,3}.ffn_down.weight`**, at
+12.5-14.4 ms EACH (`kind=reduce-cooperative`, i.e. NOT row-blocked — these are
+exactly the 4 `ffn_down` layers still dequantized to f32), `gpu_ns_per_byte`
+0.053-0.061 — 6-7x worse than every `Q4_K` row-blocked family's own band
+(0.0093-0.0277, ROW 91's own figures, unchanged this row for the untouched
+Q4_K ops). `output.weight` (`Q6_K`, ROW 91's own landing) ranks 5th at 2.35 ms,
+`gpu_ns_per_byte` 0.0219 — squarely inside the Q4_K band, confirming ROW 91's
+own kernel is still healthy and unaffected by this row.
+
+Per-family table (`op_profile_family`, all 1196 ops, one line per weight
+family, layer index stripped):
+
+| family | op_count | gpu_ms | operand_bytes | ns/byte | row_blocked | rejected |
+|---|---|---|---|---|---|---|
+| `blk.ffn_down.weight` | 32 | 71.648 | 1,866,203,136 | 0.038392 | 28 | 4 |
+| `blk.ffn_up.weight` | 32 | 16.695 | 1,057,488,896 | 0.015787 | 32 | 0 |
+| `blk.ffn_gate.weight` | 32 | 16.612 | 1,057,488,896 | 0.015709 | 32 | 0 |
+| `blk.attn_q.weight` | 32 | 6.894 | 302,514,176 | 0.022791 | 32 | 0 |
+| `blk.attn_output.weight` | 32 | 6.191 | 302,514,176 | 0.020466 | 32 | 0 |
+| `blk.attn_v.weight` | 32 | 3.201 | 133,693,440 | 0.023944 | 28 | 4 |
+| `output.weight` | 1 | 2.360 | 107,543,104 | 0.021945 | 1 | 0 |
+| `blk.attn_k.weight` | 32 | 2.230 | 76,021,760 | 0.029331 | 32 | 0 |
+| `token_embd.weight` | 1 | 0.009 | 524,320,768 | 0.000018 | 0 | 0 |
+
+Exactly two families carry a `rejected` count: `ffn_down` and `attn_v`, each
+4-of-32 — the 4 `Q5_K` layers per family, matching this checkpoint's own
+inventory (`Q4_K x217, F32 x65, Q5_K x8, Q6_K x1`, ROW 63).
+
+### Task 3 — `Q5_K` isolated from `Q4_K` in the SAME family, against the CURRENT denominator
+
+ROW 91's own aggregate (66-71 ms combined) mixed 8 `Q5_K` ops with 56
+already-fast `Q4_K` ops. Isolating required one small, targeted instrumentation
+addition — `FamilyGpuStats` (`generate.rs`) gained `passed_gpu_ns`/
+`passed_operand_bytes`/`rejected_gpu_ns`/`rejected_operand_bytes` alongside its
+existing `row_blocked_count`/`rejected_count`, and `report_op_timings` prints a
+new `op_profile_family_split` line for any family carrying BOTH a `PASS` and a
+rejection (mixed families only — a family that is 100% one verdict prints
+nothing extra, so this diagnostic goes silent on its own once `Q5_K` lands,
+which it now does — see the AFTER run below). This is instrumentation, not a
+new type: a `u64` widening on an existing diagnostic-only struct, gated behind
+the same `instrument` feature the rest of this file already requires.
+
+**Measured, isolated, BEFORE this row's landing** (same diagnostic run as
+Task 2's table):
+
+| family | passed (28 Q4_K) gpu_ms | passed ns/byte | **rejected (4 Q5_K, f32) gpu_ms** | **rejected ns/byte** |
+|---|---|---|---|---|
+| `blk.ffn_down.weight` | 15.935 | 0.017200 | **55.713** | **0.059284** |
+| `blk.attn_v.weight` | 2.054 | 0.030885 | **1.147** | **0.017071** |
+| **sum** | 17.989 | | **56.860** | |
+
+**`Q5_K`'s own 8 ops cost 56.860 ms of this diagnostic run's 152.036 ms total
+(37.4%) — roughly HALF of the production-scale `gpu_exec` (109.834 ms
+multi-run average) once the diagnostic's own per-op fixed overhead is
+accounted for.** This directly overturns ROW 91's own reading of its own
+aggregate ("Q5_K's own slice of that aggregate is smaller still") — the
+aggregate mixing masked that nearly ALL of `ffn_down`'s family cost (55.7 of
+71.6 ms, 78%) was the 4 `Q5_K` ops, not spread across the 32.
+
+### The ceiling projection — labelled as a projection
+
+`Q5_K`'s dequantized-to-f32 byte footprint this step: `ffn_down` 939,753,472 B,
+`attn_v` 67,174,400 B, sum 1,006,927,872 B (f32, 4 bytes/element). Packed
+`Q5_K` is 176 bytes / 256 elements = 0.6875 B/element, so packed bytes =
+f32_bytes x (176/1024) = f32_bytes x 0.171875: **projected packed bytes ≈
+173,065,728 B (165 MiB)**. At the `Q4_K` row-blocked band this row's own Task 2
+table restates (0.0093-0.0277 ns/byte): **projected Q5_K-packed cost ≈
+1.61-4.79 ms**, projected saving ≈ 52.1-55.2 ms, i.e. roughly HALVING
+`gpu_exec` again (109.8 -> ~55-58 ms). This is a PROJECTION, computed from
+measured bytes and a measured band from an unrelated codec, not itself a
+timing — labelled as such, and checked against the actual landed number below.
+
+**Given the magnitude (potentially halving the whole budget a second time,
+right after `Q6_K` already halved it once), the number justifies a third
+kernel.** `Q5_K`'s `qh` high-bit plane is a genuinely different bit layout from
+both `Q4_K` (no high-bit plane at all) and `Q6_K` (`qh` present but a 2-bit
+lane per element, not 1, and no `dmin`/min term) — this is a third kernel, not
+a widening of either existing one, exactly as this row's own brief anticipated.
+
+### Task 4 — `Q5_K` landed
+
+**Reuse first, written as an expression, not a paragraph:** `crate::msl::PackedCodec`
+widened from a two-variant (`Q4K`/`Q6K`) enum to three (`Q4K`/`Q5K`/`Q6K`) — the
+same widening ROW 91 made from `bool` to `PackedCodec` one row prior, now one
+variant further; `PACKED_ROWS_PER_GROUP`/`push_packed_row_blocked_body`'s
+rows-per-group/lane-spread outer loop, `upload_packed_bytes`,
+`correct_packed_matmul_layouts` (already takes a bare `&BTreeSet<NodeId>`, zero
+codec knowledge needed), `omega::msl::reduction_dims`/`gather_count`/
+`gather_slots`, every `render_reduce`/`render_elementwise`/`render_scan`
+structural shape — ALL reused unchanged. **Zero new types in `proxima-tensor` or
+the CPU evaluator** — `QuantizedBlock::Q5K` already existed (ROW 62), the CPU
+int8 dot (`dot_q5k_q8k`) already existed (ROW 63). This row is entirely inside
+`omega`, mirroring `Q6_K`'s own landing (ROW 91) one codec over.
+
+**Added, and why it was unavoidable:** `PackedCodec::Q5K` variant (the pipe
+question, answered by writing the expression: could the existing two-variant
+enum express "packed as `Q5_K`"? No — a caller building the operand-codec map
+can now dispatch to `q5k_element`/176-byte strides, which neither existing
+variant could express without adding this one). `Q5K_UNPACK_MSL` (new MSL
+constant, `q5k_scale_min`/`q5k_header_for`/`q5k_value`/`q5k_element`, ported
+line-for-line from `proxima_gguf::quant::q5_k::{get_scale_min_k4,
+dequantize_block}`, restated per this crate's own per-codec-file precedent,
+not re-derived from ggml). `push_packed_row_blocked_body`'s `PackedCodec::Q5K`
+arm mirrors `Q6K`'s exactly: header (`scale`, `minimum`, and — new for this
+codec — the `qh` bit `mask`, since which bit a sub-block reads depends on
+which of the four 64-element chunks it falls in) decoded once per 32-element
+sub-block via `q5k_header_for`, then one element at a time via `q5k_value`. No
+new type in `proxima-model-interop`.
+
+**A genuine, disciplined deletion this row forced, not merely narrowed:** once
+`Q5_K` joined `Q4_K`/`Q6_K` in staying packed, `proxima-model-interop`'s entire
+"dequantize this packed weight back to f32 because Metal has no unpack kernel
+for it yet" mechanism had ZERO remaining callers — every packed codec this
+checkpoint's weights actually carry now has its own kernel. Left in place, the
+match arm reduced to an unconditional early return, making everything after it
+genuinely unreachable code, and `matmul_weight_dims`/
+`InteropError::UnknownMatmulWeightName` (both single-call-site, only reached
+from that now-dead branch) would have failed `-D warnings`' `dead_code` lint
+outright — not a style call, a compile error. Deleted, not stubbed:
+`bind::dequantize_packed_for_metal`, `bind::matmul_weight_dims`,
+`generate::dequantize_unsupported_metal_weights`, `generate::resolve_packed_block`,
+`InteropError::UnknownMatmulWeightName`, and the now-dead
+`BackendRuntime::backend()` accessor its removal exposed one level up. This is
+principle 15 in the form the task's own "Reuse first" bar demands: a mechanism
+a landing empties out completely gets deleted, not narrowed and left as a live
+wire for the next reader to trip over.
+
+### The one deliberate incompleteness: no `q5k_run8`
+
+Same posture `Q6_K`'s own row took: `Q4_K`'s row-blocked kernel amortizes its
+per-element header decode by pulling 8 consecutive nibbles from two
+32-bit-aligned word loads (`q4k_run8`). `Q5_K`'s bit layout does not offer that
+shape either — an element's 5-bit level needs a `qs` nibble AND a `qh` bit from
+a DIFFERENT byte selected by a chunk-dependent mask, not four adjacent lanes
+from one aligned word. This row's `q5k_header_for`/`q5k_value` amortize the
+things that ARE constant across a 32-element sub-block (`d`, the sub-block's
+own `scale`/`minimum`, and which `qh` bit-mask applies) and read `qs`/`qh` bytes
+one element at a time otherwise — correct, simpler, and, per the measurement
+below, already enough to erase essentially all of the isolated `Q5_K` cost. A
+`q5k_run8`-equivalent is a real, named follow-up, not a correctness gap.
+
+### Correctness — the incumbent wins, on REAL bytes, before any timing
+
+Three tests, ascending in realism, all PASS (mirrors ROW 91's own three-tier
+structure exactly):
+
+1. **Synthetic, bit-exact against the Rust reference**
+   (`omega::tests::q5k_unpack::q5k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly`,
+   16 random blocks x 256 elements = 4096 comparisons, `assert_eq!` on
+   `.to_bits()`, no epsilon). A second test
+   (`q5k_qh_bit_is_selected_by_mask_not_by_a_second_qh_index`) pins the exact
+   trap this codec's own module doc calls out as easiest to get silently
+   wrong: two elements in DIFFERENT 64-element chunks but the SAME local `qh`
+   offset must read DIFFERENT BITS of the SAME `qh` byte — built with a
+   deliberately NONZERO scale on the second probe so a wrong read would
+   surface as `160.0`, not silently vanish into a degenerate zero.
+2. **Synthetic weight, real device, GPU vs CPU-dequantize-then-fold**
+   (`metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path`
+   and the `q5k_at_float32`/`q5k_at_float16` cases of
+   `metal_matmul_parity_across_codec_and_dtype`) — a real `MTLDevice` compiles
+   and runs the row-blocked kernel against quantized-then-packed synthetic
+   weights, compared to the same weights dequantized and matmul'd on CPU.
+3. **REAL checkpoint bytes, real device** (new test file,
+   `omega/tests/q5k_real_checkpoint_parity.rs`,
+   `metal_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path`)
+   — reads the first 64 rows of `blk.0.ffn_down.weight`'s actual packed `Q5_K`
+   bytes directly out of `openchat-3.5-1210.Q4_K_S.gguf` (guiding-principles §9),
+   runs them through `omega::execute` on a real device, compares against
+   `proxima_gguf::quant::q5_k::dequantize` + CPU matmul: **`relative=0.00000396983`
+   (`max_diff=0.000012874603`, `max_magnitude=3.2431123`)** — float-summation-order
+   noise, five orders of magnitude under the codec's own loose sanity bound,
+   the same posture ROW 91's own `Q6_K` real-bytes number reports.
+
+Generated text, 24-token greedy decode, real checkpoint, **byte-identical
+across all 6 runs this row captured (3 BEFORE, 3 AFTER)** and against ROW 81's
+own baseline — a wrong unpack yields plausible garbage, not a crash, and this
+is the check that would have caught it:
+
+```
+"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"
+```
+
+### The numbers — paired, same session, same host, multi-run
+
+**`gpu_exec` — the PRODUCTION batched metric**, 3 runs x 23 steady-decode steps
+= 69 samples/side:
+
+| | BEFORE (n=69) | AFTER (n=69) | delta |
+|---|---|---|---|
+| mean | 109.834 ms | **55.196 ms** | **-54.638 ms, -49.75%, 1.99x** |
+| min-max | 109.408-110.569 ms | 55.177-55.232 ms | |
+| CoV | 0.48% | 0.05% | |
+
+**`step_wall` — the full per-token harness wall clock** (same samples):
+
+| | BEFORE | AFTER | delta |
+|---|---|---|---|
+| mean | 129.392 ms | **74.958 ms** | **-54.434 ms, -42.07%, 1.73x** |
+| CoV | 0.37% | 0.22% | |
+
+**The actual landed Q5_K-only cost, computed the same way Task 3 isolated it**
+(AFTER run's own per-op numbers: `ffn_down`'s 4 ex-`Q5_K` ops are directly
+readable off the top-20 table, MEASURED, 342,708+347,000+350,708+339,874 ns =
+1.380 ms; `attn_v`'s 4 ex-`Q5_K` ops did not rank in the top 20, so their
+contribution is DERIVED from their exact packed byte count (11,599,872 B,
+computed as the exact geometry difference between this run's `attn_v` total
+bytes and the unchanged `Q4_K`-only byte count) times the family's own measured
+ns/byte, ≈0.226 ms): **≈1.606 ms diagnostic-scale, against a 1.61-4.79 ms
+projected range — landed at the very bottom of the projected band, not merely
+inside it.** `56.860 -> 1.606 ms` is a 35.4x reduction on the isolated ops
+themselves, consistent with `gpu_exec`'s own 1.99x reduction on the WHOLE token
+once diluted by every other op that did not change.
+
+**Host loadout:** AFTER runs captured on a quiet box throughout, 1-min load
+2.5-3.4, no other benches active this session.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p omega --features metal,instrument` | **67 passed, 1 skipped** (60 baseline + 7 new: 4x `q5k_unpack`, 1x `q5k_real_checkpoint_parity`, `metal_matmul_on_packed_q5k_weights_...`, 2x `q5k_at_float32`/`q5k_at_float16` -- minus 1: `q5_k` case deleted from `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` since `Q5_K` is no longer unsupported; 60+4+1+3-1=67) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** (unchanged — this row never touches `proxima-tensor`) |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** (unchanged) |
+| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean (the dead-code the deletion above forced ahead of is what this gate would have caught) |
+| generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
+
+### Re-provable now
+
+```
+cargo nextest run -p omega --features metal,instrument
+cargo test -p omega --features metal,instrument --test q5k_real_checkpoint_parity -- --nocapture
+cargo test -p proxima-model-interop --release --features metal,instrument --lib -- \
+  --ignored --exact --nocapture \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+cargo test -p proxima-model-interop --release --features metal,instrument --lib -- \
+  --ignored --exact --nocapture \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
+```
+The second command's `relative=`/`max_diff=`/`max_magnitude=` line is this
+row's real-checkpoint correctness number. The third command's
+`token_breakdown`/`token_breakdown_metal` lines carry Task 1's full split,
+exactly as tabulated above (steps 1-23). The fourth command's
+`op_profile_family_split` lines are Task 3's isolation table — and, run again
+AFTER this row's own code (rebuild first), correctly print NOTHING for
+`ffn_down`/`attn_v` any more, since neither family is mixed once `Q5_K` joins
+`Q4_K`/`Q6_K` in taking the row-blocked path — a silent diagnostic is this
+row's own negative-space confirmation that the fix landed everywhere it
+needed to.
+
+### Metal vs the two named incumbents, plainly
+
+| | ms/token (steady decode) | vs this row |
+|---|---|---|
+| llama.cpp Metal (`-ngl 99`, prior row's own figure) | **17.62 ms** | we are 4.26x slower |
+| our own CPU path (prior row's own figure) | **59.71 ms** | we are 1.26x slower |
+| **our Metal, BEFORE this row** | 129.39 ms | 7.34x / 2.17x slower |
+| **our Metal, AFTER this row** | **74.96 ms** | **4.26x / 1.26x slower** |
+
+Metal moved from "worse than our own CPU by more than 2x" to "worse by
+roughly a quarter" — real, measured progress, and still a loss. The gap
+remaining is the `reduce-cooperative` family (every op NOT on a row-blocked
+packed kernel — `kv_cache.*`, `rope_cos`/`rope_sin`, the 289 `(no named
+operand)` ops at 1.28-1.32 ns/byte, an order of magnitude worse than the
+row-blocked band) and the ~3.1-3.7 ms/token uncounted per-op driver residual
+Task 1 named but did not decompose further. Neither is this row's scope; both
+are named, sized, and left for the next row rather than absorbed into this
+one's headline.
+
+### Rollback rows
+
+None this row — the `Q5_K` unpack kernel measured a clean win on both families
+it changes (`ffn_down`, `attn_v`) and the degenerate control (every OTHER
+family's `gpu_ms`, Task 2's table, unchanged in shape from ROW 91's own) shows
+no other family moved, so nothing was reverted. The deletion of
+`dequantize_packed_for_metal`/`matmul_weight_dims`/`resolve_packed_block`/
+`UnknownMatmulWeightName`/`BackendRuntime::backend()` is not a rollback either:
+none of that code was reverted, it was retired because this row's own change
+left it with zero callers, and it re-derives cleanly from git history if a
+future codec ever needs the same shape again.
