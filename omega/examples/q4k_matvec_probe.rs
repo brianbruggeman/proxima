@@ -119,6 +119,30 @@ fn run() {
         (samples[samples.len() / 2], packed.len() as f64)
     }
 
+    // is the `Reduce(Elementwise)` fusion firing? If it is not, omega
+    // materializes the full [rows, 1, k] product before reducing it --
+    // rows*k floats of intermediate for a rows*k/2-byte weight, which would
+    // dominate everything else here.
+    {
+        use proxima_tensor::{bind, infer};
+        let (program, sum) = matvec_program(4096, 4096);
+        let shapes = infer(&program, &[]).expect("probe program infers");
+        let nests = bind(&program, &shapes, &[sum]).expect("probe program binds");
+        println!("q4k_matvec_probe bound_ops={} (1 == fused, 2 == materializing)", nests.len());
+        let kernel = omega::emit(&nests[0], &std::collections::BTreeSet::new())
+            .expect("probe kernel emits");
+        println!("--- emitted kernel entry={} grid={:?}", kernel.entry, kernel.grid);
+        println!("{}", kernel.source);
+        println!("--- end kernel");
+        for (index, bound) in nests.iter().enumerate() {
+            println!(
+                "  op{index} kind={:?} output_elements={}",
+                core::mem::discriminant(&bound.kind),
+                bound.extents.iter().map(|extent| *extent as usize).product::<usize>()
+            );
+        }
+    }
+
     const RUNS: usize = 21;
     const K: u32 = 4096;
     let (small_ms, small_bytes) = measure(1024, K, RUNS);
@@ -143,6 +167,85 @@ fn run() {
         "  marginal (large-small, cancels per-call compile+upload fixed cost): \
          {:.2} MB in {delta_ms:.3} ms = {marginal_gbs:.1} GB/s",
         delta_bytes / 1e6
+    );
+
+    // control: the IDENTICAL kernel shape with an f32 weight. Same iteration
+    // space, same reduce, same everything except the operand read — so the
+    // difference isolates what `q4k_element` costs per element against a
+    // single flat load. 4x the bytes, so if packed is not FASTER per byte
+    // the unpack is eating more than the traffic it saves.
+    fn measure_f32(rows: u32, k: u32, runs: usize) -> f64 {
+        let weight = random_vec(17, rows as usize * k as usize);
+        let activation = random_vec(13, k as usize);
+        let mut program = Vec::new();
+        let weight_node = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let activation_node = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k), Extent::Static(1)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight_node, IndexMap::Affine(projection(3, &[0, 2]))),
+                    (activation_node, IndexMap::Affine(projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let blocks = [
+            QuantizedBlock::Float32(&weight),
+            QuantizedBlock::Float32(&activation),
+        ];
+        omega::execute(&program, &[], &blocks, &[sum]).expect("f32 control warms up");
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let started = Instant::now();
+            omega::execute(&program, &[], &blocks, &[sum]).expect("f32 control executes");
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+
+    let f32_ms = measure_f32(4096, K, RUNS);
+    let elements = 4096.0 * f64::from(K);
+    println!(
+        "  CONTROL f32 weight, same 4096x{K} iteration space: median={f32_ms:.3} ms \
+         ({:.2} G elem/s) vs packed {large_ms:.3} ms ({:.2} G elem/s)",
+        elements / (f32_ms / 1000.0) / 1e9,
+        elements / (large_ms / 1000.0) / 1e9
+    );
+    println!(
+        "  uploads over the whole probe: nocopy={} copying={} (every execute re-uploads every block)",
+        omega::metal::NOCOPY_BUFFER_UPLOADS.get(),
+        omega::metal::COPYING_BUFFER_UPLOADS.get()
     );
     println!("  bar: llama.cpp Metal on 7B Q4_K_S = 214.7 GB/s (3.784 GB in 17.62 ms/token)");
 }

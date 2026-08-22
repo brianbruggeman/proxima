@@ -149,6 +149,7 @@ use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ptr::NonNull;
 use std::sync::OnceLock;
+use core::cell::RefCell;
 
 use half::f16;
 use objc2::rc::Retained;
@@ -197,6 +198,53 @@ pub enum MetalError {
     #[error(transparent)]
     Emit(#[from] EmitError),
 }
+/// This thread's Metal device paired with its command queue — both created
+/// once per thread rather than per [`execute`] call.
+type DeviceAndQueue = (
+    Retained<ProtocolObject<dyn MTLDevice>>,
+    Retained<ProtocolObject<dyn MTLCommandQueue>>,
+);
+
+thread_local! {
+    /// Compiled pipelines, keyed by kernel source, for the lifetime of the
+    /// thread rather than of one [`execute`] call.
+    ///
+    /// This was per-call, which meant EVERY `execute` compiled every kernel
+    /// from MSL source before dispatching it. A serving loop runs the same
+    /// graph thousands of times, so that is thousands of redundant
+    /// compiles — measured at 3.2 ms for a 2.36 MB matvec and 8.3 ms for a
+    /// 9.44 MB one, against llama.cpp's 17.62 ms for an entire 7B token.
+    /// `thread_local` rather than a process-wide `OnceLock`: `Retained<_>` of
+    /// an `objc2` protocol object is not `Send`/`Sync`, and a per-thread
+    /// cache needs no lock on the dispatch path anyway.
+    static PIPELINE_CACHE: RefCell<BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>> =
+        RefCell::new(BTreeMap::new());
+
+    /// The device and its command queue, created once per thread. Both were
+    /// also per-call; `MTLCreateSystemDefaultDevice` plus `newCommandQueue`
+    /// is not free, and nothing about either depends on the program being
+    /// run.
+    static DEVICE_AND_QUEUE: RefCell<Option<DeviceAndQueue>> = const { RefCell::new(None) };
+}
+
+/// This thread's Metal device and command queue, created on first use.
+fn device_and_queue() -> Result<DeviceAndQueue, MetalError> {
+    DEVICE_AND_QUEUE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(existing) = slot.as_ref() {
+            return Ok(existing.clone());
+        }
+        let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
+        let queue = device
+            .newCommandQueue()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "device refused to create a command queue".to_string(),
+            })?;
+        let pair = (device, queue);
+        *slot = Some(pair.clone());
+        Ok(pair)
+    })
+}
 
 /// Runs a tensor program on the system's default Metal device.
 ///
@@ -214,12 +262,7 @@ pub fn execute(
 ) -> Result<Evaluated, MetalError> {
     let prepared = prepare(program, symbols, blocks, outputs)?;
 
-    let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
-    let queue = device
-        .newCommandQueue()
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "device refused to create a command queue".to_string(),
-        })?;
+    let (device, queue) = device_and_queue()?;
 
     let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
     for (node, block) in prepared.block_nodes.iter().zip(blocks.iter()) {
@@ -250,10 +293,8 @@ pub fn execute(
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
 
-    let mut pipeline_cache: BTreeMap<
-        String,
-        Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    > = BTreeMap::new();
+    // pipelines live in this thread's `PIPELINE_CACHE`, not here: see that
+    // static's own doc for why per-call was the defect.
     // (bound op, its fault buffer, gather count) for every op that gathered —
     // checked only after the single end-of-program wait below, since a fault
     // buffer is not CPU-visible until the command buffer it was written in
@@ -263,7 +304,6 @@ pub fn execute(
         let fault = encode_op(
             &device,
             &command_buffer,
-            &mut pipeline_cache,
             &mut device_buffers,
             bound,
             &q4k_operands,
@@ -783,14 +823,15 @@ fn compile_pipeline(
 
 fn pipeline_for(
     device: &ProtocolObject<dyn MTLDevice>,
-    pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     kernel: &Kernel,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    if let Some(pipeline) = pipeline_cache.get(&kernel.source) {
-        return Ok(pipeline.clone());
+    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(&kernel.source).cloned()) {
+        return Ok(pipeline);
     }
     let pipeline = compile_pipeline(device, kernel)?;
-    pipeline_cache.insert(kernel.source.clone(), pipeline.clone());
+    PIPELINE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(kernel.source.clone(), pipeline.clone());
+    });
     Ok(pipeline)
 }
 
@@ -1115,13 +1156,12 @@ fn dispatch(
 fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
-    pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
     bound: &BoundOp,
     q4k_operands: &BTreeSet<NodeId>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     let kernel = emit(bound, q4k_operands)?;
-    let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
+    let pipeline = pipeline_for(device, &kernel)?;
     let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
     let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
     let gathers = gather_count(bound);

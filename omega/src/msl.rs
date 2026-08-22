@@ -1281,6 +1281,67 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
+    // A SINGLE reduction dim is the shape every matmul takes, and it makes
+    // the whole per-element index computation redundant. `r` already IS the
+    // reduction coordinate (`r < reduction_total == reduction_extents[0]`),
+    // so the unflatten is an identity; and every operand's offset then
+    // advances by a CONSTANT stride per step, so the base can be hoisted and
+    // the step folded into one add.
+    //
+    // What the general path below costs per element, measured on the emitted
+    // MSL: a 64-bit integer `%` and `/` against a runtime extent (Apple GPUs
+    // have no integer divider — that is an emulated multi-instruction
+    // sequence), a write into a thread-local `long` array, and `rank`
+    // 64-bit multiply-adds per operand. For a 4096x4096 matvec that is all
+    // of it: the probe measured 1.6 GB/s against llama.cpp Metal's 214.7.
+    if reduce_rank == 1 {
+        let reduce_dim = reduce_dims[0] as usize;
+        for index in 0..operand_count {
+            source.push_str(&format!(
+                "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
+            ));
+            source.push_str(&format!("    long off{index} = u.operand_base[{index}];\n"));
+            for dim in 0..rank {
+                if dim == reduce_dim {
+                    continue;
+                }
+                source.push_str(&format!(
+                    "    off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                ));
+            }
+            source.push_str(&format!("    off{index} += (long)lane * stride{index};\n"));
+            source.push_str(&format!(
+                "    long advance{index} = stride{index} * {SIMD_WIDTH};\n"
+            ));
+        }
+        source.push_str(&format!(
+            "    for (long r = (long)lane; r < u.reduction_total; r += {SIMD_WIDTH}) {{\n"
+        ));
+        source.push_str(&format!(
+            "        {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        for (index, &is_packed) in quantized.iter().enumerate() {
+            source.push_str(&format!(
+                "        scratch[{index}] = {};\n",
+                operand_read(index, &format!("off{index}"), is_packed)
+            ));
+        }
+        let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
+        source.push_str(&format!("        {element_type} value = {value_expr};\n"));
+        let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+        source.push_str(&format!(
+            "        accumulator = seeded ? {combine_expr} : value;\n"
+        ));
+        source.push_str("        seeded = true;\n");
+        for index in 0..operand_count {
+            source.push_str(&format!("        off{index} += advance{index};\n"));
+        }
+        source.push_str("    }\n");
+        push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
+        return;
+    }
+
     source.push_str(&format!(
         "    for (long r = (long)lane; r < u.reduction_total; r += {SIMD_WIDTH}) {{\n"
     ));
@@ -1331,6 +1392,19 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
+    push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
+}
+
+/// The `simd_sum` fold and the lane-0 store both cooperative loop shapes
+/// end with — shared so the strength-reduced single-reduction-dim path and
+/// the general path cannot drift on how the result is written out.
+fn push_cooperative_reduce_tail(
+    source: &mut String,
+    _resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    rank: usize,
+    element_type: &str,
+) {
     let combine_fn = simd_combine_fn(reduce_op);
     source.push_str(&format!(
         "    {element_type} reduced = {combine_fn}(accumulator);\n"
