@@ -516,7 +516,7 @@ impl BackendRuntime {
         let plan = self
             .plans
             .get_mut(&shape)
-            .expect("just inserted on miss, found on hit, above");
+            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
         Ok(execute_plan_named(plan, named)?)
     }
 
@@ -550,7 +550,7 @@ impl BackendRuntime {
         let plan = self
             .plans
             .get_mut(&shape)
-            .expect("just inserted on miss, found on hit, above");
+            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
         Ok(execute_plan_named_metal_op_timed(plan, named)?)
     }
 }
