@@ -1073,6 +1073,81 @@ mod real_openchat_file {
         assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
     }
 
+    /// Diagnostic-only: drives the same real cached decode loop as
+    /// [`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`],
+    /// but sets `PROXIMA_METAL_OP_PROFILE_STEP=3` so `run_decode_loop`'s own
+    /// `instrument`-gated branch (`generate.rs`) swaps ONE decode step from
+    /// the production batched `execute_plan` to the diagnostic
+    /// `execute_plan_op_timed` -- one command buffer PER `BoundOp` instead
+    /// of one for the whole program -- and prints the per-op GPU
+    /// attribution `proxima-tensor/docs/discipline.md`'s `gpu_exec`
+    /// investigation needed. Step 3 is a real decode step (`new_count=1`,
+    /// `cached_len=prompt_len+3`), comfortably past the first token so the
+    /// resident-buffer cache and KV-cache growth are both in their steady
+    /// state (ROW 84's own `resident_uploads=0` pattern). Not a
+    /// pass/fail-on-numbers test -- `report_op_timings`' own `println!`
+    /// output IS the deliverable this test exists to produce, exactly like
+    /// this file's other `_summary`-printing diagnostic tests.
+    #[cfg(all(feature = "metal", feature = "instrument"))]
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
+    fn profiles_one_real_decode_step_by_per_op_gpu_time() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        prefault_if_requested(file_bytes);
+
+        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let prompt = decode_loop_prompt();
+        let max_tokens = 5;
+
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+
+        // SAFETY: this test only runs via an explicit `--ignored` invocation
+        // (never nextest's default parallel sweep), matching the same
+        // single-process-at-a-time convention `PROXIMA_PREFAULT`/
+        // `PROXIMA_MAX_TOKENS` already rely on being read, unmutated, by
+        // this same file's other ignored tests.
+        unsafe {
+            std::env::set_var("PROXIMA_METAL_OP_PROFILE_STEP", "3");
+        }
+        let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+        let generated = model
+            .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
+            .expect("generate through the metal backend");
+        // SAFETY: same justification as the `set_var` above -- single
+        // process, no concurrent reader.
+        unsafe {
+            std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
+        }
+
+        std::println!(
+            "op_profile_run tokens_generated={} stopped_by_eos={} generated_text={:?}",
+            generated.0.len(),
+            generated.2,
+            generated.1
+        );
+        assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
+    }
+
     /// Every real openchat weight this checkpoint's cached forward program
     /// binds by name -- `Q4_K`/`Q5_K`/`Q6_K` tensors packed straight out of
     /// an mmap, everything else dequantized -- reused by the `Q8_0`

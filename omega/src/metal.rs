@@ -193,6 +193,8 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 
 use crate::error::EmitError;
 use crate::msl::{gather_count, reduction_dims};
+#[cfg(feature = "instrument")]
+use crate::msl::diagnose_packed_row_block;
 use crate::{Binding, GridSpec, Kernel, emit};
 
 /// A live Metal buffer handle — the shape every device-buffer table and
@@ -440,6 +442,28 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
 
+    // ONE `MTLComputeCommandEncoder` for the whole program, opened here and
+    // `endEncoding()`d once below, after every op has been encoded into it --
+    // not one per op. `computeCommandEncoder()` (no dispatch-type argument)
+    // defaults to `MTLDispatchTypeSerial` (Apple's own documented default,
+    // confirmed against `objc2-metal-0.3.2`'s own `MTLDispatchType` doc:
+    // "Command encoder dispatches are executed in dispatched order"), the
+    // IDENTICAL dispatch type every one of the former per-op encoders already
+    // used -- this change narrows encoder COUNT, not dispatch semantics.
+    // Ordering and hazard-tracked visibility between two dispatches in one
+    // serial encoder is Metal's documented behavior for tracked resources
+    // (every buffer here is `storageModeShared`, never
+    // `HazardTrackingModeUntracked` -- see the module doc's "Execution
+    // model"), so this is the SAME correctness argument that section already
+    // makes for two encoders in one command buffer, just one level tighter:
+    // one encoder's own dispatches were always ordered and hazard-tracked
+    // relative to each other, encoder boundaries or not.
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command buffer refused to hand out a compute encoder".to_string(),
+        })?;
+
     // pipelines live in this thread's `PIPELINE_CACHE`, not here: see that
     // static's own doc for why per-call was the defect.
     // (bound op, its fault buffer, gather count) for every op that gathered —
@@ -448,13 +472,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     // completes. See the module doc's "Gather fault reporting" section.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        let fault = encode_op(
-            &device,
-            &command_buffer,
-            &mut device_buffers,
-            bound,
-            q4k_operands,
-        )?;
+        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, q4k_operands)?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
@@ -462,6 +480,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             device_buffers.remove(retired);
         }
     }
+    encoder.endEncoding();
 
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
@@ -516,6 +535,211 @@ pub fn execute_plan_named(
 ) -> Result<Evaluated, MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan(plan, &blocks)
+}
+
+/// One [`BoundOp`]'s GPU-only execution time and the operand bytes it read,
+/// as gathered by [`execute_plan_op_timed`]. `weight_name` is
+/// [`Op::name`](proxima_tensor::Op::name) off whichever operand is a named
+/// block input (a model weight or the `ids`/`eps`/`rope_*`/KV-cache block
+/// this program declares by name) -- `None` when every operand is itself a
+/// computed node, which is the common case for a chained elementwise op.
+#[cfg(feature = "instrument")]
+#[derive(Debug, Clone)]
+pub struct OpGpuTiming {
+    pub node: NodeId,
+    pub kind: &'static str,
+    pub operand_bytes: u64,
+    pub gpu_ns: u64,
+    pub weight_name: Option<String>,
+    /// `bound.operands().len()` -- surfaced so a diagnostic caller can tell
+    /// a two-operand (weight, activation) reduce, the shape
+    /// [`crate::msl::packed_row_block`] requires, from a fused reduce whose
+    /// element body absorbed a third operand (e.g. a gate/up product ahead
+    /// of a down-projection), which disqualifies the row-blocked kernel via
+    /// that same function's `quantized.len() != 2` check.
+    pub operand_count: usize,
+    /// [`crate::msl::diagnose_packed_row_block`]'s own verdict on THIS op,
+    /// against a REAL bound program rather than a synthetic symbolic one --
+    /// `None` when the op is not a `Reduce { keep: Keep::Reduce, .. }` at
+    /// all (the diagnosis does not apply), `Some("PASS")` when it took the
+    /// row-blocked path, `Some(<rejection debug>)` otherwise. Exists
+    /// because a synthetic probe's rejection table and a real production
+    /// run's own `classify_kind` bucket disagreed on `ffn_down`/
+    /// `output.weight` -- printing this against the REAL bound op is what
+    /// settles which one was wrong, rather than trusting either by
+    /// inference.
+    pub packed_row_block_rejection: Option<String>,
+}
+
+/// Diagnostic-only counterpart of [`execute_plan`]: instead of sharing ONE
+/// command buffer across the whole program and `commit`/`waitUntilCompleted`ing
+/// it exactly once (see the module doc's "Execution model"), this commits
+/// and waits on its OWN command buffer per [`BoundOp`], so each op's
+/// `GPUStartTime`/`GPUEndTime` -- `MTLCommandBuffer`'s own documented
+/// per-buffer GPU occupancy, not a CPU-side measurement -- can be read back
+/// individually. It exists to answer exactly one question: does GPU time
+/// track operand bytes, or is it flat per dispatch regardless of size. That
+/// answer costs exactly what [`execute_plan`]'s own module doc says ROW 73
+/// measured and removed -- one submission-boundary intercept per split, now
+/// paid `prepared.resolved.len()` times instead of once -- which is why this
+/// function is reachable only behind the `instrument` feature, from this
+/// crate's own diagnostic call sites, and never from the serving loop
+/// ([`execute_plan`]/[`execute_plan_named`] remain the only production
+/// entry points and are completely unchanged by this function's existence).
+///
+/// # Errors
+/// Same as [`execute_plan`].
+#[cfg(feature = "instrument")]
+pub fn execute_plan_op_timed(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let prepared = &plan.prepared;
+    let q4k_operands = &plan.q4k_operands;
+
+    let (device, queue) = device_and_queue()?;
+
+    let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        let resident = plan.resident_nodes.contains(node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            other => return Err(unsupported_gpu_codec(*node, other)),
+        };
+        device_buffers.insert(*node, buffer);
+    }
+
+    let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let operand_bytes: u64 = bound
+            .operands()
+            .iter()
+            .map(|(source, _, _)| {
+                device_buffers
+                    .get(source)
+                    .map(|buffer| buffer.length() as u64)
+                    .unwrap_or(0)
+            })
+            .sum();
+        let weight_name = bound
+            .operands()
+            .iter()
+            .find_map(|(source, _, _)| plan.program[source.0 as usize].name())
+            .map(ToString::to_string);
+        let kind = classify_kind(bound, q4k_operands);
+        let packed_row_block_rejection = diagnose_kind(bound, q4k_operands);
+
+        let command_buffer = queue
+            .commandBuffer()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command queue refused to hand out a command buffer".to_string(),
+            })?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?;
+        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, q4k_operands)?;
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        let gpu_ns = ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
+        if let Some((fault_buffer, gathers)) = fault {
+            check_gather_fault(bound, &fault_buffer, gathers)?;
+        }
+        for retired in &prepared.retires[position] {
+            device_buffers.remove(retired);
+        }
+        timings.push(OpGpuTiming {
+            node: bound.node,
+            kind,
+            operand_bytes,
+            gpu_ns,
+            weight_name,
+            operand_count: bound.operands().len(),
+            packed_row_block_rejection,
+        });
+    }
+
+    let evaluated = finish(
+        &plan.program,
+        &prepared.index_nodes,
+        &prepared.shapes,
+        &prepared.effective_outputs,
+        &device_buffers,
+        prepared.root,
+    )?;
+    Ok((evaluated, timings))
+}
+
+/// [`execute_plan_op_timed`] against a name-keyed block set, mirroring
+/// [`execute_plan_named`]'s own name resolution.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(feature = "instrument")]
+pub fn execute_plan_named_op_timed(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_op_timed(plan, &blocks)
+}
+
+/// Classifies one [`BoundOp`]'s emitted kernel body the same way
+/// `omega/examples/real_forward_packed_probe.rs` (discipline log ROW 85)
+/// does: by grepping the SOURCE for the row-blocked call site vs the
+/// generic per-element scalar call site vs a SIMD cooperative combine,
+/// since [`crate::msl::emit`] is the one place that decides which of the
+/// three a given `Reduce` gets and none of that decision is exposed as its
+/// own accessor.
+#[cfg(feature = "instrument")]
+fn classify_kind(bound: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> &'static str {
+    match &bound.kind {
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+        BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => match emit(bound, q4k_operands) {
+            Ok(kernel) if kernel.source.contains("q4k_run8(blk") => "reduce-packed-row-blocked",
+            Ok(kernel)
+                if kernel.source.contains("simd_sum(")
+                    || kernel.source.contains("simd_max(")
+                    || kernel.source.contains("simd_min(")
+                    || kernel.source.contains("simd_product(") =>
+            {
+                "reduce-cooperative"
+            }
+            Ok(_) => "reduce-generic-scalar",
+            Err(_) => "reduce-unclassified",
+        },
+    }
+}
+
+/// [`diagnose_packed_row_block`]'s verdict for THIS bound op, against the
+/// REAL production layout rather than a synthetic symbolic probe --
+/// `None` for anything that is not a `Reduce { keep: Keep::Reduce, .. }`
+/// (the row-blocked kernel does not apply). `Some("PASS")` means it took
+/// (or would take) the row-blocked path; `Some(<debug of the rejection>)`
+/// names the exact gate that rejected it.
+#[cfg(feature = "instrument")]
+fn diagnose_kind(bound: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> Option<String> {
+    if !matches!(bound.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+        return None;
+    }
+    let quantized: Vec<bool> = bound.operands().iter().map(|(node, _, _)| q4k_operands.contains(node)).collect();
+    Some(match diagnose_packed_row_block(bound, &quantized) {
+        Ok(()) => "PASS".to_string(),
+        Err(rejection) => format!("{rejection:?}"),
+    })
 }
 
 /// Everything [`execute`] needs before touching a device — the same
@@ -1621,16 +1845,20 @@ fn dispatch(
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
 }
 
-/// Encodes one `BoundOp` as a compute pass into `command_buffer` — its own
-/// `MTLComputeCommandEncoder`, opened and `endEncoding()`d here, but neither
-/// committed nor waited on: [`execute`] shares one command buffer across
-/// every op in the program and commits/waits exactly once (see the module
-/// doc's "Execution model"). Returns the op's fault buffer and gather count
-/// when it gathers, so [`execute`] can check it after that single wait
-/// instead of here, where the buffer is not yet CPU-visible.
+/// Encodes one `BoundOp` as a compute dispatch into the CALLER's already-open
+/// `encoder` — neither opened nor `endEncoding()`d here. [`execute_plan`]
+/// opens exactly one `MTLComputeCommandEncoder` for the whole program and
+/// ends it once, after every op has been encoded into it (see the module
+/// doc's "Execution model"); [`execute_plan_op_timed`]'s diagnostic path
+/// instead opens and ends one per call, one op at a time. Either way this
+/// function only ever binds a pipeline, binds buffers, and dispatches —
+/// exactly the same three calls regardless of how many other ops share the
+/// encoder it was handed. Returns the op's fault buffer and gather count
+/// when it gathers, so the caller can check it after its own wait instead
+/// of here, where the buffer is not yet CPU-visible.
 fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
-    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
     bound: &BoundOp,
     q4k_operands: &BTreeSet<NodeId>,
@@ -1658,24 +1886,9 @@ fn encode_op(
         counter!(OP_SETUP_TICKS, elapsed_ticks(op_setup_started));
     }
 
-    let encoder =
-        command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
-
     encoder.setComputePipelineState(&pipeline);
-    bind_buffers(
-        &encoder,
-        &kernel,
-        device_buffers,
-        &output,
-        &uniforms,
-        fault.as_ref(),
-    )?;
-    dispatch(&encoder, &pipeline, kernel.grid);
-    encoder.endEncoding();
+    bind_buffers(encoder, &kernel, device_buffers, &output, &uniforms, fault.as_ref())?;
+    dispatch(encoder, &pipeline, kernel.grid);
 
     device_buffers.insert(bound.node, output);
     Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))

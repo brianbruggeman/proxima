@@ -70,6 +70,10 @@ use proxima_tokenizer::Vocab;
 #[cfg(feature = "metal")]
 use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
 #[cfg(all(feature = "instrument", feature = "metal"))]
+use omega::backend::execute_plan_named_metal_op_timed;
+#[cfg(all(feature = "instrument", feature = "metal"))]
+use omega::metal::OpGpuTiming;
+#[cfg(all(feature = "instrument", feature = "metal"))]
 use omega::metal::metal_stage_totals;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
@@ -85,6 +89,170 @@ use crate::serving::GPU_LAYERS_ALL;
 
 const ROPE_FREQ_BASE: f32 = 10_000.0;
 const RMS_EPSILON: f32 = 1e-5;
+
+/// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
+/// individually -- the discipline log's own "top 20 ops by GPU time" ask.
+#[cfg(all(feature = "instrument", feature = "metal"))]
+const OP_PROFILE_TOP_N: usize = 20;
+
+/// Prints the per-op GPU attribution `run_decode_loop`'s
+/// `PROXIMA_METAL_OP_PROFILE_STEP` branch gathers for exactly one decode
+/// step: the op count and summed GPU time (asserting the count so a
+/// degenerate empty profile reads as RED, not quiet), one line per
+/// `OpGpuTiming::kind` bucket, and the top [`OP_PROFILE_TOP_N`] ops by GPU
+/// time with their operand bytes and bytes/ns -- exactly what settles
+/// whether GPU time tracks operand bytes or is flat per dispatch.
+#[cfg(all(feature = "instrument", feature = "metal"))]
+fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
+    let op_count = timings.len();
+    let total_gpu_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
+    let total_operand_bytes: u64 = timings.iter().map(|timing| timing.operand_bytes).sum();
+
+    std::println!(
+        "op_profile step={step} op_count={op_count} total_gpu_ns={total_gpu_ns} \
+         total_gpu_ms={:.3} total_operand_bytes={total_operand_bytes}",
+        total_gpu_ns as f64 / 1e6,
+    );
+
+    let mut by_kind: alloc::collections::BTreeMap<&'static str, (u64, u64, u64)> = alloc::collections::BTreeMap::new();
+    for timing in timings {
+        let entry = by_kind.entry(timing.kind).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += timing.gpu_ns;
+        entry.2 += timing.operand_bytes;
+    }
+    for (kind, (count, ns, bytes)) in &by_kind {
+        std::println!(
+            "op_profile_bucket step={step} kind={kind} op_count={count} gpu_ms={:.3} \
+             gpu_ns_per_op={:.1} operand_bytes={bytes}",
+            *ns as f64 / 1e6,
+            *ns as f64 / *count as f64,
+        );
+    }
+
+    let mut ranked: Vec<&OpGpuTiming> = timings.iter().collect();
+    ranked.sort_by_key(|timing| core::cmp::Reverse(timing.gpu_ns));
+    for (rank, timing) in ranked.iter().take(OP_PROFILE_TOP_N).enumerate() {
+        std::println!(
+            "op_profile_top step={step} rank={} node={} kind={} weight_name={:?} \
+             operand_bytes={} operand_count={} gpu_ns={} gpu_ns_per_byte={:.6}",
+            rank + 1,
+            timing.node.0,
+            timing.kind,
+            timing.weight_name,
+            timing.operand_bytes,
+            timing.operand_count,
+            timing.gpu_ns,
+            if timing.operand_bytes == 0 {
+                0.0
+            } else {
+                timing.gpu_ns as f64 / timing.operand_bytes as f64
+            },
+        );
+    }
+
+    // one row per real weight FAMILY (`blk.N.ffn_down.weight` -> `ffn_down.weight`,
+    // stripping the per-layer digit so 32 layers' worth of one matmul kind
+    // aggregates into one line) -- the byte-share/time-share table the
+    // discipline log's "by tensor name where you can recover it" ask ends
+    // on, since a per-node top-20 line cannot show whether a whole KIND is
+    // slow or just its biggest instance.
+    let mut by_family: alloc::collections::BTreeMap<String, FamilyGpuStats> = alloc::collections::BTreeMap::new();
+    for timing in timings {
+        let family = match &timing.weight_name {
+            Some(name) => strip_layer_index(name),
+            None => String::from("(no named operand)"),
+        };
+        let entry = by_family.entry(family).or_default();
+        entry.op_count += 1;
+        entry.gpu_ns += timing.gpu_ns;
+        entry.operand_bytes += timing.operand_bytes;
+        entry.min_operand_count = entry.min_operand_count.min(timing.operand_count);
+        entry.max_operand_count = entry.max_operand_count.max(timing.operand_count);
+        match timing.packed_row_block_rejection.as_deref() {
+            Some("PASS") => stats_pass(entry),
+            Some(rejection) => stats_reject(entry, rejection),
+            None => {}
+        }
+    }
+    let mut family_ranked: Vec<(&String, &FamilyGpuStats)> = by_family.iter().collect();
+    family_ranked.sort_by_key(|(_, stats)| core::cmp::Reverse(stats.gpu_ns));
+    for (family, stats) in family_ranked {
+        std::println!(
+            "op_profile_family step={step} family={family:?} op_count={} gpu_ms={:.3} \
+             operand_bytes={} gpu_ns_per_byte={:.6} min_operand_count={} max_operand_count={} \
+             row_blocked_count={} rejected_count={} packed_row_block_gates={:?}",
+            stats.op_count,
+            stats.gpu_ns as f64 / 1e6,
+            stats.operand_bytes,
+            if stats.operand_bytes == 0 { 0.0 } else { stats.gpu_ns as f64 / stats.operand_bytes as f64 },
+            stats.min_operand_count,
+            stats.max_operand_count,
+            stats.row_blocked_count,
+            stats.rejected_count,
+            stats.packed_row_block_gates,
+        );
+    }
+}
+
+#[cfg(all(feature = "instrument", feature = "metal"))]
+fn stats_pass(entry: &mut FamilyGpuStats) {
+    entry.row_blocked_count += 1;
+    entry.packed_row_block_gates.insert("PASS".to_string());
+}
+
+#[cfg(all(feature = "instrument", feature = "metal"))]
+fn stats_reject(entry: &mut FamilyGpuStats, rejection: &str) {
+    entry.rejected_count += 1;
+    entry.packed_row_block_gates.insert(rejection.to_string());
+}
+
+/// One tensor family's aggregated per-op GPU cost across every layer that
+/// carries it, plus the DISTINCT set of [`OpGpuTiming::packed_row_block_rejection`]
+/// verdicts its ops reported -- printed as a set (rather than one value)
+/// because a family's own gate can legitimately vary by shape (a family's
+/// `Some("PASS")` alongside a rejection would mean SOME layers took the
+/// fast path and others did not, which the aggregate ns/byte alone cannot
+/// show).
+#[cfg(all(feature = "instrument", feature = "metal"))]
+struct FamilyGpuStats {
+    op_count: u64,
+    gpu_ns: u64,
+    operand_bytes: u64,
+    min_operand_count: usize,
+    max_operand_count: usize,
+    row_blocked_count: u64,
+    rejected_count: u64,
+    packed_row_block_gates: BTreeSet<String>,
+}
+
+#[cfg(all(feature = "instrument", feature = "metal"))]
+impl Default for FamilyGpuStats {
+    fn default() -> Self {
+        Self {
+            row_blocked_count: 0,
+            rejected_count: 0,
+            op_count: 0,
+            gpu_ns: 0,
+            operand_bytes: 0,
+            min_operand_count: usize::MAX,
+            max_operand_count: 0,
+            packed_row_block_gates: BTreeSet::new(),
+        }
+    }
+}
+
+/// `blk.7.ffn_down.weight` -> `ffn_down.weight`: drops exactly one
+/// `.`-delimited numeric segment (the layer index every `blk.N.*` weight
+/// name carries) so [`report_op_timings`] can sum one matmul KIND across
+/// all 32 layers instead of reporting 32 near-identical lines.
+#[cfg(all(feature = "instrument", feature = "metal"))]
+fn strip_layer_index(name: &str) -> String {
+    name.split('.')
+        .filter(|segment| segment.parse::<u32>().is_err())
+        .collect::<Vec<&str>>()
+        .join(".")
+}
 
 /// A checkpoint's weights, bound once from a caller-owned byte view, plus
 /// its compiled cached forward program -- everything a generation request
@@ -351,6 +519,40 @@ impl BackendRuntime {
             .expect("just inserted on miss, found on hit, above");
         Ok(execute_plan_named(plan, named)?)
     }
+
+    /// Diagnostic counterpart of [`Self::evaluate`]: same plan-cache lookup,
+    /// but the Metal driver commits and waits on ONE command buffer PER
+    /// `BoundOp` instead of once for the whole program, so each op's own
+    /// GPU-only execution time comes back alongside the result -- see
+    /// `omega::metal::execute_plan_op_timed`'s own doc for the cost this
+    /// pays and why it must never replace [`Self::evaluate`] on the serving
+    /// loop. Reachable only behind the `instrument` feature and only from
+    /// this crate's own diagnostic call sites (`run_decode_loop`'s
+    /// `PROXIMA_METAL_OP_PROFILE_STEP` branch).
+    #[cfg(feature = "instrument")]
+    fn evaluate_op_timed(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+    ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        if self.plans.contains_key(&shape) {
+            self.plan_hits += 1;
+        } else {
+            self.plan_misses += 1;
+            let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+            mark_resident(&mut plan, resident_names);
+            self.plans.insert(shape, plan);
+        }
+        let plan = self
+            .plans
+            .get_mut(&shape)
+            .expect("just inserted on miss, found on hit, above");
+        Ok(execute_plan_named_metal_op_timed(plan, named)?)
+    }
 }
 
 /// The CPU-direct runtime a build without the `metal` feature keeps --
@@ -598,6 +800,29 @@ impl<'file> LoadedModel<'file> {
 
             #[cfg(feature = "instrument")]
             let evaluate_started = read_ticks();
+            // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
+            // default-off: unset in every production run, so `runtime.evaluate`
+            // is the only path a caller without this env var ever takes. When
+            // set to this step's own index, this ONE step instead runs
+            // `evaluate_op_timed` (per-op command buffers, see that method's own
+            // doc for the cost) and prints the per-op GPU attribution this
+            // crate's own discipline log needed to settle the `gpu_exec`
+            // investigation. Every other step, and every run without the env
+            // var, is byte-for-byte the pre-existing path.
+            #[cfg(all(feature = "instrument", feature = "metal"))]
+            let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                Some(target) if target == _step => {
+                    let (evaluated, timings) =
+                        runtime.evaluate_op_timed(&self.program, &symbols, &named_blocks, &roots, &resident_names)?;
+                    report_op_timings(_step, &timings);
+                    evaluated
+                }
+                _ => runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?,
+            };
+            #[cfg(not(all(feature = "instrument", feature = "metal")))]
             let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?;
             #[cfg(feature = "instrument")]
             let evaluate_ticks = elapsed_ticks(evaluate_started);

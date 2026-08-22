@@ -80,7 +80,10 @@ objc2 = { version = "0.6.4", optional = true }
 # calls: device + runtime compile (MTLDevice, MTLLibrary), buffers
 # (MTLBuffer, MTLResource, MTLAllocation), and dispatch (MTLCommandQueue,
 # MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder,
-# MTLComputePipeline, MTLTypes for MTLSize).
+# MTLComputePipeline, MTLTypes for MTLSize). `objc2-core-foundation` gates
+# `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` (`CFTimeInterval`), which the
+# `instrument`-gated per-op diagnostic timing in `metal.rs` reads back --
+# nothing on the production `execute`/`execute_plan` path calls either.
 objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLDevice",
     "MTLLibrary",
@@ -94,6 +97,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLComputePipeline",
     "MTLTypes",
     "block2",
+    "objc2-core-foundation",
 ], optional = true }
 # objc2-foundation: NSString (kernel source and entry name go in), NSError
 # (a compile failure's localizedDescription comes out) — the two Foundation
