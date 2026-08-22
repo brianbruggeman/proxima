@@ -28,6 +28,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "std")]
+pub mod backend;
 pub mod error;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
