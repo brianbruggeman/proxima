@@ -70,6 +70,10 @@ use proxima_tokenizer::Vocab;
 
 #[cfg(feature = "metal")]
 use omega::backend::{Backend, Plan, execute_plan_named, plan_named};
+#[cfg(all(feature = "instrument", feature = "metal"))]
+use omega::metal::metal_stage_totals;
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 #[cfg(feature = "metal")]
@@ -500,13 +504,27 @@ impl<'file> LoadedModel<'file> {
         let vocab_size = self.architecture.vocab as usize;
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(&self.vocab, max_tokens, |_step| {
+            #[cfg(feature = "instrument")]
+            let step_started = read_ticks();
+
             let new_count = next_ids.len();
+            #[cfg(feature = "instrument")]
+            let apply_serving_config_started = read_ticks();
             apply_serving_config(serving_config, cached_len + new_count);
+            #[cfg(feature = "instrument")]
+            let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
+
+            #[cfg(feature = "instrument")]
+            let build_position_inputs_started = read_ticks();
             let inputs = build_position_inputs(&next_ids, cached_len, self.architecture.head_dim);
+            #[cfg(feature = "instrument")]
+            let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
             let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                 self.weights.owned.len() + self.weights.packed.len() + 3 + layer_caches.len() * 3,
             );
+            #[cfg(feature = "instrument")]
+            let named_blocks_weights_started = read_ticks();
             named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
             for (name, data) in &self.weights.owned {
                 named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
@@ -517,9 +535,28 @@ impl<'file> LoadedModel<'file> {
             named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
             named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+            #[cfg(feature = "instrument")]
+            let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
+
+            // KV-cache HOST -> DEVICE traffic: every named block below is the
+            // FULL accumulated history (`LayerCache::append` only grows these,
+            // never truncates), so this is the full `cached_len`-sized array
+            // re-bound as a model input every single step -- not the
+            // `new_count`-sized increment. Measured directly as element
+            // counts read off the `Vec`s themselves (a size, not a timing),
+            // so it is exact and needs no instrumentation to be turned on.
+            #[cfg(feature = "instrument")]
+            let kv_cache_upload_elements: u64 = layer_caches
+                .iter()
+                .map(|cache| (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64)
+                .sum();
+            #[cfg(feature = "instrument")]
+            let named_blocks_kv_started = read_ticks();
             for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
                 named_blocks.extend(layer_caches[layer].named_blocks(k_even_name, k_odd_name, v_name));
             }
+            #[cfg(feature = "instrument")]
+            let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
             let symbols = [new_count as u64, cached_len as u64];
             let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.cache_roots.len() * 3);
@@ -530,14 +567,39 @@ impl<'file> LoadedModel<'file> {
                 roots.push(*value);
             }
 
+            #[cfg(feature = "instrument")]
+            let evaluate_started = read_ticks();
             let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots)?;
+            #[cfg(feature = "instrument")]
+            let evaluate_ticks = elapsed_ticks(evaluate_started);
+            #[cfg(all(feature = "instrument", feature = "metal"))]
+            let metal_stage = metal_stage_totals();
 
+            // KV-cache DEVICE -> HOST readback + host append: unlike the
+            // upload above, `evaluated.get(*even)` etc. is this step's own
+            // `new_count`-sized OUTPUT increment (what the forward computed
+            // for the newly-added positions), which `LayerCache::append`
+            // then extends onto the growing history -- so this side is
+            // expected to stay FLAT across tokens where the upload side
+            // grows. `layer_cache_append` ticks/bytes below are the pure
+            // host `extend_from_slice` memcpy cost, distinct from the GPU
+            // readback `metal_stage_totals` already reports.
+            #[cfg(feature = "instrument")]
+            let layer_cache_append_started = read_ticks();
+            #[cfg(feature = "instrument")]
+            let mut layer_cache_append_elements: u64 = 0;
             for (layer, (even, odd, value)) in self.cache_roots.iter().enumerate() {
                 let (even_data, _) = evaluated.get(*even).ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
                 let (odd_data, _) = evaluated.get(*odd).ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
                 let (value_data, _) = evaluated.get(*value).ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                #[cfg(feature = "instrument")]
+                {
+                    layer_cache_append_elements += (even_data.len() + odd_data.len() + value_data.len()) as u64;
+                }
                 layer_caches[layer].append(even_data, odd_data, value_data);
             }
+            #[cfg(feature = "instrument")]
+            let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
             cached_len += new_count;
 
             let (logits, _shape) = evaluated
@@ -545,8 +607,65 @@ impl<'file> LoadedModel<'file> {
                 .ok_or(InteropError::MissingEvaluatedNode { node: self.logits_root })?;
             let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
 
+            #[cfg(feature = "instrument")]
+            let greedy_pick_started = read_ticks();
             let token_id = proxima_tokenizer::greedy_pick(last_position).ok_or(InteropError::EmptyLogits)?;
+            #[cfg(feature = "instrument")]
+            let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
             next_ids = alloc::vec![token_id];
+
+            #[cfg(feature = "instrument")]
+            {
+                let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
+                std::println!(
+                    "token_breakdown step={_step} new_count={new_count} cached_len_before={} \
+                     step_wall_ms={:.3} apply_serving_config_ms={:.3} build_position_inputs_ms={:.3} \
+                     named_blocks_weights_ms={:.3} named_blocks_kv_ms={:.3} kv_cache_upload_bytes={} \
+                     evaluate_ms={:.3} layer_cache_append_ms={:.3} layer_cache_append_bytes={} \
+                     greedy_pick_ms={:.3}",
+                    cached_len,
+                    ms(elapsed_ticks(step_started)),
+                    ms(apply_serving_config_ticks),
+                    ms(build_position_inputs_ticks),
+                    ms(named_blocks_weights_ticks),
+                    ms(named_blocks_kv_ticks),
+                    kv_cache_upload_elements * 4,
+                    ms(evaluate_ticks),
+                    ms(layer_cache_append_ticks),
+                    layer_cache_append_elements * 4,
+                    ms(greedy_pick_ticks),
+                );
+                #[cfg(feature = "metal")]
+                std::println!(
+                    "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
+                     emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
+                     block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
+                     op_setup_calls={} op_setup_ms={:.3} gpu_exec_calls={} gpu_exec_ms={:.3} \
+                     readback_calls={} readback_ms={:.3} readback_bytes={} \
+                     nocopy_uploads={} copying_uploads={} nocopy_reuses={}",
+                    metal_stage.prepare_calls,
+                    ms(metal_stage.prepare_ticks),
+                    metal_stage.emit_calls,
+                    ms(metal_stage.emit_ticks),
+                    metal_stage.pipeline_hits,
+                    metal_stage.pipeline_misses,
+                    ms(metal_stage.pipeline_compile_ticks),
+                    metal_stage.block_upload_calls,
+                    ms(metal_stage.block_upload_ticks),
+                    metal_stage.block_upload_bytes,
+                    metal_stage.op_setup_calls,
+                    ms(metal_stage.op_setup_ticks),
+                    metal_stage.gpu_exec_calls,
+                    ms(metal_stage.gpu_exec_ticks),
+                    metal_stage.readback_calls,
+                    ms(metal_stage.readback_ticks),
+                    metal_stage.readback_bytes,
+                    metal_stage.nocopy_uploads,
+                    metal_stage.copying_uploads,
+                    metal_stage.nocopy_reuses,
+                );
+            }
+
             Ok(token_id)
         })?;
 

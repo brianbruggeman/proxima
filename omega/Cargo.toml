@@ -55,6 +55,14 @@ vulkan = []
 cuda = []
 npu = []
 ane = []
+# Per-token wall-clock attribution for the Metal decode path (split-4019
+# initiative): tick counters over prepare (infer+bind), MSL emit, pipeline
+# cache hit/miss, block upload, per-op setup, GPU execute, and readback --
+# mirroring the shape `proxima_tensor::instrument`'s own `MATMUL_Q4K_CALL_TICKS`
+# already uses. Default-off and additive only: every wrap is
+# `#[cfg(feature = "instrument")]`, so an instrument-off build never pays the
+# `read_ticks()` call it would otherwise cost.
+instrument = ["metal", "proxima-tensor/instrument"]
 
 [dependencies]
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
