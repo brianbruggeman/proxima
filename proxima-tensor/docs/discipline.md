@@ -8940,3 +8940,166 @@ PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS={1,2,4,8} \
   bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
 ```
 The last command, swept over `PROXIMA_MATMUL_WORKERS` and with `PROXIMA_MAX_TOKENS=1` for the prefill-only subtraction baseline, reproduces every table in this row from `token_breakdown`/`DIAG evaluate_quantized`/`matmul_split`/`matmul_split_staged` lines. Dropping `,instrument` from `--features` reproduces the production headline (no `matmul_split`/`token_breakdown` output, `decode_summary`'s own `total_wall_clock_ms` only).
+
+## ROW 100 — four arms, ONE window: standing 44.09 does NOT reproduce cleanly (CoV 53%), 17.62 does (CoV 3.75%); our Metal ties our own CPU on decode but its prefill is 1.8x slower, and neither backend beats llama.cpp on either metric
+
+**Headline, stated first:** every ratio this initiative has quoted against llama.cpp paired a same-day measurement against a different-day incumbent figure. This row fixes that: all four arms (ours-cpu-w8, ours-metal, llama-cpu-t8, llama-metal) run in ONE interleaved window, same model, same prompt, same 24-token budget, same box. Result: the standing CPU bar (44.09 ms/token) does **not** reproduce cleanly today — measured median is 39.9% higher, min is still 9.5% higher, and CoV is 53.35% (an order of magnitude above this skill's 5% trust threshold) — while the standing Metal bar (17.62 ms/token) reproduces tightly (median -0.68%, min -1.53%, CoV 3.75%). **We do not beat llama.cpp on any arm, on either metric, and our own Metal backend does not even beat our own CPU backend on total wall-clock for a short 24-token generation** — its decode ties CPU (66.6 vs 69.0 ms/token median) but its prefill is 1.8x slower (2217.5 vs 1235.7 ms median), driven by a one-time pipeline-compile + block-upload cost that a 24-token run cannot amortize.
+
+**Repo:** worktree `agent-a585f8281e4851e98`, branch `feat/tensor-consolidated` @ `e88ac602942834ed07c4ffb7dc42d6b20c32bd73` (this row's build matches this commit's tree exactly — the three files it touched, `bind.rs`/`cpu.rs`/`instrument.rs`, were already present uncommitted when this row's build started and were committed by a concurrent session partway through this row's own measurement window; diffed to confirm identical content before citing).
+**Host:** Apple M1 Max, 10 logical cores, 64 GiB. `CARGO_TARGET_DIR` and all bench artifacts isolated under this session's own scratch directory, deleted after this row per the task's cleanup instruction — one raw-data file kept, path in Re-prove.
+**Incumbent:** llama.cpp b2534622, `/Users/brianbruggeman/repos/others/llama.cpp/bin/llama-cli`. CPU arm verified `load_tensors: offloaded 0/33 layers to GPU`; Metal arm verified `offloaded 33/33 layers to GPU`, `using device Metal (Apple M1 Max)`. Both verified `NEON=1 ARM_FMA=1 FP16_VA=1 DOTPROD=1 LLAMAFILE=1 ACCELERATE=1 REPACK=1` from `system_info:`.
+**Model, both sides:** `openchat-3.5-1210.Q4_K_S.gguf` (TheBloke, 3.86 GiB) — the exact file ROW 67/68 used, re-verified present at the recorded path, not substituted.
+**Prompt, both sides, 31 tokens (verified via llama-cli's own `prompt eval time = ... / 31 tokens`):** `"GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:"` — read directly out of `proxima-model-interop/src/bind.rs`'s `default_prompt()`, not invented.
+**Byte-identical output, all 24 runs across all 4 arms:** `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"` — the incumbent is doing our work, not a cheaper one, on every arm.
+
+### Method note: how "ours" prefill/decode were split, and why it differs from ROW 67's technique
+
+ROW 67 isolated decode by running `PROXIMA_MAX_TOKENS=1` and `=24` as two separate process invocations and subtracting. This row instead reads the `instrument`-gated `token_breakdown step=N ... step_wall_ms=X` line the harness already prints per decode step within a SINGLE 24-token run: `step=0`'s `step_wall_ms` is prefill (the one full-context forward), and the mean of `step=1..23`'s `step_wall_ms` is decode ms/token. This is strictly more precise (one process pays the mmap/parse/load cost once, not twice) and was verified to sum back to the harness's own `decode_summary total_wall_clock_ms` within roundoff. llama-cli needs no such reconstruction — `llama_perf_context_print` already splits `prompt eval time` (prefill) from `eval time` (decode) natively, per invocation.
+
+### Waiting for a quiet box — full poll log
+
+Box was NOT quiet at the start: `uptime` showed load 3.16/2.74 at 18:24-18:26, then spiked to **56.80 -> 82.83** during the build+smoke-test phase (confirmed via `ps -eo pid,pcpu,comm -r`: sibling agents' `neon_tile_full_output` bench and an unrelated workspace crate's h2 test suite). Polled every 60s afterward as the spike decayed: 43.51, 16.09, 7.61, 4.54, 8.65, 6.77, 8.36, 6.16, **2.57**, **3.01** — two consecutive polls at or below 4 (18:40, 18:41) before the timed sweep began. Full poll log and every individual before/after `uptime` (48 readings, one before and one after each of the 24 timed runs) are in the kept raw-data file (see Re-prove). Load crept back to 5-7 partway through cycle 6 (sibling `rustc` release-build contention resumed, confirmed via `ps`) — reported honestly rather than discarding that cycle's data; it is the source of `llama-cpu-t8`'s worst outlier (see below).
+
+### The four-arm table, n=6 cycles (24 runs), interleaved ours-cpu-w8 / ours-metal / llama-cpu-t8 / llama-metal x6, quiet-start / noisier-tail host
+
+| arm | metric | min | median | max | range | CoV | design-favors |
+|---|---|---|---|---|---|---|---|
+| ours-cpu-w8, `w=8` | prefill, ms | 1123.320 | 1235.656 | 1632.238 | 508.918 | 13.59% | ours |
+| ours-cpu-w8, `w=8` | decode, ms/token | 65.014 | 68.976 | 74.479 | 9.465 | **5.14%** | ours |
+| ours-metal | prefill, ms | 2139.503 | 2217.528 | 3011.440 | 871.937 | 12.93% | ours |
+| ours-metal | decode, ms/token | 66.110 | 66.647 | 69.084 | 2.974 | 1.45% | ours |
+| llama.cpp `-ngl 0 -t 8` | prefill, ms (31 tok x ms/tok) | 782.750 | 841.960 | 1698.490 | 915.740 | **32.62%** | incumbent |
+| llama.cpp `-ngl 0 -t 8` | decode, ms/token | 48.260 | 61.670 | 163.300 | 115.040 | **53.35%** | incumbent |
+| llama.cpp `-ngl 99` | prefill, ms (31 tok x ms/tok) | 102.920 | 103.230 | 103.850 | 0.930 | 0.32% | incumbent |
+| llama.cpp `-ngl 99` | decode, ms/token | 17.350 | 17.500 | 19.230 | 1.880 | 3.75% | incumbent |
+
+Both CPU arms (ours and llama's) sit above this skill's 5% CoV trust line (13.59%/32.62% prefill, 5.14%/53.35% decode) — the range is reported, not a point estimate. Both Metal arms are tight (CoV <= 3.75%), matching ROW 67's own finding that llama's CPU arm is far more sensitive to desktop interference than either Metal arm or our own CPU arm — reconfirmed here on a different day, different noise source.
+
+### Ratios, median AND min-vs-min (the two estimators still disagree, as ROW 67 found)
+
+| comparison | median | min-vs-min |
+|---|---|---|
+| decode, ours-cpu-w8 vs llama-cpu-t8 | **1.118x behind** | 1.347x behind |
+| decode, ours-metal vs llama-metal | 3.808x behind | 3.810x behind |
+| prefill, ours-cpu-w8 vs llama-cpu-t8 | 1.468x behind | 1.435x behind |
+| prefill, ours-metal vs llama-metal | 21.481x behind | 20.788x behind |
+
+The decode median-vs-min disagreement (1.118x vs 1.347x) is exactly the pattern ROW 67 flagged: llama-cpu-t8's own 53% CoV inflates its median, so min-vs-min is the more trustworthy quiet-box estimate — and even by that more favorable estimate we are 1.347x behind, not the flattering 1.118x.
+
+### tokens/sec, the number a user reads (median decode)
+
+| arm | tok/s |
+|---|---|
+| ours-cpu-w8 | 14.50 |
+| ours-metal | 15.00 |
+| llama.cpp `-ngl 0 -t 8` | 16.22 |
+| llama.cpp `-ngl 99` | **57.14** |
+
+### Total 24-token wall-clock (prefill + 23 x decode, median-built) — the number that actually answers "which backend should a caller pick"
+
+| arm | total ms | vs llama-metal (their best) |
+|---|---|---|
+| llama.cpp `-ngl 99` | **505.7** | — |
+| llama.cpp `-ngl 0 -t 8` | 2260.4 | 4.47x slower |
+| ours-cpu-w8 | 2822.1 | 5.58x slower |
+| ours-metal | 3750.4 | 7.42x slower |
+
+**Our best arm (ours-cpu-w8, 2822.1 ms) vs their best arm (llama-metal, 505.7 ms): 5.58x behind.**
+**Our Metal (3750.4 ms) vs their CPU (2260.4 ms): 1.659x behind — our GPU backend does not beat their CPU backend.**
+**Our CPU vs their CPU (apples to apples, both CPU-only): 1.249x behind on total wall**, closer than the decode-only 1.118-1.347x range because our cheaper-relative prefill offsets some of the decode gap.
+
+### New finding this row: our own Metal backend loses to our own CPU backend, driven entirely by prefill
+
+Decode ties (66.647 vs 68.976 ms/token median, Metal ~3.4% faster) but prefill does not: ours-metal's median prefill (2217.528 ms) is **1.795x slower** than ours-cpu-w8's (1235.656 ms; min-vs-min 1.905x). MEASURED, not derived, from the same run's own diagnostic line (`c1` smoke capture): `token_breakdown_metal step=0 ... pipeline_compile_ms=641.182 block_upload_ms=399.076 gpu_exec_ms=1717.218` — 1.04 ms of the 2.16 s step-0 cost is one-time pipeline compile plus weight upload, present on step 0 only (`step=1`'s own line shows `pipeline_compile_ms=0.000 block_upload_ms=1.922`, three orders of magnitude cheaper once resident). Over a short 24-token generation that one-time cost is not amortized, so it dominates total wall-clock and our own Metal backend is the **slowest of all four arms**, not merely "behind the incumbent" — it loses to our own CPU path first.
+
+### Does 44.09 reproduce? No. Does 17.62? Yes.
+
+| standing figure | today, median | delta | today, min | delta | CoV |
+|---|---|---|---|---|---|
+| llama.cpp CPU `-ngl 0 -t 8`, 44.09 | 61.670 | **+39.9%** | 48.260 | +9.5% | 53.35% |
+| llama.cpp Metal `-ngl 99`, 17.62 | 17.500 | -0.68% | 17.350 | -1.53% | 3.75% |
+
+**This is the headline the task asked for, named plainly:** the CPU incumbent figure this initiative has quoted in every ratio since ROW 68 does not hold up under a same-window re-measurement — even the more favorable min-vs-min estimator sits 9.5% off, and the CoV (53.35%) means no single number from today's CPU-arm run should be trusted as a point estimate either. The Metal incumbent figure holds tightly. Every historical ratio in this log computed against **44.09 specifically** carries an unquantified but nontrivial (9.5-40%) uncertainty this row did not have before; ratios computed against **17.62** do not carry that same risk.
+
+### Re-prove — exact commands, all four arms
+
+```
+# ours-cpu-w8 (prefill = token_breakdown step=0 step_wall_ms; decode = mean of step=1..23 step_wall_ms)
+cargo test -p proxima-model-interop --release --lib --features metal,instrument --no-run
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 <testbin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+
+# ours-metal (same testbin, same extraction)
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 <testbin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+
+# llama-cpu-t8 (verbatim, ROW 67's own command)
+llama-cli -m openchat-3.5-1210.Q4_K_S.gguf -ngl 0 -t 8 -n 24 \
+  --temp 0 --top-k 1 -no-cnv --seed 1 \
+  -p "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:"
+
+# llama-metal (NOT verbatim from a prior row -- see gap below)
+llama-cli -m openchat-3.5-1210.Q4_K_S.gguf -ngl 99 -n 24 \
+  --temp 0 --top-k 1 -no-cnv --seed 1 \
+  -p "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:"
+```
+
+`<testbin>` = the `--no-run` build's emitted path, e.g. `$CARGO_TARGET_DIR/release/deps/proxima_model_interop-<hash>`; `cargo test --release --lib --features metal,instrument -- --ignored --exact <test-name> --nocapture` runs it directly without needing the hash.
+
+**Gap, named exactly:** the exact `llama-cli` invocation that produced the standing **17.62** figure is NOT recorded anywhere in this repo — grepped `discipline.md`, `omega/examples/q4k_matvec_probe.rs` (which cites the number: "the bar, measured on this box with llama.cpp `-ngl 99` on a 7B `Q4_K_S` checkpoint: 17.62 ms/token"), and every `.md`/`.sh`/`.rs` file for `ngl 99`/`llama-cli` — only the flag (`-ngl 99`) and the resulting number survive; the full invocation (thread count, sampler flags, prompt) was never committed. This row's `llama-metal` command is a **reconstruction**: ROW 67's own verbatim CPU command with `-ngl 0 -t 8` swapped for `-ngl 99`, same everything else. It reproduces the standing figure closely (17.50 median vs 17.62, -0.68%) which is corroborating evidence the reconstruction is faithful, but it is not proof of verbatim identity, and future rows should not assume it is.
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (release build artifacts) and all 24 individual per-run log files deleted after extraction. One consolidated raw-data file kept: `row100_raw_results.md` (all 48 individual `uptime` before/after readings, all extracted per-cycle values, exact model/prompt/commit) — path was session-scratch-local; the numbers in this row's tables are copied verbatim from it and this row is the durable record.
+
+### Honest read
+
+We do not beat llama.cpp on any arm, on either prefill or decode, on this box, today. Our own Metal backend does not beat our own CPU backend either, for a run this short — its prefill regression (1.8x our own CPU) outweighs its (marginal, within-CoV) decode tie. The CPU-side incumbent bar this initiative has repeated since ROW 68 (44.09) is measurably noisy on this box (53% CoV) and did not reproduce within 10% even on its best estimator; the Metal-side bar (17.62) reproduced within 1.5%. Nothing here changes any landed code — this is a same-window recalibration of the comparison itself, and the honest scoreboard is: **llama.cpp Metal (505.7 ms/24-tok) is the fastest arm by a wide margin; our best arm is our own CPU at 2822.1 ms, 5.58x behind; our Metal arm is our own slowest option at 3750.4 ms.**
+
+### CONTAMINATION NOTICE — this row's CPU arms are not trustworthy
+
+Recorded by the coordinator, whose error it was.
+
+A second measurement agent (ROW 101's `spin_polls` sweep) was dispatched while
+this four-arm sweep was still running. Two timing agents shared the box. That
+is the exact failure this initiative already has a rule against — measure
+alone, implement in parallel.
+
+The evidence is in this row's own numbers, not an inference:
+
+- `llama-cpu` decode CoV **53.35%**, range 48.26-163.30 ms. A 3.4x spread
+  across runs of an identical command is scheduler contention, not llama.
+- `ours-cpu-w8` decode measured **68.98 ms** here at CoV 5.14%, against
+  **53.854 ms** at CoV 1.21% measured in isolation the same day (ROW 99).
+  A 28% disagreement between two same-day measurements of the same binary.
+
+**Trustworthy from this row** (tight CoV, and both corroborate independent
+same-day figures):
+
+- `llama-metal` 17.50 ms/token decode, CoV 3.75%; prefill 103.2 ms, CoV 0.32%.
+  Reproduces the standing 17.62 within 0.68%.
+- `ours-metal` 66.65 ms/token decode, CoV 1.45%. Consistent with ROW 94's
+  65.671.
+
+**NOT trustworthy from this row:** both CPU arms, and therefore every CPU
+ratio in it, including the "5.58x behind" headline and the claim that 44.09
+does not reproduce. That claim may well be true — a 53% CoV cannot establish
+it either way. It is unmeasured, not refuted.
+
+**Survives regardless of the contamination**, because it is a structural
+property rather than a timing ratio: our Metal prefill pays
+`pipeline_compile_ms=641.182` + `block_upload_ms=399.076` on step 0 only,
+~1040 ms of one-time cost that a 24-token run cannot amortize. Every Metal
+figure this initiative has reported (ROWs 82-99) is steady-state decode and
+excludes it. On total wall clock for a short run our Metal backend is our
+slowest arm, and no amount of decode tuning changes that.
+
+**Also open, and it is a re-provability hole (gate 16):** the exact
+`llama-cli` invocation behind the standing 17.62 is recorded nowhere in this
+repo. This row's `-ngl 99` command is a reconstruction of ROW 67's CPU command
+with the flag swapped. It reproduces within 1.5%, which corroborates but does
+not prove identity. The incumbent command every claim in this file is measured
+against must be written down verbatim.
+
+**Required before any CPU number here is quoted again:** re-run the four arms
+with nothing else on the box, one agent, no concurrent build.
