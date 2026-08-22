@@ -8051,3 +8051,309 @@ multi-run figures. The third is ROW77's own synthetic dissection, re-run for
 row 1b's methodology-confirmation caveat. Both ignored tests require the
 host-local checkpoint at `ServingConfig::DEFAULT_MODEL_PATH` and a real Metal
 device; the example needs neither.
+
+## ROW 95 — the 1.47x is MOSTLY (R²=0.973) per-op byte count, not a bandwidth ceiling: 64% of the log-gap closes on paper, 0% closes in practice. `PACKED_ROWS_PER_GROUP` swept both directions from 4 — BOTH regress the whole forward. ROLLED BACK, twice.
+
+**Host:** Apple M1 Max, 32 GPU cores, 64 GB, release profile throughout.
+**Repo:** `feat/tensor-consolidated` @ `eb4845d` (ROW94's own tip; this row's
+own edits were made, measured, and reverted — nothing landed, tree is clean
+at every gate below). **Host loadout:** pasted per run below; ranged 1.3-11.8
+1-min load across this session (a build competed with a sibling process early
+on), flagged per table rather than averaged away.
+
+### Task 1 — does per-op size explain the gap? Confirmed, with a number, and a residual named
+
+`ROW77`'s 143.5 GB/s (line 5451) is explicitly a **MARGINAL** figure: `(large_ms -
+small_ms) / (large_bytes - small_bytes)` from `q4k_matvec_probe.rs`'s own
+`measure(rows, k, runs)` at `rows=4096` (9.44 MB, matching `attn_q`/
+`attn_output`'s real per-op size almost exactly) and `rows=16384` (37.75 MB,
+**larger than this model's own biggest Q4_K op**, `ffn_down` at 34.0 MB/op).
+ROW94's 97.31 GB/s is an **ABSOLUTE**, bytes-weighted average across the real
+forward's whole mix of op sizes (76 MB to 1088 MB *per family*, i.e. 2.4-34.0
+MB per individual op). These are different quantities by this file's own ROW82
+rule ("a number may not appear in a column headed `vs <incumbent>` unless
+produced by the same KIND of run") — but unlike ROW82's retracted comparison,
+here **both quantities are legitimately marginal-shaped** (ROW77's by explicit
+two-point subtraction; the fit below by regression intercept), so the
+comparison is admissible, not a repeat of that error.
+
+**Per-family ns/byte vs per-op bytes, quiet-box (`uptime` 1.7-4.1 throughout),
+3 runs each, `PROXIMA_METAL_OP_PROFILE_STEP=3`, medians of 3:**
+
+| family | bytes/op | ns/byte (median) | GB/s | codec |
+|---|---|---|---|---|
+| `blk.attn_k.weight` | 2,375,680 | 0.019277 | 51.9 | Q4_K/Q5_K mix |
+| `blk.attn_v.weight` | 2,441,216 | 0.020474 | 48.8 | Q4_K/Q5_K mix |
+| `blk.attn_q.weight` | 9,453,568 | 0.017238 | 58.0 | Q4_K |
+| `blk.attn_output.weight` | 9,453,568 | 0.012964 | 77.1 | Q4_K |
+| `blk.ffn_up.weight` | 33,046,528 | 0.009270 | 107.9 | Q4_K |
+| `blk.ffn_gate.weight` | 33,046,528 | 0.009350 | 107.0 | Q4_K |
+| `blk.ffn_down.weight` | 34,004,992 | 0.009208 | 108.6 | Q4_K/Q5_K mix |
+| `output.weight` | 107,543,104 | 0.006839 | 146.2 | **Q6_K, different kernel** |
+
+**ns/byte tracks per-op byte count, not row count.** The naive story ("small
+`output_total`/row-count = bad") is REFUTED by `ffn_down` itself: its output
+axis is the 4096-wide embedding dim — the SAME row count as `attn_q`/
+`attn_output` — yet it measures at `ffn_gate`/`ffn_up`'s FAST rate (108.6 vs
+58-77 GB/s), because its reduce depth (14336) makes its TOTAL per-op bytes
+(34.0 MB) match `ffn_gate`/`ffn_up`, not `attn_q`. The variable that predicts
+the rate is **total operand bytes moved per dispatch**, not specifically the
+row/group-count axis the task brief's own hypothesis named. Correcting this
+mid-investigation rather than inheriting the row-count framing, per this
+file's own retraction standard.
+
+**Linear regression, `ns = a + b*bytes`, the 7 Q4_K-family points (Python,
+`ordinary least squares`, `output.weight` excluded — different codec, different
+kernel, would conflate two different per-byte costs):**
+
+```
+slope b = 0.008015 ns/byte  ->  marginal rate 124.77 GB/s
+intercept a = 45,335 ns (~45.3 us fixed cost per op, THIS diagnostic harness)
+R^2 = 0.9733
+```
+
+**R²=0.973 confirms the hypothesis: 97.3% of the variance in per-op GPU time
+across these 7 real matmuls is explained by their own byte count alone.** The
+3% residual is real and named, not hidden: `attn_q` and `attn_output` have
+IDENTICAL bytes/op (9,453,568) but measure 58.0 vs 77.1 GB/s — a genuine
+33% gap the bytes-only model cannot explain. (`attn_output`'s reduce folds
+three axes via ROW88's contiguous-fold widening; `attn_q`'s is a plain
+single-axis reduce. Which one is anomalous, and why, is not settled this row —
+named as residual, not guessed at.)
+
+**Caveat on the regression itself, stated before using it further:** ROW77's
+technique holds `k` FIXED (4096) and varies ONLY row count between its two
+points — a controlled dissection. This row's 7-point fit is OBSERVATIONAL:
+`ffn_down` varies `k` (14336) as well as row count relative to `ffn_gate`/
+`ffn_up`, so the fitted slope conflates a row-count effect with a
+reduce-depth effect. It is reported as what the real data shows, not
+represented as a clean re-derivation of ROW77's own controlled number.
+
+**How much of the 1.47x gap this closes, arithmetically (all three numbers
+MEASURED or fit from measured data, none assumed):**
+
+| quantity | value | provenance |
+|---|---|---|
+| ROW77 marginal (synthetic, controlled 2-point dissection) | 143.5 GB/s | MEASURED |
+| ROW94 in-situ absolute (bytes-weighted mean, real mix of op sizes) | 97.31 GB/s | MEASURED |
+| this row's Q4_K-family marginal (observational 7-point fit) | 124.77 GB/s | FIT, R²=0.973 |
+| raw gap | 143.5 / 97.31 = **1.475x** | DERIVED |
+| gap closed by "every op pays only its own bytes, zero fixed per-dispatch tax" | 124.77 / 97.31 = **1.282x** | DERIVED |
+| residual, unexplained by size/fixed-cost alone | 143.5 / 124.77 = **1.150x** | DERIVED |
+| fraction of the LOG gap the size effect explains | **64.0%** | DERIVED |
+
+**The size/fixed-cost effect explains most, not all, of the 1.47x.** The
+remaining 1.15x residual has two named, unsettled candidates: (a) this
+model's own largest Q4_K op (`ffn_down`, 34.0 MB, 4096x14336) never reaches
+the row count ROW77's synthetic "large" arm used (16384 rows, vs this model's
+max of 14336) — if the true per-byte cost keeps falling above 34 MB/op, part
+of the residual is an **intrinsic ceiling for THIS model's architecture**,
+not a fixable defect, and no model this initiative runs will ever produce an
+op large enough to test that; (b) the observational fit's `k`-conflation
+noted above means 124.77 GB/s is not a clean re-derivation of ROW77's
+controlled number and some of the residual may be exactly that conflation.
+Neither is settled this row.
+
+### Task 2 — the one cheap lever named in the brief, swept both directions, both REGRESS
+
+`PACKED_ROWS_PER_GROUP` (`omega/src/msl.rs:791`, currently a bare
+`const usize = 4`) is the one dispatch-geometry knob both `grid_threads` and
+`push_packed_row_blocked_body` read, and it is genuinely a candidate: it sets
+how many output rows one SIMD group folds, trading (a) activation-read reuse
+[rises with the constant] against (b) live-register count per lane
+[`sumf`/`weight_base`/`other_base`, each sized `[rows]`, also rises with the
+constant] and (c) per-group index-setup cost duplicated across however many
+groups get dispatched [falls with the constant, for ops with many groups].
+
+**Tried `PACKED_ROWS_PER_GROUP = 2`** (edited, rebuilt, measured, reverted —
+`git diff --stat` clean before and after, nothing committed):
+
+Quiet-box paired comparison (`uptime` 1.5-1.9 throughout both sides), 3 runs
+each, `total_gpu_ms` from `profiles_one_real_decode_step_by_per_op_gpu_time`:
+
+| | BEFORE (`rows=4`, this row's own requiet baseline) | AFTER (`rows=2`) | delta |
+|---|---|---|---|
+| runs | 60.371 / 60.108 / 58.971 | 63.035 / 62.567 / 63.267 | |
+| mean | 59.817 | 62.956 | **+3.139 ms, +5.25%** |
+| CoV | 1.02% | 0.46% | both well under 5%, delta is 5x the larger CoV |
+
+Per-family, same 3 runs, medians (GB/s = 1/ns_per_byte):
+
+| family | BEFORE GB/s | AFTER (`rows=2`) GB/s | direction |
+|---|---|---|---|
+| `attn_k` (2.4 MB/op) | 51.9 | 59.7 | **+15.0%, as predicted** |
+| `attn_v` (2.4 MB/op) | 48.8 | 58.6 | **+20.1%, as predicted** |
+| `attn_q` (9.45 MB/op) | 58.0 | 72.0 | **+24.1%, as predicted** |
+| `attn_output` (9.45 MB/op) | 77.1 | 86.5 | **+12.2%, as predicted** |
+| `ffn_up` (33.0 MB/op) | 107.9 | 99.4 | **-7.9%, WRONG direction** |
+| `ffn_gate` (33.0 MB/op) | 107.0 | 98.6 | **-7.9%, WRONG direction** |
+| `ffn_down` (34.0 MB/op) | 108.6 | 80.8 | **-25.6%, WRONG direction** |
+| `output.weight` (107.5 MB/op, Q6_K) | 146.2 | 111.4 | **-23.8%, WRONG direction** |
+
+Every small family improved exactly as the byte-count model predicts. Every
+large family REGRESSED, `ffn_down` worst of all at -25.6% — activation-reuse
+loss (halved, from 4x to 2x) costs the large-`k` families more than the extra
+groups gain them. **`ffn_gate`+`ffn_up`+`ffn_down` alone are 76.9% of the
+packed bucket's bytes**; their regression outweighs the small families'
+combined gain, net -5.25% on the whole forward. **ROLLED BACK** — `omega/src/msl.rs`
+restored to `const PACKED_ROWS_PER_GROUP: usize = 4` (`git diff --stat` empty,
+confirmed below).
+
+**Tried `PACKED_ROWS_PER_GROUP = 8`** (same procedure — edited, built, measured
+3x, reverted):
+
+| | BEFORE (`rows=4`) | AFTER (`rows=8`) | delta |
+|---|---|---|---|
+| runs | 60.371 / 60.108 / 58.971 | 63.680 / 62.920 / 64.266 | |
+| mean | 59.817 | 63.622 | **+3.805 ms, +6.36%** |
+| CoV | 1.02% | 0.87% | both under 5%, delta is 6x the larger CoV |
+
+Per-family: `ffn_gate`/`ffn_up`/`ffn_down` ALSO regressed at rows=8 (98.6/97.5%
+of baseline rate — 5-11% worse, not better, despite MORE activation reuse),
+and `attn_k`/`attn_v` regressed catastrophically (0.019277->0.034633,
+0.020474->0.034342 ns/byte — **44-45% WORSE**, not better). Only
+`attn_q`/`attn_output`/`output.weight` sat roughly flat.
+
+**This is the informative result: `rows=4` is a real local optimum for this
+model's shape mix, not an arbitrary default that merely favors large ops.**
+Moving EITHER direction regresses the whole forward, and it regresses
+DIFFERENT families for DIFFERENT reasons — `rows=2` starves `ffn`'s
+activation-reuse; `rows=8`'s larger `sumf[8]`/`weight_base[8]`/`other_base[8]`
+per-lane register footprint apparently costs occupancy broadly enough to hurt
+even `ffn` (which gained nothing from the extra reuse) and devastates
+`attn_k`/`attn_v` (fewest groups to begin with, hit hardest by reduced
+occupancy). Neither mechanism was cycle-counted directly this session — named
+from the direction and magnitude of the measured deltas, flagged as
+inference over a measured pattern, not a profiled register count.
+
+**ROLLED BACK** — `omega/src/msl.rs` restored to `const PACKED_ROWS_PER_GROUP:
+usize = 4` a second time. Confirmed clean both times:
+
+```
+$ git diff --stat
+$ git status --porcelain
+(both empty)
+```
+
+Neither attempt was ever committed — the regression was measured and reverted
+in the working tree before any commit, so there is no revert-commit pair to
+create; the discipline-log row is the only artifact of the attempt, which is
+this file's own standard for a same-session try/measure/revert (contrast
+ROW90, which reverted a PRIOR session's already-committed change via
+`git revert`).
+
+### Task 3 — the per-op-variable version: sized from already-measured components, not landed
+
+A per-op-VARIABLE `rows` (2 for `attn_q`/`attn_output`/`attn_v`/`attn_k`, 4 for
+`ffn_gate`/`ffn_up`/`ffn_down`/`output.weight`) is NOT a "widen a predicate"
+change — `PackedRowBlock`'s own doc (`msl.rs:793-798`) already names the
+constraint: `grid_threads` and `push_packed_row_blocked_body` must reach the
+IDENTICAL decision, and today that identity comes for free from a shared
+`const`. Making it per-op means a new decision function, computed once from
+`resolved`'s own `output_total` and threaded through both call sites so they
+cannot drift — real, scoped, but new surface, not a one-line change. It ALSO
+introduces a new tunable (whatever size threshold picks 2 vs 4), which per
+this task's own binding constraint and this repo's §12 may not be a bare
+`const` — it would need the sizing-config-generator machinery `omega` does not
+have yet (ROW89's own commits explicitly note they introduced no new tunable
+specifically to avoid this obligation). Building that machinery is its own
+multi-hour unit, not a same-session add-on to a measurement row — the exact
+shape of gate this file already applies to `StagedRound` (ROW89/90) and to the
+`reduce-cooperative` fusion (ROW94 Task 3).
+
+**Sized upside, composed from ALREADY-MEASURED per-family numbers, not a new
+run** (small families' `rows=2` medians + large families' `rows=4` baseline
+medians, same quiet-box session, both sides real measurements — only their
+COMBINATION is hypothetical):
+
+```
+baseline packed-bucket composite (all rows=4):        42.646 ms
+mixed composite (attn_* at rows=2, ffn_*/output.weight at rows=4): 40.752 ms
+delta:                                                 -1.894 ms (-4.44% of the packed bucket)
+as a fraction of ROW94's gpu_exec (55.498 ms):          -3.41%
+as a fraction of ROW94's step_wall (65.671 ms):         -2.88%
+```
+
+**Upper-bound estimate, not a result:** assumes zero cost for the per-op
+branch/decision itself and zero interaction effect between differently-sized
+kernel bodies sharing a command buffer — neither checked. Named and sized,
+matching this file's own ROW94 Task-3 precedent for the `reduce-cooperative`
+fusion candidate: **not attempted this row because it is a new-surface,
+new-tunable change that needs its own session to implement AND verify to this
+file's bar (byte-identical text across all matmul families, not just the two
+sizes swept here; full gate re-run; the sizing-config wiring or an honest,
+named violation of §12).**
+
+### Answering the question directly
+
+**Why is the packed kernel 1.47x slower in situ than ROW77's synthetic
+figure:** mostly (R²=0.973, 64% of the log-gap) because the real forward's
+packed matmuls span a 14x range of per-op byte count (2.4-34.0 MB) and
+per-dispatch fixed cost is not free — ROW77's 143.5 GB/s is itself a marginal
+(fixed-cost-excluded) number from a controlled two-point dissection at sizes
+at-or-above this model's OWN largest op, and the real forward's bytes-weighted
+average necessarily includes the smaller ops (`attn_*`, 23.1% of packed bytes)
+that never reach that regime. **Can the 1.47x be recovered:** not via the one
+cheap compile-time lever this task named — `PACKED_ROWS_PER_GROUP` swept to 2
+and to 8, BOTH regress the whole forward (+5.25%, +6.36%), because 4 already
+sits at a local optimum across this model's specific shape mix, trading
+occupancy against activation-reuse against per-group setup cost in ways that
+point in OPPOSITE directions for different families. A per-op-variable
+version is sized at a plausible ~3.4% of `gpu_exec` (~1.9 ms/token) but needs
+new surface and new tunable-config machinery this session did not build.
+**The remaining 1.15x beyond the size effect is not explained by anything
+measured this session** — two named, unsettled candidates (this model's own
+matmuls never reaching ROW77's synthetic large-arm row count; the
+observational regression's row-count/reduce-depth conflation), neither
+resolved.
+
+### Standing, against the two named incumbents (unchanged — nothing landed this row)
+
+| | ms/token (steady decode) | vs this row |
+|---|---|---|
+| llama.cpp Metal (`-ngl 99`) | **17.62 ms** | we are ~3.7-3.9x slower |
+| our own CPU path | **59.71 ms** | our Metal is ~1.10-1.15x slower than our own CPU |
+| our Metal, ROW94's own quiet 3-run figure (unchanged, nothing landed) | `step_wall` mean **65.671 ms** (CoV 1.30%), `gpu_exec` mean **55.498 ms** (CoV 1.10%) | reference |
+| our Metal, this row's own single re-confirmation run (`uptime` 6.4-7.55, moderately loaded — NOT a quiet-box figure) | `step_wall` mean **68.73 ms** over steps 19-23, `gpu_exec` mean **56.97 ms** | within load-explained noise of ROW94's figure, not a regression (source is byte-identical, `git diff --stat` clean) |
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p omega` | **73 passed, 1 skipped** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** |
+| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean |
+| generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` — byte-identical, re-confirmed this row |
+| `git diff --stat` / `git status --porcelain` at row close | both empty — nothing landed |
+
+### Re-provable now (guiding-principle 16)
+
+```
+cargo nextest run -p omega
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo clippy -p omega --features std,cpu,metal -- -D warnings
+cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings
+
+cargo build --release --tests -p proxima-model-interop --features metal,instrument
+<built test binary> --ignored --exact \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time --nocapture
+<built test binary> --ignored --exact \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --nocapture
+```
+The per-family `op_profile_family` lines from the first ignored test, run 3x,
+are Task 1's and Task 2's full attribution table. The `PACKED_ROWS_PER_GROUP`
+sweep is re-provable by editing `omega/src/msl.rs:791` to `2` or `8`, rebuilding,
+and re-running the same test — the diff is a single line, not committed here,
+so "re-provable" means re-running the edit, not checking out a commit.
+
+### Rollback rows
+
+**Both this row's own attempts**: `PACKED_ROWS_PER_GROUP = 2` (measured
++5.25% net regression on `gpu_exec`'s per-op-diagnostic proxy, quiet-box,
+CoV 0.46-1.02%, 5x the noise) and `PACKED_ROWS_PER_GROUP = 8` (measured +6.36%
+net regression, CoV 0.87-1.02%, 6x the noise). Neither was ever committed —
+edited, built, measured, reverted in the working tree, same session. `git
+diff --stat` and `git status --porcelain` both empty at this row's close.
