@@ -9103,3 +9103,103 @@ against must be written down verbatim.
 
 **Required before any CPU number here is quoted again:** re-run the four arms
 with nothing else on the box, one agent, no concurrent build.
+
+## ROW 102 — the canonical incumbent command, verbatim, in one place
+
+Every number in this file is measured against llama.cpp, and until now no row
+recorded the full invocation. `:4808` had the prompt as a literal placeholder
+(`"<the 31-token prompt>"`) and a bare filename for the model; ROW 69 recorded
+the Metal arm as only `-ngl 99` with no command at all. ROW 100's `-ngl 99` run
+was therefore a RECONSTRUCTION, corroborated to 1.5% but not proven identical.
+
+Gate 16 says a row's claim must be re-provable from the artifact alone, today,
+without dev memory. The incumbent bar failed that test. This row fixes it.
+
+### Verified facts, each with its source
+
+| fact | value | source |
+|---|---|---|
+| binary | `/Users/brianbruggeman/repos/others/llama.cpp/bin/llama-cli` | `ls -la`, 1949176 bytes, Jun 26 2025 |
+| build | `version: 5761 (b2534622)` | `llama-cli --version` |
+| | built with Apple clang 17.0.0 for arm64-apple-darwin24.6.0 | same |
+| model | `/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf` | `serving.rs:50` |
+| model size | 4,140,385,376 bytes | `ls -la` |
+| prompt | see below, 31 tokens | `bind.rs:717-720` `default_prompt()` |
+| our test | `bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock` | `bind.rs:795` |
+
+`b2534622` confirms the build string ROW 100 claimed.
+
+### The prompt, verbatim — copy this, do not retype it
+
+```
+GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:
+```
+
+### Incumbent, CPU arm
+
+```
+/Users/brianbruggeman/repos/others/llama.cpp/bin/llama-cli \
+  -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf \
+  -ngl 0 -t 8 -n 24 --temp 0 --top-k 1 -no-cnv --seed 1 \
+  -p "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:"
+```
+
+Verify from its own output before trusting the run:
+`load_tensors: offloaded 0/33 layers to GPU`, and
+`prompt eval time = ... / 31 tokens`.
+
+### Incumbent, Metal arm
+
+Identical except `-ngl 99`:
+
+```
+/Users/brianbruggeman/repos/others/llama.cpp/bin/llama-cli \
+  -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf \
+  -ngl 99 -n 24 --temp 0 --top-k 1 -no-cnv --seed 1 \
+  -p "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:"
+```
+
+Verify: `offloaded 33/33 layers to GPU`, `using device Metal (Apple M1 Max)`.
+
+Both arms should report
+`NEON=1 ARM_FMA=1 FP16_VA=1 DOTPROD=1 LLAMAFILE=1 ACCELERATE=1 REPACK=1`
+from `system_info:`. A build without `DOTPROD` or `ACCELERATE` is a different
+incumbent and its numbers are not comparable to anything in this file.
+
+`llama_perf_context_print` splits `prompt eval time` (prefill) from
+`eval time` (decode) natively — no subtraction needed on their side.
+
+### Ours
+
+```
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
+  <test-bin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+
+All four env vars verified as actually read, which is not assumed here — this
+crate's `build.rs` was found in ROW 98 to have had NO per-key env override at
+all while its own doc claimed otherwise, so every documented knob now gets
+checked rather than believed:
+
+| var | read at | effect |
+|---|---|---|
+| `PROXIMA_PREFAULT` | `bind.rs:690` | warms every mmap page before the timed pass |
+| `PROXIMA_PROMPT` | `bind.rs:701` | overrides `default_prompt()` |
+| `PROXIMA_MAX_TOKENS` | `bind.rs:706` | token budget, defaults to 24 |
+| `PROXIMA_MATMUL_WORKERS` | `cpu.rs:6083` | worker count, `OnceLock`, defaults to `performance_core_count()` |
+
+Prefer ROW 100's split technique over ROW 67's: read the `instrument`-gated
+`token_breakdown step=N ... step_wall_ms=X` line within ONE run — `step=0` is
+prefill, mean of `step=1..23` is decode. ROW 67 ran `MAX_TOKENS=1` and `=24` as
+two processes and subtracted, which pays the mmap/parse/load cost twice.
+
+### Standing bars, and their current status
+
+| bar | figure | status |
+|---|---|---|
+| llama Metal `-ngl 99` | 17.62 ms/token | REPRODUCED, ROW 100, within 0.68%, CoV 3.75% |
+| llama CPU `-ngl 0 -t 8` | 44.09 ms/token | **UNVERIFIED.** ROW 100's attempt measured CoV 53.35% on a contaminated box — see that row's contamination notice. Neither confirmed nor refuted. |
+
+**Do not quote 44.09 as measured until it is re-run on a quiet box with this
+command.** Do not quote ROW 100's CPU figures either; both arms were noise.
