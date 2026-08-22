@@ -117,13 +117,19 @@ use core::num::NonZeroUsize;
 use core::ops::Deref;
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 use core::sync::atomic::AtomicU64;
-// `#[cfg(test)]` staged-round scaffolding (`StagedRound`, `evaluate_parallel`'s
-// ordering tests) uses `Ordering` regardless of `target_arch`/`instrument`,
-// unlike `AtomicU64` above which only backs the aarch64+instrument tile
-// counters -- gated on `any(test, ..)` rather than left unconditional so a
-// non-test, non-aarch64-instrument build (nothing left to use it) does not
-// pick up an unused-import warning under this workspace's deny(warnings).
-#[cfg(any(test, all(target_arch = "aarch64", feature = "instrument")))]
+// `StagedRound` (production once `cohort-staged-graph` is on, test-only
+// scaffolding otherwise) plus `evaluate_parallel`'s ordering tests use
+// `Ordering` regardless of `target_arch`/`instrument`, unlike `AtomicU64`
+// above which only backs the aarch64+instrument tile counters -- gated on
+// `any(test, .., feature = "cohort-staged-graph")` rather than left
+// unconditional so a non-test, non-aarch64-instrument, feature-off build
+// (nothing left to use it) does not pick up an unused-import warning under
+// this workspace's deny(warnings).
+#[cfg(any(
+    test,
+    all(target_arch = "aarch64", feature = "instrument"),
+    feature = "cohort-staged-graph"
+))]
 use core::sync::atomic::Ordering;
 use std::borrow::Cow;
 use std::thread;
@@ -669,7 +675,36 @@ pub fn evaluate_quantized_with_scratch(
     // `matmul_rows_threaded` falls back to the `nest_pool` dispatch path in
     // that case, unchanged.
     let session = nest_cohort().and_then(|cohort| cohort.enter().ok());
-    for (position, computed) in resolved.iter().enumerate() {
+    let mut position = 0usize;
+    while position < resolved.len() {
+        #[cfg(feature = "cohort-staged-graph")]
+        if let Some(session_ref) = session.as_ref() {
+            let run_end = staged_batch_run_end(&resolved, position, &quantized_weights);
+            if run_end - position >= STAGED_BATCH_MIN_LEN {
+                #[cfg(feature = "instrument")]
+                let diag_batch_started = instrument::read_ticks();
+                run_staged_batch(
+                    &resolved[position..run_end],
+                    position,
+                    &mut buffers,
+                    &quantized_weights,
+                    session_ref,
+                    free_buffers,
+                    &retires,
+                    &mut live_now,
+                )?;
+                peak_live_buffers = peak_live_buffers.max(live_now);
+                #[cfg(feature = "instrument")]
+                {
+                    let entry = diag_kind_ticks.entry("staged_batch").or_insert((0, 0));
+                    entry.0 += (run_end - position) as u64;
+                    entry.1 += instrument::elapsed_ticks(diag_batch_started);
+                }
+                position = run_end;
+                continue;
+            }
+        }
+        let computed = &resolved[position];
         #[cfg(feature = "instrument")]
         let diag_alloc_started = instrument::read_ticks();
         let mut output = take_or_allocate(free_buffers, node_output_len(computed));
@@ -723,6 +758,7 @@ pub fn evaluate_quantized_with_scratch(
         {
             diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
         }
+        position += 1;
     }
     #[cfg(feature = "instrument")]
     std::eprintln!(
@@ -2432,29 +2468,48 @@ where
 /// deadlock-freedom, error publication), so they are proven FIRST and
 /// separately from the graph-walking change that will use them. Wiring the
 /// executor onto this is what removes the gate.
-#[cfg(test)]
+///
+/// `stage_offsets` (length `stage_count + 1`, strictly increasing,
+/// `stage_offsets[0] == 0`) replaces a single uniform `chunks_per_stage`:
+/// stage `s` owns chunks `stage_offsets[s]..stage_offsets[s + 1]`, so a
+/// matmul-reduce stage (many row-chunks, real cross-worker parallelism) and
+/// an elementwise/reduce stage (one chunk, `run_node_into`'s own serial
+/// body) can share the SAME round without the narrower stage paying for
+/// chunks it never needed — a uniform `chunks_per_stage` would have forced
+/// every stage to either match the matmul stage's width (every one-node
+/// stage now split into phantom sub-chunks with nothing to parallelize) or
+/// the elementwise stage's width (every matmul stage capped at one chunk,
+/// serializing the dominant-cost computation onto a single worker). Both
+/// are exactly the failure `docs/discipline.md` ROW 96 measured when it
+/// tried the uniform-width version of this idea against non-matmul nodes
+/// only.
+#[cfg(any(test, feature = "cohort-staged-graph"))]
 struct StagedRound<'round, Run> {
-    stage_count: usize,
-    chunks_per_stage: usize,
+    stage_offsets: &'round [usize],
     /// completed-chunk count for each stage, indexed by stage.
     completed: &'round [AtomicUsize],
     run_stage_chunk: Run,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "cohort-staged-graph"))]
 impl<Run> CohortRound<TensorError> for StagedRound<'_, Run>
 where
     Run: Fn(usize, usize) -> Result<(), TensorError> + Sync,
 {
     fn chunks(&self) -> usize {
-        self.stage_count * self.chunks_per_stage
+        self.stage_offsets.last().copied().unwrap_or(0)
     }
 
     fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
-        let stage = chunk.0 / self.chunks_per_stage;
-        let within_stage = chunk.0 % self.chunks_per_stage;
+        // `stage_offsets` is strictly increasing starting at 0, so the
+        // number of offsets `<= chunk.0` is always `stage + 1` for the
+        // owning stage `s` -- `partition_point`'s own contract (first index
+        // whose predicate is false) hands that back directly.
+        let stage = self.stage_offsets.partition_point(|&offset| offset <= chunk.0) - 1;
+        let within_stage = chunk.0 - self.stage_offsets[stage];
         if let Some(previous) = stage.checked_sub(1) {
-            while self.completed[previous].load(Ordering::Acquire) < self.chunks_per_stage {
+            let previous_len = self.stage_offsets[previous + 1] - self.stage_offsets[previous];
+            while self.completed[previous].load(Ordering::Acquire) < previous_len {
                 core::hint::spin_loop();
             }
         }
@@ -2789,6 +2844,437 @@ impl CohortRound<TensorError> for TransposeRound<'_> {
         }
         Ok(())
     }
+}
+
+/// Below this many consecutive [`is_staged_batch_eligible`] nodes,
+/// [`run_staged_batch`] is not worth calling: a run of one node has nothing
+/// to amortize a round-open against, so [`evaluate_quantized_with_scratch`]
+/// falls through to the plain per-node call for it, exactly as
+/// `cohort-staged-graph` off always does. Not yet threaded through a
+/// build-time sizing config (principle 12) — recorded as a residual in
+/// `docs/discipline.md` ROW 97 rather than left silent.
+#[cfg(feature = "cohort-staged-graph")]
+const STAGED_BATCH_MIN_LEN: usize = 2;
+
+/// One codec's row-dot kernel: `(weight_row, activation_q8k) -> dot`. Every
+/// `Q4_K`/`Q5_K`/`Q6_K` kernel (`dot_q4k_q8k`/`dot_q5k_q8k`/`dot_q6k_q8k`)
+/// shares this exact signature, which is what makes [`dot_fn_for`]'s return
+/// type — and therefore [`MatmulStagePlan::dot_fn`] — the same concrete type
+/// regardless of which codec a given matmul node uses.
+#[cfg(feature = "cohort-staged-graph")]
+type MatmulRowDotFn = fn(&[u8], &[u8]) -> Result<f32, TensorError>;
+
+/// Selects the row-dot kernel for one quantized-matmul-reduce node's own
+/// codec as a plain `fn` pointer rather than naming a distinct codec
+/// function at a distinct closure-literal source location -- what makes a
+/// `Q4_K` node's own row-chunk work and a `Q5_K` or `Q6_K` node's the exact
+/// same concrete Rust type: the ONE thing `docs/discipline.md` ROW 96 named
+/// as the actual blocker to folding matmul stages into a shared round
+/// ("each codec's closure is a distinct type") does not apply once the
+/// codec choice is a captured VALUE ([`MatmulStagePlan::dot_fn`]) instead of
+/// a name baked into the closure body. `None` for `Q8_0` (no shared
+/// `Q8_K`-activation wide-fold path exists for it — see
+/// [`run_reduce_quantized`]'s own per-position loop, which dequantizes
+/// `Q8_0` row-by-row instead) and for `Float32` (not a quantized weight at
+/// all); either leaves that node on the existing unbatched path via
+/// [`is_staged_batch_eligible`].
+#[cfg(feature = "cohort-staged-graph")]
+fn dot_fn_for(weight_block: QuantizedBlock<'_>) -> Option<MatmulRowDotFn> {
+    match weight_block {
+        #[cfg(feature = "q4k-int8-dot")]
+        QuantizedBlock::Q4K(_) => Some(dot_q4k_q8k),
+        #[cfg(feature = "q5k-int8-dot")]
+        QuantizedBlock::Q5K(_) => Some(dot_q5k_q8k),
+        #[cfg(feature = "q6k-int8-dot")]
+        QuantizedBlock::Q6K(_) => Some(dot_q6k_q8k),
+        _ => None,
+    }
+}
+
+/// Whether `resolved` belongs in a [`run_staged_batch`] run: ONLY a
+/// quantized-weight matmul fold whose own codec has a [`dot_fn_for`] entry
+/// (`Q4_K`/`Q5_K`/`Q6_K` built with that codec's own `-int8-dot` feature).
+/// Every other kind — elementwise, dense f32 reduce, scan, iota, constant —
+/// is deliberately NOT eligible here, unlike `docs/discipline.md` ROW 96's
+/// own version of this function, which admitted them. Measured, not
+/// assumed (ROW 97): a mixed run (ROW 96's non-matmul kinds ALSO admitted,
+/// alongside this session's matmul fold) measured `rounds` RISE 6972 ->
+/// 10355 (+48.5%) — the non-matmul kinds still open a round wherever grouped
+/// that they opened zero of before, exactly ROW 96's own finding, and it
+/// swamps the matmul-fold's own savings. Restricting eligibility to matmul
+/// alone measured `rounds` FALL 6972 -> 4412 (-36.7%), because a run this
+/// narrow only ever replaces rounds that already existed (one per matmul
+/// node) with fewer, larger ones — it can never ADD a round where none
+/// existed, which is the one property ROW 96's broader version lacked.
+#[cfg(feature = "cohort-staged-graph")]
+fn is_staged_batch_eligible(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> bool {
+    match quantized_operand(resolved, quantized_weights) {
+        None => false,
+        Some(weight_node) => quantized_weights.get(&weight_node).is_some_and(|block| dot_fn_for(*block).is_some()),
+    }
+}
+
+/// The end (exclusive) of the maximal run of [`is_staged_batch_eligible`]
+/// nodes starting at `start` — [`evaluate_quantized_with_scratch`]'s own
+/// walk over `resolved` reuses this rather than recomputing a dependency
+/// DAG: `resolved` is already topologically ordered (`bind::bind`'s own
+/// doc), so a contiguous run of eligible positions is, by construction,
+/// exactly as independent-of-everything-outside-the-run as any single node
+/// already is of everything before it. [`run_staged_batch`] commits every
+/// stage's output into the real `buffers` table only after the whole round
+/// returns, so a node added to the run must read every operand from OUTSIDE
+/// the run — a node at an earlier position that is ALSO in this run has not
+/// been written into `buffers` yet when an in-run consumer's stage would
+/// need to read it (`docs/discipline.md` ROW 96 caught exactly this via
+/// `spec::tests::a_cached_decode_step_matches_the_uncached_forward_pass_exactly`).
+/// `resolved`'s topological order means any such dependency is necessarily
+/// on an earlier position, so checking positions `start..end` — never
+/// anything after `end` — is exhaustive.
+#[cfg(feature = "cohort-staged-graph")]
+fn staged_batch_run_end(resolved: &[BoundOp], start: usize, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> usize {
+    let mut end = start;
+    while end < resolved.len() && is_staged_batch_eligible(&resolved[end], quantized_weights) {
+        let reads_from_this_run = resolved[end]
+            .operands()
+            .iter()
+            .any(|(operand, _, _)| resolved[start..end].iter().any(|produced| produced.node == *operand));
+        if reads_from_this_run {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// One quantized-matmul-reduce node's own row-parallel work, prepared
+/// BEFORE [`run_staged_batch`] opens its round: activation quantization
+/// (`Some(session)` — safe here because this runs strictly before
+/// `session.run(&round)` is ever called, so there is no in-flight round for
+/// a second `session.run` to collide with; see [`build_matmul_stage_plan`]'s
+/// own call site) and the [`row_chunk_count`]-many `(row_start, ptr, len)`
+/// ranges into `wide`, split via `split_at_mut` exactly the way
+/// [`matmul_rows_threaded`] itself splits its own `output` — same
+/// single-writer argument, one stage's own chunks instead of one call's.
+#[cfg(feature = "cohort-staged-graph")]
+struct MatmulStagePlan<'plan> {
+    weights: &'plan [u8],
+    activation_q8k: Vec<u8>,
+    row_bytes: usize,
+    q8k_row_bytes: usize,
+    /// `leading_total` — [`matmul_rows_threaded`]'s own `width` parameter:
+    /// how many positions are folded into one row's own dot.
+    width: usize,
+    rows: usize,
+    dot_fn: MatmulRowDotFn,
+    /// row-major (`[row][position]`) scratch this stage's chunks write
+    /// into; transposed to the node's real position-major output by
+    /// [`run_staged_batch`] after the round returns, the same transpose
+    /// [`run_reduce_quantized`]'s own wide-fold arms pay unbatched.
+    wide: Vec<f32>,
+    chunk_ranges: Vec<(usize, usize, usize)>,
+}
+
+#[cfg(feature = "cohort-staged-graph")]
+impl MatmulStagePlan<'_> {
+    fn run_chunk(&self, within_stage: usize) -> Result<(), TensorError> {
+        let (row_start, address, length) = self.chunk_ranges[within_stage];
+        // SAFETY: identical single-writer argument to `RowRound::run_chunk`
+        // — carved via `split_at_mut` before the round opens (see this
+        // plan's own construction in `build_matmul_stage_plan`), one chunk
+        // per pointer, `self.wide` never pushed/resized again until the
+        // round returns and `run_staged_batch` reads it back through `&self`.
+        let chunk_output = unsafe { core::slice::from_raw_parts_mut(address as *mut f32, length) };
+        for (offset, slot) in chunk_output.chunks_exact_mut(self.width).enumerate() {
+            let row = row_start + offset;
+            let start = row * self.row_bytes;
+            let weight_row = &self.weights[start..start + self.row_bytes];
+            for (position, output_slot) in slot.iter_mut().enumerate() {
+                let q8k_start = position * self.q8k_row_bytes;
+                *output_slot = (self.dot_fn)(weight_row, &self.activation_q8k[q8k_start..q8k_start + self.q8k_row_bytes])?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Builds `resolved`'s own [`MatmulStagePlan`], or `None` when its shape
+/// does not clear [`quantized_matmul_workers`]'s threshold — too little
+/// work to parallelize, the same threshold [`run_reduce_quantized`] itself
+/// checks before calling [`matmul_rows_threaded`]. `None` here means
+/// [`run_staged_batch`] falls back to running this ONE node through the
+/// plain [`run_node_into`] path (a single one-chunk stage, `session: None`),
+/// identical to what every other batch-eligible node kind already does.
+///
+/// Shape derivation duplicates (rather than extracts from)
+/// [`run_reduce_quantized`]'s own `rows`/`k`/`leading_total` derivation —
+/// deliberately, so this feature's own additions never touch that already
+/// bit-exact-verified function's body; the copy stays narrow and close to
+/// it so a future drift shows up in a diff, not behind an extra call this
+/// session did not have budget to verify against every one of
+/// `run_reduce_quantized`'s own edge cases (the `Q8_0` growable-cache
+/// `output.is_empty()` early return among them — moot here since `Q8_0` is
+/// never [`dot_fn_for`]-eligible, but a reason to keep the two copies
+/// separate rather than partially shared).
+#[cfg(feature = "cohort-staged-graph")]
+fn build_matmul_stage_plan<'weights>(
+    resolved: &BoundOp,
+    buffers: &[Option<Cow<'_, [f32]>>],
+    weight_block: QuantizedBlock<'weights>,
+    weight_node: NodeId,
+    session: &MatmulSession<'_>,
+) -> Result<Option<MatmulStagePlan<'weights>>, TensorError> {
+    let activation_node = resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| *node)
+        .find(|node| *node != weight_node)
+        .ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "quantized matmul reduce has no activation operand",
+        })?;
+    let activation = buffers[activation_node.0 as usize].as_deref().ok_or(TensorError::NotLowerable {
+        node: activation_node,
+        reason: "quantized matmul activation operand has no bound buffer",
+    })?;
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        unreachable!("build_matmul_stage_plan is only called for a Keep::Reduce fold")
+    };
+    let axis_shape = resolve_reduce_axis_shape(resolved, output_axes.as_slice());
+    let contraction_width: u64 = axis_shape.reduction_extents.iter().product();
+    let shape_error = || TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "quantized matmul batch shape does not evenly divide by its packed weight rows",
+    };
+    let shared_axis_error = || TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "quantized matmul activation varies along an output axis its packed weight also \
+                 varies along -- not a flat weight matmul this interpreter can express",
+    };
+    let k = usize::try_from(contraction_width).map_err(|_| shape_error())?;
+
+    let weight_layout = resolved
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == weight_node)
+        .map(|(_, layout, _)| layout)
+        .ok_or_else(shape_error)?;
+    let activation_layout = resolved
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == activation_node)
+        .map(|(_, layout, _)| layout)
+        .ok_or_else(shape_error)?;
+
+    let mut rows_total: u64 = 1;
+    let mut leading_total_u64: u64 = 1;
+    for axis in output_axes.as_slice() {
+        let extent = resolved.extents[*axis as usize];
+        if weight_layout.stride(*axis) != 0 {
+            if activation_layout.stride(*axis) != 0 {
+                return Err(shared_axis_error());
+            }
+            rows_total *= extent;
+        } else {
+            leading_total_u64 *= extent;
+        }
+    }
+    let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
+    let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
+
+    let (weights, block_bytes, block_elements): (&[u8], usize, usize) = match weight_block {
+        QuantizedBlock::Float32(_) => return Err(shape_error()),
+        QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
+    };
+    if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
+        return Err(shape_error());
+    }
+    let total_weight_elements = (weights.len() / block_bytes) * block_elements;
+    if total_weight_elements != rows * k {
+        return Err(shape_error());
+    }
+    if activation.len() != leading_total * k {
+        return Err(shape_error());
+    }
+    if !k.is_multiple_of(Q4K_BLOCK_ELEMENTS) {
+        return Err(shape_error());
+    }
+
+    let Some(dot_fn) = dot_fn_for(weight_block) else {
+        return Ok(None);
+    };
+    let Some(workers) = quantized_matmul_workers(rows, activation.len()) else {
+        return Ok(None);
+    };
+
+    let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
+    let q8k_row_bytes = (k / Q4K_BLOCK_ELEMENTS) * Q8K_BLOCK_BYTES;
+    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+    // `Some(session)` here is safe, unlike inside a stage's own
+    // `run_stage_chunk` closure: this call runs during the precompute pass,
+    // strictly BEFORE `run_staged_batch` opens its round (`session.run(&round)`
+    // has not been called yet), so there is no in-flight round for a second
+    // `session.run` to collide with. Matches `run_reduce_quantized`'s own
+    // unbatched call exactly (same function, same session), so a wide
+    // (prefill-shaped) activation keeps its existing parallel quantize
+    // instead of losing it just because this node got folded.
+    quantize_row_q8k_dispatch(activation, &mut activation_q8k, Some(session))?;
+
+    let row_bytes = weights.len() / rows;
+    let chunk_count = row_chunk_count(rows, workers, k.saturating_mul(leading_total));
+    let chunk_len = rows.div_ceil(chunk_count);
+    let mut wide = vec![0.0f32; rows * leading_total];
+    let mut chunk_ranges = Vec::with_capacity(chunk_count);
+    let mut remaining = wide.as_mut_slice();
+    let mut row_start = 0usize;
+    while !remaining.is_empty() {
+        let take_rows = chunk_len.min(remaining.len() / leading_total);
+        let (slice, rest) = remaining.split_at_mut(take_rows * leading_total);
+        remaining = rest;
+        chunk_ranges.push((row_start, slice.as_mut_ptr() as usize, slice.len()));
+        row_start += take_rows;
+    }
+
+    Ok(Some(MatmulStagePlan {
+        weights,
+        activation_q8k,
+        row_bytes,
+        q8k_row_bytes,
+        width: leading_total,
+        rows,
+        dot_fn,
+        wide,
+        chunk_ranges,
+    }))
+}
+
+/// Runs `run` (a maximal [`is_staged_batch_eligible`] slice of `resolved`,
+/// starting at `resolved[run_start]`) as ONE [`StagedRound`] instead of one
+/// `CohortSession::run` per node — the fix `docs/discipline.md` ROW 68/90/96
+/// point at: threads stay resident and busy-spin through every stage of the
+/// whole run behind a single round-open/wake, INCLUDING the quantized-matmul
+/// stages that are ~87% of a forward's own wall time (ROW 96 folded every
+/// OTHER kind and measured `rounds` rise, not fall, because those kinds
+/// already opened zero rounds on their own — matmul is where the existing
+/// per-node rounds actually live).
+///
+/// A node with a [`MatmulStagePlan`] becomes a many-chunk stage (real
+/// cross-worker row parallelism, [`MatmulStagePlan::run_chunk`]); a matmul
+/// node too small to parallelize (see [`build_matmul_stage_plan`]'s own
+/// doc — the only way a node in `run` lacks a plan, since
+/// [`is_staged_batch_eligible`] admits nothing else) is a single one-chunk
+/// stage running the exact [`run_node_into`] call the unbatched path would
+/// have made, `session: None` because that specific node would ALSO
+/// serial-fallback with a real session (the same `quantized_matmul_workers`
+/// threshold gates both), never because of round reentrancy.
+///
+/// Every output buffer for the whole run is allocated up front (reusing
+/// [`take_or_allocate`], the same pool [`evaluate_quantized_with_scratch`]'s
+/// per-node path already draws from) so the round's own closure can hold a
+/// raw pointer to each stage's own disjoint slot before the round opens —
+/// retirement (`retires`) is applied after the round returns, in run order,
+/// so the final `buffers`/`free_buffers` state this leaves is identical to
+/// running every node in `run` one at a time; the only difference is that a
+/// buffer whose last use falls inside the run is held slightly longer
+/// (until the run's own round returns) instead of being freed the instant
+/// its consumer finishes — bounded by one run's own total output size, not
+/// the whole step's.
+#[cfg(feature = "cohort-staged-graph")]
+#[allow(clippy::too_many_arguments)]
+fn run_staged_batch(
+    run: &[BoundOp],
+    run_start: usize,
+    buffers: &mut [Option<Cow<'_, [f32]>>],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    session: &MatmulSession<'_>,
+    free_buffers: &mut Vec<Vec<f32>>,
+    retires: &[Vec<NodeId>],
+    live_now: &mut usize,
+) -> Result<(), TensorError> {
+    let mut run_outputs: Vec<Vec<f32>> =
+        run.iter().map(|node| take_or_allocate(free_buffers, node_output_len(node))).collect();
+    let buffers_ref: &[Option<Cow<'_, [f32]>>] = buffers;
+
+    let mut plans: Vec<Option<MatmulStagePlan<'_>>> = Vec::with_capacity(run.len());
+    for node in run {
+        let plan = match quantized_operand(node, quantized_weights) {
+            Some(weight_node) => {
+                let weight_block = quantized_weights.get(&weight_node).copied().ok_or(TensorError::NotLowerable {
+                    node: weight_node,
+                    reason: "quantized weight node has no bound byte buffer",
+                })?;
+                build_matmul_stage_plan(node, buffers_ref, weight_block, weight_node, session)?
+            }
+            None => None,
+        };
+        plans.push(plan);
+    }
+
+    let stage_offsets: Vec<usize> = core::iter::once(0)
+        .chain(plans.iter().scan(0usize, |total, plan| {
+            *total += plan.as_ref().map_or(1, |plan| plan.chunk_ranges.len());
+            Some(*total)
+        }))
+        .collect();
+    let output_slots: Vec<(usize, usize)> =
+        run_outputs.iter_mut().map(|buffer| (buffer.as_mut_ptr() as usize, buffer.len())).collect();
+    let completed: Vec<AtomicUsize> = (0..run.len()).map(|_| AtomicUsize::new(0)).collect();
+
+    let round = StagedRound {
+        stage_offsets: &stage_offsets,
+        completed: &completed,
+        run_stage_chunk: |stage: usize, within: usize| -> Result<(), TensorError> {
+            match &plans[stage] {
+                Some(plan) => plan.run_chunk(within),
+                None => {
+                    let computed = &run[stage];
+                    let (address, length) = output_slots[stage];
+                    // SAFETY: single-writer argument identical to
+                    // `ElementwiseRowRound`/`RowRound`'s own `split_at_mut`-carved
+                    // ranges — one stage owns this whole slot (`plans[stage]`
+                    // is `None`, so this stage is exactly one chunk).
+                    let output = unsafe { core::slice::from_raw_parts_mut(address as *mut f32, length) };
+                    run_node_into(computed, buffers_ref, Some(quantized_weights), None, output)
+                }
+            }
+        },
+    };
+
+    let report = session.run(&round);
+    if let Some(error) = report.first_error {
+        return Err(error);
+    }
+    if report.abandoned > 0 {
+        return Err(TensorError::ThreadedChunkFailed {
+            chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
+            reason: alloc::string::String::from("cohort member panicked while running a staged graph batch"),
+        });
+    }
+
+    // `Some(session)` here is safe for the identical reason
+    // `build_matmul_stage_plan`'s own quantize call is: this loop runs
+    // strictly AFTER `session.run(&round)` above has already returned, so
+    // the round this session was driving is closed before any of these
+    // transpose calls open a new one.
+    for (offset, node_output) in run_outputs.iter_mut().enumerate() {
+        if let Some(plan) = &plans[offset] {
+            transpose_wide_to_output(&plan.wide, plan.rows, plan.width, Some(session), node_output)?;
+        }
+    }
+
+    for (offset, node_output) in run_outputs.into_iter().enumerate() {
+        let node = run[offset].node;
+        buffers[node.0 as usize] = Some(Cow::Owned(node_output));
+        *live_now += 1;
+        for retired in &retires[run_start + offset] {
+            if retire_into(buffers, *retired, free_buffers) {
+                *live_now -= 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// [`run_reduce`]'s quantized-weight branch: `resolved` is the fused
@@ -9976,6 +10462,14 @@ mod tests {
     use crate::test_support::Lcg;
 
 
+    /// `stage_offsets` for `stage_count` stages of a UNIFORM `chunks_per_stage`
+    /// width -- the shape every pre-existing test used before `StagedRound`
+    /// grew variable-width stages; kept as a fixture so those tests read the
+    /// same as before, with the new field spelled out.
+    fn uniform_stage_offsets(stage_count: usize, chunks_per_stage: usize) -> Vec<usize> {
+        (0..=stage_count).map(|stage| stage * chunks_per_stage).collect()
+    }
+
     /// The property [`StagedRound`] exists for: a chunk in stage `s` never
     /// observes stage `s - 1` incomplete. Driven from real threads against
     /// the real `run_chunk`, with chunks handed out off a monotonic cursor
@@ -9992,13 +10486,13 @@ mod tests {
         const CHUNKS: usize = 4;
         const MEMBERS: usize = 3;
 
+        let stage_offsets = uniform_stage_offsets(STAGES, CHUNKS);
         let completed: Vec<AtomicUsize> = (0..STAGES).map(|_| AtomicUsize::new(0)).collect();
         let published: Vec<AtomicUsize> = (0..STAGES * CHUNKS).map(|_| AtomicUsize::new(0)).collect();
         let violations = AtomicUsize::new(0);
 
         let round = StagedRound {
-            stage_count: STAGES,
-            chunks_per_stage: CHUNKS,
+            stage_offsets: &stage_offsets,
             completed: &completed,
             run_stage_chunk: |stage: usize, within: usize| {
                 for earlier in 0..stage {
@@ -10044,11 +10538,11 @@ mod tests {
         const STAGES: usize = 5;
         const CHUNKS: usize = 2;
 
+        let stage_offsets = uniform_stage_offsets(STAGES, CHUNKS);
         let completed: Vec<AtomicUsize> = (0..STAGES).map(|_| AtomicUsize::new(0)).collect();
         let ran = AtomicUsize::new(0);
         let round = StagedRound {
-            stage_count: STAGES,
-            chunks_per_stage: CHUNKS,
+            stage_offsets: &stage_offsets,
             completed: &completed,
             run_stage_chunk: |_stage: usize, _within: usize| {
                 ran.fetch_add(1, Ordering::Relaxed);
@@ -10066,10 +10560,10 @@ mod tests {
     #[test]
     fn staged_round_publishes_a_failed_chunk_so_later_stages_do_not_hang() {
         const CHUNKS: usize = 2;
+        let stage_offsets = uniform_stage_offsets(2, CHUNKS);
         let completed: Vec<AtomicUsize> = (0..2).map(|_| AtomicUsize::new(0)).collect();
         let round = StagedRound {
-            stage_count: 2,
-            chunks_per_stage: CHUNKS,
+            stage_offsets: &stage_offsets,
             completed: &completed,
             run_stage_chunk: |stage: usize, _within: usize| {
                 if stage == 0 {
@@ -10084,6 +10578,51 @@ mod tests {
         assert_eq!(completed[0].load(Ordering::Relaxed), CHUNKS, "a failed chunk must still publish");
         assert!(round.run_chunk(ChunkIndex(2)).is_ok(), "stage 1 must not be blocked by stage 0's error");
     }
+
+    /// The property the whole matmul-fold design depends on
+    /// (`docs/discipline.md` ROW 96's "what remains open"): a wide
+    /// matmul-shaped stage (many chunks, real cross-worker parallelism) and
+    /// a narrow elementwise-shaped stage (exactly one chunk) coexisting in
+    /// the SAME round, neither one forced to match the other's width. Stage
+    /// widths here are deliberately irregular (3, 1, 5, 1, 2) rather than a
+    /// clean power of two, so a bug that only reproduces at a stage
+    /// boundary math edge (off-by-one in `partition_point`'s translation
+    /// back to `within_stage`) has somewhere to show up.
+    #[test]
+    fn staged_round_supports_variable_width_stages_in_one_round() {
+        const WIDTHS: [usize; 5] = [3, 1, 5, 1, 2];
+        let stage_offsets: Vec<usize> = core::iter::once(0)
+            .chain(WIDTHS.iter().scan(0usize, |total, width| {
+                *total += width;
+                Some(*total)
+            }))
+            .collect();
+        let completed: Vec<AtomicUsize> = (0..WIDTHS.len()).map(|_| AtomicUsize::new(0)).collect();
+        let observed_widths: Vec<AtomicUsize> = (0..WIDTHS.len()).map(|_| AtomicUsize::new(0)).collect();
+        let violations = AtomicUsize::new(0);
+
+        let round = StagedRound {
+            stage_offsets: &stage_offsets,
+            completed: &completed,
+            run_stage_chunk: |stage: usize, within: usize| {
+                if within >= WIDTHS[stage] {
+                    violations.fetch_add(1, Ordering::Relaxed);
+                }
+                observed_widths[stage].fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        };
+
+        assert_eq!(round.chunks(), WIDTHS.iter().sum::<usize>(), "flat chunk space must cover every stage's own width");
+        for chunk in 0..round.chunks() {
+            round.run_chunk(ChunkIndex(chunk)).expect("staged chunk must not fail");
+        }
+        assert_eq!(violations.load(Ordering::Relaxed), 0, "a chunk landed in the wrong stage or read the wrong within-stage index");
+        for (stage, width) in WIDTHS.iter().enumerate() {
+            assert_eq!(observed_widths[stage].load(Ordering::Relaxed), *width, "stage {stage} did not run exactly its own width in chunks");
+        }
+    }
+
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
         (0..count).map(|_| lcg.next_unit()).collect()
