@@ -165,7 +165,7 @@ use proxima_telemetry::metric::Counter;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
-    Shapes, TensorError, bind, infer,
+    Shapes, TensorError, bind, infer, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -394,6 +394,37 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         &device_buffers,
         prepared.root,
     )
+}
+
+/// [`plan`] against a name-keyed block set — the shape a model binds its
+/// weights in. Resolution goes through
+/// [`proxima_tensor::resolve_named_blocks`], the same function the CPU
+/// evaluator uses, so the two backends cannot disagree about which name is
+/// which position.
+///
+/// # Errors
+/// Propagates name-resolution and planning failures.
+pub fn plan_named(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Plan, MetalError> {
+    let blocks = resolve_named_blocks(program, named)?;
+    plan(program, symbols, &blocks, outputs)
+}
+
+/// [`execute_plan`] against a name-keyed block set. The plan owns its
+/// program, so the caller hands over only the per-call data.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+pub fn execute_plan_named(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<Evaluated, MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan(plan, &blocks)
 }
 
 /// Everything [`execute`] needs before touching a device — the same
