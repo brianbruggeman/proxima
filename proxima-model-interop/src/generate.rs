@@ -52,6 +52,7 @@
 //! never see a turn-boundary marker reappear as if it were generated
 //! content.
 
+#[cfg(not(feature = "metal"))]
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -60,15 +61,24 @@ use core::future::Future;
 use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
+use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
+#[cfg(not(feature = "metal"))]
+use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program};
 use proxima_tokenizer::Vocab;
 
+#[cfg(feature = "metal")]
+use omega::backend::{Backend, Plan, execute_plan_named, plan_named};
+
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
+#[cfg(feature = "metal")]
+use crate::bind::dequantize_packed_for_metal;
 use crate::error::InteropError;
 use crate::serving::ServingConfig;
 use crate::serving::apply_serving_config;
+#[cfg(feature = "metal")]
+use crate::serving::GPU_LAYERS_ALL;
 
 const ROPE_FREQ_BASE: f32 = 10_000.0;
 const RMS_EPSILON: f32 = 1e-5;
@@ -217,6 +227,158 @@ fn supported_serving_config() -> ServingConfig<'static> {
     }
 }
 
+/// `ServingConfig::gpu_layers` (`-ngl`, `serving.rs`) is this crate's
+/// existing GPU-offload knob, so backend selection reads it rather than a
+/// second mechanism -- `0` (cpu-only, [`supported_serving_config`]'s own
+/// default) selects [`Backend::Cpu`]; [`GPU_LAYERS_ALL`] (`-ngl all`)
+/// selects [`Backend::Metal`]. `apply_serving_config` rejects every other
+/// value before a forward ever runs, so those are the only two this match
+/// needs to distinguish.
+#[cfg(feature = "metal")]
+fn select_backend(config: &ServingConfig) -> Backend {
+    if config.gpu_layers == GPU_LAYERS_ALL { Backend::Metal } else { Backend::Cpu }
+}
+
+/// The 9-or-so `Q5_K`/`Q6_K` weights [`bind_all_weights`] packs zero-copy
+/// (`bind_matmul_weight`) cannot cross to Metal packed -- `omega::metal`'s
+/// driver has no unpack kernel for either codec. Converted once per
+/// [`LoadedModel::generate_with_serving_config`] call, before the decode
+/// loop starts, rather than once per token: the packed bytes never change
+/// across a call, so re-dequantizing them every step would pay real,
+/// avoidable cost for a value that is already fixed.
+#[cfg(feature = "metal")]
+fn dequantize_unsupported_metal_weights(
+    packed: &[(alloc::string::String, QuantizedBlock<'_>)],
+) -> Result<Vec<(alloc::string::String, Vec<f32>)>, InteropError> {
+    let mut converted = Vec::new();
+    for (name, block) in packed {
+        if let Some(floats) = dequantize_packed_for_metal(block)? {
+            converted.push((name.clone(), floats));
+        }
+    }
+    Ok(converted)
+}
+
+/// `block` unchanged unless `name` is one of `dequantize_unsupported_metal_weights`'s
+/// converted entries, in which case its owned `f32` buffer takes over as
+/// [`QuantizedBlock::Float32`]. `metal_converted_weights` is empty whenever
+/// the `metal` feature is off or the selected backend is the CPU one, so
+/// this always returns `*block` unchanged in both of those cases -- the
+/// same value the decode loop pushed before this function existed.
+fn resolve_packed_block<'weights>(
+    name: &str,
+    block: &QuantizedBlock<'weights>,
+    metal_converted_weights: &'weights [(alloc::string::String, Vec<f32>)],
+) -> QuantizedBlock<'weights> {
+    metal_converted_weights
+        .iter()
+        .find(|(converted_name, _)| converted_name == name)
+        .map_or(*block, |(_, floats)| QuantizedBlock::Float32(floats.as_slice()))
+}
+
+/// Everything a decode step needs to actually run the program that is
+/// backend-specific: which [`Backend`] to run it on, and the reusable state
+/// each call to [`Self::evaluate`] persists across steps. Owns the plan
+/// cache directly rather than through a trait object -- [`Backend`] is
+/// already a closed, non-`dyn` enum (`omega::backend`'s own doc), and this
+/// struct's whole job is picking one arm of it once per
+/// [`LoadedModel::generate_with_serving_config`] call.
+#[cfg(feature = "metal")]
+pub(crate) struct BackendRuntime {
+    backend: Backend,
+    /// Keyed by `(new_count, cached_len)` -- the two symbols
+    /// `mistral_cached_forward_program`'s cached-attention read extent
+    /// resolves against (`Extent::Symbolic(1) == cached_len`). A [`Plan`]
+    /// bakes concrete shapes from those symbols (`omega::backend::plan_named`'s
+    /// own doc), and `cached_len` grows by `new_count` every decode step, so
+    /// a plan built for one step's shape is never valid for the next --
+    /// this cache exists for the shape that DOES repeat (a caller replaying
+    /// the same partial length twice), not for ordinary autoregressive
+    /// decode, which visits a strictly increasing `cached_len` and so never
+    /// hits it within one call. See this crate's own task report for the
+    /// measured hit/miss count on a real 24-token decode.
+    plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
+    pub(crate) plan_hits: usize,
+    pub(crate) plan_misses: usize,
+}
+
+#[cfg(feature = "metal")]
+impl BackendRuntime {
+    pub(crate) fn new(config: &ServingConfig) -> Self {
+        Self {
+            backend: select_backend(config),
+            plans: alloc::collections::BTreeMap::new(),
+            plan_hits: 0,
+            plan_misses: 0,
+        }
+    }
+
+    pub(crate) fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    fn evaluate(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+    ) -> Result<Evaluated, InteropError> {
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        match self.plans.get_mut(&shape) {
+            Some(plan) => {
+                self.plan_hits += 1;
+                Ok(execute_plan_named(plan, named)?)
+            }
+            None => {
+                self.plan_misses += 1;
+                let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+                let evaluated = execute_plan_named(&mut plan, named)?;
+                self.plans.insert(shape, plan);
+                Ok(evaluated)
+            }
+        }
+    }
+}
+
+/// The CPU-direct runtime a build without the `metal` feature keeps --
+/// `omega` is not even a dependency in that build (`Cargo.toml`'s `metal`
+/// feature is the only thing that turns `dep:omega` on), so this calls
+/// [`evaluate_quantized_named_with_scratch`] exactly as
+/// [`LoadedModel::generate`] always has. `free_buffers`/`validated_weight_nodes`
+/// are the same scratch this loop's local variables used to own directly --
+/// moved onto this struct so [`LoadedModel::generate_with_serving_config`]'s
+/// loop body reads identically whether or not `metal` is compiled in.
+#[cfg(not(feature = "metal"))]
+pub(crate) struct BackendRuntime {
+    free_buffers: Vec<Vec<f32>>,
+    validated_weight_nodes: Option<BTreeSet<NodeId>>,
+}
+
+#[cfg(not(feature = "metal"))]
+impl BackendRuntime {
+    pub(crate) fn new(_config: &ServingConfig) -> Self {
+        Self { free_buffers: Vec::new(), validated_weight_nodes: None }
+    }
+
+    fn evaluate(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+    ) -> Result<Evaluated, InteropError> {
+        Ok(evaluate_quantized_named_with_scratch(
+            program,
+            symbols,
+            named,
+            outputs,
+            &mut self.free_buffers,
+            &mut self.validated_weight_nodes,
+        )?)
+    }
+}
+
 impl<'file> Pipe for LoadedModel<'file> {
     type In = (String, usize);
     type Out = (Vec<u32>, String, bool);
@@ -261,16 +423,54 @@ fn decode_until_stop_or_budget(
 }
 
 impl<'file> LoadedModel<'file> {
-    /// The greedy decode loop itself: `max_tokens` steps, each one call
-    /// into `evaluate_quantized_named_with_scratch` against `new_positions
-    /// == 1` after the first step (`new_positions == prompt_length` on the
-    /// first), growing [`LayerCache`] by one call's worth of positions
-    /// every step instead of re-running the whole sequence from scratch --
-    /// stopping early the moment the model emits its own end-of-sequence
-    /// id (see this module's doc for what that id is on the real
-    /// checkpoint), never running past `max_tokens` regardless.
+    /// [`Self::generate_with_serving_config`] against
+    /// [`supported_serving_config`] -- the reachable path every existing
+    /// caller and test uses, unchanged: `gpu_layers: 0` always selects the
+    /// CPU backend, so this runs exactly the forward it always has, on
+    /// CPU, regardless of whether this build was compiled with the
+    /// `metal` feature.
     fn generate(&self, prompt: &str, max_tokens: usize) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let serving_config = supported_serving_config();
+        self.generate_with_serving_config(prompt, max_tokens, supported_serving_config())
+    }
+
+    /// The greedy decode loop itself: `max_tokens` steps, each one call
+    /// into [`BackendRuntime::evaluate`] against `new_positions == 1` after
+    /// the first step (`new_positions == prompt_length` on the first),
+    /// growing [`LayerCache`] by one call's worth of positions every step
+    /// instead of re-running the whole sequence from scratch -- stopping
+    /// early the moment the model emits its own end-of-sequence id (see
+    /// this module's doc for what that id is on the real checkpoint),
+    /// never running past `max_tokens` regardless.
+    ///
+    /// `serving_config` is a caller-supplied override of
+    /// [`supported_serving_config`]'s default -- the same [`ServingConfig`]
+    /// [`apply_serving_config`] already gates, never a second selection
+    /// mechanism. Setting `gpu_layers` to `GPU_LAYERS_ALL` (`-ngl all`) on
+    /// a build compiled with this crate's `metal` feature runs this same
+    /// loop against the Metal backend instead of the CPU one; every other
+    /// field must already satisfy [`apply_serving_config`]'s gate the same
+    /// way [`supported_serving_config`]'s does.
+    pub fn generate_with_serving_config(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: ServingConfig,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let mut runtime = BackendRuntime::new(&serving_config);
+        self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
+    }
+
+    /// Shared by [`Self::generate_with_serving_config`] and this crate's
+    /// own metal-path tests, which need to read `runtime`'s plan-cache
+    /// hit/miss counters after the loop finishes -- a caller reachable
+    /// only through the public method above never sees `runtime` at all.
+    pub(crate) fn run_decode_loop(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
 
         let block_count = self.architecture.block_count as usize;
@@ -285,15 +485,22 @@ impl<'file> LoadedModel<'file> {
             .collect();
         let mut layer_caches: Vec<LayerCache> = (0..block_count).map(|_| LayerCache::new()).collect();
 
+        #[cfg(feature = "metal")]
+        let metal_converted_weights: Vec<(String, Vec<f32>)> = if runtime.backend() == Backend::Metal {
+            dequantize_unsupported_metal_weights(&self.weights.packed)?
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(feature = "metal"))]
+        let metal_converted_weights: Vec<(String, Vec<f32>)> = Vec::new();
+
         let mut cached_len = 0usize;
         let mut next_ids = ids;
-        let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-        let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
         let vocab_size = self.architecture.vocab as usize;
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(&self.vocab, max_tokens, |_step| {
             let new_count = next_ids.len();
-            apply_serving_config(&serving_config, cached_len + new_count);
+            apply_serving_config(serving_config, cached_len + new_count);
             let inputs = build_position_inputs(&next_ids, cached_len, self.architecture.head_dim);
 
             let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
@@ -304,7 +511,7 @@ impl<'file> LoadedModel<'file> {
                 named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
             }
             for (name, block) in &self.weights.packed {
-                named_blocks.push((name.as_str(), *block));
+                named_blocks.push((name.as_str(), resolve_packed_block(name, block, &metal_converted_weights)));
             }
             named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
@@ -322,14 +529,7 @@ impl<'file> LoadedModel<'file> {
                 roots.push(*value);
             }
 
-            let evaluated = evaluate_quantized_named_with_scratch(
-                &self.program,
-                &symbols,
-                &named_blocks,
-                &roots,
-                &mut free_buffers,
-                &mut validated_weight_nodes,
-            )?;
+            let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots)?;
 
             for (layer, (even, odd, value)) in self.cache_roots.iter().enumerate() {
                 let (even_data, _) = evaluated.get(*even).ok_or(InteropError::MissingEvaluatedNode { node: *even })?;

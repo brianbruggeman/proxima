@@ -103,4 +103,12 @@ pub enum InteropError {
     #[cfg(feature = "std")]
     #[error("greedy_pick: logits slice is empty")]
     EmptyLogits,
+
+    /// [`crate::generate::LoadedModel`]'s decode loop asked
+    /// [`omega::backend`] to plan or execute a forward step and the backend
+    /// itself refused -- an unrecognized/uncompiled backend name, or a
+    /// codec the chosen backend's driver has no kernel for.
+    #[cfg(feature = "metal")]
+    #[error(transparent)]
+    Backend(#[from] omega::backend::BackendError),
 }
