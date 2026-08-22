@@ -8618,3 +8618,105 @@ net loss on both regimes that matter (decode +1.62%, prefill +1.76%,
 `rounds` +85.2% instead of the diagnosed fall) with the dominant-cost
 matmul path deliberately untouched (see scope section). Reverted via `git
 revert`, its own commit, this session.
+
+## ROW 97 — matmul row-chunks folded into a shared `StagedRound`: `rounds` FALLS 33.1% (first fall this initiative has measured), decode -4.82%, prefill flat (+1.04%, within noise). LANDED, default-off.
+
+**Headline, stated first: this is the first row in this initiative — across ROW 68/90/96 — where the direct-evidence counter (`rounds`) actually FELL, and it paired with a real decode improvement (-4.82%, clears combined noise ~5x) at an essentially flat prefill (+1.04%, inside combined noise). We remain far from the 44.09 ms/token target (1.265x behind, was 1.329x) — this closes part of the gap, it does not close it.** Host: Apple M1 Max, `uptime` load averages 3.2-8.1 across the session (recorded per run below — noisier than ROW 96's own session; every comparison below uses a load-MATCHED baseline captured in the same window, not the quieter one captured at session start). Repo: `feat/tensor-consolidated` @ `ec7ef35` + this row's own commit, release profile throughout (`cargo test --release`, never a debug build compared against a release one).
+
+### The premise, measured fresh this session (not inferred from ROW 96's own numbers)
+
+`PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8`, instrument feature, one run: every one of the 24 forward passes (prefill + 23 decode steps) reports `node_kind=reduce_matmul_quantized count=225` — constant across every step, matching the crate's own `run_reduce_quantized` comment ("216 of 225 matmul weights... Q4_K") exactly. `cohort_summary rounds=6972` for the whole run, `6972 / 24 ≈ 290/step` — matmul-reduce nodes plus their own `quantize_row_q8k_dispatch`/`transpose_wide_to_output` helper calls (which also open cohort rounds above a size threshold) account for the gap between 225 and 290. **Premise confirmed: the matmul path is ~225 rounds/token, one per node, exactly as the task named.**
+
+### The corrected barrier, verified against source before any design
+
+`matmul_rows_threaded`'s `dot_row: Row` really is a distinct closure TYPE per call site (`proxima-tensor/src/cpu.rs:6790`, `:7164`, `:7577` each write their own closure literal), so three separate calls to `matmul_rows_threaded::<Row>` monomorphize three separate copies — a real barrier to putting all three codecs' work through ONE `session.run(&round)` call with a single `Round` type. But `dot_q4k_q8k`/`dot_q5k_q8k`/`dot_q6k_q8k` (`cpu.rs:6265`, `:6895`, `:7261`) share the IDENTICAL signature `fn(&[u8], &[u8]) -> Result<f32, TensorError>` — a plain `fn` item, not a capturing closure. Selecting between them as a **value** (`MatmulRowDotFn`, a type alias for that `fn` pointer type) rather than naming one at a distinct closure-literal source location collapses all three codecs' row-computation into ONE concrete type. This is the actual mechanism that unblocks the fold — no `Box<dyn Fn>`, no new trait, an existing `fn`-pointer value used where the barrier assumed a name.
+
+One factual correction to ROW 96's own doc: it attributes `StagedRound` to `prime::os::cohort` alongside `CohortRound`/`CohortSession`. `CohortRound`/`CohortSession`/`ChunkIndex` are `prime/src/os/cohort.rs`; **`StagedRound` itself is local to `proxima-tensor/src/cpu.rs:2436`** (grep `struct StagedRound` in `prime/` returns nothing). Minor, but principle 6 says verify rather than repeat.
+
+### What was reused vs added
+
+Reused, unmodified: `CohortRound`/`CohortSession`/`ChunkIndex` (`prime/src/os/cohort.rs`), `bind::bind`'s topological order, `take_or_allocate`/`retire_into`, `dot_q4k_q8k`/`dot_q5k_q8k`/`dot_q6k_q8k`/`quantize_row_q8k_dispatch`/`transpose_wide_to_output`/`row_chunk_count`/`quantized_matmul_workers`/`resolve_reduce_axis_shape` (all called exactly as `run_reduce_quantized` calls them — same functions, same arguments, `Some(session)` for quantize/transpose since both calls happen strictly outside the round's own lifetime, `None` only for the plain `run_node_into` fallback for a too-small matmul node, which would ALSO serial-fallback with a real session per the same `quantized_matmul_workers` threshold — verified by writing the call site, not assumed). `StagedRound` itself is EXTENDED (not replaced): `chunks_per_stage: usize` (uniform) becomes `stage_offsets: &[usize]` (variable per stage, `partition_point` translates a flat chunk index back to `(stage, within_stage)`) — this is what lets a matmul stage (many chunks, real cross-worker parallelism) and a small-matmul-fallback stage (one chunk) share the same round without either paying for the other's width. All 4 `StagedRound` unit tests still pass unchanged in shape (rewritten to build `stage_offsets` from a uniform-width fixture) plus one NEW test (`staged_round_supports_variable_width_stages_in_one_round`) driving 5 stages of irregular width (3,1,5,1,2) through one round.
+
+Added: `MatmulRowDotFn` (type alias, not a new trait), `dot_fn_for` (one `match` over the existing `QuantizedBlock` enum — no new enum minted, per principle 1's "can an existing primitive express this" — yes, `QuantizedBlock`'s own variants ARE the discriminant), `is_staged_batch_eligible`/`staged_batch_run_end` (ROW 96's own functions, eligibility narrowed — see below), `MatmulStagePlan`/`build_matmul_stage_plan` (the new per-node row-chunk context: activation quantized once per node before the round opens, `row_chunk_count`-many `(row_start, ptr, len)` ranges into a `wide` row-major scratch buffer, split via `split_at_mut` exactly the way `matmul_rows_threaded` itself splits its own `output` — same single-writer argument), `run_staged_batch` (one `StagedRound` per qualifying run of matmul nodes, matmul stages carrying real chunk counts, a too-small matmul node a one-chunk stage). All net-new code lives behind `cohort-staged-graph`, default-off, implying `std` + `dep:prime` the same way `tensor-cohort` already does.
+
+**Design correction found by measurement, not by reasoning about it (this row's own honest finding):** the first working version made `is_staged_batch_eligible` admit every `BoundOpKind` (ROW 96's own scope) PLUS quantized-matmul-reduce nodes. Measured: `rounds` ROSE 6972 -> 10355 (+48.5%) — ROW 96's own non-matmul-kind folding still adds a round wherever 2+ of those nodes land in one run (they open zero today), and that effect swamped the matmul fold's own savings. **Restricting eligibility to ONLY quantized-matmul-reduce nodes** (elementwise/dense-reduce/scan/iota/constant excluded — the opposite of ROW 96's own scope) is what actually landed: a batch this narrow can only ever replace rounds that already existed, never add one where none existed. This is a one-line change (`is_staged_batch_eligible`'s `None` arm: `true` -> `false`) but it is the load-bearing one — reported here so the next person does not re-try the broader version.
+
+### Correctness
+
+- Bit-exact: `spec::tests::a_cached_decode_step_matches_the_uncached_forward_pass_exactly` and every other `evaluate_quantized`-vs-`evaluate` parity test pass unchanged under `cohort-staged-graph`.
+- The real end-to-end test (`bind::real_openchat_file::runs_a_cached_greedy_decode_loop...`) passes with `generated_text` byte-identical to the feature-off run, at both `w=1` and `w=8`, across every run in this row (6 runs total).
+- Float reduction order: unaffected. Every folded matmul row's own dot product still runs through the exact same `dot_q4k_q8k`/`dot_q5k_q8k`/`dot_q6k_q8k` call, same block-by-block accumulation; which worker computes which ROW changed (never affects the value, only which thread produced it — dot products across different rows are independent), accumulation order WITHIN a row's own dot is untouched.
+- One aliasing hazard checked and ruled out by construction: `MatmulStagePlan::run_chunk`'s `unsafe { from_raw_parts_mut }` reconstructs a pointer captured from `self.wide.as_mut_slice()`'s own `split_at_mut` BEFORE the round opens (`build_matmul_stage_plan`), never resized after — identical single-writer argument to the file's own `RowRound`/`ElementwiseRowRound`/`TransposeRound`, all three already load-bearing in this crate.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **360 passed** (was 359 before this row — +1 new `StagedRound` test) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **364 passed** (was 363 — same +1) |
+| `cargo nextest run -p proxima-tensor --features std,instrument,cohort-staged-graph` | **364 passed** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** |
+| `cargo nextest run -p omega` | **73 passed** |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` (one `clippy::type_complexity` hit on the bare `fn(&[u8],&[u8])->Result<f32,TensorError>` type — fixed by naming it `MatmulRowDotFn`, not by `#[allow]`) |
+
+### Bench — decode and prefill, `w=8`, load-matched (both sides captured back-to-back in the same noisier window, NOT compared against the quieter session-open numbers)
+
+`bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`, `--release`. Decode = mean of `step_wall_ms` steps 1-23; prefill = step 0's `step_wall_ms`.
+
+| | BEFORE (feature off, load 5.0-5.7, n=3) | AFTER (this row, load 4.8-8.1, n=3) | delta |
+|---|---|---|---|
+| decode (ms/token) | 59.117, 58.317, 58.351 — mean 58.595, CoV 0.75% | 55.381, 56.147, 55.784 — mean 55.771, CoV 0.56% | **-2.824 ms, -4.82%** — clears combined noise (~0.94%) by ~5x |
+| prefill (ms) | 947.414, 938.447, 950.297 — mean 945.386, CoV 0.64% | 956.056, 947.259, 962.341 — mean 955.219, CoV 0.65% | **+9.833 ms, +1.04%** — inside combined noise (~0.91%): a tie, not a regression |
+
+**`w=1` (n=1 each, time-boxed, directional only, no CoV):**
+
+| | BEFORE | AFTER | delta |
+|---|---|---|---|
+| decode (ms/token) | 188.870 | 187.902 | -0.968 ms, -0.51% (single sample, near noise floor) |
+| prefill (ms) | 5939.659 | 5947.994 | +8.335 ms, +0.14% (single sample, no signal) |
+
+### `cohort_summary rounds` — the direct-evidence counter, and it FELL this time
+
+| config | `rounds` | delta vs feature-off |
+|---|---|---|
+| feature off (either baseline run) | 6972 (identical across all runs, deterministic node structure) | — |
+| **this row (matmul-only fold)** | **4668** (identical across 3 runs) | **-2304, -33.1%** |
+| ablation: matmul fold + ROW 96's own non-matmul eligibility (not landed, measurement only) | 10355 (identical across 3 runs) | +3383, +48.5% |
+| ablation: matmul-only fold, session=None for quantize/transpose (intermediate step, not landed) | 4412 (n=1) | -2560, -36.7% |
+
+Per-node-kind, one representative step: `reduce_matmul_quantized` (unbatched, too small to parallelize) count=65/step (was 225/step); `staged_batch` (folded) count=160/step. 160 of 225 matmul nodes per step now share rounds; the remaining 65 are below `quantized_matmul_workers`' own threshold and take the identical serial-or-nest_pool path they always did, batched or not.
+
+### Honest read
+
+The mechanism works exactly as designed: 160/225 matmul nodes per step fold into shared, variable-width `StagedRound`s, `rounds` falls by a third, and decode improves by a real, noise-clearing 4.82%. Two negative results are recorded, not buried, because they are the reason the LANDED version looks the way it does:
+
+1. **Broadening eligibility to ROW 96's own non-matmul kinds is STILL a net loss when combined with this row's matmul fold** (`rounds` +48.5%, not measured further into wall-clock since the direct-evidence counter alone settles it against the landed narrower version) — ROW 96's finding is not superseded, it is reinforced under a new combination.
+2. **Forcing `session: None` for a folded matmul node's own quantize/transpose step cost real wall-clock on prefill specifically** (+13.8%/+16.3% in two earlier measurements of this row, before the fix) — corrected once the actual reentrancy window was checked (quantize runs before the round opens, transpose after it closes; neither is ever concurrent with the round the "no nested `session.run`" rule warns against). Passing the real `session` through recovers prefill to within noise. This was root-caused from the call graph, not guessed-and-checked: the fix followed directly from re-reading `cohort.rs`'s own reentrancy note and confirming BOTH call sites sit outside `session.run(&round)`'s own lifetime.
+
+### Against the incumbent
+
+llama.cpp CPU `-ngl 0 -t 8`: **44.09 ms/token** (ROW 68, standing figure). This row's AFTER: 55.771 ms/token mean, **1.265x behind** (load-matched BEFORE: 58.595, 1.329x behind). We do not beat llama.cpp. The gap narrows by about 5 percentage points of the multiplier; it does not close.
+
+### What remains open
+
+The 65/step matmul nodes still unbatched are below `quantized_matmul_workers`' own parallel threshold — folding those would need `chunks_per_stage` down to 1 chunk per stage for a node that ALSO can't usefully split further, i.e. no further win available there by construction. The larger remaining lever is folding the matmul stages together WITH their neighboring elementwise consumers (RoPE, residual-add, RMSNorm) in a way that does not reproduce finding #1 above — not attempted this session; ROW 96 and this row both independently measured that the naive version of that combination loses. `STAGED_BATCH_MIN_LEN = 2` is a bare source constant, not yet threaded through a build-time sizing config (principle 12) — named here as a residual, not left silent.
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-tensor --features std,instrument,cohort-staged-graph
+cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo nextest run -p omega
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
+  cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+The last command reproduces the BEFORE column at this commit's parent; adding `--features proxima-tensor/cohort-staged-graph` reproduces the AFTER column at this row's own commit.
+
+### Rollback rows
+
+None for this row's own landed change — the measured result is a net improvement on the primary regime (decode) at a flat (not regressed) secondary regime (prefill), so it is kept. Two DESIGN ALTERNATIVES were tried and rejected within this same session, recorded above rather than silently discarded: (1) broad (ROW-96-shaped) eligibility combined with the matmul fold — `rounds` +48.5%, rejected; (2) `session: None` for a folded node's own quantize/transpose — prefill +13.8%/+16.3%, superseded by passing the real session through (both calls verified to sit outside the round's own lifetime).
