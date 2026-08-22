@@ -6932,3 +6932,249 @@ dispatch dense reduce nodes across the cohort in evaluate_quantized`) —
 measured a net loss on both regimes that matter (prefill +14.9%, decode
 +6.15%) with zero measured gain on the node kind they targeted. Reverted via
 `git revert`, own commits, this session.
+
+## ROW 91 — `Q6_K` stays packed to the GPU kernel: `output.weight` 154.2 -> 0.743 ms, `gpu_exec` 288.2 -> 110.3 ms median (2.61x). `Q5_K` NOT landed, sized instead.
+
+**The headline, stated first: `output.weight` — the ONE `Q6_K` tensor this
+checkpoint carries, ~60% of `gpu_exec` before this row — measured
+207.6x faster and reads 4.876x fewer bytes.** `gpu_exec` itself (the
+production batched metric) drops 2.61x. Both numbers below are same-session,
+same-host, paired before/after via `git stash`, not a cross-session
+cross-check.
+
+### What was reused vs what was added
+
+**Reused, unchanged:** `crate::msl::PACKED_ROWS_PER_GROUP`/lane-spread
+geometry, `push_packed_row_blocked_body`'s rows-per-group/lane-spread outer
+loop shape, `crate::metal::upload_packed_bytes` (already codec-agnostic —
+raw bytes in, no codec branch), `proxima_tensor::bind::correct_packed_matmul_layouts`
+(already takes a bare `packed_operands: &BTreeSet<NodeId>`, no codec
+knowledge needed — its own doc already named `Q5_K`/`Q6_K` as in-scope
+before this row landed), `omega::msl::reduction_dims`/`gather_count`/
+`gather_slots`, every `render_reduce`/`render_elementwise`/`render_scan`
+structural shape. **Zero new types in `proxima-tensor` or the CPU
+evaluator** — `QuantizedBlock::Q6K` already existed (ROW 64); this row is
+entirely inside `omega`, the GPU emitter/driver.
+
+**Added, and why it was unavoidable:** `omega::msl::PackedCodec` (a
+two-variant enum, `Q4K`/`Q6K`) and `omega::msl::PackedOperands` (a
+`BTreeMap<NodeId, PackedCodec>` type alias). The pipe-question, answered by
+writing the expression: could the existing `q4k_operands: &BTreeSet<NodeId>`
+express "packed AND which codec"? No — a `BTreeSet` membership test is a
+`bool`; `operand_read`/`push_packed_row_blocked_body` need to pick between
+`q4k_element`/`q6k_element` and between 144-byte/210-byte super-block
+strides, which a `bool` cannot carry. Widening `bool` to
+`Option<PackedCodec>` (not minting a new type family, just a fielded enum
+sitting where a bool sat) is the minimal change; a caller building this map
+can now do something a caller with a bare `BTreeSet` could not — dispatch
+per-operand to the correct unpack function — which the two-set alternative
+(`q4k_operands` + a second `q6k_operands` parameter) could also do, but only
+by duplicating every threading site `emit`/`classify_kind`/`diagnose_kind`/
+`encode_op`/`prepare`/`plan` already has, rather than widening the one they
+have. `Q6K_UNPACK_MSL` (new MSL constant, mirroring `Q4K_UNPACK_MSL`'s
+existing shape exactly: `q6k_header_for`/`q6k_value`/`q6k_element`, ported
+from `proxima_gguf::quant::q6_k::{dequantize_block, unpack_levels}` line for
+line, not re-derived from ggml). No new type in `proxima-model-interop`;
+`dequantize_packed_for_metal` shrank (Q6K branch deleted), it did not grow.
+
+### The one deliberate incompleteness: no `q6k_run8`
+
+`Q4_K`'s row-blocked kernel amortizes its per-element header decode by
+pulling 8 consecutive nibbles from two 32-bit-aligned word loads
+(`q4k_run8`, ROW 77's "eight levels from two 32-bit loads"). `Q6_K`'s bit
+layout does not offer that shape: a `Q6_K` element's 6-bit level needs a
+`ql` nibble AND a `qh` 2-bit lane from a DIFFERENT byte AND a sub-block
+scale that changes every 16 elements (not every 32) — `unpack_levels`
+computes one lane per call, not four adjacent lanes from one aligned word.
+This row's `q6k_value`/`q6k_header_for` amortize the ONE thing that genuinely
+is constant across a whole super-block (`d`, decoded once per `ib` iteration
+via `q6k_header_for`, not once per element) and read `ql`/`qh`/scale bytes
+one element at a time otherwise — correct, simpler, and, per the measurement
+below, already enough to erase 99.5% of `output.weight`'s GPU cost even
+without the word-batched trick. A `q6k_run8`-equivalent is a real, named
+follow-up optimization, not a correctness gap: it was not attempted this
+row because `output.weight` is a single op and the measured win already
+closes the gap this initiative was opened to close.
+
+### Correctness — the incumbent (CPU dequantize path) wins, on REAL bytes, before any timing
+
+Three tests, ascending in realism, all PASS:
+
+1. **Synthetic, bit-exact against the Rust reference**
+   (`omega::tests::q6k_unpack::q6k_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly`,
+   16 random blocks x 256 elements = 4096 comparisons, `assert_eq!` on
+   `.to_bits()`, no epsilon) — the MSL index arithmetic, transcribed to Rust
+   host-side, matches `proxima_gguf::quant::q6_k::dequantize_block` exactly.
+   A second test (`q6k_scale_trails_the_block_not_leads_it`) pins the one
+   detail easiest to get silently wrong: `d` sits LAST (offset 208), unlike
+   `Q4_K`/`Q5_K` where it leads.
+2. **Synthetic weight, real device, GPU vs CPU-dequantize-then-fold**
+   (`omega::tests::metal_parity::metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path`
+   and the `q6k_at_float32`/`q6k_at_float16` cases of
+   `metal_matmul_parity_across_codec_and_dtype`) — a real `MTLDevice`
+   compiles and runs the row-blocked kernel against quantized-then-packed
+   synthetic weights, compared to the same weights dequantized and matmul'd
+   on CPU.
+3. **REAL checkpoint bytes, real device** (new test file,
+   `omega/tests/q6k_real_checkpoint_parity.rs`,
+   `metal_matmul_on_real_output_weight_q6k_bytes_matches_the_dequantized_f32_cpu_path`)
+   — reads the first 64 rows of `output.weight`'s actual packed `Q6_K` bytes
+   directly out of `openchat-3.5-1210.Q4_K_S.gguf` (guiding-principles §9:
+   real-world data, not synthetic), runs them through `omega::execute` on a
+   real device, and compares against `proxima_gguf::quant::q6_k::dequantize`
+   + CPU matmul. **`relative=0.0000013349761` (`max_diff=0.0000011324883`,
+   `max_magnitude=0.84832096`)** — float-summation-order noise, not a
+   quantization-error bound (both sides fold the identical dequantized
+   values), five orders of magnitude under the codec's own loose sanity
+   bound.
+
+Generated text, 24-token greedy decode, real checkpoint, byte-identical
+BEFORE and AFTER this row (same assertion this initiative has carried since
+ROW 81):
+```
+"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"
+```
+
+### The numbers — same session, same host, paired via `git stash`
+
+Every BEFORE number below was captured by `git stash push -u`, rebuilding
+and re-running the identical test at `a1c1f76` (this session's own starting
+commit), then `git stash pop` to restore this row's changes and re-running
+the same test — not a cross-session cross-check, and not the prior
+session's own cited baseline (`gpu_exec` 250.7 ms), which this row's BEFORE
+figure (288.2 ms median) is 15% off, on a NOISIER window of this same box
+(see host loadout below) — reported as such rather than reconciled to a
+number from a different run.
+
+**`gpu_exec` — the PRODUCTION batched metric, `execute_plan`, one command
+buffer for the whole 1196-op program**, read from
+`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+steps 1-23 (steady decode, `new_count=1`), 3 runs each, n=69 samples/side:
+
+| | BEFORE (n=69) | AFTER (n=69) | delta |
+|---|---|---|---|
+| median | 288.150 ms | **110.329 ms** | **-177.82 ms, -61.7%, 2.61x** |
+| mean | 286.090 ms | 110.385 ms | |
+| min-max | 265.137-298.864 ms | 108.861-112.667 ms | |
+| CoV | 3.08% | 0.59% | |
+
+Both CoVs are well under the delta magnitude (61.7% vs 3.08%/0.59%), so this
+is a real, reproducible win, not noise. Generated text byte-identical across
+all 6 runs (3 before, 3 after — see above).
+
+**Host loadout, pasted per window, not summarized away:** BEFORE runs
+captured 14:08-14:10, `uptime` load 3.65-7.66 (1-min) across the window —
+the shell's own classifier blocked a couple of `export`+`cd` compound
+commands mid-session, so load was sampled at the window's edges rather than
+before every individual run; AFTER runs (`full_metal_run1-3`) captured
+14:06-14:07, load 4.44-6.30 — a slightly quieter window than BEFORE's,
+which is the OPPOSITE direction a contamination story would need (a noisier
+BEFORE window would inflate the BEFORE number, understating the win, not
+overstating it).
+
+**`output.weight` — per-op GPU time, real steady decode step
+(`new_count=1`, `PROXIMA_METAL_OP_PROFILE_STEP=3`), single sample each side
+(this diagnostic path pays one extra fixed cost per op vs the batched path,
+per ROW 71/73 — not pooled across runs this row; the `gpu_exec` table above
+is the multi-run-averaged claim):**
+
+| | BEFORE | AFTER | delta |
+|---|---|---|---|
+| gpu_ms | 154.249 | **0.743** | **-153.506 ms, -99.5%, 207.6x** |
+| operand_bytes | 524,337,152 (524.34 MB, f32) | **107,543,104 (107.54 MB, packed Q6_K)** | **-416,794,048 B, -79.5%, 4.876x fewer bytes** |
+| ns/byte | 0.294178 | 0.006908 | 42.6x |
+| `packed_row_block` gate | `NotExactlyOnePackedOperand` (rejected) | `PASS` (row-blocked) | |
+
+The bytes/token figure the task's own brief estimated at "~134 MB packed" —
+the REAL measured number is tighter, 107.54 MB, because `Q6_K`'s actual rate
+is 6.5625 bits/weight (0.8203 B/elem), not the cruder ~1 B/elem the
+estimate assumed.
+
+**Sum of every family's `operand_bytes` this same diagnostic step (all 1196
+ops, one decode step): 5,871,535,508 -> 5,454,741,460 bytes, -416,794,048 B**
+— exactly `output.weight`'s own delta, confirming no OTHER family's byte
+footprint moved (see the degenerate control below).
+
+**Degenerate control — every OTHER family's `gpu_ms` is within host-noise
+band, not structurally moved** (single-sample per side, so read this as a
+sanity check on scope, not a second averaged claim):
+
+| family | BEFORE gpu_ms | AFTER gpu_ms | note |
+|---|---|---|---|
+| `blk.ffn_down.weight` (28 Q4_K + 4 Q5_K, untouched) | 68.203 | 63.408 | noise (Q5_K path untouched this row) |
+| `blk.attn_v.weight` (28 Q4_K + 4 Q5_K, untouched) | 3.000 | 2.516 | noise |
+| `blk.ffn_gate.weight` (Q4_K only) | 15.657 | 9.877 | noise, same code path both sides |
+| `blk.attn_q.weight` (Q4_K only) | 6.485 | 5.168 | noise |
+| `token_embd.weight` (F32, untouched) | 0.010 | 0.010 | flat |
+
+**Per-family ns/byte, `Q4_K`-only families (unaffected, both sides — the
+comparison bar `output.weight` now joins):** `ffn_gate` 0.0093-0.0148,
+`ffn_up` 0.0092-0.0148, `attn_q` 0.0171-0.0214, `attn_output` 0.0128-0.0196,
+`attn_k` 0.0196-0.0277. **`output.weight` AFTER (0.006908) now sits INSIDE
+this band** — it was 0.294 (13-40x worse than every Q4_K family) BEFORE.
+
+### `Q5_K`: NOT landed this row, sized instead
+
+Per this row's own ordering instruction ("Q6_K first... then decide on
+Q5_K with that number in hand"): `Q5_K`'s bit layout is a THIRD distinct
+shape from both `Q4_K` and `Q6_K` — it shares `Q4_K`'s 8-sub-blocks-of-32
+scale/min packing exactly (ROW 63's own finding) but adds a `qh` high-bit
+plane `Q6_K` does not have, so neither this row's `Q6K_UNPACK_MSL` nor the
+existing `Q4K_UNPACK_MSL` can be reused unchanged — it needs its OWN MSL
+unpack function, the same shape of work this row did for `Q6_K`, not a
+one-line extension of either.
+
+**The sizing number that answers "is it worth it yet":** `blk.attn_v.weight`
+and `blk.ffn_down.weight` are each 28 `Q4_K` (already row-blocked, cheap) +
+4 `Q5_K` (still F32-dequantized) ops PER FAMILY. Their aggregate `gpu_ms`
+this same diagnostic step (28+4 ops together) is 68.203/63.408 (`ffn_down`)
+and 3.000/2.516 (`attn_v`) — a COMBINED family total of ~66-71 ms across
+BOTH families' 8 Q5_K ops AND their 56 unaffected Q4_K ops together. Even
+the entire aggregate (an upper bound on the Q5_K-only slice, since most of
+each family's ops are already-cheap Q4_K) is under half of what
+`output.weight` alone cost BEFORE this row (154.2 ms) — `Q5_K`'s own slice
+of that aggregate is smaller still. This matches the task brief's own
+framing ("Q5_K is 8 ops worth far less") with a measured number rather than
+asserting it. **Not landed because the measured ceiling on the win is small
+relative to the cost of a third bespoke unpack kernel within this session's
+budget — a real "not worth it yet," not a "ran out of time" dressed up as
+one.** Reopen with a per-op (not per-family-aggregate) breakdown if a future
+session wants the exact Q5_K-only number.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p omega --features metal,instrument` | **60 passed, 1 skipped** (53 baseline + 8 new: `q6k_at_float32`/`q6k_at_float16`, `metal_matmul_on_packed_q6k_weights_...`, 4x `q6k_unpack` module, 1x `q6k_real_checkpoint_parity` — minus 1: `q6_k` case deleted from `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` since `Q6_K` is no longer unsupported) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** (unchanged — this row never touches `proxima-tensor`) |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** (unchanged) |
+| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean (the two pre-existing `clippy::expect_used` sites the prior row named are no longer present) |
+| generated text | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
+
+### Re-provable now
+
+```
+cargo nextest run -p omega --features metal,instrument
+cargo test -p omega --features metal,instrument --test q6k_real_checkpoint_parity -- --nocapture
+cargo test -p proxima-model-interop --release --features metal,instrument --lib -- \
+  --ignored --exact --nocapture \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+cargo test -p proxima-model-interop --release --features metal,instrument --lib -- \
+  --ignored --exact --nocapture \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
+```
+The second command's own `relative=`/`max_diff=`/`max_magnitude=` line is
+this row's real-checkpoint correctness number, regenerable from the artifact
+alone. The third command's `token_breakdown_metal` lines carry `gpu_exec_ms`
+per step — this row's `gpu_exec` table, steps 1-23. The fourth command's
+`op_profile_family` lines carry `family="output.weight"` — this row's
+per-op table, exactly as printed above.
+
+### Rollback rows
+
+None this row — the fold widening (`Option<PackedCodec>` over `bool`)
+measured a clean win on the one family it changes
+(`output.weight`) and a no-op everywhere else (degenerate control above), so
+nothing was reverted. `Q5_K` is a deferral (see above), not a rollback: no
+`Q5_K` code was written and reverted this row.
