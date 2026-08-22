@@ -1310,12 +1310,19 @@ fn push_cooperative_reduce_body(
                 ));
             }
             source.push_str(&format!("    off{index} += (long)lane * stride{index};\n"));
+            // 32-bit from here down. The offsets ABOVE stay `long` because a
+            // layout base can legitimately be one; the per-element WALK never
+            // needs that range, and Apple GPUs are 32-bit machines where
+            // 64-bit integer arithmetic is emulated. `u.walk_fits_int` is the
+            // runtime guard — when an operand's span really does exceed
+            // `int`, the 64-bit walk below runs instead.
+            source.push_str(&format!("    int walk{index} = (int)off{index};\n"));
             source.push_str(&format!(
-                "    long advance{index} = stride{index} * {SIMD_WIDTH};\n"
+                "    int advance{index} = (int)(stride{index} * {SIMD_WIDTH});\n"
             ));
         }
         source.push_str(&format!(
-            "    for (long r = (long)lane; r < u.reduction_total; r += {SIMD_WIDTH}) {{\n"
+            "    for (int r = (int)lane; r < (int)u.reduction_total; r += {SIMD_WIDTH}) {{\n"
         ));
         source.push_str(&format!(
             "        {element_type} scratch[{}];\n",
@@ -1324,7 +1331,7 @@ fn push_cooperative_reduce_body(
         for (index, &is_packed) in quantized.iter().enumerate() {
             source.push_str(&format!(
                 "        scratch[{index}] = {};\n",
-                operand_read(index, &format!("off{index}"), is_packed)
+                operand_read(index, &format!("walk{index}"), is_packed)
             ));
         }
         let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1335,7 +1342,7 @@ fn push_cooperative_reduce_body(
         ));
         source.push_str("        seeded = true;\n");
         for index in 0..operand_count {
-            source.push_str(&format!("        off{index} += advance{index};\n"));
+            source.push_str(&format!("        walk{index} += advance{index};\n"));
         }
         source.push_str("    }\n");
         push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
