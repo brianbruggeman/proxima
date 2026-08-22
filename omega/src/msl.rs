@@ -252,6 +252,35 @@ static inline float q4k_value(device const uchar *block, uint index, q4k_header 
     uchar nibble = (within < 32u) ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
     return header.scale * (float)nibble - header.minimum;
 }
+
+// Eight consecutive levels from TWO 32-bit loads instead of eight byte
+// loads. A lane's run is `slot .. slot+7` and never crosses a 32-element
+// sub-block boundary, so all eight share a group and a nibble half, and
+// their bytes are eight CONSECUTIVE bytes of `qs`. `slot % 32` is one of
+// {0,8,16,24} and a super-block is 144 bytes (a multiple of 16), so the
+// address is 4-byte aligned and the `uint` cast is sound.
+//
+// ggml does the same thing one width down (`q1[i] & 0x000F / 0x0F00 /
+// 0x00F0 / 0xF000` off a `uint16_t`), for the same reason: the nibble
+// extract is cheap and the LOAD is what costs.
+static inline void q4k_run8(device const uchar *block, uint index, thread float *out) {
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint byte_index = group * 32u + (within % 32u);
+    device const uint *words = (device const uint *)(qs + byte_index);
+    uint w0 = words[0];
+    uint w1 = words[1];
+    uint shift = (within < 32u) ? 0u : 4u;
+    out[0] = (float)((w0 >> (shift +  0u)) & 0xFu);
+    out[1] = (float)((w0 >> (shift +  8u)) & 0xFu);
+    out[2] = (float)((w0 >> (shift + 16u)) & 0xFu);
+    out[3] = (float)((w0 >> (shift + 24u)) & 0xFu);
+    out[4] = (float)((w1 >> (shift +  0u)) & 0xFu);
+    out[5] = (float)((w1 >> (shift +  8u)) & 0xFu);
+    out[6] = (float)((w1 >> (shift + 16u)) & 0xFu);
+    out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
+}
 "#;
 
 /// Bytes one `Q4_K` super-block occupies, and elements it carries — the two
@@ -1419,13 +1448,17 @@ fn push_packed_row_blocked_body(
             "            device const uchar *blk = in{weight} + (((int)weight_base[q] + block_start) / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES};\n"
         ));
         source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
+        // the whole run's levels in two 32-bit loads, hoisted out of the
+        // element loop — see `q4k_run8`.
+        source.push_str(&format!("            {element_type} levels[{run}];\n"));
+        source.push_str("            q4k_run8(blk, slot, levels);\n");
         source.push_str(&format!("            for (int j = 0; j < {run}; ++j) {{\n"));
         source.push_str(&format!(
             "                {element_type} scratch[{}];\n",
             operand_count.max(1)
         ));
         source.push_str(&format!(
-            "                scratch[{weight}] = q4k_value(blk, slot + (uint)j, hdr);\n"
+            "                scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
         ));
         source.push_str(&format!("                scratch[{other}] = acts[j];\n"));
         let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);

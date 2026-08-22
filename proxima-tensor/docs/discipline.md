@@ -5362,3 +5362,60 @@ closer to one load per four values plus an fma.
 three amortizations paid here (super-block header ROW 72, row blocking
 ROW 74) and the third measured zero. The list is not the argument; the
 per-element instruction count is.
+
+## ROW 76 — eight levels from two 32-bit loads: 2.0x -> 1.64x off llama.cpp Metal
+
+**Host:** Apple M1 Max. **Method:** ROW 71's two-size dissection at
+9.44/37.75 MB, 3 runs. Run 2 was an interference outlier (large arm 1.382 ms
+against 0.605/0.598) and is reported, not dropped silently.
+
+### The change
+
+ROW 75 said the next candidate had to be argued from what is left per
+element, not from the incumbent's feature list. What was left in `q4k_value`:
+ONE BYTE LOAD per element, plus a select between mask and shift.
+
+A lane's run is `slot .. slot+7`, never crosses a 32-element sub-block
+boundary, so all eight levels share a group and a nibble half and their bytes
+are eight CONSECUTIVE bytes of `qs`. `slot % 32` is one of {0,8,16,24} and a
+super-block is 144 bytes, so the address is 4-byte aligned: two `uint` loads
+cover the run, and the eight nibbles fall out as shifts of those two words.
+`q4k_run8` does that, hoisted out of the element loop.
+
+ggml does the same thing one width down (`q1[i] & 0x000F / 0x0F00 / 0x00F0 /
+0xF000` off a `uint16_t`) for the same reason — the extract is cheap and the
+LOAD is what costs.
+
+### Measured
+
+| | large arm (37.75 MB) | MARGINAL | element rate | vs 381 G elem/s |
+|---|---|---|---|---|
+| ROW 74, byte loads | 0.634/0.650/0.654 ms | ~108 GB/s | ~193 G | 2.0x |
+| this row, 32-bit loads | 0.605/**1.382**/0.598 ms | **~131 GB/s** | **~233 G** | **1.64x** |
+
+1.21x, parity 38/38 unchanged.
+
+### The whole packed arc, one defect at a time
+
+| | marginal | element rate | gap |
+|---|---|---|---|
+| per-element header decode | 12.3 GB/s | 21.9 G | 17x |
+| + super-block tiling (ROW 72) | ~61 | ~109 G | 3.5x |
+| + 4-row blocking (ROW 74) | ~108 | ~193 G | 2.0x |
+| + wide level loads (this row) | ~131 | ~233 G | **1.64x** |
+| `dmin` factoring (ROW 75) | ZERO, reverted | | |
+
+Four of ggml's amortizations tried, three paid, one measured nothing. The
+ordering was found by measuring what was left, never by working down a list.
+
+### Corroboration from a sibling session, same GPU
+
+A concurrent large-GEMV bench on this same box independently measured a
+**1.9x win from access pattern alone** on a 1M-row f32 GEMV — dim-major so
+adjacent threads read adjacent words — taking 68.5 -> 129.2 GB/s. Same
+machine, same lesson: on this GPU the shape of the load dominates the
+arithmetic around it. That session also flagged `omega::execute` for creating
+a device, queue and pipeline cache per call with no handle to hold across
+calls; that is fixed (ROW 70/71: thread-local device/queue/pipelines,
+`(pointer,len)`-keyed no-copy buffers, and `omega::plan`/`execute_plan`), so
+a resident corpus now uploads once.
