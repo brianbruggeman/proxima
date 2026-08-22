@@ -1310,6 +1310,83 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
     );
 }
 
+/// Same claim as [`metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`],
+/// one codec over: the weight buffer is never materialized as `f32` on the
+/// GPU side, `output.weight` — the ONE `Q6_K` tensor
+/// `openchat-3.5-1210.Q4_K_S.gguf` carries and 60% of this checkpoint's GPU
+/// time (`proxima-tensor/docs/discipline.md`'s own measurement) — is the
+/// real shape this proves packed reads for.
+#[test]
+fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    let rows: u32 = 5;
+    let blocks_per_row = 3usize;
+    let k = QK_K as u32 * blocks_per_row as u32;
+
+    let activation: Vec<f32> = random_vec(13, k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let weight_f32: Vec<f32> = random_vec(17, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+    for (row_f32, row_blocks) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+    }
+
+    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
+    for (row_blocks, row_f32) in weight_blocks
+        .chunks_exact(blocks_per_row * BLOCK_BYTES)
+        .zip(dequantized.chunks_exact_mut(k as usize))
+    {
+        dequantize(row_blocks, row_f32).expect("a whole number of q6_k super-blocks");
+    }
+
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let metal = omega::execute(
+        &packed_program,
+        &[],
+        &[
+            QuantizedBlock::Q6K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ],
+        &[packed_sum],
+    )
+    .expect("metal executes a packed q6_k matmul on a real device");
+
+    let (f32_program, f32_sum) = q4k_matmul_program(rows, k, DType::Float32);
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu matmul evaluates");
+
+    let actual = metal.root();
+    let expected = cpu.root();
+    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "metal produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude;
+    eprintln!(
+        "packed-q6k metal vs dequantized-f32 cpu: rows={rows} k={k} \
+         max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-5,
+        "packed unpack disagrees with the dequantized reference: relative={relative} max_diff={max_diff}"
+    );
+}
+
 /// `[rows, k] x [k, 1] -> [rows, 1]`, with the weight operand's declared
 /// dtype as a parameter: `UInt8` marks "this operand arrives as packed
 /// bytes" (the same marker `cpu::quantized_matmul_program` uses), `Float32`
@@ -1437,12 +1514,17 @@ fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: D
 #[case::float32_at_float16("float32", DType::Float16, 1e-2)]
 #[case::q4k_at_float32("q4_k", DType::Float32, 1e-5)]
 #[case::q4k_at_float16("q4_k", DType::Float16, 1e-2)]
+#[case::q6k_at_float32("q6_k", DType::Float32, 1e-5)]
+#[case::q6k_at_float16("q6_k", DType::Float16, 1e-2)]
 async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case] compute_dtype: DType, #[case] epsilon: f32) {
-    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    use proxima_gguf::quant::q4_k;
+    use proxima_gguf::quant::q6_k;
 
     let rows: u32 = 5;
     let blocks_per_row = 3usize;
-    let k = QK_K as u32 * blocks_per_row as u32;
+    // `Q4_K`/`Q6_K` share one super-block element count (`QK_K == 256`,
+    // both codecs' own module docs) so this shape's `k` is valid for either.
+    let k = q4_k::QK_K as u32 * blocks_per_row as u32;
 
     let weight_f32: Vec<f32> = random_vec(17, rows as usize * k as usize)
         .into_iter()
@@ -1456,12 +1538,22 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
     let packed_weight_blocks: Option<Vec<u8>> = match codec {
         "float32" => None,
         "q4_k" => {
-            let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+            let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * q4_k::BLOCK_BYTES];
             for (row_f32, row_blocks) in weight_f32
                 .chunks_exact(k as usize)
-                .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                .zip(weight_blocks.chunks_exact_mut(blocks_per_row * q4_k::BLOCK_BYTES))
             {
-                quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+                q4_k::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+            }
+            Some(weight_blocks)
+        }
+        "q6_k" => {
+            let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * q6_k::BLOCK_BYTES];
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(weight_blocks.chunks_exact_mut(blocks_per_row * q6_k::BLOCK_BYTES))
+            {
+                q6_k::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
             }
             Some(weight_blocks)
         }
@@ -1470,25 +1562,38 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
 
     let weight_dtype = if packed_weight_blocks.is_some() { DType::UInt8 } else { DType::Float32 };
     let (program, sum) = codec_matmul_program(rows, k, weight_dtype, compute_dtype);
-    let weight_block = match &packed_weight_blocks {
-        Some(bytes) => QuantizedBlock::Q4K(bytes),
-        None => QuantizedBlock::Float32(&weight_f32),
+    let weight_block = match (&packed_weight_blocks, codec) {
+        (Some(bytes), "q4_k") => QuantizedBlock::Q4K(bytes),
+        (Some(bytes), "q6_k") => QuantizedBlock::Q6K(bytes),
+        (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
+        (None, _) => QuantizedBlock::Float32(&weight_f32),
     };
     let metal = omega::execute(&program, &[], &[weight_block, QuantizedBlock::Float32(&activation)], &[sum])
         .unwrap_or_else(|error| panic!("{codec}@{compute_dtype:?}: metal executes on a real device: {error}"));
 
-    let cpu_weight: Vec<f32> = match &packed_weight_blocks {
-        None => weight_f32.clone(),
-        Some(bytes) => {
+    let cpu_weight: Vec<f32> = match (&packed_weight_blocks, codec) {
+        (None, _) => weight_f32.clone(),
+        (Some(bytes), "q4_k") => {
             let mut dequantized = vec![0.0f32; rows as usize * k as usize];
             for (row_blocks, row_f32) in bytes
-                .chunks_exact(blocks_per_row * BLOCK_BYTES)
+                .chunks_exact(blocks_per_row * q4_k::BLOCK_BYTES)
                 .zip(dequantized.chunks_exact_mut(k as usize))
             {
-                dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
+                q4_k::dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
             }
             dequantized
         }
+        (Some(bytes), "q6_k") => {
+            let mut dequantized = vec![0.0f32; rows as usize * k as usize];
+            for (row_blocks, row_f32) in bytes
+                .chunks_exact(blocks_per_row * q6_k::BLOCK_BYTES)
+                .zip(dequantized.chunks_exact_mut(k as usize))
+            {
+                q6_k::dequantize(row_blocks, row_f32).expect("a whole number of q6_k super-blocks");
+            }
+            dequantized
+        }
+        (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
     };
     let (f32_program, f32_sum) = codec_matmul_program(rows, k, DType::Float32, DType::Float32);
     let cpu = evaluate(&f32_program, &[], &[&cpu_weight, &activation], &[f32_sum]).expect("f32 cpu oracle evaluates");
@@ -1518,7 +1623,6 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
 /// 45/45-green run never caught.
 #[proxima::test(runtime = "tokio")]
 #[case::q5_k("q5_k")]
-#[case::q6_k("q6_k")]
 #[case::q8_0("q8_0")]
 async fn metal_rejects_a_codec_with_no_unpack_kernel_and_names_it(#[case] codec: &str) {
     let rows: u32 = 3;
@@ -1529,7 +1633,6 @@ async fn metal_rejects_a_codec_with_no_unpack_kernel_and_names_it(#[case] codec:
     let (program, sum) = codec_matmul_program(rows, k, DType::UInt8, DType::Float32);
     let weight_block = match codec {
         "q5_k" => QuantizedBlock::Q5K(&weight_bytes),
-        "q6_k" => QuantizedBlock::Q6K(&weight_bytes),
         "q8_0" => QuantizedBlock::Q8_0(&weight_bytes),
         other => panic!("unhandled codec case in this matrix: {other}"),
     };

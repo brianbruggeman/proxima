@@ -195,7 +195,7 @@ use crate::error::EmitError;
 use crate::msl::{gather_count, reduction_dims};
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
-use crate::{Binding, GridSpec, Kernel, emit};
+use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
 
 /// A live Metal buffer handle — the shape every device-buffer table and
 /// return value in this file traffics in.
@@ -295,7 +295,7 @@ pub struct Plan {
     /// plan that borrowed it could not outlive the caller's buffer.
     program: Vec<Op>,
     prepared: Prepared,
-    q4k_operands: BTreeSet<NodeId>,
+    packed_operands: PackedOperands,
     block_dtypes: Vec<DType>,
     /// Every block-input node a caller has told this plan, via
     /// [`Plan::mark_resident`], is bound to data that never changes across
@@ -342,6 +342,22 @@ impl Plan {
     }
 }
 
+/// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has a
+/// row-blocked unpack kernel for (`Q4_K`, `Q6_K`), keyed to its
+/// [`PackedCodec`] — the single place this crate decides "packed AND which
+/// codec," shared by [`plan`] and [`prepare`] so the two cannot drift on it.
+fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
+    block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .filter_map(|(node, block)| match block {
+            QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
+            QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
 /// CODECS and shapes only — the data is not captured, so the same plan runs
 /// against fresh block data every call.
@@ -362,13 +378,7 @@ pub fn plan(
         counter!(PREPARE_CALLS, 1);
         counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
     }
-    let q4k_operands: BTreeSet<NodeId> = prepared
-        .block_nodes
-        .iter()
-        .zip(blocks.iter())
-        .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
-        .map(|(node, _)| *node)
-        .collect();
+    let packed_operands = packed_operands_of(&prepared.block_nodes, blocks);
     let block_dtypes = prepared
         .block_nodes
         .iter()
@@ -377,7 +387,7 @@ pub fn plan(
     Ok(Plan {
         program: program.to_vec(),
         prepared,
-        q4k_operands,
+        packed_operands,
         block_dtypes,
         resident_nodes: BTreeSet::new(),
     })
@@ -407,7 +417,7 @@ pub fn execute(
 /// Propagates block-codec and Metal driver failures.
 pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evaluated, MetalError> {
     let prepared = &plan.prepared;
-    let q4k_operands = &plan.q4k_operands;
+    let packed_operands = &plan.packed_operands;
 
     let (device, queue) = device_and_queue()?;
 
@@ -428,7 +438,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
             other => return Err(unsupported_gpu_codec(*node, other)),
         };
         device_buffers.insert(*node, buffer);
@@ -472,7 +482,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     // completes. See the module doc's "Gather fault reporting" section.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, q4k_operands)?;
+        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, packed_operands)?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
@@ -595,7 +605,7 @@ pub fn execute_plan_op_timed(
     blocks: &[QuantizedBlock<'_>],
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let prepared = &plan.prepared;
-    let q4k_operands = &plan.q4k_operands;
+    let packed_operands = &plan.packed_operands;
 
     let (device, queue) = device_and_queue()?;
 
@@ -609,7 +619,7 @@ pub fn execute_plan_op_timed(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
             other => return Err(unsupported_gpu_codec(*node, other)),
         };
         device_buffers.insert(*node, buffer);
@@ -632,8 +642,8 @@ pub fn execute_plan_op_timed(
             .iter()
             .find_map(|(source, _, _)| plan.program[source.0 as usize].name())
             .map(ToString::to_string);
-        let kind = classify_kind(bound, q4k_operands);
-        let packed_row_block_rejection = diagnose_kind(bound, q4k_operands);
+        let kind = classify_kind(bound, packed_operands);
+        let packed_row_block_rejection = diagnose_kind(bound, packed_operands);
 
         let command_buffer = queue
             .commandBuffer()
@@ -645,7 +655,7 @@ pub fn execute_plan_op_timed(
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "command buffer refused to hand out a compute encoder".to_string(),
             })?;
-        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, q4k_operands)?;
+        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, packed_operands)?;
         encoder.endEncoding();
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
@@ -700,7 +710,7 @@ pub fn execute_plan_named_op_timed(
 /// three a given `Reduce` gets and none of that decision is exposed as its
 /// own accessor.
 #[cfg(feature = "instrument")]
-fn classify_kind(bound: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> &'static str {
+fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static str {
     match &bound.kind {
         BoundOpKind::Elementwise { .. } => "elementwise",
         BoundOpKind::Iota => "iota",
@@ -708,8 +718,10 @@ fn classify_kind(bound: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> &'static s
         BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => match emit(bound, q4k_operands) {
-            Ok(kernel) if kernel.source.contains("q4k_run8(blk") => "reduce-packed-row-blocked",
+        } => match emit(bound, packed_operands) {
+            Ok(kernel) if kernel.source.contains("q4k_run8(blk") || kernel.source.contains("q6k_value(blk") => {
+                "reduce-packed-row-blocked"
+            }
             Ok(kernel)
                 if kernel.source.contains("simd_sum(")
                     || kernel.source.contains("simd_max(")
@@ -731,11 +743,12 @@ fn classify_kind(bound: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> &'static s
 /// (or would take) the row-blocked path; `Some(<debug of the rejection>)`
 /// names the exact gate that rejected it.
 #[cfg(feature = "instrument")]
-fn diagnose_kind(bound: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> Option<String> {
+fn diagnose_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> Option<String> {
     if !matches!(bound.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
         return None;
     }
-    let quantized: Vec<bool> = bound.operands().iter().map(|(node, _, _)| q4k_operands.contains(node)).collect();
+    let quantized: Vec<Option<PackedCodec>> =
+        bound.operands().iter().map(|(node, _, _)| packed_operands.get(node).copied()).collect();
     Some(match diagnose_packed_row_block(bound, &quantized) {
         Ok(()) => "PASS".to_string(),
         Err(rejection) => format!("{rejection:?}"),
@@ -775,9 +788,13 @@ fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize
         QuantizedBlock::Q4K(bytes) => {
             Ok((bytes.len() / crate::msl::Q4K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
         }
-        QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) | QuantizedBlock::Q8_0(_) => {
-            Err(unsupported_gpu_codec(node, block))
+        // `Q6_K`'s super-block is a different byte width (210, not 144) but
+        // the SAME element count per super-block (256) as `Q4_K`/`Q5_K` —
+        // see `crate::msl::Q4K_BLOCK_ELEMENTS`'s own doc.
+        QuantizedBlock::Q6K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q6K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
         }
+        QuantizedBlock::Q5K(_) | QuantizedBlock::Q8_0(_) => Err(unsupported_gpu_codec(node, block)),
     }
 }
 
@@ -808,7 +825,7 @@ fn unsupported_gpu_codec(node: NodeId, block: &QuantizedBlock<'_>) -> MetalError
         QuantizedBlock::Float32(_) => "float32",
         QuantizedBlock::Q4K(_) => "metal has no q4_k unpack kernel yet; cpu reaches it via dot_q4k_q8k",
         QuantizedBlock::Q5K(_) => "metal has no q5_k unpack kernel yet",
-        QuantizedBlock::Q6K(_) => "metal has no q6_k unpack kernel yet",
+        QuantizedBlock::Q6K(_) => "metal has no q6_k unpack kernel yet; cpu reaches it via dot_q6k_q8k",
         QuantizedBlock::Q8_0(_) => "metal has no q8_0 unpack kernel yet",
     };
     TensorError::NotLowerable { node, reason }.into()
@@ -820,19 +837,15 @@ fn prepare(
     outputs: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
-    let q4k_operands: BTreeSet<NodeId> = block_node_ids(program)
-        .iter()
-        .zip(blocks.iter())
-        .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
-        .map(|(node, _)| *node)
-        .collect();
+    let packed_operands = packed_operands_of(&block_node_ids(program), blocks);
     // every packed codec's declared dtype is the "these are bytes" marker
     // `reject_unsupported_gpu_dtype`'s own doc already claims as its
-    // exemption's rationale -- not just `Q4_K`'s. Using `q4k_operands` alone
-    // here would reject a `Q5_K`/`Q6_K`/`Q8_0` weight on a dtype mismatch
-    // before it ever reaches `unsupported_gpu_codec`'s codec-naming error,
-    // which is the wrong reason to fail: the real gap is "no unpack kernel",
-    // not "not float".
+    // exemption's rationale -- not just the codecs `packed_operands` above
+    // has a kernel for. Using `packed_operands` alone here would reject a
+    // still-unsupported `Q5_K`/`Q8_0` weight on a dtype mismatch before it
+    // ever reaches `unsupported_gpu_codec`'s codec-naming error, which is
+    // the wrong reason to fail: the real gap is "no unpack kernel", not
+    // "not float".
     let packed_operand_nodes: BTreeSet<NodeId> = block_node_ids(program)
         .iter()
         .zip(blocks.iter())
@@ -882,11 +895,12 @@ fn prepare(
     // `bind`'s own `layout_of` assumes every operand is stored row-major in
     // its DECLARED axis order -- true for every f32 buffer this driver reads
     // (bound-time-transposed to match, `bind_matmul_weight`'s own doc), but
-    // never true for a packed `Q4_K` weight, whose bytes are GGUF's native
-    // `[out, in]` regardless of what the declared shape says. Left
+    // never true for a packed `Q4_K`/`Q6_K` weight, whose bytes are GGUF's
+    // native `[out, in]` regardless of what the declared shape says. Left
     // uncorrected, every quantized matmul reads its weight through the wrong
-    // stride -- see `correct_packed_matmul_layouts`'s own doc.
-    correct_packed_matmul_layouts(&mut resolved, &q4k_operands);
+    // stride -- see `correct_packed_matmul_layouts`'s own doc (already
+    // codec-agnostic: it takes any `packed_operands` node set).
+    correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     let retires = bound_op_retirement(&resolved, &effective_outputs);
     let index_nodes = index_node_ids(program);
 
@@ -1861,11 +1875,11 @@ fn encode_op(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
     bound: &BoundOp,
-    q4k_operands: &BTreeSet<NodeId>,
+    packed_operands: &PackedOperands,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
-    let kernel = emit(bound, q4k_operands)?;
+    let kernel = emit(bound, packed_operands)?;
     #[cfg(feature = "instrument")]
     {
         counter!(EMIT_CALLS, 1);

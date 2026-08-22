@@ -14,7 +14,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use proxima_tensor::spec::mistral_cached_forward_program;
 use proxima_tensor::{bind, infer};
@@ -71,7 +71,7 @@ fn main() {
     };
     println!("bound ops={}", bound.len());
 
-    let no_packed = BTreeSet::new();
+    let no_packed = BTreeMap::new();
     let mut emitted = 0usize;
     let mut failures: BTreeMap<String, usize> = BTreeMap::new();
     let mut first_failure: Option<String> = None;

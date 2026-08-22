@@ -63,7 +63,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::collections::BTreeSet;
+use alloc::collections::BTreeMap;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
@@ -289,19 +289,117 @@ static inline void q4k_run8(device const uchar *block, uint index, thread float 
 /// `proxima-gguf` at build time, so they are restated here and pinned by a
 /// test that does.
 pub const Q4K_BLOCK_BYTES: usize = 144;
-/// Elements one `Q4_K` super-block carries.
+/// Elements one `Q4_K` super-block carries. Shared by `Q5_K`/`Q6_K` too —
+/// the whole K-quant super-block family is 256 elements wide
+/// (`proxima-tensor/src/cpu.rs`'s own doc on its `Q6K_BLOCK_BYTES` makes the
+/// same point); only the packed BYTE width differs per codec.
 pub const Q4K_BLOCK_ELEMENTS: usize = 256;
 
-pub fn emit(resolved: &BoundOp, q4k_operands: &BTreeSet<NodeId>) -> Result<Kernel, EmitError> {
+/// MSL source for unpacking one element of a `Q6_K` super-block. Ports
+/// [`proxima_gguf::quant::q6_k::dequantize_block`]/`unpack_levels` exactly:
+/// two 128-element halves, each split into four 32-wide lanes sharing one
+/// `qh` byte per lane position (2 bits each), `ql`'s low/high nibble shared
+/// between lanes 0/2 (`ql[l]`) and 1/3 (`ql[l+32]`), one signed 8-bit
+/// sub-block scale (`x = d*sc*(level-32)`, no `dmin` term at all — a
+/// genuinely different shape from `Q4_K`/`Q5_K`, not a small variation), and
+/// `d` trailing the block (offset 208) rather than leading it.
+///
+/// Layout, 210 bytes per 256 elements: 128 bytes `ql` at 0, 64 bytes `qh` at
+/// 128, 16 signed scale bytes at 192, `d` f16 at 208.
+pub const Q6K_UNPACK_MSL: &str = r#"
+// one Q6_K super-block's scale `d` -- decoded ONCE per super-block by the
+// row-blocked path (see push_packed_row_blocked_body), since it is constant
+// across all 256 elements (unlike Q4_K's per-sub-block header).
+struct q6k_header { float d; };
+
+static inline q6k_header q6k_header_for(device const uchar *block) {
+    ushort d_bits = (ushort)((uint)block[208] | ((uint)block[209] << 8));
+    q6k_header header;
+    header.d = (float)as_type<half>(d_bits);
+    return header;
+}
+
+// element `index` (0..256) of one Q6_K super-block, given its super-block's
+// already-decoded `d` -- byte-for-byte the value
+// proxima_gguf::quant::q6_k::dequantize_block writes at the same index.
+static inline float q6k_value(device const uchar *block, uint index, q6k_header header) {
+    uint half_index = index / 128u;
+    uint local = index % 128u;
+    uint l = local % 32u;
+    uint lane = local / 32u;
+    uint sub_block_in_half = l / 16u;
+
+    device const uchar *ql = block + half_index * 64u;
+    device const uchar *qh = block + 128u + half_index * 32u;
+    device const uchar *scales = block + 192u;
+
+    uchar ql_byte = (lane % 2u == 0u) ? ql[l] : ql[l + 32u];
+    uchar nibble = (lane < 2u) ? (ql_byte & 0x0Fu) : (ql_byte >> 4u);
+    uchar high2 = (qh[l] >> (uchar)(lane * 2u)) & 0x03u;
+    uchar level = nibble | (high2 << 4u);
+
+    uchar scale_byte = scales[half_index * 8u + sub_block_in_half + lane * 2u];
+    float scale = (float)(char)scale_byte;
+    float quant = (float)level - 32.0f;
+    return header.d * scale * quant;
+}
+
+// element `index` of one Q6_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, unlike the row-blocked
+// path's `q6k_header_for` decoded once per super-block.
+static inline float q6k_element(device const uchar *block, uint index) {
+    return q6k_value(block, index, q6k_header_for(block));
+}
+"#;
+
+/// Bytes one `Q6_K` super-block occupies. Mirrors
+/// `proxima_gguf::quant::q6_k::BLOCK_BYTES`; pinned in
+/// `omega/tests/q6k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
+pub const Q6K_BLOCK_BYTES: usize = 210;
+
+/// Which packed K-quant codec one operand's bytes are — the second axis
+/// [`emit`] needs alongside "is this operand packed at all" (a plain `bool`
+/// cannot distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte
+/// one, or which unpack function reads it). `Copy`/`Eq` so it can sit
+/// directly in the `quantized` slice every render function already threads
+/// through, with no allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackedCodec {
+    Q4K,
+    Q6K,
+}
+
+impl PackedCodec {
+    /// Bytes one super-block of this codec occupies — the multiplier
+    /// [`operand_read`] and the row-blocked path need to step between
+    /// super-blocks; element count per super-block is shared
+    /// ([`Q4K_BLOCK_ELEMENTS`]) across the whole K-quant family.
+    const fn block_bytes(self) -> usize {
+        match self {
+            PackedCodec::Q4K => Q4K_BLOCK_BYTES,
+            PackedCodec::Q6K => Q6K_BLOCK_BYTES,
+        }
+    }
+}
+
+/// Every packed operand a bound program has, keyed by [`NodeId`] to its
+/// codec — the single source of truth [`emit`] (via the `quantized` slice it
+/// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
+/// need, generalizing the Q4_K-only `BTreeSet<NodeId>` this crate carried
+/// before Q6_K support existed.
+pub type PackedOperands = BTreeMap<NodeId, PackedCodec>;
+
+pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
-    // one flag per operand, resolved ONCE here rather than re-asked at each
-    // of the five read sites: which of this op's operands is a packed
-    // `Q4_K` buffer rather than a flat element array.
-    let quantized: Vec<bool> = resolved
+    // one codec slot per operand, resolved ONCE here rather than re-asked at
+    // each of the five read sites: which of this op's operands is a packed
+    // buffer (and which codec) rather than a flat element array.
+    let quantized: Vec<Option<PackedCodec>> = resolved
         .operands()
         .iter()
-        .map(|(node, _, _)| q4k_operands.contains(node))
+        .map(|(node, _, _)| packed_operands.get(node).copied())
         .collect();
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
@@ -532,6 +630,9 @@ struct PackedRowBlock {
     /// operand index of the single non-packed operand (the activation)
     other: usize,
     reduce_dim: usize,
+    /// which codec `weight`'s bytes are packed as — decides the block byte
+    /// width and which unpack function the emitted body calls.
+    codec: PackedCodec,
 }
 
 /// Why a given [`BoundOp`] did NOT take the row-blocked packed kernel —
@@ -577,7 +678,10 @@ pub enum PackedRowBlockRejection {
 /// both need — this function is the single source of truth;
 /// `packed_row_block` is `.ok()` over it so there is exactly one place the
 /// seven conditions are spelled out, never two copies that could drift.
-fn classify_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<PackedRowBlock, PackedRowBlockRejection> {
+fn classify_packed_row_block(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+) -> Result<PackedRowBlock, PackedRowBlockRejection> {
     if !reduce_is_cooperative(resolved) {
         return Err(PackedRowBlockRejection::NotCooperativeReduce);
     }
@@ -595,10 +699,13 @@ fn classify_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<P
     let packed: Vec<usize> = quantized
         .iter()
         .enumerate()
-        .filter_map(|(index, &is_packed)| is_packed.then_some(index))
+        .filter_map(|(index, codec)| codec.is_some().then_some(index))
         .collect();
     let [weight] = packed[..] else {
         return Err(PackedRowBlockRejection::NotExactlyOnePackedOperand);
+    };
+    let Some(codec) = quantized[weight] else {
+        unreachable!("weight index came from the is_some() filter above")
     };
     let other = 1 - weight;
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
@@ -650,10 +757,11 @@ fn classify_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<P
         weight,
         other,
         reduce_dim: innermost as usize,
+        codec,
     })
 }
 
-fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowBlock> {
+fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Option<PackedRowBlock> {
     classify_packed_row_block(resolved, quantized).ok()
 }
 
@@ -666,11 +774,14 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Option<PackedRowB
 /// Returns the specific [`PackedRowBlockRejection`] gate that rejected this
 /// op.
 #[cfg(feature = "instrument")]
-pub fn diagnose_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<(), PackedRowBlockRejection> {
+pub fn diagnose_packed_row_block(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+) -> Result<(), PackedRowBlockRejection> {
     classify_packed_row_block(resolved, quantized).map(drop)
 }
 
-fn grid_threads(resolved: &BoundOp, quantized: &[bool]) -> u64 {
+fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
     match &resolved.kind {
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
@@ -934,19 +1045,19 @@ fn push_body_steps(
 
 fn kernel_signature(
     source: &mut String,
-    quantized: &[bool],
+    quantized: &[Option<PackedCodec>],
     gather_count: usize,
     entry: &str,
     element_type: &str,
 ) {
     let operand_count = quantized.len();
     source.push_str(&format!("kernel void {entry}(\n"));
-    for (index, &is_packed) in quantized.iter().enumerate() {
+    for (index, &codec) in quantized.iter().enumerate() {
         // a packed operand's buffer is BYTES, not elements — the shader
         // turns an element offset into a super-block plus a position inside
         // it at the read (`operand_read`), so the binding has to be typed
         // for what is actually in the buffer.
-        let binding_type = if is_packed { "uchar" } else { element_type };
+        let binding_type = if codec.is_some() { "uchar" } else { element_type };
         source.push_str(&format!(
             "    device const {binding_type}* in{index} [[buffer({index})]],\n"
         ));
@@ -1092,6 +1203,8 @@ fn preamble(source: &mut String) {
     // read a packed operand" into the preamble for no gain.
     source.push_str(Q4K_UNPACK_MSL);
     source.push('\n');
+    source.push_str(Q6K_UNPACK_MSL);
+    source.push('\n');
 }
 
 /// How operand `index` is READ, given the element-offset expression the
@@ -1102,13 +1215,15 @@ fn preamble(source: &mut String) {
 /// `(n / 256) * 144`. The uniforms stay in elements either way — only the
 /// read shape changes, which is the entire point of unpacking at the read
 /// instead of materializing a dequantized tensor first.
-fn operand_read(index: usize, offset: &str, quantized: bool) -> String {
-    if quantized {
-        format!(
+fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> String {
+    match codec {
+        None => format!("in{index}[{offset}]"),
+        Some(PackedCodec::Q4K) => format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
-        )
-    } else {
-        format!("in{index}[{offset}]")
+        ),
+        Some(PackedCodec::Q6K) => format!(
+            "q6k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
+        ),
     }
 }
 
@@ -1179,7 +1294,7 @@ fn msl_literal(value: f32) -> String {
     format!("{value:?}")
 }
 
-fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Result<String, EmitError> {
+fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>]) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -1236,10 +1351,10 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Re
         "    {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
-    for (index, &is_packed) in quantized.iter().enumerate() {
+    for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "    scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), is_packed)
+            operand_read(index, &format!("off{index}"), codec)
         ));
     }
 
@@ -1249,7 +1364,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Re
     Ok(source)
 }
 
-fn render_reduce(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Result<String, EmitError> {
+fn render_reduce(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>]) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1342,7 +1457,7 @@ fn push_serial_reduce_body(
     reduce_rank_len: usize,
     operand_count: usize,
     gather_slots: &[Option<usize>],
-    quantized: &[bool],
+    quantized: &[Option<PackedCodec>],
     element_type: &str,
 ) {
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
@@ -1413,10 +1528,10 @@ fn push_serial_reduce_body(
         "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
-    for (index, &is_packed) in quantized.iter().enumerate() {
+    for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), is_packed)
+            operand_read(index, &format!("off{index}"), codec)
         ));
     }
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1461,7 +1576,7 @@ fn push_packed_row_blocked_body(
     init: ReduceInit,
     output_axes: &[u16],
     rank: usize,
-    quantized: &[bool],
+    quantized: &[Option<PackedCodec>],
     element_type: &str,
 ) {
     let Some(block) = packed_row_block(resolved, quantized) else {
@@ -1471,7 +1586,9 @@ fn push_packed_row_blocked_body(
         weight,
         other,
         reduce_dim,
+        codec,
     } = block;
+    let block_bytes = codec.block_bytes();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
     // seeded on lane 0 only, exactly as the general cooperative path does:
@@ -1564,36 +1681,68 @@ fn push_packed_row_blocked_body(
         source.push_str("        }\n");
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str(&format!(
-            "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {Q4K_BLOCK_BYTES};\n"
+            "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
         ));
-        source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
-        source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
-        // raw 4-bit levels (0..15) are exact in float regardless of the
-        // kernel's element type; q4k_run8 takes `thread float *out`, and the
-        // narrowing to element_type happens where levels combine into
-        // scratch below, same as every other operand read.
-        source.push_str(&format!("                float levels[{run}];\n"));
-        source.push_str(&format!(
-            "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
-        ));
-        source.push_str(&format!("                for (int j = 0; j < {run}; ++j) {{\n"));
-        source.push_str(&format!(
-            "                    {element_type} scratch[{}];\n",
-            operand_count.max(1)
-        ));
-        source.push_str(&format!(
-            "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
-        ));
-        source.push_str(&format!(
-            "                    scratch[{other}] = acts[c * {run} + j];\n"
-        ));
-        let value_expr =
-            push_body_steps(source, resolved.element_body(), "                    ", element_type);
-        source.push_str(&format!("                    {element_type} value = {value_expr};\n"));
-        let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-        source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
-        source.push_str("                }\n");
-        source.push_str("            }\n");
+        match codec {
+            PackedCodec::Q4K => {
+                source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
+                source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+                // raw 4-bit levels (0..15) are exact in float regardless of
+                // the kernel's element type; q4k_run8 takes `thread float
+                // *out`, and the narrowing to element_type happens where
+                // levels combine into scratch below, same as every other
+                // operand read.
+                source.push_str(&format!("                float levels[{run}];\n"));
+                source.push_str(&format!(
+                    "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
+                ));
+                source.push_str(&format!("                for (int j = 0; j < {run}; ++j) {{\n"));
+                source.push_str(&format!(
+                    "                    {element_type} scratch[{}];\n",
+                    operand_count.max(1)
+                ));
+                source.push_str(&format!(
+                    "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
+                ));
+                source.push_str(&format!(
+                    "                    scratch[{other}] = acts[c * {run} + j];\n"
+                ));
+                let value_expr =
+                    push_body_steps(source, resolved.element_body(), "                    ", element_type);
+                source.push_str(&format!("                    {element_type} value = {value_expr};\n"));
+                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
+                source.push_str("                }\n");
+                source.push_str("            }\n");
+            }
+            PackedCodec::Q6K => {
+                // No `q6k_run8`-style batched unpack yet — `Q6_K`'s bit
+                // layout does not reduce to two word loads the way `Q4_K`'s
+                // does (each element needs a `ql` byte, a `qh` byte, AND a
+                // sub-block scale byte, not one nibble out of an
+                // already-loaded word). Correct, one element at a time; `d`
+                // is still decoded ONCE per super-block via
+                // `q6k_header_for` rather than per element. A follow-up
+                // optimization, not a correctness gap — see this landing's
+                // discipline row for the measured cost of skipping it.
+                source.push_str("            q6k_header hdr = q6k_header_for(blk);\n");
+                source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                source.push_str(&format!(
+                    "                {element_type} scratch[{}];\n",
+                    operand_count.max(1)
+                ));
+                source.push_str(&format!(
+                    "                scratch[{weight}] = q6k_value(blk, slot + (uint)e, hdr);\n"
+                ));
+                source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                let value_expr =
+                    push_body_steps(source, resolved.element_body(), "                ", element_type);
+                source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+                source.push_str("            }\n");
+            }
+        }
         source.push_str("        }\n");
         source.push_str("    }\n");
         let combine_fn = simd_combine_fn(reduce_op);
@@ -1635,7 +1784,7 @@ fn push_cooperative_reduce_body(
     output_axes: &[u16],
     reduce_dims: &[u16],
     rank: usize,
-    quantized: &[bool],
+    quantized: &[Option<PackedCodec>],
     element_type: &str,
 ) {
     let rank_len = rank.max(1);
@@ -1730,10 +1879,17 @@ fn push_cooperative_reduce_body(
     // Requires: exactly one packed operand, contiguous along the reduction
     // dim, and a reduction extent that is a whole number of super-blocks —
     // all known here, from the bound layout, not at runtime.
+    // Q4_K-only: the body below calls `q4k_header_for`/`q4k_value` by name,
+    // so this fallback requires the packed operand specifically to be that
+    // codec — a `Q6_K` operand that somehow reaches here (it never does in
+    // practice: `packed_row_block` above already claims every real
+    // `Q6_K` matmul this repo's checkpoint carries) falls through to the
+    // fully generic scalar path below instead of emitting the wrong codec's
+    // unpack call.
     let packed: Vec<usize> = quantized
         .iter()
         .enumerate()
-        .filter_map(|(index, &is_packed)| is_packed.then_some(index))
+        .filter_map(|(index, codec)| matches!(codec, Some(PackedCodec::Q4K)).then_some(index))
         .collect();
     let reduce_extent = resolved.extents[reduce_dim] as usize;
     let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
@@ -1827,10 +1983,10 @@ fn push_cooperative_reduce_body(
             "        {element_type} scratch[{}];\n",
             operand_count.max(1)
         ));
-        for (index, &is_packed) in quantized.iter().enumerate() {
+        for (index, &codec) in quantized.iter().enumerate() {
             source.push_str(&format!(
                 "        scratch[{index}] = {};\n",
-                operand_read(index, &format!("walk{index}"), is_packed)
+                operand_read(index, &format!("walk{index}"), codec)
             ));
         }
         let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1883,10 +2039,10 @@ fn push_cooperative_reduce_body(
         "        {element_type} scratch[{}];\n",
         operand_count.max(1)
     ));
-    for (index, &is_packed) in quantized.iter().enumerate() {
+    for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), is_packed)
+            operand_read(index, &format!("off{index}"), codec)
         ));
     }
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1926,7 +2082,7 @@ fn push_cooperative_reduce_tail(
     source.push_str("    }\n");
 }
 
-fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[bool]) -> Result<String, EmitError> {
+fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>]) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
     } = &resolved.kind
@@ -2241,7 +2397,7 @@ mod tests {
     #[test]
     fn a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound, &BTreeSet::new()).expect("gather emits");
+        let kernel = emit(&bound, &BTreeMap::new()).expect("gather emits");
 
         assert_eq!(
             kernel.entry, "omega_elementwise_r2_n1_identity_g1",
@@ -2274,7 +2430,7 @@ mod tests {
     #[test]
     fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound, &BTreeSet::new()).expect("gather emits");
+        let kernel = emit(&bound, &BTreeMap::new()).expect("gather emits");
 
         assert!(
             kernel.bindings.contains(&Binding::Fault),
@@ -2297,7 +2453,7 @@ mod tests {
     #[test]
     fn a_gather_free_op_names_and_binds_exactly_as_before_gather_existed() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound, &BTreeSet::new()).expect("gather-free elementwise emits");
+        let kernel = emit(&bound, &BTreeMap::new()).expect("gather-free elementwise emits");
         assert!(
             !kernel.entry.contains("_g"),
             "a gather-free kernel's name must not grow a gather suffix"
@@ -2321,7 +2477,7 @@ mod tests {
     #[test]
     fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound, &BTreeSet::new()).expect("elementwise emits");
+        let kernel = emit(&bound, &BTreeMap::new()).expect("elementwise emits");
 
         assert_eq!(kernel.entry, "omega_elementwise_r1_n1_tanh");
         assert_eq!(
@@ -2348,7 +2504,7 @@ mod tests {
             matches!(bound.kind, BoundOpKind::Reduce { .. }),
             "the elementwise op must have fused into the reduce"
         );
-        let kernel = emit(&bound, &BTreeSet::new()).expect("matmul emits");
+        let kernel = emit(&bound, &BTreeMap::new()).expect("matmul emits");
 
         assert_eq!(kernel.entry, "omega_reduce_r3_n2_multiply_add_zero");
         assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
@@ -2381,7 +2537,7 @@ mod tests {
     #[test]
     fn cumsum_op_emits_a_scan_kernel_with_one_thread_per_line() {
         let bound = cumsum_op(8);
-        let kernel = emit(&bound, &BTreeSet::new()).expect("cumsum emits");
+        let kernel = emit(&bound, &BTreeMap::new()).expect("cumsum emits");
 
         assert_eq!(kernel.entry, "omega_scan_r1_n1_identity_add_zero");
         assert!(kernel.source.contains("inner_len"));
@@ -2395,8 +2551,8 @@ mod tests {
     #[test]
     fn emit_is_deterministic_byte_equal() {
         let bound = matmul_op(4, 3, 5);
-        let first = emit(&bound, &BTreeSet::new()).expect("first emit succeeds");
-        let second = emit(&bound, &BTreeSet::new()).expect("second emit succeeds");
+        let first = emit(&bound, &BTreeMap::new()).expect("first emit succeeds");
+        let second = emit(&bound, &BTreeMap::new()).expect("second emit succeeds");
         assert_eq!(first, second);
     }
 
@@ -2405,8 +2561,8 @@ mod tests {
         let small = elementwise_tanh_op(4);
         let large = elementwise_tanh_op(4096);
 
-        let small_kernel = emit(&small, &BTreeSet::new()).expect("small emits");
-        let large_kernel = emit(&large, &BTreeSet::new()).expect("large emits");
+        let small_kernel = emit(&small, &BTreeMap::new()).expect("small emits");
+        let large_kernel = emit(&large, &BTreeMap::new()).expect("large emits");
 
         assert_eq!(small_kernel.source, large_kernel.source);
         assert_eq!(small_kernel.entry, large_kernel.entry);
@@ -2420,7 +2576,7 @@ mod tests {
             body.steps[0].op = ScalarOp::Add; // arity 2, but the step still carries 1 arg
         }
 
-        let error = emit(&bound, &BTreeSet::new()).expect_err("mismatched arity is rejected");
+        let error = emit(&bound, &BTreeMap::new()).expect_err("mismatched arity is rejected");
         assert!(matches!(error, EmitError::ArityMismatch { .. }), "{error}");
     }
 
@@ -2431,7 +2587,7 @@ mod tests {
             *reduce_op = ScalarOp::Select;
         }
 
-        let error = emit(&bound, &BTreeSet::new()).expect_err("select reduction body is rejected");
+        let error = emit(&bound, &BTreeMap::new()).expect_err("select reduction body is rejected");
         assert!(
             matches!(error, EmitError::ReductionBodyIsSelect { .. }),
             "{error}"
@@ -2446,7 +2602,7 @@ mod tests {
             output_axes.clear();
         }
 
-        let error = emit(&bound, &BTreeSet::new()).expect_err("an empty scan is rejected");
+        let error = emit(&bound, &BTreeMap::new()).expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
     }
 }

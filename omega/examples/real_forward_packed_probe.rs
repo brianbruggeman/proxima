@@ -90,6 +90,13 @@ fn main() {
                 .then_some(NodeId(position as u32))
         })
         .collect();
+    // this probe marks every matmul weight `Q4_K` specifically (see the
+    // module doc); `emit`/`diagnose_packed_row_block` need the codec-keyed
+    // map `omega::metal` itself builds in production
+    // (`packed_operands_of`), not the bare node set `correct_packed_matmul_layouts`
+    // still takes (that one stays codec-agnostic).
+    let packed_operands: omega::PackedOperands =
+        q4k_operands.iter().map(|node| (*node, omega::PackedCodec::Q4K)).collect();
     println!(
         "matmul weight names={} resolved to q4k_operands={}",
         matmul_weight_names.len(),
@@ -142,7 +149,8 @@ fn main() {
 
         #[cfg(feature = "instrument")]
         {
-            let quantized: Vec<bool> = op.operands().iter().map(|(node, _, _)| q4k_operands.contains(node)).collect();
+            let quantized: Vec<Option<omega::PackedCodec>> =
+                op.operands().iter().map(|(node, _, _)| packed_operands.get(node).copied()).collect();
             let weight_node = op
                 .operands()
                 .iter()
@@ -179,7 +187,7 @@ fn main() {
             entry.count += 1;
         }
 
-        let kernel = omega::emit(op, &q4k_operands).expect("the real forward's own bound ops emit");
+        let kernel = omega::emit(op, &packed_operands).expect("the real forward's own bound ops emit");
         // `q4k_run8`/`q4k_element`'s own FUNCTION DEFINITIONS are always
         // part of the emitted prelude regardless of which path a given
         // reduce body takes, so the marker has to be the CALL SITE, not the
