@@ -8720,3 +8720,86 @@ The last command reproduces the BEFORE column at this commit's parent; adding `-
 ### Rollback rows
 
 None for this row's own landed change — the measured result is a net improvement on the primary regime (decode) at a flat (not regressed) secondary regime (prefill), so it is kept. Two DESIGN ALTERNATIVES were tried and rejected within this same session, recorded above rather than silently discarded: (1) broad (ROW-96-shaped) eligibility combined with the matmul fold — `rounds` +48.5%, rejected; (2) `session: None` for a folded node's own quantize/transpose — prefill +13.8%/+16.3%, superseded by passing the real session through (both calls verified to sit outside the round's own lifetime).
+
+## ROW 98 — `STAGED_BATCH_MIN_LEN` threaded into the sizing config; `cohort-staged-graph` DEFAULT-ON via `std`; both named open levers measured and declined, neither attempted
+
+**Headline, stated first: two mechanical fixes landed (a §12 violation closed, a proven feature flipped to default), and a measurement-only pass on ROW 97's two open levers found neither justifies an attempt this session — reported as a negative result so nobody re-tries the same combination a third time.** Host: Apple M1 Max, `uptime` load averages 2.8-13.0 across the session (noisier than either ROW 96 or ROW 97's own sessions -- `mds_stores`/`mediaanalysisd` background indexing, confirmed via `ps -eo pcpu` as unrelated system churn, not a contending cargo build). Repo: `feat/tensor-consolidated` @ `3b7ed71` + this row's own commits, release profile for every bench command (`cargo test --release`), debug profile for build/clippy/nextest gates only (never compared against release numbers).
+
+### Task 1 — the §12 violation: `STAGED_BATCH_MIN_LEN` was a bare `const`
+
+`proxima-tensor` already ships the full mechanism principle 12 demands: `proxima-tensor-runtime.toml` (sizing input) + `build.rs`'s `emit_sizing_consts` (build step) + `OUT_DIR/proxima_tensor_sized.rs` (generated module) + `src/sized.rs` (the doc-carrying re-export layer, mirroring `prime/prime-runtime.toml`'s shape) — verified by reading `build.rs` and `sized.rs` directly, not assumed. **Reuse first, not built again:** `STAGED_BATCH_MIN_LEN` was moved into this exact existing mechanism rather than growing a second one.
+
+One real gap found in the existing mechanism while extending it: `proxima-tensor/build.rs`'s `get_int` had no env-var override at all, despite `proxima-tensor-runtime.toml`'s own header comment claiming to "mirror `prime/build.rs`'s `emit_sizing_consts`" — `prime/build.rs` has carried a `PRIME_<SECTION>_<KEY>` override (`resolve_int`) since before this session; `proxima-tensor/build.rs` never grew the equivalent. Principle 12 clause 2 requires it ("applies per-key environment overrides"). Fixed for the *whole* sizing family, not just the one new key this row needed — `resolve_int` is the same shared helper every existing call site already funnelled through `get_int`, so upgrading it upgrades all eight prior keys' override capability as a byproduct of writing it once (`build.rs`'s `parallel.*`/`quantize.*`/`transpose.*`/`cohort.*`/`neon.*` sections all now honor `PROXIMA_TENSOR_<SECTION>_<KEY>`).
+
+**Added, this row:** `[staged_batch]` section (`min_len = 2`) in `proxima-tensor-runtime.toml`; `resolve_int`-based emission of `STAGED_BATCH_MIN_LEN` in `build.rs`, gated on `CARGO_FEATURE_COHORT_STAGED_GRAPH` (the build-script env var Cargo sets when that feature is active) rather than target-arch, mirroring `emit_dotprod_cfg`/`emit_avx2_cfg`'s own conditional-cfg-emission shape but keyed on a feature instead of an ISA; `sized::STAGED_BATCH_MIN_LEN` re-export (`#[cfg(all(feature = "std", feature = "cohort-staged-graph"))]`) carrying the measurement-record doc comment (there is no sweep to report — the value simply encodes the smallest run length for which batching is definable, stated as such rather than fabricating a sweep that never happened); a new `sized::tests::staged_batch_min_len_matches_the_measurement_record` drift-catch test, same shape as the module's existing seven. `cpu.rs`'s bare `const STAGED_BATCH_MIN_LEN: usize = 2;` (`cpu.rs:2857` pre-row) is deleted; the call site (`cpu.rs:683`) now resolves through `use crate::sized::STAGED_BATCH_MIN_LEN;`, the same "doc-commented `use` placed at the call site" convention this file already uses for `PARALLEL_THRESHOLD`/`OVERSUBSCRIBE`/`SPLIT_ALIGNMENT`/etc.
+
+**Numeric axis (principle 8):** `staged_batch.min_len = 2` — not yet swept against alternatives; recorded as such, not silently left bare. **Structural axis:** one new TOML section, one new feature-gated conditional emission branch (mirrors the existing `target_arch = "aarch64"` branch's shape), one new `sized.rs` re-export + test.
+
+**Mechanically re-proven, not asserted:** built `--features std,instrument,cohort-staged-graph` (clean) and `--features std,instrument` without the feature (clean, generated module simply omits the constant — confirmed no dead-code warning either way). Then drove the override end-to-end: `PROXIMA_TENSOR_STAGED_BATCH_MIN_LEN=3` against the `sized::tests::staged_batch_min_len_matches_the_measurement_record` test rebuilt (rerun-if-env-changed fired) and the test **failed** with `left: 3, right: 2` — proof the env var reaches the const, not a code-reading claim. Re-ran without the override afterward and it passed again (`ok`), confirming reversion.
+
+### Task 2 — the feature default, decided on fresh evidence
+
+**Verified first (principle 6), not assumed:** `proxima-tensor/Cargo.toml:13`'s `default` and (pre-row) `:19`'s `std` list did not name `cohort-staged-graph`; `:107` defined it fully opt-in (`["std", "dep:prime"]`). `proxima-model-interop/Cargo.toml:26-32`'s own `std` feature forwards `proxima-tensor/std` and `proxima-tensor/config` but never `proxima-tensor/cohort-staged-graph`. A plain release test of `proxima-model-interop` with `--features std,instrument` therefore never executed ROW 97's fold before this row — confirmed by manifest inspection, then confirmed again by measurement (below), not merely inferred from the `Cargo.toml` text.
+
+**Fresh re-measurement (this row, not a rerun of ROW 97's own numbers), n=8 per side** — larger than ROW 97's own n=3, deliberately, because the host was noisier this session and a bigger sample was needed to trust the call:
+
+| | BEFORE (feature off, default composition, load 4.3-8.6) | AFTER (feature on, load 2.8-8.6) | delta |
+|---|---|---|---|
+| decode (ms/token), n=8 | min 58.246, max 59.224, mean 58.609, CoV 0.53% | min 55.155, max 55.933, mean 55.553, CoV 0.53% | **-3.056 ms, -5.21%** — clears combined noise (~0.75%) by ~7x |
+| prefill (ms), n=8 | min 934.047, max 959.664, mean 945.867, CoV 0.95% | min 951.758, max 995.994, mean 964.134, CoV 1.62% | **+18.267 ms, +1.93%** — combined noise ~1.88%: at the noise floor, a tie, not a reproducible regression |
+
+This independently reproduces ROW 97's own shape (decode wins clearly, prefill ties) with a bigger sample under a noisier host, which is stronger evidence than re-running the same n=3 would have been. `generated_text` byte-identical across all four configurations captured this row (BEFORE/AFTER at w=8, post-flip default at w=8 and w=1) — bit-exact holds.
+
+**w=1, n=1 (directional only, matches ROW 97's own choice not to CoV-sweep the slow arm):** post-flip default: decode 187.983 ms, prefill 5913.846 ms, `cohort_summary rounds=1536`. Cross-referenced against ROW 97's own recorded w=1 figures (BEFORE 188.870/5939.659, AFTER 187.902/5947.994) — consistent, single-sample, no new claim drawn from it beyond "did not regress directionally."
+
+**Decision: flipped.** `proxima-tensor/Cargo.toml`'s `std` feature now implies `cohort-staged-graph`, exactly the shape already established for `tensor-bgpool`/`tensor-cohort` (same file, same reasoning: `std` is the only tier that can hold `prime`, so it is where the implication belongs). `cohort-staged-graph`'s own feature definition is left in place and nameable (unlike folding it away entirely) so existing re-prove commands (`--features proxima-tensor/cohort-staged-graph`) keep resolving.
+
+**Mechanically re-proven that the flip is live, not just declared:** rebuilt and ran the real-openchat-forward acceptance test with plain `--features std,instrument` (no `cohort-staged-graph` named anywhere on the command line) — `cohort_summary rounds=4668` (was `6972` before this row's Cargo.toml edit, exact match to the AFTER column's own figure), `node_kind=staged_batch count=160` present in the diagnostic output, decode step mean 55.205 ms. The default build gets the fold now; this is measured, not inferred from the manifest text.
+
+**Test-count arithmetic, stated exactly:** `proxima-tensor --features std`: 360 -> **361** (+1). `--features std,instrument`: 364 -> **365** (+1). Both +1s are the SAME test: `sized::tests::staged_batch_min_len_matches_the_measurement_record` (added in Task 1, gated `#[cfg(feature = "cohort-staged-graph")]`) previously compiled only when that feature was named explicitly; now that `std` implies it, the test compiles under plain `std` too. `proxima-model-interop --features metal,instrument`: **24**, unchanged. `omega`: **73**, unchanged. Unchanged is expected and verified, not assumed: a workspace-wide grep for `cohort-staged-graph` excluding `proxima-tensor/` returns nothing — no downstream crate's test surface can be gated on it.
+
+### Task 3 — the two named open levers, measured, neither attempted
+
+**Lever 1: the 65 sub-threshold matmul nodes.** ROW 97 called these "below `quantized_matmul_workers`'s own threshold... no further win available there by construction." Measured this row (n=23 decode steps, this row's own default-composition run): `reduce_matmul_quantized count=65` costs a mean **16.28 ms/step** — **~29.5% of the 55.2 ms mean decode step**, not small in isolation.
+
+**Verified against source, not accepted on ROW 97's own framing (principle 6):** `is_staged_batch_eligible` (`cpu.rs:2911`) admits *any* quantized-matmul node whose codec has a `dot_fn_for` match — there is no size/threshold check in eligibility at all. `build_matmul_stage_plan` (`cpu.rs:3020`) returning `None` for a too-small shape does NOT exclude a node from folding: `run_staged_batch`'s own dispatch closure (`cpu.rs:3187`, the `match &plans[stage] { None => run_node_into(...) }` arm) still runs that node as a one-chunk stage inside the SAME shared round. The actual gate that keeps a node out of `staged_batch` entirely is `cpu.rs:683`'s `run_end - position >= STAGED_BATCH_MIN_LEN` — a node fails this only when its own *maximal contiguous run of eligible neighbours in topological order* has length 1, i.e. it is topologically isolated (an ineligible node, or a within-run data dependency, sits on both sides). **This is a different gate than the compute-parallelism threshold ROW 97's residual note named** — the two were conflated under one phrase; a node can clear `quantized_matmul_workers`'s own threshold easily and still be excluded here purely by topological isolation, and vice versa.
+
+Citing this crate's own already-measured fixed cost (`sized.rs`'s `MIN_QUANTIZE_BLOCKS_FOR_DISPATCH` doc: "a cohort round costs ~32us of fixed open/close overhead regardless of chunk count" — MEASURED there, cited here, not re-measured this row): the maximum recoverable overhead from folding all 65 isolated nodes (worst case, one round-open apiece today) is **DERIVED, not measured** at 65 x 32us ~= **2.08 ms/step, ~3.8% of the 55.2 ms decode step and ~12.8% of the 65 nodes' own 16.28 ms** — the remaining ~87% is dot-product compute folding cannot touch either way. **The honest read: "by construction" undersold the true situation (there IS a small, nonzero, boundable opportunity, not zero) while the raw 16.28ms/29.5% figure oversold it (most of that time is unavoidable compute, not overhead) — the real number is ~2ms, ~3.8% of decode, at best.**
+
+**Lever 2: folding matmul stages with neighbouring elementwise consumers.** Measured this row: `elementwise count=547` costs a mean **4.05 ms/step (~7.3% of decode)**; of those 547 calls/step, only **32** currently clear `MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`/`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`'s own thresholds and open a round at all (`elementwise_breakdown calls=771 cohort_rounds=32` — the per-step diagnostic, present in every log this row captured); the other ~515/step run at **zero round-open cost today**. Folding matmul stages with their neighbouring elementwise nodes broadly enough to also capture Lever 1's isolated matmul nodes is exactly ROW 96's and ROW 97's own already-measured combination — `rounds` rose 6972 -> 10355 (+48.5%) in ROW 97's own ablation, BECAUSE it forces the ~515 currently-round-free elementwise nodes to newly pay round-open bookkeeping they do not pay today. **Not re-attempted this row: it is already a known, twice-measured negative result, and this row's own math shows the reward it would unlock (Lever 1's ~2ms/step bound) is an order of magnitude smaller than the raw framing suggested, making the risk/reward strictly worse than ROW 97 already found.**
+
+**Neither lever was attempted this session.** Per the task's own conditional ("attempt at most one, and only if its number justifies it"): Lever 1's true bound (~3.8% of decode) does not justify new engineering on its own; the only known mechanism that would unlock it (Lever 2, broadly scoped) is already measured negative twice; and a narrower mitigation (folding an isolated matmul node with only its single immediate non-matmul neighbour, not all elementwise broadly) is a plausible next candidate but **has no measurement of its own** — building it without measuring it first would violate this same task's "measure before you build" instruction, so it is named here as the next thing to *measure*, not landed as a guess dressed as an optimization.
+
+### Gates, actual numbers (post-flip, this row's own commits)
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **361 passed** (was 360 — +1, explained above) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed** (was 364 — same +1) |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** (unchanged) |
+| `cargo nextest run -p omega` | **73 passed** (unchanged) |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `proxima-tensor --features std,instrument,cohort-staged-graph`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
+| env-override mechanical proof | `PROXIMA_TENSOR_STAGED_BATCH_MIN_LEN=3` rebuild -> test fails `left: 3, right: 2`; unset -> rebuild -> test passes |
+| default-composition proof | plain `--features std,instrument` (no feature named) -> `cohort_summary rounds=4668`, `node_kind=staged_batch` present |
+
+### Rollback rows
+
+None — both landed changes (sizing-config threading, feature-default flip) are net improvements or neutral on every measured axis, and Task 3 produced no code change to roll back (a measurement-only negative result, recorded above rather than silently discarded). No prior landed behavior regressed: `rounds`, decode, prefill, and `generated_text` all match or improve on their pre-row baselines.
+
+### Re-provable now
+
+- `cargo nextest run -p proxima-tensor --features std`
+- `cargo nextest run -p proxima-tensor --features std,instrument`
+- `cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings`
+- `cargo clippy -p proxima-tensor --features std,instrument,cohort-staged-graph --all-targets -- -D warnings`
+- `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings`
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -- -D warnings`
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`
+- `cargo nextest run -p omega`
+- `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8` env with a release build of `proxima-model-interop --features std,instrument`, driving the `bind::real_openchat_file` acceptance test's greedy-decode-loop-and-report-per-token-wall-clock case, `--ignored --exact --nocapture`
+
+The last command now reproduces the AFTER column by default (no extra feature flag needed) — this is the mechanical proof the flip is live, re-runnable at any time without dev memory.
+
+### Against the incumbent
+
+llama.cpp CPU `-ngl 0 -t 8`: **44.09 ms/token** (ROW 68, standing figure). This row's default-build decode: 55.553 ms/token mean (n=8) -- **1.260x behind** (previous default, feature off: 58.609 ms/token, 1.329x behind). The gap narrows by the same amount ROW 97 measured; production callers now get that narrowing without an opt-in flag. We still do not beat llama.cpp.
