@@ -167,6 +167,8 @@ use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
     Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, resolve_named_blocks,
 };
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 
 use crate::error::EmitError;
 use crate::msl::{gather_count, reduction_dims};
@@ -286,7 +288,14 @@ pub fn plan(
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
 ) -> Result<Plan, MetalError> {
+    #[cfg(feature = "instrument")]
+    let prepare_started = read_ticks();
     let prepared = prepare(program, symbols, blocks, outputs)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(PREPARE_CALLS, 1);
+        counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
+    }
     let q4k_operands: BTreeSet<NodeId> = prepared
         .block_nodes
         .iter()
@@ -336,12 +345,19 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     let (device, queue) = device_and_queue()?;
 
     let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
+    #[cfg(feature = "instrument")]
+    let block_upload_started = read_ticks();
     for ((node, block), dtype) in prepared
         .block_nodes
         .iter()
         .zip(blocks.iter())
         .zip(plan.block_dtypes.iter())
     {
+        #[cfg(feature = "instrument")]
+        {
+            counter!(BLOCK_UPLOAD_CALLS, 1);
+            counter!(BLOCK_UPLOAD_BYTES, block_byte_len(block) as u64);
+        }
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype)?,
             QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes)?,
@@ -349,6 +365,8 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         };
         device_buffers.insert(*node, buffer);
     }
+    #[cfg(feature = "instrument")]
+    counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
 
     let command_buffer = queue
         .commandBuffer()
@@ -379,8 +397,15 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         }
     }
 
+    #[cfg(feature = "instrument")]
+    let gpu_exec_started = read_ticks();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
+    #[cfg(feature = "instrument")]
+    {
+        counter!(GPU_EXEC_CALLS, 1);
+        counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
+    }
 
     for (bound, fault_buffer, gathers) in &pending_faults {
         check_gather_fault(bound, fault_buffer, *gathers)?;
@@ -463,6 +488,21 @@ fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize
         QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) | QuantizedBlock::Q8_0(_) => {
             Err(unsupported_gpu_codec(node, block))
         }
+    }
+}
+
+/// Raw host bytes one [`QuantizedBlock`] hands [`upload_block`]/
+/// [`upload_packed_bytes`] — the split-4019 "block upload" term's byte count,
+/// distinct from [`block_element_count`]'s element count (a `Q4_K`
+/// super-block's bytes and elements are not the same unit either).
+#[cfg(feature = "instrument")]
+fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
+    match block {
+        QuantizedBlock::Float32(data) => size_of_val(*data),
+        QuantizedBlock::Q4K(bytes)
+        | QuantizedBlock::Q5K(bytes)
+        | QuantizedBlock::Q6K(bytes)
+        | QuantizedBlock::Q8_0(bytes) => bytes.len(),
     }
 }
 
@@ -941,9 +981,18 @@ fn pipeline_for(
     kernel: &Kernel,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
     if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(&kernel.source).cloned()) {
+        #[cfg(feature = "instrument")]
+        counter!(PIPELINE_HITS, 1);
         return Ok(pipeline);
     }
+    #[cfg(feature = "instrument")]
+    let compile_started = read_ticks();
     let pipeline = compile_pipeline(device, kernel)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(PIPELINE_MISSES, 1);
+        counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
+    }
     PIPELINE_CACHE.with(|cache| {
         cache.borrow_mut().insert(kernel.source.clone(), pipeline.clone());
     });
@@ -961,6 +1010,113 @@ fn allocate_buffer(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate a shared buffer".to_string(),
         })
+}
+
+/// split-4019 per-token attribution counters — each is a (`_CALLS`, `_TICKS`)
+/// pair over one named stage of [`execute_plan`], read back via `.get()`
+/// (cumulative) or `.snapshot_and_reset()` (per-token delta) by a caller that
+/// wants to attribute wall clock rather than assume it. Every wrap site notes
+/// which term of the split-4019 table it feeds.
+#[cfg(feature = "instrument")]
+pub static PREPARE_CALLS: Counter = Counter::new("omega.metal.prepare_calls");
+#[cfg(feature = "instrument")]
+pub static PREPARE_TICKS: Counter = Counter::new("omega.metal.prepare_ticks");
+#[cfg(feature = "instrument")]
+pub static EMIT_CALLS: Counter = Counter::new("omega.metal.emit_calls");
+#[cfg(feature = "instrument")]
+pub static EMIT_TICKS: Counter = Counter::new("omega.metal.emit_ticks");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_HITS: Counter = Counter::new("omega.metal.pipeline_hits");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_MISSES: Counter = Counter::new("omega.metal.pipeline_misses");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_COMPILE_TICKS: Counter = Counter::new("omega.metal.pipeline_compile_ticks");
+#[cfg(feature = "instrument")]
+pub static BLOCK_UPLOAD_CALLS: Counter = Counter::new("omega.metal.block_upload_calls");
+#[cfg(feature = "instrument")]
+pub static BLOCK_UPLOAD_TICKS: Counter = Counter::new("omega.metal.block_upload_ticks");
+#[cfg(feature = "instrument")]
+pub static BLOCK_UPLOAD_BYTES: Counter = Counter::new("omega.metal.block_upload_bytes");
+#[cfg(feature = "instrument")]
+pub static OP_SETUP_CALLS: Counter = Counter::new("omega.metal.op_setup_calls");
+#[cfg(feature = "instrument")]
+pub static OP_SETUP_TICKS: Counter = Counter::new("omega.metal.op_setup_ticks");
+#[cfg(feature = "instrument")]
+pub static GPU_EXEC_CALLS: Counter = Counter::new("omega.metal.gpu_exec_calls");
+#[cfg(feature = "instrument")]
+pub static GPU_EXEC_TICKS: Counter = Counter::new("omega.metal.gpu_exec_ticks");
+#[cfg(feature = "instrument")]
+pub static READBACK_CALLS: Counter = Counter::new("omega.metal.readback_calls");
+#[cfg(feature = "instrument")]
+pub static READBACK_TICKS: Counter = Counter::new("omega.metal.readback_ticks");
+#[cfg(feature = "instrument")]
+pub static READBACK_BYTES: Counter = Counter::new("omega.metal.readback_bytes");
+
+/// One [`execute_plan`] call's worth of the split-4019 counters above,
+/// snapshot-and-reset so a caller (the metal decode test) can read a
+/// PER-TOKEN delta rather than a cumulative mean over the whole run —
+/// guiding-principle 19's "per-token records, not just a mean".
+#[cfg(feature = "instrument")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetalStageTotals {
+    pub prepare_calls: u64,
+    pub prepare_ticks: u64,
+    pub emit_calls: u64,
+    pub emit_ticks: u64,
+    pub pipeline_hits: u64,
+    pub pipeline_misses: u64,
+    pub pipeline_compile_ticks: u64,
+    pub block_upload_calls: u64,
+    pub block_upload_ticks: u64,
+    pub block_upload_bytes: u64,
+    pub op_setup_calls: u64,
+    pub op_setup_ticks: u64,
+    pub gpu_exec_calls: u64,
+    pub gpu_exec_ticks: u64,
+    pub readback_calls: u64,
+    pub readback_ticks: u64,
+    pub readback_bytes: u64,
+    /// Split of `block_upload_calls` above by host->device path — reads back
+    /// the ALREADY-EXISTING [`NOCOPY_BUFFER_UPLOADS`]/[`COPYING_BUFFER_UPLOADS`]/
+    /// [`NOCOPY_BUFFER_REUSES`] counters (see this module's "Host buffer
+    /// upload" doc) rather than adding parallel ones, so a caller can tell
+    /// whether the 380+ ms/token `block_upload_ticks` figure is genuine
+    /// no-copy cache misses (a real `newBufferWithBytes*` driver call) or a
+    /// growing count of small COPYING allocations (the KV cache's own
+    /// re-`Vec`-allocated-every-append pointer, which can never take the
+    /// no-copy path).
+    pub nocopy_uploads: u64,
+    pub copying_uploads: u64,
+    pub nocopy_reuses: u64,
+}
+
+/// Reads and resets every split-4019 counter in one call — see
+/// [`MetalStageTotals`]'s own doc for why snapshot-and-reset rather than
+/// `.get()`.
+#[cfg(feature = "instrument")]
+pub fn metal_stage_totals() -> MetalStageTotals {
+    MetalStageTotals {
+        prepare_calls: PREPARE_CALLS.snapshot_and_reset(),
+        prepare_ticks: PREPARE_TICKS.snapshot_and_reset(),
+        emit_calls: EMIT_CALLS.snapshot_and_reset(),
+        emit_ticks: EMIT_TICKS.snapshot_and_reset(),
+        pipeline_hits: PIPELINE_HITS.snapshot_and_reset(),
+        pipeline_misses: PIPELINE_MISSES.snapshot_and_reset(),
+        pipeline_compile_ticks: PIPELINE_COMPILE_TICKS.snapshot_and_reset(),
+        block_upload_calls: BLOCK_UPLOAD_CALLS.snapshot_and_reset(),
+        block_upload_ticks: BLOCK_UPLOAD_TICKS.snapshot_and_reset(),
+        block_upload_bytes: BLOCK_UPLOAD_BYTES.snapshot_and_reset(),
+        op_setup_calls: OP_SETUP_CALLS.snapshot_and_reset(),
+        op_setup_ticks: OP_SETUP_TICKS.snapshot_and_reset(),
+        gpu_exec_calls: GPU_EXEC_CALLS.snapshot_and_reset(),
+        gpu_exec_ticks: GPU_EXEC_TICKS.snapshot_and_reset(),
+        readback_calls: READBACK_CALLS.snapshot_and_reset(),
+        readback_ticks: READBACK_TICKS.snapshot_and_reset(),
+        readback_bytes: READBACK_BYTES.snapshot_and_reset(),
+        nocopy_uploads: NOCOPY_BUFFER_UPLOADS.snapshot_and_reset(),
+        copying_uploads: COPYING_BUFFER_UPLOADS.snapshot_and_reset(),
+        nocopy_reuses: NOCOPY_BUFFER_REUSES.snapshot_and_reset(),
+    }
 }
 
 /// How many real [`upload_block`] calls took each host->device path —
@@ -1335,14 +1491,28 @@ fn encode_op(
     bound: &BoundOp,
     q4k_operands: &BTreeSet<NodeId>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    #[cfg(feature = "instrument")]
+    let emit_started = read_ticks();
     let kernel = emit(bound, q4k_operands)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(EMIT_CALLS, 1);
+        counter!(EMIT_TICKS, elapsed_ticks(emit_started));
+    }
     let pipeline = pipeline_for(device, &kernel)?;
+    #[cfg(feature = "instrument")]
+    let op_setup_started = read_ticks();
     let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
     let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
         .then(|| allocate_fault_buffer(device, gathers))
         .transpose()?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(OP_SETUP_CALLS, 1);
+        counter!(OP_SETUP_TICKS, elapsed_ticks(op_setup_started));
+    }
 
     let encoder =
         command_buffer
@@ -1470,6 +1640,8 @@ fn finish(
     root: NodeId,
 ) -> Result<Evaluated, MetalError> {
     let mut results = Vec::with_capacity(effective_outputs.len());
+    #[cfg(feature = "instrument")]
+    let readback_started = read_ticks();
     for node in effective_outputs {
         let shape = shapes.of(*node).to_vec();
         let dtype = gpu_dtype(program, index_nodes, *node);
@@ -1477,8 +1649,15 @@ fn finish(
             Some(buffer) => read_back(buffer, element_count(&shape), *node, dtype)?,
             None => Vec::new(),
         };
+        #[cfg(feature = "instrument")]
+        {
+            counter!(READBACK_CALLS, 1);
+            counter!(READBACK_BYTES, size_of_val(data.as_slice()) as u64);
+        }
         results.push((*node, shape, data));
     }
+    #[cfg(feature = "instrument")]
+    counter!(READBACK_TICKS, elapsed_ticks(readback_started));
     // this backend's buffer lifetime is managed by Metal's own
     // retain/release, not counted the way `cpu::evaluate` counts its
     // `Vec<Option<Vec<f32>>>` table, so peak_live_buffers is not tracked

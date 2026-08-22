@@ -39,7 +39,12 @@ interop-bgpool = ["dep:prime", "dep:proxima-core"]
 # forward-pass test (`bind::real_openchat_file`) can also be built and run
 # WITHOUT the per-chunk/per-node tick counters compiled in at all, to answer
 # whether the instrumentation itself is part of what gets measured.
-instrument = ["proxima-tensor/instrument"]
+# `omega?/instrument` (the `?` skips the passthrough when `omega` itself is
+# not a dependency, i.e. the `metal` feature is off) turns on the split-4019
+# per-token attribution counters in `omega::metal` alongside this crate's own
+# generate.rs-side ones, so a single feature flag lights up both halves of
+# the decode-loop split rather than needing two.
+instrument = ["proxima-tensor/instrument", "omega?/instrument"]
 # Metal decode path (macOS + Metal only). `generate.rs`'s decode loop runs
 # the cached forward through `omega::backend::plan_named`/`execute_plan_named`
 # instead of `proxima_tensor::cpu::evaluate_quantized_named_with_scratch`
