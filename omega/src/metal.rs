@@ -343,7 +343,7 @@ impl Plan {
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has a
-/// row-blocked unpack kernel for (`Q4_K`, `Q6_K`), keyed to its
+/// row-blocked unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`), keyed to its
 /// [`PackedCodec`] — the single place this crate decides "packed AND which
 /// codec," shared by [`plan`] and [`prepare`] so the two cannot drift on it.
 fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
@@ -352,6 +352,7 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
         .zip(blocks.iter())
         .filter_map(|(node, block)| match block {
             QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
+            QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
             _ => None,
         })
@@ -438,7 +439,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
             other => return Err(unsupported_gpu_codec(*node, other)),
         };
         device_buffers.insert(*node, buffer);
@@ -619,7 +620,7 @@ pub fn execute_plan_op_timed(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
             other => return Err(unsupported_gpu_codec(*node, other)),
         };
         device_buffers.insert(*node, buffer);
@@ -719,7 +720,11 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => match emit(bound, packed_operands) {
-            Ok(kernel) if kernel.source.contains("q4k_run8(blk") || kernel.source.contains("q6k_value(blk") => {
+            Ok(kernel)
+                if kernel.source.contains("q4k_run8(blk")
+                    || kernel.source.contains("q5k_value(blk")
+                    || kernel.source.contains("q6k_value(blk") =>
+            {
                 "reduce-packed-row-blocked"
             }
             Ok(kernel)
@@ -794,7 +799,12 @@ fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize
         QuantizedBlock::Q6K(bytes) => {
             Ok((bytes.len() / crate::msl::Q6K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
         }
-        QuantizedBlock::Q5K(_) | QuantizedBlock::Q8_0(_) => Err(unsupported_gpu_codec(node, block)),
+        // `Q5_K`'s super-block is yet another byte width (176) over the
+        // same 256-element count.
+        QuantizedBlock::Q5K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q5K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
+        }
+        QuantizedBlock::Q8_0(_) => Err(unsupported_gpu_codec(node, block)),
     }
 }
 
@@ -824,7 +834,7 @@ fn unsupported_gpu_codec(node: NodeId, block: &QuantizedBlock<'_>) -> MetalError
     let reason = match block {
         QuantizedBlock::Float32(_) => "float32",
         QuantizedBlock::Q4K(_) => "metal has no q4_k unpack kernel yet; cpu reaches it via dot_q4k_q8k",
-        QuantizedBlock::Q5K(_) => "metal has no q5_k unpack kernel yet",
+        QuantizedBlock::Q5K(_) => "metal has no q5_k unpack kernel yet; cpu reaches it via dot_q5k_q8k",
         QuantizedBlock::Q6K(_) => "metal has no q6_k unpack kernel yet; cpu reaches it via dot_q6k_q8k",
         QuantizedBlock::Q8_0(_) => "metal has no q8_0 unpack kernel yet",
     };
@@ -895,7 +905,7 @@ fn prepare(
     // `bind`'s own `layout_of` assumes every operand is stored row-major in
     // its DECLARED axis order -- true for every f32 buffer this driver reads
     // (bound-time-transposed to match, `bind_matmul_weight`'s own doc), but
-    // never true for a packed `Q4_K`/`Q6_K` weight, whose bytes are GGUF's
+    // never true for a packed `Q4_K`/`Q5_K`/`Q6_K` weight, whose bytes are GGUF's
     // native `[out, in]` regardless of what the declared shape says. Left
     // uncorrected, every quantized matmul reads its weight through the wrong
     // stride -- see `correct_packed_matmul_layouts`'s own doc (already

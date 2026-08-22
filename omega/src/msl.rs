@@ -358,6 +358,95 @@ static inline float q6k_element(device const uchar *block, uint index) {
 /// `omega/tests/q6k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q6K_BLOCK_BYTES: usize = 210;
 
+/// MSL source for unpacking one element of a `Q5_K` super-block. Ports
+/// [`proxima_gguf::quant::q5_k::dequantize_block`]/`get_scale_min_k4`
+/// exactly: the SAME super-block/sub-block shape and SAME bit-interleaved
+/// `(scale, min)` packing as `Q4_K` (`q5k_scale_min` below is
+/// `q4k_scale_min` unchanged, restated rather than shared -- see this
+/// crate's own per-codec duplication precedent in `proxima_gguf::quant`),
+/// plus a `qh` high-bit plane `Q4_K` does not have: each element's 5-bit
+/// level is a `qs` nibble OR'd with one bit of `qh[offset]`, selected by a
+/// mask that depends on which of the four 64-element chunks the element
+/// falls in (`mask = 1 << (2*chunk)` for the chunk's low half, `2 <<
+/// (2*chunk)` for its high half) -- genuinely a third bit layout, not a
+/// `Q4_K` widening or a `Q6_K` narrowing, matching this landing's own
+/// sizing note on why it needed its own kernel.
+///
+/// Layout, 176 bytes per 256 elements: `d` f16 at 0, `dmin` f16 at 2, 12
+/// packed scale/min bytes at 4, 32 `qh` bytes at 16, 128 nibble bytes at 48.
+pub const Q5K_UNPACK_MSL: &str = r#"
+// ports proxima_gguf::quant::q5_k::get_scale_min_k4 -- byte-for-byte the
+// same function q4k_scale_min above computes, restated here rather than
+// shared (see this constant's own doc).
+static inline uchar2 q5k_scale_min(device const uchar *scales, uint sub_block) {
+    if (sub_block < 4u) {
+        return uchar2(scales[sub_block] & 63, scales[sub_block + 4u] & 63);
+    }
+    uchar scale = (scales[sub_block + 4u] & 0x0F) | ((scales[sub_block - 4u] >> 6) << 4);
+    uchar minimum = (scales[sub_block + 4u] >> 4) | ((scales[sub_block] >> 6) << 4);
+    return uchar2(scale, minimum);
+}
+
+// one Q5_K super-block's per-sub-block scale, min, and high-bit MASK,
+// decoded ONCE for a run of elements inside that sub-block -- the same
+// amortization q4k_header_for makes, widened to also carry which `qh` bit
+// this sub-block's elements read (constant across the whole 32-element
+// sub-block: `chunk` and "low or high half" are both fixed for it).
+struct q5k_header { float scale; float minimum; uchar mask; };
+
+static inline q5k_header q5k_header_for(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+
+    uint chunk = index / 64u;
+    uint within = index % 64u;
+    bool low = within < 32u;
+    uint sub_block = 2u * chunk + (low ? 0u : 1u);
+
+    uchar2 scale_min = q5k_scale_min(scales, sub_block);
+    q5k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    header.mask = low ? (uchar)(1u << (2u * chunk)) : (uchar)(2u << (2u * chunk));
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header. `qh` is
+// indexed by `offset` (0..32) alone, never by `chunk` -- the same
+// within-sub-block-position indexing `dequantize_block`'s own doc calls
+// out as `Q5_K`'s "easiest to get silently wrong" trap: two elements in
+// DIFFERENT chunks but the SAME local offset read different BITS of the
+// SAME `qh` byte (the header's own `mask` is what picks the right bit).
+static inline float q5k_value(device const uchar *block, uint index, q5k_header header) {
+    device const uchar *qh = block + 16;
+    device const uchar *qs = block + 48;
+
+    uint chunk = index / 64u;
+    uint within = index % 64u;
+    bool low = within < 32u;
+    uint offset = within % 32u;
+
+    uchar qs_byte = qs[chunk * 32u + offset];
+    uchar nibble = low ? (qs_byte & 0x0Fu) : (qs_byte >> 4u);
+    float high = (qh[offset] & header.mask) != 0u ? 16.0f : 0.0f;
+    return header.scale * ((float)nibble + high) - header.minimum;
+}
+
+// element `index` of one Q5_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, unlike the row-blocked
+// path's `q5k_header_for` decoded once per sub-block.
+static inline float q5k_element(device const uchar *block, uint index) {
+    return q5k_value(block, index, q5k_header_for(block, index));
+}
+"#;
+
+/// Bytes one `Q5_K` super-block occupies. Mirrors
+/// `proxima_gguf::quant::q5_k::BLOCK_BYTES`; pinned in
+/// `omega/tests/q5k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
+pub const Q5K_BLOCK_BYTES: usize = 176;
+
 /// Which packed K-quant codec one operand's bytes are — the second axis
 /// [`emit`] needs alongside "is this operand packed at all" (a plain `bool`
 /// cannot distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte
@@ -367,6 +456,7 @@ pub const Q6K_BLOCK_BYTES: usize = 210;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackedCodec {
     Q4K,
+    Q5K,
     Q6K,
 }
 
@@ -378,6 +468,7 @@ impl PackedCodec {
     const fn block_bytes(self) -> usize {
         match self {
             PackedCodec::Q4K => Q4K_BLOCK_BYTES,
+            PackedCodec::Q5K => Q5K_BLOCK_BYTES,
             PackedCodec::Q6K => Q6K_BLOCK_BYTES,
         }
     }
@@ -1203,6 +1294,8 @@ fn preamble(source: &mut String) {
     // read a packed operand" into the preamble for no gain.
     source.push_str(Q4K_UNPACK_MSL);
     source.push('\n');
+    source.push_str(Q5K_UNPACK_MSL);
+    source.push('\n');
     source.push_str(Q6K_UNPACK_MSL);
     source.push('\n');
 }
@@ -1220,6 +1313,9 @@ fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> Strin
         None => format!("in{index}[{offset}]"),
         Some(PackedCodec::Q4K) => format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
+        ),
+        Some(PackedCodec::Q5K) => format!(
+            "q5k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q5K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
         Some(PackedCodec::Q6K) => format!(
             "q6k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
@@ -1713,6 +1809,33 @@ fn push_packed_row_blocked_body(
                 let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
                 source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
                 source.push_str("                }\n");
+                source.push_str("            }\n");
+            }
+            PackedCodec::Q5K => {
+                // No `q5k_run8`-style batched unpack yet — `Q5_K`'s `qh`
+                // high-bit plane means each element needs a `qs` nibble AND
+                // a `qh` bit from a DIFFERENT byte, the same shape gap
+                // `Q6_K`'s own arm below documents. `d` and this sub-block's
+                // scale/min/mask ARE decoded once per 32-element run via
+                // `q5k_header_for` (the same granularity `q4k_header_for`
+                // amortizes over) — a follow-up optimization, not a
+                // correctness gap; see this landing's discipline row (ROW
+                // 92) for the measured cost of skipping it.
+                source.push_str("            q5k_header hdr = q5k_header_for(blk, slot);\n");
+                source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                source.push_str(&format!(
+                    "                {element_type} scratch[{}];\n",
+                    operand_count.max(1)
+                ));
+                source.push_str(&format!(
+                    "                scratch[{weight}] = q5k_value(blk, slot + (uint)e, hdr);\n"
+                ));
+                source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                let value_expr =
+                    push_body_steps(source, resolved.element_body(), "                ", element_type);
+                source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                 source.push_str("            }\n");
             }
             PackedCodec::Q6K => {
