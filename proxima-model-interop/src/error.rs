@@ -121,4 +121,14 @@ pub enum InteropError {
     #[cfg(feature = "metal")]
     #[error(transparent)]
     Backend(#[from] omega::backend::BackendError),
+
+    /// [`crate::generate::BackendRuntime::evaluate`]/`evaluate_op_timed`'s
+    /// plan cache: `shape` was just inserted (on miss) or already present (on
+    /// hit) immediately above, so a subsequent lookup missing it means the
+    /// map lost an entry with no external mutation possible under `&mut
+    /// self` -- an interpreter/program-construction invariant violation,
+    /// surfaced instead of panicking, mirroring [`Self::MissingEvaluatedNode`].
+    #[cfg(feature = "metal")]
+    #[error("plan cache for shape {shape:?} is missing the entry inserted moments earlier")]
+    PlanCacheEntryVanished { shape: (usize, usize) },
 }
