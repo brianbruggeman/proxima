@@ -1168,7 +1168,7 @@ thread_local! {
     /// kernel binds them `constant` and never writes through them, and two
     /// ops with identical uniform bytes want identical contents by
     /// definition.
-    static UNIFORM_BUFFERS: RefCell<BTreeMap<Vec<u8>, Retained<ProtocolObject<dyn MTLBuffer>>>> =
+    static UNIFORM_BUFFERS: RefCell<BTreeMap<Vec<u8>, MetalBuffer>> =
         RefCell::new(BTreeMap::new());
 }
 
