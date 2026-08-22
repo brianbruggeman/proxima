@@ -5527,3 +5527,63 @@ bound-op count. It also prints the input set by size, so the residency
 question is answered from the graph rather than estimated. Three rows of
 this file have now recorded a number the instrument could not have produced;
 this one produces the number that decides the next move.
+
+## ROW 79 — omega RUNS the real forward graph on device, 3.1e-7 relative against the CPU
+
+**Host:** Apple M1 Max. **Gate:** `omega/tests/metal_real_forward.rs`.
+
+```
+real forward, 2 layers: max_diff=0.000005722046 max_magnitude=18.48168
+                        relative=0.00000030960638
+```
+
+### What this is, and what every prior GPU row was not
+
+`mistral_cached_forward_program` — the same builder `proxima-model-interop`
+uses for a real token — bound and run through BOTH evaluators on identical
+named blocks, comparing logits. Embedding gather, RMSNorm, RoPE,
+grouped-query attention with a KV cache, SwiGLU, output projection.
+
+The architecture is scaled to 2 layers / 64-wide so it runs in a test, but
+the OP SET and graph shape are production. ROW 78 separately proved the
+FULL-size graph emits: 1196/1196 ops, 0 failures.
+
+Every GPU number before ROW 78 came from a synthetic 4096x4096 matvec.
+
+### What it took, and what it did not
+
+Not a backend capability. Three things:
+
+1. `resolve_named_blocks` lifted out of `cpu.rs` and made public. A model
+   binds blocks by NAME; both evaluators bind them positionally. That
+   mapping is now ONE function both call, rather than a copy in each that
+   can drift about which name is which position.
+2. `omega::plan_named` / `execute_plan_named` on top of it.
+3. Nothing else. No new codec, no new kernel, no emitter change.
+
+### Two defects the gate caught immediately
+
+- **A padded empty block.** KV-cache inputs are genuinely zero-length at
+  `cached_len == 0`; `count.max(1)` invented an element and
+  `InputSizeMismatch { expected: 0, found: 1 }` rejected it. The shape check
+  was right and the fixture was wrong.
+- Before that, importing `evaluate_quantized_named_with_scratch` from the
+  crate root — it lives in `cpu`.
+
+### Where this leaves the GPU
+
+| | measured | vs llama.cpp Metal |
+|---|---|---|
+| runs the real forward | **yes**, 3.1e-7 vs CPU | — |
+| emits the full 7B graph | **1196/1196 ops** | — |
+| f32 kernel marginal | 336-385 GB/s | 1.6x FASTER than its 214.7 |
+| packed Q4_K element rate | ~255 G elem/s | **1.49x** off its 381 |
+| per-forward intercept | ~0.28 ms | 1.6% of a 17.62 ms token |
+| weight residency | 4.07 GB packed | fits 64 GiB |
+
+216 of 225 matmul weights are `Q4_K`, which omega reads packed. The other 9
+are `Q5_K`/`Q6_K` and would come through as `Float32` via the loader's
+existing dequantize — 1 GB of extra residency, blocking nothing.
+
+What remains before a GPU token is a dependency edge from
+`proxima-model-interop` to omega and a block-name map, not backend work.

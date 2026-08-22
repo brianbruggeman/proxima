@@ -892,6 +892,38 @@ pub fn evaluate_quantized_named<'block>(
 /// [`evaluate_quantized_with_scratch`] — the same name-to-[`Op::Input`]
 /// resolution loop, handing the resolved positional `blocks` and both
 /// caller-carried pools straight through rather than duplicating either
+/// Resolves a name-keyed block set into the positional order a program's
+/// [`Op::Input`] nodes appear in.
+///
+/// Public and shared rather than private to the CPU evaluator: omega's Metal
+/// driver binds blocks positionally too, and a second copy of this mapping
+/// is a second thing that can drift from what the program actually declares.
+/// The two backends already share [`QuantizedBlock`]; they share how a name
+/// becomes a position as well.
+///
+/// # Errors
+/// [`TensorError::UnnamedInput`] if a block input carries no name,
+/// [`TensorError::UnboundInputName`] if `named` has no entry for one.
+pub fn resolve_named_blocks<'block>(
+    program: &[Op],
+    named: &[(&str, QuantizedBlock<'block>)],
+) -> Result<Vec<QuantizedBlock<'block>>, TensorError> {
+    let block_nodes = block_node_ids(program);
+    let mut blocks: Vec<QuantizedBlock<'block>> = Vec::with_capacity(block_nodes.len());
+    for node in &block_nodes {
+        let name = program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        let data = named
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, data)| *data)
+            .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
+        blocks.push(data);
+    }
+    Ok(blocks)
+}
+
 /// evaluator's body a third time.
 pub fn evaluate_quantized_named_with_scratch<'block>(
     program: &[Op],
@@ -908,24 +940,12 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
     // count * named count) string compares.
     #[cfg(feature = "instrument")]
     let diag_resolve_started = instrument::read_ticks();
-    let block_nodes = block_node_ids(program);
-    let mut blocks: Vec<QuantizedBlock<'block>> = Vec::with_capacity(block_nodes.len());
-    for node in &block_nodes {
-        let name = program[node.0 as usize]
-            .name()
-            .ok_or(TensorError::UnnamedInput(*node))?;
-        let data = named
-            .iter()
-            .find(|(candidate, _)| *candidate == name)
-            .map(|(_, data)| *data)
-            .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
-        blocks.push(data);
-    }
+    let blocks = resolve_named_blocks(program, named)?;
     #[cfg(feature = "instrument")]
     std::eprintln!(
         "DIAG evaluate_quantized_named resolve_ms={:.3} block_count={}",
         instrument::ticks_to_nanos(instrument::elapsed_ticks(diag_resolve_started)) as f64 / 1_000_000.0,
-        block_nodes.len(),
+        blocks.len(),
     );
     evaluate_quantized_with_scratch(program, symbols, &blocks, outputs, free_buffers, validated_weight_nodes)
 }
