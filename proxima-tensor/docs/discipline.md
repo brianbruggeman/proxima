@@ -5073,3 +5073,62 @@ ROW 69 spent four rows peepholing before reading `ggml-metal.metal`, then
 concluded "architecture" from the peepholes' failure. Both halves were
 wrong. Read the incumbent's kernel structure FIRST — and when a fix measures
 zero, that is a fact about the fix, never a syllogism about the cause.
+
+## ROW 71 — dissection: THREE defects, correctly sized. f32 kernel 1.42x, packed kernel 3.9x, and 0.19-0.40 ms of fixed cost PER `execute`
+
+**Host:** Apple M1 Max, load 3.98. **Method:** two problem sizes per arm,
+min of 21, so the per-call fixed cost cancels in the difference and the
+slope is the kernel. Single-size numbers cannot separate the two, which is
+what produced ROW 69's and ROW 70's wrong sizings.
+
+### Measured
+
+| arm | small | large | MARGINAL bandwidth | fixed-cost intercept |
+|---|---|---|---|---|
+| f32 | 0.302 ms (16.8 MB) | 0.635 ms (67.1 MB) | **151.2 GB/s** | **0.191 ms** |
+| packed Q4_K | 0.444 ms (2.36 MB) | 0.574 ms (9.44 MB) | **54.3 GB/s** | **0.400 ms** |
+
+Per ELEMENT on the margin (12.58M elements either way):
+
+| arm | marginal element rate |
+|---|---|
+| f32 | 37.8 G elem/s |
+| packed Q4_K | **96.8 G elem/s** |
+| llama.cpp Metal (3.784 GB / 17.62 ms at 0.5625 B/weight) | **381 G elem/s** |
+
+### The three defects, in the order their size says to fix them
+
+1. **0.19-0.40 ms of fixed cost per `execute` call.** A real forward is 1196
+   nodes; at one `execute` per node that is 228-478 ms per forward of pure
+   overhead, against llama.cpp Metal's 17.62 ms for the WHOLE token. This is
+   the serving-path killer and nothing else comes close. It is
+   `prepare` (infer + bind) re-run per call, an output buffer and a uniforms
+   buffer allocated per op per call, a command buffer per call, a
+   `waitUntilCompleted` full GPU sync per call, and a readback per call.
+2. **Packed kernel 3.9x off on element rate** (96.8 vs 381 G elem/s). THIS is
+   where ggml's register blocking actually pays: `float sumf[nr0]` with
+   `N_R0_Q4_K 4`, activation held in registers across those 4 rows, and
+   `d`/`dmin`/scale-min decoded once per super-block instead of per element.
+   The ROW 69 structural comparison was right about the mechanism and wrong
+   about the magnitude.
+3. **f32 kernel 1.42x off on bandwidth** (151.2 vs 214.7 GB/s). Smallest of
+   the three, and plausibly the same register-blocking lead.
+
+### Corrections to ROW 70
+
+ROW 70 reported "packed is 2.2x slower per element than f32". That was also
+a fixed-cost artifact: packed carries the LARGER intercept (0.400 vs 0.191
+ms) because its per-call work is the same while its bytes are 4x fewer, so a
+single-size comparison charged the intercept to the kernel. On the margin
+packed is **2.6x FASTER per element** than f32, exactly as it should be for
+a bandwidth-bound sweep reading 4x fewer bytes. The packed read path is
+doing the right thing; it is simply not yet bandwidth-saturated.
+
+### Method, now three rows deep
+
+ROW 69 concluded from failed peepholes. ROW 70 corrected the magnitude but
+still compared single-size numbers and mis-sized defect 2 in the opposite
+direction. Only two sizes per arm separated kernel from overhead. **A
+performance number taken at one problem size is not a kernel measurement —
+it is a kernel measurement plus an unknown intercept, and the intercept has
+now been the dominant term twice.**
