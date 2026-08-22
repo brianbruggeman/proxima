@@ -237,13 +237,38 @@ fn run() {
         samples[0]
     }
 
-    let f32_ms = measure_f32(4096, K, RUNS);
-    let elements = 4096.0 * f64::from(K);
+    // DISSECTION. At these sizes the per-call fixed cost (prepare/infer/bind,
+    // output + uniforms buffer allocation, command buffer, submit,
+    // waitUntilCompleted, readback) is comparable to the kernel itself, so a
+    // single-size number cannot tell them apart. Two sizes per arm cancel it:
+    // the DIFFERENCE is marginal cost, which is the kernel.
+    let f32_small_ms = measure_f32(1024, K, RUNS);
+    let f32_large_ms = measure_f32(4096, K, RUNS);
+    let f32_small_bytes = 1024.0 * f64::from(K) * 4.0;
+    let f32_large_bytes = 4096.0 * f64::from(K) * 4.0;
+    let f32_marginal_gbs = ((f32_large_bytes - f32_small_bytes) / 1e9)
+        / ((f32_large_ms - f32_small_ms) / 1000.0);
+    // fixed cost, extrapolated back to zero bytes from the two points
+    let f32_slope_ms_per_byte = (f32_large_ms - f32_small_ms) / (f32_large_bytes - f32_small_bytes);
+    let f32_fixed_ms = f32_small_ms - f32_slope_ms_per_byte * f32_small_bytes;
+    let packed_slope = (large_ms - small_ms) / (large_bytes - small_bytes);
+    let packed_fixed_ms = small_ms - packed_slope * small_bytes;
+
+    println!("  --- dissection: two sizes per arm, fixed cost cancelled ---");
     println!(
-        "  CONTROL f32 weight, same 4096x{K} iteration space: median={f32_ms:.3} ms \
-         ({:.2} G elem/s) vs packed {large_ms:.3} ms ({:.2} G elem/s)",
-        elements / (f32_ms / 1000.0) / 1e9,
-        elements / (large_ms / 1000.0) / 1e9
+        "  f32    small={f32_small_ms:.3} ms ({:.1} MB)  large={f32_large_ms:.3} ms ({:.1} MB)",
+        f32_small_bytes / 1e6,
+        f32_large_bytes / 1e6
+    );
+    println!(
+        "  f32    MARGINAL = {f32_marginal_gbs:.1} GB/s   fixed-cost intercept = {f32_fixed_ms:.3} ms"
+    );
+    println!(
+        "  packed MARGINAL = {marginal_gbs:.1} GB/s   fixed-cost intercept = {packed_fixed_ms:.3} ms"
+    );
+    println!(
+        "  bar 214.7 GB/s => f32 kernel is {:.2}x off on MARGINAL bandwidth",
+        214.7 / f32_marginal_gbs
     );
     println!(
         "  uploads: nocopy_attempts={} of which REUSED={} (so {} real wires), copying={}",
