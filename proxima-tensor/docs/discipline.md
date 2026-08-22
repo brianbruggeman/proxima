@@ -7760,3 +7760,294 @@ requires the host-local checkpoint at `ServingConfig::DEFAULT_MODEL_PATH`
 `source_len`/`entry_len` probe re-runs as `cargo run --release --example
 real_forward_emit_probe -p omega --features std,cpu,metal` against the
 UNMODIFIED (in-tree) probe — no fixture required, needs no checkpoint.
+
+## ROW 94 — fresh per-op split at the CURRENT 55.5 ms denominator: 71.6% is the packed-weight sweep at its known in-situ rate, 15.6% is dispatch-count-bound on tiny attention/KV-cache reduces, 12.5% is elementwise near its own bandwidth. No cheap structural fix found; not landed.
+
+**Host:** Apple M1 Max, 64 GB. Same box as every prior row in this file.
+**Host loadout, this row's own runs:** 1-min load 2.9-5.2 throughout (`uptime`
+pasted before/after every timed command below); no sibling cargo/rustc
+processes running (`ps aux` checked). Quieter than ROW92's own AFTER window
+(2.5-3.4) at the low end, noisier at the high end — reported as a range, not
+averaged away.
+
+### Task 1 — the bucket table, N asserted, residual named
+
+`PROXIMA_METAL_OP_PROFILE_STEP=3` against
+`bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time`
+(already wired from a prior session; nothing added to get this split, only run
+it), 3 runs on rebuild-free repeats of the same binary:
+
+```
+op_profile step=3 op_count=1196 total_gpu_ns=58043070/57696802/59481745
+total_operand_bytes=4621123540 (identical all 3 runs — deterministic given the
+same generated tokens)
+```
+
+**N=1196, asserted identically across all 3 runs — not RED.**
+
+| kind | op_count | mean gpu_ms (3 runs) | CoV | share of diagnostic total | operand_bytes | ns/byte |
+|---|---|---|---|---|---|---|
+| `constant` | 37 | 0.160 | 2.80% | 0.27% | 0 | n/a |
+| `elementwise` | 547 | 7.303 | 2.35% | 12.51% | 538,764,692 | 0.01356 |
+| `iota` | 2 | 0.008 | 0.00% | 0.01% | 0 | n/a |
+| `reduce-cooperative` | 385 | 9.111 | 2.04% | 15.60% | 12,509,184 | 0.7284 |
+| `reduce-packed-row-blocked` | 225 | 41.826 | 0.99% | 71.61% | 4,069,849,664 | 0.01028 |
+| **sum of buckets** | **1196** | **58.408** | | **100%** | **4,621,123,540** | |
+| **diagnostic total (measured directly)** | **1196** | **58.407** | 1.32% | | **4,621,123,540** | |
+| **diagnostic-internal residual** | | **-0.001 ms (-0.002%)** | | | | negligible, not a hole |
+
+Every run's own five bucket lines sum to that same run's own `total_gpu_ms`
+line to within 0.01 ms (rounding only) — this diagnostic never leaves an
+unattributed hole. CoV on every bucket is comfortably under the 5% trust
+floor; point estimates above are safe to report.
+
+**The residual that matters is against the PRODUCTION metric, not the
+diagnostic's own total**, and it is a second, separate row: production
+`gpu_exec` (same 3-run x 23-steady-step methodology ROW92/93 used, 69 samples)
+means **55.498 ms** (CoV 1.10%, min 54.365 / max 56.933), against this
+diagnostic's own 58.407 ms mean — **the diagnostic OVERSHOOTS production by
++2.909 ms (+5.24%)**. That overshoot is not unexplained: `execute_plan_op_timed`'s
+own doc says exactly why — it commits and `waitUntilCompleted()`s ONE command
+buffer PER `BoundOp` (1196 submissions) where production's `execute_plan`
+shares ONE encoder and ONE submission for the whole program. The gap is the
+diagnostic's own documented instrumentation tax, named by mechanism, not a
+second unattributed hole.
+
+Scaling every bucket by `55.498/58.407 = 0.9502` (a calibration, DERIVED, not
+a separate measurement) lands the production-scale attribution at
+`constant` 0.152, `elementwise` 6.940, `iota` 0.008, `reduce-cooperative`
+8.656, `reduce-packed-row-blocked` 39.744 — summing to 55.500 ms against the
+55.498 ms measured mean, 0.002 ms off.
+
+### Top 20 ops by GPU time (run 1 of 3, full table re-provable via the command
+below; ranks 2-20 all mirror rank 1's own PASS/row-blocked pattern)
+
+| rank | weight_name | operand_bytes | gpu_ns | gpu_ns/byte |
+|---|---|---|---|---|
+| 1 | `output.weight` | 107,543,104 | 734,000 | 0.006825 |
+| 2 | `blk.2.ffn_down.weight` | 40,427,520 | 346,125 | 0.008562 |
+| 3 | `blk.0.ffn_down.weight` | 40,427,520 | 345,124 | 0.008537 |
+| 4 | `blk.1.ffn_down.weight` | 40,427,520 | 339,916 | 0.008408 |
+| 5 | `blk.3.ffn_down.weight` | 40,427,520 | 336,875 | 0.008333 |
+| 6-20 | `ffn_down`/`ffn_gate` (mixed layers) | 33.0-33.1 MB each | 308.5-316.1 µs | 0.0093-0.0096 |
+
+Every one of the top 20 is `reduce-packed-row-blocked`/`PASS` — the packed
+weight matmul dominates the ranked list exactly as its 71.6% bucket share
+predicts; no surprise entrant from `elementwise`/`reduce-cooperative` cracks
+the top 20 despite their combined 971 ops, because no single one of those ops
+costs more than ~24 µs.
+
+### Per-family table (run 1; families stable across all 3 runs to the byte —
+`operand_bytes` is identical every run, `gpu_ms` varies only inside each
+bucket's own CoV above)
+
+| family | op_count | gpu_ms | operand_bytes | ns/byte | row_blocked | rejected |
+|---|---|---|---|---|---|---|
+| `(no named operand)` | 681 | 11.196 | 12,825,224 | 0.872947 | 0 | 289 |
+| `blk.ffn_down.weight` | 32 | 9.978 | 1,088,159,744 | 0.009169 | 32 | 0 |
+| `blk.ffn_gate.weight` | 32 | 9.724 | 1,057,488,896 | 0.009195 | 32 | 0 |
+| `blk.ffn_up.weight` | 32 | 9.614 | 1,057,488,896 | 0.009092 | 32 | 0 |
+| `blk.attn_q.weight` | 32 | 4.832 | 302,514,176 | 0.015972 | 32 | 0 |
+| `blk.attn_output.weight` | 32 | 3.851 | 302,514,176 | 0.012731 | 32 | 0 |
+| `kv_cache.v` | 32 | 1.534 | 4,460,544 | 0.343863 | 0 | 32 |
+| `blk.attn_v.weight` | 32 | 1.490 | 78,118,912 | 0.019070 | 32 | 0 |
+| `blk.attn_k.weight` | 32 | 1.435 | 76,021,760 | 0.018876 | 32 | 0 |
+| `kv_cache.k_even` | 32 | 0.796 | 2,424,832 | 0.328126 | 0 | 32 |
+| `rope_cos` | 64 | 0.758 | 1,343,488 | 0.563995 | 0 | 0 |
+| `kv_cache.k_odd` | 32 | 0.756 | 2,424,832 | 0.311905 | 0 | 32 |
+| `rope_sin` | 64 | 0.743 | 1,343,488 | 0.553200 | 0 | 0 |
+| `output.weight` | 1 | 0.734 | 107,543,104 | 0.006825 | 1 | 0 |
+| `eps` | 65 | 0.593 | 2,130,700 | 0.278451 | 0 | 0 |
+| `token_embd.weight` | 1 | 0.010 | 524,320,768 | 0.000018 | 0 | 0 |
+
+Every family that carries a NAMED packed weight operand is 100% `PASS`
+(`ffn_down`/`ffn_gate`/`ffn_up`/`attn_q`/`attn_output`/`attn_v`/`attn_k`/
+`output.weight`) — no mixed-verdict family remains (ROW92's `Q5_K` isolation
+work retired that split cleanly, and this row's data confirms it stayed
+retired). Every family with ZERO row-blocked ops is either a KV-cache
+buffer (`kv_cache.*`, `NotExactlyOnePackedOperand` — neither operand is a
+packed weight, so the row-blocked kernel structurally does not apply, not a
+codec gap) or a pure-activation elementwise op (`rope_cos`/`rope_sin`/`eps`,
+no rejection at all because they are not `Reduce` ops in the first place).
+
+### Task 2 — kernel efficiency or structure: BOTH, cleanly separated by bucket
+
+**Three rates, side by side, each labeled by provenance:**
+
+| # | rate | value | provenance |
+|---|---|---|---|
+| 1 | our packed kernel, SYNTHETIC two-size dissection (ROW77's own vetted figure) | **143.5 GB/s** | MEASURED, ROW77, 3 runs, one discarded as interfered |
+| 1b | same synthetic probe, re-run THIS session, 3 fresh runs | **112.1 / 228.5 / [10960.7 discarded]** GB/s | MEASURED, but see caveat below |
+| 2 | our packed kernel, IN SITU, real forward, THIS row | **97.70 / 98.25 / 96.00** → mean **97.31 GB/s**, CoV 0.99% | MEASURED, 3 runs, re-confirms the prior 96-108 GB/s band |
+| 3 | llama.cpp Metal implied rate | 4.07 GB / 17.62 ms = **230.99 GB/s** | DERIVED (a division), the incumbent's own achieved throughput on its own kernel — NOT a hardware fact about this device |
+| — | our OWN f32 dense kernel, sustained marginal, THIS session | **349.0 / 374.4 / 358.6 GB/s** → mean 360.7, CoV 2.90% | MEASURED — the best available proxy for "how fast a compute kernel can sustain reads on this device," since no dedicated streaming-memcpy probe was built this row |
+| — | this device's raw memory bandwidth ceiling | **UNMEASURED** | no spec-sheet number is used anywhere in this row; see below |
+
+**Caveat on row 1b:** the two-size marginal-difference technique is a
+subtraction of two small numbers (28.31 MB / sub-millisecond deltas), and this
+session's own 3 fresh runs reproduce exactly the fragility ROW77's own text
+already flagged (its own third run was discarded as "interfered"): run 3 here
+had a 0.003 ms denominator and produced a non-physical 10960.7 GB/s, discarded
+the same way ROW77 discarded its own outlier. Row 1b is reported as a
+methodology confirmation, not used to revise ROW77's own 143.5 GB/s figure —
+that figure stands, cited by provenance, not re-derived from a noisier repeat.
+
+**This row does NOT claim a hardware bandwidth roof.** The f32 kernel's own
+360.7 GB/s (MEASURED, this session, on this device) already answers the
+load-bearing question without needing one: it is 3.7x the packed kernel's
+in-situ rate on the SAME device, so the packed kernel is not bumping into a
+device ceiling — this reconfirms ROW69-72's own original finding (`Q4_K` was
+compute-bound on the per-element unpack, not bandwidth-bound) with a fresh
+number rather than inheriting the old one.
+
+**Total bytes the GPU actually reads per forward, vs the 4.07 GB declared:**
+
+`total_operand_bytes=4,621,123,540` (4.621 GB) summed across all 1196 ops for
+one decode step — **1.1354x the 4.07 GB declared weight-set size.** Isolating
+the `reduce-packed-row-blocked` bucket's own operand bytes alone —
+`4,069,849,664` — against the 4.07 GB declared figure: **ratio 1.0000x, i.e.
+the packed weight set sweeps EXACTLY once, no duplication.** The 1.1354x
+excess (0.551 GB) is entirely the OTHER four buckets' operand bytes
+(`elementwise` 538,764,692 B + `reduce-cooperative` 12,509,184 B + `constant`/
+`iota` 0) — ordinary activation/KV-cache/rope-table traffic, not re-read
+weights. This is a materially cleaner picture than ROW87's own 1.44x
+(5.87 GB vs 4.07 GB, measured BEFORE `Q5_K`/`Q6_K` landed, when 65 ops were
+still dequantizing packed weights to f32 for the GPU and reading 4x the bytes
+for that tail) — the mechanism for the improvement is exactly ROW88-92's own
+landings, re-confirmed here rather than assumed to still hold.
+
+**Naming the ~15.75 ms that is not the weight sweep** (production-scale:
+55.498 - 39.744 = 15.754 ms, 28.4% of `gpu_exec`): splitting it by whether
+each bucket's measured time is explained by its own bytes at the confirmed
+97.31 GB/s in-situ rate —
+
+| bucket | bytes | measured ms (scaled) | bandwidth-predicted ms @ 97.31 GB/s | ratio | verdict |
+|---|---|---|---|---|---|
+| `elementwise` | 538.76 MB | 6.940 | 5.537 | 1.25x | close to bandwidth-bound |
+| `reduce-cooperative` | 12.51 MB | 8.656 | 0.129 | **67.3x** | **dispatch-launch-bound, not bandwidth-bound** |
+
+`reduce-cooperative`'s 385 ops are exactly the KV-cache read/write triple
+(`kv_cache.v`/`k_even`/`k_odd`, 96 ops, `NotExactlyOnePackedOperand` — neither
+operand is a packed weight so `packed_row_block` structurally never applies)
+plus the 289 `(no named operand)` rejected ops (attention `Q@K^T`/softmax/
+`A@V` — both operands are computed activation nodes, never a weight). Their
+own `grid_threads` (`msl.rs:971-974`) is `output_total * SIMD_WIDTH` — one
+32-lane SIMD group per output element, a CORRECTNESS requirement the kernel's
+own coordinate math depends on (`kernel_dispatch_shape`'s own doc), not a
+tunable occupancy knob. At decode's `new_count=1`, `output_total` per op is
+small (one query position, `head_dim` or fewer outputs), so each of these 385
+dispatches launches a genuinely small grid — GPU per-dispatch launch latency
+dominates real bytes moved by roughly two orders of magnitude. **This is the
+"name it": the remaining cost is a mix of near-bandwidth-bound elementwise
+work (not a target) and dispatch-count-bound small attention/KV-cache reduces
+(a real, structural target), not a second bandwidth mystery.**
+
+### Task 3 — sized, not landed
+
+The one candidate fix the split names — fusing the 385 `reduce-cooperative`
+ops' per-layer/per-head attention and KV-cache reduces into fewer, wider
+dispatches so `output_total` (and therefore useful work per launch) grows —
+is real and structural, but it is **not a "widen an existing predicate"
+change**: `packed_row_block`'s rejection here (`NotExactlyOnePackedOperand`)
+is correct and permanent (neither operand IS a packed weight; no codec gate
+misclassifies anything), so there is no existing fast-path predicate to widen
+onto. Making these dispatches wider requires the KV-cache tensors and the
+attention score/value computation to be laid out so ONE kernel call can walk
+multiple layers or heads at once — today `LayerCache` binds each layer's
+`k_even`/`k_odd`/`v` as SEPARATE named `Op::Input` blocks
+(`proxima-model-interop/src/generate.rs`'s `named_blocks.extend` loop, one
+call per layer), and `mistral_cached_forward_program` emits one attention
+subgraph per layer. Fusing across that boundary is a graph-level redesign of
+how the forward program is built and how `LayerCache` stores state — the kind
+of change this file's own precedent (ROW90's rolled-back `split_axis`
+attempt) shows needs its own bench, its own commit, and real time to verify
+byte-identical output, not a same-session add-on to a measurement row.
+
+**Writing the paragraph that would defend a new type here IS the finding**
+(guiding principle: a plausible justification for a new abstraction is the
+danger, not the safety) — there is no cheap version of this fix, so per this
+row's own brief, it is sized and left named rather than rushed:
+
+- **Named candidate:** fuse the KV-cache read/write triple and the attention
+  score/value reduce across some batching axis (layer or head) so
+  `reduce-cooperative`'s 385 dispatches collapse toward a much smaller count
+  with proportionally larger `output_total` each.
+- **Sized upside, DERIVED not measured:** if all 385 ops reached the
+  `elementwise` bucket's OWN 1.25x-over-bandwidth ratio (not the packed
+  kernel's 1.0x, since these ops will never carry a packed weight operand),
+  `reduce-cooperative` would cost ≈0.129×1.25 ≈ 0.16 ms instead of 8.656 ms —
+  an upper-bound projection of ≈8.5 ms/token, ≈15% of the current 55.5 ms
+  `gpu_exec`, IF the fusion introduced no new fixed cost of its own (it will;
+  the true number is smaller and unmeasured until attempted).
+- **Why not attempted this row:** it touches `proxima-model-interop`'s
+  `LayerCache`/named-block binding AND `proxima-tensor`'s
+  `mistral_cached_forward_program` graph builder, not just `omega` — a wider
+  blast radius than any tweak this file has landed to date, and the
+  session's remaining budget was not enough to do it AND verify it to this
+  file's own bar (byte-identical text, 3-5 run CoV, rollback-ready).
+
+**The dominant term (71.6% of `gpu_exec`) is genuine kernel throughput,
+already at its own known ceiling, with no NEW structural waste found this
+row.** The packed-weight matmul sweeps the declared 4.07 GB exactly once, at
+97.31 GB/s in-situ (re-confirmed, CoV 0.99%), a rate this file's own ROW69-77
+already root-caused as compute-bound-on-unpack rather than bandwidth-bound,
+and re-tuning it further is a kernel-microarchitecture problem outside this
+row's per-op split. Per this row's own brief: naming the structural residual
+and sizing it, without a hasty landing, is the complete deliverable here.
+
+### Rollback rows
+
+None — nothing was landed this row. No source file changed; this row is
+measurement and documentation only.
+
+### Standing, against the two named incumbents
+
+| | ms/token (steady decode) | vs this row |
+|---|---|---|
+| llama.cpp Metal (`-ngl 99`) | **17.62 ms** | we are 3.73x slower |
+| our own CPU path | **59.71 ms** | we are 1.10x slower |
+| our Metal, this row's own re-measurement (3 runs x 23 steps, n=69) | `step_wall` mean **65.671 ms** (CoV 1.30%, min 63.856/max 68.257) | — |
+
+Metal has NOT overtaken our own CPU decode this row: `step_wall` (65.671 ms)
+is still 1.10x SLOWER than our own CPU path (59.71 ms) and 3.73x slower than
+llama.cpp Metal (17.62 ms). `gpu_exec` alone (55.498 ms, 84.5% of `step_wall`)
+is essentially unchanged from ROW93's own 55.515 ms figure — this row's own
+brief said as much going in ("`gpu_exec` is 55.5ms, 83% of it") and the fresh
+multi-run measurement confirms the denominator did not move.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p omega --features std,cpu,metal` | **73 passed, 1 skipped** (unchanged from ROW93 — no source touched) |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **363 passed, 4 skipped** (unchanged) |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 6 skipped** (unchanged) |
+| `cargo clippy -p omega --features std,cpu,metal -- -D warnings` | clean |
+| `cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings` | clean |
+| generated text, all 3 timed decode runs this row | byte-identical: `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
+
+### Re-provable now (guiding-principle 16)
+
+```
+cargo nextest run -p omega --features std,cpu,metal
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo clippy -p omega --features std,cpu,metal -- -D warnings
+cargo clippy -p proxima-model-interop --features metal,instrument -- -D warnings
+
+cargo build --release --tests -p proxima-model-interop --features metal,instrument
+<built test binary> --ignored --exact \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time --nocapture
+<built test binary> --ignored --exact \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --nocapture
+
+cargo run --release --example q4k_matvec_probe -p omega --features std,cpu,metal
+```
+The first ignored test's `op_profile`/`op_profile_bucket`/`op_profile_top`/
+`op_profile_family` lines are Task 1's full attribution (repeat 3x for the
+CoV table above). The second's `token_breakdown_metal` lines, repeated 3x
+over the full 24-token loop, are the production `gpu_exec`/`step_wall`
+multi-run figures. The third is ROW77's own synthetic dissection, re-run for
+row 1b's methodology-confirmation caveat. Both ignored tests require the
+host-local checkpoint at `ServingConfig::DEFAULT_MODEL_PATH` and a real Metal
+device; the example needs neither.
