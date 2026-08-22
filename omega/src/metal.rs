@@ -248,6 +248,65 @@ fn device_and_queue() -> Result<DeviceAndQueue, MetalError> {
 
 /// Runs a tensor program on the system's default Metal device.
 ///
+/// Everything about a program that does not change between runs, resolved
+/// ONCE so a serving loop stops re-deriving it per token.
+///
+/// [`execute`] re-ran `infer` + `bind` on every call, then re-derived which
+/// operands are packed, allocated fresh device buffers, and read the result
+/// back. Measured on this box (`omega/examples/q4k_matvec_probe.rs`, two
+/// problem sizes so the intercept separates from the slope): **0.191 ms of
+/// fixed cost per call on the f32 arm and 0.400 ms on the packed arm**. A
+/// real forward is 1196 nodes, so at one `execute` per node that is 228-478
+/// ms per forward of overhead against llama.cpp Metal's 17.62 ms for the
+/// whole token (`proxima-tensor/docs/discipline.md` ROW 71).
+///
+/// What a caller can do with this that they could not do before: prepare a
+/// program once and run it many times. That is the entire justification for
+/// the type — the shapes, the bound ops, the retirement schedule and the
+/// codec set are all functions of the PROGRAM, and a serving loop holds the
+/// program fixed while the block DATA changes every token.
+pub struct Plan {
+    /// The plan owns its program: `finish` needs it for output dtypes, and a
+    /// plan that borrowed it could not outlive the caller's buffer.
+    program: Vec<Op>,
+    prepared: Prepared,
+    q4k_operands: BTreeSet<NodeId>,
+    block_dtypes: Vec<DType>,
+}
+
+/// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
+/// CODECS and shapes only — the data is not captured, so the same plan runs
+/// against fresh block data every call.
+///
+/// # Errors
+/// Propagates inference, binding, dtype-gate and block-shape failures.
+pub fn plan(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+) -> Result<Plan, MetalError> {
+    let prepared = prepare(program, symbols, blocks, outputs)?;
+    let q4k_operands: BTreeSet<NodeId> = prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
+        .map(|(node, _)| *node)
+        .collect();
+    let block_dtypes = prepared
+        .block_nodes
+        .iter()
+        .map(|node| gpu_dtype(program, &prepared.index_nodes, *node))
+        .collect();
+    Ok(Plan {
+        program: program.to_vec(),
+        prepared,
+        q4k_operands,
+        block_dtypes,
+    })
+}
+
 /// Same contract as [`proxima_tensor::cpu::evaluate`], and returns the same
 /// [`Evaluated`] type — a CPU run and a Metal run report the identical
 /// shape, so a parity test compares them directly with no adapter on either
@@ -260,32 +319,36 @@ pub fn execute(
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
 ) -> Result<Evaluated, MetalError> {
-    let prepared = prepare(program, symbols, blocks, outputs)?;
+    let resolved_plan = plan(program, symbols, blocks, outputs)?;
+    execute_plan(&resolved_plan, blocks)
+}
+
+/// Runs an already-resolved [`Plan`] against fresh block data. This is the
+/// serving-loop entry point: the plan is built once, this is called per
+/// token, and none of `infer`/`bind`/codec-resolution happens here.
+///
+/// # Errors
+/// Propagates block-codec and Metal driver failures.
+pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evaluated, MetalError> {
+    let prepared = &plan.prepared;
+    let q4k_operands = &plan.q4k_operands;
 
     let (device, queue) = device_and_queue()?;
 
     let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
-    for (node, block) in prepared.block_nodes.iter().zip(blocks.iter()) {
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                let dtype = gpu_dtype(program, &prepared.index_nodes, *node);
-                upload_block(&device, data, *node, dtype)?
-            }
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype)?,
             QuantizedBlock::Q4K(bytes) => upload_packed_bytes(&device, bytes)?,
             other => return Err(unsupported_gpu_codec(*node, other)),
         };
         device_buffers.insert(*node, buffer);
     }
-    // which block nodes are packed, resolved once for the whole dispatch:
-    // the emitter needs it to type each operand binding and pick the read
-    // shape, and it is only knowable here, from the bound blocks.
-    let q4k_operands: BTreeSet<NodeId> = prepared
-        .block_nodes
-        .iter()
-        .zip(blocks.iter())
-        .filter(|(_, block)| matches!(block, QuantizedBlock::Q4K(_)))
-        .map(|(node, _)| *node)
-        .collect();
 
     let command_buffer = queue
         .commandBuffer()
@@ -306,7 +369,7 @@ pub fn execute(
             &command_buffer,
             &mut device_buffers,
             bound,
-            &q4k_operands,
+            q4k_operands,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -324,7 +387,7 @@ pub fn execute(
     }
 
     finish(
-        program,
+        &plan.program,
         &prepared.index_nodes,
         &prepared.shapes,
         &prepared.effective_outputs,

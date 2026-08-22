@@ -36,7 +36,7 @@ pub mod sized;
 
 pub use error::EmitError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub use metal::{MetalError, execute, page_size};
+pub use metal::{MetalError, Plan, execute, execute_plan, page_size, plan};
 pub use msl::{
     Binding, GridSpec, Kernel, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL, emit,
 };

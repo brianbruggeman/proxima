@@ -107,11 +107,15 @@ fn run() {
             QuantizedBlock::Float32(&activation),
         ];
 
-        omega::execute(&program, &[], &blocks, &[sum]).expect("warmup executes");
+        // plan ONCE, execute per iteration -- the serving-loop shape. This
+        // is what takes `infer`/`bind`/codec-resolution out of the timed
+        // region, where they never belonged.
+        let resolved = omega::plan(&program, &[], &blocks, &[sum]).expect("probe plans");
+        omega::execute_plan(&resolved, &blocks).expect("warmup executes");
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
             let started = Instant::now();
-            let out = omega::execute(&program, &[], &blocks, &[sum]).expect("probe executes");
+            let out = omega::execute_plan(&resolved, &blocks).expect("probe executes");
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
             assert_eq!(out.root().len(), rows as usize, "degenerate probe: no output");
         }
@@ -146,7 +150,11 @@ fn run() {
         }
     }
 
-    const RUNS: usize = 21;
+    // a marginal figure is a DIFFERENCE of two minima, so sampling error in
+    // either one is amplified. 21 samples produced a 5.7x swing between
+    // consecutive runs of this probe; this is the count that makes the
+    // difference readable rather than the noise.
+    const RUNS: usize = 201;
     const K: u32 = 4096;
     let (small_ms, small_bytes) = measure(1024, K, RUNS);
     let (large_ms, large_bytes) = measure(4096, K, RUNS);
@@ -226,11 +234,12 @@ fn run() {
             QuantizedBlock::Float32(&weight),
             QuantizedBlock::Float32(&activation),
         ];
-        omega::execute(&program, &[], &blocks, &[sum]).expect("f32 control warms up");
+        let resolved = omega::plan(&program, &[], &blocks, &[sum]).expect("f32 control plans");
+        omega::execute_plan(&resolved, &blocks).expect("f32 control warms up");
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
             let started = Instant::now();
-            omega::execute(&program, &[], &blocks, &[sum]).expect("f32 control executes");
+            omega::execute_plan(&resolved, &blocks).expect("f32 control executes");
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         samples.sort_by(f64::total_cmp);
