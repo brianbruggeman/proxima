@@ -1474,7 +1474,11 @@ fn push_packed_row_blocked_body(
         ));
         source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
         source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
-        source.push_str(&format!("                {element_type} levels[{run}];\n"));
+        // raw 4-bit levels (0..15) are exact in float regardless of the
+        // kernel's element type; q4k_run8 takes `thread float *out`, and the
+        // narrowing to element_type happens where levels combine into
+        // scratch below, same as every other operand read.
+        source.push_str(&format!("                float levels[{run}];\n"));
         source.push_str(&format!(
             "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
         ));
