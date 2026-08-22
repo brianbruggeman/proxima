@@ -6633,3 +6633,151 @@ this row reports, regenerable from the artifact alone.
 None — the fold-widening measured a clean win on its one affected family and a
 no-op on every other family (see the degenerate control above), so nothing was
 reverted.
+## ROW 89 — the audit ROW 68 called for: `reduce_f32_dense` had no parallel arm to fall off of, and `split_axis` only ever offered the axis that is 1 at decode. Both landed; NO TIMING TAKEN this session (host was reserved for a sibling agent's GPU wall-clock run)
+
+**Repo:** `feat/tensor-consolidated` @ `40c1986`, this row's own commits on
+top: `e680b7f` (split-axis width fallback), `e6f097f` (reduce dispatch
+wiring). **Constraint this session ran under:** a sibling agent was taking
+GPU wall-clock measurements on the same box; this session was explicitly
+forbidden from running anything timed (bench, criterion, a timed decode
+loop) to avoid corrupting it (this initiative has already recorded CoV
+going 0.3% -> 53% under exactly this kind of contention). Every claim
+below is build/test/read, not a duration.
+
+### Audit: every site where the decode shape (outer/leading extent == 1) falls off a parallel path, or partitions on an axis whose extent is 1 at decode
+
+| site (`file:line`, pre-row-86) | op kind | what the gate tests | what happens at decode | status |
+|---|---|---|---|---|
+| `cpu.rs` `run_node_into`'s `Keep::Reduce` non-quantized arm (was: direct `run_reduce(resolved, buffers, output)` call, no `session`/split at all) | `reduce_f32_dense` | nothing — there was no gate, the arm never attempted a parallel dispatch regardless of `session`/worker count | always fully sequential, at every regime, not only decode (ROW 68: 3.859ms @1 worker -> 3.952ms @8, no scaling) | **FIXED, `e6f097f`** — new `run_reduce_dispatch` (mirrors `run_elementwise_dispatch`'s session+`PARALLEL_THRESHOLD` gate, `BoundOp::split_aligned` for chunks, a `ReduceLeadingRound` cohort round) |
+| `bind.rs` `BoundOp::split_axis` (now `split_axis_candidates`), `Keep::Reduce` arm | `reduce_f32_dense` (any caller of `split`/`split_aligned`, including the fix above) | picked `output_axes.first()` only (the leading/position axis) | decode's leading axis has extent 1 -> `split_aligned` always returned `None` -> sequential, regardless of how large the width axis (e.g. 4096/14336) is | **FIXED, `e680b7f`** — falls back to `output_axes.last()` (width axis) only when every leading axis has extent 1 (the exact condition that keeps the fallback sound — see the method's own doc for why splitting width is unsound whenever more than one leading position exists) |
+| `cpu.rs:2287` `run_elementwise_dispatch`, `if workers <= 1 \|\| outer_len < 2 \|\| inner_len == 0` | `elementwise` | flattened-outer-position space (`split_innermost`) has room (`outer_len >= 2`) | decode's flattened outer space is exactly 1 (one sequence position) -> always sequential (ROW 68: 2.644ms @1 -> 4.144ms @8, WORSE with more threads) | **NOT fixed — already investigated, refuted twice.** ROW 68 FIX 2 (elementwise width-split, whole node): 3.99 -> 7.9ms, reverted. A second, narrower attempt scoped to `Generic`-shaped nodes with three different per-chunk floors (documented in `run_elementwise_dispatch`'s own doc comment) also regressed the real forward's comparably-sized `Generic` nodes. Left alone per this session's explicit "do not retry" instruction. The reduce fix above is NOT the same idea re-tried: a reduce's per-output-element cost is a `k`-wide dot product, not O(1), so the round-open-vs-work ratio differs — this is asserted, not measured, this session (no timing taken); the next run's bench is what actually separates the two economically. |
+| `bind.rs` `split_axis_candidates`, `Elementwise` arm (`(!self.extents.is_empty()).then_some(0)`) | `elementwise`, but only via `evaluate_node_parallel`/`evaluate_parallel` (the plain, non-quantized evaluator) | axis 0 unconditionally, no fallback | same unit-axis hazard as the reduce case, but this path is not on the production `evaluate_quantized` decode loop at all | **Left unchanged.** Site above (`run_elementwise_dispatch`) already tried and refuted a width-axis fallback for this op kind on the path that actually matters; extending the same refuted idea to a path off the critical path is not worth the risk this session. |
+| `cpu.rs` `run_reduce_quantized` -> `matmul_rows_threaded` (Q4_K/Q5_K/Q6_K/Q8_0 weight matmuls) | `reduce_matmul_quantized` | parallelizes over the packed weight's OWN row axis (`rows`, e.g. 4096/14336 — the output-feature dimension), never over the sequence/position axis | independent of decode's position count by construction -> already scales (ROW 68: 178.1ms @1 worker -> 49.52ms @8) | **Reference model, no fix needed.** This is the shape the reduce fix above reuses: parallelize over an axis the decode shape does not shrink to 1, not over the axis that does. |
+| `cpu.rs` `StagedRound` (`#[cfg(test)]`-gated) | infrastructure, not one op kind — a multi-node persistent round | proven in isolation (claim order, barrier, deadlock-freedom under `CohortRound`'s flat cursor) but its own doc says "gated... until its consumer lands... wiring the executor onto this is what removes the gate" | not reachable from any evaluator yet — every per-node dispatch in this row (elementwise, reduce, quantized matmul) still pays one round open/close PER NODE, which ROW 68 identified as the actual root cause ("threads must own the whole graph... a persistent team with a cheap barrier between nodes") | **NOT wired.** This is the architecture-level fix ROW 68 named. Wiring it means restructuring `evaluate_quantized_with_scratch`'s per-node loop into an ordered multi-stage batch across however many consecutive nodes share a round — a materially larger, more correctness-sensitive change than this session's no-timing constraint makes safe to land blind. Flagged as the clear next step, explicitly not attempted here. |
+| `bind.rs` `split_axis_candidates`, `Keep::Scan` arm | `scan` (RoPE-adjacent running/cumulative ops) | no candidates, by design | correctly sequential — each step reads the previous step's output, so the axis is a data dependency, not parallel work | **N/A, not a defect.** Included so the audit is exhaustive over every `BoundOpKind`, not silently skipped. |
+| `bind.rs` `split_axis_candidates`, `Iota`/`Constant` arms | `iota`/`constant` | no candidates, by design | cheap enough (one write per element, no operand reads) that the round-open cost this whole row is about would dominate | **N/A, not a defect.** Same reason as above. |
+
+### The change
+
+Two commits, each independently green and independently attributable:
+
+- `e680b7f` — `BoundOp::split_axis` -> `split_axis_candidates`: tries
+  `output_axes.first()` first (unchanged from before — every currently-scaling
+  shape keeps splitting on exactly the same axis, byte-for-byte), then falls
+  back to `output_axes.last()` only when every leading axis has extent 1.
+  New tests: `split_falls_back_to_the_width_axis_when_the_leading_axis_is_a_decode_singleton`,
+  `split_still_prefers_the_leading_axis_when_it_has_room`, one new `#[case]`
+  on the existing `split_returns_none_when_unsound_or_unhelpful` table, and
+  `splitting_a_decode_shaped_fused_matmul_reduction_on_its_width_axis_matches_the_unsplit_result`
+  (bit-exact `assert_eq!` against the sequential run, not a tolerance).
+- `e6f097f` — `run_reduce_dispatch` + `ReduceLeadingRound`, wired into
+  `run_node_into`'s `Keep::Reduce` non-quantized arm, mirroring
+  `run_elementwise_dispatch`'s shape exactly (session + `PARALLEL_THRESHOLD`
+  gate, `BoundOp::split_aligned` for the chunks — no new splitting logic of
+  its own, reuses the fix above). New test:
+  `evaluate_quantized_matches_evaluate_for_a_decode_shaped_dense_matmul`
+  (`#[case]` at 2/3/8 workers), which drives the ACTUAL production
+  `evaluate_quantized` loop at `m == 1` and asserts `quantized.root() ==
+  sequential.root()` bit-for-bit — this is the one test that proves both
+  commits reachable together from the real decode path, not just from a
+  unit-level `BoundOp::split` call.
+
+**Float reduction order:** unchanged. Splitting the output space (by
+whichever axis) changes only WHICH worker computes a given output
+element, never the order of the `k`-wide accumulation THAT computes it —
+every output element of a reduce still folds its own reduced dims in the
+same order regardless of split axis, so this does not touch the CPU
+oracle's bit-exactness contract the Metal parity tests depend on.
+
+**No magic numbers:** both commits reuse `PARALLEL_THRESHOLD`,
+`OVERSUBSCRIBE`, and `SPLIT_ALIGNMENT` exactly as `run_elementwise_dispatch`/
+`evaluate_node_parallel` already do — no new tunable was introduced, so
+there is nothing new to trace to the sizing-config generator; the existing
+trace (`sized.rs` -> `generated::*`) already covers every constant this
+row touches.
+
+**Reuse-first:** no new type beyond `ReduceLeadingRound` (a plain data
+struct + one `CohortRound` impl, the same shape as `ElementwiseRowRound`/
+`RowRound`/`TransposeRound`/`QuantizeRound` already in this file — one more
+instance of an established pattern, not a new abstraction). `split_axis`
+was renamed to `split_axis_candidates` and widened in place rather than
+adding a parallel method; `run_reduce_dispatch` slots into the exact match
+arm `run_reduce` occupied before, changing one line at the call site
+(`run_reduce(resolved, buffers, output)` -> `run_reduce_dispatch(resolved,
+buffers, session, output)`).
+
+### Gates (all commands re-run at the tip of this row, actual counts)
+
+| unit | features | N | vs this session's stated expectation |
+|---|---|---|---|
+| proxima-tensor | `std` | **366 passed**, 4 skipped | expected 359 baseline + 7 new tests (4 from `e680b7f`, 3 from `e6f097f`) = 366 — matches |
+| proxima-tensor | `std,instrument` | **370 passed**, 4 skipped | expected 363 baseline + 7 new tests = 370 — matches |
+| proxima-model-interop | `std` | **24 passed**, 4 skipped | matches this session's stated 24 exactly, unchanged (this row never touched `proxima-model-interop`) |
+
+clippy `-D warnings` clean on `proxima-tensor --features std,instrument
+--all-targets`. `cargo check -p proxima-tensor --no-default-features
+--features std --all-targets` also clean (the no_std-adjacent tier this
+crate's `std` feature gates against still builds with both commits in).
+
+**Re-prove command (gate 16):**
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features std
+cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings
+cargo check -p proxima-tensor --no-default-features --features std --all-targets
+```
+
+### The bench this row explicitly did NOT run, and what the next quiet-box session should sweep
+
+Nothing above is a timing claim. The next run should sweep, on a quiet
+box, the same two shapes ROW 68 already measured `reduce_f32_dense` at (so
+the delta is attributable to this row's two commits and nothing else):
+
+- **decode shape**: `m=1`, the real forward's per-layer `reduce_f32_dense`
+  sizes (RoPE-adjacent dense reduces, not the quantized matmuls) — this is
+  the exact ROW 68 "3.859ms @1 worker -> 3.952ms @8, no scaling" arm.
+- **prefill shape**: `m=31` (or whatever the fixture's prompt length is) —
+  the same node kind, to confirm the fallback axis (still the leading axis
+  whenever `m >= 2`, unchanged behavior) has NOT regressed ROW 68's
+  976.81ms/24-token prefill baseline, per this session's own constraint
+  #4 (gates for different op kinds — and different regimes of the same op
+  kind — are different gates; check both).
+
+Sweep both at 1/2/4/8 `PROXIMA_MATMUL_WORKERS`, 3-5 runs each, report the
+range if CoV > 5% (this initiative's own floor). Isolate the box first —
+this session's contention note (0.3% -> 53% CoV under a sibling agent) is
+exactly the failure mode to avoid.
+
+```
+# decode-shaped reduce_f32_dense, isolated from the quantized matmuls, at
+# each worker count -- this row's own new test's program shape is the
+# fixture to reuse (m=1, k=64, n=8192), not the full real-forward fixture,
+# so the delta isolates this row's change from every other moving part.
+PROXIMA_MATMUL_WORKERS=1 cargo test -p proxima-tensor --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored cpu::tests::evaluate_quantized_matches_evaluate_for_a_decode_shaped_dense_matmul
+# repeat at 2, 4, 8 -- the test itself is correctness-only (asserts parity, not
+# a duration), so the next run needs to add its own timing harness around the
+# same fixture shape, e.g. std::time::Instant around evaluate_quantized alone.
+
+# then the full real-forward decode/prefill sweep this initiative already uses:
+llama-cli -m openchat-3.5-1210.Q4_K_S.gguf -ngl 0 -t 8 -n 24 \
+  --temp 0 --top-k 1 -no-cnv --seed 1 -p "<the 31-token prompt>"
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 \
+  <test-bin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+
+Prior numbers to diff against, so the delta is attributable (ROW 68,
+`34c7a40`, host M1 Max 10 cores): decode 59.83ms/token vs llama's 44.09ms
+(1.357x behind); `reduce_f32_dense` 3.859ms @1 worker / 3.952ms @8 (no
+scaling); prefill 976.81ms vs 749.81ms (1.303x behind). If this row's fix
+does nothing for decode specifically, the most likely reason (per ROW 68's
+own root-cause analysis) is that the per-round open cost (~25us, ROW 68's
+own figure) still dominates whatever work a single decode-shaped
+`reduce_f32_dense` node has to hand out — the same economics that killed
+elementwise's width-split, just not yet shown to apply or not apply here.
+That would point straight at `StagedRound` (this row's audit table, last
+infrastructure row) as the next thing to actually wire, not another
+threshold tweak on this row's mechanism.
