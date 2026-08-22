@@ -117,19 +117,13 @@ use core::num::NonZeroUsize;
 use core::ops::Deref;
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 use core::sync::atomic::AtomicU64;
-// `StagedRound` (production once `cohort-staged-graph` is on, test-only
-// scaffolding otherwise) plus `evaluate_parallel`'s ordering tests use
-// `Ordering` regardless of `target_arch`/`instrument`, unlike `AtomicU64`
-// above which only backs the aarch64+instrument tile counters -- gated on
-// `any(test, .., feature = "cohort-staged-graph")` rather than left
-// unconditional so a non-test, non-aarch64-instrument, feature-off build
-// (nothing left to use it) does not pick up an unused-import warning under
-// this workspace's deny(warnings).
-#[cfg(any(
-    test,
-    all(target_arch = "aarch64", feature = "instrument"),
-    feature = "cohort-staged-graph"
-))]
+// `#[cfg(test)]` staged-round scaffolding (`StagedRound`, `evaluate_parallel`'s
+// ordering tests) uses `Ordering` regardless of `target_arch`/`instrument`,
+// unlike `AtomicU64` above which only backs the aarch64+instrument tile
+// counters -- gated on `any(test, ..)` rather than left unconditional so a
+// non-test, non-aarch64-instrument build (nothing left to use it) does not
+// pick up an unused-import warning under this workspace's deny(warnings).
+#[cfg(any(test, all(target_arch = "aarch64", feature = "instrument")))]
 use core::sync::atomic::Ordering;
 use std::borrow::Cow;
 use std::thread;
@@ -675,36 +669,7 @@ pub fn evaluate_quantized_with_scratch(
     // `matmul_rows_threaded` falls back to the `nest_pool` dispatch path in
     // that case, unchanged.
     let session = nest_cohort().and_then(|cohort| cohort.enter().ok());
-    let mut position = 0usize;
-    while position < resolved.len() {
-        #[cfg(feature = "cohort-staged-graph")]
-        if let Some(session_ref) = session.as_ref() {
-            let run_end = staged_batch_run_end(&resolved, position, &quantized_weights);
-            if run_end - position >= STAGED_BATCH_MIN_LEN {
-                #[cfg(feature = "instrument")]
-                let diag_batch_started = instrument::read_ticks();
-                run_staged_batch(
-                    &resolved[position..run_end],
-                    position,
-                    &mut buffers,
-                    &quantized_weights,
-                    session_ref,
-                    free_buffers,
-                    &retires,
-                    &mut live_now,
-                )?;
-                peak_live_buffers = peak_live_buffers.max(live_now);
-                #[cfg(feature = "instrument")]
-                {
-                    let entry = diag_kind_ticks.entry("staged_batch").or_insert((0, 0));
-                    entry.0 += (run_end - position) as u64;
-                    entry.1 += instrument::elapsed_ticks(diag_batch_started);
-                }
-                position = run_end;
-                continue;
-            }
-        }
-        let computed = &resolved[position];
+    for (position, computed) in resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
         let diag_alloc_started = instrument::read_ticks();
         let mut output = take_or_allocate(free_buffers, node_output_len(computed));
@@ -758,7 +723,6 @@ pub fn evaluate_quantized_with_scratch(
         {
             diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
         }
-        position += 1;
     }
     #[cfg(feature = "instrument")]
     std::eprintln!(
@@ -2463,15 +2427,12 @@ where
 /// that stops dispatch early would strand a stage's chunks unclaimed and
 /// hang the stage behind it.
 ///
-/// Was gated to `cfg(test)` until its consumer landed: the semantics below
-/// are the load-bearing, easy-to-get-wrong half (claim order, barrier,
-/// deadlock-freedom, error publication), so they were proven FIRST and
-/// separately from the graph-walking change that uses them. `evaluate_quantized`
-/// (behind `cohort-staged-graph`, default-off) is that consumer —
-/// [`run_staged_batch`] — so this is now `cfg(any(test, feature =
-/// "cohort-staged-graph"))` rather than `cfg(test)` alone: still absent from
-/// a normal build that never turns the feature on, but no longer test-only.
-#[cfg(any(test, feature = "cohort-staged-graph"))]
+/// Gated to `cfg(test)` until its consumer lands: the semantics below are
+/// the load-bearing, easy-to-get-wrong half (claim order, barrier,
+/// deadlock-freedom, error publication), so they are proven FIRST and
+/// separately from the graph-walking change that will use them. Wiring the
+/// executor onto this is what removes the gate.
+#[cfg(test)]
 struct StagedRound<'round, Run> {
     stage_count: usize,
     chunks_per_stage: usize,
@@ -2480,7 +2441,7 @@ struct StagedRound<'round, Run> {
     run_stage_chunk: Run,
 }
 
-#[cfg(any(test, feature = "cohort-staged-graph"))]
+#[cfg(test)]
 impl<Run> CohortRound<TensorError> for StagedRound<'_, Run>
 where
     Run: Fn(usize, usize) -> Result<(), TensorError> + Sync,
@@ -2691,172 +2652,6 @@ fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, Qu
         return None;
     }
     resolved.operands().iter().map(|(node, _, _)| *node).find(|node| quantized_weights.contains_key(node))
-}
-
-/// Below this many consecutive eligible nodes, [`run_staged_batch`] is not
-/// worth calling: a run of one node has nothing to amortize a round-open
-/// against, so [`evaluate_quantized_with_scratch`] falls through to the
-/// plain per-node call for it, exactly as `cohort-staged-graph` off always
-/// does. Not yet threaded through a build-time sizing config (principle
-/// 12) — recorded as a residual in `docs/discipline.md` ROW 96 rather than
-/// left silent.
-#[cfg(feature = "cohort-staged-graph")]
-const STAGED_BATCH_MIN_LEN: usize = 2;
-
-/// Whether `resolved` belongs in a [`run_staged_batch`] run: every
-/// `BoundOpKind` except a quantized-weight matmul fold. The quantized
-/// matmul path keeps its own existing round (`run_reduce_quantized` ->
-/// `matmul_rows_threaded` -> `RowRound`, all untouched by this feature) —
-/// its `dot_row` closures are constructed per quantized codec
-/// (`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`, each with its own wide-fold variant) and
-/// are not addressable by an external chunk index without threading a
-/// chunk parameter through every one of those call sites, a much larger
-/// change than this feature's own scope (`docs/discipline.md` ROW 96 names
-/// this explicitly as the reason the megaround does not span matmul
-/// stages this session).
-#[cfg(feature = "cohort-staged-graph")]
-fn is_staged_batch_eligible(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> bool {
-    !matches!(resolved.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) || quantized_operand(resolved, quantized_weights).is_none()
-}
-
-/// The end (exclusive) of the maximal run of [`is_staged_batch_eligible`]
-/// nodes starting at `start` — [`evaluate_quantized_with_scratch`]'s own
-/// walk over `resolved` reuses this rather than recomputing a dependency
-/// DAG: `resolved` is already topologically ordered (`bind::bind`'s own
-/// doc), so a contiguous run of eligible positions is, by construction,
-/// exactly as independent-of-everything-outside-the-run as any single node
-/// already is of everything before it.
-#[cfg(feature = "cohort-staged-graph")]
-/// [`run_staged_batch`] commits every stage's output into the real
-/// `buffers` table only after the whole round returns (its own doc: "the
-/// same...state as running every node in `run` one at a time"), so a node
-/// added to the run must read every operand from OUTSIDE the run — a node
-/// at an earlier position that is ALSO in this run has not been written
-/// into `buffers` yet when an in-run consumer's stage would need to read
-/// it, and `run_node_into` would see a `None` slot
-/// (`TensorError::NotLowerable { reason: "operand buffer missing at
-/// evaluation time" }`) instead of that producer's real output — caught by
-/// `spec::tests::a_cached_decode_step_matches_the_uncached_forward_pass_exactly`
-/// while building this feature (`docs/discipline.md` ROW 96). `resolved`'s
-/// topological order (`bind::bind`'s own doc) means any such dependency is
-/// necessarily on an earlier position, so checking positions
-/// `start..end` — never anything after `end` — is exhaustive.
-fn staged_batch_run_end(resolved: &[BoundOp], start: usize, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> usize {
-    let mut end = start;
-    while end < resolved.len() && is_staged_batch_eligible(&resolved[end], quantized_weights) {
-        let reads_from_this_run = resolved[end]
-            .operands()
-            .iter()
-            .any(|(operand, _, _)| resolved[start..end].iter().any(|produced| produced.node == *operand));
-        if reads_from_this_run {
-            break;
-        }
-        end += 1;
-    }
-    end
-}
-
-/// Runs `run` (a maximal [`is_staged_batch_eligible`] slice of `resolved`,
-/// starting at `resolved[run_start]`) as ONE [`StagedRound`] instead of one
-/// `CohortSession::run` per node — the fix `docs/discipline.md` ROW 68/90
-/// point at: threads stay resident and busy-spin through every stage of
-/// the whole run behind a single round-open/wake, rather than the round
-/// machinery never engaging at all (today's behavior for every node in
-/// `run`'s own kind set — see [`is_staged_batch_eligible`]'s doc) or engaging
-/// once per node (what a naive per-node port of this would cost, and what
-/// ROW 68's own FIX 1/FIX 2 measured as a net loss).
-///
-/// `chunks_per_stage` is `1`: this landing does not attempt to split any one
-/// node's own work across workers (ROW 68 already measured both axes of
-/// that — outer-position and width — and both cost more than they returned
-/// for exactly this shape of node). Only stage `within == 0` ever runs real
-/// work; [`StagedRound`]'s barrier is what lets many stages share one round
-/// regardless.
-///
-/// Every output buffer for the whole run is allocated up front (reusing
-/// [`take_or_allocate`], the same pool [`evaluate_quantized_with_scratch`]'s
-/// per-node path already draws from) so [`run_stage_chunk`]'s closure can
-/// hold a raw pointer to each stage's own disjoint slot before the round
-/// opens — retirement (`retires`) is applied after the round returns,
-/// in run order, so the final `buffers`/`free_buffers` state this leaves is
-/// identical to running every node in `run` one at a time; the only
-/// difference is that a buffer whose last use falls inside the run is held
-/// slightly longer (until the run's own round returns) instead of being
-/// freed the instant its consumer finishes — bounded by one run's own
-/// total output size, not the whole step's.
-#[cfg(feature = "cohort-staged-graph")]
-#[allow(clippy::too_many_arguments)]
-fn run_staged_batch(
-    run: &[BoundOp],
-    run_start: usize,
-    buffers: &mut [Option<Cow<'_, [f32]>>],
-    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
-    session: &MatmulSession<'_>,
-    free_buffers: &mut Vec<Vec<f32>>,
-    retires: &[Vec<NodeId>],
-    live_now: &mut usize,
-) -> Result<(), TensorError> {
-    let mut run_outputs: Vec<Vec<f32>> =
-        run.iter().map(|node| take_or_allocate(free_buffers, node_output_len(node))).collect();
-    let output_slots: Vec<(usize, usize)> =
-        run_outputs.iter_mut().map(|buffer| (buffer.as_mut_ptr() as usize, buffer.len())).collect();
-    let completed: Vec<AtomicUsize> = (0..run.len()).map(|_| AtomicUsize::new(0)).collect();
-    let buffers_ref: &[Option<Cow<'_, [f32]>>] = buffers;
-
-    let round = StagedRound {
-        stage_count: run.len(),
-        chunks_per_stage: 1,
-        completed: &completed,
-        run_stage_chunk: |stage: usize, _within: usize| -> Result<(), TensorError> {
-            let computed = &run[stage];
-            let (address, length) = output_slots[stage];
-            // SAFETY: `StagedRound::run_chunk` blocks stage `stage` on
-            // stage `stage - 1`'s own barrier flag before ever invoking this
-            // closure (see that impl's doc), so no two stages' closures are
-            // ever concurrently active; each stage's slice was carved from
-            // its own `take_or_allocate` allocation above and never
-            // resized or touched again until the round returns below, so no
-            // two stages ever alias the same bytes either -- the same
-            // single-writer argument `ElementwiseRowRound`/`RowRound` make
-            // for their own `split_at_mut`-carved ranges, just one whole
-            // node's output per stage instead of a sub-range of one node.
-            let output = unsafe { core::slice::from_raw_parts_mut(address as *mut f32, length) };
-            // `session: None` — a nested `session.run` from inside a chunk
-            // this same `session` is already driving would corrupt the
-            // cohort's single shared `Control` block (`cohort.rs`'s own
-            // doc: exactly one round may be in flight at a time). Every
-            // node `is_staged_batch_eligible` admits already takes this
-            // path today regardless (dense reduce never accepts a session
-            // parameter at all; elementwise's own dispatch falls through to
-            // its serial arm whenever `outer_len < 2`, decode's only shape),
-            // so this is not a new fallback, only a new caller of the
-            // existing one.
-            run_node_into(computed, buffers_ref, Some(quantized_weights), None, output)
-        },
-    };
-
-    let report = session.run(&round);
-    if let Some(error) = report.first_error {
-        return Err(error);
-    }
-    if report.abandoned > 0 {
-        return Err(TensorError::ThreadedChunkFailed {
-            chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
-            reason: alloc::string::String::from("cohort member panicked while running a staged graph batch"),
-        });
-    }
-
-    for (offset, node_output) in run_outputs.into_iter().enumerate() {
-        let node = run[offset].node;
-        buffers[node.0 as usize] = Some(Cow::Owned(node_output));
-        *live_now += 1;
-        for retired in &retires[run_start + offset] {
-            if retire_into(buffers, *retired, free_buffers) {
-                *live_now -= 1;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// proxima-debugger diagnostic (`evaluate_quantized`'s per-node-kind timing
