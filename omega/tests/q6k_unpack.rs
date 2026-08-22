@@ -67,7 +67,7 @@ fn q6k_element_host(block: &[u8], index: usize) -> f32 {
     let qh = &block[128 + half_index * 32..128 + half_index * 32 + 32];
     let scales = &block[192..208];
 
-    let ql_byte = if lane % 2 == 0 { ql[l] } else { ql[l + 32] };
+    let ql_byte = if lane.is_multiple_of(2) { ql[l] } else { ql[l + 32] };
     let nibble = if lane < 2 { ql_byte & 0x0F } else { ql_byte >> 4 };
     let high2 = (qh[l] >> (lane * 2)) & 0x03;
     let level = nibble | (high2 << 4);
