@@ -5641,12 +5641,68 @@ agents reported and stopped rather than routing around it, which is the
 correct outcome and the opposite of what two earlier agents did the previous
 day.
 
-The design is settled and the implementation is mechanical once that hook
-distinguishes subagents: `Backend { Cpu, Metal }` with both variants always
-present; a `Plan` whose variants are cfg-gated per arm; `plan_named` /
-`execute_plan_named` mirroring the Metal shape already landed; the CPU arm
-calling `evaluate_quantized_named_with_scratch` directly, threading the
-caller's `free_buffers` and validated-node cache through so the per-call
-allocation the CPU path already avoids does not come back; selection via an
-env var read once into a `OnceLock`, the idiom `matmul_worker_count`
-(`proxima-tensor/src/cpu.rs`) already establishes.
+**Resolved.** The hook was fixed to identify a subagent positively (the
+blocked event carries an `agent_id`/`agent_type` the main loop does not) and
+the wrapper landed: `omega/src/backend.rs`, commit `6153e77`.
+
+### What landed, and the one test that matters
+
+`Backend { Cpu, Metal, Vulkan, Cuda, Npu, Ane }` — the owner widened the set
+mid-build from two to six, so all six variants exist regardless of features
+and only the EXECUTION arms are cfg-gated. A closed, known set is a
+discriminated enum matched at the dispatch point, NOT `Box<dyn Backend>`:
+the workspace's Rust rules permit `dyn` only for an open/unbounded set, and
+adding a seventh backend is a variant plus a feature plus one match arm.
+`Vulkan`/`Cuda`/`Npu`/`Ane` are name reservations with zero-dependency
+features and no drivers; `NotCompiled { backend, feature }` and
+`NotImplemented { backend }` are distinct errors, and neither is ever a
+silent fallback to the other backend.
+
+The trap above is now held by a test rather than a comment:
+
+```
+cargo nextest run -p omega --no-default-features --features std,metal
+  -> 43 tests run: 43 passed
+     PASS backend::tests::requesting_cpu_without_the_feature_errors_naming_it
+```
+
+That is the exact configuration where `proxima_tensor::cpu` IS reachable
+(metal pulls `proxima-tensor/std`) while omega's `cpu` feature is off. The
+CPU backend is correctly not selectable there. Full suite 39 -> 44.
+
+Selection is a plain argument, not process-wide state: a test plans and
+executes Cpu then Metal back-to-back in ONE process with no env var touched.
+`Backend::from_env` exists as an opt-in default only, and neither entry point
+reads it internally. That is what keeps per-phase or per-run backend mixing
+possible later — a process-wide "current backend" global would have closed it
+off permanently for the cost of looking tidier now.
+
+### Owner direction on the end state
+
+Mix several backends in one run rather than pick one. Two measured facts
+bound that, and both are already in this log:
+
+- **Unified memory makes CPU<->Metal handoff nearly free HERE** — a no-copy
+  `MTLBuffer` aliases host pages (ROW 70), witnessed by
+  `nocopy_attempts=66, REUSED=63`. That is an Apple-silicon property and NOT
+  true of CUDA on a discrete card, where a handoff is a PCIe copy. A
+  partitioner may not assume it.
+- **Switch granularity must be RUNS of nodes, not nodes.** The per-`execute`
+  round trip is ~0.28 ms (ROW 73) and survived every attempt to remove it.
+  A forward is 1196 nodes; a switch per node would cost far more than any
+  placement wins. Per-PHASE is one switch and easily absorbed — and the
+  phases have genuinely different bottlenecks: prefill compute-bound
+  (llama 749.81 ms CPU vs 103.27 ms Metal), decode bandwidth-bound at
+  0.012 bytes/mac (44.09 vs 17.62).
+
+`Npu`/`Ane` are also a different KIND of target and cannot share the seam:
+Metal, Vulkan and CUDA consume EMITTED KERNELS, which is what this backend
+produces, while ANE is reachable only through a compiled CoreML graph and the
+one NPU backend in llama.cpp (`ggml-cann`, Huawei Ascend) goes through
+Ascend's ACL graph API. Verified: 13 ggml backends, zero hits for
+`coreml|ANECompiler|MLModel`. And since decode is bandwidth-bound, an
+accelerator's TOPS cannot move it at all — 7B at 70 tok/s needs 265 GB/s,
+which is a DRAM number. Those two would pay on PREFILL or not at all.
+
+No driver is written for any of the four, because nothing has measured a
+reason yet.
