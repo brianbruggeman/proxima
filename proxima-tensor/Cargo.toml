@@ -11,12 +11,19 @@ readme.workspace = true
 
 [features]
 default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
-# `tensor-bgpool` is implied, not opt-in: the pool path was previously
-# reachable only by naming a feature nothing else turned on, so it never
-# executed in any default build. `std` is the only tier that can hold
-# `prime` (threads, an OS-backed pool), so it is the natural place for the
-# implication to live — the `alloc`-only floor stays free of `dep:prime`.
-std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "dep:libc"]
+# `tensor-bgpool`/`tensor-cohort`/`cohort-staged-graph` are implied, not
+# opt-in: each was previously reachable only by naming a feature nothing
+# else turned on, so none of them ever executed in any default build.
+# `std` is the only tier that can hold `prime` (threads, an OS-backed pool
+# and cohort), so it is the natural place for the implication to live --
+# the `alloc`-only floor stays free of `dep:prime`. `cohort-staged-graph`
+# earned the switch at ROW 98 (`docs/discipline.md`): ROW 97 measured
+# decode -4.82% (n=3) with prefill a tie (+1.04%, inside combined noise),
+# bit-exact greedy output; ROW 98 re-measured fresh at n=8 under a noisier
+# host loadout (`uptime` load 4.3-8.3 across the session) and got the same
+# shape -- decode -5.21% (clears combined noise ~7x), prefill +1.93%
+# (~1.03x combined noise, i.e. a tie, not a regression).
+std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
@@ -101,9 +108,13 @@ q6k-int8-dot = []
 # row-chunks become a many-chunk stage in the SAME round (real cross-worker
 # parallelism preserved via `StagedRound`'s variable-width stages); every
 # other eligible node kind stays a one-chunk stage exactly as ROW 96 wired
-# it. Default-off: the wiring is new and its win/loss is still being
-# measured against the unwired baseline — see ROW 97 for the numbers before
-# this earns the switch.
+# it. Implied by `std` as of ROW 98 (`docs/discipline.md`) -- see that
+# row and the `std` feature's own doc above for the e2e evidence
+# (decode -4.82%/-5.21% across two independent measurement sessions,
+# prefill a tie both times, bit-exact) that earned the switch. Kept as a
+# separately named feature (not folded away entirely) purely so the doc
+# history and re-prove commands that name it explicitly
+# (`--features proxima-tensor/cohort-staged-graph`) keep resolving.
 cohort-staged-graph = ["std", "dep:prime"]
 
 [dependencies]
