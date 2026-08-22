@@ -1159,15 +1159,34 @@ fn zero_fault_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize
     slots.fill(0);
 }
 
+
+thread_local! {
+    /// Uniform blobs, keyed by their own bytes. A plan's uniforms are a
+    /// function of the BOUND OP — extents, strides, bases — so they are
+    /// byte-identical on every call, and `execute` was allocating a fresh
+    /// `MTLBuffer` for each of them per op per call. Safe to share: the
+    /// kernel binds them `constant` and never writes through them, and two
+    /// ops with identical uniform bytes want identical contents by
+    /// definition.
+    static UNIFORM_BUFFERS: RefCell<BTreeMap<Vec<u8>, Retained<ProtocolObject<dyn MTLBuffer>>>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// Counts uniform buffers served from cache rather than allocated.
+pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
 fn upload_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    if let Some(existing) = UNIFORM_BUFFERS.with(|cache| cache.borrow().get(bytes).cloned()) {
+        counter!(UNIFORM_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
     // SAFETY: `bytes` is always non-empty (every `Uniforms` struct has at
     // least two `long` fields), so its first byte's address is valid and
     // stays valid while this call copies from it.
     let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-    unsafe {
+    let buffer = unsafe {
         device.newBufferWithBytes_length_options(
             pointer,
             bytes.len(),
@@ -1176,7 +1195,9 @@ fn upload_uniforms(
     }
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused to allocate the uniforms buffer".to_string(),
-    })
+    })?;
+    UNIFORM_BUFFERS.with(|cache| cache.borrow_mut().insert(bytes.to_vec(), buffer.clone()));
+    Ok(buffer)
 }
 
 fn buffer_for(

@@ -5204,3 +5204,58 @@ of the timed region (ROW 71 predicted that would be the cost; it was not).
 What remains in it: command buffer creation, submit, `waitUntilCompleted`
 round-trip, readback, and a per-op output and uniforms buffer allocation. At
 1196 nodes per forward this is still the dominant serving-path term.
+
+## ROW 73 — CORRECTION: the per-call fixed cost is per-FORWARD, not per-node. It is 1.6% of the budget, not the dominant term
+
+**Repo:** `feat/tensor-consolidated`. **Host:** Apple M1 Max.
+
+### The claim being corrected
+
+ROW 71 and ROW 72 both stated that the 0.23-0.45 ms per-call fixed cost is
+"the dominant serving-path term", reasoning: a forward is 1196 nodes, so at
+one `execute` per node that is 228-478 ms per forward.
+
+**The premise is false and I asserted it twice without opening the file.**
+`execute_plan` encodes EVERY bound op of the program into ONE command
+buffer and calls `commit()` + `waitUntilCompleted()` exactly once
+(`omega/src/metal.rs:382-383`, and the loop above it at `for (position,
+bound) in prepared.resolved.iter()`). The intercept is paid once per
+`execute`, which for a serving loop is once per FORWARD.
+
+0.28 ms per forward against llama.cpp Metal's 17.62 ms per token is **1.6%**.
+It is not the dominant term and it was never worth the two rows spent on it.
+
+### What the intercept actually is, and why the probe cannot see the rest
+
+Measured across every configuration tried, the f32 intercept sat at
+0.266-0.321 ms and did not move for:
+
+| removed from the timed region | intercept before -> after |
+|---|---|
+| MSL compile (persistent pipeline cache) | unchanged |
+| `infer` + `bind` (the `Plan` API, ROW 71's prediction) | 0.319 -> 0.287 ms |
+| uniform buffer allocation (this row) | 0.287 -> 0.291 ms |
+
+Three predicted causes, three misses. A floor that survives all of them and
+sits at ~0.28 ms regardless of graph content is the CPU-GPU command buffer
+round trip — submit, GPU wake, `waitUntilCompleted`, readback.
+
+**And the probe is single-op, so it cannot measure per-OP cost at all.** The
+uniform-buffer cache landed here allocates one fewer `MTLBuffer` per op per
+call; on a 1196-node forward that is 1196 fewer allocations, and this probe
+has exactly one op, so it correctly measured nothing. The same is true of
+the per-op output buffer, which is still allocated fresh. Both are real for
+a real graph and invisible here. **A single-op probe is the wrong instrument
+for a per-op cost, and this row is the third time this file has recorded a
+number the instrument could not have produced.**
+
+### Where the GPU gap actually stands
+
+| | measured | vs llama.cpp Metal |
+|---|---|---|
+| f32 kernel marginal | 336-385 GB/s | 1.6x FASTER than its 214.7 GB/s |
+| packed Q4_K element rate | ~109 G elem/s | **3.5x** off its 381 G elem/s |
+| per-forward intercept | ~0.28 ms | 1.6% of a 17.62 ms token |
+
+One live defect: the packed kernel's remaining 3.5x. Nothing else measured
+above noise.
