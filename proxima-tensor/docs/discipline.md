@@ -5419,3 +5419,55 @@ a device, queue and pipeline cache per call with no handle to hold across
 calls; that is fixed (ROW 70/71: thread-local device/queue/pipelines,
 `(pointer,len)`-keyed no-copy buffers, and `omega::plan`/`execute_plan`), so
 a resident corpus now uploads once.
+
+## ROW 77 — lane spread: eight lanes per super-block, not thirty-two. 1.64x -> 1.49x
+
+**Host:** Apple M1 Max. **Method:** ROW 71's two-size dissection, 3 runs.
+Run 3's SMALL arm was interfered (0.458 ms against 0.342/0.345), which
+inflates a marginal figure rather than deflating it; runs 1-2 are the
+reading.
+
+### What was still missing
+
+ROW 76 amortized the `Q4_K` header decode over a lane's run of 8. A
+super-block's header is constant over 256 elements, and a SUB-block's
+scale/min over 32 — so 8 was leaving 4x on the floor.
+
+Putting all 32 lanes on one super-block is what caps the run at 8 (256/32).
+ggml instead puts EIGHT lanes on a super-block (`ix = tiisg/8`) and lets the
+32 lanes span FOUR super-blocks at once (`for ib = ix; ib < nb; ib += 4`),
+so each lane owns exactly one 32-element sub-block per header decode — the
+granularity the header is actually constant over.
+
+Levels are still pulled 8 at a time inside that (`q4k_run8`, four times)
+rather than 32 at once, to keep the live register count near ggml's
+`yl[16] + yh[16] + sumf[4]` instead of `levels[32] + acts[32] + sumf[4]`.
+
+### Measured
+
+| | large arm (37.75 MB) | MARGINAL | element rate | vs 381 G elem/s |
+|---|---|---|---|---|
+| ROW 76, 32 lanes/super-block | 0.605/0.598 ms | ~131 GB/s | ~233 G | 1.64x |
+| this row, 8 lanes/super-block | **0.534/0.547** ms | **~143.5 GB/s** | **~255 G** | **1.49x** |
+
+Parity 38/38 unchanged.
+
+### The first attempt was wrong and the parity test caught it
+
+`lanes_per_block = SIMD_WIDTH / (Q4K_BLOCK_ELEMENTS / run)` evaluates to
+`32 / 32 = 1`, not 8 — so it emitted `acts[256]` and gave every lane the
+whole super-block. Relative error 0.016 against the dequantized-f32 oracle,
+where the passing bound is 1e-5. A derived constant that looked like
+arithmetic was a plain 8 all along; the device parity test is the only
+reason that did not land.
+
+### The packed arc
+
+| | marginal | element rate | gap |
+|---|---|---|---|
+| per-element header decode | 12.3 GB/s | 21.9 G | 17x |
+| + super-block tiling (ROW 72) | ~61 | ~109 G | 3.5x |
+| + 4-row blocking (ROW 74) | ~108 | ~193 G | 2.0x |
+| + wide 32-bit level loads (ROW 76) | ~131 | ~233 G | 1.64x |
+| + lane spread (this row) | ~143.5 | ~255 G | **1.49x** |
+| `dmin` factoring (ROW 75) | ZERO, reverted | | |

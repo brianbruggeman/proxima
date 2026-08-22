@@ -1433,38 +1433,68 @@ fn push_packed_row_blocked_body(
         source.push_str(&format!(
             "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
         ));
-        source.push_str(&format!("    uint slot = (uint)lane * {run}u;\n"));
-        source.push_str(&format!("    {element_type} acts[{run}];\n"));
+        // LANE SPREAD, ggml's `ix = tiisg/8`. Putting all 32 lanes on ONE
+        // super-block gives each lane 8 of its 256 elements, so the header
+        // decode is amortized over 8. Putting EIGHT lanes on a super-block
+        // and letting the 32 lanes span FOUR at once gives each lane a whole
+        // 32-element sub-block per decode — 4x the amortization, and the
+        // sub-block is exactly the granularity the header is constant over.
+        //
+        // `it` selects the sub-block, so `slot = it * 32` and every one of
+        // that lane's 32 elements shares a group and a nibble half. Levels
+        // are still pulled 8 at a time (`q4k_run8`) rather than 32, to keep
+        // the live register count near ggml's `yl[16]+yh[16]+sumf[4]`.
+        // eight lanes per super-block (ggml's `tiisg/8`), so the 32 lanes of
+        // a SIMD group span four super-blocks and each lane owns exactly one
+        // 32-element sub-block — the granularity the header is constant over.
+        let lanes_per_block = 8;
+        let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
+        source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
+        source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
+        source.push_str(&format!("    uint slot = it * {sub}u;\n"));
+        source.push_str(&format!("    {element_type} acts[{sub}];\n"));
         source.push_str(&format!(
-            "    for (int block_start = 0; block_start < (int)u.reduction_total; block_start += {Q4K_BLOCK_ELEMENTS}) {{\n"
+            "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
         ));
-        source.push_str(&format!("        for (int j = 0; j < {run}; ++j) {{\n"));
         source.push_str(&format!(
-            "            acts[j] = in{other}[other_base[0] + (long)(block_start + (int)slot + j) * other_stride];\n"
+            "    for (int ib = (int)ix; ib < super_blocks; ib += {}) {{\n",
+            SIMD_WIDTH as usize / lanes_per_block
+        ));
+        source.push_str(&format!(
+            "        int elem0 = ib * {Q4K_BLOCK_ELEMENTS} + (int)slot;\n"
+        ));
+        source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
+        source.push_str(&format!(
+            "            acts[j] = in{other}[other_base[0] + (long)(elem0 + j) * other_stride];\n"
         ));
         source.push_str("        }\n");
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str(&format!(
-            "            device const uchar *blk = in{weight} + (((int)weight_base[q] + block_start) / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES};\n"
+            "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {Q4K_BLOCK_BYTES};\n"
         ));
         source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
-        // the whole run's levels in two 32-bit loads, hoisted out of the
-        // element loop — see `q4k_run8`.
-        source.push_str(&format!("            {element_type} levels[{run}];\n"));
-        source.push_str("            q4k_run8(blk, slot, levels);\n");
-        source.push_str(&format!("            for (int j = 0; j < {run}; ++j) {{\n"));
+        source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+        source.push_str(&format!("                {element_type} levels[{run}];\n"));
         source.push_str(&format!(
-            "                {element_type} scratch[{}];\n",
+            "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
+        ));
+        source.push_str(&format!("                for (int j = 0; j < {run}; ++j) {{\n"));
+        source.push_str(&format!(
+            "                    {element_type} scratch[{}];\n",
             operand_count.max(1)
         ));
         source.push_str(&format!(
-            "                scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
+            "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
         ));
-        source.push_str(&format!("                scratch[{other}] = acts[j];\n"));
-        let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
-        source.push_str(&format!("                {element_type} value = {value_expr};\n"));
+        source.push_str(&format!(
+            "                    scratch[{other}] = acts[c * {run} + j];\n"
+        ));
+        let value_expr =
+            push_body_steps(source, resolved.element_body(), "                    ", element_type);
+        source.push_str(&format!("                    {element_type} value = {value_expr};\n"));
         let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-        source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+        source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
+        source.push_str("                }\n");
         source.push_str("            }\n");
         source.push_str("        }\n");
         source.push_str("    }\n");
