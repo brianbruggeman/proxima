@@ -7551,3 +7551,212 @@ no other family moved, so nothing was reverted. The deletion of
 none of that code was reverted, it was retired because this row's own change
 left it with zero callers, and it re-derives cleanly from git history if a
 future codec ever needs the same shape again.
+
+## ROW 93 — plan-reuse-work-once, part A landed: `emit` no longer runs on a pipeline-cache hit, `step_wall` 74.98 -> 66.78 ms (-10.95%). `prepare` measured NOT dominant, so B (bucketing) was not attempted this row
+
+**The number that hurts first: Metal decode is still 66.78 ms/token against
+llama.cpp Metal's 17.62 ms (3.79x slower) and our own CPU's 59.71 ms
+(1.12x slower) — this row closed roughly a third of the CPU gap, it did not
+close it.** `gpu_exec` (55.51 ms, 83.1% of the token) is completely untouched
+by this row; every ms this row recovered came out of the ~18.5 ms of
+shape-dependent host work the brief identified.
+
+**Allocation budget, stated before the change:** hot path (`encode_op`, once
+per `BoundOp` per token, 1196x/token) — zero *additional* heap allocations
+versus before; `kernel_cache_key` builds one `String` (tens of bytes) and
+`kernel_dispatch_shape` builds one `Vec<Binding>` (2-5 entries) per call,
+exactly the same two allocations `emit` was already making internally on
+every call (`bindings(resolved)`'s `Vec`, `entry_name`'s `String`) — this row
+relocates work, it does not add allocation count. Setup path (`plan()`,
+24x/decode) — unchanged. Cold path (miss) — unchanged, still calls the full
+`emit` for the MSL string.
+
+### Task 1 — the four uncounted `encode_op` calls, instrumented and named
+
+`pipeline_for`'s own lookup, `setComputePipelineState`, `bind_buffers`,
+`dispatch` (ROW 92's residual, `metal.rs:1873-1908` at that row's line
+numbers) now carry two new counter pairs, same `(_CALLS, _TICKS)` split-4019
+shape as every other stage: `PIPELINE_LOOKUP_CALLS`/`PIPELINE_LOOKUP_TICKS`
+wraps the whole `pipeline_for` call (cache lookup on a hit, lookup+compile on
+a miss); `ENCODE_DISPATCH_CALLS`/`ENCODE_DISPATCH_TICKS` wraps the remaining
+three (`setComputePipelineState`+`bind_buffers`+`dispatch`) as one span —
+splitting those three finer would spend more ticks reading the clock than the
+calls themselves take. Both feed `MetalStageTotals`/`metal_stage_totals()`
+and `token_breakdown_metal`'s printout exactly like every existing term.
+
+### Task 2 — root cause: `emit` built a 12 KB string to key a lookup that already hits
+
+`omega/examples/real_forward_emit_probe.rs` gained a permanent `source_len`/
+`entry_len` measurement (this row's own separate commit, ahead of this one):
+over the real 7B decode program's 1196 bound ops, **`kernel.source.len()`
+averages 12,225 bytes (max
+13,255)**, while `kernel.entry.len()` (the structural fingerprint `entry_name`
+already computed) averages **51.8 bytes** — a ~236x size difference. The
+production `PIPELINE_CACHE` is a `BTreeMap<String, Pipeline>`; a `.get()` walks
+`log2(1196) ≈ 10.2` tree levels, each comparing keys byte-by-byte up to their
+shared prefix length. Keying that lookup on the full MSL source (up to 13 KB)
+instead of a ~60-70 byte structural key was real, measured cost sitting
+entirely inside the OLD "inside-backend residual" ROW 92 could only bound
+(3.1-3.7 ms), not attribute — `pipeline_for`'s own call was never wrapped by a
+counter until this row.
+
+**The fix** (`omega/src/msl.rs`): `kernel_cache_key`/`kernel_dispatch_shape`
+split `emit`'s cheap half (structural key, `Vec<Binding>`, `GridSpec`) from its
+expensive half (the actual MSL render). `encode_op` calls the cheap half on
+EVERY op; `pipeline_for` calls the expensive `emit` only on a genuine cache
+miss (`omega/src/metal.rs`, `encode_op`/`pipeline_for`). `PIPELINE_CACHE`'s key
+changed from `kernel.source` to this fingerprint — same `BTreeMap`, only the
+key expression changed (guiding-principle 1: reuse the container, do not mint
+one).
+
+**The key must be provably at least as fine as the source it replaces, and the
+first cut of it was NOT** — `entry_name` alone (rank/operand-count/body/
+reduce-op/keep/init/gather-bits) collapsed two real distinctions in the actual
+7B graph: (a) `output_axes.len()` at the same total rank (two folds keeping a
+different NUMBER of axes), and, the one that actually broke tests, (b)
+`output_axes`' own ORDERED axis SET at the same rank AND the same axis count —
+`render_reduce`/`push_cooperative_reduce_body` bake the literal axis index tied
+to each `u.output_extents[index]` uniform slot straight into the source text
+(`coord_q[{dim}] = ... u.output_extents[{index}]`), so two folds sharing every
+field `entry_name` recorded could still emit different bodies. The regression
+was caught by `omega::metal_parity attention_block_spec_parity_matches_within_epsilon`
+and `omega::backend_parity the_wrapper_agrees_with_itself_across_cpu_and_metal`
+going from PASS to FAIL against the real, unrelated forward graph — exactly
+the mechanism guiding-principle 14 describes: the incumbent (the CPU oracle,
+here) is right until proven otherwise, and it caught a bug in the new code, not
+in itself. Fixed by folding dtype (`type_token`'s "half"/"float" split),
+per-operand `PackedCodec`, the row-blocked-path boolean, and `output_axes`' own
+full ordered sequence into `kernel_cache_key`. Five new tests in `msl.rs`
+encode this as a permanent regression gate — `distinct_output_rank_...`,
+`distinct_output_axis_set_at_the_same_output_rank_...`,
+`output_axis_order_at_the_same_axis_set_...`, `distinct_packed_codec_...`,
+`distinct_dtype_...` — each builds a real minimal pair, asserts the cache keys
+differ, AND asserts the emitted `source` actually does differ (proving the key
+is not being ASKED to distinguish two things that were secretly identical).
+
+### Per-term table, steady decode (`step=1..23`, excludes the one-time
+`step=0` prefill), 3 runs x 23 steps = 69 samples/side, paired via `git
+worktree` at two SHAs in the SAME session, `--release`, quiet box throughout
+(`uptime` 1-min load 3.3-5.8 across the whole window, no other benches
+running; see Notes for the one caveat)
+
+BEFORE = `828da3d` (this session's own starting commit), AFTER = `cd725da`
+(this row's landing). Values are the mean of three per-run steady-state
+averages; CoV computed across the three per-run means.
+
+| term | BEFORE (ms) | CoV | AFTER (ms) | CoV | delta | share of AFTER step_wall |
+|---|---|---|---|---|---|---|
+| `prepare` | 1.877 | 0.87% | 1.875 | 0.57% | flat (noise) | 2.81% |
+| `emit` | 6.370 | 0.57% | **0.735** | 2.81% | **-5.634 ms, -88.5%** | 1.10% |
+| `pipeline_lookup` | n/a (uncounted) | | 0.037 | 6.7%* | new counter | 0.06% |
+| `encode_dispatch` | n/a (uncounted) | | 0.495 | 0.8% | new counter | 0.74% |
+| `block_upload` | 2.474 | 1.53% | 2.465 | 0.24% | flat (noise) | 3.69% |
+| `op_setup` | 4.695 | 2.23% | 4.561 | 0.97% | -0.134 ms, -2.9% (within noise) | 6.83% |
+| `gpu_exec` | 55.572 | 0.03% | 55.515 | 0.13% | flat, untouched by this row | 83.14% |
+| `readback` | 0.218 | 5.8%* | 0.212 | 3.3% | flat (noise) | 0.32% |
+| **`evaluate` (sum, measured directly)** | **74.831** | | **66.640** | | **-8.191 ms** | |
+| **`step_wall` (sum, measured directly)** | **74.976** | 0.18% | **66.776** | 0.11% | **-8.200 ms, -10.94%** | 100% |
+| inside-backend residual (`evaluate` - the 8 named metal_stage terms) | 3.626 (4.85%) | | 0.745 (1.12%) | | | |
+
+\*`pipeline_lookup` and `readback` CoV sit slightly over 5% on tiny absolute
+terms (37 µs and 212 µs respectively) — reporting the range rather than
+trusting the point estimate, per this file's own rule: `pipeline_lookup`
+36-43 µs across the 3 runs (still 170x smaller than the 6.3 ms `emit` it
+replaced), `readback` 204-230 µs.
+
+**Mechanism, traced all the way down:** the whole -8.2 ms/token comes apart
+into two effects of the ONE code change. (1) `emit`'s own -5.634 ms is
+`kernel_cache_key`/`kernel_dispatch_shape` replacing the full MSL render on
+every one of the 1196 cache-HIT ops/token (`pipeline_hits_total` = 27,508 =
+23 steps x 1196, exactly, both sides — steady decode never misses on either
+build). (2) The remaining ≈-2.6 ms is the OLD residual's own biggest piece:
+`pipeline_for`'s `BTreeMap<String,_>.get()` used to compare ~12 KB source
+strings ~10 times per lookup; it now compares ~60-70 byte structural keys.
+That work was always there, it was simply invisible before this row's own
+`PIPELINE_LOOKUP_TICKS`/`ENCODE_DISPATCH_TICKS` counters existed to attribute
+it — ROW 92's "3.1-3.7 ms residual, four uncounted calls" estimate was right
+about WHICH calls, wrong about the reason: most of that time was never the
+four calls' fixed cost, it was the key comparison cost the four calls'
+`pipeline_for` call paid on a KEY THIS ROW MADE 236x SHORTER.
+
+### A vs B: measured, not assumed
+
+`prepare` is 2.81% of `step_wall` after this row's fix (1.875 ms), smaller
+than `op_setup` (6.83%) and two orders smaller than `gpu_exec` (83.14%) — **not
+dominant**, so per this row's own brief ("Only if A leaves `prepare` dominant:
+bucket the KV-cache extent"), **Candidate B (KV-cache extent bucketing) was
+NOT attempted this row.** `plan_hits=0, plan_misses=24` is unchanged on both
+sides (confirmed in every one of the 6 raw logs) — this row does not touch the
+root blocker, it removes work that was being redone on every miss regardless of
+whether the miss was avoidable.
+
+**`op_setup` (4.561 ms, 6.83%) is the next named lever, and it is explicitly
+NOT landed this row — sized, not attempted:** the brief's own framing ("a
+`Plan` can own its per-op output buffers and uniforms... neither of these
+requires plan reuse") does not hold for the FIRST half of that claim as
+stated. A `Plan` today is built and executed exactly ONCE (`plan_misses=24`,
+`plan_hits=0` — every token gets a fresh `Plan`), so moving `op_setup`'s
+allocations from execute-time into plan-build-time would relocate the SAME
+1196 allocations from `op_setup_ms` into `prepare_ms`, not remove any of
+them — a real win here needs either (a) Candidate B landing first (so a
+`Plan`, and therefore its pre-allocated buffers, is genuinely reused across
+multiple tokens), or (b) a size-keyed buffer POOL that reuses already-retired
+output buffers WITHIN one `execute_plan` call (`prepared.retires[position]`
+already frees them at exactly the right point — pooling would need no cross-
+token plan reuse to pay off, matching the brief's actual intent). (b) is a
+real, separate, riskier change (buffer-aliasing correctness, its own bench,
+its own commit) that this row's time budget did not cover; recorded here so
+the next session does not re-derive this from scratch.
+
+### Rollback rows
+
+None — this row's only correctness excursion was caught and fixed INSIDE the
+same working session, before any commit: the first cut of `kernel_cache_key`
+(entry_name + dtype + codec, no axis sequence) failed
+`attention_block_spec_parity_matches_within_epsilon` and
+`the_wrapper_agrees_with_itself_across_cpu_and_metal` (both real GPU-vs-CPU
+parity tests, not this row's own new tests) before it was ever committed. The
+fix that made both pass is the SAME commit that landed the feature — there is
+no separate revert to log because nothing broken was ever shipped.
+
+### Gates, actual numbers
+
+- `cargo nextest run -p omega --features std,cpu,metal` -> **73 passed**, 1
+  skipped (67 pre-existing + 6 new: `distinct_output_rank_...`,
+  `distinct_output_axis_set_...`, `output_axis_order_...`,
+  `distinct_packed_codec_...`, `distinct_dtype_...`,
+  `same_structure_different_extents_share_one_cache_key`)
+- `cargo nextest run -p proxima-tensor --features std,instrument` -> **363
+  passed**, 4 skipped (unchanged from ROW 92 — this row never touches
+  `proxima-tensor`)
+- `cargo nextest run -p proxima-model-interop --features metal,instrument` ->
+  **24 passed**, 6 skipped (the host-local-checkpoint-gated tests; unchanged
+  count from before this row)
+- `cargo clippy -p omega --features std,cpu,metal -- -D warnings` -> clean
+- `cargo clippy -p proxima-model-interop --features metal,instrument -- -D
+  warnings` -> clean
+- generated text, all 6 timed runs (3 BEFORE, 3 AFTER), byte-identical:
+  `"Here is a simple Python function that returns the nth Fibonacci number
+  using recursion:\n\n```"` — matches llama.cpp's own captured answer for this
+  prompt and checkpoint (the incumbent-parity gate, guiding-principle 14)
+
+### Re-prove command (guiding-principle 16)
+
+```
+git worktree add --detach /tmp/row93-before 828da3d
+CARGO_TARGET_DIR=/tmp/row93-before-target cargo build --release --tests \
+  -p proxima-model-interop --features metal,instrument \
+  --manifest-path /tmp/row93-before/Cargo.toml
+CARGO_TARGET_DIR=/tmp/row93-after-target cargo build --release --tests \
+  -p proxima-model-interop --features metal,instrument
+# run each binary 3x:
+<bin> --ignored --exact \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --nocapture
+```
+requires the host-local checkpoint at `ServingConfig::DEFAULT_MODEL_PATH`
+(`serving.rs`) and a real Metal device; parse `token_breakdown`/
+`token_breakdown_metal`/`metal_decode_summary` lines from stdout. The
+`source_len`/`entry_len` probe re-runs as `cargo run --release --example
+real_forward_emit_probe -p omega --features std,cpu,metal` against the
+UNMODIFIED (in-tree) probe — no fixture required, needs no checkpoint.
