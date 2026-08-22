@@ -36,7 +36,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
     let nests = bind(&program, &shapes, &[]).expect("elementwise lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("elementwise emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("elementwise emits")
 }
 
 /// `Erf` has no `metal_stdlib` counterpart (verified against the real
@@ -64,7 +64,7 @@ fn elementwise_erf_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("erf infers");
     let nests = bind(&program, &shapes, &[]).expect("erf lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("erf emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("erf emits")
 }
 
 fn fused_matmul_kernel() -> omega::Kernel {
@@ -112,7 +112,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
     let nests = bind(&program, &shapes, &[]).expect("matmul lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("matmul emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("matmul emits")
 }
 
 fn cumsum_kernel() -> omega::Kernel {
@@ -140,7 +140,7 @@ fn cumsum_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
     let nests = bind(&program, &shapes, &[]).expect("cumsum lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("cumsum emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("cumsum emits")
 }
 
 /// `table[ids[s], d]`: a standalone elementwise gather.
@@ -188,7 +188,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
     let nests = bind(&program, &shapes, &[]).expect("embedding lookup lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("embedding lookup emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("embedding lookup emits")
 }
 
 /// `sum_k table[ids[i], k] * weight[k, j]`: a gather fused into a reduction.
@@ -258,7 +258,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("embedding matmul infers");
     let nests = bind(&program, &shapes, &[]).expect("embedding matmul lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("embedding matmul emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("embedding matmul emits")
 }
 
 /// `Op::Iota` standing alone: a leaf with no operands, so this is the
@@ -276,7 +276,7 @@ fn iota_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("iota infers");
     let nests = bind(&program, &shapes, &[]).expect("iota lowers");
-    omega::emit(&nests[0], &std::collections::BTreeSet::new()).expect("iota emits")
+    omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("iota emits")
 }
 
 #[test]

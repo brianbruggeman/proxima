@@ -42,5 +42,6 @@ pub use metal::{
     MetalError, Plan, execute, execute_plan, execute_plan_named, page_size, plan, plan_named,
 };
 pub use msl::{
-    Binding, GridSpec, Kernel, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL, emit,
+    Binding, GridSpec, Kernel, PackedCodec, PackedOperands, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS,
+    Q4K_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, emit,
 };

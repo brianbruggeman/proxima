@@ -136,7 +136,7 @@ fn run() {
         let shapes = infer(&program, &[]).expect("probe program infers");
         let nests = bind(&program, &shapes, &[sum]).expect("probe program binds");
         println!("q4k_matvec_probe bound_ops={} (1 == fused, 2 == materializing)", nests.len());
-        let kernel = omega::emit(&nests[0], &std::collections::BTreeSet::new())
+        let kernel = omega::emit(&nests[0], &std::collections::BTreeMap::new())
             .expect("probe kernel emits");
         println!("--- emitted kernel entry={} grid={:?}", kernel.entry, kernel.grid);
         println!("{}", kernel.source);
