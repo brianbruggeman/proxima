@@ -557,12 +557,19 @@ pub enum PackedRowBlockRejection {
     OperandCountNotTwo,
     /// Neither exactly zero nor exactly one operand is packed.
     NotExactlyOnePackedOperand,
-    /// The reduce folds more than one axis (or zero) into its output.
+    /// The reduce folds ZERO axes into its output — degenerate, never
+    /// observed on a real matmul (kept so the match stays exhaustive over
+    /// every way [`reduce_dims`](reduction_dims) can come back empty).
     NotExactlyOneReduceDim { reduce_dims: Vec<u16> },
-    /// The packed operand's stride at the one reduce dim is not 1.
+    /// More than one reduce dim, but they do NOT nest contiguously for both
+    /// operands (see [`classify_packed_row_block`]'s own doc for the
+    /// contiguous-fold check this fails) — cannot be treated as one
+    /// flattened reduction, so the generic per-element path runs instead.
+    ReduceDimsNotContiguous { reduce_dims: Vec<u16> },
+    /// The packed operand's stride at the innermost reduce dim is not 1.
     NonUnitWeightStride { stride: i64 },
-    /// The reduce dim's extent is not a whole multiple of
-    /// [`Q4K_BLOCK_ELEMENTS`].
+    /// The flattened extent across every reduce dim is not a whole
+    /// multiple of [`Q4K_BLOCK_ELEMENTS`].
     ExtentNotBlockMultiple { extent: u64 },
 }
 
@@ -597,23 +604,52 @@ fn classify_packed_row_block(resolved: &BoundOp, quantized: &[bool]) -> Result<P
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
         .collect();
-    let [reduce_dim] = reduce_dims[..] else {
+    let Some(&innermost) = reduce_dims.last() else {
         return Err(PackedRowBlockRejection::NotExactlyOneReduceDim { reduce_dims });
     };
-    // the packed operand must be contiguous along the reduction dim (its
-    // super-blocks run along `k`), and the extent must be whole super-blocks
-    let stride = resolved.operands()[weight].1.stride(reduce_dim);
+    // MULTIPLE reduce dims are only a single logical reduction if they are
+    // CONTIGUOUS in memory for BOTH operands: `attn_output`'s own reduce
+    // folds three axes (kv-head-group x query-group x head-dim) that are
+    // exactly the row-major decomposition of one 4096-wide embedding axis
+    // (`docs/discipline.md`'s "print the gate, don't infer it" table: weight
+    // strides `[512, 128, 1]` against extents `[8, 4, 128]` — each outer
+    // dim's stride equals the product of every dim nested inside it). The
+    // row-blocked kernel body walks the flattened `reduction_total` range
+    // with ONE stride per operand (`crate::metal::pack_reduce_uniforms`
+    // already packs `reduction_total` as the product across every reduce
+    // dim, generic in dim count), so folding is sound exactly when this
+    // check passes — never a special case for three dims specifically.
+    for window in reduce_dims.windows(2) {
+        let [outer, inner] = window else {
+            unreachable!("windows(2) always yields a two-element slice")
+        };
+        let inner_extent = resolved.extents[*inner as usize] as i64;
+        for operand in [weight, other] {
+            let layout = &resolved.operands()[operand].1;
+            let outer_stride = layout.stride(*outer);
+            let inner_stride = layout.stride(*inner);
+            if outer_stride != inner_extent * inner_stride {
+                return Err(PackedRowBlockRejection::ReduceDimsNotContiguous {
+                    reduce_dims: reduce_dims.clone(),
+                });
+            }
+        }
+    }
+    // the packed operand must be contiguous along the INNERMOST (fastest)
+    // reduce dim (its super-blocks run along `k`), and the flattened extent
+    // across every folded reduce dim must be whole super-blocks.
+    let stride = resolved.operands()[weight].1.stride(innermost);
     if stride != 1 {
         return Err(PackedRowBlockRejection::NonUnitWeightStride { stride });
     }
-    let extent = resolved.extents[reduce_dim as usize];
+    let extent: u64 = reduce_dims.iter().map(|&dim| resolved.extents[dim as usize]).product();
     if !(extent as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(PackedRowBlockRejection::ExtentNotBlockMultiple { extent });
     }
     Ok(PackedRowBlock {
         weight,
         other,
-        reduce_dim: reduce_dim as usize,
+        reduce_dim: innermost as usize,
     })
 }
 
@@ -1471,10 +1507,13 @@ fn push_packed_row_blocked_body(
         }
         source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
         source.push_str(&format!("        long ob = u.operand_base[{other}];\n"));
-        for dim in 0..rank {
-            if dim == reduce_dim {
-                continue;
-            }
+        // Iterate the OUTPUT axes directly rather than `0..rank` minus one
+        // excluded dim: `reduce_dim` is now the innermost of possibly
+        // SEVERAL folded reduce dims (see `classify_packed_row_block`'s
+        // contiguous-fold check), so `output_axes` — already the exact
+        // complement of every reduce dim, however many there are — is the
+        // correct and simpler set to walk here regardless of reduce rank.
+        for &dim in output_axes {
             source.push_str(&format!(
                 "        wb += coord_q[{dim}] * u.operand_strides[{weight}][{dim}];\n"
             ));
