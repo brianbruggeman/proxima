@@ -84,6 +84,16 @@ pub enum InteropError {
     #[error(transparent)]
     Tensor(#[from] proxima_tensor::TensorError),
 
+    /// [`crate::bind::dequantize_packed_for_metal`] dequantized a packed
+    /// `Q5_K`/`Q6_K` block whose name matches none of
+    /// [`crate::bind::matmul_weight_dims`]'s known matmul-weight suffixes --
+    /// every name that reaches this codec path is one `bind_matmul_weight`
+    /// itself bound, so this is a program-construction invariant violation,
+    /// not a caller mistake.
+    #[cfg(feature = "metal")]
+    #[error("packed weight {name:?} has no known matmul out_dim/in_dim to transpose against")]
+    UnknownMatmulWeightName { name: String },
+
     /// [`crate::generate`]'s prompt encode/decode step failed --
     /// propagated from `proxima_tokenizer` rather than re-derived.
     #[cfg(feature = "std")]

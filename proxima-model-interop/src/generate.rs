@@ -249,10 +249,11 @@ fn select_backend(config: &ServingConfig) -> Backend {
 #[cfg(feature = "metal")]
 fn dequantize_unsupported_metal_weights(
     packed: &[(alloc::string::String, QuantizedBlock<'_>)],
+    architecture: &ModelArchitecture,
 ) -> Result<Vec<(alloc::string::String, Vec<f32>)>, InteropError> {
     let mut converted = Vec::new();
     for (name, block) in packed {
-        if let Some(floats) = dequantize_packed_for_metal(block)? {
+        if let Some(floats) = dequantize_packed_for_metal(name, block, architecture)? {
             converted.push((name.clone(), floats));
         }
     }
@@ -487,7 +488,7 @@ impl<'file> LoadedModel<'file> {
 
         #[cfg(feature = "metal")]
         let metal_converted_weights: Vec<(String, Vec<f32>)> = if runtime.backend() == Backend::Metal {
-            dequantize_unsupported_metal_weights(&self.weights.packed)?
+            dequantize_unsupported_metal_weights(&self.weights.packed, &self.architecture)?
         } else {
             Vec::new()
         };

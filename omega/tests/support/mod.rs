@@ -30,6 +30,17 @@ pub type RealForwardFixture = (Vec<Op>, Vec<u64>, Vec<NodeId>, Vec<(String, Vec<
 /// block input -- sized from the graph's own inferred shapes, so this needs
 /// no checkpoint on disk.
 pub fn real_forward_fixture() -> RealForwardFixture {
+    real_forward_fixture_with_cached_len(0)
+}
+
+/// [`real_forward_fixture`], but with symbol 1 (`cached_len`) set to
+/// `cached_len` instead of always zero -- exercises the online-softmax
+/// combine's cached-block reduce over a genuinely non-empty range, the one
+/// shape a single-step (`cached_len == 0`) fixture can never reach since
+/// every fold over the `t` axis degenerates to its `ReduceInit` identity
+/// there. The KV-cache named blocks are sized from the same inferred
+/// shapes, so a non-zero `cached_len` needs no checkpoint either.
+pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixture {
     const VOCAB: u32 = 64;
     const EMBEDDING: u32 = 64;
     const FEED_FORWARD: u32 = 128;
@@ -56,7 +67,7 @@ pub fn real_forward_fixture() -> RealForwardFixture {
         roots.push(*value);
     }
 
-    let symbols = vec![1u64, 0u64];
+    let symbols = vec![1u64, cached_len];
     let shapes = infer(&program, &symbols).expect("the real forward infers");
 
     let mut named: Vec<(String, Vec<f32>)> = Vec::new();
