@@ -637,15 +637,19 @@ pub fn evaluate_quantized_with_scratch(
     #[cfg(feature = "instrument")]
     let mut diag_peak_position = 0usize;
     // DIAGNOSTIC (proxima-debugger, remove before landing): wall time by
-    // node kind for this one serial evaluation loop -- `evaluate_quantized`
-    // never routes through `evaluate_node_parallel`, so the only per-node
-    // parallelism a forward pass gets is `run_reduce_quantized`'s internal
-    // `matmul_rows_threaded` dispatch (the "reduce_matmul_quantized"
-    // bucket below); every other kind runs fully serial on this one
-    // thread. Keyed by the label `diag_node_kind_label` derives from the
-    // same `quantized_operand` check `run_reduce_with_quantized_weights`
-    // itself uses, so the bucket a node lands in matches the arm that
-    // actually ran it.
+    // node kind for this one evaluation loop -- `evaluate_quantized` never
+    // routes through `evaluate_node_parallel`, so per-node parallelism here
+    // comes from each node kind's own session-based dispatch instead:
+    // `run_reduce_quantized`'s `matmul_rows_threaded` (the
+    // "reduce_matmul_quantized" bucket), `run_elementwise_dispatch` (the
+    // "elementwise" bucket), and `run_reduce_dispatch` (the
+    // "reduce_f32_dense" bucket) alike fall back to fully serial on this
+    // one thread whenever the session is absent, the node is below
+    // threshold, or `BoundOp::split_aligned` finds no axis to split.
+    // Keyed by the label `diag_node_kind_label` derives from the same
+    // `quantized_operand` check `run_reduce_with_quantized_weights` itself
+    // uses, so the bucket a node lands in matches the arm that actually
+    // ran it.
     #[cfg(feature = "instrument")]
     let mut diag_kind_ticks: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
     // DIAGNOSTIC (proxima-debugger, remove before landing): everything in
@@ -1917,7 +1921,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
                 Some(quantized_weights) => {
                     run_reduce_with_quantized_weights(resolved, buffers, quantized_weights, session, output)
                 }
-                None => run_reduce(resolved, buffers, output),
+                None => run_reduce_dispatch(resolved, buffers, session, output),
             }
         }
         BoundOpKind::Reduce {
@@ -2392,6 +2396,108 @@ where
             unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
         let outer_end = outer_start + slice_len / self.inner_len;
         run_elementwise_range(self.resolved, self.buffers, outer_start, outer_end, chunk_output)
+    }
+}
+
+/// Dispatches one dense (non-quantized) `Keep::Reduce` fold across the
+/// cohort when a `session` is open and the node clears
+/// [`PARALLEL_THRESHOLD`] — the parallel arm `run_node_into`'s
+/// `Keep::Reduce` non-quantized branch never had before this. Before this,
+/// that branch called [`run_reduce`] directly regardless of `session` or
+/// worker count (see `diag_node_kind_label`'s own doc: "the dense f32 arm
+/// ... serial"), which is why `reduce_f32_dense` showed no thread scaling
+/// at all (`proxima-tensor/docs/discipline.md` ROW 68).
+///
+/// Reuses [`BoundOp::split_aligned`] exactly as [`evaluate_node_parallel`]
+/// already does for the plain (non-quantized) evaluator — the only
+/// difference is which threading primitive runs the chunks (the cohort
+/// session here, `nest_pool` there via [`run_chunks_threaded`]), not how
+/// the chunks are produced or rebased. This is what makes the
+/// [`BoundOp::split_aligned`] width-axis fallback (this crate's `bind`
+/// module) reachable from the production quantized decode loop at all —
+/// without a caller here to invoke it, that fallback only ever fired for
+/// [`evaluate_parallel`]'s callers, never for `evaluate_quantized`'s.
+fn run_reduce_dispatch<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    session: Option<&MatmulSession<'_>>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let Some(session) = session else {
+        return run_reduce(resolved, buffers, output);
+    };
+    if element_count(&resolved.extents) < PARALLEL_THRESHOLD {
+        return run_reduce(resolved, buffers, output);
+    }
+    let workers = matmul_worker_count();
+    if workers <= 1 {
+        return run_reduce(resolved, buffers, output);
+    }
+    let chunk_count = workers * OVERSUBSCRIBE;
+    let Some(chunks) = resolved.split_aligned(chunk_count, SPLIT_ALIGNMENT) else {
+        return run_reduce(resolved, buffers, output);
+    };
+    if chunks.len() < 2 {
+        return run_reduce(resolved, buffers, output);
+    }
+
+    let mut slice_ranges = Vec::with_capacity(chunks.len());
+    let mut remaining = &mut *output;
+    for chunk in &chunks {
+        let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
+        slice_ranges.push((this_chunk.as_mut_ptr() as usize, this_chunk.len()));
+        remaining = rest;
+    }
+
+    let round = ReduceLeadingRound {
+        chunks: &chunks,
+        buffers,
+        slice_ranges: &slice_ranges,
+    };
+    let report = session.run(&round);
+    if let Some(error) = report.first_error {
+        return Err(error);
+    }
+    if report.abandoned > 0 {
+        return Err(TensorError::ThreadedChunkFailed {
+            chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
+            reason: alloc::string::String::from(
+                "cohort member panicked while running this dense-reduce chunk",
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// [`run_reduce_dispatch`]'s cohort dispatch shape: one round over
+/// pre-rebased [`BoundOp`] chunks from [`BoundOp::split_aligned`], each run
+/// through its own [`run_reduce`] call and writing to its own disjoint
+/// output sub-slice — simpler than [`ElementwiseRowRound`] because
+/// `split_aligned` already did the rebasing this needs; there is no
+/// separate row-range bookkeeping to carry.
+struct ReduceLeadingRound<'round, B> {
+    chunks: &'round [BoundOp],
+    buffers: &'round [Option<B>],
+    slice_ranges: &'round [(usize, usize)],
+}
+
+impl<B> CohortRound<TensorError> for ReduceLeadingRound<'_, B>
+where
+    B: Deref<Target = [f32]> + Sync,
+{
+    fn chunks(&self) -> usize {
+        self.slice_ranges.len()
+    }
+
+    fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TensorError> {
+        let (slice_address, slice_len) = self.slice_ranges[chunk.0];
+        // SAFETY: unique to this chunk by construction (`split_at_mut` in
+        // `run_reduce_dispatch` before the round starts); the parent
+        // `output` outlives every reconstructed slice because
+        // `CohortSession::run` does not return until every member has
+        // reported done.
+        let chunk_output = unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
+        run_reduce(&self.chunks[chunk.0], self.buffers, chunk_output)
     }
 }
 
@@ -12446,6 +12552,48 @@ mod tests {
             quantized.root(),
             sequential.root(),
             "cohort-dispatched elementwise output diverges from the sequential path"
+        );
+    }
+
+    /// [`run_reduce_dispatch`]'s cohort path, the dense (non-quantized)
+    /// `Keep::Reduce` counterpart of the elementwise test directly above.
+    /// `m == 1` (one sequence position — a real forward's exact decode
+    /// shape, `proxima-tensor/docs/discipline.md` ROW 68) with `n` (8192)
+    /// large enough that `m * k * n` clears `PARALLEL_THRESHOLD` and `n`
+    /// itself clears every worker count under test, so
+    /// `BoundOp::split_aligned`'s width-axis fallback actually fires and
+    /// drives a [`ReduceLeadingRound`] through the cohort, not just the
+    /// sequential path. Before `run_reduce_dispatch` existed, this arm
+    /// called `run_reduce` directly regardless of worker count; before the
+    /// width-axis fallback existed, `m == 1` meant `split_aligned` always
+    /// returned `None` even with a dispatcher wired up. Both are load-bearing
+    /// here at once.
+    #[rstest]
+    #[case::two_workers(2)]
+    #[case::three_workers(3)]
+    #[case::eight_workers(8)]
+    fn evaluate_quantized_matches_evaluate_for_a_decode_shaped_dense_matmul(#[case] workers: usize) {
+        // SAFETY: same one-test-per-process argument as
+        // `evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain`.
+        unsafe {
+            std::env::set_var("PROXIMA_MATMUL_WORKERS", workers.to_string());
+        }
+
+        let (m, k, n) = (1usize, 64usize, 8192usize);
+        let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
+        let lhs: Vec<f32> = (0..m * k).map(|value| value as f32 * 0.01).collect();
+        let rhs: Vec<f32> = (0..k * n).map(|value| value as f32 * 0.01).collect();
+
+        let sequential = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("sequential evaluates");
+        let blocks = [QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)];
+        let quantized =
+            evaluate_quantized(&program, &[], &blocks, &[]).expect("quantized evaluates");
+
+        assert_eq!(quantized.shape(), sequential.shape());
+        assert_eq!(
+            quantized.root(),
+            sequential.root(),
+            "cohort-dispatched decode-shaped dense reduce diverges from the sequential path"
         );
     }
 
