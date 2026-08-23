@@ -26,9 +26,9 @@ use proxima_protocols::quic::tls::rustls_provider::RustlsServerProvider;
 use proxima_protocols::quic::tls::rustls_provider::{RustlsClientProvider, RustlsConfig};
 use proxima_protocols::quic::transport_parameters::TransportParameters;
 use proxima_protocols::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN;
+use proxima_telemetry::{debug, trace, warn};
 use rustls::pki_types::ServerName;
 use tokio::net::UdpSocket;
-use tracing::{debug, trace, warn};
 
 #[cfg(test)]
 use proxima_http::http3::native::driver::drive_server_step;

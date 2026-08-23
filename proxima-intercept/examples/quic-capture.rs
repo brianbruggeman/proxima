@@ -33,8 +33,10 @@ use proxima_protocols::quic::endpoint::{ConnectionHandle, DatagramClassification
 use proxima_protocols::quic::time::Instant as ProtoInstant;
 use proxima_protocols::quic::tls::rustls_provider::{RustlsConfig, RustlsServerProvider};
 use proxima_protocols::quic::transport_parameters::TransportParameters;
+use proxima_telemetry::emit::{EnvFilter, global};
+use proxima_telemetry::export::install_console_recorder;
+use proxima_telemetry::{debug, error, info, warn};
 use tokio::net::UdpSocket;
-use tracing::{debug, error, info, warn};
 
 const BIND_DEFAULT: &str = "0.0.0.0:4433";
 static DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -58,12 +60,9 @@ struct ConnEntry {
 
 #[proxima::main(runtime = "tokio", flavor = "multi_thread")]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".parse().unwrap()),
-        )
-        .init();
+    let directive = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    global::install(EnvFilter::parse(&directive));
+    let _recorder = install_console_recorder().expect("install console telemetry");
 
     let bind = std::env::var("PROXIMA_QUIC_BIND").unwrap_or_else(|_| BIND_DEFAULT.to_string());
     let dump_dir =

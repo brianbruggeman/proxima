@@ -23,7 +23,6 @@ tokio-rustls = { workspace = true }
 futures = { workspace = true }
 flate2 = "1"
 serde_json.workspace = true
-tracing.workspace = true
 webpki-roots.workspace = true
 # unconditional so dep-graph readers see the recording layer without
 # chasing feature flags. functionality stays behind the `intercept-capture` /
@@ -38,14 +37,13 @@ serde = { workspace = true, features = ["derive"], optional = true }
 proxima-http = { workspace = true, optional = true, features = ["http3-native"] }
 zstd.workspace = true
 brotli = "8.0.3"
+proxima-telemetry = { workspace = true, features = ["emit"] }
 
 [dev-dependencies]
 proxima = { path = "..", features = ["http1", "tcp", "test-support", "tokio"] }
 criterion = { workspace = true, features = ["html_reports", "async_tokio"] }
-rstest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
 toml.workspace = true
 proxima-protocols = { workspace = true, default-features = false, features = ["http2_codec-alloc"] }
 rand.workspace = true
