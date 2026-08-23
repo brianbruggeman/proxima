@@ -3900,7 +3900,6 @@ dependencies = [
  "memchr",
  "proxima",
  "proxima-core",
- "rstest",
  "serde",
  "serde_json",
  "simd-json",
