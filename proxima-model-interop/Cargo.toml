@@ -66,6 +66,7 @@ metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
 
 [dependencies]
 arrayvec.workspace = true
+fastrand.workspace = true
 omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
