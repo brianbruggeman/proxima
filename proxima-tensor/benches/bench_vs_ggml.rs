@@ -1119,8 +1119,12 @@ fn main() {
         .measurement_time(Duration::from_secs(10));
 
     // definitive-measurement run: row_f only, per 75-minute wall-clock ceiling.
-    // other rows left defined (unused) rather than deleted.
-    let _ = row_a_home_turf_quantized_gemv;
+    // other rows left defined (unused) rather than deleted. `PROXIMA_BENCH_ROWS`
+    // (comma-separated row letters, e.g. "a,f") opts specific rows back in
+    // without touching this default -- added so row_a (the decode-shape
+    // quantized-GEMV home-turf arm against ggml, never run in this
+    // initiative per `docs/discipline.md`) is reachable without a permanent
+    // main() rewrite each time it is needed.
     let _ = row_b_f32_gemv;
     let _ = row_c_gather_fused_reduce;
     let _ = row_d_deep_chain;
@@ -1128,7 +1132,13 @@ fn main() {
     let _ = row_g_mlp_chain;
     let _ = row_h_elementwise_chain;
 
-    row_f_control_bare_gemm(&mut criterion);
+    let rows = std::env::var("PROXIMA_BENCH_ROWS").unwrap_or_else(|_| "f".to_string());
+    if rows.split(',').any(|row| row == "a") {
+        row_a_home_turf_quantized_gemv(&mut criterion);
+    }
+    if rows.split(',').any(|row| row == "f") {
+        row_f_control_bare_gemm(&mut criterion);
+    }
 
     criterion.final_summary();
 }

@@ -11905,3 +11905,139 @@ The second is checkable from the constant and the decode shapes without executin
 ### Bounding it before anyone builds
 
 Decode is our worst CPU ratio: **56.55 ms/tok vs llama's 39.14, 1.445x** (ROW 116, one window). If the slowest worker sets the round and spread is ~18%, perfect balance recovers at most that fraction of the parallel portion. It narrows the ratio; it does not close it. **Size it before building it.** Three kernel attempts today were built before their deciding property was measured, and all three lost.
+
+## ROW 119 — MAC count is bit-exact at 1.0000x (no GQA blowup, no waste); the gap is orchestration, not the kernel — our own single-thread kernel beats ggml's single-thread kernel by ~4.2x on identical real weight bytes, and matches what production needs 8 threads to achieve
+
+**Headline, stated first: nobody had counted, so nobody knew whether the deficit was extra MACs or slower MACs. It is neither, in the sense the task feared — it is a THIRD thing. MAC count is exact (ratio 1.0000x, zero-residual, GQA correctly shares K/V with no replication). And the raw kernel — the exact function production calls — is not slow either: called directly, single-threaded, on real GGUF weight bytes, it beats ggml's own single-threaded `ggml_mul_mat` by ~4.2x on every one of the 7 per-layer decode shapes. What production actually realizes at 1 thread (178-190ms/step, ROW68/99) is ~3.75x SLOWER than what this same kernel demonstrably does in isolation (47.2-48.1ms/step) — and production's own 8-thread number (48.40ms, ROW99) lands almost exactly on that single-thread kernel-only prediction. Eight threads are buying back orchestration overhead sitting above an already-winning kernel, not multiplying kernel throughput.** Host: Apple M1 Max, 10 logical cores, 64 GiB, `uptime` polled before every timed run (see per-section loadout below, ranged 1.87-8.17 across this session, two consecutive polls <=4 before each timed run per this task's own gate). Repo: `feat/tensor-consolidated` @ `f0271d7`, release profile for every timed run (`cargo build --release`/bench binaries), debug profile for nextest/clippy gates only. `CARGO_TARGET_DIR` isolated under this session's own scratch dir.
+
+### Allocation budget (stated first, per this initiative's own method)
+
+This is a pure measurement task: no new allocation on any path. The one code change is a benches-only `main()` edit (env-var row selector, see below) — zero production allocations added, zero production behavior changed.
+
+### Architecture, read not assumed
+
+`architecture_from_metadata` (`proxima-model-interop/src/bind.rs:238-256`) reads every dimension from the real GGUF's own metadata keys at load time — nothing hardcoded. For `openchat-3.5-1210.Q4_K_S.gguf`, the values this row used (confirmed via the bench files' own printed tensor shapes, e.g. `output.weight dims=[4096, 32002]`): `vocab=32002, embedding=4096, feed_forward=14336, query_heads=32, kv_heads=8, head_dim=128, block_count=32` (Mistral-7B-shaped). `group = query_heads/kv_heads = 4`.
+
+### Task 1 — theoretical minimum vs measured, one decode step, isolated by cumulative-counter subtraction
+
+**Method:** `MATMUL_Q4K_MACS`/`MATMUL_Q5K_MACS`/`MATMUL_Q6K_MACS` (`instrument.rs:426-430`) and `STAGED_MATMUL_MACS` (`instrument.rs:1107`) are cumulative counters, printed once per process via `quant_arm`/`matmul_split_staged` (`bind.rs:836-890`). They never reset per step, so `PROXIMA_MAX_TOKENS=2` minus `PROXIMA_MAX_TOKENS=1` (same prompt, same process invocation technique ROW99 already established) isolates exactly ONE decode step (`step=1`, `new_count=1`, `cached_len_before=32` — i.e. attends across the 31 prefilled positions plus its own, `T=32` keys total). Unlike wall-clock ticks, a MAC count has no run-to-run measurement noise (same greedy-decoded tokens every time, confirmed bit-exact across two independent full runs below) — **CoV is 0% by construction, not by luck**, so a single subtraction is a valid measurement here, not a shortcut.
+
+`PROXIMA_MAX_TOKENS=1` (prefill only, cumulative totals): `q4k_macs=67612180480 q5k_macs=7281311744 q6k_macs=4063485952`, `staged_macs=141465485312`.
+`PROXIMA_MAX_TOKENS=2` (prefill + 1 decode step, cumulative totals): `q4k_macs=69793218560 q5k_macs=7516192768 q6k_macs=4194566144`, `staged_macs=146028888064`. **Re-run independently a second time: identical to the last digit** (`macs_t2_run2.log`), confirming determinism.
+
+Deltas (= one decode step's weight-matmul MACs): `q4k=2181038080`, `q5k=234881024`, `q6k=131080192`, `staged=4563402752`. **Sum = 7,110,402,048.**
+
+**Theoretical minimum, derived from the architecture (`out_features x in_features x tokens`, tokens=1 for decode), sum over every weight matmul:**
+
+| matmul | out | in | macs |
+|---|---|---|---|
+| Q proj | query_heads*head_dim=4096 | 4096 | 16,777,216 |
+| K proj | kv_heads*head_dim=1024 | 4096 | 4,194,304 |
+| V proj | 1024 | 4096 | 4,194,304 |
+| O proj | 4096 | query_heads*head_dim=4096 | 16,777,216 |
+| FFN gate | 14336 | 4096 | 58,720,256 |
+| FFN up | 14336 | 4096 | 58,720,256 |
+| FFN down | 4096 | 14336 | 58,720,256 |
+| **per-layer sum** | | | **218,103,808** |
+| **x 32 layers** | | | **6,979,321,856** |
+| LM head (once/token, not per-layer) | vocab=32002 | 4096 | 131,080,192 |
+| **theoretical minimum, one decode step** | | | **7,110,402,048** |
+
+**Measured (7,110,402,048) == theoretical (7,110,402,048). Ratio = 1.0000000x, zero residual, to the last MAC.** N asserted: 4 counters, 2 independent full-process runs, identical cumulative values both times (`macs_t1.log`, `macs_t2.log`, `macs_t2_run2.log`).
+
+### GQA finding, file:line, with a measured (not just read) proof
+
+`spec.rs:1266-1283`: `wq` is shaped `[embedding, query_heads, head_dim]` (32 heads) but `wk`/`wv` are shaped `[embedding, kv_heads, head_dim]` — **8 heads, not 32**. The checkpoint's own tensor carries this shape too (`bench_q4k_matmul.rs` output: `attn_k_4096x1024` — `1024 = kv_heads(8) * head_dim(128)`, not `4096`). The projection matmul is therefore already minimal; a 4x replication of K/V into query-head-sized tensors before projection would have shown up directly as a 4x larger `q4k_macs`/`q5k_macs` delta for those two tensors — it did not (the K/V projection totals above match the kv_heads=8-sized theoretical exactly, which is only possible if the real matmul call used the 1024-row weight, not a 4096-row replica). **This is a measured proof, not a code-reading inference: if replication were happening, Task 1's ratio could not be 1.0000x.**
+
+At the attention-score stage (`spec.rs:1100-1113`), `k_even_cache`/`k_odd_cache` stay `[t, kv_heads, pairs]`-shaped (`"tui"`) and are broadcast into `"stugi"` via an `IndexMap` with **no free `g` term** — the same cached key value is read, never copied, for all `group=4` query heads sharing that KV head (`group_map = "s,{group}*u+g,i->sugi"` at line 1100 expands the QUERY side into `(u,g)` space; the KEY side never gains a `g` axis). No physical K/V replication exists anywhere in this graph. **Finding: GQA is correctly shared, ratio confirms no 4x blowup, ~0% of the gap is here.**
+
+**Padded/masked-but-computed regions:** none, at decode's own shape. `score_new_masked` (`spec.rs:1128-1133`) computes a `s x w` = `1 x 1` causal check for `new_count=1` — trivially unmasked (query position always >= key position at this size), nothing computed-then-discarded. (Prefill's own `31 x 31` causal block DOES compute-then-mask its upper triangle — a real, separate, out-of-scope-for-decode inefficiency, noted not chased here.)
+
+**Ratio is ~1.0x → per this task's own gate, the gap is efficiency, not extra work. Moving to Task 2.**
+
+### Where the OTHER real MACs are (a genuine, honestly-reported instrumentation gap, not part of Task 1's ratio)
+
+The QK^T / softmax@V compute is activation-times-activation, never activation-times-weight, so it runs as `reduce_f32_dense` — a DIFFERENT counter family, never touched by `MATMUL_*_MACS`. Measured delta (same subtraction, `nsper reduce_f32_dense mac_ops`, `macs_t1.log:16` vs `macs_t2.log:43`): **8,720,384**. Hand-derived from the same einsum shapes, this decomposes with **zero residual**: attention proper (`query_heads * head_dim * T`, score + weighted-sum, `spec.rs:1107-1156`) = `2 * 32 * 128 * 32 = 8,388,608`; softmax max/sum bookkeeping (`spec.rs:1137-1149`, reduces over `t`/`w` only) = `(31*8*4 + 1*8*4) * 2 * 32 layers = 65,536`; rmsnorm sum-of-squares (`spec.rs:666-667`, twice/layer + once final) = `4096 * 2 * 32 + 4096 = 266,240`. Sum = `8,388,608 + 65,536 + 266,240 = 8,720,384` — **exact match, no gap**. This is 0.12% of the decode step's total MACs at `T=32` and genuinely negligible here; it grows with context length (attention scales with `T`) and would be worth its own `MATMUL_*`-family counter before a long-context initiative, noted as a real but out-of-scope-today instrumentation gap.
+
+### Task 2 — achieved rate vs our own kernel's demonstrated capability vs ggml, same real weight bytes
+
+**Production achieved rate** (weight-matmul time only, i.e. `staged_batch + reduce_matmul_quantized`), CITED from ROW99's own already-CoV-checked, quiet-cohort sweep (not re-measured this row — this row's OWN two same-day decode-step samples were 63.45ms and 42.819ms, a ~40% spread on a host that idled 2-8 load throughout, exactly the noise ROW99 already disciplined around; reusing ROW99's validated numbers rather than a noisier same-day pair is the honest choice, not a shortcut):
+- w=1: 113.6349+66.2094 = **179.8443 ms** → rate = 7,110,402,048 / 0.1798443s = **39.54 GMAC/s**
+- w=8: 31.3443+17.0519 = **48.3962 ms** → rate = 7,110,402,048 / 0.0483962s = **146.92 GMAC/s**
+
+**Our own kernel's demonstrated single-thread capability** — `bench_q4k_matmul`/`bench_q5k_matmul`/`bench_q6k_matmul`, FRESH this row, real weight bytes read directly off the real GGUF file (`GGUF_PATH`), correctness asserted inline (`diff < 0.5`, actual diffs 0-3e-3) before any timing, `matmul_q4k_q8k_f32`/`_q5k_.../`_q6k_...` — **the exact functions production's staged/unbatched paths call** (confirmed at `cpu.rs:3495`, `cpu.rs:3527`, `cpu.rs:3554` — same dispatch site as `run_reduce_quantized`/`build_matmul_stage_plan`), 30-sample criterion runs, Q4_K shapes run twice (independent process invocations) for a range:
+
+| shape | ours packed-dispatched t1 (range, 2 runs) | ggml t1 (range) | ggml t8 |
+|---|---|---|---|
+| attn_q 4096x4096 | 102.77-106.79 us | 412.22-413.67 us | 217-234 us |
+| attn_output 4096x4096 | 101.29-108.81 us | 410.85-412.58 us | 215-234 us |
+| attn_k 4096x1024 | 64.155-66.499 us | 110.05-110.61 us | 172-216 us |
+| attn_v 4096x1024 (Q5_K, n=1) | 79.140 us | 168.42 us | (no t8 arm in this bench file) |
+| ffn_gate 4096x14336 | 315.98-323.08 us | 1390.3-1395.0 us | 494-600 us |
+| ffn_up 4096x14336 | 316.89-324.59 us | 1390.0-1402.4 us | 494-571 us |
+| ffn_down 14336x4096 (Q5_K, n=1) | 465.55 us | 2189.9 us | (no t8 arm) |
+| lm_head 4096x32002 (Q6_K, n=1) | 949.16 us | 5413.8 us | (no t8 arm) |
+
+**design-favors: ggml column = incumbent (this bench's own doc, line 283-284: "llama.cpp decode is a sequence of exactly this operation, one per weight matrix per token" — real weight bytes, real per-token GEMV shape, ggml's own `ggml_mul_mat`); ours column = ours. Every row above IS the 80%/100%-frequency case — every one of these 8 calls fires on every decode token, there is no cold-path arm to separate out here.**
+
+Summed across one full decode step (7 matmuls x 32 layers + 1 lm_head), using the min/max across the 2-run set per shape (n=1 shapes contribute the same value to both ends):
+
+- **ours, single-thread, kernel-call-only: 47.214-48.132 ms** → implied rate 147.72-150.60 GMAC/s (using 7,110,402,048 total)
+- **ggml, single-thread, kernel-call-only, same shapes/bytes: 199.77-200.38 ms** → implied rate 35.49-35.60 GMAC/s
+
+**Ours beats ggml by 4.15-4.24x, single-threaded, on the identical real-weight-bytes decode shape set — a clean home-turf win at the kernel level, the opposite of what ROW116's token-level headline (ours 56.55 ms/tok vs llama 39.14, decode) would suggest if read as "our kernel is slow."**
+
+### The mechanism: production is not realizing its own kernel's throughput
+
+- Production w=1, matmul-only (179.8443ms measured, ROW99) vs our own kernel's single-thread capability (47.2-48.1ms, this row): **production realizes only ~26-27% of what the identical kernel function demonstrably does when called directly** — production's w=1 path is 3.74-3.81x SLOWER than the kernel it is calling.
+- Production w=8 (48.40ms, ROW99) vs our own kernel's SINGLE-thread capability (47.2-48.1ms, this row): **statistically indistinguishable (within ~0.6-2.5%)**. Going from 1 to 8 threads in production buys back almost exactly the gap between the kernel's own speed and what 1-thread production achieves — it does not multiply the kernel's throughput 8x, because the kernel was never 8x-parallelizable-headroom-short; it was already fast. The parallel win is recovering orchestration overhead (StagedRound wrapping, per-node buffer-table lookups, cohort round dispatch — all already named in ROW68/97/98/99/118), not compute.
+- **Conclusion, traced to the mechanism (principle 19): the 1.118x-1.445x token-level deficit against llama.cpp (ROW100/116) is not a kernel deficit — the kernel wins by ~4.2x on its own. It is graph-interpretation/dispatch overhead sitting above an already-winning kernel.** This sharpens, does not contradict, ROW68/97/99/105/118's own prior "non-matmul residual" and "StagedRound wraps every node even when it splits nothing" findings — it adds the missing direct proof that the kernel itself is not where the 4-5x of headroom implied by ROW69-77's older dequant-path numbers actually lives anymore.
+
+### What changed on disk
+
+One benches-only edit, `proxima-tensor/benches/bench_vs_ggml.rs`'s `main()`: added a `PROXIMA_BENCH_ROWS` env-var row selector (default still `"f"`, i.e. **zero behavior change to the existing default-measurement run**) so ROW A (home-turf quantized GEMV, `4096x4096`, never run in this initiative per a full-file grep before this row) is reachable without a permanent rewrite. Ran via `PROXIMA_BENCH_ROWS=a`. ROW A's own inline doc still says proxima is "BLOCKED. no quantized dtype exists" — **stale**, written before `q4k-int8-dot` shipped as a default feature; not corrected this row (out of scope for a measurement task; flagged here so the next row doesn't trust that comment). No production source file touched.
+
+### Correctness
+
+Every bench arm asserts `max_abs_diff < 0.5` against ggml's own output on the SAME real weight bytes before any timing runs (inline `assert!`, fail-fast) — measured diffs 0 to 3.05e-3 (dequant/portable arms) and 0 to 8.6e-7 (packed-dispatched arms, i.e. production's own path). Bit-exact MAC counts across 2 independent full-process runs. No arithmetic, dtype, or dispatch logic changed anywhere in `proxima-tensor`/`proxima-model-interop` source.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **361 passed, 4 skipped** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed, 4 skipped** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 7 skipped** |
+| `cargo nextest run -p omega` | **76 passed, 1 skipped** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 errors |
+| `cargo clippy -p proxima-tensor --benches --features ggml-bench -- -D warnings` | clean, 0 errors (covers this row's own bench edit; `ggml-bench` is not a default feature so the workspace-wide gate above does not compile this file) |
+
+### Rollback rows
+
+None. The one on-disk change (bench row selector) is additive and default-preserving.
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo nextest run -p omega
+cargo clippy --workspace --all-targets -- -D warnings
+GGML_BUILD_DIR=<built ggml>/ggml cargo clippy -p proxima-tensor --benches --features ggml-bench -- -D warnings
+
+# Task 1 -- MAC counts (bit-exact, re-run twice already, CoV 0% by construction):
+PROXIMA_MAX_TOKENS=1 cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+PROXIMA_MAX_TOKENS=2 cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+# subtract quant_arm/matmul_split_staged cumulative totals between the two runs.
+
+# Task 2 -- kernel-vs-ggml, real weight bytes, home-turf shapes:
+GGML_BUILD_DIR=<built ggml>/ggml cargo build --release -p proxima-tensor \
+  --bench bench_q4k_matmul --bench bench_q5k_matmul --bench bench_q6k_matmul --bench bench_vs_ggml \
+  --features ggml-bench,q5k-int8-dot,q6k-int8-dot
+<binary> --bench                       # bench_q4k_matmul / bench_q5k_matmul / bench_q6k_matmul
+PROXIMA_BENCH_ROWS=a <bench_vs_ggml binary> --bench
+```
+Cleanup: `$CARGO_TARGET_DIR` and all intermediate `.log` files under this session's scratch directory removed after this row; the raw logs cited above were read in-session and their numbers transcribed into this row, satisfying re-provability without keeping the scratch tree.
