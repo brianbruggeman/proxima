@@ -11355,3 +11355,295 @@ reporting total wall clock directly, alongside llama Metal in the same window.
 15.0x on Metal decode, 11.5x on Metal prefill, 1.11x on CPU. **No arm beats
 its incumbent.** The CPU bar moved against us by ~11% when re-measured (ROW
 111), so today's CPU gain closed less of the gap than it appeared to.
+
+## ROW 116 — total wall clock MEASURED (not derived) for the first time since ROW 100: our best arm (CPU) is 4.30x behind llama Metal on total 24-token wall clock; `metal-tiled-gemm` beats row-blocked e2e by 1.29x but neither Metal arm beats our own CPU
+
+ROW 115 flagged the standing "~2912 ms, ~5.76x" Metal-total figure as DERIVED
+(prefill + 23 x decode from two different rows) and forbade quoting it as
+measured. This row runs all five arms in one interleaved window and reads
+`total_wall_clock_ms` (ours) / `total time` (llama's own
+`llama_perf_context_print` field) directly off each individual run — a real
+per-run measurement, not a cross-row reconstruction.
+
+**Repo:** worktree `agent-a585f8281e4851e98`, branch `feat/tensor-consolidated`
+@ `09866d1` (clean tree, matches this row's build).
+**Host:** Apple M1 Max, 10 logical cores, 64 GiB, macOS 15.7.8.
+`CARGO_TARGET_DIR` isolated under this session's own scratch path (two of
+them — a second, separate target dir for the `metal-tiled-gemm` build, since
+that feature is compile-time and cannot coexist with the default build in one
+binary); both deleted after extraction, one raw-data file kept (see Re-prove).
+**Incumbent:** llama.cpp b2534622 (`llama-cli --version`), the exact
+ROW 102 canonical command for both CPU and Metal arms, re-verified this run:
+CPU arm `load_tensors: offloaded 0/33 layers to GPU`; Metal arm
+`load_tensors: offloaded 33/33 layers to GPU`,
+`using device Metal (Apple M1 Max)`. Both `system_info:` lines carry
+`NEON=1 ARM_FMA=1 FP16_VA=1 DOTPROD=1 LLAMAFILE=1 ACCELERATE=1 REPACK=1`.
+**Model, both sides:** `openchat-3.5-1210.Q4_K_S.gguf` (3.86 GiB), the same
+file every prior row cites.
+**Prompt, both sides, 31 tokens:** ROW 102's canonical prompt, verbatim,
+copied from `bind.rs`'s `default_prompt()`, not retyped.
+**Build profile:** `--release` for every "ours" arm (`cargo test -p
+proxima-model-interop --release --lib --features metal,instrument[,metal-tiled-gemm]
+--no-run`); llama.cpp is its own prebuilt release binary. No debug-vs-release
+mismatch on either side.
+**Byte-identical output, all 24 admissible runs across all 5 arms:**
+`"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"`
+— verified against every single run log, not sampled. The one discarded run
+(`c5_ours-metal-tiled`) also produced this exact text before being dropped for
+load, so its exclusion is a timing decision only, never a correctness one.
+
+### Waiting for a quiet box
+
+`uptime` 1-min load before starting the timed sweep: 3.10 (unusable, this
+row's own build had just finished), then polled every 60s: 2.85, then two
+consecutive polls at or below 4 (**2.26** at 02:02, **1.89** at 02:03) before
+the sweep began at 02:04.
+
+### Full poll log — every before/after uptime, all 25 runs
+
+```
+BEFORE c1_ours-metal-default load=3.10   AFTER load=2.93
+BEFORE c1_ours-metal-tiled   load=2.93   AFTER load=2.93
+BEFORE c1_ours-cpu-w8        load=2.93   AFTER load=3.50
+BEFORE c1_llama-cpu-t8       load=3.50   AFTER load=3.50
+BEFORE c1_llama-metal        load=3.50   AFTER load=3.50
+BEFORE c2_ours-metal-default load=3.50   AFTER load=3.78
+BEFORE c2_ours-metal-tiled   load=3.78   AFTER load=3.48
+BEFORE c2_ours-cpu-w8        load=3.48   AFTER load=3.48
+BEFORE c2_llama-cpu-t8       load=3.48   AFTER load=3.52
+BEFORE c2_llama-metal        load=3.52   AFTER load=3.52
+BEFORE c3_ours-metal-default load=3.52   AFTER load=3.24
+BEFORE c3_ours-metal-tiled   load=3.24   AFTER load=2.98
+BEFORE c3_ours-cpu-w8        load=2.98   AFTER load=2.98
+BEFORE c3_llama-cpu-t8       load=2.98   AFTER load=3.38
+BEFORE c3_llama-metal        load=3.38   AFTER load=3.38
+BEFORE c4_ours-metal-default load=3.38   AFTER load=3.11
+BEFORE c4_ours-metal-tiled   load=3.11   AFTER load=3.11
+BEFORE c4_ours-cpu-w8        load=3.11   AFTER load=3.50
+BEFORE c4_llama-cpu-t8       load=3.50   AFTER load=3.50
+BEFORE c4_llama-metal        load=3.50   AFTER load=3.50
+BEFORE c5_ours-metal-default load=3.50   AFTER load=4.18  <- DISCARDED (after > 4)
+BEFORE c5_ours-metal-tiled   load=4.18   AFTER load=3.85  <- DISCARDED (before > 4)
+BEFORE c5_ours-cpu-w8        load=3.85   AFTER load=3.85
+BEFORE c5_llama-cpu-t8       load=3.85   AFTER load=3.78
+BEFORE c5_llama-metal        load=3.78   AFTER load=3.78
+```
+
+**2 of 25 runs discarded**, both in cycle 5, both bracketing the single
+load=4.18 reading: `c5_ours-metal-default` (its own AFTER poll hit 4.18) and
+`c5_ours-metal-tiled` (its own BEFORE poll inherited that same 4.18 reading,
+since one arm's AFTER is the next arm's BEFORE). Neither is averaged in below.
+`ours-metal-default` and `ours-metal-tiled` therefore stand on **n=4**;
+`ours-cpu-w8`, `llama-cpu-t8`, and `llama-metal` stand on the full **n=5** —
+their cycle-5 runs bracket load 3.85/3.78, both under the ~4 line.
+
+### Five-arm table — every metric, every run
+
+**ours-metal-default** (`metal-tiled-gemm` OFF, current production default), source: `metal_decode_summary`/`token_breakdown`
+
+| cycle | total, ms | prefill (step=0), ms | decode mean (step=1..23), ms/tok |
+|---|---|---|---|
+| c1 | 3616.889 | 2008.215 | 69.837 |
+| c2 | 3692.186 | 2089.743 | 69.561 |
+| c3 | 3589.750 | 1993.091 | 69.314 |
+| c4 | 3684.742 | 2070.605 | 70.068 |
+| c5 | DISCARDED (load 4.18) | DISCARDED | DISCARDED |
+
+| metric | n | min | median | max | range | CoV |
+|---|---|---|---|---|---|---|
+| total, ms | 4 | 3589.750 | 3650.816 | 3692.186 | 102.436 | 1.20% |
+| prefill, ms | 4 | 1993.091 | 2039.410 | 2089.743 | 96.652 | 1.99% |
+| decode, ms/tok | 4 | 69.314 | 69.699 | 70.068 | 0.754 | 0.41% |
+
+**ours-metal-tiled** (`metal-tiled-gemm` ON), source: `metal_decode_summary`/`token_breakdown`
+
+| cycle | total, ms | prefill (step=0), ms | decode mean (step=1..23), ms/tok |
+|---|---|---|---|
+| c1 | 3046.392 | 1383.855 | 72.167 |
+| c2 | 2827.605 | 1207.379 | 70.333 |
+| c3 | 2794.337 | 1178.871 | 70.132 |
+| c4 | 2851.443 | 1234.397 | 70.193 |
+| c5 | DISCARDED (load 4.18) | DISCARDED | DISCARDED |
+
+| metric | n | min | median | max | range | CoV |
+|---|---|---|---|---|---|---|
+| total, ms | 4 | 2794.337 | 2839.524 | 3046.392 | 252.055 | 3.41% |
+| prefill, ms | 4 | 1178.871 | 1220.888 | 1383.855 | 204.984 | **6.32%, above the 5% floor — quote as a range** |
+| decode, ms/tok | 4 | 70.132 | 70.263 | 72.167 | 2.035 | 1.20% |
+
+`c1`'s prefill (1383.855) is the outlier driving both the total and prefill
+CoV above 4%/5% — the other three cluster tightly (1178.9-1234.4). Not
+discarded (its own load bracket, 2.93-2.93, was quiet); reported as the range
+it is rather than smoothed into a point estimate.
+
+**ours-cpu-w8** (`PROXIMA_MATMUL_WORKERS=8`), source: `decode_summary`/`token_breakdown`
+
+| cycle | total, ms | prefill (step=0), ms | decode mean (step=1..23), ms/tok |
+|---|---|---|---|
+| c1 | 2233.182 | 919.854 | 56.551 |
+| c2 | 2232.540 | 909.236 | 57.003 |
+| c3 | 2218.141 | 907.802 | 56.393 |
+| c4 | 2222.365 | 915.424 | 56.384 |
+| c5 | 2220.568 | 907.065 | 56.560 |
+
+| metric | n | min | median | max | range | CoV |
+|---|---|---|---|---|---|---|
+| total, ms | 5 | 2218.141 | 2222.365 | 2233.182 | 15.041 | 0.28% |
+| prefill, ms | 5 | 907.065 | 909.236 | 919.854 | 12.789 | 0.54% |
+| decode, ms/tok | 5 | 56.384 | 56.551 | 57.003 | 0.619 | 0.40% |
+
+**llama-cpu-t8** (`-ngl 0 -t 8`), source: `llama_perf_context_print`'s own `prompt eval time` / `eval time` / `total time` fields, per run
+
+| cycle | total, ms | prefill (prompt eval), ms | decode (eval), ms/tok |
+|---|---|---|---|
+| c1 | 1598.71 | 703.65 | 38.81 |
+| c2 | 1614.37 | 711.75 | 39.14 |
+| c3 | 1613.12 | 699.10 | 39.63 |
+| c4 | 1609.40 | 710.09 | 39.00 |
+| c5 | 1644.56 | 721.23 | 40.04 |
+
+| metric | n | min | median | max | range | CoV |
+|---|---|---|---|---|---|---|
+| total, ms | 5 | 1598.710 | 1613.120 | 1644.560 | 45.850 | 0.95% |
+| prefill, ms | 5 | 699.100 | 710.090 | 721.230 | 22.130 | 1.06% |
+| decode, ms/tok | 5 | 38.810 | 39.140 | 40.040 | 1.230 | 1.14% |
+
+**llama-metal** (`-ngl 99`), source: same three native fields, per run
+
+| cycle | total, ms | prefill (prompt eval), ms | decode (eval), ms/tok |
+|---|---|---|---|
+| c1 | 516.79 | 103.98 | 17.86 |
+| c2 | 513.09 | 103.84 | 17.70 |
+| c3 | 519.83 | 103.97 | 18.00 |
+| c4 | 511.44 | 104.06 | 17.62 |
+| c5 | 519.85 | 103.03 | 18.04 |
+
+| metric | n | min | median | max | range | CoV |
+|---|---|---|---|---|---|---|
+| total, ms | 5 | 511.440 | 516.790 | 519.850 | 8.410 | 0.67% |
+| prefill, ms | 5 | 103.030 | 103.970 | 104.060 | 1.030 | 0.37% |
+| decode, ms/tok | 5 | 17.620 | 17.860 | 18.040 | 0.420 | 0.92% |
+
+Every arm's CoV is under the 5% trust floor except `ours-metal-tiled`'s
+prefill (6.32%, one outlier run named above) — every other cell is a
+trustworthy point estimate.
+
+### tokens/sec, computed from median total
+
+| arm | tok/s | design-favors |
+|---|---|---|
+| llama-metal | **46.441** | incumbent |
+| llama-cpu-t8 | 14.878 | incumbent |
+| ours-cpu-w8 | 10.799 | ours |
+| ours-metal-tiled | 8.452 | ours |
+| ours-metal-default | 6.574 | ours |
+
+### The headline: ours-metal total wall clock vs llama-metal total wall clock — MEASURED
+
+| comparison | median total, ms | ratio vs llama-metal | both sides measured (not derived)? |
+|---|---|---|---|
+| llama-metal (incumbent, their best) | **516.790** | — | yes |
+| ours-cpu-w8 (our best arm) | 2222.365 | **4.300x behind** | yes |
+| ours-metal-tiled | 2839.524 | **5.495x behind** | yes |
+| ours-metal-default (current production default) | 3650.816 | **7.064x behind** | yes |
+
+**Our best arm on total wall clock is our own CPU backend, not either Metal
+arm, and it is 4.30x behind llama Metal — not the derived ~5.76x ROW 115
+flagged, and not the ~2912 ms ROW 115 forbade quoting.** Both Metal arms
+remain behind our own CPU on total wall clock for this 24-token run (default
+1.643x slower than our CPU, tiled 1.278x slower than our CPU) — the same
+structural finding ROW 100 made, still true after ROW 113/114's tiled-GEMM
+landing.
+
+### Same-kind ratios only (ROW 104's rule)
+
+| comparison | ratio | kind |
+|---|---|---|
+| ours-metal-default total vs llama-metal total | 7.064x behind | total vs total |
+| ours-metal-tiled total vs llama-metal total | 5.495x behind | total vs total |
+| ours-cpu-w8 total vs llama-metal total | 4.300x behind | total vs total |
+| ours-cpu-w8 total vs llama-cpu-t8 total | 1.378x behind | total vs total, apples-to-apples CPU |
+| llama-cpu-t8 total vs llama-metal total | 3.121x | total vs total, both incumbent |
+| ours-metal-default prefill vs llama-metal prefill | 19.615x behind | prefill vs prefill |
+| ours-metal-tiled prefill vs llama-metal prefill | 11.743x behind | prefill vs prefill |
+| ours-cpu-w8 prefill vs llama-cpu-t8 prefill | 1.280x behind | prefill vs prefill |
+| ours-metal-default decode vs llama-metal decode | 3.903x behind | decode vs decode |
+| ours-metal-tiled decode vs llama-metal decode | 3.934x behind | decode vs decode |
+| ours-cpu-w8 decode vs llama-cpu-t8 decode | 1.445x behind | decode vs decode |
+
+Per-term tables carry no incumbent column beyond what is listed above — every
+row here pairs a phase with the same phase on the other side, never a part
+against a whole.
+
+### The e2e gate this run exists to inform: `metal-tiled-gemm` ON vs OFF
+
+| | ours-metal-default (OFF) | ours-metal-tiled (ON) | delta |
+|---|---|---|---|
+| total, median ms | 3650.816 | 2839.524 | **tiled 1.286x FASTER e2e** |
+| prefill, median ms | 2039.410 | 1220.888 | tiled 1.671x faster |
+| decode, median ms/tok | 69.699 | 70.263 | tiled 0.81% slower (within CoV, no signal) |
+
+**`metal-tiled-gemm` wins end-to-end on this box, today: 1.286x faster total
+wall clock for a 24-token generation, driven entirely by prefill (1.671x
+faster) with decode flat within noise.** This is the e2e comparison ROW 113's
+prefill-only 1.47-1.5x finding and ROW 114's attention-bucket finding were
+building toward — the full stack, not one kernel in isolation, and it wins.
+It still loses to llama-metal by 5.495x and to our own CPU arm by 1.278x on
+total wall clock, so this is a real but partial win: real relative to our own
+prior default, not sufficient on its own to catch either the incumbent or our
+own CPU backend.
+
+**This run reports the number. Flipping the default is the owner's call per
+the task brief, not made here.**
+
+### Gates, actual numbers
+
+- `cargo nextest run -p omega` → **76 tests run: 76 passed, 1 skipped**
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` → **82 tests run: 82 passed, 1 skipped**
+- `cargo nextest run -p proxima-tensor --features std,instrument` → **365 tests run: 365 passed, 4 skipped**
+- `cargo clippy --workspace --all-targets -- -D warnings` → **0 errors** (one unrelated future-incompat warning from `proc-macro-error2`, a transitive dep, not this row's code)
+
+### Re-prove — exact commands, all five arms
+
+```
+# build (once each, separate target dirs — metal-tiled-gemm is compile-time)
+cargo test -p proxima-model-interop --release --lib --features metal,instrument --no-run
+CARGO_TARGET_DIR=<other-dir> cargo test -p proxima-model-interop --release --lib \
+  --features metal,instrument,metal-tiled-gemm --no-run
+
+# ours-metal-default / ours-metal-tiled (same test, different binary)
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 <testbin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+
+# ours-cpu-w8 (default-feature binary, worker count via env)
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 <testbin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+
+# llama-cpu-t8 / llama-metal: ROW 102's canonical commands, verbatim, unchanged
+```
+
+`<testbin>` = the `--no-run` build's emitted path under each `CARGO_TARGET_DIR`,
+e.g. `$CARGO_TARGET_DIR/release/deps/proxima_model_interop-<hash>`.
+`total_wall_clock_ms`/`metal_decode_summary`/`token_breakdown` lines reproduce
+this row's tables; llama's own `llama_perf_context_print` block reproduces the
+incumbent columns.
+
+### Cleanup
+
+Both `CARGO_TARGET_DIR`s (default-feature and `metal-tiled-gemm` release
+builds) deleted after extraction. All 25 individual per-run log files and the
+build logs deleted. One consolidated raw-data file kept at this session's
+scratch path (`row116_raw_results.md` — poll log plus every per-run extracted
+value); the numbers in this row's tables are copied verbatim from it and this
+row is the durable record.
+
+### Honest read
+
+Total wall clock for a 24-token generation is now measured, not derived, for
+the first time since ROW 100. The headline moved from a forbidden ~5.76x
+(derived, wrong arm) to a measured **4.30x** — our own CPU backend, not
+either Metal arm, is our best option on this metric, exactly as ROW 100 found
+five landed fixes ago. `metal-tiled-gemm` closes real ground e2e (1.29x
+faster than the row-blocked default it would replace) without regressing
+decode, but it does not close the gap to either the incumbent or our own CPU
+backend. No arm beats llama on any metric, on this box, today.
