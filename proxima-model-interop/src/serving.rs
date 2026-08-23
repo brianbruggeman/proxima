@@ -1,9 +1,18 @@
 //! Per-invocation serving knobs for the CPU forward path, plain Rust data
 //! mirroring llama-server's CLI surface (`-c`, `-np`, `-ctk`, `-ctv`, `-fa`,
 //! `-b`, `-ub`, `-ngl`, `-fit`, `--no-kv-offload`, `--no-mmproj`,
-//! `--reasoning-budget`, `--min-p`) one field per flag, plus a configurable
+//! `--reasoning-budget`, `--min-p`, `--temp`, `--top-k`, `--top-p`,
+//! `--repeat-last-n`, `--repeat-penalty`, `--frequency-penalty`,
+//! `--presence-penalty`, `--seed`) one field per flag, plus a configurable
 //! `model_path` in place of the forward test's former hardcoded fixture
 //! constant.
+//!
+//! The eight sampling fields (`temperature` through `seed`) feed
+//! `generate.rs`'s decode loop into `proxima_tokenizer::sample::
+//! sample_next_token` instead of `proxima_tokenizer::greedy_pick` directly
+//! -- that function's own doc is the sampler's filter chain, order, and
+//! upstream citations; this module only carries the per-invocation values,
+//! it does not reimplement the algorithm.
 //!
 //! No `serde`/`toml`/`bon`/`clap`/`conflaguration` in this module or this
 //! crate's dependency graph -- an earlier runtime policy surface linked all
@@ -96,16 +105,57 @@ pub struct ServingConfig<'model> {
     /// thinking block. `0` disables it, [`REASONING_BUDGET_UNBOUNDED`]
     /// removes the cap, `N` bounds it.
     pub reasoning_budget: i32,
+    /// `--temp`: sampling temperature. `<= 0.0` (this crate's own default,
+    /// not upstream's `0.80`) samples greedily -- exact argmax over
+    /// whatever survives the other filters, matching this forward's
+    /// pre-sampler behavior byte-for-byte (`proxima_tokenizer::sample::
+    /// sample_next_token`'s own doc).
+    pub temperature: f32,
+    /// `--top-k`. `<= 0` disables the filter (upstream's own "use vocab
+    /// size" convention).
+    pub top_k: i32,
+    /// `--top-p`: nucleus sampling cutoff. `1.0` disables the filter.
+    pub top_p: f32,
     /// `--min-p`: minimum-probability sampling cutoff. `0.0` (the owner's
-    /// `--min-p 0`) disables the filter.
+    /// `--min-p 0`) disables the filter. Must be in `0.0..=1.0` --
+    /// [`apply_serving_config`] rejects anything else, since a value
+    /// outside that range feeds `ln()` a domain it was never meant to see
+    /// (see `proxima_tokenizer::sample`'s own min-p filter doc).
     pub min_p: f32,
+    /// `--repeat-last-n`: how many of the most recently seen tokens
+    /// (prompt included, matching upstream) the repetition-penalty filter
+    /// counts over. Must be `>= 0` -- upstream's `-1` ("context size")
+    /// sentinel is not implemented; [`apply_serving_config`] rejects it.
+    pub repeat_last_n: i32,
+    /// `--repeat-penalty`. `1.0` disables the multiplicative half of the
+    /// penalty filter.
+    pub repeat_penalty: f32,
+    /// `--frequency-penalty`. `0.0` disables the per-occurrence-count
+    /// subtractive penalty.
+    pub frequency_penalty: f32,
+    /// `--presence-penalty`. `0.0` disables the flat once-per-distinct-
+    /// recent-token subtractive penalty.
+    pub presence_penalty: f32,
+    /// `-s`/`--seed`: seeds the sampler's `fastrand::Rng` once per
+    /// `crate::generate::LoadedModel::generate_with_serving_config` call.
+    /// Unlike upstream's own `LLAMA_DEFAULT_SEED` (which resolves to real
+    /// OS-sourced randomness when left at its sentinel value), this field
+    /// has no such fallback -- determinism is required unconditionally, so
+    /// every seed value, including this struct's own default, is always
+    /// literal.
+    pub seed: u64,
 }
 
 impl Default for ServingConfig<'static> {
     /// The repo owner's exact invocation, verbatim:
     /// `-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa on -b 32 -ub 32 -ngl all
     /// -fit off --no-kv-offload --no-mmproj --reasoning-budget 1024
-    /// --min-p 0`.
+    /// --min-p 0`. The owner's invocation names no sampling flags at all,
+    /// so every sampling knob defaults to its own disabled value
+    /// (`temperature: 0.0`, not upstream's own `0.80` default -- see that
+    /// field's own doc for why) -- the exact greedy path this forward has
+    /// always run, byte-for-byte, proved in `generate.rs`'s own
+    /// `real_openchat_file` acceptance test.
     fn default() -> Self {
         Self {
             model_path: DEFAULT_MODEL_PATH,
@@ -121,7 +171,15 @@ impl Default for ServingConfig<'static> {
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 1024,
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
             min_p: 0.0,
+            repeat_last_n: 64,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: 0,
         }
     }
 }
@@ -258,14 +316,24 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
-    if config.min_p != 0.0 {
+    if !(0.0..=1.0).contains(&config.min_p) {
         return Err(InteropError::UnsupportedServingConfig(format!(
-            "min_p={} (--min-p): token selection today is `greedy_pick`'s deterministic \
-             argmax with no sampling distribution at all; implementing this requires a \
-             softmax-then-filter sampler before greedy_pick ever runs, which min_p=0 \
-             degenerates to (no filtering, so argmax is exact) and any nonzero value \
-             does not",
+            "min_p={} (--min-p): must be in 0.0..=1.0 -- the min-p filter's threshold is \
+             `max_logit + ln(min_p)` (`proxima_tokenizer::sample`'s own min-p filter doc), \
+             and `ln` of a value outside that range is either undefined (negative) or \
+             raises the threshold above every candidate's own logit (greater than 1.0), \
+             silently dropping every candidate including the argmax",
             config.min_p
+        )));
+    }
+
+    if config.repeat_last_n < 0 {
+        return Err(InteropError::UnsupportedServingConfig(format!(
+            "repeat_last_n={} (--repeat-last-n): upstream's own `-1` (\"context size\") \
+             sentinel is not implemented here -- the repetition-penalty filter's caller \
+             (`generate.rs`'s decode loop) must slice a concrete non-negative window out \
+             of its own token history",
+            config.repeat_last_n
         )));
     }
 
@@ -300,6 +368,23 @@ mod tests {
         assert_eq!(config.reasoning_budget, 1024, "--reasoning-budget 1024");
         assert_eq!(config.min_p, 0.0, "--min-p 0");
         assert_eq!(config.model_path, DEFAULT_MODEL_PATH);
+    }
+
+    /// Every sampling field defaults to its own disabled value -- the
+    /// owner's invocation names no sampling flags, so this forward's
+    /// pre-sampler greedy behavior must survive unchanged.
+    #[test]
+    fn default_sampling_config_is_fully_disabled() {
+        let config = ServingConfig::default();
+
+        assert_eq!(config.temperature, 0.0, "greedy, not upstream's 0.80 default");
+        assert_eq!(config.top_k, 0, "disabled");
+        assert_eq!(config.top_p, 1.0, "disabled");
+        assert_eq!(config.min_p, 0.0, "disabled");
+        assert_eq!(config.repeat_penalty, 1.0, "disabled");
+        assert_eq!(config.frequency_penalty, 0.0, "disabled");
+        assert_eq!(config.presence_penalty, 0.0, "disabled");
+        assert_eq!(config.seed, 0, "always literal, never OS-sourced");
     }
 
     /// `apply_serving_config` on the owner's own default invocation still
@@ -337,7 +422,15 @@ mod tests {
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 0,
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
             min_p: 0.0,
+            repeat_last_n: 64,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: 0,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -377,8 +470,11 @@ mod tests {
         ));
     }
 
+    /// The gap this task closes: `min_p` in its valid range no longer
+    /// errors -- it is folded into the sampler `generate.rs`'s decode loop
+    /// calls, not rejected here.
     #[test]
-    fn nonzero_min_p_reaches_its_error() {
+    fn nonzero_min_p_in_range_applies_without_error() {
         let config = ServingConfig {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -390,7 +486,41 @@ mod tests {
             min_p: 0.1,
             ..ServingConfig::default()
         };
-        let error = apply_serving_config(&config, 6).expect_err("nonzero min_p must be rejected");
+        apply_serving_config(&config, 6).expect("min_p within 0.0..=1.0 must apply cleanly");
+    }
+
+    #[test]
+    fn min_p_outside_the_valid_range_reaches_its_error() {
+        let config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: 0,
+            reasoning_budget: 0,
+            min_p: 1.5,
+            ..ServingConfig::default()
+        };
+        let error = apply_serving_config(&config, 6).expect_err("min_p > 1.0 must be rejected");
         assert!(error.to_string().contains("min_p"));
+    }
+
+    #[test]
+    fn negative_repeat_last_n_reaches_its_error() {
+        let config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: 0,
+            reasoning_budget: 0,
+            repeat_last_n: -1,
+            ..ServingConfig::default()
+        };
+        let error =
+            apply_serving_config(&config, 6).expect_err("negative repeat_last_n must be rejected");
+        assert!(error.to_string().contains("repeat_last_n"));
     }
 }
