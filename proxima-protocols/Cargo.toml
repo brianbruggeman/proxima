@@ -33,6 +33,7 @@ proxima-codec = { workspace = true, features = ["alloc"], optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-macros = { workspace = true, optional = true }
 proxima-primitives = { workspace = true, optional = true }
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 rand_core = { version = "0.10.1", default-features = false, optional = true }
 rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"], optional = true }
 serde = { workspace = true, features = ["derive", "alloc"], optional = true }
@@ -305,7 +306,7 @@ json_framing-std = [
     "dep:futures",
     "dep:serde_json",
     "dep:thiserror",
-    "dep:tracing",
+    "dep:proxima-telemetry",
 ]
 # Sans-IO QUIC + TLS 1.3 protocol implementation per RFC 9000 / 9001 /
 # 9002 / 9221 + multipath draft — extracted from proxima-quic-proto.
