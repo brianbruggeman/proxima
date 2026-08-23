@@ -107,3 +107,48 @@ jobs:
             # crate whose docs do not build.
             cargo doc -p ${{ matrix.crate }} --no-deps --all-features
           fi
+
+  # omega carries the Metal execution driver, gated by `objc2` deps that only
+  # resolve in `[target.'cfg(target_os = "macos")'.dependencies]` — its
+  # `default = ["std", "metal", "cpu"]` feature set is only fully reachable on
+  # a macOS runner. Measured 2026-08-19 (see this workflow's own header):
+  # omega appeared in ZERO workflows and ZERO gate scripts, so its own
+  # `metal_vs_cpu` incumbent bench (Metal vs CPU on the same evaluator) sat
+  # registered and unexecuted the same way `bench_vs_ggml` did in
+  # proxima-tensor. GH's macos-latest runners are real Apple Silicon
+  # hardware, so `metal` compiles and its bench links here — unlike
+  # `ggml-bench` in proxima-tensor-gate.sh, this feature needs no external
+  # asset (no vendored checkout, no multi-GB model file), so it belongs in
+  # CI rather than a local-only runner.
+  omega-gate:
+    name: omega (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: cargo clippy -p omega --all-targets -- -D warnings
+      - run: cargo nextest run -p omega --no-fail-fast
+      - run: cargo doc -p omega --no-deps
+
+  # Compare-bench (Metal vs CPU, same evaluator). Smoke-runs the incumbent
+  # bench so it can never again sit registered-but-unexecuted; `--quick`
+  # keeps CI fast and, like proxima-telemetry's compare-bench job, this
+  # records a baseline rather than sealing a discipline row (that's a manual
+  # read of the CoV).
+  omega-compare-bench:
+    name: compare-bench (metal vs cpu)
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench -p omega --features metal --bench metal_vs_cpu -- --quick

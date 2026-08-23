@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # produces a per-workload absolute-perf coverage map for proxima across every
 # bench category. comparison vs alternative implementations lives in
-# bench-vs-{hyper,pingora,rayon}. runtime variance lives in bench-proxima-runtimes.
+# bench-vs-{hyper,pingora,rayon,ggml}. runtime variance lives in bench-proxima-runtimes.
 #
 # usage: scripts/bench-proxima.sh
 #
