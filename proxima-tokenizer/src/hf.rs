@@ -22,6 +22,14 @@
 //! `tokenizer_config.json`/`generation_config.json` instead, files this
 //! sans-IO crate does not open. A caller passes them in explicitly, the same
 //! contract [`Vocab::new`] itself already has.
+//!
+//! [`bos_eos_policy_from_tokenizer_config`] reads that other file
+//! (`tokenizer_config.json`, not `tokenizer.json`) for the one fact it does
+//! carry: whether the checkpoint's own config says to auto-add BOS/EOS.
+//! Confirmed against the real, on-disk
+//! `HuggingFaceTB/SmolLM2-135M-Instruct/tokenizer_config.json` (3,764
+//! bytes) that the key can be entirely absent -- see that function's own
+//! doc for why `Option<bool>`, not `bool`, is the honest shape here.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -108,6 +116,46 @@ fn tokens_by_id(vocab_object: &serde_json::Map<String, Value>) -> Result<Vec<Str
         .collect()
 }
 
+/// Reads `add_bos_token`/`add_eos_token` out of a real `tokenizer_config.json`
+/// file's own bytes (a *different* file from `tokenizer.json` --
+/// [`vocab_from_tokenizer_json`] never opens this one) and hands the result
+/// straight to [`crate::vocab::Vocab::with_bos_eos_policy`].
+///
+/// `None` per field when the key is genuinely absent, distinct from
+/// `Some(false)` -- confirmed load-bearing against the real, on-disk
+/// `HuggingFaceTB/SmolLM2-135M-Instruct/tokenizer_config.json` (3,764
+/// bytes): it carries `bos_token`/`eos_token` (the token *strings*) but has
+/// **no `add_bos_token` key at all**. That absence is llama.cpp's own GGUF
+/// conversion heuristic, not a fact this file states, so a caller must not
+/// collapse "the file said nothing" into "the file said false".
+///
+/// # Errors
+///
+/// [`TokenizerError::MalformedHfTokenizerJson`] if `bytes` is not valid
+/// JSON, or a present `add_bos_token`/`add_eos_token` key is not a JSON
+/// boolean.
+pub fn bos_eos_policy_from_tokenizer_config(bytes: &[u8]) -> Result<(Option<bool>, Option<bool>), TokenizerError> {
+    let root: Value = serde_json::from_slice(bytes).map_err(|error| TokenizerError::MalformedHfTokenizerJson {
+        reason: error.to_string(),
+    })?;
+    Ok((
+        bool_field(&root, "add_bos_token")?,
+        bool_field(&root, "add_eos_token")?,
+    ))
+}
+
+/// `None` when `root.get(field)` is absent -- the whole point of
+/// [`bos_eos_policy_from_tokenizer_config`], see its own doc.
+fn bool_field(root: &Value, field: &'static str) -> Result<Option<bool>, TokenizerError> {
+    match root.get(field) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(TokenizerError::MalformedHfTokenizerJson {
+            reason: alloc::format!("{field} is present but is not a json boolean"),
+        }),
+    }
+}
+
 fn string_array(values: &[Value], field: &'static str) -> Result<Vec<String>, TokenizerError> {
     values
         .iter()
@@ -122,6 +170,8 @@ fn string_array(values: &[Value], field: &'static str) -> Result<Vec<String>, To
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// A tiny, hand-built `tokenizer.json` shaped exactly like the real
@@ -176,5 +226,65 @@ mod tests {
     fn non_contiguous_vocab_ids_are_a_typed_error_not_a_panic() {
         let outcome = vocab_from_tokenizer_json(br#"{"model": {"vocab": {"a": 0, "b": 5}, "merges": []}}"#, None, None, None);
         assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+    }
+
+    #[test]
+    fn present_add_bos_and_add_eos_keys_read_as_some() {
+        let (add_bos, add_eos) =
+            bos_eos_policy_from_tokenizer_config(br#"{"add_bos_token": true, "add_eos_token": false}"#)
+                .expect("well-formed tokenizer_config.json parses");
+        assert_eq!(add_bos, Some(true));
+        assert_eq!(add_eos, Some(false));
+    }
+
+    #[test]
+    fn absent_add_bos_and_add_eos_keys_read_as_none_not_false() {
+        let (add_bos, add_eos) = bos_eos_policy_from_tokenizer_config(br#"{"bos_token": "<|im_start|>"}"#)
+            .expect("tokenizer_config.json missing the keys still parses");
+        assert_eq!(add_bos, None, "an absent key must not be reported as Some(false)");
+        assert_eq!(add_eos, None);
+    }
+
+    #[test]
+    fn non_boolean_add_bos_token_is_a_typed_error_not_a_panic() {
+        let outcome = bos_eos_policy_from_tokenizer_config(br#"{"add_bos_token": "yes"}"#);
+        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+    }
+
+    #[test]
+    fn malformed_tokenizer_config_json_is_a_typed_error_not_a_panic() {
+        let outcome = bos_eos_policy_from_tokenizer_config(b"not json at all");
+        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+    }
+
+    /// The real, on-disk `tokenizer_config.json` this crate's `add_bos_eos`
+    /// module doc names -- confirms the genuine upstream quirk that started
+    /// this work: SmolLM2's own config has no `add_bos_token` key at all
+    /// (only `bos_token`, the token *string*), so `Option<bool>::None` is
+    /// the only honest thing this reader can report. `#[ignore]`d: depends
+    /// on a host-local model cache outside this repo.
+    #[test]
+    #[ignore = "depends on a host-local tokenizer_config.json checkout outside this repo"]
+    fn real_smollm2_tokenizer_config_has_no_add_bos_token_key() {
+        let path = Path::new(
+            "/Users/brianbruggeman/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct/tokenizer_config.json",
+        );
+        if !path.exists() {
+            eprintln!("no real tokenizer_config.json found at {path:?}, skipping");
+            return;
+        }
+        let bytes = std::fs::read(path).expect("read real smollm2 tokenizer_config.json");
+        assert_eq!(bytes.len(), 3764, "the real file's own byte length -- confirms this isn't a stale copy");
+
+        let (add_bos, add_eos) = bos_eos_policy_from_tokenizer_config(&bytes)
+            .expect("real smollm2 tokenizer_config.json parses as json");
+        assert_eq!(add_bos, None, "smollm2's real tokenizer_config.json has no add_bos_token key at all");
+        assert_eq!(add_eos, None, "smollm2's real tokenizer_config.json has no add_eos_token key at all");
+
+        let root: Value = serde_json::from_slice(&bytes).expect("real file is valid json");
+        assert!(
+            root.get("bos_token").is_some(),
+            "sanity: the file does carry bos_token (the string), just not add_bos_token (the policy)"
+        );
     }
 }

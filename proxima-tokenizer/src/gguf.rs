@@ -21,6 +21,8 @@
 //! | `tokenizer.ggml.scores` | array\<f32\> | one per token, `"llama"` vocabs only -- dumped from the real 32002-token openchat-3.5-1210 fixture (`tokenizer.ggml.model = "llama"`, no `merges` key at all) |
 //! | `tokenizer.ggml.bos_token_id` | u32 | `128000` |
 //! | `tokenizer.ggml.eos_token_id` | u32 | `128001` |
+//! | `tokenizer.ggml.add_bos_token` | bool | present (`true`) on the real openchat-3.5-1210 and Nous-Hermes-2-Mixtral fixtures; **absent** on the real deepseek-coder-33b-instruct and LFM2.5-8B-A1B fixtures -- this is llama.cpp's own conversion-time heuristic, not guaranteed present, so [`vocab_from_metadata`] threads it through as `Option<bool>` ([`crate::vocab::Vocab::with_bos_eos_policy`]) rather than defaulting it |
+//! | `tokenizer.ggml.add_eos_token` | bool | `false` on the same two fixtures that carry `add_bos_token`; absent on the same two that lack it |
 //!
 //! `tokenizer.ggml.unknown_token_id` and `tokenizer.ggml.padding_token_id`
 //! are read too, but absent on the llama-bpe fixture -- byte-level BPE has
@@ -43,6 +45,8 @@ const TOKEN_TYPE_KEY: &str = "tokenizer.ggml.token_type";
 const BOS_KEY: &str = "tokenizer.ggml.bos_token_id";
 const EOS_KEY: &str = "tokenizer.ggml.eos_token_id";
 const UNKNOWN_KEY: &str = "tokenizer.ggml.unknown_token_id";
+const ADD_BOS_KEY: &str = "tokenizer.ggml.add_bos_token";
+const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
 
 /// Builds a [`Vocab`] from `metadata`'s tokenizer keys, selecting the
 /// merges-driven ([`Vocab::new`]) or scores-driven ([`Vocab::new_unigram`])
@@ -69,6 +73,8 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
     let unknown_token_id = u32_scalar(metadata, UNKNOWN_KEY)?;
     let model = string_scalar(metadata, MODEL_KEY)?.ok_or(TokenizerError::MissingMetadataKey { key: MODEL_KEY })?;
     let token_types = token_type_array(metadata, tokens.len())?;
+    let add_bos_token = bool_scalar(metadata, ADD_BOS_KEY)?;
+    let add_eos_token = bool_scalar(metadata, ADD_EOS_KEY)?;
 
     let vocab = match model.as_str() {
         "gpt2" => {
@@ -84,10 +90,11 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
         other => return Err(TokenizerError::UnsupportedTokenizerModel { model: String::from(other) }),
     };
 
-    match token_types {
-        Some(token_types) => vocab.with_token_types(token_types),
-        None => Ok(vocab),
-    }
+    let vocab = match token_types {
+        Some(token_types) => vocab.with_token_types(token_types)?,
+        None => vocab,
+    };
+    Ok(vocab.with_bos_eos_policy(add_bos_token, add_eos_token))
 }
 
 /// Reads `tokenizer.ggml.token_type` (`array<i32>`, parallel to
@@ -149,6 +156,21 @@ fn u32_scalar(metadata: &ParsedGguf, key: &'static str) -> Result<Option<u32>, T
     }
 }
 
+/// `None` when `key` is absent -- not every checkpoint's own GGUF
+/// conversion carries an opinion (confirmed against real, on-disk
+/// `deepseek-coder-33b-instruct` and `LFM2.5-8B-A1B` fixtures, both of which
+/// omit `tokenizer.ggml.add_bos_token`/`add_eos_token` entirely), distinct
+/// from `Some(false)` (openchat-3.5-1210's real fixture carries
+/// `add_bos_token = true`, `add_eos_token = false` explicitly). See
+/// [`crate::vocab::Vocab::with_bos_eos_policy`].
+fn bool_scalar(metadata: &ParsedGguf, key: &'static str) -> Result<Option<bool>, TokenizerError> {
+    match metadata.metadata_value(key) {
+        None => Ok(None),
+        Some(MetadataValue::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(TokenizerError::WrongMetadataType { key }),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -172,6 +194,59 @@ mod tests {
             error,
             TokenizerError::MissingMetadataKey { key: TOKENS_KEY }
         ));
+    }
+
+    /// A synthetic vocab whose `tokenizer.ggml.add_bos_token` is present but
+    /// the wrong GGUF value type (`U32`, not `Bool`) is a typed error, not a
+    /// panic or a silent `None`. Proves [`bool_scalar`] rejects a
+    /// present-but-wrong-shaped key rather than treating it as absent.
+    #[test]
+    fn wrong_typed_add_bos_token_key_is_an_error() {
+        let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(crate::byte_level::byte_to_char(byte))).collect();
+        let metadata = ParsedGguf {
+            version: 3,
+            tensor_count: 0,
+            kv_count: 0,
+            metadata: alloc::vec![
+                (String::from(TOKENS_KEY), MetadataValue::Array(MetadataArray::String(core::mem::take(&mut tokens)))),
+                (String::from(MODEL_KEY), MetadataValue::String(String::from("gpt2"))),
+                (String::from(MERGES_KEY), MetadataValue::Array(MetadataArray::String(Vec::new()))),
+                (String::from(ADD_BOS_KEY), MetadataValue::U32(1)),
+            ],
+            tensors: Vec::new(),
+            data_offset: 0,
+            alignment: 32,
+        };
+        let error = vocab_from_metadata(&metadata).expect_err("add_bos_token present with the wrong type");
+        assert!(matches!(error, TokenizerError::WrongMetadataType { key: ADD_BOS_KEY }));
+    }
+
+    /// A synthetic vocab whose `tokenizer.ggml.add_bos_token`/`add_eos_token`
+    /// are correctly typed carries them through to [`Vocab::add_bos_token`]/
+    /// [`Vocab::add_eos_token`] -- proves the fast, no-real-file path end to
+    /// end (the real-fixture tests below prove the same thing against
+    /// genuine on-disk GGUF metadata).
+    #[test]
+    fn bool_add_bos_and_add_eos_keys_thread_through_to_the_vocab() {
+        let tokens: Vec<String> = (0..=255u8).map(|byte| String::from(crate::byte_level::byte_to_char(byte))).collect();
+        let metadata = ParsedGguf {
+            version: 3,
+            tensor_count: 0,
+            kv_count: 0,
+            metadata: alloc::vec![
+                (String::from(TOKENS_KEY), MetadataValue::Array(MetadataArray::String(tokens))),
+                (String::from(MODEL_KEY), MetadataValue::String(String::from("gpt2"))),
+                (String::from(MERGES_KEY), MetadataValue::Array(MetadataArray::String(Vec::new()))),
+                (String::from(ADD_BOS_KEY), MetadataValue::Bool(true)),
+                (String::from(ADD_EOS_KEY), MetadataValue::Bool(false)),
+            ],
+            tensors: Vec::new(),
+            data_offset: 0,
+            alignment: 32,
+        };
+        let vocab = vocab_from_metadata(&metadata).expect("well-typed metadata builds a vocab");
+        assert_eq!(vocab.add_bos_token(), Some(true));
+        assert_eq!(vocab.add_eos_token(), Some(false));
     }
 
     /// Loads the real llama-bpe vocab fixture and confirms the exact
@@ -240,6 +315,55 @@ mod tests {
             panic!("gguf metadata region did not fit in 64 MiB");
         };
         Some(vocab_from_metadata(&parsed).expect("builds vocab from real openchat metadata"))
+    }
+
+    /// Confirms the real value [`gguf.rs`]'s own module doc names for
+    /// openchat-3.5-1210: `tokenizer.ggml.add_bos_token = true`,
+    /// `tokenizer.ggml.add_eos_token = false`, both genuinely present on
+    /// this checkpoint's own GGUF metadata (not this crate's default).
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn real_openchat_vocab_carries_add_bos_true_add_eos_false() {
+        let Some(vocab) = load_real_openchat_vocab() else { return };
+        assert_eq!(vocab.add_bos_token(), Some(true), "openchat-3.5-1210's real gguf metadata says add_bos_token = true");
+        assert_eq!(vocab.add_eos_token(), Some(false), "openchat-3.5-1210's real gguf metadata says add_eos_token = false");
+    }
+
+    /// The real deepseek-coder-33b-instruct fixture's own metadata carries
+    /// no `tokenizer.ggml.add_bos_token`/`add_eos_token` key at all -- the
+    /// genuine absence case this module's `Option<bool>` shape exists for,
+    /// distinct from the explicit `Some(false)` a checkpoint like
+    /// openchat-3.5-1210 carries. `#[ignore]`d: depends on a host-local
+    /// model cache outside this repo.
+    #[test]
+    #[ignore = "depends on a host-local deepseek-coder gguf checkout outside this repo"]
+    fn real_deepseek_coder_vocab_has_no_add_bos_eos_metadata_at_all() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let candidate = Path::new(
+            "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf",
+        );
+        if !candidate.exists() {
+            eprintln!("no real deepseek-coder .gguf found at {candidate:?}, skipping");
+            return;
+        }
+        let mut file = std::fs::File::open(candidate).expect("open host-local deepseek-coder gguf fixture");
+        let mut header_buf = Vec::new();
+        let parsed = 'grow: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                    break 'grow parsed;
+                }
+            }
+            panic!("deepseek-coder gguf metadata region did not fit in 128 MiB");
+        };
+        let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real deepseek-coder metadata");
+        assert_eq!(vocab.add_bos_token(), None, "deepseek-coder's real gguf metadata carries no add_bos_token key");
+        assert_eq!(vocab.add_eos_token(), None, "deepseek-coder's real gguf metadata carries no add_eos_token key");
     }
 
     #[test]

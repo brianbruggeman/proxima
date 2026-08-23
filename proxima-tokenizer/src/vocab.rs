@@ -93,6 +93,8 @@ pub struct Vocab {
     unknown_token_id: Option<u32>,
     token_types: Vec<TokenType>,
     added_token_trie: AddedTokenNode,
+    add_bos_token: Option<bool>,
+    add_eos_token: Option<bool>,
 }
 
 impl Vocab {
@@ -253,6 +255,8 @@ impl Vocab {
             unknown_token_id,
             token_types: Vec::new(),
             added_token_trie: AddedTokenNode::default(),
+            add_bos_token: None,
+            add_eos_token: None,
         })
     }
 
@@ -285,6 +289,40 @@ impl Vocab {
         self.token_types = token_types;
         self.added_token_trie = added_token_trie;
         Ok(self)
+    }
+
+    /// Attaches the checkpoint's own BOS/EOS auto-add policy
+    /// (`tokenizer.ggml.add_bos_token`/`add_eos_token` on GGUF,
+    /// `add_bos_token`/`add_eos_token` in a HF `tokenizer_config.json`).
+    /// `None` means the source genuinely did not say -- distinct from
+    /// `Some(false)`, which means the checkpoint said "do not add this by
+    /// default". A caller deciding what to pass
+    /// [`crate::pipe::encode_with_bos_eos`] reads [`Vocab::add_bos_token`]/
+    /// [`Vocab::eos_token_id`] rather than guessing. Optional and additive,
+    /// same shape as [`Vocab::with_token_types`]: a [`Vocab`] that never
+    /// calls this reports `None` from both accessors, matching every
+    /// existing caller's behavior exactly.
+    #[must_use]
+    pub fn with_bos_eos_policy(mut self, add_bos_token: Option<bool>, add_eos_token: Option<bool>) -> Self {
+        self.add_bos_token = add_bos_token;
+        self.add_eos_token = add_eos_token;
+        self
+    }
+
+    /// Whether the checkpoint's own metadata says to prepend BOS by
+    /// default. `None` when the source (GGUF or HF `tokenizer_config.json`)
+    /// carries no opinion at all -- see [`Vocab::with_bos_eos_policy`].
+    #[must_use]
+    pub fn add_bos_token(&self) -> Option<bool> {
+        self.add_bos_token
+    }
+
+    /// Whether the checkpoint's own metadata says to append EOS by
+    /// default. `None` when the source carries no opinion at all -- see
+    /// [`Vocab::with_bos_eos_policy`].
+    #[must_use]
+    pub fn add_eos_token(&self) -> Option<bool> {
+        self.add_eos_token
     }
 
     /// The [`TokenType`] tag for `token_id`, if this vocab carries them
@@ -556,5 +594,29 @@ pub(crate) mod tests {
             error,
             TokenizerError::ScoreArrayLengthMismatch { tokens_len: 256, scores_len: 10 }
         ));
+    }
+
+    /// A vocab that never calls [`Vocab::with_bos_eos_policy`] reports
+    /// `None` from both accessors -- the "the source said nothing" case,
+    /// and also every existing caller's behavior before this policy
+    /// existed at all.
+    #[test]
+    fn a_vocab_that_never_sets_bos_eos_policy_reports_none() {
+        let vocab = tiny_vocab();
+        assert_eq!(vocab.add_bos_token(), None);
+        assert_eq!(vocab.add_eos_token(), None);
+    }
+
+    /// `Some(false)` must survive round-trip distinctly from `None` --
+    /// the whole point of carrying `Option<bool>` instead of a bare `bool`
+    /// with a default. If this collapsed to a `bool`, this exact case
+    /// (checkpoint explicitly says "do not auto-add EOS") would be
+    /// indistinguishable from "the checkpoint never said".
+    #[test]
+    fn with_bos_eos_policy_preserves_some_false_distinctly_from_none() {
+        let vocab = tiny_vocab().with_bos_eos_policy(Some(true), Some(false));
+        assert_eq!(vocab.add_bos_token(), Some(true));
+        assert_eq!(vocab.add_eos_token(), Some(false));
+        assert_ne!(vocab.add_eos_token(), None, "Some(false) must not read back as None");
     }
 }
