@@ -12337,3 +12337,220 @@ cargo clippy -p omega -p proxima-gguf -p proxima-tensor --all-targets --all-feat
 ### Cleanup
 
 `$CARGO_TARGET_DIR` (isolated scratch path) and all per-run `.log` files removed after this row; the throwaway `proxima-gguf/examples/dump_types.rs` probe used to produce the real-checkpoint tensor-type histograms above was deleted after use (not committed) — its output is transcribed above and independently re-derivable from `proxima_gguf::pipe::parse_complete` against the three cited host paths.
+
+## ROW 123 — weights/s reframing verified against source; a MEASURED-ceiling probe built and gated, NOT yet run: host load 85-104 on a 10-core box rules out any timed number this row
+
+**The brief this row answers asked for a unit change**: prior rows reported
+GB/s of bytes read, which conflates codecs that carry different amounts of
+model per byte. Converting to weights/s (elements/s) requires a real,
+source-cited bytes/weight per codec — this row verifies that conversion and
+builds the missing MEASURED denominator, and explicitly does NOT produce the
+timed numerator/fraction-of-ceiling numbers, because this host was
+unusable for timing the entire session (`uptime` load averages 85-104 on a
+10-core M1 Max, four to five sibling agents building concurrently — see Host
+loadout below). Per guiding-principle #18, a timed claim taken on this box
+would be a number with no mechanism behind it (contention, not the kernel),
+so none is reported.
+
+### Task 1 — the ROW94/ROW77 arithmetic, verified against source, not re-derived from memory
+
+The brief's conversion claimed: F32 4.0 B/weight at 360.7 GB/s = 90.2 G
+weights/s; packed Q4_K in-situ 0.5625 B/weight at 97.31 GB/s = 173 G
+weights/s; packed Q4_K at the f32 path's OWN 360.7 GB/s = 641 G weights/s
+(hypothetical ceiling); 173/641 = 27.0%; llama.cpp's 381 G elem/s (ROW71/72,
+cited again in ROW77's own table) / 641 = 59.4%.
+
+**Every GB/s figure traces to a real row, unaltered:**
+
+| figure | value | where | line |
+|---|---|---|---|
+| packed Q4_K in-situ, real forward, production rate | 97.31 GB/s, CoV 0.99% | ROW94 Task 2 table, row "2" | `docs/discipline.md:7881` |
+| our OWN f32 dense kernel, sustained marginal (proxy, NOT a hardware ceiling — ROW94 says so explicitly) | 360.7 GB/s, CoV 2.90% | ROW94 Task 2 table | `docs/discipline.md:7883` |
+| this device's raw memory bandwidth ceiling | **UNMEASURED** (stated as such by ROW94 itself) | ROW94 Task 2 table | `docs/discipline.md:7884` |
+| packed Q4_K synthetic marginal (2-size dissection) | 143.5 GB/s, ~255 G elem/s, 1.49x off ggml | ROW77 "Measured"/"packed arc" tables | `docs/discipline.md:5451,5472` |
+| llama.cpp Metal implied compute rate | 381 G elem/s (3.784 GB / 0.5625 B/wt / 17.62 ms) | ROW71/72 (NOT ROW77 — ROW77 CITES it as "vs 381 G elem/s" but the figure originates at ROW71 line 5097, re-derived at ROW72 line 5154/5197) | `docs/discipline.md:5097,5154,5197` |
+
+**Correction to the brief:** the brief attributed "381 G elem/s" to ROW 77.
+That figure's own row of origin is ROW 71 (`f32 kernel 1.42x, packed kernel
+3.9x` — "llama.cpp Metal (3.784 GB / 17.62 ms at 0.5625 B/weight) | 381 G
+elem/s") and it is RE-CITED, not re-measured, at ROW 72 and ROW 77. ROW 77's
+own table literally reads "vs 381 G elem/s" as a column header, which is
+presumably where the brief's attribution came from — the number is genuinely
+ROW 77's own comparison target, just not where it was first measured. Not a
+material error, but the brief's shorthand undercounted the citation chain by
+two rows.
+
+**Bytes/weight, from the actual block constants, not restated from memory
+(guiding-principle #6 — read the code, don't infer it):**
+
+| codec | block bytes | block elements | bits/weight | **bytes/weight** | source |
+|---|---|---|---|---|---|
+| F32 | 4 | 1 | 32 | **4.0** | IEEE 754, not a codec constant |
+| Q4_K | 144 | 256 | 4.5 | **0.5625** | `Q4K_BLOCK_BYTES`/`Q4K_BLOCK_ELEMENTS`, `omega/src/msl.rs:291,296` |
+| Q5_K | 176 | 256 (shared) | 5.5 | **0.6875** | `Q5K_BLOCK_BYTES`, `omega/src/msl.rs:448` |
+| Q6_K | 210 | 256 (shared) | 6.5625 | **0.8203125** | `Q6K_BLOCK_BYTES`, `omega/src/msl.rs:359` |
+| Q8_0 | 34 | 32 | 8.5 | **1.0625** | `Q8_0_BLOCK_BYTES`/`Q8_0_BLOCK_ELEMENTS`, `omega/src/msl.rs:483,488` |
+
+144\*8/256=4.5, 210\*8/256=6.5625, 176\*8/256=5.5, 34\*8/32=8.5 — checked by
+hand (`bc`), not restated. **The brief's Q4_K figure (0.5625) and F32 figure
+(4.0) both check out exactly against source.**
+
+Re-doing the brief's own arithmetic with these verified constants:
+- F32: 360.7 / 4.0 = **90.175 G weights/s** ≈ 90.2 G/s — matches.
+- Packed Q4_K in-situ: 97.31 / 0.5625 = **173.0 G weights/s** — matches.
+- Packed Q4_K at F32's marginal bandwidth (hypothetical, DERIVED, not a
+  measured rate for the packed kernel): 360.7 / 0.5625 = **641.2 G
+  weights/s** — matches.
+- 173.0 / 641.2 = **27.0%**; 381 / 641.2 = **59.4%** — both match the brief.
+
+**The arithmetic is correct. The premise underneath it is what this row
+flags**: the 641.2 G weights/s denominator is DERIVED from a MATMUL kernel's
+marginal bandwidth (ROW94's f32 dense kernel does a multiply-then-reduce,
+not a pure streaming read), and ROW94 itself refuses to call it a hardware
+ceiling (`docs/discipline.md:7884`, `:7895-7901`). The brief's own 27%/59%
+figures are therefore DERIVED-on-DERIVED — arithmetically correct given
+their inputs, but the denominator is a proxy, not the MEASURED ceiling the
+brief also asks for. That is exactly the gap Task 2 below exists to close,
+and closing it requires a timed run this session cannot honestly produce.
+
+### Task 2 — the mechanism: what the packed kernel does per weight that the f32 kernel does not
+
+**F32 path** (`operand_read`, no codec): `in{index}[{offset}]` — one load,
+full stop. `omega/src/msl.rs:1793`.
+
+**Packed Q4_K, row-blocked, scale-deferred inner loop** (the fast path a real
+forward actually takes — `push_packed_row_blocked_body`,
+`omega/src/msl.rs:2186-2335`), per weight, steady state:
+
+1. **Amortized once per 32-element sub-block** (not per weight):
+   `q4k_header_for` (`msl.rs:230-242`) — two `uchar` pairs assembled into
+   `ushort`, two `half`-to-`float` converts, one call to `q4k_scale_min`
+   (`msl.rs:189-196` — a branch, then either 2 mask ops or 2 mask + 2 shift +
+   2 or ops depending on which side of the branch). Amortized cost per
+   weight: 1/32 of that.
+2. **Amortized once per 8 weights**: `q4k_run8` (`msl.rs:266-283`) — two
+   32-bit-aligned loads (`words[0]`, `words[1]`) covering 8 nibbles.
+   Amortized cost per weight: 1/8 of two loads, i.e. a quarter-load.
+3. **Per weight, unavoidable**: one shift, one mask (`(w >> shift) & 0xF`,
+   already counted inside `q4k_run8`'s unrolled body,
+   `msl.rs:275-282`), one `fma` into `raw_acc` (`msl.rs:2329`,
+   `raw_acc += levels[j] * act`), one add into `act_sum`
+   (`msl.rs:2330`). Scale/minimum are applied ONCE per (q, sub-block) pair
+   after the loop (`msl.rs:2333-2335`), not per weight.
+
+So the packed kernel's steady-state marginal cost per weight is **the f32
+path's one load-and-fma, PLUS one shift, one mask, and one extra add**
+(the `act_sum` accumulation the scale-deferred trick needs to factor
+`dmin` out), amortized register loads shared 8-wide and a header decode
+shared 32-wide. This is the "~1.6 ops per weight" ROW72's own code comment
+already named (`msl.rs:226`) as ggms's own amortization target — this row
+confirms the CURRENT code (post-ROW106 scale-deferral, post-ROW77 lane
+spread) still matches that shape, read fresh rather than assumed to still
+hold.
+
+**What this predicts, not yet measured:** the packed kernel does STRICTLY
+MORE per-weight arithmetic than f32 (one load+fma vs one load+fma+shift+
+mask+add), reading 7.1x fewer bytes. If the packed path is bandwidth-bound,
+those few extra integer ops are free (hidden under the memory stall) and
+weights/s should approach the f32 kernel's own bytes/weight-scaled rate. If
+it is compute-bound, the extra ops show up directly as a rate ceiling
+independent of bytes moved — which is exactly what ROW69-77's own history
+already found for the PRE-tiling kernel (17x gap, fixed by amortization) and
+what ROW94's 27%-of-derived-ceiling figure is consistent with, but does NOT
+prove, because the denominator was a proxy (Task 1's finding). **This
+question — memory-bound or unpack-bound — is the one the membw_probe below
+exists to answer, and it requires the timed run this row could not do.**
+
+### Task 3 — the MEASURED-ceiling probe, built, compiled, clippy-clean, NOT executed for a number
+
+New file, `omega/examples/membw_probe.rs` — a bench-shaped example, not a
+library type (pipe question: nothing here is composed by a caller; it is a
+`fn main` that prints numbers, same posture as `q4k_matvec_probe.rs`).
+
+- **CPU arm**: plain Rust, no `omega`/`proxima-tensor` dependency. A 2 GiB
+  `Vec<f32>` (512 Mi elements, ~40x this host's ~48 MB SLC), filled with
+  `sin(index * 1e-6)` (not a closed-form-collapsible constant), summed by a
+  single-pass streaming reduce — one add per element, as close to zero
+  arithmetic-per-byte as a reduction gets without becoming dead code. Both
+  single-threaded (`Iterator::sum`) and multi-threaded
+  (`std::thread::scope`, one worker per `available_parallelism` chunk).
+  5 runs, min reported (this file's own established convention: interference
+  inflates, never deflates), CoV computed and printed.
+- **Metal arm**, `cfg(feature = "metal", feature = "cpu", target_os =
+  "macos")`: a full `Op::Reduce(Add)` over one `Op::Input` f32 buffer
+  (`out_map` projected to rank 0 — a genuine scalar output, not a
+  disguised per-row reduce), run through `omega::plan`/`execute_plan` at two
+  sizes (64 Mi / 256 Mi elements = 256 MB / 1 GB) so the marginal
+  difference cancels the per-call fixed cost — the SAME two-size technique
+  `q4k_matvec_probe.rs` uses and ROW71 established as mandatory once a
+  single-size number was shown to conflate kernel bandwidth with per-call
+  driver overhead.
+
+**Gates, actual numbers:**
+
+| gate | result |
+|---|---|
+| `cargo build --release --example membw_probe -p omega` | exit 0, clean, no warnings (`build1.log`) |
+| `cargo clippy --release --example membw_probe -p omega -- -D warnings` | exit 0, clean (`clippy1.log`) |
+| `cargo nextest run -p proxima-tensor --features std` | **361 passed** (8 slow), 4 skipped — unchanged from ROW122's own baseline; this row added no `proxima-tensor` source |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed** (8 slow), 4 skipped — unchanged |
+| `cargo nextest run -p omega` (default features std,cpu,metal) | **83 passed**, 1 skipped — unchanged from ROW122's own tip |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0, 0 errors (one benign upstream `proc-macro-error2` future-incompat notice, unrelated, pre-existing) |
+
+**NOT executed for a timed number** — the Metal arm's correctness is
+therefore **UNVERIFIED-BY-EXECUTION** (same posture ROW62 documented for its
+AVX2 kernel: compiles, and that is the whole claim this row makes for it).
+Running either arm on this host right now would produce a number with no
+mechanism behind it: `uptime` read **85.23 / 82.46 / 80.67** (1/5/15-min)
+and **104.54** moments earlier, four-to-five sibling agents building
+concurrently on a 10-core box. Guiding-principle #18 rules this out as a
+reportable measurement, not merely as an inconvenience.
+
+### Explicitly deferred — named, not guessed at
+
+- **The MEASURED CPU and Metal bandwidth ceilings.** Re-prove command:
+  `cargo run --release --example membw_probe -p omega` on a host with two
+  consecutive `uptime` 1-minute readings at or below ~4, sixty seconds
+  apart.
+- **The real fraction-of-ceiling per path** (packed Q4_K in-situ / Q5_K /
+  Q6_K in-situ, packed Q4_K synthetic, f32), once the MEASURED ceiling above
+  replaces the DERIVED 641.2 G weights/s proxy Task 1 flagged.
+- **The low-bit-quant verdict** (would `Q2_K`/`Q3_K`/`IQ*` help or hurt).
+  Task 2's mechanism read predicts MORE per-weight unpack work at lower bit
+  widths would matter more, not less, if the kernel is compute-bound rather
+  than memory-bound — but that is a prediction from reading the code, not a
+  measurement, and this row does not convert it into a verdict. It requires
+  the fraction-of-ceiling numbers above, on a quiet box.
+
+### Rollback rows
+
+None — nothing landed changes production behaviour. One new example file,
+`instrument`-independent (it does not touch the `instrument` feature at
+all), default-off in the sense that it is never built or run except by
+explicit `cargo run --example`/`cargo build --example` invocation.
+
+### Host loadout
+
+`uptime` samples taken during this row (informational only — no timed
+number in this row depends on host quiet): `11:47 up 26 days, 21:25, 6
+users, load averages: 85.23 82.46 80.67`; a `104.54` reading moments before
+that. Coordinator-confirmed four-to-five sibling agents building
+concurrently on this shared 10-core box for the duration of this row.
+
+### Re-prove
+
+```sh
+cd <this worktree>
+cargo build --release --example membw_probe -p omega
+cargo clippy --release --example membw_probe -p omega -- -D warnings
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p omega
+cargo clippy --workspace --all-targets -- -D warnings
+# deferred, requires a quiet host (two consecutive `uptime` <= ~4, 60s apart):
+cargo run --release --example membw_probe -p omega
+```
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (isolated scratch path under `/private/tmp/.../scratchpad/wthroughput-target`) deleted after this row; per-run `.log` files under `$SCRATCH` deleted except one results file retained (`membw_probe_gates.log`, the concatenation of the six gate logs above, cited by path in the session report).
