@@ -52,8 +52,8 @@ use futures::{FutureExt, select};
 use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "tls")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use proxima_telemetry::{debug, error, warn};
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, error, warn};
 
 use crate::body::RequestStream;
 use crate::error::ProximaError;

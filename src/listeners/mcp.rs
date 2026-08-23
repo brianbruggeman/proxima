@@ -9,11 +9,11 @@ use futures::{FutureExt, select};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, warn};
 
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
 use proxima_protocols::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use proxima_telemetry::{debug, warn};
 
 use crate::error::ProximaError;
 use crate::pipe::PipeHandle;
