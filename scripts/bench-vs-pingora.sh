@@ -26,7 +26,13 @@ cd "$crate_dir"
 PLATFORM="$(detect_platform)"
 TRIALS="${TRIALS:-1}"
 
-FEATURES="http1,http2,tcp,runtime-tokio,runtime-prime-full,tls"
+# `http-hyper` is required, not incidental: h1_vs_pingora/h2_vs_pingora both
+# also carry a `hyper::http2::Builder` arm (`use hyper::...`) alongside the
+# pingora arm, which needs the optional hyper/hyper-util deps this feature
+# gates. Measured 2026-08-23: without it, `cargo bench --bench h2_vs_pingora`
+# errors "requires the features: http-hyper" and this script's `|| true`
+# swallowed that -- the bench had never actually run.
+FEATURES="http1,http2,tcp,runtime-tokio,runtime-prime-full,tls,http-hyper"
 RESULTS="benches/RESULTS_bench-vs-pingora_${PLATFORM}.md"
 CRITERION_DIR="target/criterion"
 LOGS_DIR="/tmp/bench-vs-pingora-logs"

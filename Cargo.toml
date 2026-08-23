@@ -1238,19 +1238,26 @@ required-features = ["http2", "tls"]
 name = "h2_vs_hyper"
 path = "benches/http/h2_vs_hyper.rs"
 harness = false
-required-features = ["http2", "tls"]
+# `hyper`/`hyper-util` are optional deps gated behind `http-hyper` (this
+# file's own `use hyper::...`) -- `["http2", "tls"]` alone let cargo accept
+# the invocation and then error "requires the features: http-hyper" or
+# silently skip the target, which is how this bench sat unexecuted behind
+# an under-declared gate rather than a missing one.
+required-features = ["http2", "tls", "http-hyper"]
 
 [[bench]]
 name = "h2_vs_pingora"
 path = "benches/http/h2_vs_pingora.rs"
 harness = false
-required-features = ["http2", "tls"]
+# same gap as h2_vs_hyper above -- this file also does `use hyper::...`.
+required-features = ["http2", "tls", "http-hyper"]
 
 [[bench]]
 name = "h2_tail_vs_incumbents"
 path = "benches/http/h2_tail_vs_incumbents.rs"
 harness = false
-required-features = ["http2", "tls"]
+# same gap as h2_vs_hyper above -- this file also does `use hyper::...`.
+required-features = ["http2", "tls", "http-hyper"]
 
 [[bench]]
 name = "h2_native_frame"
