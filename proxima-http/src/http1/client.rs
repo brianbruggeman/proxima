@@ -1226,8 +1226,6 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use rstest::rstest;
-
     use super::*;
     use futures::StreamExt as _;
     use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
@@ -1773,12 +1771,12 @@ mod tests {
     /// onto the request path. `base_path` empty is the regression that
     /// matters most — it must leave `request.path` untouched, byte for
     /// byte, so a base url with no path is unaffected by this change.
-    #[rstest]
+    #[proxima::test]
     #[case::no_base_path("", "/chat", &[], "/chat")]
     #[case::single_segment_base("/v1", "/chat", &[], "/v1/chat")]
     #[case::nested_base("/llm/openai/v1", "/generate", &[], "/llm/openai/v1/generate")]
     #[case::query_string_preserved("/v1", "/chat", &[("stream", "true")], "/v1/chat?stream=true")]
-    fn prefixed_path_produces_the_wire_target(
+    async fn prefixed_path_produces_the_wire_target(
         #[case] base_path: &str,
         #[case] request_path: &str,
         #[case] query: &[(&str, &str)],
