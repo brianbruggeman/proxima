@@ -55,4 +55,7 @@ pub enum TokenizerError {
 
     #[error("gguf tokenizer.ggml.model '{model}' is not a tokenizer family this crate supports")]
     UnsupportedTokenizerModel { model: String },
+
+    #[error("hf tokenizer.json is not valid json, or is missing model.vocab/model.merges: {reason}")]
+    MalformedHfTokenizerJson { reason: String },
 }
