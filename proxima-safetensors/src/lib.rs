@@ -304,6 +304,33 @@ mod tests {
         assert!(outcome.is_err(), "expected a typed error, got {outcome:?}");
     }
 
+    /// The reader's counterpart to `writer::tests::
+    /// write_complete_rejects_tensor_data_length_mismatch`: a header
+    /// declaring `shape [4]` (`F32`, 16 bytes) but a `data_offsets` range
+    /// of only 4 bytes must be rejected, not silently accepted with a
+    /// `TensorEntry` whose `shape` promises more bytes than `byte_len()`
+    /// actually spans — the exact "trust the header past the real
+    /// buffer" shape of bug this crate's own `data_offsets_outside_the_
+    /// byte_buffer_is_a_typed_error` test already guards for the whole-
+    /// buffer case; this guards the per-tensor shape/dtype case.
+    #[test]
+    fn shape_dtype_data_offsets_length_mismatch_is_a_typed_error() {
+        let json = br#"{"t":{"dtype":"F32","shape":[4],"data_offsets":[0,4]}}"#;
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
+        wire.extend_from_slice(json);
+        wire.extend_from_slice(&[0_u8; 4]);
+        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::TensorDataLengthMismatch {
+                expected: 16,
+                found: 4,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn empty_tensor_directory_is_a_valid_empty_manifest() {
         let (buf, _) = build_buffer(&[], &[]);
