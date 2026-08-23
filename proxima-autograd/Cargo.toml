@@ -38,6 +38,7 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 # math crate already in this workspace's dependency tree (pulled in
 # transitively today; declared directly here since this crate calls it).
 libm = "0.2"
+proxima-primitives = { workspace = true, default-features = false }
 proxima-telemetry = { workspace = true, optional = true }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 serde = { workspace = true, features = ["derive"], optional = true }

@@ -1,11 +1,17 @@
 //! The adjoint transform: forward program plus a scalar loss node in,
-//! adjoint program out — [`differentiate`] is a pure, synchronous
-//! `&[Op] -> Differentiated` function, not a [`proxima_primitives::pipe::Pipe`].
-//! `Pipe::call` is `async` (RPITIT, `proxima-primitives/src/pipe/primitives.rs:101`)
-//! because the algebra is an I/O-composition surface; graph construction
-//! has no I/O behind it, so forcing an async boundary here would be
-//! manufacturing one to earn a name, exactly the error this workspace's own
-//! `AGENTS.md` names and rejects.
+//! adjoint program out. [`differentiate`] is the direct-call surface — a
+//! plain `&[Op] -> Result<Differentiated, AutogradError>` function, no
+//! `.await` needed at a straight-line call site. [`Differentiate`] is the
+//! same core wearing this workspace's uniform algebra shape: a
+//! [`proxima_primitives::pipe::Pipe`] whose `call` delegates straight to
+//! `differentiate`, exactly the relationship
+//! `proxima_tensor::shape::ShapeTable`'s own `Pipe` impl
+//! (`proxima-tensor/src/shape.rs:292-304`) has to `shape::infer`'s
+//! free-function loop over it — the incremental/whole-program primitive
+//! wears `Pipe`, the batch convenience is a plain function. Both surfaces
+//! exist for the same reason `proxima_tensor::spec::ProgramSpec` exposes a
+//! builder AND a plain struct: pick whichever fits the call site, they are
+//! the same value.
 //!
 //! One rule per [`Op`] form:
 //!
@@ -46,7 +52,9 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::future::Future;
 
+use proxima_primitives::pipe::Pipe;
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::IndexMap;
 use proxima_tensor::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
@@ -434,4 +442,91 @@ fn differentiate_reduce(
     let operand_rank = shapes.of(reduce.operand).len() as u16;
     accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
     Ok(())
+}
+
+/// [`differentiate`] wearing this workspace's uniform algebra shape — see
+/// this module's own doc for the exact relationship to
+/// `proxima_tensor::shape::ShapeTable`'s own `Pipe` impl. Zero-sized: unlike
+/// [`crate::optimizer::AdamStep`] (which holds an `AdamConfig` and a
+/// program under construction across many calls), `differentiate` runs
+/// once and needs no persistent state between calls, so there is nothing
+/// to hold in `&self`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Differentiate;
+
+impl Pipe for Differentiate {
+    /// Owned rather than `&[Op]`: `Pipe::call` takes `Self::In` by value
+    /// with no lifetime tying it to `&self`, so a borrowed program would
+    /// need a lifetime parameter on the impl itself for no benefit here —
+    /// this crate's own `differentiate` free function still only borrows
+    /// internally.
+    type In = (Vec<Op>, NodeId);
+    type Out = Differentiated;
+    type Err = AutogradError;
+
+    fn call(
+        &self,
+        (program, loss): Self::In,
+    ) -> impl Future<Output = Result<Self::Out, Self::Err>> {
+        async move { differentiate(&program, loss) }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pipe_tests {
+    use proxima_tensor::op::Extent;
+
+    use super::*;
+
+    /// `Pipe::call`'s returned future has no `Send` bound (that is the
+    /// entire point of the base rung vs `SendPipe`) — `#[proxima::test]`'s
+    /// harness requires `Send`, so a plain `#[test]` polling this
+    /// single-state-machine future once (it never returns `Pending`, there
+    /// is no `.await` inside the `async move` body) is the correct tool
+    /// here, not a workaround.
+    fn block_on_once<F: Future>(future: F) -> F::Output {
+        let mut future = core::pin::pin!(future);
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            core::task::Poll::Ready(output) => output,
+            core::task::Poll::Pending => panic!("test future must be ready on first poll"),
+        }
+    }
+
+    #[test]
+    fn the_pipe_form_agrees_with_the_free_function() {
+        let mut program = Vec::new();
+        let x = proxima_tensor::op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(3)],
+                name: Some("x".into()),
+            },
+        );
+        let loss = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map: IndexMap::Affine(proxima_tensor::map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let via_pipe = block_on_once(Differentiate.call((program.clone(), loss)))
+            .expect("pipe form differentiates");
+        let via_function = differentiate(&program, loss).expect("free function differentiates");
+
+        assert_eq!(
+            via_pipe.gradient_of_named("x"),
+            via_function.gradient_of_named("x"),
+            "the Pipe wrapper must delegate to the exact same transform"
+        );
+    }
 }
