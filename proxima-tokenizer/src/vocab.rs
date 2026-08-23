@@ -167,6 +167,23 @@ impl Vocab {
 
         let id_to_bytes: Vec<Vec<u8>> = tokens.iter().map(|token| token_bytes_for(token)).collect();
 
+        // A real HF byte-level BPE vocab is NOT guaranteed to carry all 256
+        // single-byte display tokens explicitly -- confirmed against the
+        // real, on-disk `HuggingFaceTB/SmolLM2-135M-Instruct/tokenizer.json`
+        // (49152 tokens), which is missing 21 of them (mostly control bytes
+        // and UTF-8 lead/continuation bytes that never occur as a
+        // standalone trained token): byte 4, 6, 19, 20, 22, 29, 192, 193,
+        // 241..=255. This is not a SmolLM2 quirk -- the original GPT-2
+        // `vocab.json` this family's tokenizer descends from has the
+        // identical property, for the identical reason (BPE training only
+        // ever assigns an id to a symbol that appears as its OWN token
+        // somewhere in the corpus; a byte that always occurs merged with a
+        // neighbor never needs one). Left as `None` here rather than a hard
+        // error: [`Self::base_byte_token`] already tolerates `None`
+        // (falls back to token id `0`), so the runtime path this was always
+        // going to take is now also the construction-time path, and a
+        // vocab this incomplete only actually matters if a caller's real
+        // input contains one of these specific rare bytes.
         let mut base_byte_token_id = [None; 256];
         for byte in 0..=255u8 {
             let display = byte_to_char(byte);
@@ -176,9 +193,6 @@ impl Vocab {
                 .get(&single_char)
                 .copied()
                 .or_else(|| token_to_id.get(hex_fallback_token(byte).as_str()).copied());
-            if token_id.is_none() {
-                return Err(TokenizerError::MissingBaseByteToken { byte, display });
-            }
             base_byte_token_id[byte as usize] = token_id;
         }
 
@@ -476,11 +490,17 @@ pub(crate) mod tests {
         Vocab::new_unigram(tokens, scores, Some(1), Some(2), None).expect("tiny unigram vocab builds")
     }
 
+    /// A vocab missing one of the 256 base byte tokens must still build --
+    /// real HF byte-level BPE vocabs commonly omit rare/control bytes (see
+    /// [`Vocab::assemble`]'s own doc, confirmed against the real SmolLM2
+    /// checkpoint's `tokenizer.json`), so this is no longer
+    /// [`TokenizerError::MissingBaseByteToken`], and [`Vocab::base_byte_token`]
+    /// falls back to token id `0` for the byte this fixture omits.
     #[test]
-    fn missing_base_byte_token_is_an_error() {
+    fn missing_base_byte_token_builds_with_a_fallback_not_an_error() {
         let tokens: Vec<String> = (0..=254u8).map(|byte| String::from(byte_to_char(byte))).collect();
-        let error = Vocab::new(tokens, &[], None, None, None).expect_err("missing byte 255");
-        assert!(matches!(error, TokenizerError::MissingBaseByteToken { byte: 255, .. }));
+        let vocab = Vocab::new(tokens, &[], None, None, None).expect("a vocab missing byte 255's token still builds");
+        assert_eq!(vocab.base_byte_token(255), 0, "the missing byte falls back to token id 0");
     }
 
     #[test]
