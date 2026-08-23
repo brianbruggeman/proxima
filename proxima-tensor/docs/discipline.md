@@ -9489,25 +9489,44 @@ Not "we are 3.7x behind" in the honest read. In the table, beside the number.
 | Metal | **17.62 ms/token** | ROW 102, `-ngl 99` |
 | CPU | **44.09 ms/token** | ROW 102, `-ngl 0 -t 8` — **UNVERIFIED**, see ROW 100 |
 
-Where a per-term table has no per-term incumbent number (we have never split
-llama's token), carry **llama's whole token** in the column and say so. That
-comparison is harsh and it is the correct one: a term of ours that exceeds
-their entire token cannot be optimized into a win.
+**CORRECTED — this paragraph originally said the opposite and was wrong.**
 
-Worked example, and it is why this rule earns its place — the CPU split at
-ROW 99, restated with the column:
+The first draft instructed: where a per-term table has no per-term incumbent
+number, carry llama's WHOLE TOKEN in the column. **That is forbidden**, and it
+violates ROW 83's own rule written into this same file: *a number may not
+appear in a column headed `vs <incumbent>` unless it was produced by the same
+KIND of run as the incumbent's number.* Our matmul-alone against their whole
+token is precisely that — a part compared to a whole, dressed as a ratio.
 
-| term | ours ms | llama WHOLE token |
-|---|---|---|
-| `staged_batch`, 160 matmuls | 29.04 | 44.09 |
-| `reduce_matmul_quantized`, 65 | 16.75 | 44.09 |
-| **matmul subtotal** | **45.79** | **44.09** |
-| everything else | 8.06 | 44.09 |
+**The rule, corrected: apples to apples or the cell is empty.**
 
-With the column, one line does what three rows of prose did not: **our matmul
-alone already exceeds their entire token**, so driving every other CPU term to
-zero still loses. Without the column that table reads as "matmul is 79% of our
-time", which is true, useless, and invites another session of overhead hunting.
+- `step_wall` vs `step_wall` — carry the column.
+- A per-term table where we have no equivalent llama term — **no incumbent
+  column at all.** Write `not measured` once, beneath the table.
+- Never substitute a coarser incumbent figure for a finer one. "Harsh but
+  directionally right" is not a category; it is a wrong number that happens to
+  point the way you already believed.
+
+Worked example, the CPU split at ROW 99, stated correctly:
+
+| term | ours ms |
+|---|---|
+| `staged_batch`, 160 matmuls | 29.04 |
+| `reduce_matmul_quantized`, 65 | 16.75 |
+| **matmul subtotal** | **45.79** |
+| everything else | 8.06 |
+| **step_wall total** | **53.85** |
+
+llama per-term: **not measured.** We have never split their token, so no cell
+in this table gets an incumbent value. The only admissible comparison from this
+data is the bottom row against theirs: **53.85 vs 44.09 ms/token, 1.221x.**
+
+What that costs us: the observation "our matmul alone exceeds their whole
+token" is NOT supported by this table, because their 44.09 includes their
+non-matmul work and ours excludes it. Whether their matmul alone is above or
+below 45.79 is unknown. **Getting llama's per-op split is the work** — ggml has
+per-op timing facilities; use them, rather than borrowing a number of the wrong
+shape.
 
 ### Today's arc, with the column
 
