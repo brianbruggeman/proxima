@@ -243,7 +243,6 @@ impl IndexReader {
 mod tests {
     use super::*;
     use prime::os::runtime::PrimeRuntime;
-    use rstest::rstest;
     use tempfile::tempdir;
 
     fn prime() -> Arc<dyn Runtime> {
@@ -291,13 +290,12 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::below_first(5, Some(0))]
     #[case::exact_first(10, Some(0))]
     #[case::between(20, Some(1))]
     #[case::exact_last(40, Some(2))]
     #[case::above_last(100, None)]
-    #[proxima::test]
     async fn seek_by_ts_returns_first_record_with_ts_ge_target(
         #[case] target: u64,
         #[case] expected: Option<u64>,

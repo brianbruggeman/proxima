@@ -4549,7 +4549,6 @@ dependencies = [
  "proxima-protocols",
  "proxima-runtime",
  "proxima-telemetry",
- "rstest",
  "serde",
  "serde_json",
  "smallvec",
