@@ -85,7 +85,13 @@ for file in "${paths[@]}"; do
         end_line=$((test_line - 1))
     fi
 
-    matches=$(head -n "$end_line" "$file" | awk -f "$gate_awk" || true)
+    awk_status=0
+    matches=$(head -n "$end_line" "$file" | awk -f "$gate_awk") || awk_status=$?
+    if [ "$awk_status" -ne 0 ]; then
+        printf 'nostd-gate: %s failed on %s (exit %d) -- treating as a gate failure, not a clean file\n' \
+            "$gate_awk" "$file" "$awk_status" >&2
+        exit 1
+    fi
     if [ -z "$matches" ]; then
         continue
     fi
