@@ -255,13 +255,12 @@ impl Pipe for DecimalMultiply<i128> {
 mod tests {
     use super::*;
     use proxima_primitives::block_on;
-    use rstest::rstest;
 
-    #[rstest]
+    #[proxima::test]
     #[case::whole_number(3.0, 300)]
     #[case::two_decimal_places(19.99, 1999)]
     #[case::negative(-2.5, -250)]
-    fn to_fixed_scales_by_ten_to_the_scale(#[case] value: f64, #[case] expected: i64) {
+    async fn to_fixed_scales_by_ten_to_the_scale(#[case] value: f64, #[case] expected: i64) {
         let pipe = ToFixed::<i64>::new(2).expect("scale 2 fits i64");
         let fixed = block_on(pipe.call(value)).expect("finite input never errors");
         assert_eq!(fixed, expected);

@@ -409,7 +409,6 @@ pub mod decimal;
 mod tests {
     use super::*;
     use proxima_primitives::block_on;
-    use rstest::rstest;
 
     #[test]
     fn widening_ladder_round_trips_a_small_value() {
@@ -430,13 +429,13 @@ mod tests {
         assert_eq!(narrow_wide, wide as i8);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::zero(0.0)]
     #[case::one(1.0)]
     #[case::negative(-3.5)]
     #[case::saturates_high(1.0e30)]
     #[case::saturates_low(-1.0e30)]
-    fn float_to_int_saturates_never_panics(#[case] value: f32) {
+    async fn float_to_int_saturates_never_panics(#[case] value: f32) {
         let converted: i32 = block_on(Convert::<f32, i32>::new().call(value)).unwrap();
         assert_eq!(converted, value as i32);
     }
@@ -456,11 +455,11 @@ mod tests {
         assert_eq!(via_slice, via_scalar);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::i8_i16(17)]
     #[case::exact_multiple(16)]
     #[case::single_remainder(9)]
-    fn simd_ladder_pairs_agree_with_scalar(#[case] length: usize) {
+    async fn simd_ladder_pairs_agree_with_scalar(#[case] length: usize) {
         let input: Vec<i16> = (0..length as i32).map(|value| value as i16).collect();
         let mut via_slice = vec![0_i32; length];
         Convert::<i16, i32>::new().convert_slice(&input, &mut via_slice);
@@ -478,12 +477,12 @@ mod tests {
         assert!(!as_bool_zero);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::zero(0.0)]
     #[case::one(1.0)]
     #[case::negative_fraction(-0.25)]
     #[case::small(1.0e-30)]
-    fn bf16_round_trips_representable_values(#[case] value: f32) {
+    async fn bf16_round_trips_representable_values(#[case] value: f32) {
         let narrowed: bf16 = block_on(Convert::<f32, bf16>::new().call(value)).unwrap();
         let widened: f32 = block_on(Convert::<bf16, f32>::new().call(narrowed)).unwrap();
         // bf16 keeps f32's exponent and drops 16 mantissa bits, so a value
@@ -506,13 +505,13 @@ mod tests {
         assert_eq!(back_infinite, f32::INFINITY);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::zero(0.0)]
     #[case::one(1.0)]
     #[case::negative(-2.5)]
     #[case::max_normal(65504.0)]
     #[case::small_subnormal(0.000_061_035_156)]
-    fn f16_round_trips_representable_values(#[case] value: f32) {
+    async fn f16_round_trips_representable_values(#[case] value: f32) {
         let narrowed: f16 = block_on(Convert::<f32, f16>::new().call(value)).unwrap();
         let widened: f32 = block_on(Convert::<f16, f32>::new().call(narrowed)).unwrap();
         assert_eq!(widened, value, "every value in this table is exactly representable in f16");
@@ -543,10 +542,13 @@ mod tests {
         assert_eq!(back_infinite, f32::NEG_INFINITY);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::rounds_down_kept_lsb_even(1.000_488_3, 0x3c00)]
     #[case::rounds_up_kept_lsb_odd(1.002_441_4, 0x3c02)]
-    fn f16_normal_path_ties_round_to_nearest_even(#[case] value: f32, #[case] expected_bits: u16) {
+    async fn f16_normal_path_ties_round_to_nearest_even(
+        #[case] value: f32,
+        #[case] expected_bits: u16,
+    ) {
         // both `value`s sit exactly halfway between two representable f16
         // values (dropped mantissa bits exactly 0x1000) — round-half-even
         // must round to the neighbor with an even kept LSB, never always up.

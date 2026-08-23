@@ -10499,7 +10499,6 @@ mod tests {
     use crate::bind::BodyStep;
     use crate::map::{self, AxisTerm, IndexMap};
     use crate::op::{Extent, Reduce, append};
-    use rstest::rstest;
 
     use std::time::Instant;
 
@@ -10755,12 +10754,15 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::swiglu(swiglu_body(), vec![1, 0, 1])]
     #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 1])]
     #[case::rope_add(rope_body(ScalarOp::Add), vec![1, 1, 1, 1])]
     #[case::rope_subtract(rope_body(ScalarOp::Subtract), vec![1, 1, 1, 1])]
-    fn elementwise_width_generic_matches_scalar_apply_body(#[case] body: ComposedBody, #[case] strides: Vec<i64>) {
+    async fn elementwise_width_generic_matches_scalar_apply_body(
+        #[case] body: ComposedBody,
+        #[case] strides: Vec<i64>,
+    ) {
         let width = 32;
         let operand_len = |stride: i64| if stride == 0 { 1 } else { width };
         let buffers: Vec<Vec<f32>> = strides
@@ -10967,11 +10969,11 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::swiglu(swiglu_body(), vec![1, 0, 1])]
     #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 1])]
     #[case::rope_add(rope_body(ScalarOp::Add), vec![1, 1, 1, 1])]
-    fn generic_body_is_affine_fast_path_accepts_gather_free_affine_operands(
+    async fn generic_body_is_affine_fast_path_accepts_gather_free_affine_operands(
         #[case] body: ComposedBody,
         #[case] strides: Vec<i64>,
     ) {
@@ -10979,18 +10981,21 @@ mod tests {
         assert!(generic_body_is_affine_fast_path(&resolved, &body, &strides));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::swiglu(swiglu_body(), vec![1, 0, 1])]
     #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 1])]
-    fn generic_body_is_affine_fast_path_rejects_a_gathered_operand(#[case] body: ComposedBody, #[case] strides: Vec<i64>) {
+    async fn generic_body_is_affine_fast_path_rejects_a_gathered_operand(
+        #[case] body: ComposedBody,
+        #[case] strides: Vec<i64>,
+    ) {
         let resolved = bound_op_for_gate(body.clone(), &strides, Some(0));
         assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::swiglu(swiglu_body(), vec![2, 0, 1])]
     #[case::rmsnorm(rmsnorm_body(), vec![1, 0, 2])]
-    fn generic_body_is_affine_fast_path_accepts_a_non_negative_constant_stride(
+    async fn generic_body_is_affine_fast_path_accepts_a_non_negative_constant_stride(
         #[case] body: ComposedBody,
         #[case] strides: Vec<i64>,
     ) {
@@ -10998,10 +11003,13 @@ mod tests {
         assert!(generic_body_is_affine_fast_path(&resolved, &body, &strides));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::swiglu(swiglu_body(), vec![-1, 0, 1])]
     #[case::rmsnorm(rmsnorm_body(), vec![1, 0, -1])]
-    fn generic_body_is_affine_fast_path_rejects_a_negative_stride(#[case] body: ComposedBody, #[case] strides: Vec<i64>) {
+    async fn generic_body_is_affine_fast_path_rejects_a_negative_stride(
+        #[case] body: ComposedBody,
+        #[case] strides: Vec<i64>,
+    ) {
         let resolved = bound_op_for_gate(body.clone(), &strides, None);
         assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
     }
@@ -11177,11 +11185,11 @@ mod tests {
     /// parity check, not a round-trip-to-self check. Two real (pseudo-random,
     /// non-degenerate — `Lcg`, not zeros/constants) rows x 2 super-blocks
     /// (512 elements) each, `Q4_K`'s minimum non-trivial multi-block shape.
-    #[rstest]
+    #[proxima::test]
     #[case::seed_1(1)]
     #[case::seed_7(7)]
     #[case::seed_1000(1000)]
-    fn matmul_q4k_f32_matches_dequantize_then_f32_matmul(#[case] seed: u64) {
+    async fn matmul_q4k_f32_matches_dequantize_then_f32_matmul(#[case] seed: u64) {
         use proxima_gguf::quant::q4_k::{QK_K, dequantize, quantize};
 
         const ROWS: usize = 2;
@@ -12068,11 +12076,11 @@ mod tests {
         assert_eq!(evaluated.root(), reference.as_slice());
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_worker(1)]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
-    fn evaluate_parallel_matches_evaluate_for_a_gather_program(#[case] workers: usize) {
+    async fn evaluate_parallel_matches_evaluate_for_a_gather_program(#[case] workers: usize) {
         let (vocab, embed_dim, seq, out_dim) = (100usize, 6usize, 4usize, 3usize);
         let program =
             embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
@@ -12939,11 +12947,13 @@ mod tests {
     /// fully sequential [`evaluate`] path, per this node kind's own
     /// no-cross-element-accumulation argument (`run_elementwise_dispatch`'s
     /// doc).
-    #[rstest]
+    #[proxima::test]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
     #[case::eight_workers(8)]
-    fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(#[case] workers: usize) {
+    async fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(
+        #[case] workers: usize,
+    ) {
         // SAFETY of the test env var mutation: `PROXIMA_MATMUL_WORKERS` is
         // read exactly once, lazily, behind `matmul_worker_count`'s own
         // `OnceLock` — set before that lock is ever touched by any other
@@ -12991,12 +13001,12 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_worker(1)]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
     #[case::eight_workers(8)]
-    fn evaluate_parallel_matches_evaluate_for_a_matmul(#[case] workers: usize) {
+    async fn evaluate_parallel_matches_evaluate_for_a_matmul(#[case] workers: usize) {
         let (m, k, n) = (4usize, 3usize, 5usize);
         let (program, _sum) = matmul_program(m as u32, k as u32, n as u32, false);
         let lhs: Vec<f32> = (0..m * k).map(|value| value as f32).collect();
@@ -13005,12 +13015,12 @@ mod tests {
         assert_parallel_matches_sequential(&program, &[], &[&lhs, &rhs], &[], workers);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_worker(1)]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
     #[case::eight_workers(8)]
-    fn evaluate_parallel_matches_evaluate_for_a_tanh_chain(#[case] workers: usize) {
+    async fn evaluate_parallel_matches_evaluate_for_a_tanh_chain(#[case] workers: usize) {
         let mut program = Vec::new();
         let mut current = f32_block(&mut program, &[Extent::Static(4)]);
         for _ in 0..8 {
@@ -13030,12 +13040,12 @@ mod tests {
         assert_parallel_matches_sequential(&program, &[], &[&input], &[], workers);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_worker(1)]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
     #[case::eight_workers(8)]
-    fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) {
+    async fn evaluate_parallel_matches_evaluate_for_softmax(#[case] workers: usize) {
         let mut program = Vec::new();
         let (n, d) = (2usize, 4usize);
         let input = f32_block(
@@ -13104,12 +13114,12 @@ mod tests {
         assert_parallel_matches_sequential(&program, &[], &[&input_data], &[], workers);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_worker(1)]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
     #[case::eight_workers(8)]
-    fn evaluate_parallel_matches_evaluate_for_cumsum(#[case] workers: usize) {
+    async fn evaluate_parallel_matches_evaluate_for_cumsum(#[case] workers: usize) {
         let mut program = Vec::new();
         let source = f32_block(&mut program, &[Extent::Static(6)]);
         append(
@@ -13130,12 +13140,14 @@ mod tests {
         assert_parallel_matches_sequential(&program, &[], &[&data], &[], workers);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_worker(1)]
     #[case::two_workers(2)]
     #[case::three_workers(3)]
     #[case::eight_workers(8)]
-    fn evaluate_parallel_matches_evaluate_for_multiple_requested_outputs(#[case] workers: usize) {
+    async fn evaluate_parallel_matches_evaluate_for_multiple_requested_outputs(
+        #[case] workers: usize,
+    ) {
         let mut program = Vec::new();
         let source = f32_block(&mut program, &[Extent::Static(4)]);
         let mut current = source;
@@ -13353,7 +13365,7 @@ mod tests {
         (program, lhs, rhs, sum)
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::int8(DType::Int8, TypedBuffer::Int8(alloc::vec![1, 2, 3]), TypedBuffer::Int8(alloc::vec![10, 20, 30]), TypedBuffer::Int8(alloc::vec![11, 22, 33]))]
     #[case::uint8(DType::UInt8, TypedBuffer::UInt8(alloc::vec![1, 2, 3]), TypedBuffer::UInt8(alloc::vec![10, 20, 30]), TypedBuffer::UInt8(alloc::vec![11, 22, 33]))]
     #[case::int16(DType::Int16, TypedBuffer::Int16(alloc::vec![1, 2, 3]), TypedBuffer::Int16(alloc::vec![10, 20, 30]), TypedBuffer::Int16(alloc::vec![11, 22, 33]))]
@@ -13365,7 +13377,7 @@ mod tests {
     #[case::int128(DType::Int128, TypedBuffer::Int128(alloc::vec![1, 2, 3]), TypedBuffer::Int128(alloc::vec![10, 20, 30]), TypedBuffer::Int128(alloc::vec![11, 22, 33]))]
     #[case::uint128(DType::UInt128, TypedBuffer::UInt128(alloc::vec![1, 2, 3]), TypedBuffer::UInt128(alloc::vec![10, 20, 30]), TypedBuffer::UInt128(alloc::vec![11, 22, 33]))]
     #[case::float64(DType::Float64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.5]), TypedBuffer::Float64(alloc::vec![10.0, 20.0, 30.0]), TypedBuffer::Float64(alloc::vec![11.5, 22.5, 33.5]))]
-    fn evaluate_typed_adds_across_every_extended_width(
+    async fn evaluate_typed_adds_across_every_extended_width(
         #[case] dtype: DType,
         #[case] lhs: TypedBuffer,
         #[case] rhs: TypedBuffer,
@@ -13515,11 +13527,11 @@ mod tests {
         (program, sum)
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::int32(DType::Int32, TypedBuffer::Int32(alloc::vec![1, 2, 3, 4]), TypedBuffer::Int32(alloc::vec![10]))]
     #[case::uint64(DType::UInt64, TypedBuffer::UInt64(alloc::vec![1, 2, 3, 4]), TypedBuffer::UInt64(alloc::vec![10]))]
     #[case::float64(DType::Float64, TypedBuffer::Float64(alloc::vec![1.5, 2.5, 3.0, 4.0]), TypedBuffer::Float64(alloc::vec![11.0]))]
-    fn evaluate_typed_reduces_a_vector_to_a_scalar_across_widths(
+    async fn evaluate_typed_reduces_a_vector_to_a_scalar_across_widths(
         #[case] dtype: DType,
         #[case] operand: TypedBuffer,
         #[case] expected: TypedBuffer,
@@ -15330,13 +15342,13 @@ mod tests {
     /// path (`matmul_q4k_q8k_f32`-family), so a single absolute bound across
     /// all five cells would be either vacuous for `float32` or spuriously
     /// red for the packed codecs.
-    #[rstest]
+    #[proxima::test]
     #[case::float32("float32", 1e-6)]
     #[case::q4_k("q4_k", 0.01)]
     #[case::q5_k("q5_k", 0.01)]
     #[case::q6_k("q6_k", 0.01)]
     #[case::q8_0("q8_0", 0.01)]
-    fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec(
+    async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec(
         #[case] codec: &str,
         #[case] tolerance: f32,
     ) {

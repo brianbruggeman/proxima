@@ -510,7 +510,6 @@ mod tests {
     use crate::dtype::DType;
     use crate::map::{self, AxisTerm};
     use crate::op::{Extent, ReduceInit, ScalarOp, append};
-    use rstest::rstest;
 
     fn leaf(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
         append(
@@ -681,10 +680,10 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::static_extent(Extent::Static(4), &[], &[4])]
     #[case::symbolic_extent(Extent::Symbolic(0), &[16], &[16])]
-    fn an_iota_resolves_its_own_shape_from_its_extent(
+    async fn an_iota_resolves_its_own_shape_from_its_extent(
         #[case] extent: Extent,
         #[case] symbols: &[u64],
         #[case] expected: &[u64],
@@ -835,10 +834,10 @@ mod tests {
         assert_eq!(shapes.of(reduced), &[4]);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::forward_reference(NodeId(2))]
     #[case::self_reference(NodeId(1))]
-    fn a_non_backward_reference_is_rejected(#[case] referenced: NodeId) {
+    async fn a_non_backward_reference_is_rejected(#[case] referenced: NodeId) {
         let mut program = Vec::new();
         leaf(&mut program, &[Extent::Static(4)]);
         let map = IndexMap::Affine(map::projection(1, &[0]));
