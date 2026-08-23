@@ -11647,3 +11647,223 @@ five landed fixes ago. `metal-tiled-gemm` closes real ground e2e (1.29x
 faster than the row-blocked default it would replace) without regressing
 decode, but it does not close the gap to either the incumbent or our own CPU
 backend. No arm beats llama on any metric, on this box, today.
+
+## ROW 117 — ROW 105's "static split, no stealing" premise is WRONG at HEAD: the atomic-claim work-steal it called for already shipped 2026-08-19; the measured residual is 2-7% (prefill) / 13-23% (decode), and Step 2 is correctly a no-op
+
+Dispatched to verify ROW 105's finding #3 (`ggml-cpu.c:1359-1385` dynamic
+atomic-claim vs `cpu.rs:6271-6280` "fixed row ranges... a member that finishes
+early cannot take a neighbour's remainder") and, only if the imbalance
+justified it, build a `fetch_add` claim loop mirroring ggml's shape.
+
+### Citation verification — both sides, before anything else
+
+**ggml, confirmed correct.** `ggml-cpu.c:1332-1385` (re-read in full, the
+task's `:1359-1385` sub-range is the tail of the same function): chunk size
+`16`, or `64` when `nr0==1 || nr1==1` (`:1332-1336`); `current_chunk = ith`
+seed, then `current_chunk = atomic_fetch_add_explicit(&threadpool->current_chunk,
+1, memory_order_relaxed)` (`:1385`) inside a `while (current_chunk <
+nchunk0*nchunk1)` claim loop. Matches the citation exactly.
+
+**`cpu.rs:6271-6280`, WRONG at current HEAD — and ROW 105 itself was wrong
+when it was written, not merely stale.** Those lines only build the
+`chunk_ranges` vector via repeated `split_at_mut` — true in isolation, but
+`row_chunk_count` (`cpu.rs:6187-6192`) already sizes that vector to
+`workers * ROW_OVERSUBSCRIBE` chunks (`ROW_OVERSUBSCRIBE = 4`, `sized.rs:318`,
+generated from `proxima-tensor-runtime.toml` via `build.rs:196`), i.e. **more
+chunks than workers whenever total macs clear `MIN_MACS_PER_CHUNK` (500,000,
+`sized.rs:320`)**. Every one of `matmul_rows_threaded`'s two dispatch paths
+then claims those oversubscribed ranges through a **shared atomic cursor**,
+not a 1:1 static assignment:
+- pool path: `claim_and_run_rows` (`cpu.rs`, `next_index: &AtomicUsize`,
+  `next_index.fetch_add(1, Relaxed)`).
+- cohort path: `RowRound` dispatched through `CohortSession::run` ->
+  `prime/src/os/cohort.rs:789-895`'s `run_round`, `control.cursor.fetch_add(1,
+  Relaxed)` per member, looping until the cursor exceeds `chunk_total`.
+
+Same shape as ggml's `current_chunk`/`atomic_fetch_add_explicit` loop, chunk
+size decided by macs-per-chunk instead of a fixed 16/64. **Landed**
+`b8b4bb1` "perf(tensor): quantized matmuls thread through the shared pool"
+(2026-08-19) and refined `388d93a` "perf(tensor): chunk count scales with the
+work in the call" (2026-08-20) — both **before** ROW 105 was written
+(ROW 105 sits between ROW 104 and ROW 106 in this same file, both dated
+around the ROW 100-108 cluster, i.e. 2026-08-20/21). ROW 105 read the
+`chunk_ranges`-build loop and never connected it to `row_chunk_count`'s own
+oversubscription math three lines above the call site — an incomplete read,
+not new information the codebase lacked. **The log had the bug, not the
+source** — this task's own stop condition, invoked here.
+
+**Per gate 14 (internal-primitive audit) and the task's own instruction:**
+Step 2 (build a `fetch_add` claim loop mirroring ggml) is not attempted.
+Writing it again would duplicate `prime::os::cohort::run_round`, already the
+identical primitive, under a second name.
+
+### Step 1 — measured anyway, because the number is real and new
+
+`prime/src/os/cohort.rs`'s `diag` module (behind `cohort-instrument`, wired
+transitively through `proxima-tensor`'s `instrument` feature,
+`proxima-tensor/Cargo.toml:46`) already carries the exact per-worker
+instrumentation the brief asked for — `SLOT_COMPUTE_NANOS`/`SLOT_CHUNKS`/
+`SLOT_ROUNDS`/`SLOT_TAIL_NANOS`/`SLOT_FIRST_CLAIM_NANOS`, printed per-slot by
+`proxima-model-interop/src/bind.rs:899-909`'s `cohort_slot` line. No new
+instrumentation was written; this reuses what shipped alongside the dispatch
+fix itself. Nothing in `discipline.md` (`grep -c cohort_slot` /
+`ROW_OVERSUBSCRIBE`, zero hits before this row) had read it before.
+
+**Isolation method:** the `cohort_slot` counters are cumulative from process
+start, so `PROXIMA_MAX_TOKENS=1` isolates prefill alone (one forward pass,
+matches the docstring on `runs_one_real_forward_pass...`), and
+`PROXIMA_MAX_TOKENS=24` gives prefill + 23 decode steps combined; decode-only
+totals are the per-slot difference between the two (the same subtraction
+technique this file's own `matmul_split` doc comment, `bind.rs:852-855`,
+already documents for isolating decode). The busy-time *ratio* this produces
+is invariant to dividing by step count, so "spread" below reads the same
+whether stated per-step or aggregated across the run.
+
+**Repo:** worktree `agent-a585f8281e4851e98`, branch `feat/tensor-consolidated`
+@ `5d1af6a` (clean tree, no source changed this row).
+**Host:** Apple M1 Max, 10 logical cores, 64 GiB, macOS 15.7.8.
+**Build profile:** `--release`, `cargo test -p proxima-model-interop --release
+--lib --features metal,instrument --no-run`, isolated `CARGO_TARGET_DIR`.
+**Host loadout — NOT quiet, recorded honestly:** `uptime` never produced two
+consecutive polls at or below 4 during this row. Before the build: 5.25.
+After the build, polling every 60s: 4.51 -> 10.30 -> 6.31 -> 6.56 -> 8.97 ->
+8.69 -> 8.39 -> 7.71, climbing to 7.65-11.35 across the six measurement runs.
+`ps aux` confirms the cause: a sibling worktree's `rustc`/`cargo check`
+(`proxima-core` build.rs, `/tmp/cargo_target`) running concurrently — the
+documented "own agents contaminate the bench" failure mode. Proceeded anyway
+because (a) the measurement is a **within-process ratio across 8 threads
+racing the same host at the same instant**, not a cross-process wall-clock
+comparison, so contention affects all 8 slots together rather than one arm
+vs. another, and (b) the absolute-time contamination is directly visible and
+reported (`mean_ms_per_token` 172 / 260 / 298 ms across the three `w8`
+`MAX_TOKENS=24` reps — 2-4x ROW 116's clean-box 56.55) so no absolute number
+from this row is used for anything beyond computing the ratio.
+
+**Correctness, unaffected (no source changed):** all three `MAX_TOKENS=24`
+runs produced the byte-identical target text:
+`"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"`
+
+### Per-slot total busy ms — prefill only (`MAX_TOKENS=1`, `PROXIMA_MATMUL_WORKERS=8`), 3 reps
+
+| slot | r1 busy ms | r2 busy ms | r3 busy ms |
+|---|---|---|---|
+| 0 | 1591.409 | 2155.646 | 1686.590 |
+| 1 | 1588.713 | 2100.512 | 1680.221 |
+| 2 | 1588.954 | 2119.046 | 1669.396 |
+| 3 | 1599.471 | 2116.757 | 1672.992 |
+| 4 | 1595.291 | 2119.100 | 1652.505 |
+| 5 | 1573.407 | 2058.732 | 1674.500 |
+| 6 | 1566.483 | 2044.949 | 1630.265 |
+| 7 | 1578.301 | 2004.643 | 1608.676 |
+
+Spread `(max-min)/max`: r1 **2.06%**, r2 **7.00%**, r3 **4.62%**.
+n=3: range **2.06%-7.00%**, mean 4.56%, median 4.62%, CoV **54%** (n=3,
+sample) — **above the 5% floor, quote the range, not the mean.**
+
+### Per-slot total busy ms — decode only (full-24 minus the prefill-only baseline, same worker count), 3 paired reps
+
+| slot | r1 busy ms | r2 busy ms | r3 busy ms |
+|---|---|---|---|
+| 0 | 1440.358 | 2850.586 | 4219.423 |
+| 1 | 1417.009 | 2778.138 | 4069.916 |
+| 2 | 1366.009 | 2713.505 | 4036.226 |
+| 3 | 1340.151 | 2638.367 | 4014.973 |
+| 4 | 1345.711 | 2601.216 | 3951.619 |
+| 5 | 1323.100 | 2516.389 | 3838.535 |
+| 6 | 1288.098 | 2364.363 | 3744.763 |
+| 7 | 1165.050 | 2204.500 | 3666.028 |
+
+Spread `(max-min)/max`: r1 **19.11%**, r2 **22.66%**, r3 **13.12%**.
+n=3: range **13.12%-22.66%**, mean 18.30%, median 19.11%, CoV **26%** (n=3,
+sample) — **above the 5% floor, quote the range.**
+
+**Every one of the six runs (3 prefill, 3 decode) has the identical
+ordering**: slot 0 (the calling/leader thread, never parks, always the
+lowest `first_claim_ms`) does the most total busy work, slot 7 the least,
+monotonically in between — the residual is directional, not run-to-run
+noise, even though its magnitude is noisy.
+
+### The number that decides Step 2, and why the decision is "do not build it"
+
+Decode's spread (13-23%) is not small — by the brief's own criterion this
+would normally justify Step 2. **It does not here, because the described
+Step 2 already shipped**; the 13-23% is the *residual left over after*
+oversubscribed atomic-claim stealing, not evidence stealing is absent. The
+brief's binary ("small -> stop" / "large -> build the claim loop") assumed
+those were the only two states; a third exists — large residual, mechanism
+already built — and that third state routes to "report the residual, do not
+re-build the mechanism."
+
+**DERIVED (not directly measured), tag as such:** the matmul bucket
+(`staged_batch` + `reduce_matmul_quantized`) is 91.06% of a prefill step's
+wall clock and 84.34% of a late decode step's (both from this row's own
+`DIAG evaluate_quantized node_kind=` lines, `full24_r1`'s final block for
+decode, `prefill_only_r1`'s only block for prefill). Naively scaling the
+busy-time spread by that share puts the wall-clock ceiling at roughly
+**1.9-6.4% for prefill** and **11-19% for decode** — an upper bound assuming
+perfect elimination of the imbalance, not a guaranteed recovery, since a
+round's wall clock is set by whichever slot's cumulative claim path is
+longest, and that is not identical to the spread in cumulative busy time
+across the whole step.
+
+### What a real fix would target, un-built, handed off
+
+The consistent slot-0-wins-most-work-every-round pattern is not "no
+stealing" — it is the cohort's leader (the calling thread) never paying wake
+latency while pool members do, most exposed in decode's narrower, more
+numerous, lower-macs-per-chunk rounds where `row_chunk_count`'s
+`MIN_MACS_PER_CHUNK` floor yields chunk counts close to (or below) 8, so a
+late-waking member can find the cursor already exhausted. A candidate fix —
+lowering `MIN_MACS_PER_CHUNK` for decode-shaped calls, or de-biasing the
+leader's head start — is a **different, narrower hypothesis** than "add
+stealing" (which already exists), requires its own design/bench/correctness
+cycle, and was not attempted here: out of the scope this task named ("mirror
+ggml's shape"), and the measured ceiling (11-19% of decode wall clock, upper
+bound, DERIVED) does not obviously clear the bar for a dedicated cycle against
+ROW 116's standing 1.445x decode gap on its own. Handed off, not built.
+
+### Gates, actual numbers
+
+- `cargo nextest run -p proxima-tensor --features std` → **361 tests run: 361 passed, 4 skipped**
+- `cargo nextest run -p proxima-tensor --features std,instrument` → **365 tests run: 365 passed, 4 skipped**
+- `cargo nextest run -p proxima-model-interop --features metal,instrument` → **24 tests run: 24 passed, 7 skipped**
+- `cargo nextest run -p omega` → **76 tests run: 76 passed, 1 skipped**
+- `cargo clippy --workspace --all-targets -- -D warnings` → **0 errors** (same unrelated `proc-macro-error2` future-incompat warning ROW 116 also noted, not this row's code)
+- Generated text, all three `MAX_TOKENS=24` reps: `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"`
+
+### Re-prove — exact commands
+
+```
+cargo test -p proxima-model-interop --release --lib --features metal,instrument --no-run
+
+# prefill-only baseline (repeat 3x for the range)
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=1 PROXIMA_MATMUL_WORKERS=8 <testbin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+
+# full 24-token run (repeat 3x for the range); decode-only = per-slot subtraction of the two
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 PROXIMA_MATMUL_WORKERS=8 <testbin> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+
+`cohort_slot slot=<n> rounds=<r> chunks=<c> first_claim_ms=<a> compute_ms=<b>
+tail_ms=<d>` lines reproduce this row's tables (`total_busy_ms = compute_ms *
+rounds` per slot); `decode_summary`/`token_breakdown` lines reproduce the
+absolute-time contamination note.
+
+### Cleanup
+
+`CARGO_TARGET_DIR` (isolated scratch path) and all per-run logs deleted after
+extraction. This row is the durable record; no raw-data file kept beyond it
+since every number here is reproduced by the commands above verbatim.
+
+### Honest read
+
+The task's premise and ROW 105's finding #3 were both wrong at HEAD: dynamic
+atomic-claim work-stealing, shaped exactly like ggml's, has shipped in this
+codebase since 2026-08-19. Building it again was correctly not attempted.
+What *is* new: a measured residual imbalance survives the existing
+mechanism — small on prefill (2-7%), real on decode (13-23%) — with a
+consistent leader-advantage direction across every one of six runs. That
+residual is real information this log did not have before, but it targets a
+narrower, unasked-for hypothesis (chunk-floor tuning / wake-order bias) that
+was not built this row. No code changed; no rollback applies.
