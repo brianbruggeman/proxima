@@ -1159,8 +1159,8 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
         },
     );
 
-    let mut aligned =
-        proxima_tensor::AlignedBuffer::new(page_elements as usize, omega::page_size());
+    let mut aligned = proxima_tensor::AlignedBuffer::new(page_elements as usize, omega::page_size())
+        .expect("small aligned request never fails");
     for (index, value) in aligned.iter_mut().enumerate() {
         *value = (index % 7) as f32 * 0.1;
     }
