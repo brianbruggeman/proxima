@@ -31,8 +31,15 @@ use proxima_tensor::cpu::{matmul_q4k_q8k_f32, matmul_q4k_q8k_portable_f32};
 use proxima_tensor::test_support::Lcg;
 use std::hint::black_box;
 
-const GGUF_PATH: &str =
-    "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+/// real GGUF checkpoint path, overridable per-operator via
+/// `PROXIMA_BENCH_GGUF_PATH` — the hardcoded default only ever resolved on
+/// one machine, which made this bench unrunnable anywhere else.
+fn gguf_path() -> String {
+    std::env::var("PROXIMA_BENCH_GGUF_PATH").unwrap_or_else(|_| {
+        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
+            .to_string()
+    })
+}
 
 /// Streams the file in growing prefixes until the parser reports
 /// `Complete`, without ever reading the (multi-GiB) tensor data section.
@@ -142,7 +149,7 @@ unsafe fn compute_plan(graph: *mut ggml_cgraph, plan: &mut Plan) {
 /// side gets a synthetic-data advantage and neither side's quantizer
 /// choices leak into the other's numbers).
 fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
-    let (parsed, file_len) = parse_header(Path::new(GGUF_PATH));
+    let (parsed, file_len) = parse_header(Path::new(&gguf_path()));
     let tensor = find_tensor(&parsed, tensor_name);
     let in_dim = tensor.dims[0] as usize;
     let out_dim = tensor.dims[1] as usize;
@@ -166,7 +173,7 @@ fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
         return;
     }
 
-    let mut file = File::open(GGUF_PATH).expect("reopen real gguf file for tensor data");
+    let mut file = File::open(gguf_path()).expect("reopen real gguf file for tensor data");
     let weight_bytes = read_tensor_bytes(&mut file, &parsed, tensor, file_len);
     println!("packed weight bytes: {} ({} rows x {} in_dim)", weight_bytes.len(), out_dim, in_dim);
 
@@ -292,9 +299,24 @@ unsafe fn build_graph(ctx: *mut ggml_context, root: *mut ggml_tensor) -> *mut gg
 }
 
 fn main() {
-    if !Path::new(GGUF_PATH).exists() {
-        println!("real gguf file not found at {GGUF_PATH}; nothing to bench");
+    let path = gguf_path();
+    if !Path::new(&path).exists() {
+        println!("real gguf file not found at {path}; nothing to bench");
         return;
+    }
+
+    // every proxima arm below is labeled `_t1`, but `matmul_worker_count`
+    // (cpu.rs) defaults to `hw.perflevel0.logicalcpu` (8 on this host)
+    // whenever `PROXIMA_MATMUL_WORKERS` is unset -- without this pin, the
+    // `_dispatched_t1`/`_portable_t1` arms silently ran on every performance
+    // core, not one thread, and the number drifted with the host's own core
+    // count (discipline.md ROW 120): attn_q_4096x4096 measured 119.46us
+    // unpinned vs 410.36us pinned on this machine, a ~3.4x gap the label
+    // gave no warning of.
+    // SAFETY: single-threaded here, before any bench runs or
+    // `matmul_worker_count`'s `OnceLock` has been read.
+    unsafe {
+        std::env::set_var("PROXIMA_MATMUL_WORKERS", "1");
     }
 
     let mut criterion = Criterion::default()
