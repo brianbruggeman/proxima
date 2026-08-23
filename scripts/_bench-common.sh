@@ -146,3 +146,29 @@ median_of() {
     mid=$(( (count + 1) / 2 ))
     printf '%s\n' "$sorted" | sed -n "${mid}p"
 }
+
+# run_bench_logged <bench_name> <log_file> -- <cargo bench argv...>
+# runs the command, tees its output to log_file, and records the command's
+# own exit code (not tee's) in BENCH_FAILURES on failure. Callers used to
+# swallow this with a blanket `|| true` on the whole pipe, which reported a
+# missing feature or a compile error the same as a clean run.
+declare -a BENCH_FAILURES=()
+run_bench_logged() {
+    local bench_name="$1"
+    local log_file="$2"
+    shift 2
+    if ! "$@" 2>&1 | tee "$log_file"; then
+        local status="${PIPESTATUS[0]}"
+        printf 'bench FAILED: %s (exit %s) -- see %s\n' "$bench_name" "$status" "$log_file" >&2
+        BENCH_FAILURES+=("$bench_name")
+    fi
+}
+
+# report_bench_failures -- call once at the end of a script; exits 1 if any
+# run_bench_logged call above recorded a failure.
+report_bench_failures() {
+    if [[ ${#BENCH_FAILURES[@]} -gt 0 ]]; then
+        printf '\n== bench failures: %s ==\n' "${BENCH_FAILURES[*]}" >&2
+        exit 1
+    fi
+}

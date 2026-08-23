@@ -89,21 +89,17 @@ run_bench_pingora() {
     if [[ "$TRIALS" -ge 5 ]]; then
         printf -- '--- running %s (5-trial) ---\n' "$bench_name"
         for trial in 1 2 3 4 5; do
-            cargo bench \
-                --no-default-features \
-                --features "$FEATURES" \
-                --bench "$bench_name" \
-                -- --save-baseline "trial-${trial}" \
-                2>&1 | tee "${LOGS_DIR}/${bench_name}_trial${trial}.log" || true
+            run_bench_logged "${bench_name}_trial${trial}" "${LOGS_DIR}/${bench_name}_trial${trial}.log" \
+                cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name" \
+                -- --save-baseline "trial-${trial}"
         done
-        cat "${LOGS_DIR}/${bench_name}_trial5.log" > "$log_file" || true
+        if [[ -f "${LOGS_DIR}/${bench_name}_trial5.log" ]]; then
+            cp "${LOGS_DIR}/${bench_name}_trial5.log" "$log_file"
+        fi
     else
         printf -- '--- running %s ---\n' "$bench_name"
-        cargo bench \
-            --no-default-features \
-            --features "$FEATURES" \
-            --bench "$bench_name" \
-            2>&1 | tee "$log_file" || true
+        run_bench_logged "$bench_name" "$log_file" \
+            cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name"
     fi
 }
 
@@ -266,3 +262,5 @@ run_bench_pingora "h1_vs_pingora" "$h1_log"
 } > "$RESULTS"
 
 printf 'wrote %s\n' "$RESULTS"
+
+report_bench_failures

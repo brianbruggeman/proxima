@@ -51,25 +51,21 @@ printf 'output:   %s\n' "$RESULTS"
 run_bench_single() {
   local bench_name="$1"
   printf -- '--- bench: %s ---\n' "$bench_name"
-  cargo bench \
-    --no-default-features \
-    --features "$FEATURES" \
-    --bench "$bench_name" \
-    2>&1 | tee "${LOGS_DIR}/${bench_name}.log" || true
+  run_bench_logged "$bench_name" "${LOGS_DIR}/${bench_name}.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name"
 }
 
 run_bench_trials() {
   local bench_name="$1"
   printf -- '--- bench (5-trial): %s ---\n' "$bench_name"
   for trial in 1 2 3 4 5; do
-    cargo bench \
-      --no-default-features \
-      --features "$FEATURES" \
-      --bench "$bench_name" \
-      -- --save-baseline "trial-${trial}" \
-      2>&1 | tee "${LOGS_DIR}/${bench_name}_trial${trial}.log" || true
+    run_bench_logged "${bench_name}_trial${trial}" "${LOGS_DIR}/${bench_name}_trial${trial}.log" \
+      cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name" \
+      -- --save-baseline "trial-${trial}"
   done
-  cat "${LOGS_DIR}/${bench_name}_trial5.log" > "${LOGS_DIR}/${bench_name}.log" || true
+  if [[ -f "${LOGS_DIR}/${bench_name}_trial5.log" ]]; then
+    cp "${LOGS_DIR}/${bench_name}_trial5.log" "${LOGS_DIR}/${bench_name}.log"
+  fi
 }
 
 run_bench() {
@@ -236,3 +232,5 @@ done
 
 printf '\n---\nRun completed: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$RESULTS"
 printf 'bench-vs-hyper complete. results: %s\n' "$RESULTS"
+
+report_bench_failures
