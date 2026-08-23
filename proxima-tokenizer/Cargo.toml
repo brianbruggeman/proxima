@@ -23,6 +23,11 @@ std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
 # combination end to end is the real-fixture test, which needs a file
 # read.
 gguf = ["std", "dep:proxima-gguf", "proxima-gguf/std"]
+# builds a `Vocab` directly from a real HuggingFace `tokenizer.json` (BPE
+# `model.vocab`/`model.merges`, exactly the shape `Vocab::new` already takes
+# from GGUF's parallel arrays) -- optional for the same reason `gguf` is:
+# the tokenizer core has no hard dependency on any one wire format's parser.
+hf = ["std", "dep:serde_json"]
 
 [dependencies]
 proxima-primitives = { workspace = true, default-features = false }
@@ -31,6 +36,14 @@ bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 proxima-gguf = { workspace = true, optional = true }
+# `cargo add serde_json --optional` errors in this workspace right now
+# ("unrecognized feature for crate serde_json: alloc", even though the
+# locked version, 1.0.151, has that feature and the workspace root's own
+# `serde_json` entry already declares it) -- added by hand, copying
+# `proxima-safetensors/Cargo.toml`'s identical `serde_json.workspace = true`
+# line verbatim rather than inventing new syntax, with `optional = true`
+# appended for this crate's own feature gate.
+serde_json = { workspace = true, optional = true }
 # direct, not workspace-inherited: the workspace entry locks default-features
 # on, whose `std` feature pulls std; `sample.rs` is part of this crate's
 # no_std+alloc floor (never gated on the `std` feature), so this mirrors

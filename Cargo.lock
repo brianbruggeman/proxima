@@ -3821,6 +3821,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-autograd"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "conflaguration",
+ "libm",
+ "proxima",
+ "proxima-telemetry",
+ "proxima-tensor",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "proxima-build"
 version = "0.1.0"
 dependencies = [
@@ -4760,6 +4774,7 @@ dependencies = [
  "proxima-gguf",
  "proxima-primitives",
  "serde",
+ "serde_json",
  "temp-env",
  "thiserror 2.0.19",
 ]
