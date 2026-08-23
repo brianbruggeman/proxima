@@ -28,6 +28,8 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::slice;
 
+use crate::error::TensorError;
+
 /// An owned, zero-initialized `f32` buffer whose backing allocation's
 /// pointer and byte length are both a multiple of `page_size`.
 ///
@@ -55,25 +57,39 @@ impl AlignedBuffer {
     /// `page_size` must be a power of two — a real host page size the
     /// caller queried itself (e.g. `omega::metal::page_size`), never
     /// hard-coded here, since it varies across hosts.
-    #[must_use]
-    pub fn new(min_elements: usize, page_size: usize) -> Self {
-        let element_bytes = min_elements
-            .checked_mul(size_of::<f32>())
-            .unwrap_or_else(|| panic_on_overflow(min_elements));
+    ///
+    /// # Errors
+    ///
+    /// [`TensorError::AlignedAllocationRejected`] if `min_elements` does not
+    /// fit a `usize` byte length, or if `page_size` is not a valid `Layout`
+    /// alignment for the rounded byte length (not a power of two, or the
+    /// rounded byte length exceeds `isize::MAX`) — both are properties of
+    /// the caller's request, never a plain out-of-memory condition (which
+    /// the allocator itself still aborts on, matching `Vec`'s own policy).
+    pub fn new(min_elements: usize, page_size: usize) -> Result<Self, TensorError> {
+        let element_bytes =
+            min_elements
+                .checked_mul(size_of::<f32>())
+                .ok_or(TensorError::AlignedAllocationRejected {
+                    reason: "requested element count overflows a byte length in usize",
+                })?;
         let rounded_bytes = element_bytes.next_multiple_of(page_size).max(page_size);
-        let layout = Layout::from_size_align(rounded_bytes, page_size)
-            .unwrap_or_else(|_| panic_on_bad_layout(rounded_bytes, page_size));
+        let layout = Layout::from_size_align(rounded_bytes, page_size).map_err(|_| {
+            TensorError::AlignedAllocationRejected {
+                reason: "page_size is not a valid allocation alignment for the rounded byte length",
+            }
+        })?;
         // SAFETY: `layout`'s size is nonzero — `.max(page_size)` above
         // guarantees at least one page even when `min_elements` is 0.
         let raw = unsafe { alloc_zeroed(layout) };
         let Some(ptr) = NonNull::new(raw.cast::<f32>()) else {
             handle_alloc_error(layout);
         };
-        Self {
+        Ok(Self {
             ptr,
             len: rounded_bytes / size_of::<f32>(),
             layout,
-        }
+        })
     }
 
     /// The full usable element count — always `>= min_elements`, and always
@@ -118,45 +134,37 @@ impl Drop for AlignedBuffer {
     }
 }
 
-#[cold]
-fn panic_on_overflow(min_elements: usize) -> ! {
-    panic!("requested element count {min_elements} overflows a byte length in usize")
-}
-
-#[cold]
-fn panic_on_bad_layout(rounded_bytes: usize, page_size: usize) -> ! {
-    panic!("page_size {page_size} is not a valid allocation alignment for {rounded_bytes} bytes")
-}
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::AlignedBuffer;
+    use crate::error::TensorError;
 
     const PAGE: usize = 16384;
 
     #[test]
     fn rounds_up_to_a_page_multiple() {
-        let buffer = AlignedBuffer::new(1, PAGE);
+        let buffer = AlignedBuffer::new(1, PAGE).expect("small request never fails");
         assert_eq!(buffer.len(), PAGE / core::mem::size_of::<f32>());
     }
 
     #[test]
     fn exact_page_multiple_request_is_unchanged() {
         let elements = PAGE / core::mem::size_of::<f32>();
-        let buffer = AlignedBuffer::new(elements, PAGE);
+        let buffer = AlignedBuffer::new(elements, PAGE).expect("small request never fails");
         assert_eq!(buffer.len(), elements);
     }
 
     #[test]
     fn pointer_is_page_aligned() {
-        let buffer = AlignedBuffer::new(4096, PAGE);
+        let buffer = AlignedBuffer::new(4096, PAGE).expect("small request never fails");
         let address = buffer.as_ptr() as usize;
         assert_eq!(address % PAGE, 0, "pointer {address:#x} is not page-aligned");
     }
 
     #[test]
     fn contents_start_zeroed_and_are_writable() {
-        let mut buffer = AlignedBuffer::new(8, PAGE);
+        let mut buffer = AlignedBuffer::new(8, PAGE).expect("small request never fails");
         assert!(buffer.iter().all(|&value| value == 0.0));
         buffer[0] = 1.5;
         buffer[7] = 2.5;
@@ -164,9 +172,36 @@ mod tests {
         assert_eq!(buffer[7], 2.5);
     }
 
+    /// The defect this signature change fixes, proved directly: a caller
+    /// that used to crash the process on a huge `min_elements` now gets a
+    /// typed error it can propagate or log instead.
+    #[test]
+    fn element_count_overflow_is_a_typed_error_not_a_panic() {
+        let result = AlignedBuffer::new(usize::MAX, PAGE);
+        assert_eq!(
+            result.err(),
+            Some(TensorError::AlignedAllocationRejected {
+                reason: "requested element count overflows a byte length in usize",
+            })
+        );
+    }
+
+    /// Same proof for the other failure mode: a `page_size` that is not a
+    /// power of two cannot form a valid `Layout` alignment.
+    #[test]
+    fn non_power_of_two_page_size_is_a_typed_error_not_a_panic() {
+        let result = AlignedBuffer::new(8, 3);
+        assert_eq!(
+            result.err(),
+            Some(TensorError::AlignedAllocationRejected {
+                reason: "page_size is not a valid allocation alignment for the rounded byte length",
+            })
+        );
+    }
+
     #[test]
     fn zero_elements_still_allocates_one_page() {
-        let buffer = AlignedBuffer::new(0, PAGE);
+        let buffer = AlignedBuffer::new(0, PAGE).expect("zero-element request never fails");
         assert_eq!(buffer.len(), PAGE / core::mem::size_of::<f32>());
     }
 }

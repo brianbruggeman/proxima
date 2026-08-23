@@ -38,6 +38,19 @@ use core::marker::PhantomData;
 
 use half::{bf16, f16};
 use proxima_primitives::block_on;
+
+/// Unwraps a `Result` whose error type is uninhabited — every
+/// `Convert<From, To>::call` returns `Result<To, Infallible>`, so this can
+/// never reach the `Err` arm; the `match` on an empty enum is exhaustive by
+/// construction, never a panic. The alternative each call site had before
+/// (`.expect("Convert::call is Infallible")`) says the same thing but as a
+/// runtime assertion instead of a compile-time one.
+fn assume_infallible<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
 use proxima_primitives::pipe::Pipe;
 
 /// A conversion between two scalar element types, as data: `In` = source,
@@ -332,7 +345,7 @@ macro_rules! impl_simd_convert_neon {
                     processed += lanes;
                 }
                 for index in processed..input.len() {
-                    output[index] = block_on(self.call(input[index])).expect("Convert::call is Infallible");
+                    output[index] = assume_infallible(block_on(self.call(input[index])));
                 }
             }
 
@@ -340,7 +353,7 @@ macro_rules! impl_simd_convert_neon {
             fn convert_slice(&self, input: &[$From], output: &mut [$To]) {
                 assert_eq!(input.len(), output.len(), "convert_slice: length mismatch");
                 for (source, target) in input.iter().zip(output.iter_mut()) {
-                    *target = block_on(self.call(*source)).expect("Convert::call is Infallible");
+                    *target = assume_infallible(block_on(self.call(*source)));
                 }
             }
         }
@@ -353,7 +366,7 @@ macro_rules! impl_simd_convert_scalar {
             fn convert_slice(&self, input: &[$From], output: &mut [$To]) {
                 assert_eq!(input.len(), output.len(), "convert_slice: length mismatch");
                 for (source, target) in input.iter().zip(output.iter_mut()) {
-                    *target = block_on(self.call(*source)).expect("Convert::call is Infallible");
+                    *target = assume_infallible(block_on(self.call(*source)));
                 }
             }
         }
