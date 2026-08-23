@@ -358,7 +358,13 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
             QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
-            QuantizedBlock::Float32(_) => None,
+            // no `PackedCodec` unpack kernel exists for either yet -- `None`
+            // here mirrors `Float32`'s "not a packed codec this driver has a
+            // kernel for" posture; the real rejection happens downstream in
+            // `block_element_count`.
+            QuantizedBlock::Float32(_)
+            | QuantizedBlock::Float16(_)
+            | QuantizedBlock::BFloat16(_) => None,
         })
         .collect()
 }
@@ -448,6 +454,18 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            // `plan`'s own `prepare` -> `block_element_count` already
+            // rejects `Float16`/`BFloat16` with a typed `NotLowerable`
+            // before a `Plan` can exist -- this arm only exists so the
+            // match stays exhaustive as the enum grows, never reachable
+            // for a `Plan` this driver actually produced.
+            QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {
+                return Err(TensorError::NotLowerable {
+                    node: *node,
+                    reason: "metal has no f16/bf16 unpack kernel yet; cpu reaches it via dot_f16_f32/dot_bf16_f32",
+                }
+                .into());
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -632,6 +650,18 @@ pub fn execute_plan_op_timed(
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            // `plan`'s own `prepare` -> `block_element_count` already
+            // rejects `Float16`/`BFloat16` with a typed `NotLowerable`
+            // before a `Plan` can exist -- this arm only exists so the
+            // match stays exhaustive as the enum grows, never reachable
+            // for a `Plan` this driver actually produced.
+            QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {
+                return Err(TensorError::NotLowerable {
+                    node: *node,
+                    reason: "metal has no f16/bf16 unpack kernel yet; cpu reaches it via dot_f16_f32/dot_bf16_f32",
+                }
+                .into());
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -802,7 +832,7 @@ struct Prepared {
 /// evaluators cannot drift on what a block IS. A packed codec's element
 /// count is derived from its own block geometry, never from `data.len()` —
 /// packed bytes and elements are not the same unit.
-fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
+fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
     match block {
         QuantizedBlock::Float32(data) => Ok(data.len()),
         // packed bytes and elements are NOT the same unit: a `Q4_K`
@@ -835,6 +865,18 @@ fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> 
         QuantizedBlock::Q4_0(bytes) => {
             Ok((bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS)
         }
+        // Half-precision weights have no unpack kernel here yet -- CPU is
+        // the only path that reaches them (`dot_f16_f32`/`dot_bf16_f32`).
+        QuantizedBlock::Float16(_) => Err(TensorError::NotLowerable {
+            node,
+            reason: "metal has no f16 unpack kernel yet; cpu reaches it via dot_f16_f32",
+        }
+        .into()),
+        QuantizedBlock::BFloat16(_) => Err(TensorError::NotLowerable {
+            node,
+            reason: "metal has no bf16 unpack kernel yet; cpu reaches it via dot_bf16_f32",
+        }
+        .into()),
     }
 }
 
@@ -850,7 +892,9 @@ fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
         | QuantizedBlock::Q5K(bytes)
         | QuantizedBlock::Q6K(bytes)
         | QuantizedBlock::Q8_0(bytes)
-        | QuantizedBlock::Q4_0(bytes) => bytes.len(),
+        | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Float16(bytes)
+        | QuantizedBlock::BFloat16(bytes) => bytes.len(),
     }
 }
 
@@ -902,7 +946,7 @@ fn prepare(
     }
     for (node, block) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
-        let found = block_element_count(block)?;
+        let found = block_element_count(*node, block)?;
         if found != expected {
             return Err(TensorError::InputSizeMismatch {
                 node: *node,
