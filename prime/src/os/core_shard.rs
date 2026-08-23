@@ -32,6 +32,11 @@ use proxima_clock::coarse::TickCell;
 use proxima_clock::ticks::Ticks;
 use proxima_core::ProximaError;
 use proxima_runtime::{CoreId, SpawnError, SpawnRequest};
+// `error!` only fires under the inverted worker (`prime-tokio-compat-inverted`);
+// `warn!`'s non-inverted call site is unconditional wherever this file compiles.
+#[cfg(feature = "prime-tokio-compat-inverted")]
+use proxima_telemetry::error;
+use proxima_telemetry::warn;
 
 #[cfg(not(feature = "runtime-prime-inbox-dynamic"))]
 use super::super::core::inbox as inbox_impl;
@@ -804,7 +809,7 @@ fn worker_main(
             match drain_cqes_if_initialized() {
                 Ok(uring_fired) if uring_fired > 0 => continue,
                 Ok(_) => {}
-                Err(err) => tracing::warn!(error = %err, "io_uring drain failed"),
+                Err(err) => warn!(error = %err, "io_uring drain failed"),
             }
         }
 
@@ -1026,7 +1031,7 @@ fn worker_main(
                 if let Err(err) = turn_result
                     && err.kind() != std::io::ErrorKind::Interrupted
                 {
-                    tracing::warn!(error = %err, "proxima reactor turn failed");
+                    warn!(error = %err, "proxima reactor turn failed");
                 }
                 reactor_mut.disarm_wakeup();
                 // drain io_uring CQEs immediately after the epoll park so that
@@ -1034,7 +1039,7 @@ fn worker_main(
                 // processed before the next executor tick.
                 #[cfg(all(target_os = "linux", feature = "io-uring"))]
                 if let Err(err) = super::io_uring::reactor::drain_cqes_if_initialized() {
-                    tracing::warn!(error = %err, "io_uring post-park drain failed");
+                    warn!(error = %err, "io_uring post-park drain failed");
                 }
             }
         }
@@ -1152,7 +1157,7 @@ fn worker_main_inverted(
     {
         Ok(value) => value,
         Err(err) => {
-            tracing::error!(error = %err, core = core_id.0, "inverted sister runtime build failed");
+            error!(error = %err, core = core_id.0, "inverted sister runtime build failed");
             return;
         }
     };
@@ -1178,7 +1183,7 @@ fn worker_main_inverted(
         ) {
             Ok(value) => value,
             Err(err) => {
-                tracing::error!(error = %err, core = core_id.0, "inverted wake AsyncFd registration failed");
+                error!(error = %err, core = core_id.0, "inverted wake AsyncFd registration failed");
                 return;
             }
         }
@@ -1337,7 +1342,7 @@ fn worker_main_inverted(
         if let Err(err) = reactor_mut.turn(Some(INVERTED_PARK_TIMEOUT))
             && err.kind() != std::io::ErrorKind::Interrupted
         {
-            tracing::warn!(error = %err, "proxima inverted reactor turn failed");
+            warn!(error = %err, "proxima inverted reactor turn failed");
         }
         // C2b (linux): unified park. wait on the sister's reactor (which
         // services tokio I/O + timers while parked) until prime's epoll fd is
@@ -1363,7 +1368,7 @@ fn worker_main_inverted(
             if let Err(err) = reactor_mut.turn(Some(std::time::Duration::ZERO))
                 && err.kind() != std::io::ErrorKind::Interrupted
             {
-                tracing::warn!(error = %err, "proxima inverted reactor drain failed");
+                warn!(error = %err, "proxima inverted reactor drain failed");
             }
         }
         reactor_mut.disarm_wakeup();

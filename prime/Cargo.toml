@@ -36,7 +36,6 @@ futures = { workspace = true, optional = true, features = ["async-await", "std"]
 num_cpus = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net"] }
-tracing = { workspace = true }
 conflaguration = { workspace = true, optional = true, features = ["derive", "toml"] }
 core_affinity = { workspace = true, optional = true }
 # `runtime-prime-config`'s override-TOML reader (src/os/sizing.rs) needs this
@@ -47,6 +46,7 @@ libc = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 proxima-primitives = { workspace = true, features = ["alloc", "async-mutex"] }
 proxima-clock.workspace = true
+proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 # socket2 hard-errors at compile time on targets it does not support (wasm32),
