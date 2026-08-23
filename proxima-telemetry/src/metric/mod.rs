@@ -177,8 +177,7 @@ mod tests {
         clippy::default_constructed_unit_structs
     )]
 
-    use rstest::rstest;
-
+    
     use crate::metric::{Counter, Gauge, MetricSample, NumberDataPoint, UpDownCounter};
     use crate::tag::ScalarValue;
 
@@ -201,11 +200,11 @@ mod tests {
     }
 
     // 3. UpDownCounter positive increments, negative decrements
-    #[rstest]
+    #[proxima::test]
     #[case::increment(5i64, 3i64, 8i64)]
     #[case::decrement(10i64, -4i64, 6i64)]
     #[case::net_zero(5i64, -5i64, 0i64)]
-    fn updown_counter_positive_and_negative(
+    async fn updown_counter_positive_and_negative(
         #[case] first: i64,
         #[case] second: i64,
         #[case] expected: i64,

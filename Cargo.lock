@@ -4676,7 +4676,6 @@ dependencies = [
  "proxima-macros",
  "proxima-primitives",
  "rand 0.10.2",
- "rstest",
  "rustc-hash",
  "serde",
  "serde_json",

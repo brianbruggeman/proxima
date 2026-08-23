@@ -51,7 +51,6 @@ proxima = { workspace = true, features = ["test-support"] }
 # (`pipe::clock::testing::{MockClock, RecordingClock}`) — see
 # `proxima-primitives/src/pipe/clock.rs`. Backs `out::resilient`'s tests.
 proxima-primitives = { workspace = true, features = ["test-support"] }
-rstest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 temp-env = "0.3.6"

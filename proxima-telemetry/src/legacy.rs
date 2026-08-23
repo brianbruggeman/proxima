@@ -300,8 +300,7 @@ pub use proxima_primitives::pipe::telemetry_surface::{HistogramSummary, MetricsS
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
-
+    
     #[test]
     fn labels_sort_by_name_for_stable_keys() {
         let one = Labels::from_pairs(&[("zone", "a"), ("region", "us")]);
@@ -378,11 +377,11 @@ mod tests {
         assert_eq!(snapshot.histograms.len(), 1);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::nan(f64::NAN)]
     #[case::neg_infinity(f64::NEG_INFINITY)]
     #[case::negative(-5.0)]
-    fn histogram_record_rejects_invalid_values(#[case] value: f64) {
+    async fn histogram_record_rejects_invalid_values(#[case] value: f64) {
         let metrics = Metrics::default();
         let labels = Labels::empty();
         metrics.histogram_record("anything", &labels, value);
