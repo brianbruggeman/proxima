@@ -85,7 +85,6 @@ use crate::serving::apply_serving_config;
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
 
-const ROPE_FREQ_BASE: f32 = 10_000.0;
 const RMS_EPSILON: f32 = 1e-5;
 
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
@@ -419,7 +418,12 @@ struct PositionInputs {
     sin: Vec<f32>,
 }
 
-fn build_position_inputs(new_ids: &[u32], start_position: usize, head_dim: u32) -> PositionInputs {
+fn build_position_inputs(
+    new_ids: &[u32],
+    start_position: usize,
+    head_dim: u32,
+    rope_freq_base: f32,
+) -> PositionInputs {
     let new_count = new_ids.len();
     let pairs = head_dim as usize / 2;
     let ids_f32: Vec<f32> = new_ids.iter().map(|&id| id as f32).collect();
@@ -430,7 +434,7 @@ fn build_position_inputs(new_ids: &[u32], start_position: usize, head_dim: u32) 
     for offset in 0..new_count {
         let position = (start_position + offset) as f32;
         for pair in 0..pairs {
-            let theta = position * ROPE_FREQ_BASE.powf(-((2 * pair) as f32) / (head_dim as f32));
+            let theta = position * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
             cos[offset * pairs + pair] = theta.cos();
             sin[offset * pairs + pair] = theta.sin();
         }
@@ -786,7 +790,12 @@ impl<'file> LoadedModel<'file> {
 
             #[cfg(feature = "instrument")]
             let build_position_inputs_started = read_ticks();
-            let inputs = build_position_inputs(&next_ids, cached_len, self.architecture.head_dim);
+            let inputs = build_position_inputs(
+                &next_ids,
+                cached_len,
+                self.architecture.head_dim,
+                self.architecture.rope_freq_base,
+            );
             #[cfg(feature = "instrument")]
             let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 

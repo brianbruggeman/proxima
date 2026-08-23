@@ -62,6 +62,16 @@ min_elements_for_dispatch = 64000
 # only when CARGO_CFG_TARGET_ARCH is aarch64.
 column_panel_budget_bytes = 2621440
 
+[rope]
+# fallback RoPE frequency base ("theta") when a checkpoint's own
+# `{architecture}.rope.freq_base` metadata key is absent. 10000.0 is the
+# value every checkpoint this crate has evaluated so far (openchat-3.5)
+# declares explicitly, so this fallback has never yet been exercised on a
+# real load -- see sized::ROPE_FREQ_BASE_DEFAULT. Not swept against
+# alternatives (ROW 98's own precedent for STAGED_BATCH_MIN_LEN): the
+# value is a definitional default, not a measured tuning knob.
+freq_base_default = 10000.0
+
 [staged_batch]
 # below this many consecutive is_staged_batch_eligible nodes,
 # run_staged_batch is not worth calling -- a run of one node has nothing to
