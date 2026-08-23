@@ -204,4 +204,23 @@ pub enum TensorError {
     /// request, never a plain out-of-memory condition.
     #[error("aligned buffer allocation rejected: {reason}")]
     AlignedAllocationRejected { reason: &'static str },
+
+    /// [`crate::spec::causal_conv1d`]'s window width: a zero-tap convolution
+    /// has no weights to sum and no window to derive causality from.
+    #[error("short convolution needs l_cache >= 1, got {l_cache}")]
+    InvalidConvConfig { l_cache: u32 },
+
+    /// [`crate::spec::LayerKind::from_tensor_names`] found neither an
+    /// attention marker (`blk.{layer}.attn_q.weight`) nor a short-convolution
+    /// marker (`blk.{layer}.shortconv.conv.weight`) among the tensor names it
+    /// was given for this block — GGUF carries no `layer_types` metadata key,
+    /// so tensor presence is the only ground truth, and this is what an
+    /// unrecognised or malformed checkpoint layout looks like.
+    #[error("block {layer} has neither an attention nor a short-convolution tensor marker")]
+    UndeterminedLayerKind { layer: u32 },
+
+    /// [`crate::spec::lfm2_forward_program_with_experts`]'s `layer_kinds`
+    /// must name exactly one [`crate::spec::LayerKind`] per block.
+    #[error("layer_kinds has {found} entries but block_count is {expected}")]
+    LayerKindCountMismatch { expected: u32, found: usize },
 }
