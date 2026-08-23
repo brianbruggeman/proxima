@@ -447,29 +447,81 @@ static inline float q5k_element(device const uchar *block, uint index) {
 /// `omega/tests/q5k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q5K_BLOCK_BYTES: usize = 176;
 
-/// Which packed K-quant codec one operand's bytes are — the second axis
-/// [`emit`] needs alongside "is this operand packed at all" (a plain `bool`
-/// cannot distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte
-/// one, or which unpack function reads it). `Copy`/`Eq` so it can sit
-/// directly in the `quantized` slice every render function already threads
-/// through, with no allocation.
+/// `Q8_0`: a flat 32-element block, one `f16` scale, no sub-block scale/min
+/// pair and no bit-packing at all -- genuinely a different SHAPE from the
+/// K-quant family above (no super-block; each level is already a full signed
+/// byte, not a nibble), not a widening or narrowing of one. It slots into
+/// the same PACKED-OPERAND mechanism ([`PackedCodec`], [`operand_read`],
+/// this preamble) as a fourth codec precisely because that mechanism is
+/// generic over block byte width and element count; it does NOT take the
+/// row-blocked ([`classify_packed_row_block`]) or tiled-GEMM
+/// ([`classify_tiled_gemm`]) fast paths, both of which hard-code the
+/// K-quants' shared 256-element super-block and 8-lane amortization scheme
+/// this codec has no analogue for -- `Q8_0` always renders through the fully
+/// generic per-element accessor below, same as any codec those two paths
+/// reject.
+///
+/// Ports `proxima_gguf::quant::q8_0::dequantize_block` exactly: `x = q*d`
+/// per element, no sub-block structure at all.
+///
+/// Layout, 34 bytes per 32 elements: `d` f16 at 0, 32 signed `int8_t` levels
+/// at 2.
+pub const Q8_0_UNPACK_MSL: &str = r#"
+// element `index` (0..32) of one Q8_0 block, byte-for-byte the value
+// proxima_gguf::quant::q8_0::dequantize_block writes at the same index.
+static inline float q8_0_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    char level = (char)block[2u + index];
+    return (float)level * d;
+}
+"#;
+
+/// Bytes one `Q8_0` block occupies. Mirrors
+/// `proxima_gguf::quant::q8_0::BLOCK_BYTES`; pinned in
+/// `omega/tests/q8_0_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
+pub const Q8_0_BLOCK_BYTES: usize = 34;
+
+/// Elements one `Q8_0` block carries -- 32, NOT [`Q4K_BLOCK_ELEMENTS`]'s 256:
+/// `Q8_0` has no super-block structure, so it does not share the K-quant
+/// family's element count. Mirrors `proxima_gguf::quant::q8_0::QK8_0`.
+pub const Q8_0_BLOCK_ELEMENTS: usize = 32;
+
+/// Which packed codec one operand's bytes are — the second axis [`emit`]
+/// needs alongside "is this operand packed at all" (a plain `bool` cannot
+/// distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte one, or
+/// which unpack function reads it). `Copy`/`Eq` so it can sit directly in
+/// the `quantized` slice every render function already threads through,
+/// with no allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// the ggml/gguf ecosystem's own name is `Q8_0` everywhere else this codec
+// appears (`GgmlType::Q8_0`, `QuantizedBlock::Q8_0`) -- the K-quant variants
+// dropped their underscore for a terser name, but there is no "Q80" spelling
+// anyone else uses, so this one variant keeps it instead of drifting from
+// its own wire name.
+#[allow(non_camel_case_types)]
 pub enum PackedCodec {
     Q4K,
     Q5K,
     Q6K,
+    /// Flat 32-element block, no super-block structure — see
+    /// [`Q8_0_UNPACK_MSL`]'s own doc for how this differs in KIND from the
+    /// three K-quants above, not just in size.
+    Q8_0,
 }
 
 impl PackedCodec {
-    /// Bytes one super-block of this codec occupies — the multiplier
+    /// Bytes one block of this codec occupies — the multiplier
     /// [`operand_read`] and the row-blocked path need to step between
-    /// super-blocks; element count per super-block is shared
-    /// ([`Q4K_BLOCK_ELEMENTS`]) across the whole K-quant family.
+    /// blocks. Element count per block is shared ([`Q4K_BLOCK_ELEMENTS`])
+    /// across the K-quant family (`Q4K`/`Q5K`/`Q6K`) but NOT by `Q8_0`,
+    /// which uses its own, much smaller [`Q8_0_BLOCK_ELEMENTS`].
     const fn block_bytes(self) -> usize {
         match self {
             PackedCodec::Q4K => Q4K_BLOCK_BYTES,
             PackedCodec::Q5K => Q5K_BLOCK_BYTES,
             PackedCodec::Q6K => Q6K_BLOCK_BYTES,
+            PackedCodec::Q8_0 => Q8_0_BLOCK_BYTES,
         }
     }
 }
@@ -557,6 +609,7 @@ pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOpera
             Some(PackedCodec::Q4K) => '4',
             Some(PackedCodec::Q5K) => '5',
             Some(PackedCodec::Q6K) => '6',
+            Some(PackedCodec::Q8_0) => '8',
             None => 'f',
         });
     }
@@ -881,6 +934,13 @@ pub enum PackedRowBlockRejection {
     OperandCountNotTwo,
     /// Neither exactly zero nor exactly one operand is packed.
     NotExactlyOnePackedOperand,
+    /// The packed operand's codec is [`PackedCodec::Q8_0`] — this path's
+    /// lane amortization ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element
+    /// sub-block) is hard-coded to the K-quant family's shared 256-element
+    /// super-block, which `Q8_0`'s flat 32-element block has no analogue
+    /// for. `Q8_0` always takes the fully generic per-element path instead
+    /// (see [`Q8_0_UNPACK_MSL`]'s own doc).
+    NotKQuantCodec,
     /// The reduce folds ZERO axes into its output — degenerate, never
     /// observed on a real matmul (kept so the match stays exhaustive over
     /// every way [`reduce_dims`](reduction_dims) can come back empty).
@@ -953,6 +1013,9 @@ fn classify_packed_row_block(
     let Some(codec) = quantized[weight] else {
         unreachable!("weight index came from the is_some() filter above")
     };
+    if codec == PackedCodec::Q8_0 {
+        return Err(PackedRowBlockRejection::NotKQuantCodec);
+    }
     let other = 1 - weight;
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
@@ -1713,6 +1776,8 @@ fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q6K_UNPACK_MSL);
     source.push('\n');
+    source.push_str(Q8_0_UNPACK_MSL);
+    source.push('\n');
 }
 
 /// How operand `index` is READ, given the element-offset expression the
@@ -1734,6 +1799,11 @@ fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> Strin
         ),
         Some(PackedCodec::Q6K) => format!(
             "q6k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
+        ),
+        // `Q8_0`'s block is 32 elements, not 256 -- its own
+        // [`Q8_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
+        Some(PackedCodec::Q8_0) => format!(
+            "q8_0_element(in{index} + ({offset} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, (uint)({offset} % {Q8_0_BLOCK_ELEMENTS}))"
         ),
     }
 }
@@ -2347,6 +2417,12 @@ fn push_packed_row_blocked_body(
                 let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
                 source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                 source.push_str("            }\n");
+            }
+            PackedCodec::Q8_0 => {
+                unreachable!(
+                    "classify_packed_row_block rejects PackedCodec::Q8_0 via NotKQuantCodec \
+                     before packed_row_block can ever return Some for it"
+                )
             }
         }
         source.push_str("        }\n");

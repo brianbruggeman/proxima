@@ -344,8 +344,8 @@ impl Plan {
     }
 }
 
-/// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has a
-/// row-blocked unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`), keyed to its
+/// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
+/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`), keyed to its
 /// [`PackedCodec`] — the single place this crate decides "packed AND which
 /// codec," shared by [`plan`] and [`prepare`] so the two cannot drift on it.
 fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
@@ -356,7 +356,8 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
             QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
-            _ => None,
+            QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
+            QuantizedBlock::Float32(_) => None,
         })
         .collect()
 }
@@ -441,8 +442,9 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
-            other => return Err(unsupported_gpu_codec(*node, other)),
+            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) | QuantizedBlock::Q8_0(bytes) => {
+                upload_packed_bytes(&device, bytes, resident)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -622,8 +624,9 @@ pub fn execute_plan_op_timed(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) => upload_packed_bytes(&device, bytes, resident)?,
-            other => return Err(unsupported_gpu_codec(*node, other)),
+            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) | QuantizedBlock::Q8_0(bytes) => {
+                upload_packed_bytes(&device, bytes, resident)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -794,7 +797,7 @@ struct Prepared {
 /// evaluators cannot drift on what a block IS. A packed codec's element
 /// count is derived from its own block geometry, never from `data.len()` —
 /// packed bytes and elements are not the same unit.
-fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
+fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
     match block {
         QuantizedBlock::Float32(data) => Ok(data.len()),
         // packed bytes and elements are NOT the same unit: a `Q4_K`
@@ -815,7 +818,12 @@ fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize
         QuantizedBlock::Q5K(bytes) => {
             Ok((bytes.len() / crate::msl::Q5K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
         }
-        QuantizedBlock::Q8_0(_) => Err(unsupported_gpu_codec(node, block)),
+        // `Q8_0`'s block is a different shape entirely (34 bytes carrying
+        // 32 elements, no super-block) — its own constants, never
+        // `Q4K_BLOCK_ELEMENTS`.
+        QuantizedBlock::Q8_0(bytes) => {
+            Ok((bytes.len() / crate::msl::Q8_0_BLOCK_BYTES) * crate::msl::Q8_0_BLOCK_ELEMENTS)
+        }
     }
 }
 
@@ -834,23 +842,6 @@ fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
     }
 }
 
-/// The one honest answer while the shader side is still float-only: name
-/// the codec that was handed in and the fact that no MSL kernel unpacks it
-/// yet. Decode is a weight sweep, so this is the gap that decides whether
-/// the GPU path is worth anything at all — at `f16` a 7B sweep is 14.5 GB
-/// per token against `Q4_K`'s 3.784 GB, which measured 14.8 tok/s against
-/// llama.cpp Metal's 56.8 on this box. `proxima-tensor/docs/discipline.md`
-/// ROW 69 carries the arithmetic.
-fn unsupported_gpu_codec(node: NodeId, block: &QuantizedBlock<'_>) -> MetalError {
-    let reason = match block {
-        QuantizedBlock::Float32(_) => "float32",
-        QuantizedBlock::Q4K(_) => "metal has no q4_k unpack kernel yet; cpu reaches it via dot_q4k_q8k",
-        QuantizedBlock::Q5K(_) => "metal has no q5_k unpack kernel yet; cpu reaches it via dot_q5k_q8k",
-        QuantizedBlock::Q6K(_) => "metal has no q6_k unpack kernel yet; cpu reaches it via dot_q6k_q8k",
-        QuantizedBlock::Q8_0(_) => "metal has no q8_0 unpack kernel yet",
-    };
-    TensorError::NotLowerable { node, reason }.into()
-}
 fn prepare(
     program: &[Op],
     symbols: &[u64],
@@ -862,11 +853,9 @@ fn prepare(
     // every packed codec's declared dtype is the "these are bytes" marker
     // `reject_unsupported_gpu_dtype`'s own doc already claims as its
     // exemption's rationale -- not just the codecs `packed_operands` above
-    // has a kernel for. Using `packed_operands` alone here would reject a
-    // still-unsupported `Q5_K`/`Q8_0` weight on a dtype mismatch before it
-    // ever reaches `unsupported_gpu_codec`'s codec-naming error, which is
-    // the wrong reason to fail: the real gap is "no unpack kernel", not
-    // "not float".
+    // has a kernel for, so any future codec added to `QuantizedBlock` before
+    // it has an unpack kernel here still gets the right dtype exemption
+    // rather than an unrelated "not float" rejection.
     let packed_operand_nodes: BTreeSet<NodeId> = block_node_ids(program)
         .iter()
         .zip(blocks.iter())
@@ -901,7 +890,7 @@ fn prepare(
     }
     for (node, block) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
-        let found = block_element_count(*node, block)?;
+        let found = block_element_count(block)?;
         if found != expected {
             return Err(TensorError::InputSizeMismatch {
                 node: *node,
