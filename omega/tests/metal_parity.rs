@@ -1311,6 +1311,156 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
 }
 
 /// Same claim as [`metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`],
+/// but with a MANY-token activation ([`q4k_tiled_gemm_program`]'s `[k,
+/// tokens]` shape) instead of that test's single-column `[k, 1]` one, so
+/// that this is the arm that actually clears `TILED_GEMM_MIN_TOKENS` and
+/// takes the `simdgroup_matrix`-tiled path (ROW 107) rather than the
+/// row-blocked one. `rows=12`/`tokens=20` are both deliberately NOT whole
+/// multiples of `TILE_DIM` (8), so a wrong boundary-tile mask on EITHER
+/// axis would show up as a real numeric disagreement here, not just a
+/// missing/extra write.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    let rows: u32 = 12;
+    let blocks_per_row = 3usize;
+    let k = QK_K as u32 * blocks_per_row as u32;
+    let tokens: u32 = 20;
+
+    let activation: Vec<f32> = random_vec(23, k as usize * tokens as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let weight_f32: Vec<f32> = random_vec(29, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+    for (row_f32, row_blocks) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+    }
+
+    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
+    for (row_blocks, row_f32) in weight_blocks
+        .chunks_exact(blocks_per_row * BLOCK_BYTES)
+        .zip(dequantized.chunks_exact_mut(k as usize))
+    {
+        dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks");
+    }
+
+    let (packed_program, packed_sum) = q4k_tiled_gemm_program(rows, k, tokens, DType::UInt8);
+    let metal = omega::execute(
+        &packed_program,
+        &[],
+        &[
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ],
+        &[packed_sum],
+    )
+    .expect("metal executes a tiled packed q4_k gemm on a real device");
+
+    let (f32_program, f32_sum) = q4k_tiled_gemm_program(rows, k, tokens, DType::Float32);
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu gemm evaluates");
+
+    let actual = metal.root();
+    let expected = cpu.root();
+    let element_count = rows as usize * tokens as usize;
+    assert_eq!(actual.len(), element_count, "degenerate gate: no outputs compared");
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "metal produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude;
+    eprintln!(
+        "tiled-gemm packed-q4k metal vs dequantized-f32 cpu: rows={rows} k={k} tokens={tokens} \
+         max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    // Unlike the row-blocked path's own 1e-5 bound (both sides stay f32
+    // throughout), the tiled path casts the dequantized weight to `half`
+    // for `simdgroup_half8x8` -- a real, necessary precision cost of using
+    // the hardware matrix unit (ggml's own `kernel_mul_mm_q4_K_f32`
+    // instantiation makes the identical choice, `T = half` at
+    // `ggml-metal.metal:6927`). `5e-3` is this suite's own established
+    // ceiling for any f16-involved path
+    // (`matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle`), not a
+    // number invented for this row. Measured at landing: relative ~3.3e-5,
+    // ~150x inside this bound.
+    assert!(
+        relative < 5e-3,
+        "tiled GEMM packed unpack disagrees with the dequantized reference: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// `[rows, k] x [k, tokens] -> [rows, tokens]` -- [`q4k_matmul_program`]'s
+/// same shape generalized to a many-token activation, the shape
+/// [`classify_tiled_gemm`](omega::msl) gates the tiled `simdgroup_matrix`
+/// path on.
+#[cfg(feature = "metal-tiled-gemm")]
+fn q4k_tiled_gemm_program(rows: u32, k: u32, tokens: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(tokens)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            // token axis FIRST, feature axis LAST -- the convention every
+            // real matmul in `proxima-tensor/src/spec.rs` follows and
+            // `classify_tiled_gemm`'s own doc requires for
+            // `native_packed_layout`'s packed-stride reconstruction to
+            // describe real bytes (see that function's doc, and
+            // `omega/src/msl.rs`'s `tiled_gemm_op` test fixture doc).
+            out_map: IndexMap::Affine(projection(3, &[1, 0])),
+            keep: Keep::Reduce,
+            name: Some("q4k_tiled_gemm".into()),
+        }),
+    );
+    (program, sum)
+}
+
+/// Same claim as [`metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`],
 /// one codec over: the weight buffer is never materialized as `f32` on the
 /// GPU side, `output.weight` — the ONE `Q6_K` tensor
 /// `openchat-3.5-1210.Q4_K_S.gguf` carries and 60% of this checkpoint's GPU

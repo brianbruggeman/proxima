@@ -560,7 +560,29 @@ pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOpera
             None => 'f',
         });
     }
-    key.push(if packed_row_block(resolved, &quantized).is_some() { 'B' } else { 'S' });
+    // 'G' (tiled `simdgroup_matrix` GEMM) is checked FIRST: `tiled_gemm_block`
+    // only ever returns `Some` when `packed_row_block` also would (it is
+    // built ON TOP of that same gate), so the two are mutually exclusive by
+    // construction and this order costs nothing extra to get right.
+    key.push(
+        if let BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            output_axes,
+            ..
+        } = &resolved.kind
+        {
+            if tiled_gemm_block(resolved, &quantized, *reduce_op, *init, output_axes).is_some() {
+                'G'
+            } else if packed_row_block(resolved, &quantized).is_some() {
+                'B'
+            } else {
+                'S'
+            }
+        } else {
+            'S'
+        },
+    );
     if let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind {
         key.push_str("_ax");
         for axis in output_axes {
@@ -790,6 +812,16 @@ pub(crate) fn gather_count(resolved: &BoundOp) -> usize {
 /// the per-row work becomes one header decode plus the nibble extracts.
 const PACKED_ROWS_PER_GROUP: usize = 4;
 
+/// Edge length of the `simdgroup_matrix` tile `push_tiled_gemm_body` uses —
+/// `simdgroup_float8x8`/`simdgroup_half8x8` are fixed 8x8 by the MSL type
+/// itself on every Apple GPU family that supports them, the same "hardware
+/// fact, not a policy knob" class [`SIMD_WIDTH`] is in
+/// (`crate::sized`'s own module doc draws this exact line): there is no
+/// tuning that would make this anything but 8, so it stays a bare `const`
+/// rather than threading through the sizing-config mechanism
+/// [`crate::sized::TILED_GEMM_MIN_TOKENS`] uses.
+const TILE_DIM: usize = 8;
+
 /// The one decision that both [`grid_threads`] and
 /// [`push_cooperative_reduce_body`] must reach identically: whether this
 /// bound op takes the row-blocked packed path. They compute different things
@@ -937,6 +969,158 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Op
     classify_packed_row_block(resolved, quantized).ok()
 }
 
+/// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
+/// path requires on top of [`packed_row_block`]'s own row-blocked
+/// eligibility -- the one decision [`grid_threads`] and
+/// [`push_cooperative_reduce_body`] must reach IDENTICALLY, same discipline
+/// [`PackedRowBlock`] itself follows (see its own doc): this reads a
+/// CONCRETE extent (the activation/token axis, against
+/// [`crate::sized::TILED_GEMM_MIN_TOKENS`]) on top of `packed_row_block`'s
+/// own concrete-stride gate, so [`kernel_cache_key`] re-derives this too
+/// rather than caching by structure alone (`docs/discipline.md` ROW 107).
+struct TiledGemmBlock {
+    weight: usize,
+    other: usize,
+    reduce_dim: usize,
+    /// output axis the ACTIVATION owns exclusively (nonzero stride on
+    /// `other`, zero on `weight`) -- the token/sequence dimension the tile
+    /// loop's N side walks.
+    token_axis: usize,
+    /// output axis the WEIGHT owns exclusively (nonzero stride on
+    /// `weight`, zero on `other`) -- the out-features dimension the tile
+    /// loop's M side walks.
+    feature_axis: usize,
+}
+
+/// `resolved`/`quantized`/`reduce_op`/`init`/`output_axes` are exactly
+/// [`push_cooperative_reduce_body`]'s own parameters -- this and
+/// [`packed_row_block`] are the two gates that function consults, in order,
+/// before falling back to the fully generic cooperative-reduce path.
+///
+/// Feature-gated: without `metal-tiled-gemm`,
+/// [`crate::sized::TILED_GEMM_MIN_TOKENS`] does not exist (see that
+/// constant's own doc), so this always returns `None` and every dispatch
+/// keeps taking the row-blocked or generic path exactly as it does today —
+/// the tiled kernel does not exist as far as the rest of this module can
+/// observe.
+fn classify_tiled_gemm(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> Option<TiledGemmBlock> {
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    {
+        let _ = (resolved, quantized, reduce_op, init, output_axes);
+        None
+    }
+    #[cfg(feature = "metal-tiled-gemm")]
+    {
+        let PackedRowBlock {
+            weight,
+            other,
+            reduce_dim,
+            codec,
+        } = classify_packed_row_block(resolved, quantized).ok()?;
+        // Q4_K only -- Q5_K/Q6_K have no batched-unpack helper yet
+        // (`push_packed_row_blocked_body`'s own comment on their arms) and,
+        // more to the point, have never been measured on this path.
+        // Shipping them unmeasured on a correctness-critical GPU kernel
+        // would violate the same discipline this landing's own gate
+        // demands (principle 18).
+        if codec != PackedCodec::Q4K {
+            return None;
+        }
+        // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
+        // no hardware knob for `Maximum`/`Subtract`/etc, so this only ever
+        // applies to the exact shape a real matmul takes: an `Add`-reduce
+        // over a plain `weight * activation` body, seeded from zero. Every
+        // other combination keeps taking the row-blocked or generic path.
+        if reduce_op != ScalarOp::Add || init != ReduceInit::Zero {
+            return None;
+        }
+        if !is_plain_product_reduce(resolved, reduce_op, weight, other) {
+            return None;
+        }
+        // Restricted to a plain 2-D matmul (one token axis, one feature
+        // axis, one folded reduce dim) -- the exact shape every FFN/logits
+        // matmul in `proxima-tensor/src/spec.rs` takes (`gate`/`up`/`down`/
+        // `logits`). The multi-head attention projections (Q/K/V/
+        // attn_output) keep more than one weight-owned output axis and stay
+        // on the row-blocked path -- a documented scope limit, not a silent
+        // gap (ROW 107).
+        let [axis_a, axis_b] = output_axes[..] else {
+            return None;
+        };
+        if reduction_dims(resolved, output_axes).len() != 1 {
+            return None;
+        }
+        let weight_layout = &resolved.operands()[weight].1;
+        let other_layout = &resolved.operands()[other].1;
+        // Structural, not conventional: whichever axis the activation alone
+        // depends on (nonzero stride there, zero on the weight) is the
+        // token axis; whichever the weight alone depends on is the feature
+        // axis. A shape where either operand depends on BOTH axes (a
+        // broadcast this restricted path was never measured against) falls
+        // through to `None` rather than guessing an axis assignment.
+        let (token_axis, feature_axis) = if weight_layout.stride(axis_a) == 0
+            && other_layout.stride(axis_a) != 0
+            && weight_layout.stride(axis_b) != 0
+            && other_layout.stride(axis_b) == 0
+        {
+            (axis_a, axis_b)
+        } else if weight_layout.stride(axis_b) == 0
+            && other_layout.stride(axis_b) != 0
+            && weight_layout.stride(axis_a) != 0
+            && other_layout.stride(axis_a) == 0
+        {
+            (axis_b, axis_a)
+        } else {
+            return None;
+        };
+        let token_extent = resolved.extents[token_axis as usize];
+        if token_extent < crate::sized::TILED_GEMM_MIN_TOKENS {
+            return None;
+        }
+        // `proxima_tensor::bind::native_packed_layout`'s own doc: a packed
+        // weight's on-disk layout is `[out_dim, in_dim]` row-major, and
+        // WITHIN the "out" side, "relative axis order is preserved from the
+        // declared shape" -- reconstructed by walking `output_axes` in
+        // REVERSE, so the operand's OWN axis must be the LAST-listed output
+        // axis (innermost, adjacent to the reduce group) for the
+        // reconstructed stride to describe real bytes. Every real matmul in
+        // `spec.rs` lists the token axis first and the weight's own axis
+        // last (`"sg->sdg"`, `"so->sugdo"`, ...) -- this is that same
+        // convention, checked structurally rather than assumed. A shape
+        // that violates it (weight's axis listed first) would read a
+        // corrupted stride here: `native_packed_layout` folds the WRONG
+        // (broadcast) axis's extent into the weight's own stride before
+        // zeroing that axis back out, one axis too late to undo the
+        // contamination for a swapped order.
+        if output_axes[output_axes.len() - 1] != feature_axis {
+            return None;
+        }
+        Some(TiledGemmBlock {
+            weight,
+            other,
+            reduce_dim,
+            token_axis: token_axis as usize,
+            feature_axis: feature_axis as usize,
+        })
+    }
+}
+
+fn tiled_gemm_block(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> Option<TiledGemmBlock> {
+    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes)
+}
+
 /// Public diagnostic seam: which condition, if any, rejected `resolved`
 /// from the row-blocked packed kernel. `Ok(())` means it WOULD take (or
 /// does take) the fast path. Behind `instrument` — see
@@ -958,6 +1142,8 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
+            reduce_op,
+            init,
             output_axes,
             ..
         } => {
@@ -965,7 +1151,15 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                 .iter()
                 .map(|dim| resolved.extents[*dim as usize])
                 .product();
-            if packed_row_block(resolved, quantized).is_some() {
+            if let Some(block) = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes) {
+                // one SIMD group per TILE_DIM x TILE_DIM output tile, tiled
+                // over BOTH the feature axis and the token axis — the
+                // amortization the row-blocked path does not do (it tiles
+                // the feature axis alone; see `push_tiled_gemm_body`'s doc).
+                let row_tiles = resolved.extents[block.feature_axis].div_ceil(TILE_DIM as u64);
+                let col_tiles = resolved.extents[block.token_axis].div_ceil(TILE_DIM as u64);
+                row_tiles * col_tiles * SIMD_WIDTH
+            } else if packed_row_block(resolved, quantized).is_some() {
                 // one SIMD group per PACKED_ROWS_PER_GROUP outputs
                 output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64) * SIMD_WIDTH
             } else if reduce_is_cooperative(resolved) {
@@ -2053,6 +2247,151 @@ fn push_packed_row_blocked_body(
     }
 }
 
+/// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 107) --
+/// ports the shape `ggml-metal.metal:6500-6600`'s `kernel_mul_mm` takes
+/// (`simdgroup_float8x8`/`simdgroup_load`/`simdgroup_multiply_accumulate`
+/// staging both operand tiles into threadgroup memory before the hardware
+/// matrix unit runs), attributed and simplified to ONE `TILE_DIM x TILE_DIM`
+/// tile per simdgroup rather than ggml's multi-simdgroup 64x32 block: this
+/// crate's operand model reads through generic per-axis strides (never
+/// assumes row-major-contiguous device memory the way ggml's raw `nb01`
+/// byte strides do), so both operand tiles are staged the same way
+/// [`push_packed_row_blocked_body`] already reads a strided operand, just
+/// written into a fixed `threadgroup` array instead of a private register.
+///
+/// One simdgroup computes one `TILE_DIM x TILE_DIM` output tile:
+/// `TILE_DIM` weight rows (the feature axis) by `TILE_DIM` tokens (the
+/// token axis), reusing EVERY loaded byte across the whole tile instead of
+/// [`push_packed_row_blocked_body`]'s `PACKED_ROWS_PER_GROUP` rows for a
+/// SINGLE token -- the reuse a many-token (prefill) dispatch has to exploit
+/// and a one-token (decode) dispatch does not, which is exactly why
+/// [`classify_tiled_gemm`] gates this on [`crate::sized::TILED_GEMM_MIN_TOKENS`]
+/// rather than taking it unconditionally.
+///
+/// Threadgroup memory is two FIXED-SIZE local arrays (`TILE_DIM * TILE_DIM`
+/// `half` for the dequantized weight tile, the same count of `float` for the
+/// activation tile) declared directly in the kernel body -- `TILE_DIM` is a
+/// compile-time constant, so this needs no `[[threadgroup(n)]]` kernel
+/// parameter and no `setThreadgroupMemoryLength` call on the driver side,
+/// unlike ggml's dynamically-sized `shmem` (`ggml-metal.m:3101`): every
+/// existing call site in `crate::metal` keeps dispatching through the same
+/// `dispatchThreads:threadsPerThreadgroup:` path unchanged.
+///
+/// Boundary tiles (feature or token extent not a whole multiple of
+/// `TILE_DIM`) are handled by zero-padding out-of-range reads during
+/// staging (a true-zero contribution changes nothing) and skipping
+/// out-of-range writes entirely during the final scatter -- the same
+/// n_rows/n_cols masking `ggml-metal.metal`'s own kernel applies at
+/// `BLOCK_SIZE_M`/`BLOCK_SIZE_N` boundaries, at `TILE_DIM` granularity
+/// instead. The reduction dimension needs no such mask: [`PackedRowBlock`]
+/// already guarantees it is a whole number of [`Q4K_BLOCK_ELEMENTS`]
+/// super-blocks, and 256 is a multiple of `TILE_DIM`.
+fn push_tiled_gemm_body(
+    source: &mut String,
+    output_axes: &[u16],
+    rank: usize,
+    block: &TiledGemmBlock,
+    element_type: &str,
+) {
+    let TiledGemmBlock {
+        weight,
+        other,
+        reduce_dim,
+        token_axis,
+        feature_axis,
+    } = *block;
+    let rank_len = rank.max(1);
+    let tile_area = TILE_DIM * TILE_DIM;
+    let token_axis_index = output_axes
+        .iter()
+        .position(|&dim| dim as usize == token_axis)
+        .unwrap_or(0);
+    let feature_axis_index = output_axes
+        .iter()
+        .position(|&dim| dim as usize == feature_axis)
+        .unwrap_or(1);
+
+    source.push_str(&format!(
+        "    long feature_extent = u.output_extents[{feature_axis_index}];\n"
+    ));
+    source.push_str(&format!(
+        "    long token_extent = u.output_extents[{token_axis_index}];\n"
+    ));
+    source.push_str(&format!(
+        "    long num_col_tiles = (token_extent + {}) / {TILE_DIM};\n",
+        TILE_DIM - 1
+    ));
+    source.push_str("    long row_tile = output_index / num_col_tiles;\n");
+    source.push_str("    long col_tile = output_index % num_col_tiles;\n");
+    source.push_str(&format!("    threadgroup half weight_tile[{tile_area}];\n"));
+    source.push_str(&format!("    threadgroup float act_tile[{tile_area}];\n"));
+    source.push_str("    simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8>(0.0f);\n");
+    source.push_str("    for (long k0 = 0; k0 < u.reduction_total; k0 += 8) {\n");
+    source.push_str(&format!(
+        "        for (uint idx = lane; idx < {tile_area}u; idx += {SIMD_WIDTH}u) {{\n"
+    ));
+    source.push_str(&format!("            uint w_row = idx / {TILE_DIM}u;\n"));
+    source.push_str(&format!("            uint w_k = idx % {TILE_DIM}u;\n"));
+    source.push_str(&format!("            long w_feat = row_tile * {TILE_DIM} + (long)w_row;\n"));
+    source.push_str("            long w_k_global = k0 + (long)w_k;\n");
+    source.push_str("            half w_value = 0.0h;\n");
+    source.push_str("            if (w_feat < feature_extent) {\n");
+    source.push_str(&format!(
+        "                long woff = u.operand_base[{weight}] + w_feat * u.operand_strides[{weight}][{feature_axis}] + w_k_global * u.operand_strides[{weight}][{reduce_dim}];\n"
+    ));
+    source.push_str(&format!(
+        "                w_value = (half)({});\n",
+        operand_read(weight, "woff", Some(PackedCodec::Q4K))
+    ));
+    source.push_str("            }\n");
+    source.push_str("            weight_tile[idx] = w_value;\n");
+    source.push_str(&format!("            uint a_k = idx / {TILE_DIM}u;\n"));
+    source.push_str(&format!("            uint a_col = idx % {TILE_DIM}u;\n"));
+    source.push_str(&format!("            long a_tok = col_tile * {TILE_DIM} + (long)a_col;\n"));
+    source.push_str("            long a_k_global = k0 + (long)a_k;\n");
+    source.push_str("            float a_value = 0.0f;\n");
+    source.push_str("            if (a_tok < token_extent) {\n");
+    source.push_str(&format!(
+        "                long aoff = u.operand_base[{other}] + a_tok * u.operand_strides[{other}][{token_axis}] + a_k_global * u.operand_strides[{other}][{reduce_dim}];\n"
+    ));
+    source.push_str(&format!("                a_value = {};\n", operand_read(other, "aoff", None)));
+    source.push_str("            }\n");
+    source.push_str("            act_tile[idx] = a_value;\n");
+    source.push_str("        }\n");
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("        simdgroup_half8x8 a_mat;\n");
+    source.push_str("        simdgroup_float8x8 b_mat;\n");
+    source.push_str("        simdgroup_load(a_mat, weight_tile, 8);\n");
+    source.push_str("        simdgroup_load(b_mat, act_tile, 8);\n");
+    source.push_str("        simdgroup_multiply_accumulate(acc, a_mat, b_mat, acc);\n");
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("    }\n");
+    source.push_str(&format!("    threadgroup float out_tile[{tile_area}];\n"));
+    source.push_str("    simdgroup_store(acc, out_tile, 8);\n");
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str(&format!(
+        "    for (uint idx = lane; idx < {tile_area}u; idx += {SIMD_WIDTH}u) {{\n"
+    ));
+    source.push_str(&format!("        uint o_row = idx / {TILE_DIM}u;\n"));
+    source.push_str(&format!("        uint o_col = idx % {TILE_DIM}u;\n"));
+    source.push_str(&format!("        long o_feat = row_tile * {TILE_DIM} + (long)o_row;\n"));
+    source.push_str(&format!("        long o_tok = col_tile * {TILE_DIM} + (long)o_col;\n"));
+    source.push_str("        if (o_feat < feature_extent && o_tok < token_extent) {\n");
+    source.push_str(&format!("            long coord[{rank_len}];\n"));
+    source.push_str(&format!("            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"));
+    source.push_str(&format!("            coord[{feature_axis}] = o_feat;\n"));
+    source.push_str(&format!("            coord[{token_axis}] = o_tok;\n"));
+    source.push_str("            long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!("            out_offset += coord[{dim}] * u.out_strides[{dim}];\n"));
+    }
+    source.push_str(&format!(
+        "            out[out_offset] = ({element_type})out_tile[idx];\n"
+    ));
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
 // the emitter threads a bound op's full shape (rank, axes, reduce op, init,
 // element type, codec flags) into one kernel body; splitting that into a
 // struct would relocate the arguments, not remove them.
@@ -2074,6 +2413,19 @@ fn push_cooperative_reduce_body(
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
     let operand_count = resolved.operands().len();
+
+    // the tiled GEMM path owns its own preamble too: `output_index` is a
+    // flat TILE index there, one simdgroup per `TILE_DIM x TILE_DIM` output
+    // tile, not one simdgroup per `PACKED_ROWS_PER_GROUP` flat outputs the
+    // way the row-blocked path below reads it. Checked FIRST: see
+    // `kernel_cache_key`'s own comment for why the two are mutually
+    // exclusive by construction.
+    if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
+        source.push_str(&format!("    long output_index = (long)gid / {SIMD_WIDTH};\n"));
+        source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+        push_tiled_gemm_body(source, output_axes, rank, &block, element_type);
+        return;
+    }
 
     // the row-blocked packed path owns its own preamble: `output_index` is a
     // GROUP index there, not an output index, so the guard below would be
@@ -2698,6 +3050,267 @@ mod tests {
         assert!(
             source.contains("hdr.scale * levels[j] - hdr.minimum"),
             "a Maximum reduce must keep dequantizing per element:\n{source}"
+        );
+    }
+
+    /// Same shape as [`matmul_op`] (`lhs=[features,k]` weight,
+    /// `rhs=[k,tokens]` activation), but with the out_map listing the TOKEN
+    /// axis before the feature axis -- `output_axes = [1, 0]` instead of
+    /// `matmul_op`'s `[0, 1]`. This is the convention every real matmul in
+    /// `proxima-tensor/src/spec.rs` follows (`"sg->sdg"`, `"so->sugdo"`,
+    /// ...: token/sequence letters listed first, the weight's own letters
+    /// last) and [`classify_tiled_gemm`]'s own doc names as load-bearing for
+    /// `native_packed_layout`'s packed-stride reconstruction — `matmul_op`'s
+    /// own `[0, 1]` order fails that check by construction, so the tiled
+    /// path needs its own fixture rather than reusing `matmul_op` (which
+    /// several PRE-EXISTING structural tests already pin to its current
+    /// order).
+    fn tiled_gemm_op(tokens: u32, k: u32, features: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(features), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k), Extent::Static(tokens)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[1, 0])),
+                keep: Keep::Reduce,
+                name: Some("tiled_gemm".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("tiled gemm op infers");
+        bind(&program, &shapes, &[])
+            .expect("tiled gemm op lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    /// Same fused body as [`matmul_op`], but a 3-output-axis shape (`h`, `d`
+    /// weight-owned, `s` activation-owned) mirroring the multi-head Q/K/V
+    /// projections `proxima-tensor/src/spec.rs`'s `"ihd->shdi"` pattern
+    /// takes — `classify_tiled_gemm`'s own doc names this the documented
+    /// scope limit (ROW 107), not a silent gap: [`push_tiled_gemm_body`]
+    /// only understands a 2-D tile, so this shape must always stay on the
+    /// row-blocked path regardless of token count.
+    #[cfg(feature = "metal-tiled-gemm")]
+    fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(seq), Extent::Static(embed)],
+                name: None,
+            },
+        );
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(embed), Extent::Static(heads), Extent::Static(head_dim)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(4, &[3, 1, 2]))),
+                    (activation, IndexMap::Affine(map::projection(4, &[0, 3]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
+                keep: Keep::Reduce,
+                name: Some("multi_head_matmul".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("multi-head matmul infers");
+        bind(&program, &shapes, &[])
+            .expect("multi-head matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    #[test]
+    fn tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature() {
+        // 16 tokens clears every plausible threshold; without the feature
+        // compiled in, `TILED_GEMM_MIN_TOKENS` does not exist at all and
+        // `classify_tiled_gemm` always returns `None` — see that function's
+        // own doc. This test is cfg-gated the OPPOSITE way from the
+        // `metal-tiled-gemm`-only tests below: it proves the tiled path is
+        // invisible in the build that does not opt into it.
+        let bound = tiled_gemm_op(16, 256, 4);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            !source.contains("simdgroup_multiply_accumulate"),
+            "the tiled GEMM path must not exist at all without `metal-tiled-gemm`:\n{source}"
+        );
+        assert!(
+            source.contains("sumf["),
+            "16 tokens must still take the row-blocked path when the feature is off:\n{source}"
+        );
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in() {
+        // ONE token (real decode's own shape) is below
+        // `TILED_GEMM_MIN_TOKENS` (8) regardless of how large the feature
+        // axis is — proves decode keeps taking the vector path even when
+        // the tiled kernel is compiled into the binary, the exact
+        // correctness requirement ROW 107 states.
+        let bound = tiled_gemm_op(1, 256, 4096);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert!(
+            tiled_gemm_block(&bound, &operand_codecs(&bound, &q4k), ScalarOp::Add, ReduceInit::Zero, &[1, 0]).is_none(),
+            "one token must never clear TILED_GEMM_MIN_TOKENS"
+        );
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            !source.contains("simdgroup_multiply_accumulate"),
+            "a one-token (decode-shaped) dispatch must not take the tiled GEMM path:\n{source}"
+        );
+        assert!(
+            source.contains("sumf["),
+            "a one-token dispatch must still take the row-blocked path:\n{source}"
+        );
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn many_token_matmul_takes_the_tiled_gemm_path() {
+        // 16 tokens clears TILED_GEMM_MIN_TOKENS (8); 4 weight rows is
+        // deliberately NOT a multiple of TILE_DIM (8), exercising the
+        // boundary-tile mask on the feature axis in the same test that
+        // proves the path is taken at all.
+        let bound = tiled_gemm_op(16, 256, 4);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert!(
+            tiled_gemm_block(&bound, &operand_codecs(&bound, &q4k), ScalarOp::Add, ReduceInit::Zero, &[1, 0]).is_some(),
+            "16 tokens must clear TILED_GEMM_MIN_TOKENS"
+        );
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            source.contains("simdgroup_multiply_accumulate"),
+            "a 16-token dispatch must take the tiled GEMM path:\n{source}"
+        );
+        assert!(source.contains("simdgroup_load"), "the tiled path must stage both operand tiles:\n{source}");
+        assert!(
+            source.contains("feature_extent"),
+            "the boundary mask must read the feature extent from uniforms, never bake it in:\n{source}"
+        );
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
+        // Q5_K/Q6_K are explicitly out of scope (ROW 107) -- unmeasured on
+        // this path, and their unpack has no batched form to reuse.
+        let bound = tiled_gemm_op(16, 256, 4);
+        let weight_node = bound.operands()[0].0;
+        let mut q6k = BTreeMap::new();
+        q6k.insert(weight_node, PackedCodec::Q6K);
+
+        assert!(
+            tiled_gemm_block(&bound, &operand_codecs(&bound, &q6k), ScalarOp::Add, ReduceInit::Zero, &[1, 0]).is_none(),
+            "a Q6_K weight must never take the tiled GEMM path"
+        );
+        let source = emit(&bound, &q6k).expect("emits").source;
+        assert!(
+            !source.contains("simdgroup_multiply_accumulate"),
+            "a Q6_K weight must not emit the tiled GEMM kernel:\n{source}"
+        );
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count() {
+        // 32 sequence positions clears TILED_GEMM_MIN_TOKENS handily, but
+        // this op keeps TWO weight-owned output axes (`heads`, `head_dim`)
+        // -- `classify_tiled_gemm`'s documented scope limit, not a silent
+        // gap.
+        let bound = multi_head_matmul_op(32, 8, 128, 4096);
+        let weight_node = bound.operands()[1].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        let codecs = operand_codecs(&bound, &q4k);
+        assert!(
+            packed_row_block(&bound, &codecs).is_some(),
+            "test fixture must actually clear the row-blocked gate for this assertion to mean anything"
+        );
+        let BoundOpKind::Reduce {
+            reduce_op,
+            init,
+            output_axes,
+            ..
+        } = &bound.kind
+        else {
+            panic!("multi_head_matmul_op always builds a Keep::Reduce fold")
+        };
+        assert!(
+            tiled_gemm_block(&bound, &codecs, *reduce_op, *init, output_axes).is_none(),
+            "a 3-output-axis matmul must never take the 2-D tiled GEMM path"
+        );
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            !source.contains("simdgroup_multiply_accumulate"),
+            "a multi-head-shaped matmul must stay on the row-blocked path:\n{source}"
         );
     }
 
