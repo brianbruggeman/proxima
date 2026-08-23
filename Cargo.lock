@@ -4212,6 +4212,7 @@ name = "proxima-model-interop"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "fastrand",
  "half",
  "omega",
  "prime",
@@ -4749,6 +4750,8 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "conflaguration",
+ "fastrand",
+ "libm",
  "proxima-gguf",
  "proxima-primitives",
  "serde",

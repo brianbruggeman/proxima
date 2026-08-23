@@ -65,7 +65,7 @@ use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program};
-use proxima_tokenizer::Vocab;
+use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(feature = "metal")]
 use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
@@ -711,6 +711,27 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
+        // The repetition-penalty filter's own window: prompt tokens included,
+        // matching upstream (`tools/main/main.cpp:725` feeds prompt tokens
+        // through the same `common_sampler_accept` generated tokens use), grown
+        // by one id every decode step below. `sample_config`/`rng` are built
+        // once and threaded through every step -- the same seeded
+        // `fastrand::Rng` this workspace already uses for every other
+        // deterministic-by-seed pipe, drawn from progressively rather than
+        // reseeded per token, mirroring upstream's own one-`std::mt19937`-per-
+        // sampler-chain lifetime (`proxima_tokenizer::sample`'s own doc).
+        let mut token_history: Vec<u32> = ids.clone();
+        let repeat_window = serving_config.repeat_last_n.max(0) as usize;
+        let sample_config = SamplingConfig {
+            temperature: serving_config.temperature,
+            top_k: serving_config.top_k,
+            top_p: serving_config.top_p,
+            min_p: serving_config.min_p,
+            repeat_penalty: serving_config.repeat_penalty,
+            frequency_penalty: serving_config.frequency_penalty,
+            presence_penalty: serving_config.presence_penalty,
+        };
+        let mut rng = fastrand::Rng::with_seed(serving_config.seed);
 
         let block_count = self.architecture.block_count as usize;
         let kv_cache_names: Vec<(String, String, String)> = (0..block_count)
@@ -874,7 +895,11 @@ impl<'file> LoadedModel<'file> {
 
             #[cfg(feature = "instrument")]
             let greedy_pick_started = read_ticks();
-            let token_id = proxima_tokenizer::greedy_pick(last_position).ok_or(InteropError::EmptyLogits)?;
+            let recent_window_start = token_history.len().saturating_sub(repeat_window);
+            let recent_tokens = &token_history[recent_window_start..];
+            let token_id =
+                sample_next_token(last_position, recent_tokens, sample_config, &mut rng).ok_or(InteropError::EmptyLogits)?;
+            token_history.push(token_id);
             #[cfg(feature = "instrument")]
             let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
             next_ids = alloc::vec![token_id];
