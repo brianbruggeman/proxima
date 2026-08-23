@@ -115,32 +115,24 @@ async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] 
 /// have no encoder OR decoder anywhere in `proxima_gguf::quant` (grepped:
 /// only `q4_k`/`q5_k`/`q6_k`/`q8_0` exist as modules) -- `bind::gguf_tensor_as_f32`'s
 /// own `match` names every one of them as `InteropError::UnrepresentableGgmlType`
-/// rather than misreading a codec it has no decoder for. That error never
-/// reaches `LoadedModel::load`'s own `Result`, though: `bind::bind_matmul_weight`'s
-/// error arm is `.unwrap_or_else(|error| panic!(...))`, so what a caller
-/// actually observes today is a **panic naming the unrepresentable type**,
-/// not a returned `Err` -- a real, reproducible robustness gap (worth its
-/// own fix: a checkpoint loader panicking on untrusted input contradicts
-/// this crate's own `# Errors` contract on [`LoadedModel::load`]), proved
-/// here rather than assumed.
+/// rather than misreading a codec it has no decoder for. `bind::bind_dense`/
+/// `bind::bind_matmul_weight`/`bind::bind_all_weights` now propagate that
+/// `Err` with `?` instead of `.unwrap_or_else(|error| panic!(...))`, so
+/// `LoadedModel::load` returns it through its own documented `Result`
+/// rather than aborting the process on untrusted input.
 #[proxima::test]
 #[case::q4_0(GgmlType::Q4_0)]
 #[case::q5_0(GgmlType::Q5_0)]
 #[case::q2_k(GgmlType::Q2_K)]
 #[case::q3_k(GgmlType::Q3_K)]
-async fn dense_cpu_unrepresentable_codec_load_panics_instead_of_returning_an_error(#[case] codec: GgmlType) {
+async fn dense_cpu_unrepresentable_codec_load_returns_a_typed_error(#[case] codec: GgmlType) {
     let file_bytes = support::checkpoint_bytes(codec);
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| LoadedModel::load(&parsed, &file_bytes)));
-    let panic_payload = outcome.err().expect("loading an unrepresentable codec must panic (see this test's own doc)");
-    let message = panic_payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| panic_payload.downcast_ref::<&str>().map(|value| (*value).to_string()))
-        .unwrap_or_default();
+    let outcome = LoadedModel::load(&parsed, &file_bytes);
+    let error = outcome.err().expect("loading an unrepresentable codec must return Err, not Ok");
     assert!(
-        message.contains("UnrepresentableGgmlType") || message.contains("no safetensors dtype counterpart"),
-        "a {codec:?} checkpoint's panic must name the unrepresentable type: {message:?}"
+        matches!(error, InteropError::UnrepresentableGgmlType { ggml_type, .. } if ggml_type == codec),
+        "a {codec:?} checkpoint's load must fail with UnrepresentableGgmlType naming {codec:?}: {error:?}"
     );
 }
 
