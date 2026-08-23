@@ -15977,4 +15977,145 @@ mod tests {
              max_magnitude={max_magnitude}"
         );
     }
+
+    /// Fixed-topology (structured) sparsity needs no gate at all: the
+    /// nonzero pattern here is two disjoint 2x2 blocks fixed at graph-build
+    /// time, and each block is a plain, unshifted `IndexMap::Affine`
+    /// projection -- never `IndexMap::Computed`. The zero off-diagonal
+    /// blocks of the dense 4x4 equivalent are never built as ops at all, so
+    /// this costs 2 * (2*2) = 8 multiply-adds against the 16 a dense matmul
+    /// would spend, and nothing here is data-dependent, so
+    /// `shape.rs:166`'s scatter gate never sees this program.
+    #[test]
+    fn a_static_block_sparse_matmul_needs_no_data_dependent_map() {
+        let mut program = Vec::new();
+        let x_block0 = f32_block(&mut program, &[Extent::Static(2)]);
+        let x_block1 = f32_block(&mut program, &[Extent::Static(2)]);
+        let weight_block0 = f32_block(&mut program, &[Extent::Static(2), Extent::Static(2)]);
+        let weight_block1 = f32_block(&mut program, &[Extent::Static(2), Extent::Static(2)]);
+
+        let block_output = |program: &mut Vec<Op>, weight: NodeId, x: NodeId| {
+            let product = append(
+                program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                        (x, IndexMap::Affine(map::projection(2, &[1]))),
+                    ],
+                    name: None,
+                },
+            );
+            append(
+                program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[0])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            )
+        };
+
+        let block0_output = block_output(&mut program, weight_block0, x_block0);
+        let block1_output = block_output(&mut program, weight_block1, x_block1);
+
+        let x0 = [1.0f32, 2.0];
+        let x1 = [3.0f32, 4.0];
+        let weight0 = [2.0f32, 1.0, 1.0, 2.0];
+        let weight1 = [1.0f32, 1.0, 1.0, -1.0];
+        let evaluated = evaluate(
+            &program,
+            &[],
+            &[&x0, &x1, &weight0, &weight1],
+            &[block0_output, block1_output],
+        )
+        .expect("static block-sparse matmul lowers and evaluates");
+
+        let (block0, _) = evaluated.get(block0_output).expect("block0 output present");
+        let (block1, _) = evaluated.get(block1_output).expect("block1 output present");
+        assert_eq!(block0, &[4.0, 5.0], "weight0 @ (x0, x1)");
+        assert_eq!(block1, &[7.0, -1.0], "weight1 @ (x2, x3)");
+    }
+
+    /// The adjoint of a gather -- and gradient accumulation into a
+    /// fixed-shape destination -- is expressible today with the same three
+    /// generators the crate's own causal-mask idiom already composes
+    /// (`Iota` plus `Equal` builds the selector; see `op.rs`'s `Iota` doc),
+    /// never `IndexMap::Computed` as an `out_map`. The destination extent
+    /// (`3` here) comes from `Iota`'s own `extent` field -- the same
+    /// externally-supplied-extent mechanism `Op::Input`'s leaf shape already
+    /// uses -- not from `shape.rs`'s iteration-space unification, which is
+    /// why this needs no change to the `is_data_dependent` gate at
+    /// `shape.rs:166`. Source rows 0 and 2 both target destination row 0,
+    /// which is the whole difference between a scatter-add and a
+    /// scatter-write: `Reduce`'s own `body: Add` sums both contributions
+    /// instead of one clobbering the other.
+    #[test]
+    fn scatter_add_into_a_known_destination_via_mask_composition() {
+        let mut program = Vec::new();
+        let destination_positions = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(3),
+            },
+        );
+        let indices = f32_block(&mut program, &[Extent::Static(4)]);
+        let source = f32_block(&mut program, &[Extent::Static(4)]);
+
+        let mask = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Equal,
+                operands: alloc::vec![
+                    (destination_positions, IndexMap::Affine(map::projection(2, &[0]))),
+                    (indices, IndexMap::Affine(map::projection(2, &[1]))),
+                ],
+                name: None,
+            },
+        );
+        let masked_source = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (mask, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (source, IndexMap::Affine(map::projection(2, &[1]))),
+                ],
+                name: None,
+            },
+        );
+        let scattered = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: masked_source,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("scatter_add".into()),
+            }),
+        );
+
+        let index_values = [0.0f32, 2.0, 0.0, 1.0];
+        let source_values = [10.0f32, 20.0, 30.0, 40.0];
+        let evaluated = evaluate(&program, &[], &[&index_values, &source_values], &[scattered])
+            .expect("scatter-add composed from Iota+Equal+Multiply+Reduce lowers and evaluates");
+
+        assert_eq!(
+            evaluated.root(),
+            &[40.0, 40.0, 20.0],
+            "dest[0]=src[0]+src[2] (collision), dest[1]=src[3], dest[2]=src[1]"
+        );
+    }
 }
