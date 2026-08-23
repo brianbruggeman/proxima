@@ -7,8 +7,9 @@
 //! already-sized job": the parser reports a tensor's [`crate::GgmlType`]
 //! and byte range faithfully, and this module turns those raw bytes into
 //! numbers (and back), one block format at a time. [`q4_k`] landed first;
-//! [`q8_0`], [`q6_k`], and [`q5_k`] followed.
+//! [`q8_0`], [`q6_k`], [`q5_k`], and [`q4_0`] followed.
 
+pub mod q4_0;
 pub mod q4_k;
 pub mod q5_k;
 pub mod q6_k;
@@ -18,8 +19,8 @@ pub mod policy;
 use thiserror::Error;
 
 /// Everything that can go wrong sizing a block-quant codec call, shared by
-/// every codec in this module (`q4_k`/`q5_k`/`q6_k`/`q8_0`) instead of each
-/// declaring its own structurally identical type. Never a panic: a
+/// every codec in this module (`q4_0`/`q4_k`/`q5_k`/`q6_k`/`q8_0`) instead
+/// of each declaring its own structurally identical type. Never a panic: a
 /// malformed or mis-sized buffer is always an `Err`. `codec` carries which
 /// codec raised it, so the rendered message still names it.
 #[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
@@ -34,7 +35,7 @@ pub enum QuantError {
     InputNotElementMultiple {
         codec: &'static str,
         /// `"super-block"` for the K-quants (`q4_k`/`q5_k`/`q6_k`), plain
-        /// `"block"` for `q8_0`, which has no sub-block structure.
+        /// `"block"` for `q4_0`/`q8_0`, which have no sub-block structure.
         unit: &'static str,
         found: usize,
         block_elements: usize,
