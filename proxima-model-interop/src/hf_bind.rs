@@ -192,6 +192,76 @@ fn hf_bind_dense<'file>(
     Ok(())
 }
 
+/// Reorders `flat`'s (`[out_dim, in_dim]` row-major, `out_dim ==
+/// head_count * head_dim`) rows from HF's own RoPE layout into the
+/// interleaved layout [`proxima_tensor::spec`]'s RoPE math (`spec.rs`'s
+/// `q_even`/`q_odd`, indexed `"2*i"`/`"2*i+1"`) consumes -- the same
+/// per-head row permutation `llama.cpp`'s own `convert_hf_to_gguf.py`
+/// applies (its `permute()`) before writing `blk.N.attn_q.weight`/
+/// `blk.N.attn_k.weight` into a GGUF file, which is why [`crate::bind`]'s
+/// GGUF path has never needed this: a GGUF checkpoint's bytes already
+/// carry it.
+///
+/// HF/PyTorch's own rotary embedding (`transformers`' `rotate_half`)
+/// treats a head's `head_dim` channels as two contiguous halves, `x1 =
+/// x[..half]`, `x2 = x[half..]`, and rotates each `(x1[i], x2[i])` pair.
+/// `spec.rs`'s RoPE instead rotates adjacent-channel pairs `(x[2*i],
+/// x[2*i+1])` -- mathematically the same rotation, over a differently
+/// numbered set of pairs, so it needs `x1[i]`/`x2[i]` delivered at channels
+/// `2*i`/`2*i+1` instead of at `i`/`i+head_dim/2`. Per head:
+///
+/// ```text
+/// permuted[head*head_dim + 2*i]     = original[head*head_dim + i]
+/// permuted[head*head_dim + 2*i + 1] = original[head*head_dim + head_dim/2 + i]
+/// ```
+///
+/// Confirmed against the real, downloaded `HuggingFaceTB/SmolLM2-135M-Instruct/model.safetensors`:
+/// without this permutation, this crate's own forward pass matches
+/// `llama.cpp`'s bit-for-bit at RoPE position 0 (where every pair's angle
+/// is zero, so no permutation convention can matter) and diverges starting
+/// at position 1 already inside layer 0 -- exactly the position dependence
+/// this permutation, and only this permutation, explains.
+fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_dim: usize) -> Vec<f32> {
+    let half = head_dim / 2;
+    let mut permuted = alloc::vec![0.0f32; flat.len()];
+    for head in 0..head_count {
+        for i in 0..half {
+            let source_even = (head * head_dim + i) * in_dim;
+            let source_odd = (head * head_dim + half + i) * in_dim;
+            let dest_even = (head * head_dim + 2 * i) * in_dim;
+            let dest_odd = (head * head_dim + 2 * i + 1) * in_dim;
+            permuted[dest_even..dest_even + in_dim].copy_from_slice(&flat[source_even..source_even + in_dim]);
+            permuted[dest_odd..dest_odd + in_dim].copy_from_slice(&flat[source_odd..source_odd + in_dim]);
+        }
+    }
+    permuted
+}
+
+/// [`hf_bind_matmul_weight`]'s counterpart for `q_proj`/`k_proj` alone:
+/// always decodes to an owned `[out_dim, in_dim]` buffer (never takes the
+/// packed zero-copy path -- [`permute_rope_rows`]'s reorder is a physical
+/// byte move a borrowed packed block cannot express) and applies
+/// [`permute_rope_rows`] before the same transpose
+/// [`hf_bind_matmul_weight`] already does.
+fn hf_bind_rope_weight<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    lookup_name: String,
+    store_name: String,
+    head_count: usize,
+    head_dim: usize,
+    in_dim: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
+    let permuted = permute_rope_rows(&decoded, head_count, head_dim, in_dim);
+    let out_dim = head_count * head_dim;
+    state.resident_bytes += permuted.len() * core::mem::size_of::<f32>();
+    state.owned.push((store_name, transpose_out_in_to_in_out(&permuted, &lookup_name, out_dim, in_dim)?));
+    Ok(())
+}
+
 /// A 2-D projection weight bound as one matmul operand -- HF/PyTorch's
 /// `nn.Linear` weight is `[out_features, in_features]`, row-major, the
 /// identical on-disk convention GGUF's own `[out, in]` layout uses (see
@@ -403,8 +473,28 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             node_names::ffn_norm(layer),
             &mut state,
         )?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::q_proj(layer), node_names::attn_q(layer), embedding, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::k_proj(layer), node_names::attn_k(layer), kv_dim, embedding, &mut state)?;
+        hf_bind_rope_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::q_proj(layer),
+            node_names::attn_q(layer),
+            architecture.query_heads as usize,
+            architecture.head_dim as usize,
+            embedding,
+            &mut state,
+        )?;
+        hf_bind_rope_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::k_proj(layer),
+            node_names::attn_k(layer),
+            architecture.kv_heads as usize,
+            architecture.head_dim as usize,
+            embedding,
+            &mut state,
+        )?;
         hf_bind_matmul_weight(manifest, file_bytes, data_start, names::v_proj(layer), node_names::attn_v(layer), kv_dim, embedding, &mut state)?;
         hf_bind_matmul_weight(
             manifest,
