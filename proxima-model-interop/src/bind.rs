@@ -24,6 +24,7 @@
 //! `proxima_tensor::spec::mistral_cached_forward_program` needs, still
 //! without opening a file.
 
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -216,7 +217,28 @@ pub struct ModelArchitecture {
     pub embedding: u32,
     pub feed_forward: u32,
     pub query_heads: u32,
+    /// `{architecture}.attention.head_count_kv`. Confirmed against a real
+    /// checkpoint (LFM2.5-8B-A1B) to sometimes carry a per-layer
+    /// [`MetadataArray`] instead of one scalar `U32` -- a hybrid
+    /// architecture's convolution layers report `0` kv heads, its attention
+    /// layers a real count, and the two differ within the SAME checkpoint.
+    /// [`architecture_from_metadata`] reads that array shape without
+    /// erroring when every entry agrees (the common case, and every
+    /// checkpoint this field's doc could confirm before now), but returns
+    /// [`InteropError::HeterogeneousMetadataArray`] rather than collapsing a
+    /// genuinely per-layer-varying array into one number here -- this field
+    /// cannot represent "8 for these layers, 0 for those" and silently
+    /// picking one value would be architecturally wrong, not just imprecise.
     pub kv_heads: u32,
+    /// `{architecture}.rope.dimension_count`. Optional on the wire:
+    /// confirmed absent on a real checkpoint (LFM2.5-8B-A1B, which has no
+    /// rotary attention key its writer needed at all) where `embedding_length
+    /// / attention.head_count` (2048/32 = 64) matches the real per-head
+    /// dimension independently (`attn_q_norm.weight`'s own declared shape,
+    /// `[64]`, on that same file). [`architecture_from_metadata`] falls back
+    /// to that derived quotient when the key is absent, the same "derive
+    /// when the format allows it" shape [`crate::hf_config::HfConfig::head_dim`]
+    /// already uses for HF's identically-optional `head_dim` key.
     pub head_dim: u32,
     pub block_count: u32,
     /// `{architecture}.expert_count` (llama.cpp's own key for a sparse
@@ -247,18 +269,29 @@ pub struct ModelArchitecture {
 /// Reads [`ModelArchitecture`] out of `parsed`'s own metadata: looks up
 /// `general.architecture` first (`"llama"` for a Mistral-shaped checkpoint
 /// such as openchat-3.5), then every `{architecture}.*` dimension key
-/// under that name. `head_dim` reads `{architecture}.rope.dimension_count`
-/// directly rather than deriving `embedding / query_heads` -- GGUF stores
-/// the rotary dimension count as its own key, and for a full-rotation
-/// architecture (every Mistral/Llama-family checkpoint this crate has
-/// evaluated) that value already equals the per-head dimension, so reading
-/// it directly avoids assuming the division holds for an architecture this
-/// crate has not seen.
+/// under that name.
+///
+/// `head_dim` reads `{architecture}.rope.dimension_count` when present --
+/// GGUF stores the rotary dimension count as its own key, and for a
+/// full-rotation architecture that value already equals the per-head
+/// dimension, so reading it directly avoids assuming the division holds
+/// for an architecture this crate has not seen. When the key is ABSENT
+/// (confirmed on a real checkpoint, LFM2.5-8B-A1B -- see
+/// [`ModelArchitecture::head_dim`]'s own doc), falls back to
+/// `embedding / query_heads` instead of [`InteropError::MissingMetadataKey`].
+///
+/// `kv_heads` reads `{architecture}.attention.head_count_kv` as a plain
+/// scalar `U32` in the common case, but also accepts a per-layer
+/// [`MetadataArray`] (confirmed on the same real checkpoint) PROVIDED every
+/// entry agrees -- see [`ModelArchitecture::kv_heads`]'s own doc for why a
+/// genuinely heterogeneous array is refused rather than collapsed.
 ///
 /// # Errors
 ///
 /// [`InteropError::MissingMetadataKey`] naming the first key that is
 /// absent, or present with the wrong [`MetadataValue`] variant;
+/// [`InteropError::HeterogeneousMetadataArray`] if `attention.head_count_kv`
+/// is a [`MetadataArray`] whose entries are not all equal;
 /// [`InteropError::VocabShapeMismatch`] if `token_embd.weight`'s element
 /// count does not divide evenly by `embedding_length`.
 pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
@@ -266,9 +299,13 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
     let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &alloc::format!("{architecture}.feed_forward_length"))?;
     let query_heads = metadata_u32(parsed, &alloc::format!("{architecture}.attention.head_count"))?;
-    let kv_heads = metadata_u32(parsed, &alloc::format!("{architecture}.attention.head_count_kv"))?;
+    let kv_heads = metadata_u32_or_uniform_array(parsed, &alloc::format!("{architecture}.attention.head_count_kv"))?;
     let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
-    let head_dim = metadata_u32(parsed, &alloc::format!("{architecture}.rope.dimension_count"))?;
+    let head_dim = metadata_u32_optional_or(
+        parsed,
+        &alloc::format!("{architecture}.rope.dimension_count"),
+        embedding / query_heads.max(1),
+    );
     let vocab = vocab_from_token_embedding(parsed, embedding)?;
     let expert_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
     let expert_used_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_used_count"));
@@ -311,7 +348,74 @@ fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
 /// dense checkpoint carries, absence is data ("this is not a
 /// mixture-of-experts model"), not a malformed file.
 fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
-    parsed.metadata_value(key).and_then(MetadataValue::as_u32).unwrap_or(0)
+    metadata_u32_optional_or(parsed, key, 0)
+}
+
+/// Same shape as [`metadata_u32_optional`], but `default` (a caller-derived
+/// fallback, e.g. `embedding / query_heads`) rather than a fixed `0` when
+/// `key` is absent -- for a key whose absence still has a principled
+/// derived value, unlike a mixture-of-experts-only key where `0` genuinely
+/// means "not present."
+fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) -> u32 {
+    parsed.metadata_value(key).and_then(MetadataValue::as_u32).unwrap_or(default)
+}
+
+/// Same lookup as [`metadata_u32`], but also accepts `key` stored as a
+/// per-element [`proxima_gguf::value::MetadataArray`] of `U32`/`I32`
+/// entries -- confirmed necessary against a real checkpoint
+/// (LFM2.5-8B-A1B), whose `attention.head_count_kv` is `Array(I32[24])`
+/// (`0` for its 18 convolution layers, a real count for its 6 attention
+/// layers) rather than the single scalar every other checkpoint this crate
+/// has read declares.
+///
+/// Every entry must agree for this to return `Ok` -- see
+/// [`ModelArchitecture::kv_heads`]'s own doc for why a genuinely
+/// per-layer-varying array is refused ([`InteropError::HeterogeneousMetadataArray`])
+/// rather than collapsed into one scalar by, say, taking the max or the
+/// first nonzero entry: either of those would silently misrepresent a
+/// hybrid architecture's real per-layer structure as a uniform one.
+///
+/// # Errors
+///
+/// [`InteropError::MissingMetadataKey`] if `key` is absent, or present with
+/// neither a scalar `U32`/`I32` nor an `Array` of one of those;
+/// [`InteropError::HeterogeneousMetadataArray`] if `key` is an `Array` whose
+/// entries are not all equal, or a negative `I32` entry has no `u32`
+/// representation.
+fn metadata_u32_or_uniform_array(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
+    use proxima_gguf::value::MetadataArray;
+
+    match parsed.metadata_value(key) {
+        Some(MetadataValue::U32(value)) => Ok(*value),
+        Some(MetadataValue::I32(value)) => u32::try_from(*value).map_err(|_| InteropError::HeterogeneousMetadataArray {
+            key: key.into(),
+            distinct_values: 1,
+        }),
+        Some(MetadataValue::Array(MetadataArray::U32(values))) => uniform_u32_array(key, values.iter().copied()),
+        Some(MetadataValue::Array(MetadataArray::I32(values))) => {
+            uniform_u32_array(key, values.iter().map(|value| u32::try_from(*value).unwrap_or(u32::MAX)))
+        }
+        _ => Err(InteropError::MissingMetadataKey { key: key.into() }),
+    }
+}
+
+/// Every element of `values` must be identical, or this returns
+/// [`InteropError::HeterogeneousMetadataArray`] naming how many distinct
+/// values were actually found -- see [`metadata_u32_or_uniform_array`]'s
+/// own doc for why.
+fn uniform_u32_array(key: &str, values: impl Iterator<Item = u32>) -> Result<u32, InteropError> {
+    let mut distinct: BTreeSet<u32> = BTreeSet::new();
+    for value in values {
+        distinct.insert(value);
+    }
+    match distinct.len() {
+        0 => Err(InteropError::MissingMetadataKey { key: key.into() }),
+        1 => Ok(distinct.into_iter().next().unwrap_or(0)),
+        distinct_values => Err(InteropError::HeterogeneousMetadataArray {
+            key: key.into(),
+            distinct_values,
+        }),
+    }
 }
 
 /// Same absent-is-data shape as [`metadata_u32_optional`], but for a
@@ -984,6 +1088,134 @@ mod tests {
         assert_eq!(
             architecture.expert_used_count, 2,
             "expert_used_count must read the real metadata key, not default to 0"
+        );
+    }
+
+    /// A checkpoint absent `{architecture}.rope.dimension_count` entirely
+    /// (confirmed real on LFM2.5-8B-A1B, `bind.rs`'s own doc on
+    /// [`ModelArchitecture::head_dim`]) must derive `head_dim` as
+    /// `embedding / query_heads` rather than
+    /// [`InteropError::MissingMetadataKey`] -- this fixture's own
+    /// embedding=8, query_heads=2 implies head_dim=4, matching what this
+    /// same fixture's other tests declare explicitly via the key.
+    #[test]
+    fn architecture_from_metadata_derives_head_dim_when_rope_dimension_count_is_absent() {
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4]; // [embedding=8, vocab=3] f32
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                ("llama.embedding_length".to_string(), Value::U32(8)),
+                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+                ("llama.attention.head_count".to_string(), Value::U32(2)),
+                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+                ("llama.block_count".to_string(), Value::U32(4)),
+                // deliberately no llama.rope.dimension_count key
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf without rope.dimension_count");
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf without rope.dimension_count");
+
+        let architecture =
+            architecture_from_metadata(&parsed).expect("absent rope.dimension_count must derive, not error");
+        assert_eq!(architecture.head_dim, 4, "head_dim must derive as embedding(8) / query_heads(2)");
+    }
+
+    /// `{architecture}.attention.head_count_kv` stored as a per-layer
+    /// [`proxima_gguf::value::MetadataArray`] whose entries all agree
+    /// (every real dense/uniform checkpoint that ever uses the array
+    /// encoding at all) must read as that one scalar, not error.
+    #[test]
+    fn architecture_from_metadata_reads_uniform_head_count_kv_array() {
+        use proxima_gguf::value::MetadataArray;
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4];
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                ("llama.embedding_length".to_string(), Value::U32(8)),
+                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+                ("llama.attention.head_count".to_string(), Value::U32(2)),
+                ("llama.attention.head_count_kv".to_string(), Value::Array(MetadataArray::I32(vec![1, 1, 1, 1]))),
+                ("llama.block_count".to_string(), Value::U32(4)),
+                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with a uniform head_count_kv array");
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with a uniform head_count_kv array");
+
+        let architecture =
+            architecture_from_metadata(&parsed).expect("a uniform per-layer array must read as its one scalar");
+        assert_eq!(architecture.kv_heads, 1);
+    }
+
+    /// `{architecture}.attention.head_count_kv` stored as a per-layer array
+    /// whose entries genuinely DISAGREE (confirmed real on LFM2.5-8B-A1B:
+    /// `0` for its 18 convolution layers, `8` for its 6 attention layers,
+    /// in the SAME array) must surface
+    /// [`InteropError::HeterogeneousMetadataArray`], never a silently picked
+    /// scalar -- the defect this test is named for: before this fix,
+    /// [`metadata_u32`]'s `MetadataValue::as_u32` had no `Array` arm at all,
+    /// so this exact shape returned [`InteropError::MissingMetadataKey`]
+    /// (a WRONG diagnosis -- the key is present, just array-shaped),
+    /// hard-failing every hybrid checkpoint's load with a misleading error.
+    #[test]
+    fn architecture_from_metadata_refuses_a_heterogeneous_head_count_kv_array() {
+        use proxima_gguf::value::MetadataArray;
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4];
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), Value::String("lfm2".to_string())),
+                ("lfm2.embedding_length".to_string(), Value::U32(8)),
+                ("lfm2.feed_forward_length".to_string(), Value::U32(32)),
+                ("lfm2.attention.head_count".to_string(), Value::U32(2)),
+                (
+                    "lfm2.attention.head_count_kv".to_string(),
+                    Value::Array(MetadataArray::I32(vec![0, 0, 8, 0, 8, 8])),
+                ),
+                ("lfm2.block_count".to_string(), Value::U32(6)),
+                ("lfm2.rope.dimension_count".to_string(), Value::U32(4)),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with a heterogeneous head_count_kv array");
+        let parsed =
+            proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with a heterogeneous head_count_kv array");
+
+        let outcome = architecture_from_metadata(&parsed);
+        assert!(
+            matches!(
+                outcome,
+                Err(InteropError::HeterogeneousMetadataArray {
+                    distinct_values: 2,
+                    ..
+                })
+            ),
+            "a genuinely per-layer-varying array must be refused with a named, honest error, got {outcome:?}"
         );
     }
 
@@ -2545,5 +2777,125 @@ mod real_mixtral_file {
                 std::println!("real_mixtral OUTCOME=panic message={message}");
             }
         }
+    }
+}
+
+// Real-data proof for the two `architecture_from_metadata` gaps a real
+// hybrid checkpoint (LFM2.5-8B-A1B: 18 short-convolution layers, 6 attention
+// layers) exposed: `{architecture}.rope.dimension_count` genuinely absent on
+// this file (its writer never emitted the key at all, unlike every
+// Mistral/Llama-family checkpoint this crate had evaluated before now), and
+// `{architecture}.attention.head_count_kv` stored as a per-layer
+// `MetadataArray` whose entries disagree (`0` for conv layers, a real count
+// for attention layers) rather than one scalar. Header-only, same
+// `#[ignore]`d/skip-if-absent convention as `real_mixtral_file` -- this
+// crate's forward program cannot express LFM2's convolution layers at all
+// (a separate, larger `proxima-tensor` gap, out of this change's scope), so
+// this module only proves `architecture_from_metadata`'s own read is
+// correct and non-fatal, never attempts a forward pass.
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod real_lfm2_hybrid_file {
+    use std::io::{Read, Seek, SeekFrom};
+
+    use proxima_gguf::pipe::parse_complete;
+
+    use super::*;
+
+    const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
+
+    macro_rules! parse_header_region {
+        ($file:expr, $header_buf:ident) => {{
+            let mut parsed = None;
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                $header_buf.resize(cap, 0);
+                $file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = $file.read(&mut $header_buf).expect("read gguf header region");
+                $header_buf.truncate(read);
+                if let Ok(result) = parse_complete(&$header_buf) {
+                    parsed = Some(result);
+                    break;
+                }
+            }
+            parsed.expect("gguf metadata region did not fit in 64 MiB")
+        }};
+    }
+
+    /// `architecture_from_metadata` must not hard-fail this real checkpoint
+    /// with [`InteropError::MissingMetadataKey`] on `rope.dimension_count`
+    /// (genuinely absent -- confirmed via `strings` on this exact file) --
+    /// before the derive-when-absent fallback landed, this call errored
+    /// outright, never reaching the `head_count_kv` array at all. This
+    /// checkpoint's own `attention.head_count_kv` genuinely disagrees across
+    /// layers (conv vs. attention), so the correct, honest outcome here is
+    /// still an `Err` -- just the NAMED one
+    /// ([`InteropError::HeterogeneousMetadataArray`]), not a misdiagnosed
+    /// [`InteropError::MissingMetadataKey`] and not a silently wrong scalar.
+    #[test]
+    #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
+    fn architecture_from_metadata_names_the_heterogeneous_kv_heads_honestly() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local lfm2 gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local lfm2 gguf fixture");
+        let mut header_buf: Vec<u8> = Vec::new();
+        let parsed = parse_header_region!(file, header_buf);
+
+        let outcome = architecture_from_metadata(&parsed);
+        std::println!("real_lfm2 architecture_from_metadata outcome={outcome:?}");
+        assert!(
+            matches!(outcome, Err(InteropError::HeterogeneousMetadataArray { .. })),
+            "LFM2's real per-layer-varying head_count_kv must surface the named, honest error \
+             (never MissingMetadataKey, and never a silently-picked scalar), got {outcome:?}"
+        );
+    }
+
+    /// Same real file, isolating just the `rope.dimension_count` fallback:
+    /// reads `general.architecture`/`embedding_length`/`attention.head_count`
+    /// directly (bypassing `architecture_from_metadata`'s `head_count_kv`
+    /// step, which errors on this checkpoint) and confirms the derived
+    /// `embedding / query_heads` quotient matches this checkpoint's
+    /// independently-known real per-head dimension (`attn_q_norm.weight`'s
+    /// own declared shape is `[64]` on this file).
+    #[test]
+    #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
+    fn rope_dimension_count_absent_derives_the_real_lfm2_head_dim() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local lfm2 gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local lfm2 gguf fixture");
+        let mut header_buf: Vec<u8> = Vec::new();
+        let parsed = parse_header_region!(file, header_buf);
+
+        let architecture_name =
+            metadata_str(&parsed, "general.architecture").expect("general.architecture present on a real gguf");
+        let embedding = metadata_u32(&parsed, &alloc::format!("{architecture_name}.embedding_length"))
+            .expect("embedding_length present on a real gguf");
+        let query_heads = metadata_u32(&parsed, &alloc::format!("{architecture_name}.attention.head_count"))
+            .expect("attention.head_count present on a real gguf");
+        let rope_dimension_count_key = alloc::format!("{architecture_name}.rope.dimension_count");
+        let key_present = parsed.metadata_value(&rope_dimension_count_key).is_some();
+        let derived_head_dim = metadata_u32_optional_or(&parsed, &rope_dimension_count_key, embedding / query_heads.max(1));
+
+        std::println!(
+            "real_lfm2 architecture={architecture_name} embedding={embedding} query_heads={query_heads} \
+             rope_dimension_count_key_present={key_present} derived_head_dim={derived_head_dim}"
+        );
+        assert!(
+            !key_present,
+            "this test's whole premise is that rope.dimension_count is ABSENT on this real checkpoint; \
+             if this fails, the file changed and this test's fallback path is no longer exercised"
+        );
+        assert_eq!(
+            derived_head_dim, 64,
+            "LFM2.5-8B-A1B's real per-head dimension is 64 (independently confirmed via \
+             attn_q_norm.weight's own declared [64] shape on this file)"
+        );
     }
 }
