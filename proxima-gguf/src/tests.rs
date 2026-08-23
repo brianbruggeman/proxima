@@ -1085,10 +1085,17 @@ mod real_models {
     use crate::types::GgmlType;
     use crate::value::{MetadataArray, MetadataValue};
 
-    const MODEL_PATHS: [&str; 3] = [
+    const MODEL_PATHS: [&str; 4] = [
         "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf",
         "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf",
         "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf",
+        // LFM2.5-8B-A1B: hybrid conv/attention MoE (`Lfm2MoeForCausalLM`) --
+        // 18 of 24 layers are short-convolution, only 6 are attention, and
+        // the FFN is fine-grained MoE (top-4 of 32) on all but the first 2
+        // dense layers. The visible contrast case for `GROUP_PATTERNS`
+        // (built from dense/Mixtral names) and for `print_expert_layout`
+        // (Mixtral's stacked `ffn_gate_exps.weight` vs whatever this ships).
+        "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf",
     ];
 
     /// Growth ladder for the header-region read. A ~1000-tensor model's KV
@@ -1275,6 +1282,13 @@ mod real_models {
         );
     }
 
+    fn print_full_tensor_list(parsed: &ParsedGguf) {
+        println!("-- full tensor directory ({} entries) --", parsed.tensors.len());
+        for tensor in &parsed.tensors {
+            println!("  {} dims={:?} type={:?}", tensor.name, tensor.dims.as_slice(), tensor.ggml_type);
+        }
+    }
+
     #[test]
     #[ignore = "point-in-time report against host-local multi-GB gguf files; run with --ignored --nocapture"]
     fn reports_real_models() {
@@ -1297,6 +1311,7 @@ mod real_models {
             print_functional_groups(&parsed);
             print_expert_layout(&parsed);
             print_dequant_memory_cost(&parsed);
+            print_full_tensor_list(&parsed);
         }
     }
 }
