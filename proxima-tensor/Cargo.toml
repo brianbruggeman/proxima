@@ -115,7 +115,20 @@ q6k-int8-dot = []
 # separately named feature (not folded away entirely) purely so the doc
 # history and re-prove commands that name it explicitly
 # (`--features proxima-tensor/cohort-staged-graph`) keep resolving.
-cohort-staged-graph = ["std", "dep:prime"]
+# Requires all three `*-int8-dot` codecs, not an incidental call-site need:
+# `is_staged_batch_eligible` (`src/cpu.rs`) admits ONLY a quantized-weight
+# matmul fold with a `dot_fn_for` entry -- every other node kind was
+# deliberately excluded at ROW 97 (that function's own doc). With every
+# `*-int8-dot` feature off, `dot_fn_for` always returns `None`, so this
+# feature's staged-round path is permanently unreachable and its own
+# `Q8_K` quantize/transpose helpers have nothing to serve -- a consumer
+# who reaches `std` without this crate's `default` (e.g. via
+# `default-features = false` plus an explicit `features = ["std"]`, the
+# shape `omega`'s `cpu` feature takes) hit an `E0425` at those helpers,
+# not a runtime gap. Declaring the true requirement here, rather than
+# papering over it at the one caller that happened to hit it, keeps every
+# future `std`-without-`default` consumer buildable.
+cohort-staged-graph = ["std", "dep:prime", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 
 [dependencies]
 arrayvec.workspace = true
