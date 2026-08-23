@@ -24,7 +24,14 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./_bench-common.sh
 source "${script_dir}/_bench-common.sh"
 
-FEATURES="http1,http2,tcp,runtime-tokio,runtime-prime-full,tls"
+# `http-hyper` is required, not incidental: every bench this script runs
+# (`use hyper::...`) needs the optional hyper/hyper-util deps it gates.
+# Measured 2026-08-23: without it, `cargo bench --bench h1_vs_hyper` errors
+# "requires the features: http-hyper" and this script's `|| true` on the
+# invocation swallowed that, so all four benches below sat behind a script
+# that had never actually run them -- the same defect this repo's incumbent-
+# bench audit exists to close, one level under the named orphans.
+FEATURES="http1,http2,tcp,runtime-tokio,runtime-prime-full,tls,http-hyper"
 TRIALS="${TRIALS:-1}"
 
 crate_dir="$(cd "$script_dir/.." && pwd)"
