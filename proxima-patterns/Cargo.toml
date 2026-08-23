@@ -146,7 +146,6 @@ toml = { workspace = true }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }
-rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time", "sync"] }
 tempfile = { workspace = true }
 proxima-telemetry = { workspace = true }

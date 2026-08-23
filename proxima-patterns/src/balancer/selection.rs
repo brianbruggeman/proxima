@@ -807,7 +807,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use proxima_primitives::pipe::handler::{into_handle, into_thread_local_handle};
-    use rstest::rstest;
 
     use super::*;
 
@@ -960,11 +959,10 @@ mod tests {
         assert_eq!(outcome.upstream_index, 1);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::single(1, &[0])]
     #[case::two(2, &[0, 1, 0])]
     #[case::three(3, &[0, 1, 2, 0])]
-    #[proxima::test]
     async fn round_robin_cycles_through_upstreams(
         #[case] count: usize,
         #[case] expected_indices: &[usize],

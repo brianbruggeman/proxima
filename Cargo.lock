@@ -4312,7 +4312,6 @@ dependencies = [
  "proxima-primitives",
  "proxima-runtime",
  "proxima-telemetry",
- "rstest",
  "serde",
  "serde_json",
  "tempfile",
