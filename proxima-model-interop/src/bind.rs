@@ -209,7 +209,8 @@ fn dequantize(
 /// that tensor's row count already IS the vocabulary size, so
 /// `element_count() / embedding_length` reads it without inventing a key
 /// GGUF never wrote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// f32 has no Eq impl, so rope_freq_base drops this struct to PartialEq only.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelArchitecture {
     pub vocab: u32,
     pub embedding: u32,
@@ -232,6 +233,15 @@ pub struct ModelArchitecture {
     /// top-2 routing) -- `0` alongside `expert_count == 0` for the same
     /// dense-checkpoint reason.
     pub expert_used_count: u32,
+    /// `{architecture}.rope.freq_base` (RoPE's frequency base, "theta" --
+    /// Qwen3 declares `1_000_000.0`, Llama 3 `500_000.0`, Mistral/openchat
+    /// `10_000.0`; a wrong value silently produces wrong attention and
+    /// wrong tokens, no error). [`proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT`]
+    /// when the key is absent, matching llama.cpp's own default -- every
+    /// checkpoint this crate has evaluated so far (openchat-3.5) declares
+    /// the key explicitly, so that fallback has not yet been exercised
+    /// against a real load.
+    pub rope_freq_base: f32,
 }
 
 /// Reads [`ModelArchitecture`] out of `parsed`'s own metadata: looks up
@@ -262,6 +272,11 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
     let vocab = vocab_from_token_embedding(parsed, embedding)?;
     let expert_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
     let expert_used_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_used_count"));
+    let rope_freq_base = metadata_f32_optional(
+        parsed,
+        &alloc::format!("{architecture}.rope.freq_base"),
+        proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+    );
     Ok(ModelArchitecture {
         vocab,
         embedding,
@@ -272,6 +287,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         block_count,
         expert_count,
         expert_used_count,
+        rope_freq_base,
     })
 }
 
@@ -296,6 +312,22 @@ fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
 /// mixture-of-experts model"), not a malformed file.
 fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
     parsed.metadata_value(key).and_then(MetadataValue::as_u32).unwrap_or(0)
+}
+
+/// Same absent-is-data shape as [`metadata_u32_optional`], but for a
+/// float-valued key -- `default` rather than an error when `key` is
+/// missing. Matches both [`MetadataValue::F32`] and [`MetadataValue::F64`]
+/// rather than assuming one wire type: llama.cpp's own GGUF writer emits
+/// `{architecture}.rope.freq_base` as `F32`, but `MetadataValue` carries
+/// both float widths and nothing in the format's own spec forbids a
+/// writer choosing `F64`, so this reads whichever the checkpoint actually
+/// declares.
+fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {
+    match parsed.metadata_value(key) {
+        Some(MetadataValue::F32(value)) => *value,
+        Some(MetadataValue::F64(value)) => *value as f32,
+        _ => default,
+    }
 }
 
 fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) -> Result<u32, InteropError> {
@@ -908,9 +940,10 @@ mod tests {
                 block_count: 4,
                 expert_count: 0,
                 expert_used_count: 0,
+                rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
             },
             "a checkpoint with no expert_count/expert_used_count key is dense: both fields must read as 0, \
-             not error"
+             not error; a checkpoint with no rope.freq_base key must fall back to the sizing-config default"
         );
     }
 
@@ -952,6 +985,91 @@ mod tests {
             architecture.expert_used_count, 2,
             "expert_used_count must read the real metadata key, not default to 0"
         );
+    }
+
+    /// A checkpoint declaring a non-`10_000.0` `{architecture}.rope.freq_base`
+    /// (Qwen3's real `1_000_000.0`, Llama 3's real `500_000.0`) must have
+    /// `architecture_from_metadata` read that value, not silently fall back
+    /// to a hardcoded default -- the exact defect this test is named for:
+    /// before `ModelArchitecture` carried a `rope_freq_base` field at all,
+    /// this assertion could not even be written, let alone pass, and every
+    /// production call site used a bare `10_000.0` constant regardless of
+    /// what a checkpoint declared.
+    #[proxima::test]
+    #[case::qwen3_real_freq_base(1_000_000.0)]
+    #[case::llama3_real_freq_base(500_000.0)]
+    async fn architecture_from_metadata_reads_the_real_rope_freq_base(#[case] freq_base: f32) {
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4]; // [embedding=8, vocab=3] f32
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                ("llama.embedding_length".to_string(), Value::U32(8)),
+                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+                ("llama.attention.head_count".to_string(), Value::U32(2)),
+                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+                ("llama.block_count".to_string(), Value::U32(4)),
+                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+                ("llama.rope.freq_base".to_string(), Value::F32(freq_base)),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with a non-default rope.freq_base");
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with a non-default rope.freq_base");
+
+        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
+        assert_eq!(
+            architecture.rope_freq_base, freq_base,
+            "rope_freq_base must read the checkpoint's own metadata key, never the {}-default",
+            proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT
+        );
+        assert_ne!(
+            architecture.rope_freq_base,
+            proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+            "this case is only meaningful when the checkpoint's declared value differs from the default"
+        );
+    }
+
+    /// The `rope.freq_base` key stored as `F64` on the wire (a legal, if
+    /// unusual, GGUF encoding `MetadataValue` itself carries) must also be
+    /// read, not just the more common `F32` encoding -- proves the reader
+    /// does not assume one wire width.
+    #[test]
+    fn architecture_from_metadata_reads_rope_freq_base_stored_as_f64() {
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4]; // [embedding=8, vocab=3] f32
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                ("llama.embedding_length".to_string(), Value::U32(8)),
+                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+                ("llama.attention.head_count".to_string(), Value::U32(2)),
+                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+                ("llama.block_count".to_string(), Value::U32(4)),
+                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+                ("llama.rope.freq_base".to_string(), Value::F64(1_000_000.0)),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with an f64 rope.freq_base");
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with an f64 rope.freq_base");
+
+        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
+        assert_eq!(architecture.rope_freq_base, 1_000_000.0, "an f64-encoded key must still be read");
     }
 
     #[test]
@@ -1771,7 +1889,12 @@ mod real_openchat_file {
         sin: Vec<f32>,
     }
 
-    fn build_cached_position_inputs(new_ids: &[u32], start_position: usize, head_dim: u32) -> CachedPositionInputs {
+    fn build_cached_position_inputs(
+        new_ids: &[u32],
+        start_position: usize,
+        head_dim: u32,
+        rope_freq_base: f32,
+    ) -> CachedPositionInputs {
         let new_count = new_ids.len();
         let pairs = head_dim as usize / 2;
         let ids_f32: Vec<f32> = new_ids.iter().map(|&id| id as f32).collect();
@@ -1782,7 +1905,7 @@ mod real_openchat_file {
         for offset in 0..new_count {
             let position = (start_position + offset) as f32;
             for pair in 0..pairs {
-                let theta = position * ROPE_FREQ_BASE.powf(-((2 * pair) as f32) / (head_dim as f32));
+                let theta = position * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
                 cos[offset * pairs + pair] = theta.cos();
                 sin[offset * pairs + pair] = theta.sin();
             }
@@ -1791,7 +1914,6 @@ mod real_openchat_file {
         CachedPositionInputs { ids_f32, epsilon, cos, sin }
     }
 
-    const ROPE_FREQ_BASE: f32 = 10_000.0;
     const RMS_EPSILON: f32 = 1e-5;
 
     /// Every layer's growable key/value cache: `k_even`/`k_odd` are already
@@ -1899,7 +2021,8 @@ mod real_openchat_file {
                 .and_then(|vocab| proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, true, false))
                 .expect("build vocab and encode prompt");
 
-            let inputs = build_cached_position_inputs(&ids, 0, architecture.head_dim);
+            let inputs =
+                build_cached_position_inputs(&ids, 0, architecture.head_dim, architecture.rope_freq_base);
             let mut named_blocks: Vec<(&str, QuantizedBlock)> =
                 Vec::with_capacity(weights.owned.len() + weights.packed.len() + 3 + architecture.block_count as usize * 3);
             named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));

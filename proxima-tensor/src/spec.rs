@@ -4111,13 +4111,13 @@ value = 1.0
     /// step's lone new position gets its true absolute angle instead of
     /// position 0.
     fn rope_angles(start: usize, count: usize, pairs: usize, head_dim: usize) -> (Vec<f32>, Vec<f32>) {
-        const ROPE_FREQ_BASE: f32 = 10_000.0;
         let mut cos = alloc::vec![0.0f32; count * pairs];
         let mut sin = alloc::vec![0.0f32; count * pairs];
         for offset in 0..count {
             let position = (start + offset) as f32;
             for pair in 0..pairs {
-                let theta = position * ROPE_FREQ_BASE.powf(-((2 * pair) as f32) / (head_dim as f32));
+                let theta =
+                    position * crate::sized::ROPE_FREQ_BASE_DEFAULT.powf(-((2 * pair) as f32) / (head_dim as f32));
                 cos[offset * pairs + pair] = theta.cos();
                 sin[offset * pairs + pair] = theta.sin();
             }

@@ -101,6 +101,19 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/proxima_tensor_sized.rs"));
 }
 
+/// Raw value emitted by `build.rs`'s `emit_alloc_tier_sizing_consts` --
+/// [`ROPE_FREQ_BASE_DEFAULT`]'s own source. A separate private module from
+/// [`generated`] (that one is `feature = "std"`-only): this constant is
+/// consumed at the alloc-only floor too (`proxima-model-interop`'s
+/// `architecture_from_metadata`), so it needs its own always-emitted file
+/// rather than widening `generated`'s `#[cfg]` and leaving every one of
+/// its OTHER constants unreferenced (dead-code-linted) on an alloc-only
+/// build.
+#[cfg(any(feature = "std", feature = "alloc"))]
+mod generated_alloc {
+    include!(concat!(env!("OUT_DIR"), "/proxima_tensor_sized_alloc.rs"));
+}
+
 /// Below this many iteration-space elements, a nest runs the plain
 /// sequential path even when `workers > 1`. Execution policy (see this
 /// module's doc); currently build-time-only in practice, not by
@@ -300,6 +313,29 @@ pub const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = generated::NEON_COLUMN_PANEL_B
 #[cfg(all(feature = "std", feature = "cohort-staged-graph"))]
 pub const STAGED_BATCH_MIN_LEN: usize = generated::STAGED_BATCH_MIN_LEN;
 
+/// Fallback RoPE frequency base ("theta") a checkpoint's cached forward
+/// program uses when the checkpoint's own `{architecture}.rope.freq_base`
+/// GGUF metadata key is absent -- `proxima-model-interop`'s
+/// `bind::architecture_from_metadata` is the one production reader
+/// (`ModelArchitecture::rope_freq_base` carries whatever it finds, this
+/// constant only when the key is missing). Not execution policy in the
+/// [`generated`] family's sense
+/// (nothing here is swept against a real forward pass's timing) but still
+/// routed through `proxima-tensor-runtime.toml` per principle 12 rather
+/// than staying a bare `const` in three call sites -- the same move
+/// [`STAGED_BATCH_MIN_LEN`]'s own doc records for a definitional,
+/// not-yet-swept value (ROW 98).
+///
+/// `10_000.0`: the value every checkpoint this crate has evaluated so far
+/// (the real openchat-3.5-1210 fixture) declares explicitly via its own
+/// `llama.rope.freq_base` key, so this fallback path has never yet been
+/// exercised against a real load -- only against the synthetic
+/// non-10000 fixture `proxima-model-interop`'s own capability-matrix test
+/// constructs to prove the metadata key, not this fallback, wins when
+/// both are present.
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub const ROPE_FREQ_BASE_DEFAULT: f32 = generated_alloc::ROPE_FREQ_BASE_DEFAULT;
+
 /// Asserts every execution-policy const still equals the value on record
 /// (this module's own doc comments) after `build.rs`'s
 /// `emit_sizing_consts` started sourcing them from
@@ -321,6 +357,7 @@ mod tests {
         assert_eq!(MIN_QUANTIZE_BLOCKS_FOR_DISPATCH, 200);
         assert_eq!(MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH, 64_000);
         assert_eq!(COHORT_SPIN_POLLS, 2_000);
+        assert_eq!(ROPE_FREQ_BASE_DEFAULT, 10_000.0);
     }
 
     #[cfg(target_arch = "aarch64")]
