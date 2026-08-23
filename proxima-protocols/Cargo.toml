@@ -365,7 +365,6 @@ prost = { workspace = true, features = ["std", "derive"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tungstenite = { workspace = true }
 stats_alloc = "0.1.10"
-rstest.workspace = true
 proptest.workspace = true
 smoltcp = { version = "0.13.1", default-features = false, features = ["std", "socket-tcp", "proto-ipv4", "medium-ip"] }
 pgwire = { version = "0.28.0", default-features = false }
