@@ -9468,3 +9468,63 @@ argument.
 ROW 100's CPU arms (CoV 53.35%) and ROW 101's reps 2-8 are known bad. Any
 row citing a wall-clock figure from that window should be re-read against its
 own `uptime` log before it is quoted.
+
+## ROW 104 — every table carries the incumbent column. No exceptions.
+
+Owner directive: *"please fucking show llama when you show the fixes or
+before/afters <-- still need that llama column"*.
+
+A before/after without the incumbent measures progress against ourselves. It
+answers "did this help" and hides "does it win", and only the second one is
+the goal. This file has ~20 rows of before/after tables and most of them omit
+the bar entirely, so a reader tracking a 153x and a 207x win could reasonably
+believe the arms were competitive. They were not, at any point today.
+
+**Rule: any table reporting a measurement carries a column with the incumbent
+figure for that arm, on every row.** Not once in the prose above the table.
+Not "we are 3.7x behind" in the honest read. In the table, beside the number.
+
+| arm | incumbent figure | command |
+|---|---|---|
+| Metal | **17.62 ms/token** | ROW 102, `-ngl 99` |
+| CPU | **44.09 ms/token** | ROW 102, `-ngl 0 -t 8` — **UNVERIFIED**, see ROW 100 |
+
+Where a per-term table has no per-term incumbent number (we have never split
+llama's token), carry **llama's whole token** in the column and say so. That
+comparison is harsh and it is the correct one: a term of ours that exceeds
+their entire token cannot be optimized into a win.
+
+Worked example, and it is why this rule earns its place — the CPU split at
+ROW 99, restated with the column:
+
+| term | ours ms | llama WHOLE token |
+|---|---|---|
+| `staged_batch`, 160 matmuls | 29.04 | 44.09 |
+| `reduce_matmul_quantized`, 65 | 16.75 | 44.09 |
+| **matmul subtotal** | **45.79** | **44.09** |
+| everything else | 8.06 | 44.09 |
+
+With the column, one line does what three rows of prose did not: **our matmul
+alone already exceeds their entire token**, so driving every other CPU term to
+zero still loses. Without the column that table reads as "matmul is 79% of our
+time", which is true, useless, and invites another session of overhead hunting.
+
+### Today's arc, with the column
+
+| stage | ours Metal ms/tok | llama Metal | behind |
+|---|---|---|---|
+| session start | 985.79 | 17.62 | 55.9x |
+| resident buffers | 588.56 | 17.62 | 33.4x |
+| attn_output fold + Q6_K + Q5_K | 74.96 | 17.62 | 4.25x |
+| cheap pipeline cache key | 66.78 | 17.62 | 3.79x |
+| current | **65.67** | **17.62** | **3.73x** |
+
+| stage | ours CPU ms/tok | llama CPU | behind |
+|---|---|---|---|
+| session start | 59.71 | 44.09 | 1.354x |
+| matmul staged-round fold | 55.77 | 44.09 | 1.265x |
+| default flip | 55.55 | 44.09 | 1.260x |
+| production build | **53.85** | **44.09** | **1.221x** |
+
+15.0x on Metal and 1.11x on CPU in one session, and **neither arm wins.**
+Both columns belong in every row from here.
