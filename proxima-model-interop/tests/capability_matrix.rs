@@ -175,21 +175,37 @@ async fn dense_cpu_f16_activation_forward_prefill_and_decode() {
     let (_ids, _text, _stopped) = run_cpu(GgmlType::F16, 2).await.expect("f16-activation forward runs on cpu");
 }
 
-// --- architecture: MoE has no support at all ---
+// --- architecture: MoE, routed through the same public LoadedModel::load path ---
 
+/// [`run_cpu`]'s MoE counterpart: [`support::checkpoint_bytes_moe`] instead
+/// of [`support::checkpoint_bytes`], so `architecture.expert_count > 0`
+/// reaches `LoadedModel::load`'s routed branch
+/// (`proxima_tensor::spec::mistral_cached_forward_program_with_experts`)
+/// instead of the dense one.
+async fn run_cpu_moe(codec: GgmlType, max_tokens: usize) -> Result<(Vec<u32>, String, bool), InteropError> {
+    let file_bytes = support::checkpoint_bytes_moe(codec, support::EXPERT_COUNT, support::EXPERT_USED_COUNT);
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic MoE checkpoint");
+    let model = LoadedModel::load(&parsed, &file_bytes).expect("loads the synthetic MoE checkpoint");
+    Pipe::call(&model, (PROMPT.to_string(), max_tokens)).await
+}
+
+/// A mixture-of-experts checkpoint loads through the exact same public path
+/// [`dense_cpu_f32_forward_produces_a_deterministic_token_sequence`] uses,
+/// and its first forward call succeeds instead of failing on a missing
+/// named input (the gap this cell used to be `#[ignore]`d for -- see this
+/// crate's task report for the perturb-and-fail proof that this assertion
+/// is not a tautology). Deterministic for the same reason the dense cells
+/// are: [`support::push_output_projection`]'s all-zero output row makes
+/// every logit exactly `0.0` regardless of which experts a token routes
+/// through, so greedy decode's lowest-id tie-break always lands on `0`.
 #[proxima::test]
-#[ignore = "bind_all_weights (proxima-model-interop/src/bind.rs) now binds an expert_count > 0 \
-            checkpoint's routed FFN weights (blk.N.ffn_gate_inp.weight, blk.N.{ffn_gate,ffn_up,ffn_down}_exps.weight, \
-            via bind_moe_expert_weights/proxima_gguf::restack::discover_experts) -- but LoadedModel::load \
-            still calls the OLD mistral_cached_forward_program(vocab, embedding, feed_forward, query_heads, \
-            kv_heads, head_dim, block_count) with no expert_count/expert_used_count parameters at all, so \
-            the forward program it builds only ever references blk.N.ffn_{gate,up,down}.weight -- names an \
-            expert_count > 0 bind never produces. proxima_tensor::spec already has the routed building \
-            blocks (append_moe_ffn/append_mistral_moe_layer), just not wired into the one entry point \
-            generate.rs calls; a checkpoint with experts loads, but its first forward call would fail on \
-            a missing named input, not run a real MoE forward"]
-async fn moe_architecture_cpu_forward_prefill_and_decode() {
-    unimplemented!("mistral_cached_forward_program has no expert-routed variant reachable from LoadedModel::load yet");
+#[case::prefill_only(1)]
+#[case::prefill_then_decode(2)]
+async fn moe_architecture_cpu_forward_prefill_and_decode(#[case] max_tokens: usize) {
+    let (ids, text, stopped_by_eos) = run_cpu_moe(GgmlType::F32, max_tokens).await.expect("moe f32 forward runs on cpu");
+    assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
+    let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
+    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output through the routed path");
 }
 
 // --- backend: Metal parity against the same fixture, same codecs CPU runs ---

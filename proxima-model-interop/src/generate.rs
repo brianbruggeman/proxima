@@ -64,7 +64,7 @@ use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 #[cfg(not(feature = "metal"))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::op::{NodeId, Op};
-use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program};
+use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program_with_experts};
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(feature = "metal")]
@@ -335,13 +335,18 @@ impl<'file> LoadedModel<'file> {
     ///
     /// Whatever [`crate::bind::architecture_from_metadata`],
     /// [`proxima_tokenizer::gguf::vocab_from_metadata`], or
-    /// [`proxima_tensor::spec::mistral_cached_forward_program`] can fail
-    /// with.
+    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
+    /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
         let weights = bind_all_weights(parsed, file_bytes, &architecture)?;
-        let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+        // `architecture.expert_count`/`expert_used_count` read `0` for every
+        // dense checkpoint (`ModelArchitecture`'s own doc), which selects
+        // exactly the dense program this crate has always built -- a
+        // mixture-of-experts checkpoint (`expert_count > 0`) is the only case
+        // that changes which program gets compiled here.
+        let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -349,6 +354,8 @@ impl<'file> LoadedModel<'file> {
             architecture.kv_heads,
             architecture.head_dim,
             architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
         )?;
         Ok(Self {
             weights,

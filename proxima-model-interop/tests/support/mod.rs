@@ -112,6 +112,16 @@ fn architecture_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
     metadata.push((String::from("llama.rope.dimension_count"), MetadataValue::U32(HEAD_DIM)));
 }
 
+/// [`architecture_metadata`] plus the two MoE-only keys
+/// [`bind_all_weights`](proxima_model_interop) reads
+/// (`bind.rs:263-264`'s own `metadata_u32_optional` lookups) to route a
+/// layer's FFN through the routed path instead of the dense triple.
+fn moe_architecture_metadata(metadata: &mut Vec<(String, MetadataValue)>, expert_count: u32, expert_used_count: u32) {
+    architecture_metadata(metadata);
+    metadata.push((String::from("llama.expert_count"), MetadataValue::U32(expert_count)));
+    metadata.push((String::from("llama.expert_used_count"), MetadataValue::U32(expert_used_count)));
+}
+
 /// A checkpoint's projection weight -- always `codec`, `dims = [in_dim,
 /// out_dim]` (ggml's own `[ne0, ne1]` row-length-first convention,
 /// confirmed against `bind.rs`'s own `architecture_from_metadata_reads_real_keys...`
@@ -129,6 +139,30 @@ fn push_matmul_weight(
     let values = random_vec(seed, in_dim as usize * out_dim as usize);
     buffers.push(encode_weights(codec, &values));
     specs.push((name, dims(&[u64::from(in_dim), u64::from(out_dim)]), codec));
+}
+
+/// One MoE-only stacked expert weight (`blk.{layer}.{ffn_gate,ffn_up,
+/// ffn_down}_exps.weight`) -- `expert_count` back-to-back `[out_dim,
+/// in_dim]` slabs in the same on-disk row-major layout
+/// [`push_matmul_weight`] writes for a dense projection, one slab per
+/// expert, each seeded distinctly so no two experts' weights collide.
+/// [`bind_moe_expert_weights`](proxima_model_interop)'s own doc names this
+/// exact tensor name and layout as the native-stacked convention it tries
+/// first, before falling back to per-expert-tensor discovery.
+#[allow(clippy::too_many_arguments)]
+fn push_moe_expert_stack(
+    buffers: &mut Vec<Vec<u8>>,
+    specs: &mut Vec<(String, ArrayVec<u64, MAX_DIMS>, GgmlType)>,
+    codec: GgmlType,
+    name: String,
+    seed: u64,
+    expert_count: u32,
+    in_dim: u32,
+    out_dim: u32,
+) {
+    let values = random_vec(seed, expert_count as usize * in_dim as usize * out_dim as usize);
+    buffers.push(encode_weights(codec, &values));
+    specs.push((name, dims(&[u64::from(in_dim), u64::from(out_dim), u64::from(expert_count)]), codec));
 }
 
 /// `output.weight` -- like [`push_matmul_weight`], but every row is
@@ -295,4 +329,125 @@ pub fn checkpoint_bytes(weight_codec: GgmlType) -> Vec<u8> {
 
     let model = GgufModel { version: 3, metadata, tensors };
     write_complete(&model).expect("writes a well-formed synthetic checkpoint")
+}
+
+/// [`EXPERT_COUNT`]/[`EXPERT_USED_COUNT`] for [`checkpoint_bytes_moe`] --
+/// Mixtral's own shape (8 experts, top-2) scaled down to a size the fixture's
+/// `Q4_K`/`Q5_K`/`Q6_K` block-width constraint (`EMBEDDING`/`FEED_FORWARD`
+/// both one `QK_K`-wide super-block) already keeps small.
+pub const EXPERT_COUNT: u32 = 4;
+pub const EXPERT_USED_COUNT: u32 = 2;
+
+/// [`checkpoint_bytes`]'s mixture-of-experts counterpart: every dense
+/// checkpoint tensor this fixture already writes, minus the dense
+/// `ffn_{gate,up,down}.weight` triple, plus `ffn_gate_inp.weight` (the
+/// router -- always `F32`, matching every real checkpoint's own norm/router
+/// vectors never carrying a matmul quant codec in this fixture) and the
+/// stacked `ffn_{gate,up,down}_exps.weight` routed experts in `weight_codec`
+/// ([`push_moe_expert_stack`]), plus the `{architecture}.expert_count`/
+/// `expert_used_count` metadata keys [`bind_all_weights`](proxima_model_interop)
+/// reads to select the routed bind path at all. Same real GGUF byte stream
+/// (`write_complete`), same real quantizer per codec, same 2-layer/256-wide
+/// shape as [`checkpoint_bytes`] -- the only difference is which FFN weight
+/// family each layer carries.
+#[must_use]
+pub fn checkpoint_bytes_moe(weight_codec: GgmlType, expert_count: u32, expert_used_count: u32) -> Vec<u8> {
+    let embedding = EMBEDDING;
+    let feed_forward = FEED_FORWARD;
+    let kv_dim = KV_HEADS * HEAD_DIM;
+    let vocab = VOCAB;
+
+    let mut buffers: Vec<Vec<u8>> = Vec::new();
+    let mut specs: Vec<(String, ArrayVec<u64, MAX_DIMS>, GgmlType)> = Vec::new();
+    let mut seed = 1u64;
+    let mut next_seed = || {
+        seed += 1;
+        seed
+    };
+
+    push_dense_vector(&mut buffers, &mut specs, String::from("token_embd.weight"), next_seed(), vocab * embedding);
+
+    for layer in 0..BLOCK_COUNT {
+        push_dense_vector(&mut buffers, &mut specs, format!("blk.{layer}.attn_norm.weight"), next_seed(), embedding);
+        push_dense_vector(&mut buffers, &mut specs, format!("blk.{layer}.ffn_norm.weight"), next_seed(), embedding);
+        push_matmul_weight(
+            &mut buffers,
+            &mut specs,
+            weight_codec,
+            format!("blk.{layer}.attn_q.weight"),
+            next_seed(),
+            embedding,
+            embedding,
+        );
+        push_matmul_weight(
+            &mut buffers,
+            &mut specs,
+            weight_codec,
+            format!("blk.{layer}.attn_k.weight"),
+            next_seed(),
+            embedding,
+            kv_dim,
+        );
+        push_matmul_weight(
+            &mut buffers,
+            &mut specs,
+            weight_codec,
+            format!("blk.{layer}.attn_v.weight"),
+            next_seed(),
+            embedding,
+            kv_dim,
+        );
+        push_matmul_weight(
+            &mut buffers,
+            &mut specs,
+            weight_codec,
+            format!("blk.{layer}.attn_output.weight"),
+            next_seed(),
+            embedding,
+            embedding,
+        );
+        push_matmul_weight(
+            &mut buffers,
+            &mut specs,
+            GgmlType::F32,
+            format!("blk.{layer}.ffn_gate_inp.weight"),
+            next_seed(),
+            embedding,
+            expert_count,
+        );
+        for (projection, out_dim) in [("ffn_gate", feed_forward), ("ffn_up", feed_forward), ("ffn_down", embedding)] {
+            let in_dim = if projection == "ffn_down" { feed_forward } else { embedding };
+            push_moe_expert_stack(
+                &mut buffers,
+                &mut specs,
+                weight_codec,
+                format!("blk.{layer}.{projection}_exps.weight"),
+                next_seed(),
+                expert_count,
+                in_dim,
+                out_dim,
+            );
+        }
+    }
+
+    push_dense_vector(&mut buffers, &mut specs, String::from("output_norm.weight"), next_seed(), embedding);
+    push_output_projection(&mut buffers, &mut specs, weight_codec, embedding, vocab);
+
+    let tensors: Vec<TensorPayload<'_>> = specs
+        .iter()
+        .zip(buffers.iter())
+        .map(|((name, dims, ggml_type), data)| TensorPayload {
+            name: name.clone(),
+            dims: dims.clone(),
+            ggml_type: *ggml_type,
+            data: data.as_slice(),
+        })
+        .collect();
+
+    let mut metadata = Vec::new();
+    moe_architecture_metadata(&mut metadata, expert_count, expert_used_count);
+    tokenizer_metadata(&mut metadata);
+
+    let model = GgufModel { version: 3, metadata, tensors };
+    write_complete(&model).expect("writes a well-formed synthetic MoE checkpoint")
 }
