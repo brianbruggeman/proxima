@@ -1785,7 +1785,7 @@ shape = ["seq"]
 
         let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
         assert_eq!(rows.len(), SEQUENCE * SEQUENCE);
-        for row in rows.chunks_exact(SEQUENCE) {
+        for row in rows.as_chunks::<SEQUENCE>().0 {
             let total: f32 = row.iter().sum();
             assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
             let max = row.iter().copied().fold(f32::MIN, f32::max);
@@ -1950,7 +1950,7 @@ shape = ["seq"]
         assert_eq!(rows.len(), SEQUENCE * SEQUENCE);
 
         let mut checked = 0usize;
-        for (query, row) in rows.chunks_exact(SEQUENCE).enumerate() {
+        for (query, row) in rows.as_chunks::<SEQUENCE>().0.iter().enumerate() {
             let total: f32 = row.iter().sum();
             assert!(
                 (total - 1.0).abs() < 1e-5,
@@ -2044,7 +2044,7 @@ shape = ["seq"]
         assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
 
         let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
-        for row in rows.chunks_exact(SEQUENCE) {
+        for row in rows.as_chunks::<SEQUENCE>().0 {
             let total: f32 = row.iter().sum();
             assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
         }

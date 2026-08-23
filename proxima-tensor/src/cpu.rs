@@ -5414,16 +5414,14 @@ const FUSED_MULTIPLY_ADD: bool = cfg!(target_arch = "aarch64") || cfg!(target_fe
 /// tolerance ROW 12 already established for this fold.
 #[inline(always)]
 fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32 {
-    let mut chunks_a = slice_a.chunks_exact(DOT_LANES);
-    let mut chunks_b = slice_b.chunks_exact(DOT_LANES);
+    let (chunks_a, remainder_a) = slice_a.as_chunks::<DOT_LANES>();
+    let (chunks_b, remainder_b) = slice_b.as_chunks::<DOT_LANES>();
     let mut lanes = [0.0f32; DOT_LANES];
-    for (chunk_a, chunk_b) in (&mut chunks_a).zip(&mut chunks_b) {
+    for (chunk_a, chunk_b) in chunks_a.iter().zip(chunks_b) {
         for ((lane, &value_a), &value_b) in lanes.iter_mut().zip(chunk_a).zip(chunk_b) {
             *lane = value_a.mul_add(value_b, *lane);
         }
     }
-    let remainder_a = chunks_a.remainder();
-    let remainder_b = chunks_b.remainder();
     let mut acc = fold.init;
     for &lane in &lanes {
         acc += lane;
@@ -5685,8 +5683,10 @@ fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
     let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
     let mut acc = 0.0f32;
     for (block, activation_chunk) in weight_row
-        .chunks_exact(Q4K_BLOCK_BYTES)
-        .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
+        .as_chunks::<Q4K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
     {
         proxima_gguf::quant::q4_k::dequantize_block(block, &mut scratch);
         // `DOT_LANES` (8) independent partial sums instead of one serial
@@ -5803,8 +5803,10 @@ fn dot_q5k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
     let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
     let mut acc = 0.0f32;
     for (block, activation_chunk) in weight_row
-        .chunks_exact(Q5K_BLOCK_BYTES)
-        .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
+        .as_chunks::<Q5K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
     {
         proxima_gguf::quant::q5_k::dequantize_block(block, &mut scratch);
         acc = dot_fold_fused_multiply_add(
@@ -5879,8 +5881,10 @@ fn dot_q6k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
     let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
     let mut acc = 0.0f32;
     for (block, activation_chunk) in weight_row
-        .chunks_exact(Q6K_BLOCK_BYTES)
-        .zip(activation.chunks_exact(Q4K_BLOCK_ELEMENTS))
+        .as_chunks::<Q6K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
     {
         proxima_gguf::quant::q6_k::dequantize_block(block, &mut scratch);
         acc = dot_fold_fused_multiply_add(
@@ -5965,8 +5969,10 @@ fn dot_q8_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
     let mut scratch = [0.0f32; Q8_0_BLOCK_ELEMENTS];
     let mut acc = 0.0f32;
     for (block, activation_chunk) in weight_row
-        .chunks_exact(Q8_0_BLOCK_BYTES)
-        .zip(activation.chunks_exact(Q8_0_BLOCK_ELEMENTS))
+        .as_chunks::<Q8_0_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q8_0_BLOCK_ELEMENTS>().0)
     {
         proxima_gguf::quant::q8_0::dequantize_block(block, &mut scratch);
         acc = dot_fold_fused_multiply_add(
@@ -6694,7 +6700,12 @@ impl CohortRound<TensorError> for QuantizeRound<'_> {
         let in_slice = unsafe { core::slice::from_raw_parts(in_ptr as *const f32, in_len) };
         // SAFETY: same argument as `in_slice` above, mutable side.
         let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut u8, out_len) };
-        for (block, out_block) in in_slice.chunks_exact(Q4K_BLOCK_ELEMENTS).zip(out_slice.chunks_exact_mut(Q8K_BLOCK_BYTES)) {
+        for (block, out_block) in in_slice
+            .as_chunks::<Q4K_BLOCK_ELEMENTS>()
+            .0
+            .iter()
+            .zip(out_slice.as_chunks_mut::<Q8K_BLOCK_BYTES>().0)
+        {
             quantize_q8k_block(block, out_block);
         }
         Ok(())
@@ -6715,8 +6726,10 @@ pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), Ten
         });
     }
     for (chunk, out_block) in activation
-        .chunks_exact(Q4K_BLOCK_ELEMENTS)
-        .zip(output.chunks_exact_mut(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q4K_BLOCK_ELEMENTS>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<Q8K_BLOCK_BYTES>().0)
     {
         quantize_q8k_block(chunk, out_block);
     }
@@ -6754,7 +6767,7 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
     }
 
     let bsums_region = &mut out_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
-    for (sixteen, bytes) in levels.chunks_exact(16).zip(bsums_region.chunks_exact_mut(2)) {
+    for (sixteen, bytes) in levels.as_chunks::<16>().0.iter().zip(bsums_region.as_chunks_mut::<2>().0) {
         let sum: i16 = sixteen.iter().map(|&level| i16::from(level)).sum();
         bytes.copy_from_slice(&sum.to_le_bytes());
     }
@@ -6807,8 +6820,10 @@ pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
 
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
-        .chunks_exact(Q4K_BLOCK_BYTES)
-        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q4K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
     {
         #[cfg(q4k_dotprod)]
         // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
@@ -6855,8 +6870,10 @@ pub fn dot_q4k_q8k_portable(weight_row: &[u8], activation_q8k: &[u8]) -> Result<
 
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
-        .chunks_exact(Q4K_BLOCK_BYTES)
-        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q4K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
     {
         acc += dot_q4k_q8k_block_scalar(weight_block, q8k_block);
     }
@@ -7437,8 +7454,10 @@ pub fn dot_q5k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
 
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
-        .chunks_exact(Q5K_BLOCK_BYTES)
-        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q5K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
     {
         #[cfg(q4k_dotprod)]
         // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
@@ -7474,8 +7493,10 @@ pub fn dot_q5k_q8k_portable(weight_row: &[u8], activation_q8k: &[u8]) -> Result<
 
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
-        .chunks_exact(Q5K_BLOCK_BYTES)
-        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q5K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
     {
         acc += dot_q5k_q8k_block_scalar(weight_block, q8k_block);
     }
@@ -7803,8 +7824,10 @@ pub fn dot_q6k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
 
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
-        .chunks_exact(Q6K_BLOCK_BYTES)
-        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q6K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
     {
         #[cfg(q4k_dotprod)]
         // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
@@ -7838,8 +7861,10 @@ pub fn dot_q6k_q8k_portable(weight_row: &[u8], activation_q8k: &[u8]) -> Result<
 
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
-        .chunks_exact(Q6K_BLOCK_BYTES)
-        .zip(activation_q8k.chunks_exact(Q8K_BLOCK_BYTES))
+        .as_chunks::<Q6K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
     {
         acc += dot_q6k_q8k_block_scalar(weight_block, q8k_block);
     }
@@ -8270,11 +8295,11 @@ where
     if fold.len < DOT_LANES {
         return dot_fold_scalar_binary(op, reduce, slice_a, slice_b, fold);
     }
-    let mut chunks_a = slice_a.chunks_exact(DOT_LANES);
-    let mut chunks_b = slice_b.chunks_exact(DOT_LANES);
+    let (chunks_a, remainder_a) = slice_a.as_chunks::<DOT_LANES>();
+    let (chunks_b, remainder_b) = slice_b.as_chunks::<DOT_LANES>();
     let mut lanes = [fold.init; DOT_LANES];
     let mut seeded = fold.seeded;
-    for (chunk_a, chunk_b) in (&mut chunks_a).zip(&mut chunks_b) {
+    for (chunk_a, chunk_b) in chunks_a.iter().zip(chunks_b) {
         if seeded {
             for ((lane, &value_a), &value_b) in lanes.iter_mut().zip(chunk_a).zip(chunk_b) {
                 *lane = reduce(*lane, op(value_a, value_b));
@@ -8286,8 +8311,6 @@ where
             seeded = true;
         }
     }
-    let remainder_a = chunks_a.remainder();
-    let remainder_b = chunks_b.remainder();
     let mut acc = lanes[0];
     for &lane in &lanes[1..] {
         acc = reduce(acc, lane);
@@ -8334,10 +8357,10 @@ where
     if fold.len < DOT_LANES {
         return dot_fold_scalar_unary(op, reduce, slice, fold);
     }
-    let mut chunks = slice.chunks_exact(DOT_LANES);
+    let (chunks, remainder) = slice.as_chunks::<DOT_LANES>();
     let mut lanes = [fold.init; DOT_LANES];
     let mut seeded = fold.seeded;
-    for chunk in &mut chunks {
+    for chunk in chunks {
         if seeded {
             for (lane, &value) in lanes.iter_mut().zip(chunk) {
                 *lane = reduce(*lane, op(value));
@@ -8349,7 +8372,6 @@ where
             seeded = true;
         }
     }
-    let remainder = chunks.remainder();
     let mut acc = lanes[0];
     for &lane in &lanes[1..] {
         acc = reduce(acc, lane);
@@ -11195,18 +11217,19 @@ mod tests {
         const ROWS: usize = 2;
         const BLOCKS_PER_ROW: usize = 2;
         const K: usize = BLOCKS_PER_ROW * QK_K;
+        const ROW_BYTES: usize = BLOCKS_PER_ROW * Q4K_BLOCK_BYTES;
 
         let weights_f32 = random_vec(seed, ROWS * K);
         let activation = random_vec(seed.wrapping_add(1), K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q4K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES)) {
+        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
         let mut dequantized_reference = vec![0.0f32; ROWS];
         let mut dequantized_row = vec![0.0f32; K];
-        for (row_index, row_packed) in packed.chunks_exact(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES).enumerate() {
+        for (row_index, row_packed) in packed.as_chunks::<ROW_BYTES>().0.iter().enumerate() {
             dequantize(row_packed, &mut dequantized_row).expect("2 whole super-blocks dequantize cleanly");
             dequantized_reference[row_index] =
                 dequantized_row.iter().zip(&activation).map(|(weight, value)| weight * value).sum();
@@ -11268,14 +11291,13 @@ mod tests {
         const ROWS: usize = 128;
         const BLOCKS_PER_ROW: usize = 2;
         const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q4_k::QK_K;
+        const ROW_BYTES: usize = BLOCKS_PER_ROW * Q4K_BLOCK_BYTES;
 
         let weights_f32 = random_vec(42, ROWS * K);
         let activation = random_vec(43, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q4K_BLOCK_BYTES];
-        for (row_f32, row_packed) in
-            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES))
-        {
+        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -11287,7 +11309,9 @@ mod tests {
         let pooled_result = matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let sequential_reference: Vec<f32> = packed
-            .chunks_exact(BLOCKS_PER_ROW * Q4K_BLOCK_BYTES)
+            .as_chunks::<ROW_BYTES>()
+            .0
+            .iter()
             .map(|weight_row| dot_q4k_f32(weight_row, &activation).expect("well-formed row"))
             .collect();
 
@@ -11310,14 +11334,13 @@ mod tests {
         const ROWS: usize = 128;
         const BLOCKS_PER_ROW: usize = 2;
         const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q5_k::QK_K;
+        const ROW_BYTES: usize = BLOCKS_PER_ROW * Q5K_BLOCK_BYTES;
 
         let weights_f32 = random_vec(44, ROWS * K);
         let activation = random_vec(45, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q5K_BLOCK_BYTES];
-        for (row_f32, row_packed) in
-            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES))
-        {
+        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -11329,7 +11352,9 @@ mod tests {
         let pooled_result = matmul_q5k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let sequential_reference: Vec<f32> = packed
-            .chunks_exact(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES)
+            .as_chunks::<ROW_BYTES>()
+            .0
+            .iter()
             .map(|weight_row| dot_q5k_f32(weight_row, &activation).expect("well-formed row"))
             .collect();
 
@@ -11349,14 +11374,13 @@ mod tests {
         const ROWS: usize = 128;
         const BLOCKS_PER_ROW: usize = 2;
         const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q6_k::QK_K;
+        const ROW_BYTES: usize = BLOCKS_PER_ROW * Q6K_BLOCK_BYTES;
 
         let weights_f32 = random_vec(46, ROWS * K);
         let activation = random_vec(47, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q6K_BLOCK_BYTES];
-        for (row_f32, row_packed) in
-            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES))
-        {
+        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -11368,7 +11392,9 @@ mod tests {
         let pooled_result = matmul_q6k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let sequential_reference: Vec<f32> = packed
-            .chunks_exact(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES)
+            .as_chunks::<ROW_BYTES>()
+            .0
+            .iter()
             .map(|weight_row| dot_q6k_f32(weight_row, &activation).expect("well-formed row"))
             .collect();
 
@@ -11425,14 +11451,13 @@ mod tests {
         const ROWS: usize = 128;
         const BLOCKS_PER_ROW: usize = 2;
         const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q5_k::QK_K;
+        const ROW_BYTES: usize = BLOCKS_PER_ROW * Q5K_BLOCK_BYTES;
 
         let weights_f32 = random_vec(48, ROWS * K);
         let activation = random_vec(49, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q5K_BLOCK_BYTES];
-        for (row_f32, row_packed) in
-            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES))
-        {
+        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -11446,7 +11471,9 @@ mod tests {
         let mut activation_q8k = vec![0u8; BLOCKS_PER_ROW * Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
         let sequential_reference: Vec<f32> = packed
-            .chunks_exact(BLOCKS_PER_ROW * Q5K_BLOCK_BYTES)
+            .as_chunks::<ROW_BYTES>()
+            .0
+            .iter()
             .map(|weight_row| dot_q5k_q8k(weight_row, &activation_q8k).expect("well-formed row"))
             .collect();
 
@@ -11468,14 +11495,13 @@ mod tests {
         const ROWS: usize = 128;
         const BLOCKS_PER_ROW: usize = 2;
         const K: usize = BLOCKS_PER_ROW * proxima_gguf::quant::q6_k::QK_K;
+        const ROW_BYTES: usize = BLOCKS_PER_ROW * Q6K_BLOCK_BYTES;
 
         let weights_f32 = random_vec(50, ROWS * K);
         let activation = random_vec(51, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q6K_BLOCK_BYTES];
-        for (row_f32, row_packed) in
-            weights_f32.chunks_exact(K).zip(packed.chunks_exact_mut(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES))
-        {
+        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -11489,7 +11515,9 @@ mod tests {
         let mut activation_q8k = vec![0u8; BLOCKS_PER_ROW * Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
         let sequential_reference: Vec<f32> = packed
-            .chunks_exact(BLOCKS_PER_ROW * Q6K_BLOCK_BYTES)
+            .as_chunks::<ROW_BYTES>()
+            .0
+            .iter()
             .map(|weight_row| dot_q6k_q8k(weight_row, &activation_q8k).expect("well-formed row"))
             .collect();
 

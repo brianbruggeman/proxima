@@ -276,6 +276,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::alloc::string::ToString;
 
     /// The struct-literal surface (guiding-principle 4's config-as-mirror):
     /// every field the owner's invocation sets is present and matches the

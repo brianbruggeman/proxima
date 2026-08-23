@@ -196,7 +196,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (block, out_chunk) in data.chunks_exact(BLOCK_BYTES).zip(output.chunks_exact_mut(QK_K)) {
+    for (block, out_chunk) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.as_chunks_mut::<QK_K>().0) {
         dequantize_block(block, out_chunk);
     }
     Ok(())
@@ -421,7 +421,7 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, out_block) in input.chunks_exact(QK_K).zip(output.chunks_exact_mut(BLOCK_BYTES)) {
+    for (chunk, out_block) in input.as_chunks::<QK_K>().0.iter().zip(output.as_chunks_mut::<BLOCK_BYTES>().0) {
         quantize_block(chunk, out_block);
     }
     Ok(())
@@ -499,7 +499,7 @@ mod tests {
         // `-dmin*m` for every non-probe element, same as q4_k's fixture;
         // the trap only shows up at the eight probed indices.
         let mut expected = [0.0f32; QK_K];
-        for (sub_block, out) in expected.chunks_exact_mut(SUB_BLOCK_ELEMENTS).enumerate() {
+        for (sub_block, out) in expected.as_chunks_mut::<SUB_BLOCK_ELEMENTS>().0.iter_mut().enumerate() {
             out.fill(-0.5 * MIN[sub_block] as f32);
         }
         expected[0] = 3.0 * (7.0 + 16.0) - 0.5 * 61.0; // sub_block 0 (even): sc=3, m=61, q=7+16=23 -> 69 - 30.5 = 38.5

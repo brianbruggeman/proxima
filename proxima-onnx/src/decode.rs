@@ -165,10 +165,8 @@ fn push_f32_packed(field: Field<'_>, out: &mut Vec<f32>) -> Result<(), OnnxError
                     found: "len (unaligned)",
                 });
             }
-            for chunk in payload.chunks_exact(4) {
-                let mut bytes = [0u8; 4];
-                bytes.copy_from_slice(chunk);
-                out.push(f32::from_bits(u32::from_le_bytes(bytes)));
+            for chunk in payload.as_chunks::<4>().0 {
+                out.push(f32::from_bits(u32::from_le_bytes(*chunk)));
             }
             Ok(())
         }
@@ -195,10 +193,8 @@ fn push_f64_packed(field: Field<'_>, out: &mut Vec<f64>) -> Result<(), OnnxError
                     found: "len (unaligned)",
                 });
             }
-            for chunk in payload.chunks_exact(8) {
-                let mut bytes = [0u8; 8];
-                bytes.copy_from_slice(chunk);
-                out.push(f64::from_bits(u64::from_le_bytes(bytes)));
+            for chunk in payload.as_chunks::<8>().0 {
+                out.push(f64::from_bits(u64::from_le_bytes(*chunk)));
             }
             Ok(())
         }
