@@ -6540,12 +6540,16 @@ where
         row_start += take_rows;
     }
     let chunk_ranges_len = chunk_ranges.len();
+    #[cfg(feature = "instrument")]
+    instrument::record_chunks_created(chunk_ranges_len);
 
     if let Some(session) = session {
         #[cfg(feature = "instrument")]
         counter!(instrument::MATMUL_SETUP_TICKS, instrument::elapsed_ticks(diag_setup_started));
         #[cfg(feature = "instrument")]
         counter!(instrument::PARALLEL_NODES, 1);
+        #[cfg(feature = "instrument")]
+        counter!(instrument::MATMUL_COHORT_DISPATCH_CALLS, 1);
         let round = RowRound {
             dot_row: &dot_row,
             width,
@@ -6703,6 +6707,8 @@ fn claim_and_run_rows<Row>(
 {
     loop {
         let index = next_index.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "instrument")]
+        counter!(instrument::MATMUL_POOL_CLAIM_ATTEMPTS, 1);
         if index >= chunk_ranges.len() {
             return;
         }
@@ -6756,6 +6762,7 @@ where
             instrument::CpuWorkload::MatmulRow,
             instrument::thread_cpu_nanos() - chunk_cpu_started,
         );
+        counter!(instrument::MATMUL_CHUNK_RUNS, 1);
     }
     Ok(())
 }
