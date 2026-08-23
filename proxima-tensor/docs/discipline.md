@@ -12041,3 +12041,164 @@ GGML_BUILD_DIR=<built ggml>/ggml cargo build --release -p proxima-tensor \
 PROXIMA_BENCH_ROWS=a <bench_vs_ggml binary> --bench
 ```
 Cleanup: `$CARGO_TARGET_DIR` and all intermediate `.log` files under this session's scratch directory removed after this row; the raw logs cited above were read in-session and their numbers transcribed into this row, satisfying re-provability without keeping the scratch tree.
+
+## ROW 120 — ROW 119's Task 1 (MAC ratio) REPRODUCES bit-exact; Task 2 ("kernel beats ggml 4.2x single-threaded") does NOT reproduce — it was a bench labeling bug, our own arms silently ran on all 8 performance cores. Corrected: true single-thread is a ~5% tie, and the "3.8x orchestration gap" the task asked about does not exist at w=1
+
+**Headline, stated first: there is no 3.8x mystery sitting between `matmul_rows_threaded`'s entry and `dot_q4k_q8k` executing.** The premise came from comparing production's real w=1 number against a bench arm labeled `_t1` that was never single-threaded — `matmul_worker_count()` (cpu.rs:6086) defaults to `hw.perflevel0.logicalcpu` (8 on this M1 Max) whenever `PROXIMA_MATMUL_WORKERS` is unset, and every `_dispatched_t1`/`_portable_t1` arm in `bench_q4k_matmul.rs`/`bench_q5k_matmul.rs`/`bench_q6k_matmul.rs` left it unset. Measured directly, unfixed: `attn_q_4096x4096_proxima_matmul_q4k_q8k_dispatched_t1` ran at **119.46us** with no env var set, and **410.36-436us** with `PROXIMA_MATMUL_WORKERS=1` forced — a 3.4-3.65x gap the label gave no warning of. ggml's own genuinely-pinned `_t1` arm (via `make_plan(graph, 1)`) measured **419.60-424.13us** — statistically indistinguishable from our TRUE single-thread number, not the 4.2x ROW 119 reported. **Fixed, independently, converging with another concurrent agent's commit** (see "Convergent, independent landing" below): all three bench files now pin `PROXIMA_MATMUL_WORKERS=1` at the top of `main()`, unconditionally, before any bench runs. Host: Apple M1 Max, 10 logical cores (8 performance / 2 efficiency), 64 GiB. Repo: `feat/tensor-consolidated`, started this row at `69d80e4`, branch tip advanced mid-row to `9c681aa` via commits from another concurrent agent (not this row's own). Release profile for every timed run, debug profile for nextest/clippy gates only. `CARGO_TARGET_DIR` isolated under this session's own scratch dir. **Host loadout was NOT quiet for most of this session** — a sibling agent (`h1_vs_hyper`/`bench_q4k_matmul` builds under a different scratch dir, confirmed via `ps aux`) drove 1-min load to 8-46 for long stretches; every timed table below states its own loadout, and any run visibly contaminated beyond what CoV already flags is named as such rather than silently averaged in.
+
+### Re-deriving ROW 119, as this task instructed, before building on it
+
+**Task 1 (MAC ratio) — REPRODUCES, bit-exact, fresh process invocations this session.** Same subtraction technique (`PROXIMA_MAX_TOKENS=2` minus `PROXIMA_MAX_TOKENS=1`, `PROXIMA_MATMUL_WORKERS=8`, `PROXIMA_PREFAULT=1`, `--features metal,instrument --release`): `q4k_macs` delta `69793218560 - 67612180480 = 2181038080`; `q5k_macs` delta `234881024`; `q6k_macs` delta `131080192`; `staged_macs` delta `146028888064 - 141465485312 = 4563402752`. **Sum = 7,110,402,048 — identical to ROW 119's own figure and to the theoretical minimum derived from `openchat-3.5-1210`'s architecture, to the last MAC.** Re-run independently a second time (`t2_rep1..5.log`): `q4k_macs`/`staged_macs` identical to the last digit across all 5 reps despite the ms fields varying with host load — CoV 0% by construction, confirmed again. **This finding stands.**
+
+**Task 2 (kernel vs ggml, single-thread) — DOES NOT REPRODUCE.** Corrected, true single-thread comparison, all 8 decode shapes, fresh this session (host load 3.45-9.71 during this specific sweep, quieter than most of the session):
+
+| shape | ours (pinned t1) | ggml t1 | ours/ggml |
+|---|---|---|---|
+| attn_q 4096x4096 | 412.75us | 421.66us | **1.022x** (ours ahead) |
+| attn_output 4096x4096 | 413.24us | 420.13us | **1.017x** |
+| attn_k 4096x1024 | 104.13us | 110.64us | **1.063x** |
+| attn_v 4096x1024 (Q5_K) | 147.37us | 167.82us | **1.139x** |
+| ffn_gate 4096x14336 | 1383.1us | 1417.4us | **1.025x** |
+| ffn_up 4096x14336 | 1390.6us | 1394.1us | **1.003x** (tied) |
+| ffn_down 14336x4096 (Q5_K) | 1969.4us | 2185.0us | **1.109x** |
+| lm_head 4096x32002 (Q6_K) | 5126.0us | 5415.6us | **1.056x** |
+
+Summed across one decode step (7 matmuls x 32 layers + 1 lm_head): **ours 191.38ms total, ggml 201.15ms total — ours ahead by 1.051x.** Correctness re-asserted before every timing: `max abs diff` 0 to 3.05e-3 (dequant arms), 0 to 8.6e-7 (packed-dispatched arms) — unchanged from ROW 119, no arithmetic touched.
+
+**This is not a 4.2x win. It is a small, real, honest lead (roughly tied to +14% depending on shape), the opposite of the headline ROW 119 shipped.** The mislabeled arm's "4.15-4.24x" was comparing OUR default-8-worker number against GGML's genuinely-pinned 1-thread number — an apples-to-oranges comparison the label did not disclose. Read as an (unintentional) 8-worker-vs-1-thread comparison, the OLD numbers are directionally consistent with a real 8-worker speedup (attn_q: 412.75us/8 workers -> our own actual 8-worker figure, separately measured before the fix, was 119.46us, a 3.43x speedup at 8x thread count — see "what production actually shows" below), just never labeled as such.
+
+### What this resolves: production's w=1 number already matches the (corrected) kernel prediction — there is no dispatch-overhead gap to hunt at w=1
+
+ROW 119 argued production's own w=1 figure (179.8443ms, ROW 99) was "3.74-3.81x SLOWER" than "the kernel alone." With the bench corrected, the true kernel-alone single-thread total for one decode step is **191.38ms** (table above) — and production's own w=1 decode-step matmul total, measured fresh this session (3 reps, `PROXIMA_MATMUL_WORKERS=1`, direct per-step DIAG read, no subtraction needed):
+
+| rep | staged_batch ms | reduce_matmul_quantized ms | combined |
+|---|---|---|---|
+| 1 | 111.669 | 66.320 | 177.989 |
+| 2 | 110.073 | 64.738 | 174.811 |
+| 3 | 111.929 | 66.001 | 177.930 |
+| **mean** | | | **176.910** |
+
+**Production w=1 (176.91ms, this row) is 7.6% FASTER than the isolated kernel-call bench's own sum (191.38ms), not 3.74-3.81x slower.** This matches ROW 99's own independently-measured w=1 figure (179.8443ms) within normal run-to-run variance. **The "3.8x gap" this task asked me to attribute does not exist at w=1** — it was entirely a bench-labeling artifact. Production's dispatch machinery (`matmul_rows_threaded`'s setup, the cohort session, `run_staged_batch`'s per-node `MatmulStagePlan` construction) costs approximately nothing extra relative to calling the same kernel function directly, back to back, in isolation.
+
+### The question that remains real: why 1->8 threads buys 3.7x, not 8x — and why it is NOT redundant per-worker work
+
+**Per-call vs per-chunk, as asked, each with its N — this decode step, `PROXIMA_MATMUL_WORKERS=8`, fresh this session (5 reps, host load 14.12-14.48 throughout, CoV noted per row, NOT a quiet host — reported honestly, not silently averaged past):**
+
+| term | scope | N/step | mean ms | CoV | % of step_wall |
+|---|---|---|---|---|---|
+| staged quantize (`STAGED_MATMUL_QUANTIZE_TICKS`) | per-call | 160 | ~1.196 | reused ROW 99 proportion (2.83%) | 1.57% |
+| unbatched quantize (`MATMUL_QUANTIZE_ACTIVATION_TICKS`) | per-call | 65 | ~0.784 | reused ROW 99 proportion (4.21%) | 1.03% |
+| staged transpose (`STAGED_MATMUL_TRANSPOSE_TICKS`) | per-call | 160 | ~0.955 | reused ROW 99 proportion (2.26%) | 1.26% |
+| unbatched transpose (`MATMUL_Q4K_TRANSPOSE_TICKS`) | per-call | 65 | ~0.188 | reused ROW 99 proportion (1.01%) | 0.25% |
+| loop_setup_ms (shape::infer/bind, once/step) | per-call | 1 | 3.753 | 2.19% | 4.93% |
+| loop_overhead_ms (alloc+bookkeeping outside `run_node_into`) | per-call | ~225 nodes | 1.609 | 1.61% | 2.11% |
+| residual A (evaluate preamble) | per-call | 1 | 1.306 | -- | 1.72% |
+| **staged round/kernel** (`STAGED_MATMUL_ROUND_TICKS`) | **per-chunk** | **N chunks, up to 32/node** | **~40.106** | reused ROW 99 proportion (94.92%) | **52.72%** |
+| **unbatched own_chunk/kernel** (`MATMUL_OWN_CHUNK_TICKS`) | **per-chunk** | **N chunks, 8-32/node** | **~17.656** | reused ROW 99 proportion (94.78%) | **23.21%** |
+| elementwise (never opens a round, ROW 68/97) | serial, not chunked | 547 | 4.029 | 4.56% | 5.30% |
+| reduce_f32_dense (never opens a round) | serial, not chunked | 385 | 3.298 | 4.14% | 4.34% |
+| constant+iota | serial | 39 | 0.002 | -- | 0.003% |
+| step-level extras (position inputs, named blocks, KV append, greedy pick) | per-call | 1 each | 1.202 | -- | 1.58% |
+| residual B | -- | -- | 0.003 | -- | 0.004% |
+| **step_wall_ms (measured)** | | | **76.079** | 9.46% (n=5) | **100%** |
+
+Sum of every named row: 9.791 (per-call) + 57.762 (per-chunk) + 7.329 (serial non-matmul) + 1.202 + 0.003 = **76.087ms, against a measured 76.079ms mean — residual under 0.01%.** N asserted: `nodes=160` (staged) and `count=65` (unbatched) printed on every one of the 5 reps' own DIAG lines, identical every time (`t2_rep1..5.log`); the per-chunk N is derived, not counted directly (no per-chunk counter exists, by design — see below), from `row_chunk_count` (cpu.rs:6187-6192) with `ROW_OVERSUBSCRIBE=4`, `MIN_MACS_PER_CHUNK=500000` (confirmed via the generated `proxima_tensor_sized.rs`): Q/O-proj and FFN nodes clear 32 chunks (`workers*OVERSUBSCRIBE`), K/V-proj nodes clear only 8 (`total_macs/MIN_MACS_PER_CHUNK` floors them there, exactly at `workers` with zero oversubscription headroom for stealing).
+
+**Note on the inner quantize/round/transpose split: reused from ROW 99, not re-derived fresh this row.** A fresh cross-process cumulative-subtraction attempt this session (`PROXIMA_MAX_TOKENS=1` vs `=2`, subtracting `matmul_split_staged`'s own `round_ms`/`quantize_ms`/`transpose_ms`) produced an unusable range: `round_ms` deltas of **1.118ms, 58.914ms, 11.028ms, 24.784ms, 1.118ms** across 5 reps for what should be one consistent per-step quantity — a >50x spread, the same fragile-subtraction failure mode ROW 94/99 already named, amplified here by today's much heavier host contention (14-16 load vs ROW 99's 4.8-8.1). **Negative result, reported not buried**: this technique does not survive today's contention; ROW 99's own already-validated proportions (derived under a quieter host, and shown there to be far more stable than the absolute deltas) are reused instead, applied to this row's own fresh, clean, non-subtracted outer totals (`staged_batch`/`reduce_matmul_quantized`, which need no subtraction — they are each one process's own single-step DIAG printout).
+
+### The coordinator's specific candidate — `quantize_row_q8k_dispatch` — read, not assumed, and KILLED
+
+**Where it sits relative to the claim loop, by file:line:**
+- Staged path: `quantize_row_q8k_dispatch` is called at `cpu.rs:3134`, inside `build_matmul_stage_plan`, which the function's own doc states runs "during the precompute pass, strictly BEFORE `run_staged_batch` opens its round" (`session.run(&round)` at `cpu.rs:3277`). **Before the claim loop, once per node.**
+- Unbatched path: called at `cpu.rs:7328`, inside `matmul_q4k_q8k_f32_impl`, before the `matmul_rows_threaded` call at `cpu.rs:7337`. **Before the claim loop, once per node.**
+
+**N confirms this is per-call, not per-chunk:** `STAGED_MATMUL_QUANTIZE_TICKS`/`STAGED_MATMUL_NODES` print `nodes=160` per step (every one of this row's 10 DIAG blocks, prefill and decode alike); `MATMUL_QUANTIZE_ACTIVATION_TICKS` pairs with `reduce_quantized_calls`, `65`/step. Neither counter's N is anywhere near the several-thousand-per-step chunk count the per-worker redundant-execution hypothesis would require.
+
+**Even inside its own body, when it DOES parallelize (`cpu.rs:6617-6675`), it is never redundant**: `block_count`-many super-blocks are split into `chunk_count = (workers * OVERSUBSCRIBE).min(block_count)` **disjoint** `(in_ptr, in_len, out_ptr, out_len)` ranges via `split_at`/`split_at_mut` (`cpu.rs:6650-6659`) before its own `QuantizeRound` opens — each worker quantizes a **different** slice of the activation, never the same one twice. Total quantize work is constant regardless of worker count; only its distribution across workers changes. **Candidate KILLED by direct read, confirmed by measurement (2.6% of step_wall combined, far too small to explain the ~46%-efficiency gap).**
+
+**Same check, same verdict, for `transpose_wide_to_output` (`cpu.rs:2753`).** Per-call (once per node, `cpu.rs:3302` for staged/after the round returns, `cpu.rs:3512` for unbatched/inline). Its own internal split (`cpu.rs:2780-2791`) is disjoint by `position` range, never redundant. **For decode specifically it never even opens a round at all** — `leading_total` is 1 at decode (batch-1), and the dispatch guard at `cpu.rs:2776` (`leading_total < 2`) forces the plain serial `O(rows)` copy unconditionally. Zero worker-scaling exposure for this workload. **Candidate KILLED.**
+
+**The per-chunk bucket itself (`round`/`own_chunk`, 75.9% of step_wall) is ALSO structurally guaranteed non-redundant** — this is the mechanism the coordinator's "8x redundant work" inference would actually need to live in, and it is provably closed: every chunk claim goes through `next_index.fetch_add(1, Relaxed)` (`cpu.rs:6450`, unbatched path) or the cohort's equivalent cursor (staged path), over `chunk_ranges` built by `split_at_mut` before the round opens. The function's own SAFETY comment states it plainly: **"`fetch_add` never hands out the same index twice, so no two pullers ever touch the same slice"** (`cpu.rs:6438-6439`; the staged path's `MatmulStagePlan::run_chunk`, `cpu.rs:2980-2997`, carries the identical single-writer argument). No two workers can ever compute the same row's dot product. **The "8 busy threads deliver only 1 thread's worth" inference is REFUTED at the code level, not just empirically** — it cannot be redundant computation because the dispatch mechanism forbids it by construction.
+
+**What the 1->8 scaling loss actually is** (already named by ROW 99/118, re-confirmed not re-discovered this row): real, bounded, partial parallel-efficiency loss — wake/park latency with a reproducible leader-advantage pattern (ROW 118: 13-23% per-slot busy-time spread at decode, every slot genuinely busy, none idle, none doing extra work), and oversubscription-granularity limits for narrow K/V-shaped nodes (chunk_count caps at exactly `workers`=8 for those nodes, zero stealing headroom). This costs **wall-clock time** (the round's length is set by whichever worker finishes last) without any worker doing extra arithmetic. ROW 99's own w=1/w=8 numbers (179.84ms -> 48.40ms, a measured 3.716x speedup at 8x thread count, ~46% parallel efficiency) already quantify this; nothing in this row's own evidence names a new, untried, actionable fix — ROW 99 already tried and refuted the two obvious candidates (stop-parking, split-the-width-axis), and this row's own quantize/transpose read closes off the only other candidates this task named.
+
+### What production does that the direct-call bench does NOT — enumerated
+
+- **Cache warmth**: production's decode step runs immediately after 31 prefilled positions through the same weight buffers; the isolated bench reads each shape's weight bytes fresh via `mmap`/`File::open` per bench-function run. (Measured net effect: production is slightly FASTER despite this, not slower — see above.)
+- **Cohort session lifecycle**: production enters the process-wide `ThreadCohort` ONCE per forward pass (`nest_cohort().and_then(|cohort| cohort.enter().ok())`, `cpu.rs:677`) and reuses it across all 225 matmul nodes in the step; the bench's `session: None` calls always take the `nest_pool()` fallback path per invocation — a DIFFERENT dispatch mechanism than production's own cohort path, not a superset/subset of it.
+- **`run_staged_batch` batching**: production folds a contiguous run of matmul-eligible nodes into ONE `StagedRound` (shared `session.run` across every node's chunks); the bench calls `matmul_q4k_q8k_f32`/`matmul_q5k_q8k_f32`/`matmul_q6k_q8k_f32` directly, one node at a time, each its own dispatch — this is why the bench cannot observe `STAGED_MATMUL_ROUND_TICKS`'s own per-run batching benefit or cost at all.
+- **`leading_total` folding**: production's real forward folds all `leading_total` sequence positions into one row's dot at prefill (`leading_total=31`); the per-shape bench always uses `leading_total=1` (batch-1 decode shape only) — correct for a decode-focused compare, but it means this bench file says nothing about prefill's own dispatch behavior.
+- **Buffer pool reuse (`take_or_allocate`)**: production draws every node's output from a per-forward-pass free list; the bench allocates a fresh `Vec` per `b.iter()` closure call (`matmul_q4k_q8k_f32` always allocates its own output). Not separately measured this row (out of scope — this task's own allocation budget is unchanged, no new allocation added either side).
+
+### Fix landed: bench worker-count pin (the dominant, mechanism-named defect this row's own split actually surfaced)
+
+Per this task's own instruction ("fix the dominant term, if the split names one with a mechanism") — the split named here is not a production dispatch defect (quantize/transpose are correctly implemented and non-redundant, per-call cost is 2.6% of step_wall, and the per-chunk scaling loss is already root-caused and previously found un-fixable by two refuted attempts). **The dominant, concrete, actionable, mechanism-named defect this row's own re-derivation surfaced is the bench itself.** Fixed in `bench_q4k_matmul.rs`, `bench_q5k_matmul.rs`, `bench_q6k_matmul.rs`: `main()` now unconditionally pins `PROXIMA_MATMUL_WORKERS=1` (`unsafe { std::env::set_var(...) }`, same SAFETY argument already established at `cpu.rs:12994-12996` — single-threaded at this point in `main`, before any bench runs or `matmul_worker_count`'s `OnceLock` is read) so every `_t1`-labeled arm is now true to its label, on any host, regardless of performance-core count.
+
+**Before/after, same shape, same host session:**
+
+| config | attn_q_4096x4096 dispatched_t1 |
+|---|---|
+| before fix, no env var (silently multi-threaded) | 119.46us |
+| before fix, `PROXIMA_MATMUL_WORKERS=1` forced manually | 415-466us (3 reps) |
+| **after fix, no env var (now correctly pinned)** | **642-813us** (host load 18.65 during this specific check — the fix's correctness is confirmed by direction and magnitude, not by this specific noisy number; see the clean 412.75us table above for the trustworthy figure) |
+
+No production source file touched; no arithmetic, dtype, or dispatch logic changed anywhere in `proxima-tensor`/`proxima-model-interop`. Allocation budget unchanged (zero new allocations, bench-only edit, three `unsafe { std::env::set_var }` calls + doc comments).
+
+### Rollback rows
+
+None. The fix is a bench-only labeling correction with a clear, verified before/after (mislabeled arm now measures what its name claims); no regression on any metric.
+
+### Convergent, independent landing — no additional commit needed for the bench fix
+
+This worktree's own branch (`feat/tensor-consolidated`) is shared with other concurrently-running agents. Mid-write-up, `git log` showed the branch tip had advanced past this row's starting point (`69d80e4`) to `9c681aa` via six new commits landed by another process while this row was in progress (confirmed via `ps aux`: a concurrent `rustc --crate-name h1_vs_hyper` / `bench_q4k_matmul` build under a different scratch target dir was actively running throughout). One of those commits, `3a58a51` ("fix: read the bench checkpoint path from the environment", authored during this same session window), independently made the identical `PROXIMA_MATMUL_WORKERS=1` pin to the identical three bench files (`bench_q4k_matmul.rs`/`bench_q5k_matmul.rs`/`bench_q6k_matmul.rs`), bundled together with an unrelated GGUF-path portability fix. Diffing this row's own edit against that commit's content: **byte-identical.** `git diff` against the current tip now reports zero changes for all three bench files — this row's own edit and the other agent's edit converged on the same fix, independently, at nearly the same time; there is nothing left for this row to commit there. **Credited honestly, not claimed**: the bench-file fix itself landed via `3a58a51`, not via this row's own commit. This row's own contribution is the discipline-log analysis (MAC-ratio re-derivation, the corrected single-thread table, the per-call/per-chunk attribution, and the code-level refutation of the redundant-work hypothesis) plus independent confirmation that the fix is correct — `discipline.md` is the only file this row itself commits.
+
+### Gates, actual numbers
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **361 passed, 4 skipped** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed, 4 skipped** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed, 7 skipped** |
+| `cargo nextest run -p omega` | **76 passed, 1 skipped** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 errors (same unrelated `proc-macro-error2` future-incompat notice prior rows also saw) |
+| `cargo clippy -p proxima-tensor --benches --features ggml-bench,q5k-int8-dot,q6k-int8-dot -- -D warnings` | clean, 0 errors (covers the three bench files, landed via `3a58a51`) |
+| Generated text, `MAX_TOKENS=24` | `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"` |
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo nextest run -p omega
+cargo clippy --workspace --all-targets -- -D warnings
+GGML_BUILD_DIR=<built ggml>/ggml cargo clippy -p proxima-tensor --benches \
+  --features ggml-bench,q5k-int8-dot,q6k-int8-dot -- -D warnings
+
+# Task 1 reproduction (bit-exact MAC ratio):
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=1 PROXIMA_MATMUL_WORKERS=8 cargo test -p proxima-model-interop \
+  --release --features std,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=2 PROXIMA_MATMUL_WORKERS=8 cargo test -p proxima-model-interop \
+  --release --features std,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+# subtract quant_arm/matmul_split_staged cumulative totals between the two runs.
+
+# Task 2 reproduction (corrected, true single-thread kernel-vs-ggml):
+GGML_BUILD_DIR=<built ggml>/ggml cargo build --release -p proxima-tensor \
+  --bench bench_q4k_matmul --bench bench_q5k_matmul --bench bench_q6k_matmul \
+  --features ggml-bench,q5k-int8-dot,q6k-int8-dot
+<bench_q4k_matmul binary> --bench     # every _t1 arm now genuinely single-threaded
+<bench_q5k_matmul binary> --bench
+<bench_q6k_matmul binary> --bench
+
+# production w=1 decode-step reality check (no subtraction needed, direct per-step DIAG read):
+PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=2 PROXIMA_MATMUL_WORKERS=1 cargo test -p proxima-model-interop \
+  --release --features std,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+# read the SECOND `DIAG evaluate_quantized node_kind=staged_batch`/`reduce_matmul_quantized` block.
+```
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (isolated scratch path) and all per-run `.log` files under this session's scratch directory removed after this row; the raw logs cited above were read in-session and their numbers transcribed here, satisfying re-provability without keeping the scratch tree.
