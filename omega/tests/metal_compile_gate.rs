@@ -115,6 +115,72 @@ fn fused_matmul_kernel() -> omega::Kernel {
     omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("matmul emits")
 }
 
+/// `simdgroup_matrix`-tiled Q4_K GEMM (ROW 107) -- 16 tokens clears
+/// `TILED_GEMM_MIN_TOKENS` (8), 4 weight rows is deliberately not a multiple
+/// of `TILE_DIM` (8) so the boundary-tile mask is present in the emitted
+/// source this gate hands to the real Metal compiler.
+#[cfg(feature = "metal-tiled-gemm")]
+fn tiled_gemm_q4k_kernel() -> omega::Kernel {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(4), Extent::Static(256)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(256), Extent::Static(16)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            // token axis first, feature axis last -- see
+            // `omega/src/msl.rs`'s `tiled_gemm_op` test fixture doc for why
+            // this order is load-bearing for a packed weight's
+            // `native_packed_layout` stride reconstruction.
+            out_map: IndexMap::Affine(map::projection(3, &[1, 0])),
+            keep: Keep::Reduce,
+            name: Some("tiled_gemm".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("tiled gemm infers");
+    let nests = bind(&program, &shapes, &[]).expect("tiled gemm lowers");
+    let weight_node = nests[0].operands()[0].0;
+    let mut q4k = std::collections::BTreeMap::new();
+    q4k.insert(weight_node, omega::PackedCodec::Q4K);
+    let kernel = omega::emit(&nests[0], &q4k).expect("tiled gemm emits");
+    assert!(
+        kernel.source.contains("simdgroup_multiply_accumulate"),
+        "fixture must actually take the tiled GEMM path for this gate to mean anything:\n{}",
+        kernel.source
+    );
+    kernel
+}
+
 fn cumsum_kernel() -> omega::Kernel {
     let mut program = Vec::new();
     let source = append(
@@ -281,7 +347,8 @@ fn iota_kernel() -> omega::Kernel {
 
 #[test]
 fn emitted_source_compiles_with_the_metal_toolchain() {
-    let kernels = [
+    #[allow(unused_mut)]
+    let mut kernels = vec![
         elementwise_tanh_kernel(),
         elementwise_erf_kernel(),
         fused_matmul_kernel(),
@@ -290,6 +357,8 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
         embedding_matmul_kernel(),
         iota_kernel(),
     ];
+    #[cfg(feature = "metal-tiled-gemm")]
+    kernels.push(tiled_gemm_q4k_kernel());
 
     let mut compiled = 0usize;
     for kernel in &kernels {
@@ -323,10 +392,12 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
         compiled += 1;
     }
 
-    assert!(
-        compiled >= 6,
-        "compiled {compiled} kernels — need at least 6 (including a gather, an iota, and the \
-         hand-rolled erf helper) to prove this is not a vacuous pass"
+    let expected = if cfg!(feature = "metal-tiled-gemm") { 8 } else { 7 };
+    assert_eq!(
+        compiled, expected,
+        "compiled {compiled} kernels, expected exactly {expected} (including a gather, an iota, \
+         the hand-rolled erf helper, and — with `metal-tiled-gemm` — the tiled GEMM kernel) — a \
+         mismatch means a fixture silently stopped compiling into the gate"
     );
 }
 

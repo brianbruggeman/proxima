@@ -9839,3 +9839,118 @@ NOT staged or committed as part of this row's commit**; they belong to
 whoever owns that other initiative, per this repo's shared-worktree
 contamination protocol. If that work lands its own fix first, this row's
 patch to those three files is a no-op diff to drop.
+
+## ROW 107 — `simdgroup_matrix`-tiled Q4_K GEMM, feature-gated `metal-tiled-gemm`: correct (3.3e-5 relative), decode-safe, and a MEASURED 4.27x SLOWER prefill than the row-blocked path it was meant to beat
+
+**Headline, stated first:** the tiled kernel is real, correct on a real
+device against the dequantized-f32 CPU oracle, and provably never touches
+the decode path — and it makes prefill **4.27x slower**, not faster,
+measured three times on this host. Landed anyway, default-off, as a
+documented negative result: the 8x8-tile-per-simdgroup design this row
+built is the wrong shape for this workload, and the log says so rather than
+hiding it behind "feature-gated so it doesn't matter."
+
+### Citation verification (per line, against llama.cpp `b2534622` at `/Users/brianbruggeman/repos/others/llama.cpp`)
+
+Every ROW 105 citation this task named was re-read directly, not trusted from the prior row's quote:
+
+| citation | claim | verified |
+|---|---|---|
+| `ggml-metal.metal:6526-6527` | `simdgroup_float8x8 mb[2]; simdgroup_float8x8 mc[8];` | exact match |
+| `ggml-metal.metal:6580-6592` | `simdgroup_load`/`simdgroup_multiply_accumulate` calls | exact match |
+| `ggml-metal.metal:6510-6511` | `threadgroup T *sa`/`threadgroup float *sb` both staged | exact match |
+| `ggml-metal.m:3101` | `setThreadgroupMemoryLength:8192 atIndex:0` | exact match |
+| `ggml-metal.metal:6927` | `kernel_mul_mm_q4_K_f32` instantiation | exact match |
+| `ggml-metal.metal:336-352` | `dequantize_q4_K` reconstructs full values pre-matmul | exact match |
+| `ggml-metal.m:3038`, `:2857` | `ne11 > ne11_mm_min`, `ne11_mm_min = 4` | exact match |
+
+`grep -rn "simdgroup_float8x8\|simdgroup_load\|simdgroup_multiply_accumulate\|simdgroup_matrix" omega/` returned zero matches before this row (confirmed, not assumed) — every citation held, no premise was refuted, so the work proceeded as scoped.
+
+### The reuse question, answered by writing the attempt
+
+Per principle 1/guiding-principles: could [`push_packed_row_blocked_body`](omega/src/msl.rs) express a tiled GEMM? Read in full before writing anything new. It is one SIMD group computing `PACKED_ROWS_PER_GROUP` (4) FLAT output elements via scalar FMA across the reduction dim, with **no threadgroup memory, no barrier, no cooperative tile op** — its amortization is "reuse one activation register run across 4 weight rows for the SAME token," never across multiple tokens. A tiled GEMM's entire point is reuse across BOTH a weight-row tile AND a token tile simultaneously via a hardware matrix unit operating on THREADGROUP-STAGED tiles. These are two different parallelization strategies (independent-SIMD-groups-computing-scalar-sums vs. cooperative-threadgroup-tiles-computing-matrix-products), not a threshold difference on the same one. **What a caller could do after that the row-blocked function could not:** issue `simdgroup_multiply_accumulate` at all — impossible without threadgroup memory staging, which `push_packed_row_blocked_body` never allocates. A second kernel is justified; this is not a relocation.
+
+### Where the threshold lives
+
+`omega/omega-runtime.toml` (`[tiled_gemm] min_tokens = 8`) → `omega/build.rs`'s `emit_sizing_consts` (new build script; omega previously had none) → `OUT_DIR/omega_sized.rs` → `omega/src/sized.rs`'s `TILED_GEMM_MIN_TOKENS` re-export, gated `#[cfg(feature = "metal-tiled-gemm")]` and emitted by `build.rs` only when `CARGO_FEATURE_METAL_TILED_GEMM` is set — mirrors `proxima-tensor/build.rs`'s `emit_sizing_consts`/`resolve_int` shape exactly (same `OMEGA_<SECTION>_<KEY>` env-override convention, same `cargo:rerun-if-env-changed` per override, same "omitted on every build that doesn't need it" dead-code avoidance). `min_tokens = 8` is **not yet swept against alternatives** — recorded as such rather than silently presented as measured; see "Honest read" below for why sweeping it will not save this design.
+
+### Q4_K only, stated why
+
+[`classify_tiled_gemm`](omega/src/msl.rs) rejects any codec other than `Q4_K` structurally (`codec != PackedCodec::Q4K` → `None`), not just by convention. Q5_K/Q6_K are excluded because they have no batched-unpack helper (`push_packed_row_blocked_body`'s own comment on their arms already states this) and because shipping an unmeasured codec on a correctness-critical GPU path violates principle 18. Not a silent gap — the eligibility gate is the enforcement.
+
+### Selection is one decision, read from two places — and it caught a real, pre-existing latent bug
+
+`classify_tiled_gemm`/`tiled_gemm_block` is the single source of truth `grid_threads` and `push_cooperative_reduce_body` both call, mirroring `packed_row_block`'s own established discipline (see that struct's doc). Building it surfaced something the task did not ask for and that matters beyond this row:
+
+`proxima_tensor::bind::native_packed_layout` (the function that rewrites a packed weight's `Layout` from `layout_of`'s declared-shape default to its true on-disk `[out_dim, in_dim]` bytes) reconstructs an operand's stride by walking `output_axes` **in reverse**, so the operand's OWN axis must be the LAST-listed output axis (innermost, adjacent to the reduce group) for the reconstruction to describe real bytes. Every real matmul in `proxima-tensor/src/spec.rs` follows this (`"sg->sdg"`, `"so->sugdo"`, token/sequence letters first, the weight's own letters last) — but my FIRST test fixture (mirroring the pre-existing `matmul_op` helper's `[feature, token]` order) violated it, and the packed weight's reconstructed stride for the feature axis came back as `feature_extent * k` instead of `k` — reading a super-block **exactly one block past the true buffer end** for row 1 of an 8x8 test case, producing relative error 1.0 (all-zero row) and error up to 359x elsewhere. Root-caused via: a standalone Swift/Metal probe (`simdgroup_load`/`store`/`multiply_accumulate` verified byte-exact against hand-computed matmuls, isolating the bug OUT of the simdgroup mechanics) plus a temporary debug write of `u.operand_strides[weight][feature_axis]` into the output buffer, which read back `2048` where `256` was expected (`extents=[8,8,256]`, `native_packed_layout`'s own math: `2048 = 256 * 8`). Fixed two ways: (1) `classify_tiled_gemm` now REQUIRES `output_axes[last] == feature_axis` structurally, rejecting a wrongly-ordered shape rather than trusting convention; (2) every test fixture for this row uses the correct (token-first) order via a new `tiled_gemm_op` helper, leaving the pre-existing `matmul_op` (and every test that already depends on its current order) untouched. **This defect was never reachable through the row-blocked path in production** — every real matmul already follows the correct convention — but it would have silently corrupted output the first time a differently-shaped op reached this gate. Recorded here because it is real, general, and the next person extending `classify_tiled_gemm`-style logic needs to know the convention is load-bearing, not decorative.
+
+### Parity, real device, real checkpoint bytes
+
+`omega/tests/metal_parity.rs`'s new `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale` (`#[cfg(feature = "metal-tiled-gemm")]`): rows=12 (not a multiple of `TILE_DIM`=8 — exercises the M-boundary mask), tokens=20 (not a multiple of 8 — exercises the N-boundary mask), k=768 (3 real Q4_K super-blocks per row), REAL `quantize`/`dequantize` round-trip from `proxima_gguf::quant::q4_k`, compared against the dequantized-f32 CPU oracle on a real Metal device.
+
+- **Relative error, before this fix (wrong axis order): 1.0 (row corrupted) / up to 359x elsewhere.**
+- **Relative error, after the fix: ~3.3e-5.**
+- Tolerance set to `5e-3` (not the row-blocked path's `1e-5`) with a one-line why: this path casts the dequantized weight to `half` for `simdgroup_half8x8`, a real precision cost of the hardware matrix unit ggml's own `T = half` instantiation makes identically — `5e-3` is this test file's own pre-existing ceiling for any f16-involved path (`matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle`), not a number invented for this row. Measured value sits ~150x inside it.
+- `omega/tests/metal_compile_gate.rs`'s `tiled_gemm_q4k_kernel()` fixture proves the emitted MSL assembles under the real `xcrun metal` toolchain (not just "looks like MSL") — the gate's own count assertion is now feature-aware (`7` without `metal-tiled-gemm`, `8` with it) so a silently-uncompiled fixture cannot hide.
+
+### Decode stays on the vector path — proven, not asserted
+
+`omega::msl::tests::decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in`: a 1-token dispatch (`tiled_gemm_op(1, 256, 4096)`) with `metal-tiled-gemm` compiled in asserts `tiled_gemm_block(...).is_none()` AND that the emitted source does not contain `simdgroup_multiply_accumulate` AND that it does contain `sumf[` (the row-blocked path's own marker) — codegen-pinned the same way `msl.rs:2651`/`:2677`'s existing tests pin the scale-deferred path. `many_token_matmul_takes_the_tiled_gemm_path` is the positive counterpart (16 tokens, 4 weight rows — also not a multiple of `TILE_DIM`). `non_q4k_codec_never_takes_the_tiled_gemm_path` and `multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count` cover the two documented scope limits. `tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature` (the one test NOT gated on the feature) proves the whole path is invisible in the default build.
+
+### Measure — BEFORE/AFTER, real checkpoint, real device
+
+**Host:** Apple M1 Max. `uptime` polled before every timed run; 1-min load ranged 2.15-26.31 across the session (another agent active throughout — see Notes). Build profile: `--release` for every timed run (never compared against a debug-profile number); `dev` profile for the nextest/clippy/build gates, matching this file's own established convention.
+**Model/prompt:** `openchat-3.5-1210.Q4_K_S.gguf` (TheBloke, same file ROW 100/105 used), prompt = `bind::default_prompt()` (31-token prefill, verified via `new_count=31` in the harness's own diagnostic), `PROXIMA_MAX_TOKENS=24`.
+**Command (both arms):** `cargo test -p proxima-model-interop --release --lib --features metal,instrument[,omega/metal-tiled-gemm] --no-run`, then `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 <testbin> --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`. Prefill = `step=0`'s own `step_wall_ms`; decode = mean of `step=1..23`'s `step_wall_ms` (ROW 100's own extraction technique, reused verbatim).
+
+| arm | n | prefill min/median/max, ms | prefill CoV | decode mean, ms/token | decode CoV | llama Metal (not same-window; ROW 100's own figure) |
+|---|---|---|---|---|---|---|
+| BEFORE (feature off) | 3 | 2060.696 / 2128.152 / 2483.126 | 10.20% | 69.811 | 0.55% | prefill 103.2 / decode 17.62 |
+| AFTER (`metal-tiled-gemm` on) | 3 | 9329.558 / 9465.370 / 9663.207 | 1.77% | 73.429* | 8.87%* | — |
+
+`*` decode's AFTER CoV is inflated by run 1, captured during a genuine host spike (load 21.46→26.31 mid-run, confirmed via `uptime` before/after); runs 2-3 (69.904, 69.434 ms/token) tie BEFORE's decode almost exactly, and prefill's own tight 1.77% CoV in the SAME three runs (including the contaminated run 1) is the strongest evidence the prefill regression is NOT a host-noise artifact — a truly noisy host would inflate prefill's CoV the same way it inflated decode's, and it did not.
+
+**Delta:** prefill AFTER/BEFORE = 9486.045 / 2223.991 = **4.265x SLOWER**, min-vs-min 9329.558/2060.696 = 4.528x slower. Both estimators clear the combined CoV (10.20%/1.77%) by a wide margin — this delta is real, not noise. Decode: unchanged (73.429 vs 69.811 using all runs, 69.67 vs 69.811 excluding the contaminated AFTER run — either way within combined CoV, i.e. no measurable delta, exactly as the eligibility gate is designed to guarantee).
+
+**Generated text, both arms, all 6 runs:** `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"` — byte-identical, matches the task's required string and llama.cpp's own captured answer.
+
+### Diagnosis — why it lost, not just that it lost
+
+`token_breakdown_metal step=0`'s own `gpu_exec_ms` field (Metal command-buffer completion time, not wall-clock, so it excludes CPU-side scheduling jitter): BEFORE 1701.890 ms, AFTER 8855.131 ms — a **5.2x** increase in ACTUAL GPU EXECUTION time, not a one-time pipeline-compile artifact (`pipeline_compile_ms` was 283.140 ms BEFORE and 113.591 ms AFTER — smaller, not larger, ruling out compile cost as the cause). This is capability-gap category #3 from the bench-design discipline (not a wiring bug, not a shared-upstream limit): the design itself does less work per dispatch than the workload needs. `TILE_DIM = 8` means one simdgroup (32 threads, the GPU's minimum useful occupancy unit) computes a 64-element output tile and pays `threadgroup_barrier` TWICE per 8-wide K-step — for `k=4096` (a real FFN reduce extent), that is up to 512 barrier round-trips per tile, against zero barriers in the row-blocked path (pure register-level `simd_sum`, no threadgroup memory at all). ggml's own kernel never ships an 8x8-per-simdgroup tile for this reason: `BLOCK_SIZE_M=64`/`BLOCK_SIZE_N=32` amortizes the SAME staging/barrier cost across 16x more output per threadgroup, which this row's simplified design deliberately traded away for tractability within the session's budget.
+
+### Rollback — this feature does not earn the switch
+
+**No default changed anywhere** — `metal-tiled-gemm` was never in `default`/`std`/`metal`'s feature lists, so this row changes zero production behavior. Recommendation, stated plainly: **do not flip `metal-tiled-gemm` on** until a redesign closes the tile-size gap (a real `BLOCK_SIZE_M`/`BLOCK_SIZE_N`-shaped multi-simdgroup-per-threadgroup kernel, not this row's one-simdgroup-per-8x8-tile simplification). The infrastructure (sizing config, eligibility gate, cache-key discrimination, codegen-pinning tests, real-device parity test) is landed and correct, and the NEXT attempt at this kernel inherits all of it rather than re-deriving the axis-ordering trap this row already paid for.
+
+### Gates, actual numbers
+
+| gate | command | result |
+|---|---|---|
+| omega tests, default | `cargo nextest run -p omega` | **76 passed** (75 prior + 1 new: `tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature`), 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed** (76 minus the feature-off-only test, plus 5: `decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in`, `many_token_matmul_takes_the_tiled_gemm_path`, `non_q4k_codec_never_takes_the_tiled_gemm_path`, `multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_count`, `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`), 1 skipped |
+| proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped (unaffected by this row) |
+| proxima-model-interop | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed**, 6 skipped (unaffected by this row) |
+| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| omega lib build, `metal-tiled-gemm` | `cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 0 |
+| clippy, default | `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings` | exit 0, zero warnings |
+| clippy, `metal-tiled-gemm` | `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
+
+### Notes — host loadout, and a second obstruction routed around without touching it
+
+Same shared-worktree contamination this file's own ROW 106 already documented: `proxima-listen/src/stream/{mod,default_listener,datagram_listener,datagram_protocol_listener}.rs` were mid-refactor (a `ready_signal` channel type change) for a stretch of this row's session, breaking `cargo nextest run -p proxima-tensor --features std,instrument` (that crate's dev-dependency on the root `proxima` crate pulls `proxima-listen` transitively) with 5 compile errors that were NOT mine and NOT staged/touched — confirmed via `git status --porcelain` (the broken lines were either clean/committed or actively changing on disk mid-poll, per the harness's own live-file-change notice) and via the error count monotonically dropping across three retries (5 → 2 → 0) as the other agent's own fixes landed. Waited and re-ran rather than fixing another agent's in-flight signature change myself; the gate passed once their work reached a green state.
+
+Timed runs polled `uptime` before/after every rep; several polls exceeded the ~4 1-min-load guidance (peaks of 18.60/21.46/26.31) from the same concurrent agent activity — reported per-run rather than discarded, and the diagnosis above explains why the load spikes do not undermine the prefill delta specifically (decode, measured in the SAME contaminated run, stayed near baseline; prefill did not).
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (this row's own scratch build output, release + dev profiles) deleted after extraction. Intermediate per-run logs deleted; one consolidated file kept, `omega/docs/../` — actually kept at the session scratch path cited in the task's own environment block, `row107_raw_results.md`, holding the 6 individual `token_breakdown`/`token_breakdown_metal` captures this row's tables are drawn from.
+
+### Re-provable now
+
+- `cargo nextest run -p omega`
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings`
+- `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings`
+- `cargo nextest run -p proxima-tensor --features std,instrument`
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`
+- `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24` against a `--release --features metal,instrument[,omega/metal-tiled-gemm]` build of `proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`--ignored --exact --nocapture`), reading `step=0`'s `step_wall_ms` for prefill and the mean of `step=1..23` for decode — reproduces both columns of this row's own table.

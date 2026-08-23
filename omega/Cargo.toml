@@ -63,6 +63,16 @@ ane = []
 # `#[cfg(feature = "instrument")]`, so an instrument-off build never pays the
 # `read_ticks()` call it would otherwise cost.
 instrument = ["metal", "proxima-tensor/instrument"]
+# `simdgroup_matrix`-tiled Q4_K GEMM path (`msl.rs`'s `push_tiled_gemm_body`),
+# selected over the row-blocked packed path (`push_packed_row_blocked_body`)
+# only above `sized::TILED_GEMM_MIN_TOKENS` activation rows -- see that
+# const's own doc and `docs/discipline.md` ROW 107. Default-off: this is a
+# second, riskier kernel (`proxima-tensor/docs/discipline.md` ROW 105's own
+# framing) and does not earn the production default until an e2e bench shows
+# the full stack wins with it on. Depends on `metal` (not just `std`): the
+# eligibility gate and kernel body live in `msl.rs`, which is alloc-tier, but
+# the const it reads only has meaning for a Metal dispatch.
+metal-tiled-gemm = ["metal"]
 
 [dependencies]
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
@@ -134,6 +144,12 @@ libc = { workspace = true, optional = true }
 # driver always passes `None` (Metal never owns the caller's memory), but
 # the parameter's type still has to resolve.
 block2 = { version = "0.6", default-features = false, optional = true }
+
+[build-dependencies]
+# reads `omega-runtime.toml` at build time (`build.rs`'s `emit_sizing_consts`,
+# mirroring `proxima-tensor/build.rs`'s function of the same name) --
+# build-dependency only, never links into the compiled artifact.
+toml.workspace = true
 
 [lints]
 workspace = true
