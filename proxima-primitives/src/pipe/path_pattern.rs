@@ -99,15 +99,14 @@ impl PathPattern {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
-    #[rstest]
+    #[proxima::test]
     #[case::root("/", "/", true)]
     #[case::literal_match("/users", "/users", true)]
     #[case::trailing_slash("/users", "/users/", true)]
     #[case::literal_mismatch("/users", "/posts", false)]
     #[case::extra_segment("/users", "/users/42", false)]
-    fn literal_paths(#[case] pattern: &str, #[case] input: &str, #[case] expected: bool) {
+    async fn literal_paths(#[case] pattern: &str, #[case] input: &str, #[case] expected: bool) {
         let parsed = PathPattern::parse(pattern);
         assert_eq!(parsed.matches(input).is_some(), expected);
     }

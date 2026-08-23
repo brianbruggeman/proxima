@@ -350,15 +350,14 @@ impl core::fmt::Debug for RequestStream {
     }
 }
 
-// `#[proxima::test]`, `rstest`, and inline `tokio::spawn`/`tokio::time` pull
-// in the `proxima` / `tokio` dev-dependencies, which the loom build keeps
-// out of the graph (see `[target.'cfg(not(loom))'.dev-dependencies]` in
+// `#[proxima::test]` and inline `tokio::spawn`/`tokio::time` pull in the
+// `proxima` / `tokio` dev-dependencies, which the loom build keeps out of
+// the graph (see `[target.'cfg(not(loom))'.dev-dependencies]` in
 // Cargo.toml); these tests are unrelated to the Notify/watch loom protocol.
 #[cfg(all(test, not(loom)))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
     #[derive(Debug, PartialEq, Eq)]
     struct DummyRecord {
@@ -512,10 +511,9 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::ascii("hello")]
     #[case::unicode("héllo")]
-    #[proxima::test]
     async fn request_stream_roundtrips_via_collect(#[case] input: &'static str) {
         let stream = RequestStream::new(futures::stream::once({
             let bytes = Bytes::copy_from_slice(input.as_bytes());

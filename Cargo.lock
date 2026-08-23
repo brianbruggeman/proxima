@@ -4409,7 +4409,6 @@ dependencies = [
  "proxima-runtime",
  "rand 0.10.2",
  "regex",
- "rstest",
  "rustc-hash",
  "serde",
  "serde_json",
