@@ -46,7 +46,6 @@ std = [
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support"] }
-rstest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [lints]
