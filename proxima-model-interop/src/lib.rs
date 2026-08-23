@@ -29,6 +29,8 @@ mod dtype;
 mod error;
 #[cfg(feature = "std")]
 mod generate;
+#[cfg(feature = "std")]
+mod hf_bind;
 mod hf_config;
 #[cfg(feature = "std")]
 mod loader;

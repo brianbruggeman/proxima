@@ -1,0 +1,521 @@
+//! safetensors weights -> the same [`BoundWeights`] structures
+//! [`crate::bind::bind_all_weights`] produces from a GGUF checkpoint --
+//! HF-directory counterpart to that module, over the tensor manifest
+//! [`proxima_safetensors::Manifest`] hands back instead of GGUF's
+//! [`ParsedGguf`] tensor directory.
+//!
+//! Reuses `bind.rs`'s own decode/transpose/state machinery rather than
+//! duplicating it: [`crate::bind::reinterpret_f32`], [`crate::bind::dequantize`],
+//! [`crate::bind::aligned_f32_view`], [`crate::bind::transpose_out_in_to_in_out`],
+//! and [`BoundWeights`] itself are all format-agnostic once handed raw bytes
+//! and a declared dtype -- the only genuinely new work here is (a) mapping
+//! HF's per-tensor names (`model.layers.0.self_attn.q_proj.weight`) to the
+//! same weight slots GGUF's `blk.0.attn_q.weight` fills, and (b) decoding
+//! [`DType::Float16`]/[`DType::BFloat16`] (safetensors' own on-disk element
+//! types for an unquantized bf16/fp16 checkpoint), which `bind.rs`'s GGUF
+//! path has never needed since no GGUF checkpoint this crate has evaluated
+//! stores `F16`/`Bf16` weights.
+//!
+//! `std`-gated, matching `bind.rs`'s own `bind_all_weights`: both walk a
+//! whole tensor directory and need [`proxima_gguf::restack`]-free but still
+//! platform-shaped support (an owned `Vec<f32>` per non-packed weight, sized
+//! by the checkpoint), and [`crate::generate::LoadedModel`] (the only
+//! caller either bind function needs to serve) is itself `std`-only.
+//!
+//! Mixture-of-experts HF checkpoints are NOT bound here --
+//! [`InteropError::HfMoeWeightsUnsupported`] names the gap rather than
+//! guessing at Mixtral's or Qwen's per-expert tensor-naming convention
+//! against zero real on-disk evidence (the only MoE-shaped checkpoint on
+//! this host is MLX's packed `weight`/`scales`/`biases` layout, explicitly
+//! out of scope for this crate).
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use proxima_safetensors::Manifest;
+use proxima_tensor::DType;
+use proxima_tensor::cpu::QuantizedBlock;
+
+use crate::bind::{BoundWeights, ModelArchitecture, aligned_f32_view, dequantize, reinterpret_f32, transpose_out_in_to_in_out};
+use crate::error::InteropError;
+
+fn find_entry<'manifest>(
+    manifest: &'manifest Manifest,
+    name: &str,
+) -> Result<&'manifest proxima_safetensors::TensorEntry, InteropError> {
+    manifest.tensor(name).ok_or_else(|| InteropError::UnknownTensor { name: name.into() })
+}
+
+/// `entry.data_offsets` are relative to the first byte AFTER the header
+/// (`Manifest`'s own doc, `proxima-safetensors/src/parser.rs`), never to
+/// the start of the whole file -- `data_start` (`8 + header_len`, exactly
+/// what a caller who just parsed `file_bytes`'s own header already knows,
+/// see [`bind_all_weights_from_safetensors`]'s doc) is added here so every
+/// caller of this module hands in the WHOLE file buffer, matching
+/// `bind.rs`'s GGUF convention (`parsed.tensor_data_range`) instead of a
+/// caller having to pre-slice the header off itself.
+fn tensor_bytes<'file>(
+    file_bytes: &'file [u8],
+    data_start: u64,
+    entry: &proxima_safetensors::TensorEntry,
+) -> Result<&'file [u8], InteropError> {
+    let start = data_start
+        .checked_add(entry.data_offsets.0)
+        .and_then(|value| usize::try_from(value).ok());
+    let end = data_start
+        .checked_add(entry.data_offsets.1)
+        .and_then(|value| usize::try_from(value).ok());
+    match (start, end) {
+        (Some(start), Some(end)) => file_bytes.get(start..end).ok_or_else(|| InteropError::UnknownTensor {
+            name: format!("{} (byte range {start}..{end} outside a {}-byte buffer)", entry.name, file_bytes.len()),
+        }),
+        _ => Err(InteropError::UnknownTensor {
+            name: format!("{} (data_start {data_start} + declared offsets overflow usize)", entry.name),
+        }),
+    }
+}
+
+/// Zero-copy counterpart to [`safetensors_tensor_as_f32`], mirroring
+/// [`crate::bind::gguf_tensor_as_packed_block`]: borrows `name`'s raw bytes
+/// straight out of `file_bytes` for [`DType::Float32`] (alignment-checked,
+/// same reasoning as the GGUF path), [`DType::Float16`], or
+/// [`DType::BFloat16`] -- safetensors never block-quantizes, so every
+/// mapped dtype here is a flat per-element scalar array with no sub-block
+/// scale to unpack, unlike GGUF's `Q4_K`/`Q5_K`/`Q6_K`.
+///
+/// # Errors
+///
+/// [`InteropError::UnknownTensor`] if `name` isn't in `manifest`'s tensor
+/// directory, or its declared byte range doesn't fit `file_bytes`;
+/// [`InteropError::UndecodableSafetensorsDType`] for any other `DType`
+/// (an integer type, or a quantized layout's own packed payload type).
+pub(crate) fn safetensors_tensor_as_packed_block<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    name: &str,
+) -> Result<QuantizedBlock<'file>, InteropError> {
+    let entry = find_entry(manifest, name)?;
+    let bytes = tensor_bytes(file_bytes, data_start, entry)?;
+    match entry.dtype {
+        DType::Float32 => aligned_f32_view(bytes).map(QuantizedBlock::Float32).ok_or_else(|| {
+            InteropError::MisalignedFloat32Tensor {
+                tensor: entry.name.clone(),
+            }
+        }),
+        DType::Float16 => Ok(QuantizedBlock::Float16(bytes)),
+        DType::BFloat16 => Ok(QuantizedBlock::BFloat16(bytes)),
+        other => Err(InteropError::UndecodableSafetensorsDType {
+            tensor: entry.name.clone(),
+            dtype: other,
+        }),
+    }
+}
+
+/// Owned-decode counterpart, mirroring [`crate::bind::gguf_tensor_as_f32`]:
+/// reads `name`'s bytes and decodes to an owned `Vec<f32>` -- a straight
+/// reinterpret for `Float32`, and [`proxima_gguf::quant::f16`]/
+/// [`proxima_gguf::quant::bf16`]'s own `dequantize` (reused, not
+/// reimplemented -- both already have exactly this crate's `fn(&[u8], &mut
+/// [f32]) -> Result<(), QuantError>` shape) for `Float16`/`BFloat16`.
+///
+/// # Errors
+///
+/// Same as [`safetensors_tensor_as_packed_block`], plus
+/// [`InteropError::Quant`] if a `Float16`/`BFloat16` tensor's byte length is
+/// not a whole number of 2-byte elements.
+pub(crate) fn safetensors_tensor_as_f32(manifest: &Manifest, file_bytes: &[u8], data_start: u64, name: &str) -> Result<Vec<f32>, InteropError> {
+    let entry = find_entry(manifest, name)?;
+    let bytes = tensor_bytes(file_bytes, data_start, entry)?;
+    let element_count = entry.shape.iter().product::<u64>() as usize;
+    match entry.dtype {
+        DType::Float32 => Ok(reinterpret_f32(bytes)),
+        DType::Float16 => dequantize(bytes, element_count, proxima_gguf::quant::f16::dequantize),
+        DType::BFloat16 => dequantize(bytes, element_count, proxima_gguf::quant::bf16::dequantize),
+        other => Err(InteropError::UndecodableSafetensorsDType {
+            tensor: entry.name.clone(),
+            dtype: other,
+        }),
+    }
+}
+
+/// A learned 1-D scale (RMSNorm weight) -- same role as
+/// [`crate::bind::bind_dense`], reused under a new name only because its
+/// GGUF counterpart is `pub(crate)` to `bind.rs`'s own module, not this one.
+fn hf_bind_dense<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    name: String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &name) {
+        Ok(block @ QuantizedBlock::Float32(borrowed)) => {
+            state.resident_bytes += core::mem::size_of_val(borrowed);
+            state.packed.push((name, block));
+        }
+        Ok(block @ (QuantizedBlock::Float16(bytes) | QuantizedBlock::BFloat16(bytes))) => {
+            state.resident_bytes += bytes.len();
+            state.packed.push((name, block));
+        }
+        Ok(_) | Err(_) => {
+            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
+            state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+            state.owned.push((name, decoded));
+        }
+    }
+    Ok(())
+}
+
+/// A 2-D projection weight bound as one matmul operand -- HF/PyTorch's
+/// `nn.Linear` weight is `[out_features, in_features]`, row-major, the
+/// identical on-disk convention GGUF's own `[out, in]` layout uses (see
+/// [`crate::bind::transpose_out_in_to_in_out`]'s doc), so the same
+/// dequantize-then-transpose fallback applies unchanged. Packed
+/// `Float16`/`BFloat16` binds straight through zero-copy: [`QuantizedBlock`]'s
+/// own matmul kernel (`proxima_tensor::cpu::matmul_f16_f32`/`matmul_bf16_f32`)
+/// walks the packed bytes in their native `[out, in]` order directly, the
+/// same way a packed `Q4_K` operand does, so no transpose is needed on that
+/// path at all -- only the OWNED f32 fallback needs one, exactly mirroring
+/// [`crate::bind::bind_matmul_weight`].
+fn hf_bind_matmul_weight<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    name: String,
+    out_dim: usize,
+    in_dim: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &name) {
+        Ok(block) => state.packed.push((name, block)),
+        Err(_) => {
+            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
+            state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+            state.owned.push((name.clone(), transpose_out_in_to_in_out(&decoded, &name, out_dim, in_dim)?));
+        }
+    }
+    Ok(())
+}
+
+/// Every dense-checkpoint weight name [`crate::bind::bind_all_weights`]'s
+/// GGUF loop binds, HF's own naming instead -- the standard Llama/Mistral/
+/// Qwen `transformers` layout (`model.layers.{layer}.*`), the convention
+/// every dense checkpoint on HuggingFace this crate has been checked against
+/// uses.
+mod names {
+    use alloc::format;
+    use alloc::string::String;
+
+    pub(super) fn embed_tokens() -> String {
+        "model.embed_tokens.weight".into()
+    }
+    pub(super) fn input_layernorm(layer: u32) -> String {
+        format!("model.layers.{layer}.input_layernorm.weight")
+    }
+    pub(super) fn post_attention_layernorm(layer: u32) -> String {
+        format!("model.layers.{layer}.post_attention_layernorm.weight")
+    }
+    pub(super) fn q_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.self_attn.q_proj.weight")
+    }
+    pub(super) fn k_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.self_attn.k_proj.weight")
+    }
+    pub(super) fn v_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.self_attn.v_proj.weight")
+    }
+    pub(super) fn o_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.self_attn.o_proj.weight")
+    }
+    pub(super) fn gate_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.mlp.gate_proj.weight")
+    }
+    pub(super) fn up_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.mlp.up_proj.weight")
+    }
+    pub(super) fn down_proj(layer: u32) -> String {
+        format!("model.layers.{layer}.mlp.down_proj.weight")
+    }
+    pub(super) fn final_norm() -> String {
+        "model.norm.weight".into()
+    }
+    pub(super) fn lm_head() -> String {
+        "lm_head.weight".into()
+    }
+}
+
+/// HF/safetensors counterpart to [`crate::bind::bind_all_weights`]: binds
+/// every weight [`proxima_tensor::spec::mistral_cached_forward_program`]
+/// needs out of a single safetensors buffer's [`Manifest`], using HF's own
+/// per-tensor names ([`names`]) in place of GGUF's `blk.{n}.*` convention.
+///
+/// `file_bytes` is the WHOLE safetensors buffer (matching `bind.rs`'s GGUF
+/// convention), and `data_start` is the byte offset where tensor data
+/// begins -- `8 + header_len`, exactly what a caller already computed while
+/// parsing `file_bytes`'s own header into `manifest` (the same value
+/// `bf16_real_checkpoint_parity.rs`'s own `real_manifest` helper derives by
+/// hand for the identical reason: [`Manifest`]/[`proxima_safetensors::TensorEntry`]'s
+/// own `data_offsets` are relative to the byte AFTER the header, never to
+/// the start of the file, per that type's own doc).
+///
+/// Single-shard only: a real multi-file HF checkpoint (this crate's own
+/// evidence, `~/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/`,
+/// ships four `model-0000N-of-00004.safetensors` shards plus a
+/// `model.safetensors.index.json` mapping each tensor name to its shard) is
+/// NOT assembled here -- a caller with several shards' `(Manifest,
+/// file_bytes, data_start)` triples calls this once per shard it owns and
+/// merges the resulting [`BoundWeights`], or (unimplemented) this crate
+/// grows an index-aware entry point that resolves a name to its shard
+/// first. That index-following step is the concrete piece still missing
+/// between this function and a full multi-shard HF directory load.
+///
+/// # Errors
+///
+/// [`InteropError::HfMoeWeightsUnsupported`] if `architecture.expert_count`
+/// is nonzero; otherwise whatever [`hf_bind_dense`]/[`hf_bind_matmul_weight`]
+/// can fail with (see [`safetensors_tensor_as_f32`]/
+/// [`safetensors_tensor_as_packed_block`]).
+pub(crate) fn bind_all_weights_from_safetensors<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    architecture: &ModelArchitecture,
+) -> Result<BoundWeights<'file>, InteropError> {
+    if architecture.expert_count != 0 {
+        return Err(InteropError::HfMoeWeightsUnsupported {
+            expert_count: architecture.expert_count,
+        });
+    }
+
+    let mut state = BoundWeights {
+        resident_bytes: file_bytes.len(),
+        owned: Vec::new(),
+        packed: Vec::new(),
+    };
+
+    let embedding = architecture.embedding as usize;
+    let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
+    let feed_forward = architecture.feed_forward as usize;
+    let vocab = architecture.vocab as usize;
+
+    hf_bind_dense(manifest, file_bytes, data_start, names::embed_tokens(), &mut state)?;
+
+    for layer in 0..architecture.block_count {
+        hf_bind_dense(manifest, file_bytes, data_start, names::input_layernorm(layer), &mut state)?;
+        hf_bind_dense(manifest, file_bytes, data_start, names::post_attention_layernorm(layer), &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::q_proj(layer), embedding, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::k_proj(layer), kv_dim, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::v_proj(layer), kv_dim, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::o_proj(layer), embedding, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::gate_proj(layer), feed_forward, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::up_proj(layer), feed_forward, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::down_proj(layer), embedding, feed_forward, &mut state)?;
+    }
+
+    hf_bind_dense(manifest, file_bytes, data_start, names::final_norm(), &mut state)?;
+    hf_bind_matmul_weight(manifest, file_bytes, data_start, names::lm_head(), vocab, embedding, &mut state)?;
+    Ok(state)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use alloc::vec;
+
+    use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
+
+    use super::*;
+
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<u8>>()
+    }
+
+    /// `8 + header_len`, read off a real written safetensors buffer's own
+    /// 8-byte little-endian length prefix -- the `data_start` every
+    /// `bind_all_weights_from_safetensors` call in this module needs, since
+    /// `Manifest`'s own `data_offsets` are relative to this point (see
+    /// `bind_all_weights_from_safetensors`'s own doc), not to byte 0.
+    fn header_data_start(file_bytes: &[u8]) -> u64 {
+        let mut length_prefix = [0u8; 8];
+        length_prefix.copy_from_slice(&file_bytes[..8]);
+        8 + u64::from_le_bytes(length_prefix)
+    }
+
+    /// The smallest real dense architecture this crate's weight names can
+    /// bind: 1 layer, embedding=4, feed_forward=8, 2 query heads, 1 kv head
+    /// (GQA), head_dim=2, vocab=3 -- every dimension distinct so a
+    /// transposed or mis-shaped bind would produce a length mismatch, not
+    /// silently pass.
+    fn tiny_dense_architecture() -> ModelArchitecture {
+        ModelArchitecture {
+            vocab: 3,
+            embedding: 4,
+            feed_forward: 8,
+            query_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            block_count: 1,
+            expert_count: 0,
+            expert_used_count: 0,
+            rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+        }
+    }
+
+    /// Builds a real (in-memory-encoded, byte-for-byte real safetensors wire
+    /// format via [`write_complete`]) checkpoint carrying every weight name
+    /// [`bind_all_weights_from_safetensors`] looks up for
+    /// [`tiny_dense_architecture`], each an `F32` tensor of the exact shape
+    /// the architecture implies.
+    fn tiny_dense_checkpoint() -> Vec<u8> {
+        let architecture = tiny_dense_architecture();
+        let embedding = architecture.embedding as usize;
+        let feed_forward = architecture.feed_forward as usize;
+        let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
+        let vocab = architecture.vocab as usize;
+
+        let mut owned_data: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut push = |name: String, elements: usize| {
+            let values: Vec<f32> = (0..elements).map(|index| index as f32 * 0.5).collect();
+            owned_data.push((name, f32_bytes(&values)));
+        };
+
+        push(names::embed_tokens(), vocab * embedding);
+        push(names::input_layernorm(0), embedding);
+        push(names::post_attention_layernorm(0), embedding);
+        push(names::q_proj(0), embedding * embedding);
+        push(names::k_proj(0), kv_dim * embedding);
+        push(names::v_proj(0), kv_dim * embedding);
+        push(names::o_proj(0), embedding * embedding);
+        push(names::gate_proj(0), feed_forward * embedding);
+        push(names::up_proj(0), feed_forward * embedding);
+        push(names::down_proj(0), embedding * feed_forward);
+        push(names::final_norm(), embedding);
+        push(names::lm_head(), vocab * embedding);
+
+        let tensors = owned_data
+            .iter()
+            .map(|(name, bytes)| {
+                let elements = bytes.len() / 4;
+                TensorPayload {
+                    name: name.clone(),
+                    dtype: DType::Float32,
+                    shape: vec![elements as u64],
+                    data: bytes.as_slice(),
+                }
+            })
+            .collect();
+
+        write_complete(&SafetensorsModel {
+            tensors,
+            metadata: alloc::collections::BTreeMap::new(),
+        })
+        .expect("writes a real safetensors buffer")
+    }
+
+    /// Every weight name [`bind_all_weights_from_safetensors`]'s loop looks
+    /// up is present and binds without error, over a real (wire-format
+    /// encoded) safetensors buffer -- proves the HF name mapping matches
+    /// what a real dense checkpoint's own tensor directory would carry, not
+    /// just that the function compiles.
+    #[test]
+    fn binds_every_dense_weight_name_from_a_real_safetensors_buffer() {
+        let file_bytes = tiny_dense_checkpoint();
+        let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+        let architecture = tiny_dense_architecture();
+        let data_start = header_data_start(&file_bytes);
+
+        let bound = bind_all_weights_from_safetensors(&manifest, &file_bytes, data_start, &architecture)
+            .expect("binds every dense weight this architecture's forward program needs");
+
+        // 12 tensors total: embed_tokens, 2 norms, 4 attention projections,
+        // 3 ffn projections, final_norm, lm_head -- every one bound as an
+        // owned f32 buffer here since none of this fixture's tensors are
+        // 4-byte-misaligned within the written buffer.
+        assert_eq!(bound.owned.len() + bound.packed.len(), 12, "every named weight must bind, none silently skipped");
+    }
+
+    /// The one weight this test perturbs by transposing it wrong would prove
+    /// [`transpose_out_in_to_in_out`] is actually being applied: corrupt
+    /// `q_proj`'s declared shape so it disagrees with `out_dim*in_dim`, and
+    /// the typed shape-mismatch error must fire, not a panic mid-transpose.
+    /// Forces the OWNED decode-then-transpose fallback (not the zero-copy
+    /// packed path, which never validates a shape against `out_dim`/`in_dim`
+    /// at all -- see [`hf_bind_matmul_weight`]'s own doc) by prepending a
+    /// dummy leading tensor whose byte length shifts `q_proj`'s absolute
+    /// file offset off a 4-byte boundary: safetensors writes tensors
+    /// back-to-back with zero padding between them (`writer.rs`'s own doc),
+    /// so the padding length is fully under this test's control -- tried
+    /// 0..4 until the real, measured offset actually lands on an unaligned
+    /// byte, rather than assumed.
+    #[test]
+    fn shape_mismatched_weight_is_a_typed_error_not_a_panic() {
+        let architecture = tiny_dense_architecture();
+        let embedding = architecture.embedding as usize;
+        let bad_q_proj = f32_bytes(&vec![0.0f32; embedding * embedding - 1]);
+
+        for padding in 0..4u64 {
+            let dummy_bytes = vec![0u8; padding as usize];
+            let tensors = vec![
+                TensorPayload {
+                    name: "dummy_padding".into(),
+                    dtype: DType::Int8,
+                    shape: vec![padding],
+                    data: dummy_bytes.as_slice(),
+                },
+                TensorPayload {
+                    name: names::q_proj(0),
+                    dtype: DType::Float32,
+                    shape: vec![(embedding * embedding - 1) as u64],
+                    data: bad_q_proj.as_slice(),
+                },
+            ];
+            let file_bytes = write_complete(&SafetensorsModel {
+                tensors,
+                metadata: alloc::collections::BTreeMap::new(),
+            })
+            .expect("writes a real safetensors buffer");
+            let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+            let entry = manifest.tensor(&names::q_proj(0)).expect("q_proj entry present");
+            let data_start = 8 + u64::from_le_bytes(file_bytes[..8].try_into().expect("8-byte length prefix"));
+            let absolute_offset = data_start + entry.data_offsets.0;
+            if absolute_offset.is_multiple_of(4) {
+                continue; // still aligned with this padding length; try the next one
+            }
+
+            let outcome = hf_bind_matmul_weight(&manifest, &file_bytes, data_start, names::q_proj(0), embedding, embedding, &mut BoundWeights {
+                resident_bytes: 0,
+                owned: Vec::new(),
+                packed: Vec::new(),
+            });
+
+            assert!(
+                matches!(outcome, Err(InteropError::DenseWeightShapeMismatch { .. })),
+                "a short decoded buffer reached through the misaligned owned-decode fallback must \
+                 surface as a typed error, got {outcome:?}"
+            );
+            return;
+        }
+        panic!("could not construct a misaligned f32 tensor offset with padding in 0..4 -- test setup bug");
+    }
+
+    #[test]
+    fn moe_architecture_is_a_typed_error_not_an_attempted_wrong_bind() {
+        let mut architecture = tiny_dense_architecture();
+        architecture.expert_count = 8;
+        architecture.expert_used_count = 2;
+        let file_bytes: Vec<u8> = Vec::new();
+        let manifest = Manifest::default();
+
+        let outcome = bind_all_weights_from_safetensors(&manifest, &file_bytes, 0, &architecture);
+        let Err(error) = outcome else {
+            panic!("a moe architecture must surface as a typed error, not an attempted bind");
+        };
+
+        assert!(
+            matches!(error, InteropError::HfMoeWeightsUnsupported { expert_count: 8 }),
+            "expected HfMoeWeightsUnsupported{{expert_count: 8}}, got {error:?}"
+        );
+    }
+}

@@ -80,6 +80,7 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
+use crate::hf_bind::bind_all_weights_from_safetensors;
 use crate::serving::ServingConfig;
 use crate::serving::apply_serving_config;
 #[cfg(feature = "metal")]
@@ -345,6 +346,60 @@ impl<'file> LoadedModel<'file> {
         // exactly the dense program this crate has always built -- a
         // mixture-of-experts checkpoint (`expert_count > 0`) is the only case
         // that changes which program gets compiled here.
+        let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.query_heads,
+            architecture.kv_heads,
+            architecture.head_dim,
+            architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
+        )?;
+        Ok(Self {
+            weights,
+            architecture,
+            vocab,
+            program,
+            logits_root,
+            cache_roots,
+        })
+    }
+
+    /// [`Self::load`]'s HF/safetensors counterpart: binds every weight out
+    /// of a single safetensors buffer's [`proxima_safetensors::Manifest`]
+    /// ([`crate::hf_bind::bind_all_weights_from_safetensors`]) instead of a
+    /// `ParsedGguf` tensor directory, and takes `architecture`/`vocab`
+    /// already built rather than deriving them from the checkpoint itself --
+    /// unlike GGUF, safetensors carries neither: `architecture` comes from
+    /// `config.json` ([`crate::hf_config::architecture_from_hf_config`]),
+    /// and HF's own vocabulary lives in `tokenizer.json`/`tokenizer_config.json`,
+    /// files this crate has no reader for yet (out of scope for this
+    /// change -- a caller builds its own [`Vocab`] however it can, the same
+    /// way any [`Pipe`] caller owns its own setup-path inputs).
+    ///
+    /// `data_start` (`8 + header_len`) is the byte offset into `file_bytes`
+    /// where tensor data begins -- `manifest`'s own `data_offsets` are
+    /// relative to that point, never to the start of the file (see
+    /// [`crate::hf_bind::bind_all_weights_from_safetensors`]'s doc); a
+    /// caller who just parsed `file_bytes`'s header into `manifest` already
+    /// has this value.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::HfMoeWeightsUnsupported`] if `architecture.expert_count`
+    /// is nonzero; otherwise whatever
+    /// [`crate::hf_bind::bind_all_weights_from_safetensors`] or
+    /// [`mistral_cached_forward_program_with_experts`] can fail with.
+    pub fn load_from_safetensors(
+        manifest: &proxima_safetensors::Manifest,
+        file_bytes: &'file [u8],
+        data_start: u64,
+        architecture: ModelArchitecture,
+        vocab: Vocab,
+    ) -> Result<Self, InteropError> {
+        let weights = bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
         let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,

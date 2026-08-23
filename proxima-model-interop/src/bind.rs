@@ -162,7 +162,7 @@ pub fn gguf_tensor_as_packed_block<'a>(
 /// checked, so the `f32` slice covers exactly `bytes`'s bytes with none
 /// left over.
 #[cfg(feature = "std")]
-fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
+pub(crate) fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
     let float_size = core::mem::size_of::<f32>();
     if !bytes.len().is_multiple_of(float_size) {
         return None;
@@ -182,7 +182,7 @@ fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo,
         .ok_or_else(|| InteropError::UnknownTensor { name: name.into() })
 }
 
-fn reinterpret_f32(data: &[u8]) -> Vec<f32> {
+pub(crate) fn reinterpret_f32(data: &[u8]) -> Vec<f32> {
     data.as_chunks::<4>()
         .0
         .iter()
@@ -190,7 +190,7 @@ fn reinterpret_f32(data: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn dequantize(
+pub(crate) fn dequantize(
     data: &[u8],
     element_count: usize,
     decode: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
