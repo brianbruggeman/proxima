@@ -1636,6 +1636,602 @@ fn append_mistral_cached_moe_layer(
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
 
+/// Which mixer one transformer block runs. LFM2.5-8B-A1B (`general.architecture
+/// = "lfm2moe"`) hybridizes short-convolution and attention blocks in the same
+/// 24-layer stack, and GGUF carries no `layer_types` metadata key for this
+/// architecture (confirmed absent on the real checkpoint's own metadata dump)
+/// -- the only ground truth is which tensors a block's own name prefix owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerKind {
+    Attention,
+    ShortConv,
+}
+
+impl LayerKind {
+    /// Derives one block's kind from its own tensor name set: LFM2.5-8B-A1B's
+    /// real checkpoint shows every block owns exactly one of
+    /// `blk.{layer}.attn_q.weight` or `blk.{layer}.shortconv.conv.weight`,
+    /// never neither and never both, so this is a presence check, not a
+    /// classifier -- the caller (whoever already has the checkpoint's tensor
+    /// directory, e.g. `proxima-model-interop`) walks that directory once per
+    /// block and hands this a `layer`-scoped name iterator; this function
+    /// never reads a file itself, keeping `proxima-tensor` free of a GGUF
+    /// dependency.
+    pub fn from_tensor_names<'name>(
+        names: impl IntoIterator<Item = &'name str>,
+        layer: u32,
+    ) -> Result<Self, TensorError> {
+        let attention_marker = alloc::format!("blk.{layer}.attn_q.weight");
+        let conv_marker = alloc::format!("blk.{layer}.shortconv.conv.weight");
+        for name in names {
+            if name == attention_marker {
+                return Ok(Self::Attention);
+            }
+            if name == conv_marker {
+                return Ok(Self::ShortConv);
+            }
+        }
+        Err(TensorError::UndeterminedLayerKind { layer })
+    }
+}
+
+/// A fixed-width causal depthwise convolution (`l_cache` taps, one weight per
+/// channel per tap, no cross-channel mixing), built from the existing
+/// `Input`/`Elementwise`/`Reduce`/`Iota`/`Constant` vocabulary with no new
+/// `Op` -- the pipe question this crate's own rule forces before any new
+/// type, answered by writing the expression below rather than by arguing for
+/// one.
+///
+/// `specs/conv2d.toml`'s own doc already proved the naive route is closed:
+/// windowing `x` directly with a negative-offset `Affine` map
+/// (`s-(l_cache-1)+l`) fails [`shape::bounds_check`] globally, because an
+/// iteration axis always starts at 0 and the check is over the *whole*
+/// symbolic extent, not per element -- at `s=0, l=0` the window reaches
+/// index `-(l_cache-1)`, unconditionally out of bounds regardless of how
+/// large the buffer is. `conv2d.toml` closes that gap by pre-padding its
+/// input's own data; this crate's op set has no concat/pad primitive to build
+/// that padding for an internal (not caller-supplied) tensor, so this
+/// function takes a different, still-existing-primitives route: it never
+/// forms the negative index at all.
+///
+/// `raw_position = s + l - (l_cache - 1)` is computed as data (two `Iota`s
+/// plus a `Constant` offset, exactly [`causal_mask`]'s own `is_future`
+/// composition), `clamped_position = max(raw_position, 0)` (always inside
+/// `[0, s_max]`, since `raw_position`'s own maximum, reached at
+/// `l = l_cache - 1`, is exactly `s`), and `clamped_position` addresses `x`
+/// through [`IndexMap::Computed`] -- the same gather
+/// [`gathered_expert_product`] already uses to read a data-dependent row.
+/// Taps whose *unclamped* position is negative (real left-padding) are zeroed
+/// post-gather via `Select`, mirroring how [`causal_mask`] masks attention
+/// scores rather than ever reading an invalid position.
+fn causal_conv1d(program: &mut Vec<Op>, x: NodeId, weight: NodeId, l_cache: u32) -> Result<NodeId, TensorError> {
+    if l_cache == 0 {
+        return Err(TensorError::InvalidConvConfig { l_cache });
+    }
+
+    let sequence_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
+    let tap_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(l_cache) });
+    let window_offset = scalar_constant(program, -((l_cache - 1) as f32));
+
+    let sequence_plus_tap = elementwise(program, DType::Float32, ScalarOp::Add, &[(sequence_index, "s->sl"), (tap_index, "l->sl")])?;
+    let raw_position = elementwise(program, DType::Float32, ScalarOp::Add, &[(sequence_plus_tap, "sl->sl"), (window_offset, "->sl")])?;
+
+    // `clamped_position` must be an `Op::Reduce`, not a plain `Elementwise`,
+    // even though the fold itself is trivial (`max` over a synthetic 2-wide
+    // axis holding `[raw_position, 0]`): `bind::BoundOpBuilder::push`'s
+    // `Op::Elementwise` arm only forces materialization for nodes it finds in
+    // its own `operands` list, and a `Computed` gather's `indices` reference
+    // lives on a *different* node's operand entry -- a lone `Elementwise`
+    // referenced only that way can sit `held` (fusion-deferred) past the
+    // point a later gather needs its buffer, surfacing as
+    // `TensorError::NotLowerable`'s "operand buffer missing at evaluation
+    // time" (confirmed empirically: a first version of this function used
+    // exactly that shape and hit precisely this). `Op::Reduce`'s own arm
+    // always `push_ready`s immediately (`bind.rs`'s `push`, the
+    // `Op::Reduce(reduce)` match arm), which is why every existing gather
+    // index in this crate (`route` in [`gathered_expert_product`]) is already
+    // a `Reduce`, never a bare `Elementwise` -- this mirrors that, rather
+    // than being a new exception.
+    let candidate_axis = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(2) });
+    let zero = scalar_constant(program, 0.0);
+    // `zero_wide`, not the rank-0 `zero` above, is `is_raw_slot`'s second
+    // operand: a rank-0 operand contributes no extent to any axis, so
+    // `candidate_axis` alone (which only addresses `c`) would leave `s` and
+    // `l` unconstrained on this node and `shape::infer` rejects that
+    // (`TensorError::UnconstrainedDim`) -- every other broadcast pair in this
+    // crate (e.g. `neg_infinity`/`is_future` in [`causal_mask`]'s callers)
+    // always has a same-call sibling operand of the full iteration rank for
+    // exactly this reason; `zero_wide`'s declared `[Symbolic(0), l_cache]`
+    // shape is that sibling here, still comparing against literal `0.0`.
+    let zero_wide = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Symbolic(0), Extent::Static(l_cache)],
+            value: 0.0,
+        },
+    );
+    let is_raw_slot = elementwise(program, DType::Float32, ScalarOp::Equal, &[(candidate_axis, "c->slc"), (zero_wide, "sl->slc")])?;
+    let candidate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(is_raw_slot, "slc->slc"), (raw_position, "sl->slc"), (zero, "->slc")],
+    )?;
+    let clamped_position = reduce(program, DType::Int32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, candidate, "slc->slc", "sl->slc")?;
+
+    let negative_one = scalar_constant(program, -1.0);
+    let is_valid = elementwise(program, DType::Float32, ScalarOp::Greater, &[(raw_position, "sl->sl"), (negative_one, "->sl")])?;
+
+    let gathered_map = IndexMap::Computed {
+        indices: clamped_position,
+        index_map: map::projection(3, &[0, 1]),
+        base: IndexPattern {
+            iter_rank: 3,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let windowed = op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(x, gathered_map)],
+            name: None,
+        },
+    );
+
+    let tap_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(windowed, "sld->sld"), (weight, "ld->sld")])?;
+    let zero_tap = scalar_constant(program, 0.0);
+    let masked_tap = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(is_valid, "sl->sld"), (tap_product, "sld->sld"), (zero_tap, "->sld")],
+    )?;
+
+    reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, masked_tap, "sld->sld", "sd->sld")
+}
+
+/// LFM2's gated short-convolution mixer, [`append_mistral_layer`]'s
+/// attention-block counterpart for a `LayerKind::ShortConv` block: three
+/// separate `embedding x embedding` projections (`b_proj`/`c_proj`/`x_proj`)
+/// stand in for the real checkpoint's single fused `blk.N.shortconv.in_proj.weight`
+/// (`[embedding, 3*embedding]`, one matmul producing three same-width
+/// branches) -- **not** a shape this function chose for its own sake. A
+/// single reduce over the fused weight followed by three static-offset
+/// slices back out was the first version of this function, and it does not
+/// type-check: `shape::unify_iteration_space` (`shape.rs:195-212`) resolves a
+/// pure single-term axis's extent from the *sliced operand's own buffer
+/// width* regardless of its offset (confirmed empirically --
+/// `TensorError::ExtentMismatch` at the first later consumer that expects
+/// `embedding`, not `3*embedding`), so an offset-only slice of a fused
+/// `[s, 3*embedding]` tensor can never narrow to `[s, embedding]` inside this
+/// algebra's current `Affine` grammar -- only a *strided* axis (coefficient
+/// != 1, [`append_attention_mixer`]'s own `2*i` RoPE pattern) escapes that
+/// branch, and a contiguous 2048-wide slice is not a stride. Splitting into
+/// three independently-shaped `Input`s sidesteps the gap entirely, at the
+/// cost of pushing the fused-to-three-tensor split to whichever binder loads
+/// the real checkpoint (unimplemented this session, same as
+/// [`append_mistral_layer`]'s own `wq`/`wk`/`wv` already being separate
+/// `Input`s despite some checkpoints fusing QKV on disk).
+///
+/// `b_proj` gates the ungated `x_proj` branch, [`causal_conv1d`] convolves
+/// the gated result causally over `l_cache` taps, `c_proj` gates the
+/// convolved result, and `out_proj` projects back to `embedding` width --
+/// LiquidAI's published LFM2 short-convolution block, `y = out_proj(C ⊙
+/// conv(B ⊙ x))`, no activation function inside the block itself, unlike the
+/// SwiGLU FFN every layer still runs after it. This branch assignment and
+/// tap direction are read directly off HuggingFace's own reference
+/// implementation (`transformers/models/lfm2_moe/modeling_lfm2_moe.py`,
+/// `Lfm2MoeShortConv.slow_forward`, lines 434-465 of the checked-out
+/// package): `BCx = in_proj(x).transpose(-1,-2)` then `B, C, x =
+/// BCx.chunk(3, dim=-2)` -- `B` first, `C` second, ungated `x` third along
+/// the packed axis, exactly `b_proj`/`c_proj`/`x_proj`'s declared order
+/// below -- `Bx = B * x`, `conv_out = self.conv(Bx)` (an `nn.Conv1d` with
+/// `padding = l_cache - 1`, left-only), `y = C * conv_out`,
+/// `out_proj(y)`. [`causal_conv1d`]'s own tap convention (`l = l_cache - 1`
+/// is the current position, `l = 0` the furthest lookback) matches
+/// `nn.Conv1d`'s left-padded-causal convolution exactly: with `K - 1` zeros
+/// prepended, `output[t] = sum_k weight[k] * padded_input[t + k]`, so
+/// `weight[K-1]` always pairs with `input[t]` and `weight[0]` with
+/// `input[t - (K-1)]`, the same pairing this function's own weight map
+/// (`ld->sld`) uses.
+#[allow(clippy::too_many_arguments)]
+fn append_lfm2_conv_mixer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    norm_weight: NodeId,
+    b_proj: NodeId,
+    c_proj: NodeId,
+    x_proj: NodeId,
+    conv_weight: NodeId,
+    out_proj: NodeId,
+    l_cache: u32,
+) -> Result<NodeId, TensorError> {
+    let normed = rmsnorm(program, x, norm_weight, inv_dim, eps)?;
+
+    let branch_b_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "sd->sdg"), (b_proj, "dg->sdg")])?;
+    let branch_b = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, branch_b_product, "sdg->sdg", "sg->sdg")?;
+
+    let branch_x_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "sd->sdg"), (x_proj, "dg->sdg")])?;
+    let branch_x = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, branch_x_product, "sdg->sdg", "sg->sdg")?;
+
+    let branch_c_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "sd->sdg"), (c_proj, "dg->sdg")])?;
+    let branch_c = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, branch_c_product, "sdg->sdg", "sg->sdg")?;
+
+    let gated_input = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(branch_b, "sg->sg"), (branch_x, "sg->sg")])?;
+    let convolved = causal_conv1d(program, gated_input, conv_weight, l_cache)?;
+    let gated_output = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(convolved, "sg->sg"), (branch_c, "sg->sg")])?;
+
+    let out_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gated_output, "sd->sdo"), (out_proj, "do->sdo")])?;
+    let mixer_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, out_product, "sdo->sdo", "so->sdo")?;
+
+    elementwise(program, DType::Float32, ScalarOp::Add, &[(mixer_out, "sd->sd"), (x, "sd->sd")])
+}
+
+/// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
+/// causal mask + residual, no FFN) -- the piece [`lfm2_forward_program_with_experts`]
+/// needs on its own, since an attention block there sits beside
+/// [`append_lfm2_conv_mixer`] rather than always beside the same FFN choice
+/// [`append_mistral_layer`] bundles it with. Node-for-node the same attention
+/// graph [`append_mistral_layer`] runs before its own FFN call, extracted
+/// rather than shared by refactoring that function, so the dense Mistral/Llama
+/// path's own generated program bytes never change shape because this
+/// function exists next to it.
+#[allow(clippy::too_many_arguments)]
+fn append_attention_mixer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    cos: NodeId,
+    sin: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    neg_infinity: NodeId,
+    group: u32,
+    attn_norm_weight: NodeId,
+    wq: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+) -> Result<NodeId, TensorError> {
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
+    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+
+    let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
+    let k = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+
+    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
+    let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+
+    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos, "si->shi")])?;
+    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")])?;
+    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
+    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin, "si->shi")])?;
+    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")])?;
+    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+
+    let k_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (cos, "si->sui")])?;
+    let k_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")])?;
+    let rotated_k_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")])?;
+    let k_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (sin, "si->sui")])?;
+    let k_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")])?;
+    let rotated_k_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")])?;
+
+    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+
+    let score_even_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (rotated_k_even, "tui->stugi")])?;
+    let score_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_even_product, "stugi->stugi", "stug->stugi")?;
+    let score_odd_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (rotated_k_odd, "tui->stugi")])?;
+    let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
+    let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
+
+    let scores_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")])?;
+
+    let scores_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(is_future, "st->stug"), (neg_infinity, "->stug"), (scores_scaled, "stug->stug")],
+    )?;
+
+    let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
+    let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(scores_masked, "stug->stug"), (score_max, "sug->stug")])?;
+    let weights = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "stug->stug")])?;
+    let weight_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "stug->stug", "sug->stug")?;
+    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
+    let probabilities = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")])?;
+
+    let attended_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(probabilities, "stug->stugd"), (v, "tud->stugd")])?;
+    let attended = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_product, "stugd->stugd", "sugd->stugd")?;
+
+    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
+    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+
+    elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])
+}
+
+/// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
+/// [`append_attention_mixer`] or [`append_lfm2_conv_mixer`] per its own
+/// `layer_kinds[layer]` (derived by [`LayerKind::from_tensor_names`] from the
+/// real checkpoint's tensor directory, since `layer_types` is not a metadata
+/// key this architecture writes), then a shared RMSNorm and
+/// [`append_moe_ffn`]/dense-triple FFN exactly like
+/// [`mistral_forward_program_with_experts`]'s own MoE branch --
+/// `leading_dense_block_count` (LFM2.5-8B-A1B: `2`) is threaded per layer
+/// rather than a single crate-wide dense/MoE switch, since this checkpoint's
+/// first two blocks are dense and the rest are routed.
+///
+/// Prefill-only: takes the whole prompt as one `[seq, embedding]` pass, the
+/// same scope [`mistral_forward_program_with_experts`] has. A KV-cached and
+/// conv-state-cached incremental counterpart (mirroring
+/// [`mistral_cached_forward_program_with_experts`]) is a further step this
+/// function's own doc does not claim -- [`causal_conv1d`]'s masked-gather
+/// composition only needs the whole sequence to be present at once, which a
+/// one-token-at-a-time decode call does not have.
+#[allow(clippy::too_many_arguments)]
+pub fn lfm2_forward_program_with_experts(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    expert_feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    leading_dense_block_count: u32,
+    l_cache: u32,
+    layer_kinds: &[LayerKind],
+) -> Result<(Vec<Op>, NodeId), TensorError> {
+    if layer_kinds.len() != block_count as usize {
+        return Err(TensorError::LayerKindCountMismatch {
+            expected: block_count,
+            found: layer_kinds.len(),
+        });
+    }
+
+    let group = query_heads / kv_heads;
+    let pairs = head_dim / 2;
+
+    let mut program = Vec::new();
+
+    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+    let table = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+        "token_embd.weight",
+    );
+    let mut x = embedding_lookup(&mut program, table, ids);
+
+    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let ones = scalar_constant(&mut program, 1.0);
+    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    let cos = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)], "rope_cos");
+    let sin = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)], "rope_sin");
+    let group_ones = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            value: 1.0,
+        },
+    );
+    let (is_future, neg_infinity) = causal_mask(&mut program)?;
+
+    for (layer, kind) in layer_kinds.iter().enumerate() {
+        let layer = layer as u32;
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.attn_norm.weight"),
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_norm.weight"),
+        );
+
+        let post_mixer = match kind {
+            LayerKind::Attention => {
+                let wq = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(query_heads), Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_q.weight"),
+                );
+                let wk = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_k.weight"),
+                );
+                let wv = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_v.weight"),
+                );
+                let wo = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Static(kv_heads),
+                        Extent::Static(group),
+                        Extent::Static(head_dim),
+                        Extent::Static(embedding),
+                    ],
+                    &alloc::format!("blk.{layer}.attn_output.weight"),
+                );
+                append_attention_mixer(
+                    &mut program,
+                    x,
+                    inv_dim,
+                    eps,
+                    inv_sqrt_head_dim,
+                    cos,
+                    sin,
+                    group_ones,
+                    is_future,
+                    neg_infinity,
+                    group,
+                    attn_norm_weight,
+                    wq,
+                    wk,
+                    wv,
+                    wo,
+                )?
+            }
+            LayerKind::ShortConv => {
+                // `b_proj`/`c_proj`/`x_proj` are the real checkpoint's single
+                // fused `blk.{layer}.shortconv.in_proj.weight`
+                // (`[embedding, 3*embedding]`) split three ways -- see
+                // `append_lfm2_conv_mixer`'s own doc for why this graph
+                // cannot instead slice one fused `Input` by offset. Binding
+                // these three names from that one on-disk tensor is a
+                // binder-side split this session does not implement; the
+                // names here are this program's contract for whoever does.
+                let b_proj = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
+                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight.b"),
+                );
+                let c_proj = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
+                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight.c"),
+                );
+                let x_proj = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
+                    &alloc::format!("blk.{layer}.shortconv.in_proj.weight.x"),
+                );
+                let conv_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(l_cache), Extent::Static(embedding)],
+                    &alloc::format!("blk.{layer}.shortconv.conv.weight"),
+                );
+                let out_proj = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
+                    &alloc::format!("blk.{layer}.shortconv.out_proj.weight"),
+                );
+                append_lfm2_conv_mixer(&mut program, x, inv_dim, eps, attn_norm_weight, b_proj, c_proj, x_proj, conv_weight, out_proj, l_cache)?
+            }
+        };
+
+        let normed2 = rmsnorm(&mut program, post_mixer, ffn_norm_weight, inv_dim, eps)?;
+
+        let ffn_out = if layer < leading_dense_block_count {
+            let w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate.weight"),
+            );
+            let w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up.weight"),
+            );
+            let w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down.weight"),
+            );
+            let gate_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")])?;
+            let gate = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sdg->sdg", "sg->sdg")?;
+            let up_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_up, "dg->sdg")])?;
+            let up = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "sdg->sdg", "sg->sdg")?;
+
+            let neg_gate = elementwise(&mut program, DType::Float32, ScalarOp::Negate, &[(gate, "sg->sg")])?;
+            let exp_neg_gate = elementwise(&mut program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
+            let one_plus_exp = elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
+            let sigmoid_gate = elementwise(&mut program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
+            let silu_gate = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
+            let ffn_hidden = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up, "sg->sg")])?;
+
+            let down_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")])?;
+            reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "sgd->sgd", "sd->sgd")?
+        } else {
+            let gate_inp = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
+                &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
+            );
+            let expert_w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(expert_feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
+            );
+            let expert_w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(expert_feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
+            );
+            let expert_w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(expert_feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
+            );
+            append_moe_ffn(
+                &mut program,
+                normed2,
+                gate_inp,
+                expert_w_gate,
+                expert_w_up,
+                expert_w_down,
+                expert_count,
+                expert_used_count,
+                ones,
+            )?
+        };
+
+        x = elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")])?;
+    }
+
+    let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
+    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
+
+    let lm_head = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(vocab)], "output.weight");
+    let logits_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")])?;
+    let logits = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, logits_product, "sdv->sdv", "sv->sdv")?;
+
+    Ok((program, logits))
+}
+
 /// [`mistral_forward_program`]'s key/value-cached counterpart: the same
 /// architecture, but `ids`/`rope_cos`/`rope_sin` carry only the `new`
 /// positions this call introduces (symbol 0), attention also draws on a
@@ -4372,5 +4968,188 @@ value = 1.0
             max_diff < 1e-4,
             "cached decode step diverged from the uncached oracle: max_diff={max_diff}"
         );
+    }
+
+    /// [`causal_conv1d`]'s whole reason for existing, checked against
+    /// arithmetic worked out by hand rather than trusted from the
+    /// implementation: `l_cache=3`, one channel, `weight = [1, 10, 100]`
+    /// (tap `l=2` is the current position, `l=0` the furthest lookback --
+    /// [`append_lfm2_conv_mixer`]'s own convention), `x = [1, 2, 3, 4]`.
+    /// `out[s] = sum_l valid(s,l) * weight[l] * x[s - 2 + l]`, zero where the
+    /// window reaches before position 0:
+    /// - `out[0] = 100*x[0]                               = 100`
+    /// - `out[1] = 10*x[0]  + 100*x[1]                    = 210`
+    /// - `out[2] = 1*x[0]   + 10*x[1]  + 100*x[2]         = 321`
+    /// - `out[3] = 1*x[1]   + 10*x[2]  + 100*x[3]         = 432`
+    #[proxima::test]
+    async fn causal_conv1d_matches_a_hand_computed_causal_window() {
+        let mut program = Vec::new();
+        let x = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+                name: Some("x".into()),
+            },
+        );
+        let weight = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(3), Extent::Static(1)],
+                name: Some("weight".into()),
+            },
+        );
+        let output = causal_conv1d(&mut program, x, weight, 3).expect("causal conv lowers");
+
+        let x_data = [1.0f32, 2.0, 3.0, 4.0];
+        let weight_data = [1.0f32, 10.0, 100.0];
+        let evaluated = crate::cpu::evaluate_named(&program, &[4], &[("x", &x_data), ("weight", &weight_data)], &[output])
+            .expect("causal conv evaluates");
+        let (result, shape) = evaluated.get(output).expect("conv output present");
+
+        std::println!("causal_conv1d result={result:?} shape={shape:?}");
+        assert_eq!(shape, [4u64, 1u64]);
+        assert_eq!(result, [100.0, 210.0, 321.0, 432.0]);
+    }
+
+    /// Proof the new test can fail: perturbing one tap weight must move the
+    /// affected output positions away from the hand-computed reference.
+    #[proxima::test]
+    async fn causal_conv1d_hand_computed_check_actually_detects_a_wrong_weight() {
+        let mut program = Vec::new();
+        let x = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+                name: Some("x".into()),
+            },
+        );
+        let weight = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(3), Extent::Static(1)],
+                name: Some("weight".into()),
+            },
+        );
+        let output = causal_conv1d(&mut program, x, weight, 3).expect("causal conv lowers");
+
+        let x_data = [1.0f32, 2.0, 3.0, 4.0];
+        // tap l=2 perturbed from 100 to 99: every output except out[0] still
+        // matches (out[0]'s only real contribution is tap l=2, so this alone
+        // would move it too -- included to show the test is not vacuous).
+        let perturbed_weight_data = [1.0f32, 10.0, 99.0];
+        let evaluated = crate::cpu::evaluate_named(&program, &[4], &[("x", &x_data), ("weight", &perturbed_weight_data)], &[output])
+            .expect("causal conv evaluates");
+        let (result, _shape) = evaluated.get(output).expect("conv output present");
+
+        std::println!("perturbed causal_conv1d result={result:?}");
+        assert_ne!(
+            result, [100.0, 210.0, 321.0, 432.0],
+            "a perturbed tap weight must move the output away from the hand-computed reference \
+             (if this assertion cannot fail, the test above proves nothing)"
+        );
+    }
+
+    #[proxima::test]
+    #[case::attention_block(2, "blk.2.attn_q.weight", LayerKind::Attention)]
+    #[case::conv_block(0, "blk.0.shortconv.conv.weight", LayerKind::ShortConv)]
+    async fn layer_kind_derives_from_the_real_checkpoints_own_tensor_marker(
+        #[case] layer: u32,
+        #[case] marker: &str,
+        #[case] expected: LayerKind,
+    ) {
+        let names = ["token_embd.weight", marker, "output_norm.weight"];
+        let derived = LayerKind::from_tensor_names(names, layer).expect("a real block names exactly one marker");
+        assert_eq!(derived, expected);
+    }
+
+    #[proxima::test]
+    async fn layer_kind_names_the_block_when_neither_marker_is_present() {
+        let names = ["token_embd.weight", "output_norm.weight"];
+        let error = LayerKind::from_tensor_names(names, 7).expect_err("a block with no marker cannot derive a kind");
+        assert!(
+            matches!(error, TensorError::UndeterminedLayerKind { layer: 7 }),
+            "got {error:?}"
+        );
+    }
+
+    /// LFM2.5-8B-A1B's real dimensions (24 blocks: 2 leading dense, 22 MoE;
+    /// 18 short-convolution layers at blocks `{0,1,3,4,5,7,8,9,11,12,13,15,
+    /// 16,17,19,20,22,23}`, 6 attention layers at `{2,6,10,14,18,21}` -- the
+    /// real checkpoint's own tensor directory, cross-checked against
+    /// `lfm2moe.attention.head_count_kv`'s per-layer `[0,0,8,...]` sample in
+    /// its metadata dump) -- proves the hybrid builder lowers and infers at
+    /// this checkpoint's actual shapes without needing the 5 GB file itself,
+    /// the same real-dimensions-without-real-weights convention
+    /// `the_whole_mistral_forward_pass_infers_at_real_dimensions` already
+    /// uses above.
+    #[proxima::test]
+    async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
+        const REAL_CONTEXT: u64 = 8192;
+        const ATTENTION_LAYERS: [u32; 6] = [2, 6, 10, 14, 18, 21];
+
+        let layer_kinds: Vec<LayerKind> = (0..24)
+            .map(|layer| {
+                if ATTENTION_LAYERS.contains(&layer) {
+                    LayerKind::Attention
+                } else {
+                    LayerKind::ShortConv
+                }
+            })
+            .collect();
+
+        let build_start = std::time::Instant::now();
+        let (program, _logits) =
+            lfm2_forward_program_with_experts(128_000, 2048, 7168, 1792, 32, 8, 64, 24, 32, 4, 2, 3, &layer_kinds)
+                .expect("the hybrid forward pass lowers to a program");
+        let build_elapsed = build_start.elapsed();
+
+        let infer_start = std::time::Instant::now();
+        crate::shape::infer(&program, &[REAL_CONTEXT]).expect("the hybrid forward pass infers at its real context length");
+        let infer_elapsed = infer_start.elapsed();
+
+        std::println!("lfm2_forward_program_with_experts: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}", program.len());
+        assert!(
+            program.len() > 1_000,
+            "24 hybrid blocks plus embedding/lm-head should be well over a thousand nodes, not {}",
+            program.len()
+        );
+    }
+
+    #[proxima::test]
+    async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
+        let layer_kinds = [LayerKind::Attention, LayerKind::ShortConv];
+        let error = lfm2_forward_program_with_experts(128_000, 2048, 7168, 1792, 32, 8, 64, 24, 32, 4, 2, 3, &layer_kinds)
+            .expect_err("2 layer_kinds against block_count=24 must be rejected");
+        assert!(
+            matches!(error, TensorError::LayerKindCountMismatch { expected: 24, found: 2 }),
+            "got {error:?}"
+        );
+    }
+
+    #[proxima::test]
+    async fn causal_conv1d_rejects_a_zero_width_window() {
+        let mut program = Vec::new();
+        let x = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+                name: Some("x".into()),
+            },
+        );
+        let weight = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(0), Extent::Static(1)],
+                name: Some("weight".into()),
+            },
+        );
+        let error = causal_conv1d(&mut program, x, weight, 0).expect_err("l_cache=0 has no window to convolve");
+        assert!(matches!(error, TensorError::InvalidConvConfig { l_cache: 0 }), "got {error:?}");
     }
 }
