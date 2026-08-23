@@ -134,4 +134,37 @@ pub enum InteropError {
     /// caller (not just this crate) picks the config fields.
     #[error("unsupported serving config: {0}")]
     UnsupportedServingConfig(String),
+
+    /// [`crate::bind::transpose_expert_stack`]'s decoded element count did
+    /// not equal `expert_count * out_dim * in_dim` — the tensor directory's
+    /// own declared shape for a stacked MoE weight disagrees with the
+    /// `general.expert_count`/architecture hparams a malformed or
+    /// adversarial GGUF file could set independently of it. Caught here
+    /// rather than sliced past, which would otherwise panic mid-transpose.
+    #[error(
+        "moe expert stack {tensor:?} has {elements} elements, but expert_count={expert_count} \
+         out_dim={out_dim} in_dim={in_dim} needs {expected}"
+    )]
+    MoeExpertShapeMismatch {
+        tensor: String,
+        elements: usize,
+        expert_count: usize,
+        out_dim: usize,
+        in_dim: usize,
+        expected: usize,
+    },
+
+    /// [`crate::bind::transpose_out_in_to_in_out`]'s decoded element count
+    /// did not equal `out_dim * in_dim` — same disagreement as
+    /// [`Self::MoeExpertShapeMismatch`], but for a plain (non-MoE) matmul
+    /// weight: the tensor directory's own declared shape disagrees with
+    /// the architecture hparams `out_dim`/`in_dim` were derived from.
+    #[error("weight {tensor:?} has {elements} elements, but out_dim={out_dim} in_dim={in_dim} needs {expected}")]
+    DenseWeightShapeMismatch {
+        tensor: String,
+        elements: usize,
+        out_dim: usize,
+        in_dim: usize,
+        expected: usize,
+    },
 }
