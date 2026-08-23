@@ -752,7 +752,7 @@ impl<'file> LoadedModel<'file> {
             let new_count = next_ids.len();
             #[cfg(feature = "instrument")]
             let apply_serving_config_started = read_ticks();
-            apply_serving_config(serving_config, cached_len + new_count);
+            apply_serving_config(serving_config, cached_len + new_count)?;
             #[cfg(feature = "instrument")]
             let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
 

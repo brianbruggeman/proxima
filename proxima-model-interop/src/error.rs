@@ -121,4 +121,17 @@ pub enum InteropError {
     #[cfg(feature = "metal")]
     #[error("plan cache for shape {shape:?} is missing the entry inserted moments earlier")]
     PlanCacheEntryVanished { shape: (usize, usize) },
+
+    /// [`crate::serving::apply_serving_config`]'s prompt-length precondition:
+    /// `sequence` (the tokenized prompt length) exceeds the caller's own
+    /// configured `context_length` (`-c`).
+    #[error("prompt sequence {sequence} exceeds configured context_length {context_length} (-c)")]
+    SequenceExceedsContextLength { sequence: usize, context_length: u32 },
+
+    /// [`crate::serving::apply_serving_config`] found a [`crate::serving::ServingConfig`]
+    /// field requesting behavior this forward path does not implement yet --
+    /// what used to be a `todo!` naming the gap now surfaces as data, since a
+    /// caller (not just this crate) picks the config fields.
+    #[error("unsupported serving config: {0}")]
+    UnsupportedServingConfig(String),
 }

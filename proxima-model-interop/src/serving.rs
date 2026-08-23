@@ -27,13 +27,18 @@
 //! representation for `-ngl all`, so no new type is needed to say it.
 //!
 //! Every field reaches [`apply_serving_config`]: an implemented knob is
-//! validated or folded into the forward, an unimplemented one fires
-//! `todo!` naming what implementing it requires and what happens instead.
-//! A field that is neither validated, folded in, nor `todo!`-guarded here
-//! is a knob silently ignored, which this module treats as a bug, not an
-//! omission -- see this crate's own doc and the task that added this file.
+//! validated or folded into the forward, an unimplemented one returns
+//! [`crate::error::InteropError::UnsupportedServingConfig`] naming what
+//! implementing it requires and what happens instead. A field that is
+//! neither validated, folded in, nor error-guarded here is a knob silently
+//! ignored, which this module treats as a bug, not an omission -- see this
+//! crate's own doc and the task that added this file.
+
+use alloc::format;
 
 use proxima_gguf::types::GgmlType;
+
+use crate::error::InteropError;
 
 /// `-ngl all` (upstream's own `n_gpu_layers = -1` convention for "offload
 /// every layer"), reused verbatim rather than adding an `enum` variant for
@@ -123,38 +128,41 @@ impl Default for ServingConfig<'static> {
 
 /// Walks every [`ServingConfig`] field against a forward pass whose prompt
 /// is `sequence` tokens long. Implemented knobs are validated or already
-/// match what the current forward does; every other knob fires `todo!`
-/// naming what it means, what implementing it requires, and what runs
-/// instead today. Called once per forward, as early as the tokenized
-/// prompt length is known and before the program evaluates, so an owner
-/// reproducing their exact invocation gets a clear failure at the first
-/// flag that is not wired yet rather than a silently different forward.
+/// match what the current forward does; every other knob returns
+/// [`InteropError::UnsupportedServingConfig`] naming what it means, what
+/// implementing it requires, and what runs instead today. Called once per
+/// forward, as early as the tokenized prompt length is known and before the
+/// program evaluates, so an owner reproducing their exact invocation gets a
+/// clear error at the first flag that is not wired yet rather than a
+/// silently different forward.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics (via `assert!`) if `sequence` exceeds `config.context_length`,
-/// or (via `todo!`) at the first knob below whose value requests behavior
-/// this forward path does not implement yet.
-pub fn apply_serving_config(config: &ServingConfig, sequence: usize) {
-    assert!(
-        sequence <= config.context_length as usize,
-        "prompt sequence {sequence} exceeds configured context_length {} (-c)",
-        config.context_length
-    );
+/// [`InteropError::SequenceExceedsContextLength`] if `sequence` exceeds
+/// `config.context_length`, or [`InteropError::UnsupportedServingConfig`] at
+/// the first knob below whose value requests behavior this forward path
+/// does not implement yet.
+pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(), InteropError> {
+    if sequence > config.context_length as usize {
+        return Err(InteropError::SequenceExceedsContextLength {
+            sequence,
+            context_length: config.context_length,
+        });
+    }
 
     if config.parallel_sequences != 1 {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "parallel_sequences={} (-np): serving more than one sequence slot needs a \
              per-slot KV cache plus a request scheduler across slots; \
              `evaluate_quantized_named` runs exactly one sequence per call today",
             config.parallel_sequences
-        );
+        )));
     }
 
     let key_quant_supported = config.kv_cache_key_quant == GgmlType::F32;
     let value_quant_supported = config.kv_cache_value_quant == GgmlType::F32;
     if !key_quant_supported || !value_quant_supported {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): the per-layer \
              key/value context cache (`proxima-model-interop`'s cached decode loop, \
              `proxima_tensor::spec::mistral_cached_forward_program`) stores F32 unquantized \
@@ -169,93 +177,99 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) {
              rejects; F16/Q4_0/every other GgmlType has no packing or matmul kernel wired \
              in at all",
             config.kv_cache_key_quant, config.kv_cache_value_quant
-        );
+        )));
     }
 
     if config.flash_attention {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(
             "flash_attention=true (-fa on): `mistral_forward_program` lowers attention to \
              a naive multiply-then-reduce op graph, not a fused flash-attention kernel; \
              implementing this requires a new fused Op variant plus a matching cpu.rs \
              kernel that never materializes the full [seq, seq] score matrix"
-        );
+                .into(),
+        ));
     }
 
     if config.batch_size != 0 || config.ubatch_size != 0 {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "batch_size={} ubatch_size={} (-b/-ub): the interpreter evaluates the whole \
              prompt's sequence extent as one static tensor dimension with no batching \
              loop; implementing this requires chunking prefill into batch_size-token \
              windows and feeding the interpreter one micro-batch of ubatch_size at a \
              time",
             config.batch_size, config.ubatch_size
-        );
+        )));
     }
 
     if config.gpu_layers != 0 && config.gpu_layers != GPU_LAYERS_ALL {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "gpu_layers={} (-ngl): partial per-layer GPU offload needs a per-layer \
              placement decision this forward path does not make; only 0 (cpu-only) \
              and {GPU_LAYERS_ALL} (-ngl all, whole-model offload through \
              `omega::backend::Backend::Metal`) are supported",
             config.gpu_layers
-        );
+        )));
     }
     if config.gpu_layers == GPU_LAYERS_ALL && !cfg!(feature = "metal") {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "gpu_layers={GPU_LAYERS_ALL} (-ngl all): this build was not compiled with \
              proxima-model-interop's `metal` feature, so there is no GPU backend to \
              offload onto"
-        );
+        )));
     }
 
     if config.gpu_memory_fit {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(
             "gpu_memory_fit=true (-fit on): auto-fitting the KV cache to available VRAM \
              presupposes both a GPU backend and a KV cache to size, neither of which \
              exists on this forward path yet"
-        );
+                .into(),
+        ));
     }
 
     if config.kv_offload {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(
             "kv_offload=true: offloading the KV cache to a GPU presupposes both a GPU \
              backend and a KV cache, neither of which exists on this forward path yet; \
              kv_offload=false is a no-op today since every tensor already lives on the \
              host"
-        );
+                .into(),
+        ));
     }
 
     if config.multimodal_projector {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(
             "multimodal_projector=true (mmproj enabled): this crate has no image/audio \
              encoder or projector-weight loader; implementing this requires a second \
              GGUF checkpoint's worth of tensors bound and run through a separate vision \
              or audio forward before the text model ever sees an embedding"
-        );
+                .into(),
+        ));
     }
 
     if config.reasoning_budget != 0 {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "reasoning_budget={} (--reasoning-budget): there is no reasoning/thinking \
              block in this forward -- every token greedy_pick sees is a final-answer \
              token, so implementing this requires a chat-template-aware split between \
              reasoning and answer segments plus a token-count budget enforced on the \
              reasoning segment specifically",
             config.reasoning_budget
-        );
+        )));
     }
 
     if config.min_p != 0.0 {
-        todo!(
+        return Err(InteropError::UnsupportedServingConfig(format!(
             "min_p={} (--min-p): token selection today is `greedy_pick`'s deterministic \
              argmax with no sampling distribution at all; implementing this requires a \
              softmax-then-filter sampler before greedy_pick ever runs, which min_p=0 \
              degenerates to (no filtering, so argmax is exact) and any nonzero value \
              does not",
             config.min_p
-        );
+        )));
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -294,16 +308,20 @@ mod tests {
     /// `-fa`, `-ngl`, `--reasoning-budget`. The placeholders are real, not
     /// decorative, even against the one config that matters most.
     #[test]
-    #[should_panic(expected = "kv_cache_key_quant")]
     fn owner_default_invocation_reaches_an_unimplemented_knob() {
-        apply_serving_config(&ServingConfig::default(), 6);
+        let error = apply_serving_config(&ServingConfig::default(), 6)
+            .expect_err("owner's default invocation must reach an unimplemented knob");
+        assert!(
+            error.to_string().contains("kv_cache_key_quant"),
+            "expected the kv-cache-quant gate to fire first, got: {error}"
+        );
     }
 
     /// A config with every unimplemented knob switched to its
     /// currently-supported value runs clean -- proves the walk is a real
-    /// per-field gate, not a blanket `todo!()` at the top.
+    /// per-field gate, not a blanket error at the top.
     #[test]
-    fn fully_supported_config_applies_without_panicking() {
+    fn fully_supported_config_applies_without_error() {
         let config = ServingConfig {
             model_path: DEFAULT_MODEL_PATH,
             context_length: 131_072,
@@ -320,12 +338,11 @@ mod tests {
             reasoning_budget: 0,
             min_p: 0.0,
         };
-        apply_serving_config(&config, 6);
+        apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
 
     #[test]
-    #[should_panic(expected = "parallel_sequences")]
-    fn multiple_parallel_sequences_reaches_its_todo() {
+    fn multiple_parallel_sequences_reaches_its_error() {
         let config = ServingConfig {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -337,22 +354,30 @@ mod tests {
             parallel_sequences: 4,
             ..ServingConfig::default()
         };
-        apply_serving_config(&config, 6);
+        let error = apply_serving_config(&config, 6)
+            .expect_err("parallel_sequences != 1 must be rejected");
+        assert!(error.to_string().contains("parallel_sequences"));
     }
 
     #[test]
-    #[should_panic(expected = "context_length")]
-    fn prompt_longer_than_context_length_panics() {
+    fn prompt_longer_than_context_length_errors() {
         let config = ServingConfig {
             context_length: 4,
             ..ServingConfig::default()
         };
-        apply_serving_config(&config, 6);
+        let error =
+            apply_serving_config(&config, 6).expect_err("sequence longer than -c must error");
+        assert!(matches!(
+            error,
+            InteropError::SequenceExceedsContextLength {
+                sequence: 6,
+                context_length: 4
+            }
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "min_p")]
-    fn nonzero_min_p_reaches_its_todo() {
+    fn nonzero_min_p_reaches_its_error() {
         let config = ServingConfig {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -364,6 +389,7 @@ mod tests {
             min_p: 0.1,
             ..ServingConfig::default()
         };
-        apply_serving_config(&config, 6);
+        let error = apply_serving_config(&config, 6).expect_err("nonzero min_p must be rejected");
+        assert!(error.to_string().contains("min_p"));
     }
 }
