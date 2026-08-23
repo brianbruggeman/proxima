@@ -387,7 +387,7 @@ pub(crate) fn bind_matmul_weight<'file>(
         Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            state.owned.push((name, transpose_out_in_to_in_out(&decoded, out_dim, in_dim)));
+            state.owned.push((name.clone(), transpose_out_in_to_in_out(&decoded, &name, out_dim, in_dim)?));
         }
     }
     Ok(())
@@ -400,16 +400,43 @@ pub(crate) fn bind_matmul_weight<'file>(
 /// layout a non-MoE projection weight would carry, `restack.rs`'s pure byte
 /// concatenation just keeps them side by side instead of collapsing them
 /// into one.
+///
+/// # Errors
+///
+/// [`InteropError::MoeExpertShapeMismatch`] if `flat.len()` does not equal
+/// `expert_count * out_dim * in_dim` — the caller's `expert_count`/`out_dim`/
+/// `in_dim` come from GGUF hparams read independently of the tensor's own
+/// declared element count, so a malformed or adversarial file can disagree
+/// with it; caught here rather than sliced past.
 #[cfg(feature = "std")]
-fn transpose_expert_stack(flat: &[f32], expert_count: usize, out_dim: usize, in_dim: usize) -> Vec<f32> {
+fn transpose_expert_stack(
+    flat: &[f32],
+    tensor: &str,
+    expert_count: usize,
+    out_dim: usize,
+    in_dim: usize,
+) -> Result<Vec<f32>, InteropError> {
     let per_expert = out_dim * in_dim;
+    let expected = expert_count * per_expert;
+    if flat.len() != expected {
+        return Err(InteropError::MoeExpertShapeMismatch {
+            tensor: tensor.into(),
+            elements: flat.len(),
+            expert_count,
+            out_dim,
+            in_dim,
+            expected,
+        });
+    }
     let mut transposed = vec![0.0f32; flat.len()];
     for expert in 0..expert_count {
         let slab = &flat[expert * per_expert..(expert + 1) * per_expert];
-        let slab_transposed = transpose_out_in_to_in_out(slab, out_dim, in_dim);
+        // `slab.len() == per_expert == out_dim * in_dim` by construction --
+        // the length check above already proved it for every expert slab.
+        let slab_transposed = transpose_out_in_to_in_out(slab, tensor, out_dim, in_dim)?;
         transposed[expert * per_expert..(expert + 1) * per_expert].copy_from_slice(&slab_transposed);
     }
-    transposed
+    Ok(transposed)
 }
 
 /// [`InteropError`] has no dedicated [`proxima_gguf::restack::RestackError`]
@@ -465,7 +492,7 @@ fn bind_moe_stacked_experts<'file>(
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => state.packed.push((name, block)),
         Ok(_) | Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
-            let transposed = transpose_expert_stack(&decoded, expert_count, out_dim, in_dim);
+            let transposed = transpose_expert_stack(&decoded, &name, expert_count, out_dim, in_dim)?;
             state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
             state.owned.push((name, transposed));
         }
@@ -563,7 +590,7 @@ fn bind_moe_expert_weights<'file>(
             });
         }
     };
-    let transposed = transpose_expert_stack(&decoded, expert_count as usize, out_dim, in_dim);
+    let transposed = transpose_expert_stack(&decoded, &stacked_name, expert_count as usize, out_dim, in_dim)?;
     state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
     state.owned.push((stacked_name, transposed));
     Ok(())
@@ -645,16 +672,38 @@ pub(crate) fn bind_all_weights<'file>(
 /// Row-major transpose from GGUF's native flat layout (`[out, in]`, `out`
 /// rows of contiguous `in` values, ggml's linear-weight layout) to the
 /// forward program's expected `[in, out]` layout.
+///
+/// # Errors
+///
+/// [`InteropError::DenseWeightShapeMismatch`] if `flat.len()` does not equal
+/// `out_dim * in_dim` — `out_dim`/`in_dim` come from architecture hparams
+/// read independently of the tensor's own declared element count, so a
+/// malformed or adversarial GGUF file can disagree with it; caught here
+/// rather than sliced past.
 #[cfg(feature = "std")]
-pub(crate) fn transpose_out_in_to_in_out(flat: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
-    assert_eq!(flat.len(), out_dim * in_dim, "flat buffer length must match out_dim * in_dim");
+pub(crate) fn transpose_out_in_to_in_out(
+    flat: &[f32],
+    tensor: &str,
+    out_dim: usize,
+    in_dim: usize,
+) -> Result<Vec<f32>, InteropError> {
+    let expected = out_dim * in_dim;
+    if flat.len() != expected {
+        return Err(InteropError::DenseWeightShapeMismatch {
+            tensor: tensor.into(),
+            elements: flat.len(),
+            out_dim,
+            in_dim,
+            expected,
+        });
+    }
     let mut transposed = alloc::vec![0.0f32; flat.len()];
     for out_index in 0..out_dim {
         for in_index in 0..in_dim {
             transposed[in_index * out_dim + out_index] = flat[out_index * in_dim + in_index];
         }
     }
-    transposed
+    Ok(transposed)
 }
 
 // `matmul_weight_dims`/`dequantize_packed_for_metal` (the "dequantize this
@@ -681,6 +730,45 @@ mod tests {
 
     fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
         values.iter().copied().collect()
+    }
+
+    /// The defect this signature change fixes, proved directly: a decoded
+    /// buffer whose length disagrees with `expert_count * out_dim * in_dim`
+    /// (exactly what a GGUF file with a mismatched `general.expert_count`
+    /// hparam would hand this function) used to slice past the buffer's
+    /// end mid-transpose. It must now return a typed error instead.
+    #[cfg(feature = "std")]
+    #[test]
+    fn expert_stack_length_mismatch_is_a_typed_error_not_a_panic() {
+        let expert_count = 4;
+        let out_dim = 8;
+        let in_dim = 8;
+        let one_expert_short = vec![0.0f32; (expert_count - 1) * out_dim * in_dim];
+
+        let result = transpose_expert_stack(&one_expert_short, "blk.0.ffn_gate_exps.weight", expert_count, out_dim, in_dim);
+
+        assert!(
+            matches!(result, Err(InteropError::MoeExpertShapeMismatch { .. })),
+            "a short decoded buffer must surface as a typed error, got {result:?}"
+        );
+    }
+
+    /// Same proof, for the plain (non-MoE) dense-weight transpose: a
+    /// decoded buffer whose length disagrees with `out_dim * in_dim` used
+    /// to trip `assert_eq!` (a panic) instead of returning a typed error.
+    #[cfg(feature = "std")]
+    #[test]
+    fn dense_weight_length_mismatch_is_a_typed_error_not_a_panic() {
+        let out_dim = 8;
+        let in_dim = 8;
+        let too_short = vec![0.0f32; out_dim * in_dim - 1];
+
+        let result = transpose_out_in_to_in_out(&too_short, "output.weight", out_dim, in_dim);
+
+        assert!(
+            matches!(result, Err(InteropError::DenseWeightShapeMismatch { .. })),
+            "a short decoded buffer must surface as a typed error, got {result:?}"
+        );
     }
 
     /// A round-tripped `F32` tensor comes back byte-identical as `f32`,
@@ -2162,14 +2250,16 @@ mod real_mixtral_file {
         let per_expert_elements = out_dim * in_dim;
         let total_elements = per_expert_elements * experts.len();
         let decoded = dequantize(&stacked_bytes, total_elements, q4_k::dequantize).expect("dequantizes the real restacked experts");
-        let bound = transpose_expert_stack(&decoded, experts.len(), out_dim, in_dim);
+        let bound = transpose_expert_stack(&decoded, "test_moe_stack", experts.len(), out_dim, in_dim)
+            .expect("expert_count/out_dim/in_dim agree with the real restacked byte length");
 
         for (expert_index, expert_bytes) in sources.iter().enumerate() {
             let mut expected = alloc::vec![0.0f32; per_expert_elements];
             q4_k::dequantize(expert_bytes, &mut expected).expect("independently dequantizes expert's own real bytes");
 
             let bound_slab = &bound[expert_index * per_expert_elements..(expert_index + 1) * per_expert_elements];
-            let un_transposed = transpose_out_in_to_in_out(bound_slab, in_dim, out_dim);
+            let un_transposed = transpose_out_in_to_in_out(bound_slab, "test_expert_slab", in_dim, out_dim)
+                .expect("in_dim/out_dim agree with the real bound slab length");
             let max_diff = un_transposed
                 .iter()
                 .zip(&expected)
