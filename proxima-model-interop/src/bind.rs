@@ -329,25 +329,33 @@ pub(crate) struct BoundWeights<'file> {
 /// [`gguf_tensor_as_f32`]'s owned copy only if the zero-copy borrow is
 /// refused (misaligned base pointer) or the tensor is some other
 /// decodable-but-not-borrowable `GgmlType`.
+///
+/// # Errors
+///
+/// [`InteropError::UnrepresentableGgmlType`] if `name`'s tensor is a
+/// `GgmlType` neither [`gguf_tensor_as_packed_block`] nor
+/// [`gguf_tensor_as_f32`] has a decoder for -- a checkpoint using a codec
+/// this crate does not execute is a caller-visible load failure, not a
+/// process abort.
 #[cfg(feature = "std")]
 pub(crate) fn bind_dense<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     name: alloc::string::String,
     state: &mut BoundWeights<'file>,
-) {
+) -> Result<(), InteropError> {
     match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(borrowed)) => {
             state.resident_bytes += core::mem::size_of_val(borrowed);
             state.packed.push((name, block));
         }
         Ok(_) | Err(_) => {
-            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
-                .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
+            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
             state.owned.push((name, decoded));
         }
     }
+    Ok(())
 }
 
 /// A 2-D projection weight the cached forward program uses as one
@@ -359,6 +367,12 @@ pub(crate) fn bind_dense<'file>(
 /// transpose to become the `[in, out]` layout the forward program's
 /// access patterns expect, and a packed weight's own matmul kernel walks
 /// the native `[out, in]` layout directly instead.
+///
+/// # Errors
+///
+/// [`InteropError::UnrepresentableGgmlType`] if `name`'s tensor is a
+/// `GgmlType` neither the packed nor the owned decode path can handle --
+/// see [`bind_dense`].
 #[cfg(feature = "std")]
 pub(crate) fn bind_matmul_weight<'file>(
     parsed: &ParsedGguf,
@@ -367,16 +381,16 @@ pub(crate) fn bind_matmul_weight<'file>(
     out_dim: usize,
     in_dim: usize,
     state: &mut BoundWeights<'file>,
-) {
+) -> Result<(), InteropError> {
     match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
         Ok(block) => state.packed.push((name, block)),
         Err(_) => {
-            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)
-                .unwrap_or_else(|error| panic!("bind real tensor {name} by name: {error}"));
+            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
             state.owned.push((name, transpose_out_in_to_in_out(&decoded, out_dim, in_dim)));
         }
     }
+    Ok(())
 }
 
 /// Row-major transpose of one `[expert_count, out_dim, in_dim]` stack into
@@ -490,12 +504,20 @@ fn bind_moe_expert_weights(
 /// FFN's weight family instead of the dense triple (see
 /// [`bind_moe_expert_weights`]) -- every other weight is identical between
 /// the two shapes.
+///
+/// # Errors
+///
+/// [`InteropError::UnrepresentableGgmlType`] if any bound tensor carries a
+/// `GgmlType` this crate has no decoder for -- a checkpoint using an
+/// undecoded codec fails the load with a typed error rather than aborting
+/// the process (see [`bind_dense`]/[`bind_matmul_weight`]); whatever
+/// [`bind_moe_expert_weights`] can fail with, for a MoE checkpoint.
 #[cfg(feature = "std")]
 pub(crate) fn bind_all_weights<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     architecture: &ModelArchitecture,
-) -> BoundWeights<'file> {
+) -> Result<BoundWeights<'file>, InteropError> {
     let mut state = BoundWeights {
         resident_bytes: file_bytes.len(),
         owned: Vec::new(),
@@ -507,20 +529,20 @@ pub(crate) fn bind_all_weights<'file>(
     let feed_forward = architecture.feed_forward as usize;
     let vocab = architecture.vocab as usize;
 
-    bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state);
+    bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
 
     for layer in 0..architecture.block_count {
-        bind_dense(parsed, file_bytes, alloc::format!("blk.{layer}.attn_norm.weight"), &mut state);
-        bind_dense(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_norm.weight"), &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_q.weight"), embedding, embedding, &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_k.weight"), kv_dim, embedding, &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_v.weight"), kv_dim, embedding, &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_output.weight"), embedding, embedding, &mut state);
+        bind_dense(parsed, file_bytes, alloc::format!("blk.{layer}.attn_norm.weight"), &mut state)?;
+        bind_dense(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_norm.weight"), &mut state)?;
+        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_q.weight"), embedding, embedding, &mut state)?;
+        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_k.weight"), kv_dim, embedding, &mut state)?;
+        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_v.weight"), kv_dim, embedding, &mut state)?;
+        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_output.weight"), embedding, embedding, &mut state)?;
 
         if architecture.expert_count == 0 {
-            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_gate.weight"), feed_forward, embedding, &mut state);
-            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_up.weight"), feed_forward, embedding, &mut state);
-            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_down.weight"), embedding, feed_forward, &mut state);
+            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_gate.weight"), feed_forward, embedding, &mut state)?;
+            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_up.weight"), feed_forward, embedding, &mut state)?;
+            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_down.weight"), embedding, feed_forward, &mut state)?;
         } else {
             let expert_count = architecture.expert_count;
             bind_matmul_weight(
@@ -530,23 +552,22 @@ pub(crate) fn bind_all_weights<'file>(
                 expert_count as usize,
                 embedding,
                 &mut state,
-            );
+            )?;
             for (projection, out_dim, in_dim) in [
                 ("ffn_gate", feed_forward, embedding),
                 ("ffn_up", feed_forward, embedding),
                 ("ffn_down", embedding, feed_forward),
             ] {
-                let decoded = bind_moe_expert_weights(parsed, file_bytes, layer, projection, expert_count, out_dim, in_dim)
-                    .unwrap_or_else(|error| panic!("bind real moe expert weights blk.{layer}.{projection}.*: {error}"));
+                let decoded = bind_moe_expert_weights(parsed, file_bytes, layer, projection, expert_count, out_dim, in_dim)?;
                 state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
                 state.owned.push((alloc::format!("blk.{layer}.{projection}_exps.weight"), decoded));
             }
         }
     }
 
-    bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state);
-    bind_matmul_weight(parsed, file_bytes, "output.weight".into(), vocab, embedding, &mut state);
-    state
+    bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
+    bind_matmul_weight(parsed, file_bytes, "output.weight".into(), vocab, embedding, &mut state)?;
+    Ok(state)
 }
 
 /// Row-major transpose from GGUF's native flat layout (`[out, in]`, `out`
@@ -1467,7 +1488,7 @@ mod real_openchat_file {
             let file_bytes = mapped.as_slice();
             let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
             let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata");
-            let weights = bind_all_weights(&parsed, file_bytes, &architecture);
+            let weights = bind_all_weights(&parsed, file_bytes, &architecture).expect("bind real openchat checkpoint weights");
 
             use proxima_tensor::spec::mistral_cached_forward_program;
             let (program, logits_root, cache_roots) = mistral_cached_forward_program(
@@ -1688,6 +1709,7 @@ mod real_mixtral_file {
 
     use proxima_gguf::pipe::parse_complete;
     use proxima_gguf::quant::q4_k;
+    use proxima_primitives::pipe::Pipe;
 
     use super::*;
 
@@ -1740,6 +1762,64 @@ mod real_mixtral_file {
         std::println!("real_mixtral architecture={architecture:?}");
         assert_eq!(architecture.expert_count, 8, "Mixtral-8x7B carries 8 experts per layer");
         assert_eq!(architecture.expert_used_count, 2, "Mixtral-8x7B routes top-2");
+    }
+
+    /// Header-only (no tensor payload touched): tallies every real tensor's
+    /// own [`GgmlType`] and prints the checkpoint's own `tokenizer.chat_template`
+    /// metadata value if present -- answers two of this run's own questions
+    /// before any multi-gigabyte read is attempted: which codecs this file's
+    /// 995 tensors actually carry (this crate decodes `F32`/`Q4_K`/`Q5_K`/
+    /// `Q6_K`/`Q8_0`; anything else is a named capability gap, not a defect),
+    /// and whether the checkpoint ships its own chat template rather than
+    /// requiring the caller to hand-write one.
+    #[test]
+    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+    fn inventories_the_real_checkpoints_tensor_codecs_and_chat_template() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
+        let mut header_buf: Vec<u8> = Vec::new();
+        let parsed = parse_header_region!(file, header_buf);
+
+        let mut counts: alloc::collections::BTreeMap<alloc::string::String, usize> = alloc::collections::BTreeMap::new();
+        for tensor in &parsed.tensors {
+            *counts.entry(alloc::format!("{:?}", tensor.ggml_type)).or_insert(0) += 1;
+        }
+        std::println!("real_mixtral tensor_count={}", parsed.tensors.len());
+        for (ggml_type, count) in &counts {
+            std::println!("real_mixtral codec={ggml_type} tensor_count={count}");
+        }
+
+        let supported = ["F32", "Q4_K", "Q5_K", "Q6_K", "Q8_0"];
+        let unsupported: Vec<(&alloc::string::String, &usize)> =
+            counts.iter().filter(|(ggml_type, _)| !supported.contains(&ggml_type.as_str())).collect();
+        if unsupported.is_empty() {
+            std::println!("real_mixtral every real tensor's codec is one this crate already decodes");
+        } else {
+            for (ggml_type, count) in &unsupported {
+                std::println!("real_mixtral UNSUPPORTED codec={ggml_type} tensor_count={count}");
+            }
+            let sample_names: Vec<&str> = parsed
+                .tensors
+                .iter()
+                .filter(|tensor| !supported.contains(&alloc::format!("{:?}", tensor.ggml_type).as_str()))
+                .take(6)
+                .map(|tensor| tensor.name.as_str())
+                .collect();
+            std::println!("real_mixtral unsupported_codec_sample_names={sample_names:?}");
+        }
+
+        match parsed.metadata_value("tokenizer.chat_template") {
+            Some(MetadataValue::String(template)) => {
+                std::println!("real_mixtral chat_template_len={} chat_template={template:?}", template.len());
+            }
+            Some(other) => std::println!("real_mixtral tokenizer.chat_template present but not a string: {other:?}"),
+            None => std::println!("real_mixtral no tokenizer.chat_template key in this checkpoint's metadata"),
+        }
     }
 
     /// [`bind_moe_expert_weights`]'s per-expert-tensor fallback path
@@ -1810,6 +1890,156 @@ mod real_mixtral_file {
                 "expert {expert_index}: bound-then-transposed-back weights must equal an independent \
                  dequantize of that expert's own real bytes, got max_diff={max_diff}"
             );
+        }
+    }
+
+    /// A read-only `mmap` of the real 25 GB Mixtral fixture -- same
+    /// technique and same justification as `real_openchat_file::MappedGguf`
+    /// (this module's own doc), duplicated here rather than shared because
+    /// that struct is private to its own module and this crate has no
+    /// third home for a two-line mmap wrapper two fixture-specific test
+    /// modules both happen to want.
+    struct MappedGguf {
+        base: *mut core::ffi::c_void,
+        len: usize,
+        _file: std::fs::File,
+    }
+
+    impl MappedGguf {
+        fn open(path: &std::path::Path) -> std::io::Result<Self> {
+            use std::os::fd::AsFd;
+            let file = std::fs::File::open(path)?;
+            let len = usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            // SAFETY: `len` matches the just-opened file's own length; `file`
+            // is kept alive in `_file` for as long as `base` is used, and the
+            // mapping is read-only/private so no writer can observe or race it.
+            let base = unsafe {
+                rustix::mm::mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    rustix::mm::ProtFlags::READ,
+                    rustix::mm::MapFlags::PRIVATE,
+                    file.as_fd(),
+                    0,
+                )
+            }
+            .expect("mmap host-local mixtral gguf fixture");
+            Ok(Self { base, len, _file: file })
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: `base` points at `len` bytes mapped for `self`'s whole
+            // lifetime; this borrows `self` immutably, so nothing can unmap
+            // the region while the returned slice is alive.
+            unsafe { core::slice::from_raw_parts(self.base.cast::<u8>(), self.len) }
+        }
+    }
+
+    impl Drop for MappedGguf {
+        fn drop(&mut self) {
+            // SAFETY: `base`/`len` are exactly what `open`'s `mmap` call
+            // returned; nothing else unmaps this region.
+            let _ = unsafe { rustix::mm::munmap(self.base, self.len) };
+        }
+    }
+
+    /// Drives a leaf [`proxima_primitives::pipe::Pipe::call`] future to
+    /// completion -- same justification as `real_openchat_file::block_on`'s
+    /// own doc: every future this crate's pipes return is `async move { <sync
+    /// computation> }` with no internal `.await`, so the first poll is
+    /// always ready.
+    fn block_on<Fut: core::future::Future>(future: Fut) -> Fut::Output {
+        let mut future = core::pin::pin!(future);
+        let waker = core::task::Waker::noop();
+        let mut context = core::task::Context::from_waker(waker);
+        match future.as_mut().poll(&mut context) {
+            core::task::Poll::Ready(output) => output,
+            core::task::Poll::Pending => unreachable!("proxima-model-interop pipes never yield: no internal .await"),
+        }
+    }
+
+    /// The real, whole-forward-pipeline attempt this discipline log's
+    /// deliverable is built on: mmap the real 25 GB Mixtral-8x7B checkpoint,
+    /// parse it, load it through the exact same public
+    /// [`crate::generate::LoadedModel::load`] +
+    /// [`proxima_primitives::pipe::Pipe::call`] surface
+    /// [`real_openchat_file`]'s own acceptance tests drive -- no private
+    /// shortcut around either step. `Mixtral-8x7B-DPO`'s own
+    /// `tokenizer.chat_template` (asserted verbatim above in
+    /// [`inventories_the_real_checkpoints_tensor_codecs_and_chat_template`])
+    /// is `{% for message in messages %}...`, ChatML shaped -- rendered here
+    /// by hand for one user turn with no assistant reply yet, the same
+    /// one-turn-no-reply shape [`real_openchat_file::default_prompt`] uses
+    /// for its own template.
+    ///
+    /// **This is not expected to reach a decode step, for two independent
+    /// reasons, and this test observes whichever one the current code hits
+    /// first.** `LoadedModel::load` always builds
+    /// `proxima_tensor::spec::mistral_cached_forward_program`
+    /// (`generate.rs:344`), which has no `expert_count`/`expert_used_count`
+    /// parameter at all and unconditionally binds a dense
+    /// `blk.{layer}.ffn_gate.weight`/`ffn_up.weight`/`ffn_down.weight` triple
+    /// per layer (`spec.rs:1610-1627`) -- the routed alternative
+    /// (`append_mistral_moe_layer`/`append_moe_ffn`, `spec.rs:983`/`893`) is
+    /// only ever reachable through the separate, uncached
+    /// `mistral_forward_program` (`spec.rs:1115`), which nothing in this
+    /// crate calls. That mismatch would surface as
+    /// `TensorError::UnboundInputName("blk.0.ffn_gate.weight")` out of the
+    /// forward `call` itself, once weight loading gets that far.
+    ///
+    /// It does not get that far: this real checkpoint stores every layer's
+    /// `ffn_gate_inp.weight` (the MoE router) as `F16` (confirmed above --
+    /// all 32 `F16` tensors in this file are exactly the 32 layers' own
+    /// `ffn_gate_inp.weight`), and neither `gguf_tensor_as_packed_block` nor
+    /// `gguf_tensor_as_f32` decodes `F16`, so `bind_matmul_weight` (`bind.rs`)
+    /// returns [`InteropError::UnrepresentableGgmlType`] for
+    /// `blk.0.ffn_gate_inp.weight` on the very first layer, and
+    /// `LoadedModel::load` propagates that cleanly as `Err` (`generate.rs`'s
+    /// own `bind_all_weights(..)?`) -- before `bind_all_weights` ever reaches
+    /// the expert-weight loop this module's other tests already prove
+    /// correct in isolation. Still wrapped in `catch_unwind`: this observes
+    /// whatever the current code does, and a stale assumption about which of
+    /// the two gaps fires first should not abort the test binary.
+    #[test]
+    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+    fn attempts_a_real_mixtral_forward_pass_and_reports_the_outcome() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let prompt =
+            "<|im_start|>user\nWrite one sentence about the ocean.<|im_end|>\n<|im_start|>assistant\n";
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mapped = MappedGguf::open(path).expect("mmap host-local mixtral gguf fixture");
+            let file_bytes = mapped.as_slice();
+            let parsed = parse_complete(file_bytes).expect("parse host-local mixtral gguf fixture");
+
+            let model = crate::generate::LoadedModel::load(&parsed, file_bytes)
+                .expect("load real mixtral checkpoint through the public path");
+            block_on(model.call((alloc::string::String::from(prompt), 8)))
+        }));
+
+        match outcome {
+            Ok(Ok((token_ids, text, stopped_by_eos))) => {
+                std::println!(
+                    "real_mixtral OUTCOME=coherent-or-garbled-text token_ids={token_ids:?} \
+                     stopped_by_eos={stopped_by_eos} generated_text={text:?}"
+                );
+            }
+            Ok(Err(interop_error)) => {
+                std::println!("real_mixtral OUTCOME=clean-error error={interop_error}");
+            }
+            Err(panic_payload) => {
+                let message = panic_payload
+                    .downcast_ref::<alloc::string::String>()
+                    .cloned()
+                    .or_else(|| panic_payload.downcast_ref::<&str>().map(|value| alloc::string::String::from(*value)))
+                    .unwrap_or_default();
+                std::println!("real_mixtral OUTCOME=panic message={message}");
+            }
         }
     }
 }
