@@ -79,6 +79,19 @@ pub enum InteropError {
     #[error("token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}")]
     VocabShapeMismatch { elements: u64, embedding: u32 },
 
+    /// [`crate::bind::architecture_from_metadata`] found `key` (e.g.
+    /// `{architecture}.attention.head_count_kv`) stored as a per-layer
+    /// [`proxima_gguf::value::MetadataArray`] whose `distinct_values` are not
+    /// all equal -- confirmed against a real hybrid checkpoint
+    /// (LFM2.5-8B-A1B, whose convolution layers report `0` kv heads and
+    /// whose attention layers report a real count in the SAME array).
+    /// [`crate::bind::ModelArchitecture`]'s single `u32` field cannot
+    /// represent genuine per-layer variation, so this surfaces as a typed,
+    /// named gap rather than silently picking one layer's value (the max,
+    /// the first nonzero, ...) and presenting it as if it applied uniformly.
+    #[error("gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelArchitecture cannot represent per-layer variation")]
+    HeterogeneousMetadataArray { key: String, distinct_values: usize },
+
     /// [`crate::generate`]'s cached forward program failed to build or
     /// evaluate -- propagated from `proxima_tensor` rather than re-derived.
     #[error(transparent)]
