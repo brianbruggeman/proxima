@@ -1085,6 +1085,76 @@ mod real_openchat_file {
         assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
     }
 
+    /// Same harness as
+    /// [`profiles_one_real_decode_step_by_per_op_gpu_time`], but targets
+    /// `step=0` -- the PREFILL step, where `next_ids` is still the FULL
+    /// prompt (`new_count=31` for [`decode_loop_prompt`]'s default prompt,
+    /// not the `new_count=1` of every later decode step; see
+    /// `run_decode_loop`'s own `next_ids = ids` vs `next_ids = alloc::vec![token_id]`
+    /// split). Exists to settle discipline-log ROW 112's question: does a
+    /// prefill forward sweep the packed weight matrix once, like ROW 94
+    /// measured a decode step does (`total_operand_bytes` == 1.0000x the
+    /// declared 4.07 GB weight set), or once PER of the 31 prompt
+    /// positions (would read back ~31x that byte count, since every
+    /// `reduce-packed-row-blocked` op still dispatches once per program,
+    /// touching whichever operand bytes the row-blocked kernel binds
+    /// regardless of `new_count`).
+    #[cfg(all(feature = "metal", feature = "instrument"))]
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
+    fn profiles_one_real_prefill_step_by_per_op_gpu_time() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        prefault_if_requested(file_bytes);
+
+        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let prompt = decode_loop_prompt();
+        let max_tokens = 1;
+
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+
+        // SAFETY: same single-process, no-concurrent-reader justification as
+        // `profiles_one_real_decode_step_by_per_op_gpu_time`'s own `set_var`.
+        unsafe {
+            std::env::set_var("PROXIMA_METAL_OP_PROFILE_STEP", "0");
+        }
+        let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+        let generated = model
+            .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
+            .expect("generate through the metal backend");
+        // SAFETY: same justification as the `set_var` above.
+        unsafe {
+            std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
+        }
+
+        std::println!(
+            "op_profile_run tokens_generated={} stopped_by_eos={} generated_text={:?}",
+            generated.0.len(),
+            generated.2,
+            generated.1
+        );
+        assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
+    }
+
     /// Every real openchat weight this checkpoint's cached forward program
     /// binds by name -- `Q4_K`/`Q5_K`/`Q6_K` tensors packed straight out of
     /// an mmap, everything else dequantized -- reused by the `Q8_0`

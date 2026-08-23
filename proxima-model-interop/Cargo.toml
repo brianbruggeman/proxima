@@ -59,6 +59,10 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument"]
 # must additionally gate on `target_os = "macos"` directly, matching how
 # `omega` gates its own re-exports.
 metal = ["dep:omega", "std"]
+# passthrough to `omega/metal-tiled-gemm` (default-off there, ROW `eeadc2d`)
+# so this crate's own op-timed profiling tests can compare the row-blocked
+# and tiled-GEMM paths' operand-byte traffic without a second harness.
+metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
 
 [dependencies]
 arrayvec.workspace = true
