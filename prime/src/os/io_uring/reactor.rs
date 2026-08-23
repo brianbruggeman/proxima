@@ -34,6 +34,7 @@ use std::marker::PhantomData;
 use std::task::Waker;
 
 use io_uring::{IoUring, opcode};
+use proxima_telemetry::debug;
 
 use super::super::core_shard::CURRENT_REACTOR;
 use super::super::reactor::Interest;
@@ -90,7 +91,7 @@ struct OpSlot {
 fn log_parked_reclaim(parked: &ParkedResource, cqe_result: i32) {
     match parked {
         ParkedResource::StreamBuffer(buffer) => {
-            tracing::debug!(
+            debug!(
                 bytes = buffer.len(),
                 cqe_result,
                 "kernel confirmed completion, freeing parked stream buffer"
@@ -100,7 +101,7 @@ fn log_parked_reclaim(parked: &ParkedResource, cqe_result: i32) {
             addr_storage,
             addr_len,
         } => {
-            tracing::debug!(
+            debug!(
                 storage_bytes = std::mem::size_of_val(addr_storage.as_ref()),
                 addr_len = **addr_len,
                 cqe_result,
