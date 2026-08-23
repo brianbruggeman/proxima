@@ -9954,3 +9954,63 @@ Timed runs polled `uptime` before/after every rep; several polls exceeded the ~4
 - `cargo nextest run -p proxima-tensor --features std,instrument`
 - `cargo nextest run -p proxima-model-interop --features metal,instrument`
 - `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24` against a `--release --features metal,instrument[,omega/metal-tiled-gemm]` build of `proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`--ignored --exact --nocapture`), reading `step=0`'s `step_wall_ms` for prefill and the mean of `step=1..23` for decode — reproduces both columns of this row's own table.
+
+## ROW 110 — the user-visible number: total wall clock for 24 tokens. We are 7.41x behind, not 3.73x.
+
+Every Metal figure this initiative has led with is **steady-state decode**:
+65.67 ms/token against llama's 17.62, 3.73x. That is the number that was
+optimized 15x today, and it is not the number anyone experiences.
+
+A generation is one prefill plus N decode steps. ROW 100 measured all four arms
+in ONE interleaved window; the two Metal arms carried tight CoV (ours 1.45%,
+theirs 3.75%) so their totals are admissible even though that row's CPU arms
+were contaminated:
+
+| arm | total wall, 24 tokens | vs llama Metal |
+|---|---|---|
+| **llama Metal `-ngl 99`** | **505.7 ms** | — |
+| llama CPU `-ngl 0 -t 8` | 2260.4 ms | (row's CPU arms contaminated, CoV 53%) |
+| ours CPU w=8 | 2822.1 ms | (same caveat) |
+| **ours Metal** | **3750.4 ms** | **7.41x behind** |
+
+**7.41x, not 3.73x.** The decode ratio understates the real gap by ~2x, because
+prefill is more than half our wall clock and only ~20% of theirs:
+
+| | ours | llama | share of own total |
+|---|---|---|---|
+| prefill | 2224 ms | 103.2 ms | ours 59%, theirs 20% |
+| decode x23 | ~1510 ms | ~402 ms | ours 40%, theirs 80% |
+
+Their token generation dominates their run, as it should. Ours is dominated by
+a prefill that costs 21.5x theirs.
+
+### Why this row exists
+
+Leading with steady-state decode is not wrong, it is *partial*, and partial in
+the flattering direction. It was the right instrument for finding waste — six
+mechanism-backed fixes came out of it. It is the wrong instrument for answering
+"are we faster", and this file has answered that question with it ~20 times.
+
+**Rule: a performance claim about the SYSTEM is total wall clock. A claim about
+a PHASE names the phase.** "65.67 ms/token" is a decode claim and must be
+labelled one. It may not stand in for "our Metal backend is 3.73x off llama"
+because that sentence is false — the backend is 7.41x off.
+
+This is the same defect as ROW 104's part-vs-whole correction, one level up: a
+part of the run compared against the whole of the goal.
+
+### The order of work this implies
+
+| target | ours | llama | behind | share of our total |
+|---|---|---|---|---|
+| Metal prefill | 2224 ms | 103.2 ms | 21.5x | 59% |
+| Metal decode | 65.67 ms/tok | 17.62 ms/tok | 3.73x | 40% |
+
+Prefill is both the larger gap AND the larger share. It has been the top item
+all along and steady-state decode hid it. ROW 107's tiled-GEMM attempt measured
+4.27x WORSE and its geometry redesign is dispatched as ROW 109.
+
+Note also: at a longer generation the shares invert — prefill is paid once, so
+a 500-token run is decode-dominated and the 3.73x becomes the binding figure.
+**Both matter; neither alone is "the" number.** State the token count with any
+total-wall claim, and this row's is 24.
