@@ -181,11 +181,10 @@ fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo,
 }
 
 fn reinterpret_f32(data: &[u8]) -> Vec<f32> {
-    data.chunks_exact(4)
-        .map(|chunk| {
-            let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            f32::from_le_bytes(bytes)
-        })
+    data.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 

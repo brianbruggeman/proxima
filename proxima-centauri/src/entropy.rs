@@ -383,10 +383,8 @@ impl EntropyCell {
             )
             .map_err(|_| CentauriError::EntropyUnavailable("cell not empty"))?;
 
-        for (word, chunk) in self.words.iter().zip(bytes.chunks_exact(4)) {
-            let mut quad = [0u8; 4];
-            quad.copy_from_slice(chunk);
-            word.store(u32::from_le_bytes(quad), Ordering::Relaxed);
+        for (word, chunk) in self.words.iter().zip(bytes.as_chunks::<4>().0) {
+            word.store(u32::from_le_bytes(*chunk), Ordering::Relaxed);
         }
 
         self.state.store(CELL_FULL, Ordering::Release);
@@ -412,8 +410,8 @@ impl EntropyCell {
             .map_err(|_| CentauriError::EntropyUnavailable("cell empty"))?;
 
         let mut bytes = [0u8; 32];
-        for (word, chunk) in self.words.iter().zip(bytes.chunks_exact_mut(4)) {
-            chunk.copy_from_slice(&word.load(Ordering::Relaxed).to_le_bytes());
+        for (word, chunk) in self.words.iter().zip(bytes.as_chunks_mut::<4>().0) {
+            *chunk = word.load(Ordering::Relaxed).to_le_bytes();
         }
 
         self.state.store(CELL_EMPTY, Ordering::Release);

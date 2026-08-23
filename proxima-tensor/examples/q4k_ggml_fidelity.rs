@@ -82,8 +82,8 @@ fn block_elements(ggml_type: GgmlType) -> usize {
 fn ours(ggml_type: GgmlType, data: &[u8], out: &mut [f32]) -> Result<(), String> {
     match ggml_type {
         GgmlType::F32 => {
-            for (slot, chunk) in out.iter_mut().zip(data.chunks_exact(4)) {
-                *slot = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            for (slot, chunk) in out.iter_mut().zip(data.as_chunks::<4>().0) {
+                *slot = f32::from_le_bytes(*chunk);
             }
             Ok(())
         }

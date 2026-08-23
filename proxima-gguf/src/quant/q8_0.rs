@@ -102,7 +102,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (block, out_chunk) in data.chunks_exact(BLOCK_BYTES).zip(output.chunks_exact_mut(QK8_0)) {
+    for (block, out_chunk) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.as_chunks_mut::<QK8_0>().0) {
         dequantize_block(block, out_chunk);
     }
     Ok(())
@@ -157,7 +157,7 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, out_block) in input.chunks_exact(QK8_0).zip(output.chunks_exact_mut(BLOCK_BYTES)) {
+    for (chunk, out_block) in input.as_chunks::<QK8_0>().0.iter().zip(output.as_chunks_mut::<BLOCK_BYTES>().0) {
         quantize_block(chunk, out_block);
     }
     Ok(())

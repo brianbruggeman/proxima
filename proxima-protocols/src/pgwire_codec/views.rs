@@ -163,8 +163,8 @@ impl<'a> FormatCodes<'a> {
         let count = reader.take_count16(field)?;
         let tag = reader.tag();
         let raw = reader.take_bytes(count * 2)?;
-        for chunk in raw.chunks_exact(2) {
-            let code = i16::from_be_bytes([chunk[0], chunk[1]]);
+        for chunk in raw.as_chunks::<2>().0 {
+            let code = i16::from_be_bytes(*chunk);
             if FormatCode::from_i16(code).is_none() {
                 return Err(ParseError::InvalidValue { tag, field });
             }

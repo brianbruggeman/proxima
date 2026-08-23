@@ -36,6 +36,7 @@ pub fn report_fault(message: &str) {
 // loom::model(...) closure, which this plain #[test] function doesn't provide
 // (mirrors the same gate on `export.rs`'s test module).
 #[cfg(all(test, not(feature = "loom")))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};

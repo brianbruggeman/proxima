@@ -729,7 +729,7 @@ fn main() {
     for row in cold_buffers[0].chunks_exact(row_bytes).take(64) {
         let shipped = dot_q4k_q8k(row, &activation_q8k).unwrap();
         let mut local = 0.0f32;
-        for (index, weight_block) in row.chunks_exact(Q4K_BLOCK_BYTES).enumerate() {
+        for (index, weight_block) in row.as_chunks::<Q4K_BLOCK_BYTES>().0.iter().enumerate() {
             let q8k_block = &activation_q8k[index * Q8K_BLOCK_BYTES..(index + 1) * Q8K_BLOCK_BYTES];
             // SAFETY: aarch64 implies FEAT_DotProd here; slices are one super-block each.
             local += unsafe { q4k_arm_full(weight_block, q8k_block) };
