@@ -183,4 +183,17 @@ pub enum TensorError {
     /// activation length does not match the declared reduction width.
     #[error("quantized matmul shape mismatch: {reason}")]
     QuantizedShapeMismatch { reason: &'static str },
+
+    /// [`crate::spec::mistral_forward_program`]'s routed-FFN branch needs
+    /// `1 <= expert_used_count <= expert_count`: zero experts selected per
+    /// token is a config that can never route, and selecting more experts
+    /// than exist has no meaning.
+    #[error(
+        "moe routing needs 1 <= expert_used_count <= expert_count, got expert_count={expert_count} \
+         expert_used_count={expert_used_count}"
+    )]
+    InvalidExpertConfig {
+        expert_count: u32,
+        expert_used_count: u32,
+    },
 }
