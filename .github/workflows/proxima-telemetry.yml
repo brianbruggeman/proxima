@@ -109,3 +109,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench -p proxima-telemetry --bench bench_trace_native_vs_otlp --features otlp-http -- --quick
+
+  # Compare-bench (proxima Recorder vs the OpenTelemetry SDK itself, span
+  # emit / overflow / concurrent-emit axes). These three benches carry no
+  # feature gate — opentelemetry/opentelemetry_sdk are unconditional
+  # dev-dependencies — yet none of them were invoked anywhere in this repo or
+  # its CI, the same class of defect `bench_trace_native_vs_otlp` above does
+  # not have: an incumbent-comparison bench that sat registered and never
+  # ran. Records baselines; does not seal a discipline row (manual CoV read).
+  compare-bench-otel-sdk:
+    name: compare-bench (native vs otel sdk)
+    needs: changes
+    if: needs.changes.outputs.telemetry == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench -p proxima-telemetry --bench bench_telemetry_vs_otel_sdk -- --quick
+      - run: cargo bench -p proxima-telemetry --bench bench_overflow_vs_otel -- --quick
+      - run: cargo bench -p proxima-telemetry --bench bench_concurrent_emit_vs_otel -- --quick

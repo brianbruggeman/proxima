@@ -1,0 +1,62 @@
+name: proxima-http-incumbents
+
+# Measured: `h1_tail_vs_incumbents`, `h2_tail_vs_incumbents`, and
+# `h3_native_vs_quinn` were registered in Cargo.toml (each named a real
+# incumbent — hyper, pingora, quinn — under `required-features`) yet appeared
+# in ZERO workflows and ZERO local runner scripts. Unlike proxima-tensor's
+# `ggml-bench` benches, nothing here needs an external asset (no vendored
+# checkout, no multi-GB model file) — all three drive loopback TCP/UDP
+# against the same in-process incumbent crates already in Cargo.toml as
+# dev-dependencies, so there is no reason this stayed CI-absent.
+#
+# Reuses `prime_serve`'s change-scope output (`.github/ci-areas.toml`,
+# `packages = ["proxima"]`) rather than adding a new area: these benches
+# live in the same crate and dependency closure prime_serve.yml's own
+# compare-bench job already gates on.
+
+on:
+  push:
+    branches: [main, "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  changes:
+    uses: ./.github/workflows/affected.yml
+
+  # Compare-bench (h1/h2 tail latency vs hyper + pingora, same loopback
+  # harness, concurrency 1/10/100). Smoke-runs each so it can never again
+  # sit registered-but-unexecuted; `--quick` keeps CI fast and, like the
+  # other compare-bench jobs in this repo, this records a baseline rather
+  # than sealing a discipline row (that's a manual read of the CoV).
+  compare-bench-http-tail:
+    name: compare-bench (h1/h2 tail vs hyper+pingora)
+    needs: changes
+    if: needs.changes.outputs.prime_serve == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --no-default-features --features http-hyper --bench h1_tail_vs_incumbents -- --quick
+      - run: cargo bench --no-default-features --features http2,tls,http-hyper --bench h2_tail_vs_incumbents -- --quick
+
+  # Compare-bench (native H3 client vs quinn's Http3Upstream, same mounted
+  # native listener). Not a criterion harness (manual timing — see the
+  # bench's own module doc), so there is no `--quick` flag; the bench's own
+  # iteration count is what CI runs.
+  compare-bench-h3-native-vs-quinn:
+    name: compare-bench (h3 native vs quinn)
+    needs: changes
+    if: needs.changes.outputs.prime_serve == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --no-default-features --features h3-native-upstream,h3-upstream --bench h3_native_vs_quinn

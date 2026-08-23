@@ -29,8 +29,12 @@
 # doctest gate which never ran a doctest.
 #
 # No `ggml-bench` cell: that feature's build.rs wants a statically linked ggml
-# checkout on disk, so it belongs with the bench harnesses, not a correctness
+# checkout on disk (plus, for five of its six benches, a real multi-GiB GGUF
+# checkpoint), so it belongs with the bench harnesses, not a correctness
 # gate. Named here so its absence is a decision on the record, not an oversight.
+# The local-only execution path (this is a CI-unsatisfiable dependency, not a
+# missing wire) is `scripts/bench-vs-ggml.sh` -- read its header for the exact
+# GGML_BUILD_DIR/PROXIMA_BENCH_GGUF_PATH re-prove command.
 #
 # Usage:  bash scripts/proxima-tensor-gate.sh
 # Exits 0 if every cell passes, non-zero (after running them all) otherwise.
