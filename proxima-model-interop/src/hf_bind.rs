@@ -140,29 +140,53 @@ pub(crate) fn safetensors_tensor_as_f32(manifest: &Manifest, file_bytes: &[u8], 
     }
 }
 
-/// A learned 1-D scale (RMSNorm weight) -- same role as
+/// A learned 1-D scale (RMSNorm weight) or the embedding table (indexed by
+/// row via `embedding_lookup`, never projected) -- same role as
 /// [`crate::bind::bind_dense`], reused under a new name only because its
 /// GGUF counterpart is `pub(crate)` to `bind.rs`'s own module, not this one.
+///
+/// `lookup_name` is the name HF's own manifest carries on disk
+/// (`model.layers.0.input_layernorm.weight`); `store_name` is the name
+/// [`BoundWeights`] keys this tensor under -- the forward program's own
+/// GGUF-convention node name (`blk.0.attn_norm.weight`), since
+/// [`crate::generate::LoadedModel::call`] matches every bound weight against
+/// the compiled program purely by that string (`generate.rs`'s
+/// `named_blocks.push((name.as_str(), ..))` loop), never by position. The
+/// two names differ for every weight this module binds; kept as two
+/// parameters rather than reusing one, so a caller cannot silently store a
+/// tensor under the very on-disk name the program will never ask for.
+///
+/// Only `Float32` binds packed/zero-copy here -- a packed `Float16`/
+/// `BFloat16` block lands in the interpreter's `quantized_weights` map
+/// (`proxima_tensor::cpu`'s own `block_nodes`/`blocks` split), read ONLY by
+/// the quantized-matmul reduce kernel (`run_reduce_quantized`); a gather
+/// (`embedding_lookup`) or a plain elementwise scale (RMSNorm) instead reads
+/// the plain per-node `buffers` array via `buffer_of`, which never looks
+/// there at all. Confirmed the hard way against the real, downloaded
+/// `HuggingFaceTB/SmolLM2-135M-Instruct/model.safetensors` (BF16 weights
+/// throughout): binding `token_embd.weight` packed here produced
+/// `NotLowerable { reason: "operand buffer missing at evaluation time" }`
+/// the first time this path ever ran against a real bf16 HF checkpoint --
+/// this is that fix. [`hf_bind_matmul_weight`] is the one binder that feeds
+/// a genuine 2-D matmul operand, where the packed `Float16`/`BFloat16` path
+/// (`matmul_f16_f32`/`matmul_bf16_f32`) is correct and stays.
 fn hf_bind_dense<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
     data_start: u64,
-    name: String,
+    lookup_name: String,
+    store_name: String,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
-    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &name) {
+    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &lookup_name) {
         Ok(block @ QuantizedBlock::Float32(borrowed)) => {
             state.resident_bytes += core::mem::size_of_val(borrowed);
-            state.packed.push((name, block));
-        }
-        Ok(block @ (QuantizedBlock::Float16(bytes) | QuantizedBlock::BFloat16(bytes))) => {
-            state.resident_bytes += bytes.len();
-            state.packed.push((name, block));
+            state.packed.push((store_name, block));
         }
         Ok(_) | Err(_) => {
-            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
+            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            state.owned.push((name, decoded));
+            state.owned.push((store_name, decoded));
         }
     }
     Ok(())
@@ -179,21 +203,37 @@ fn hf_bind_dense<'file>(
 /// same way a packed `Q4_K` operand does, so no transpose is needed on that
 /// path at all -- only the OWNED f32 fallback needs one, exactly mirroring
 /// [`crate::bind::bind_matmul_weight`].
+///
+/// `lookup_name`/`store_name` split for the same reason [`hf_bind_dense`]'s
+/// doc explains -- and this split is also what lets a tied-embedding
+/// checkpoint bind its `output.weight` program node from
+/// `model.embed_tokens.weight`'s on-disk bytes (`lookup_name`) while still
+/// storing the result under `output.weight` (`store_name`): the identical
+/// transpose this function already applies to any other `[out, in]`
+/// projection weight, no new bind path.
+// two names (lookup/store, see this doc) plus the tensor's own shape
+// (out_dim/in_dim) plus the file/state every binder in this module threads
+// through -- the same real parameter count `bind_moe_expert_weights`
+// (`bind.rs`) carries for the identical reason.
+#[allow(clippy::too_many_arguments)]
 fn hf_bind_matmul_weight<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
     data_start: u64,
-    name: String,
+    lookup_name: String,
+    store_name: String,
     out_dim: usize,
     in_dim: usize,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
-    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &name) {
-        Ok(block) => state.packed.push((name, block)),
+    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &lookup_name) {
+        Ok(block) => state.packed.push((store_name, block)),
         Err(_) => {
-            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &name)?;
+            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            state.owned.push((name.clone(), transpose_out_in_to_in_out(&decoded, &name, out_dim, in_dim)?));
+            state
+                .owned
+                .push((store_name, transpose_out_in_to_in_out(&decoded, &lookup_name, out_dim, in_dim)?));
         }
     }
     Ok(())
@@ -243,6 +283,57 @@ mod names {
     }
     pub(super) fn lm_head() -> String {
         "lm_head.weight".into()
+    }
+}
+
+/// The forward program's own node names -- exactly the GGUF-convention
+/// strings [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
+/// builds its `Op::Input` leaves with (`spec.rs`'s own `blk.{layer}.*`/
+/// `token_embd.weight`/`output_norm.weight`/`output.weight` literals), never
+/// [`names`]'s HF-convention strings. [`crate::generate::LoadedModel::call`]
+/// matches every bound weight against the compiled program purely by name
+/// (see [`hf_bind_dense`]'s doc), so every [`BoundWeights`] entry this module
+/// produces MUST be stored under one of these, regardless of what the
+/// on-disk tensor was called.
+mod node_names {
+    use alloc::format;
+    use alloc::string::String;
+
+    pub(super) fn token_embd() -> String {
+        "token_embd.weight".into()
+    }
+    pub(super) fn attn_norm(layer: u32) -> String {
+        format!("blk.{layer}.attn_norm.weight")
+    }
+    pub(super) fn ffn_norm(layer: u32) -> String {
+        format!("blk.{layer}.ffn_norm.weight")
+    }
+    pub(super) fn attn_q(layer: u32) -> String {
+        format!("blk.{layer}.attn_q.weight")
+    }
+    pub(super) fn attn_k(layer: u32) -> String {
+        format!("blk.{layer}.attn_k.weight")
+    }
+    pub(super) fn attn_v(layer: u32) -> String {
+        format!("blk.{layer}.attn_v.weight")
+    }
+    pub(super) fn attn_output(layer: u32) -> String {
+        format!("blk.{layer}.attn_output.weight")
+    }
+    pub(super) fn ffn_gate(layer: u32) -> String {
+        format!("blk.{layer}.ffn_gate.weight")
+    }
+    pub(super) fn ffn_up(layer: u32) -> String {
+        format!("blk.{layer}.ffn_up.weight")
+    }
+    pub(super) fn ffn_down(layer: u32) -> String {
+        format!("blk.{layer}.ffn_down.weight")
+    }
+    pub(super) fn output_norm() -> String {
+        "output_norm.weight".into()
+    }
+    pub(super) fn output_weight() -> String {
+        "output.weight".into()
     }
 }
 
@@ -300,22 +391,76 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     let feed_forward = architecture.feed_forward as usize;
     let vocab = architecture.vocab as usize;
 
-    hf_bind_dense(manifest, file_bytes, data_start, names::embed_tokens(), &mut state)?;
+    hf_bind_dense(manifest, file_bytes, data_start, names::embed_tokens(), node_names::token_embd(), &mut state)?;
 
     for layer in 0..architecture.block_count {
-        hf_bind_dense(manifest, file_bytes, data_start, names::input_layernorm(layer), &mut state)?;
-        hf_bind_dense(manifest, file_bytes, data_start, names::post_attention_layernorm(layer), &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::q_proj(layer), embedding, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::k_proj(layer), kv_dim, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::v_proj(layer), kv_dim, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::o_proj(layer), embedding, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::gate_proj(layer), feed_forward, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::up_proj(layer), feed_forward, embedding, &mut state)?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::down_proj(layer), embedding, feed_forward, &mut state)?;
+        hf_bind_dense(manifest, file_bytes, data_start, names::input_layernorm(layer), node_names::attn_norm(layer), &mut state)?;
+        hf_bind_dense(
+            manifest,
+            file_bytes,
+            data_start,
+            names::post_attention_layernorm(layer),
+            node_names::ffn_norm(layer),
+            &mut state,
+        )?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::q_proj(layer), node_names::attn_q(layer), embedding, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::k_proj(layer), node_names::attn_k(layer), kv_dim, embedding, &mut state)?;
+        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::v_proj(layer), node_names::attn_v(layer), kv_dim, embedding, &mut state)?;
+        hf_bind_matmul_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::o_proj(layer),
+            node_names::attn_output(layer),
+            embedding,
+            embedding,
+            &mut state,
+        )?;
+        hf_bind_matmul_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::gate_proj(layer),
+            node_names::ffn_gate(layer),
+            feed_forward,
+            embedding,
+            &mut state,
+        )?;
+        hf_bind_matmul_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::up_proj(layer),
+            node_names::ffn_up(layer),
+            feed_forward,
+            embedding,
+            &mut state,
+        )?;
+        hf_bind_matmul_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::down_proj(layer),
+            node_names::ffn_down(layer),
+            embedding,
+            feed_forward,
+            &mut state,
+        )?;
     }
 
-    hf_bind_dense(manifest, file_bytes, data_start, names::final_norm(), &mut state)?;
-    hf_bind_matmul_weight(manifest, file_bytes, data_start, names::lm_head(), vocab, embedding, &mut state)?;
+    hf_bind_dense(manifest, file_bytes, data_start, names::final_norm(), node_names::output_norm(), &mut state)?;
+
+    // A tied checkpoint (HF's `tie_word_embeddings: true`, e.g. real
+    // SmolLM2-135M-Instruct) ships no `lm_head.weight` tensor at all -- its
+    // token-embedding table doubles as the LM head. Binding the SAME
+    // on-disk tensor at the `output.weight` program node needs no new bind
+    // path: `hf_bind_matmul_weight` already dequantizes-then-transposes (or
+    // binds packed) any `[out, in]`-shaped weight, and `embed_tokens`'s own
+    // on-disk shape (`[vocab, embedding]`) is exactly that for
+    // `out_dim = vocab, in_dim = embedding` -- the same shape `lm_head.weight`
+    // would have carried on an untied checkpoint.
+    let output_lookup_name = if architecture.tied_embeddings { names::embed_tokens() } else { names::lm_head() };
+    hf_bind_matmul_weight(manifest, file_bytes, data_start, output_lookup_name, node_names::output_weight(), vocab, embedding, &mut state)?;
     Ok(state)
 }
 
@@ -360,6 +505,7 @@ mod tests {
             expert_count: 0,
             expert_used_count: 0,
             rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+            tied_embeddings: false,
         }
     }
 
@@ -434,6 +580,144 @@ mod tests {
         // owned f32 buffer here since none of this fixture's tensors are
         // 4-byte-misaligned within the written buffer.
         assert_eq!(bound.owned.len() + bound.packed.len(), 12, "every named weight must bind, none silently skipped");
+
+        // Every stored key must be the forward program's own GGUF-convention
+        // node name, NEVER the HF on-disk name this checkpoint's manifest
+        // actually carries -- `LoadedModel::call` matches bound weights
+        // against the compiled program purely by string (`generate.rs`'s
+        // `named_blocks` loop), so a name mismatch here would bind silently
+        // and then fail (or worse, mis-match) only once a real forward pass
+        // runs.
+        let stored_names: alloc::vec::Vec<&str> = bound
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(bound.packed.iter().map(|(name, _)| name.as_str()))
+            .collect();
+        for expected in ["token_embd.weight", "blk.0.attn_norm.weight", "blk.0.ffn_norm.weight", "output_norm.weight", "output.weight"] {
+            assert!(
+                stored_names.contains(&expected),
+                "expected the GGUF-convention node name {expected:?} among stored keys {stored_names:?}"
+            );
+        }
+        for hf_name in ["model.embed_tokens.weight", "model.layers.0.input_layernorm.weight", "model.norm.weight", "lm_head.weight"] {
+            assert!(
+                !stored_names.contains(&hf_name),
+                "the HF on-disk name {hf_name:?} must never be the STORED key -- only the lookup key"
+            );
+        }
+    }
+
+    /// A real bf16 embedding table must bind as an OWNED f32 buffer, never
+    /// packed -- the exact defect this row's own fix closes, reproduced
+    /// directly rather than only through the full multi-tensor pipeline:
+    /// binding `token_embd.weight` packed would land it in the
+    /// interpreter's `quantized_weights` map, which `embedding_lookup`'s
+    /// gather (`proxima_tensor::cpu::buffer_of`) never reads at all, so a
+    /// packed bind here is a silent setup for `NotLowerable { reason:
+    /// "operand buffer missing at evaluation time" }` at forward time
+    /// rather than a bind-time failure -- this test catches it at bind time
+    /// instead.
+    #[test]
+    fn bf16_embed_tokens_binds_as_owned_f32_not_packed() {
+        let architecture = tiny_dense_architecture();
+        let vocab = architecture.vocab as usize;
+        let embedding = architecture.embedding as usize;
+        let values: Vec<half::bf16> = (0..vocab * embedding).map(|index| half::bf16::from_f32(index as f32 * 0.5)).collect();
+        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let tensors = vec![TensorPayload {
+            name: names::embed_tokens(),
+            dtype: DType::BFloat16,
+            shape: vec![vocab as u64, embedding as u64],
+            data: bytes.as_slice(),
+        }];
+        let file_bytes = write_complete(&SafetensorsModel {
+            tensors,
+            metadata: alloc::collections::BTreeMap::new(),
+        })
+        .expect("writes a real bf16 safetensors buffer");
+        let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+        let data_start = header_data_start(&file_bytes);
+
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+        };
+        hf_bind_dense(&manifest, &file_bytes, data_start, names::embed_tokens(), node_names::token_embd(), &mut state)
+            .expect("binds the real bf16 embedding table");
+
+        assert_eq!(state.owned.len(), 1, "the bf16 embedding table must decode to an OWNED f32 buffer");
+        assert_eq!(state.packed.len(), 0, "the bf16 embedding table must NEVER bind packed -- gather cannot read it there");
+        assert_eq!(state.owned[0].0, "token_embd.weight");
+        assert_eq!(state.owned[0].1.len(), vocab * embedding);
+        // real-value check, not just shape: the first decoded element must
+        // match an independent bf16 decode of the same bytes.
+        assert!((state.owned[0].1[0] - 0.0).abs() < 1e-6);
+        assert!((state.owned[0].1[1] - 0.5).abs() < 1e-6);
+    }
+
+    /// A tied checkpoint (real SmolLM2-135M-Instruct's own shape: no
+    /// `lm_head.weight` tensor at all) must still bind an `output.weight`
+    /// program node, reusing `embed_tokens`'s own on-disk bytes -- proves
+    /// [`bind_all_weights_from_safetensors`]'s tied-embedding branch, not
+    /// just that the untied path works.
+    #[test]
+    fn tied_embeddings_bind_output_weight_from_embed_tokens_with_no_lm_head_tensor() {
+        let mut architecture = tiny_dense_architecture();
+        architecture.tied_embeddings = true;
+        let embedding = architecture.embedding as usize;
+        let feed_forward = architecture.feed_forward as usize;
+        let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
+        let vocab = architecture.vocab as usize;
+
+        let mut owned_data: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut push = |name: String, elements: usize| {
+            let values: Vec<f32> = (0..elements).map(|index| index as f32 * 0.5).collect();
+            owned_data.push((name, f32_bytes(&values)));
+        };
+        push(names::embed_tokens(), vocab * embedding);
+        push(names::input_layernorm(0), embedding);
+        push(names::post_attention_layernorm(0), embedding);
+        push(names::q_proj(0), embedding * embedding);
+        push(names::k_proj(0), kv_dim * embedding);
+        push(names::v_proj(0), kv_dim * embedding);
+        push(names::o_proj(0), embedding * embedding);
+        push(names::gate_proj(0), feed_forward * embedding);
+        push(names::up_proj(0), feed_forward * embedding);
+        push(names::down_proj(0), embedding * feed_forward);
+        push(names::final_norm(), embedding);
+        // deliberately NO names::lm_head() tensor -- this is the whole point
+
+        let tensors = owned_data
+            .iter()
+            .map(|(name, bytes)| TensorPayload {
+                name: name.clone(),
+                dtype: DType::Float32,
+                shape: vec![(bytes.len() / 4) as u64],
+                data: bytes.as_slice(),
+            })
+            .collect();
+        let file_bytes = write_complete(&SafetensorsModel {
+            tensors,
+            metadata: alloc::collections::BTreeMap::new(),
+        })
+        .expect("writes a real safetensors buffer with no lm_head.weight tensor");
+        let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+        let data_start = header_data_start(&file_bytes);
+
+        let bound = bind_all_weights_from_safetensors(&manifest, &file_bytes, data_start, &architecture)
+            .expect("a tied checkpoint must bind output.weight from embed_tokens, not error looking for lm_head.weight");
+
+        let stored_names: alloc::vec::Vec<&str> =
+            bound.owned.iter().map(|(name, _)| name.as_str()).chain(bound.packed.iter().map(|(name, _)| name.as_str())).collect();
+        assert!(stored_names.contains(&"output.weight"), "output.weight must still be bound: {stored_names:?}");
+        // 12 STORED entries, same as the untied fixture: 11 on-disk tensors,
+        // but `embed_tokens` is read TWICE -- once for `token_embd.weight`,
+        // once for `output.weight` -- so the program still gets 12 named
+        // inputs even though the checkpoint carries one fewer on-disk tensor.
+        assert_eq!(bound.owned.len() + bound.packed.len(), 12, "embed_tokens binds twice: once as token_embd.weight, once as output.weight");
+        assert_eq!(manifest.tensors.len(), 11, "the checkpoint fixture itself carries 11 on-disk tensors, one fewer than the untied fixture's 12, since lm_head.weight is absent");
     }
 
     /// The one weight this test perturbs by transposing it wrong would prove
@@ -484,11 +768,20 @@ mod tests {
                 continue; // still aligned with this padding length; try the next one
             }
 
-            let outcome = hf_bind_matmul_weight(&manifest, &file_bytes, data_start, names::q_proj(0), embedding, embedding, &mut BoundWeights {
-                resident_bytes: 0,
-                owned: Vec::new(),
-                packed: Vec::new(),
-            });
+            let outcome = hf_bind_matmul_weight(
+                &manifest,
+                &file_bytes,
+                data_start,
+                names::q_proj(0),
+                node_names::attn_q(0),
+                embedding,
+                embedding,
+                &mut BoundWeights {
+                    resident_bytes: 0,
+                    owned: Vec::new(),
+                    packed: Vec::new(),
+                },
+            );
 
             assert!(
                 matches!(outcome, Err(InteropError::DenseWeightShapeMismatch { .. })),
