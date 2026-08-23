@@ -64,7 +64,7 @@ use proxima_listen::any::{
     AnyHandler, AnyProtocol, Classifier, ClassifyOutcome, ProbeVerdict, RejectReason,
     downcast_handler,
 };
-use proxima_listen::{ListenProtocol, ServeContext};
+use proxima_listen::{ListenProtocol, ReadySignal, ServeContext};
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
 use proxima_primitives::stream::{
@@ -928,7 +928,7 @@ async fn serve_via_factory(
     drain_timeout_ms: u64,
     quiesce_duration_ms: Option<u64>,
     #[cfg(feature = "tls")] tls_acceptor: Option<futures_rustls::TlsAcceptor>,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<ReadySignal>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(), ProximaError> {
     let options = proxima_primitives::stream::TcpBindOptions {
@@ -977,7 +977,7 @@ async fn serve_via_factory(
         AcceptDriver::Plain(acceptor)
     };
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     debug!(
         ?bind,
@@ -1208,7 +1208,7 @@ async fn serve_uds(
     on_reject: Option<RejectHook>,
     blacklist: Option<BlacklistTable>,
     spec: Arc<Value>,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<ReadySignal>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<(), ProximaError> {
     if path.exists() {
@@ -1228,7 +1228,7 @@ async fn serve_uds(
     }
     debug!(?path, "any listener (uds) bound");
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     let read_chunk_len = global_cap.clamp(64, 4096);
     let mut core = ListenerCore::new(proxima_listen::DispatchPolicy::Inline);

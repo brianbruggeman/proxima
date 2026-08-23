@@ -220,7 +220,8 @@ impl Listener {
                 "listener shutdown bridge spawn failed: {err}"
             )));
         }
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (ready_tx, ready_rx) =
+            std::sync::mpsc::channel::<Result<(), ProximaError>>();
         for core_index in 0..num_lanes {
             let protocol_for_lane = protocol.clone();
             let dispatch_for_lane = dispatch.clone();
@@ -231,6 +232,7 @@ impl Listener {
             let acceptor_factory_for_lane = acceptor_factory.clone();
             let datagram_factory_for_lane = datagram_factory.clone();
             let ready_tx_for_lane = ready_tx.clone();
+            let ready_tx_for_outcome = ready_tx.clone();
             let handler_dispatch_for_lane = if use_spread {
                 crate::HandlerDispatch::SpreadToPeers { num_cores }
             } else {
@@ -272,6 +274,7 @@ impl Listener {
                                         core = core_index,
                                         "listener lane exited with error",
                                     );
+                                    let _ = ready_tx_for_outcome.send(Err(error));
                                 }
                             }
                             outcome = serve_future => {
@@ -281,6 +284,7 @@ impl Listener {
                                         core = core_index,
                                         "listener lane exited with error",
                                     );
+                                    let _ = ready_tx_for_outcome.send(Err(error));
                                 }
                             }
                         }
@@ -303,10 +307,18 @@ impl Listener {
         // after this returned got `ECONNREFUSED` before this wait existed).
         drop(ready_tx);
         for _ in 0..num_lanes {
-            if ready_rx.recv_timeout(LISTENER_READY_TIMEOUT).is_err() {
-                return Err(ProximaError::Config(format!(
-                    "listener did not become ready on all {num_lanes} lane(s) within {LISTENER_READY_TIMEOUT:?}"
-                )));
+            match ready_rx.recv_timeout(LISTENER_READY_TIMEOUT) {
+                Ok(Ok(())) => {}
+                // real startup failure (bind permission, port-in-use, missing
+                // feature, …) — surface the actual cause instead of letting
+                // the caller wait out the timeout for an answer that already
+                // exists.
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(ProximaError::Config(format!(
+                        "listener did not become ready on all {num_lanes} lane(s) within {LISTENER_READY_TIMEOUT:?}"
+                    )));
+                }
             }
         }
         Ok(ListenerHandle {
@@ -838,7 +850,7 @@ mod tests {
             self.served.store(true, Ordering::SeqCst);
             Box::pin(async move {
                 if let Some(sender) = context.ready_signal {
-                    let _ = sender.send(());
+                    let _ = sender.send(Ok(()));
                 }
                 let _ = shutdown.await;
                 Ok(())
@@ -944,6 +956,67 @@ mod tests {
         assert!(
             message.contains("http"),
             "expected the registry miss to name the protocol, got: {message}"
+        );
+    }
+
+    /// Fake protocol whose `serve` fails immediately with a distinctive,
+    /// known cause — WITHOUT ever touching `ServeContext::ready_signal`.
+    /// Mirrors a real startup failure (bind permission, port-in-use, a
+    /// missing-feature config error) that never reaches the bind/listen
+    /// syscall that would fire readiness.
+    struct FailingListenProtocol;
+
+    impl ListenProtocol for FailingListenProtocol {
+        fn name(&self) -> &str {
+            "failing-listen-protocol"
+        }
+
+        fn serve(
+            &self,
+            _bind: SocketAddr,
+            _dispatch: PipeHandle,
+            _spec: &Value,
+            _context: ServeContext,
+            _shutdown: oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+            Box::pin(async move {
+                Err(ProximaError::Config(
+                    "synthetic startup failure: missing required feature `never-enabled`".into(),
+                ))
+            })
+        }
+    }
+
+    // closes the class defect at this file's multi-lane readiness wait
+    // (the `select_biased!` duplicate of `src/app.rs`'s single-lane copy):
+    // before the fix this would have hit `LISTENER_READY_TIMEOUT` (5s) and
+    // reported the generic "did not become ready" message instead of the
+    // real cause.
+    #[test]
+    fn run_with_runtime_surfaces_serve_startup_error_instead_of_timeout() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let protocol: Arc<dyn ListenProtocol> = Arc::new(FailingListenProtocol);
+        let listener = ListenerSpec::protocol(bind, protocol).attach(null_dispatch());
+
+        let registry = ListenRegistry::new();
+        let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime);
+
+        let outcome = listener.run_with_runtime(&registry, telemetry, Some(runtime), None, None);
+        let error = match outcome {
+            Ok(_) => panic!("a listener whose serve() fails must not report success"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("synthetic startup failure"),
+            "caller must see the actual startup cause, not a generic ready-timeout \
+             message; got: {message}"
+        );
+        assert!(
+            !message.contains("did not become ready"),
+            "a listener that failed BEFORE ever reporting ready must not present as \
+             a bare timeout; got: {message}"
         );
     }
 }

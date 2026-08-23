@@ -102,13 +102,13 @@ pub async fn serve_pipe_upgrades(
     runtime: Option<Arc<dyn Runtime>>,
     mut shutdown: oneshot::Receiver<()>,
     label: &str,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<crate::ReadySignal>,
 ) -> Result<(), ProximaError> {
     let mut acceptor = factory.bind(bind, options).map_err(|error| {
         ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {error}")))
     })?;
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     debug!(label = %label, %bind, "upgrade listener bound");
     loop {
