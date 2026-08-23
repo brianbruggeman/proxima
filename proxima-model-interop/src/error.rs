@@ -174,4 +174,25 @@ pub enum InteropError {
     /// `num_hidden_layers`, `intermediate_size`, or `vocab_size`).
     #[error("malformed hf config.json: {reason}")]
     MalformedHfConfig { reason: String },
+
+    /// [`crate::hf_bind`]'s weight binder found a safetensors tensor whose
+    /// declared [`DType`] this crate has no decoder for -- only
+    /// `Float32`/`Float16`/`BFloat16` dense weights are supported (an
+    /// unquantized HF checkpoint's own on-disk types); an integer dtype, a
+    /// quantized layout's packed integer payload (e.g. MLX's `U32`), or any
+    /// other unhandled type surfaces here rather than misreading bytes.
+    #[error("tensor {tensor:?} has dtype {dtype:?}, which this crate has no dense-weight decoder for")]
+    UndecodableSafetensorsDType { tensor: String, dtype: DType },
+
+    /// [`crate::hf_bind::bind_all_weights_from_safetensors`] was asked to
+    /// bind a checkpoint whose [`crate::bind::ModelArchitecture::expert_count`]
+    /// is nonzero -- HF's own mixture-of-experts tensor-naming convention
+    /// (Mixtral's per-expert `block_sparse_moe.experts.{e}.*` vs. Qwen's
+    /// `mlp.experts.{e}.*`, neither confirmed against a real on-disk
+    /// safetensors checkpoint on this host, since the only MoE checkpoint
+    /// available here is MLX's packed `weight`/`scales`/`biases` layout,
+    /// explicitly out of scope) is not yet implemented -- a caller gets a
+    /// typed, named gap rather than a silent wrong bind.
+    #[error("checkpoint has expert_count={expert_count}, but hf mixture-of-experts weight binding is not implemented (dense hf checkpoints only)")]
+    HfMoeWeightsUnsupported { expert_count: u32 },
 }
