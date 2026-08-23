@@ -16,6 +16,8 @@ use crate::metric::gauge::Gauge;
 use crate::metric::updown::UpDownCounter;
 use crate::metric::{MetricSample, NumberDataPoint};
 use crate::tag::{ScalarValue, Tag};
+#[cfg(feature = "emit")]
+use crate::error;
 
 #[cfg(feature = "histogram")]
 use crate::metric::histogram::Histogram;
@@ -333,7 +335,10 @@ impl InstrumentRegistry {
         let total = requests.len();
         for request in requests {
             if let Err(error) = pipe.call_dyn(request).await {
-                tracing::error!(error = %error, "pipe dispatch error during async instrument drain");
+                #[cfg(feature = "emit")]
+                error!(error = %error, "pipe dispatch error during async instrument drain");
+                #[cfg(not(feature = "emit"))]
+                let _ = error;
             }
         }
         total
@@ -367,7 +372,10 @@ fn call_pipe_sync(
 ) {
     let future = pipe.call_dyn(request);
     if let Err(error) = futures::executor::block_on(future) {
-        tracing::error!(error = %error, "pipe dispatch error during instrument drain");
+        #[cfg(feature = "emit")]
+        error!(error = %error, "pipe dispatch error during instrument drain");
+        #[cfg(not(feature = "emit"))]
+        let _ = error;
     }
 }
 

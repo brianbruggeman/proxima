@@ -26,6 +26,8 @@ use super::EmitShared;
 use super::ring_set::OverflowAttr;
 #[cfg(feature = "deferred-metric-fold")]
 use super::ring_set::SpanObservation;
+#[cfg(feature = "emit")]
+use crate::error;
 
 /// Batch-drain consumer over an [`EmitShared`]'s rings + instrument registry.
 ///
@@ -307,7 +309,10 @@ async fn export_async(
     match drained {
         Some((count, request)) => {
             if let Err(error) = pipe.call_dyn(request).await {
-                tracing::error!(error = %error, "pipe dispatch error during async drain");
+                #[cfg(feature = "emit")]
+                error!(error = %error, "pipe dispatch error during async drain");
+                #[cfg(not(feature = "emit"))]
+                let _ = error;
             }
             count
         }
@@ -524,7 +529,10 @@ fn call_pipe(pipe: &dyn SendDynPipe<TelemetryRequest, Response<Bytes>>, request:
         Poll::Pending => futures::executor::block_on(future),
     };
     if let Err(error) = result {
-        tracing::error!(error = %error, "pipe dispatch error during drain");
+        #[cfg(feature = "emit")]
+        error!(error = %error, "pipe dispatch error during drain");
+        #[cfg(not(feature = "emit"))]
+        let _ = error;
     }
 }
 

@@ -138,10 +138,14 @@ std = [
     # only exists under `std` (it wraps `std::time::Instant`), so the dep
     # is gated here rather than at `alloc`.
     "dep:proxima-clock",
-    # `tracing` is the OUT-OF-BAND fault channel for the telemetry runtime
-    # itself (drainer/registry export failures, drainer-thread spawn failure) —
-    # routing those through proxima's own recorder would feed the ring being
-    # drained. Nothing below `std` touches it, so bare metal never links it.
+    # `tracing` backs `tracing_bridge` (the adapter INTO the tracing
+    # ecosystem, so tracing:: events surface through proxima's recorder) and
+    # the incumbent-comparison benches. It is NOT used by the drainer/registry
+    # export-failure paths any more (2026-08): those now emit through
+    # proxima's own `error!`/`warn!`, feeding the same ring they drain from a
+    # future pass rather than an out-of-band channel — a deliberate tradeoff
+    # under the workspace's tracing-elimination directive, not an oversight.
+    # Nothing below `std` touches it, so bare metal never links it.
     "dep:tracing",
 ]
 histogram    = ["std"]

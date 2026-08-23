@@ -7,6 +7,9 @@ use dashmap::DashMap;
 use hdrhistogram::Histogram;
 use thread_local::ThreadLocal;
 
+#[cfg(feature = "emit")]
+use crate::warn;
+
 pub use proxima_primitives::pipe::telemetry_surface::{
     Labels, NoopTelemetry, Telemetry, TelemetryHandle,
 };
@@ -95,7 +98,8 @@ impl ShardedHistogram {
                 && let Ok(histogram) = mutex.lock()
                 && combined.add(&*histogram).is_err()
             {
-                tracing::warn!("histogram shard merge failed; partial summary may result");
+                #[cfg(feature = "emit")]
+                warn!("histogram shard merge failed; partial summary may result");
             }
         }
         if combined.is_empty() {
