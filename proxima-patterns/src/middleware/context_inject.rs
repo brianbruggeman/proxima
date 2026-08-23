@@ -2,7 +2,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tracing::Instrument;
+use proxima_telemetry::export::default_recorder;
+use proxima_telemetry::spanned::Spanned;
 
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle};
@@ -74,14 +75,22 @@ where
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .map(str::to_owned)
             .unwrap_or_default();
-        let span = tracing::info_span!(
-            "proxima.request",
-            method = %method_view,
-            path = %path_view,
-            pipe = %span_pipe,
-            trace_id = %trace_id_str,
-        );
-        async move { SendPipe::call(&inner, request).await }.instrument(span)
+        async move {
+            match default_recorder() {
+                Some(recorder) => {
+                    let guard = recorder
+                        .span("proxima.request")
+                        .tag("method", Bytes::from(method_view))
+                        .tag("path", Bytes::from(path_view))
+                        .tag("pipe", Bytes::from(span_pipe))
+                        .tag("trace_id", Bytes::from(trace_id_str))
+                        .start_deferred();
+                    Spanned::scoped(async move { SendPipe::call(&inner, request).await }, guard)
+                        .await
+                }
+                None => SendPipe::call(&inner, request).await,
+            }
+        }
     }
 }
 
@@ -118,14 +127,21 @@ impl Pipe for ContextInjector<ThreadLocalPipeHandle> {
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .map(str::to_owned)
             .unwrap_or_default();
-        let span = tracing::info_span!(
-            "proxima.request",
-            method = %method_view,
-            path = %path_view,
-            pipe = %span_pipe,
-            trace_id = %trace_id_str_tl,
-        );
-        async move { Pipe::call(&inner, request).await }.instrument(span)
+        async move {
+            match default_recorder() {
+                Some(recorder) => {
+                    let guard = recorder
+                        .span("proxima.request")
+                        .tag("method", Bytes::from(method_view))
+                        .tag("path", Bytes::from(path_view))
+                        .tag("pipe", Bytes::from(span_pipe))
+                        .tag("trace_id", Bytes::from(trace_id_str_tl))
+                        .start_deferred();
+                    Spanned::scoped(async move { Pipe::call(&inner, request).await }, guard).await
+                }
+                None => Pipe::call(&inner, request).await,
+            }
+        }
     }
 }
 
