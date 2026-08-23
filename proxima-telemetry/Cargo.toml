@@ -140,11 +140,14 @@ std = [
     "dep:proxima-clock",
     # `tracing` backs `tracing_bridge` (the adapter INTO the tracing
     # ecosystem, so tracing:: events surface through proxima's recorder) and
-    # the incumbent-comparison benches. It is NOT used by the drainer/registry
-    # export-failure paths any more (2026-08): those now emit through
-    # proxima's own `error!`/`warn!`, feeding the same ring they drain from a
-    # future pass rather than an out-of-band channel — a deliberate tradeoff
-    # under the workspace's tracing-elimination directive, not an oversight.
+    # the incumbent-comparison benches. It is NOT used by the drainer/registry/
+    # thread-spawn failure paths (legacy.rs, recorder/drainer.rs,
+    # recorder/registry.rs, recorder/mod.rs): those call `fault::report_fault`,
+    # which writes straight to `stderr` with no `Recorder`/`Exporter`/ring in
+    # the call path — the workspace's tracing-elimination directive stands,
+    # but those five sites cannot route failures through `error!`/`warn!`
+    # (proxima's own recorder macros) either, because that would feed the very
+    # ring the failing path just failed to drain. See `src/fault.rs`.
     # Nothing below `std` touches it, so bare metal never links it.
     "dep:tracing",
 ]
