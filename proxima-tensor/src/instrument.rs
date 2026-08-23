@@ -578,6 +578,124 @@ pub fn reset_matmul_dispatch() {
     let _ = STAGED_MATMUL_MACS.snapshot_and_reset();
     let _ = STAGED_MATMUL_NODES.snapshot_and_reset();
     let _ = STAGED_MATMUL_QUANTIZE_TICKS.snapshot_and_reset();
+    let _ = MATMUL_CHUNKS_CREATED.snapshot_and_reset();
+    let _ = MATMUL_COHORT_DISPATCH_CALLS.snapshot_and_reset();
+    let _ = MATMUL_POOL_CLAIM_ATTEMPTS.snapshot_and_reset();
+    let _ = MATMUL_CHUNK_RUNS.snapshot_and_reset();
+    MATMUL_CHUNKS_PER_DISPATCH_MIN.store(u64::MAX, Ordering::Relaxed);
+    MATMUL_CHUNKS_PER_DISPATCH_MAX.store(0, Ordering::Relaxed);
+    for bucket in &MATMUL_CHUNKS_PER_DISPATCH_HISTOGRAM {
+        bucket.store(0, Ordering::Relaxed);
+    }
+}
+
+// Answers this task's own question -- "total chunks created", "total
+// Receiver::recv waits", "total chunk claims off the atomic cursor", and the
+// chunks-per-dispatch distribution -- none of which the counters above
+// capture on their own: `MATMUL_DISPATCH_CALLS`/`MATMUL_RECV_WAIT_TICKS` only
+// ever fire from `matmul_rows_threaded`'s pool-path branch (`session ==
+// None`), never its `CohortSession` branch (`session == Some`, the one a
+// forward pass actually enters via `nest_cohort().enter()` in `cpu.rs`), so a
+// caller reading only those two could not tell "the cohort path never blocks
+// on a channel" apart from "nothing dispatched at all". `MATMUL_CHUNKS_CREATED`
+// fires from BOTH branches (recorded once `chunk_ranges_len` is known, before
+// the branch), and `MATMUL_COHORT_DISPATCH_CALLS` is the cohort branch's own
+// per-dispatch counter, the direct peer of `MATMUL_DISPATCH_CALLS` for the
+// pool branch.
+pub static MATMUL_CHUNKS_CREATED: Counter = Counter::new("proxima_tensor.matmul.chunks_created");
+pub static MATMUL_COHORT_DISPATCH_CALLS: Counter =
+    Counter::new("proxima_tensor.matmul.cohort_dispatch_calls");
+// every `next_index.fetch_add` inside `claim_and_run_rows` (`cpu.rs`), pool
+// path only -- includes the one exhausted claim each puller (the calling
+// thread and every spawned worker) makes when it observes `index >=
+// chunk_ranges.len()` and returns, so this is always
+// `MATMUL_CHUNKS_CREATED`'s pool-path share plus one exhausted claim per
+// puller, never equal to it.
+pub static MATMUL_POOL_CLAIM_ATTEMPTS: Counter =
+    Counter::new("proxima_tensor.matmul.pool_claim_attempts");
+// `run_row_chunk` (`cpu.rs`) is the one place both the pool path
+// (`claim_and_run_rows`) and the cohort path (`RowRound::run_chunk`) land
+// after a claim succeeds -- so this is the path-agnostic "a chunk actually
+// ran" count, always equal to `MATMUL_CHUNKS_CREATED` by construction (every
+// created chunk is claimed and run exactly once); recording both is the
+// cross-check that construction invariant actually holds in situ.
+pub static MATMUL_CHUNK_RUNS: Counter = Counter::new("proxima_tensor.matmul.chunk_runs");
+
+const MATMUL_CHUNKS_HISTOGRAM_BUCKETS: usize = 128;
+pub static MATMUL_CHUNKS_PER_DISPATCH_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+pub static MATMUL_CHUNKS_PER_DISPATCH_MAX: AtomicU64 = AtomicU64::new(0);
+// one bucket per chunk-count value (clamped at the top bucket past
+// `MATMUL_CHUNKS_HISTOGRAM_BUCKETS - 1`, comfortably above the largest
+// legal chunk count `row_chunk_count` can produce -- `workers *
+// ROW_OVERSUBSCRIBE` with `ROW_OVERSUBSCRIBE = 4` -- on any host this crate
+// targets) -- lets [`chunks_per_dispatch_median`] recover an exact median
+// without storing every individual dispatch's chunk count in an unbounded
+// `Vec`.
+pub static MATMUL_CHUNKS_PER_DISPATCH_HISTOGRAM: [AtomicU64; MATMUL_CHUNKS_HISTOGRAM_BUCKETS] =
+    [const { AtomicU64::new(0) }; MATMUL_CHUNKS_HISTOGRAM_BUCKETS];
+
+/// Records one `matmul_rows_threaded` call's `chunk_ranges_len` into the
+/// sum/min/max/histogram quartet -- called once per dispatch, from BOTH the
+/// cohort and pool branches, before either branch's own timer chain starts.
+pub fn record_chunks_created(chunk_count: usize) {
+    let chunk_count_u64 = chunk_count as u64;
+    counter!(MATMUL_CHUNKS_CREATED, chunk_count_u64);
+    MATMUL_CHUNKS_PER_DISPATCH_MIN.fetch_min(chunk_count_u64, Ordering::Relaxed);
+    MATMUL_CHUNKS_PER_DISPATCH_MAX.fetch_max(chunk_count_u64, Ordering::Relaxed);
+    let bucket = chunk_count.min(MATMUL_CHUNKS_HISTOGRAM_BUCKETS - 1);
+    MATMUL_CHUNKS_PER_DISPATCH_HISTOGRAM[bucket].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The exact median of every `chunk_count` recorded via
+/// [`record_chunks_created`] since the last reset, given the caller's own
+/// total dispatch count (`MATMUL_DISPATCH_CALLS.get() +
+/// MATMUL_COHORT_DISPATCH_CALLS.get()`) as the histogram's total mass --
+/// walks the fixed-size histogram instead of sorting a stored `Vec`, the same
+/// bounded-memory trade [`record_chunks_created`]'s own doc explains. Returns
+/// 0 when `dispatch_count` is 0 (nothing recorded).
+#[must_use]
+pub fn chunks_per_dispatch_median(dispatch_count: u64) -> u64 {
+    if dispatch_count == 0 {
+        return 0;
+    }
+    let target = dispatch_count / 2;
+    let mut cumulative = 0u64;
+    for (bucket, count) in MATMUL_CHUNKS_PER_DISPATCH_HISTOGRAM.iter().enumerate() {
+        cumulative += count.load(Ordering::Relaxed);
+        if cumulative > target {
+            return bucket as u64;
+        }
+    }
+    (MATMUL_CHUNKS_HISTOGRAM_BUCKETS - 1) as u64
+}
+
+/// One process run's worth of the chunk-count-and-claims witness above, read
+/// back the same way [`matmul_dispatch_totals`] is.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatmulChunkTotals {
+    pub chunks_created: u64,
+    pub chunks_per_dispatch_min: u64,
+    pub chunks_per_dispatch_max: u64,
+    pub chunks_per_dispatch_median: u64,
+    pub cohort_dispatch_calls: u64,
+    pub pool_claim_attempts: u64,
+    pub chunk_runs: u64,
+}
+
+#[must_use]
+pub fn matmul_chunk_totals() -> MatmulChunkTotals {
+    let chunks_created = MATMUL_CHUNKS_CREATED.get();
+    let dispatch_count = MATMUL_DISPATCH_CALLS.get() + MATMUL_COHORT_DISPATCH_CALLS.get();
+    let observed_min = MATMUL_CHUNKS_PER_DISPATCH_MIN.load(Ordering::Relaxed);
+    MatmulChunkTotals {
+        chunks_created,
+        chunks_per_dispatch_min: if dispatch_count == 0 { 0 } else { observed_min },
+        chunks_per_dispatch_max: MATMUL_CHUNKS_PER_DISPATCH_MAX.load(Ordering::Relaxed),
+        chunks_per_dispatch_median: chunks_per_dispatch_median(dispatch_count),
+        cohort_dispatch_calls: MATMUL_COHORT_DISPATCH_CALLS.get(),
+        pool_claim_attempts: MATMUL_POOL_CLAIM_ATTEMPTS.get(),
+        chunk_runs: MATMUL_CHUNK_RUNS.get(),
+    }
 }
 
 // `evaluate_parallel`'s own wall-clock, decomposed into every named part
