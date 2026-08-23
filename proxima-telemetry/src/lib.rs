@@ -127,6 +127,11 @@ pub mod log_buffer;
 pub(crate) mod config_merge;
 #[cfg(feature = "std")]
 pub mod export;
+// the out-of-band fault channel for the recorder's own failure paths (drainer,
+// registry, thread-spawn) — see the module doc for why it must not route
+// through `error!`/`warn!`.
+#[cfg(feature = "std")]
+pub mod fault;
 #[cfg(feature = "std")]
 pub mod out;
 #[cfg(feature = "std")]
