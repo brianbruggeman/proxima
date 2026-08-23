@@ -340,7 +340,7 @@ impl<'file> LoadedModel<'file> {
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-        let weights = bind_all_weights(parsed, file_bytes, &architecture);
+        let weights = bind_all_weights(parsed, file_bytes, &architecture)?;
         let (program, logits_root, cache_roots) = mistral_cached_forward_program(
             architecture.vocab,
             architecture.embedding,
