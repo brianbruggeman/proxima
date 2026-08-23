@@ -26,29 +26,26 @@ printf 'bench-proxima-runtimes (%s)\n' "$PLATFORM"
 # ---------------------------------------------------------------------------
 
 printf -- '--- h2_runtime_swap (default_tokio + per_core_runtime arms) ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench h2_runtime_swap -- h2_runtime_swap_proxima_native \
-    2>&1 | tee "${LOGS_DIR}/h2_runtime_swap.log" || true
+run_bench_logged "h2_runtime_swap" "${LOGS_DIR}/h2_runtime_swap.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench h2_runtime_swap \
+    -- h2_runtime_swap_proxima_native
 
 printf -- '--- bench_runtime_compat (prime arm) ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench bench_runtime_compat -- prime \
-    2>&1 | tee "${LOGS_DIR}/bench_runtime_compat.log" || true
+run_bench_logged "bench_runtime_compat" "${LOGS_DIR}/bench_runtime_compat.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench bench_runtime_compat \
+    -- prime
 
 printf -- '--- bench_spawn_burst ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench bench_spawn_burst \
-    2>&1 | tee "${LOGS_DIR}/bench_spawn_burst.log" || true
+run_bench_logged "bench_spawn_burst" "${LOGS_DIR}/bench_spawn_burst.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench bench_spawn_burst
 
 printf -- '--- bench_runtime_swap (general runtime swap) ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench bench_runtime_swap \
-    2>&1 | tee "${LOGS_DIR}/bench_runtime_swap.log" || true
+run_bench_logged "bench_runtime_swap" "${LOGS_DIR}/bench_runtime_swap.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench bench_runtime_swap
 
 printf -- '--- h3_runtime_swap ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench h3_runtime_swap \
-    2>&1 | tee "${LOGS_DIR}/h3_runtime_swap.log" || true
+run_bench_logged "h3_runtime_swap" "${LOGS_DIR}/h3_runtime_swap.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench h3_runtime_swap
 
 # ---------------------------------------------------------------------------
 # parse criterion estimates.json via jq
@@ -131,3 +128,5 @@ measurements to replace \`pending\` cells.
 MARKDOWN
 
 printf 'results written to %s\n' "$RESULTS"
+
+report_bench_failures
