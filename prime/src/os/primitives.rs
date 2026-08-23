@@ -437,14 +437,14 @@ mod tests {
     // ---- R8 — LocalRuntimeFactory parity tests ----
     //
     // `LocalRuntimeFactory` itself (PrimeLocalMutex/PrimeLocalNotify above)
-    // is tokio-free; these tests use `#[tokio::test]` purely as a
-    // convenient single-threaded async test harness (`LocalSet` +
+    // is tokio-free; these tests use `#[proxima::test(flavor = "current_thread")]`
+    // purely as a convenient single-threaded async test harness (`LocalSet` +
     // `spawn_local` for the two-waiter race), so they stay gated behind
     // `prime-tokio-compat` for the `tokio` dependency the harness itself
     // needs, not because the primitive under test needs tokio.
 
     #[cfg(feature = "prime-tokio-compat")]
-    #[tokio::test(flavor = "current_thread")]
+    #[proxima::test(flavor = "current_thread")]
     async fn local_mutex_round_trips_a_value() {
         let mutex = PrimeRuntime::new_local_mutex(0i32);
         {
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[cfg(feature = "prime-tokio-compat")]
-    #[tokio::test(flavor = "current_thread")]
+    #[proxima::test(flavor = "current_thread")]
     async fn local_mutex_serializes_two_concurrent_lockers() {
         // two tasks racing on the same lock should observe a
         // serialized "1 then 2" increment from a 0 starting state —
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[cfg(feature = "prime-tokio-compat")]
-    #[tokio::test(flavor = "current_thread")]
+    #[proxima::test(flavor = "current_thread")]
     async fn local_notify_wake_after_park_resolves() {
         let notify = std::rc::Rc::new(PrimeRuntime::new_local_notify());
         let waker = std::rc::Rc::clone(&notify);
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[cfg(feature = "prime-tokio-compat")]
-    #[tokio::test(flavor = "current_thread")]
+    #[proxima::test(flavor = "current_thread")]
     async fn local_notify_pending_permit_resolves_immediately() {
         let notify = PrimeRuntime::new_local_notify();
         notify.notify_one();
