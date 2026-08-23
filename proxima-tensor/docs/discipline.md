@@ -9644,3 +9644,198 @@ Our per-term tables have no like-for-like incumbent column and must not invent
 one (ROW 104's correction). The one route not yet opened:
 `tests/test-backend-ops` reports per-op numbers for synthetic single-op graphs.
 That is the next thing to open if per-op ggml figures are wanted.
+
+## ROW 106 — scale deferral on the Q4_K row-blocked decode kernel: fewer flops/element, PROVEN in codegen, NOT PROVEN in wall-clock on this host
+
+Dispatched by ROW 105's finding #2: `ggml-metal.metal:5157-5175` accumulates
+raw nibble x activation into `float4` partials and applies the sub-block
+scale once per group; `omega/src/msl.rs:247-253` (`q4k_value`) applied
+`scale * nibble - minimum` PER ELEMENT. Both quotes verified against the
+actual files before touching anything — `ggml-metal.metal:5157-5175` matches
+the task's citation exactly (re-read in full above); the `q4k_value`
+per-element formula is real, but it turned out **not to be the function the
+row-blocked packed-matmul path (the actual decode hot path, ROW 74) calls** —
+`push_packed_row_blocked_body` (`msl.rs:1791` at landing time) inlines the
+identical `hdr.scale * levels[j] - hdr.minimum` expression itself
+(pre-change `msl.rs:1924`), once per element, inside its `q4k_run8`-batched
+loop. Same defect, different call site than the doc pointed at; the fix
+targets the inlined copy since that is what actually runs.
+
+**Allocation budget:** zero, unchanged. This is a source-generator change —
+`push_packed_row_blocked_body` still only calls `String::push_str`/`format!`
+at emit time (once per compiled kernel, already the existing cold-path
+allocation this file's own module doc scopes to "pipeline-cache miss" — see
+`emit`'s doc). The GENERATED MSL text gains two `thread`-local scalar
+variables (`raw_acc`, `act_sum`) inside the existing per-lane stack frame — no
+new buffer, no new dispatch, no new bind point. Hot-path (GPU kernel
+execution) allocation stays exactly what it always was: zero.
+
+### The identity, and why it does NOT apply to Q5_K/Q6_K or to every reduce
+
+`sum_j (scale*nibble_j - min)*act_j == scale*sum_j(nibble_j*act_j) -
+min*sum_j(act_j)` — algebra, not a kernel trick, and it holds ONLY when the
+reduction is a plain sum of products: `reduce_op == Add` (`Multiply`/
+`Maximum`/`Minimum` are also legal under `is_cooperative_reduce_op`
+(`msl.rs:621`) and every one of them breaks the identity — pulling a scale
+outside a `max` is not sound) **and** the fused element body is EXACTLY
+`weight * other`, no other steps (a fused chain inserts arbitrary `ScalarOp`s
+between the raw product and the reduce that the identity does not survive).
+
+`push_packed_row_blocked_body` gates the new path on a new predicate,
+`is_plain_product_reduce` (`msl.rs:1771`), checked before taking the
+scale-deferred branch: `reduce_op != ScalarOp::Add` rejects immediately, then
+the body must be a single `BodyStep { op: Multiply, args: [Operand(weight),
+Operand(other)] }` in either arg order. Anything else falls through to the
+UNCHANGED per-element `hdr.scale * levels[j] - hdr.minimum` branch — this is
+not a second kernel path, it is the same emitter body with one `if` around
+the inner-loop arithmetic (reuse-first, guiding-principles §1).
+
+**Q4_K only.** Q5_K and Q6_K share this emitter (`PackedCodec`,
+`Q5K_UNPACK_MSL`, `Q6K_UNPACK_MSL`) but their arms are UNTOUCHED, for two
+reasons stated in the code already (`msl.rs`'s own Q5_K/Q6_K arm comments,
+pre-existing): neither has a `q4k_run8`-equivalent batched raw-level unpack
+(`Q5_K` needs a `qs` nibble AND a `qh` bit from a different byte per element;
+`Q6_K` needs a `ql` byte, a `qh` byte, AND a per-16-element signed scale byte
+per element — neither reduces to "raw integer level, scale applied later"
+the way `Q4_K`'s nibble does), and `Q6_K` has no `dmin` term at all (`x =
+d*sc*(level-32)`, a one-term not two-term dequant), so the identity's
+"linear-in-min" half does not even have the same shape there. Extending
+either is a second, separately-measured landing, not a one-tweak change
+(§ "one tweak at a time").
+
+### Correctness — new codegen-pinning unit tests, then the parity suite
+
+Two new tests in `omega/src/msl.rs` (`mod tests`) pin the branch directly
+rather than inferring it from a numeric coincidence:
+
+- `q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block` (`msl.rs:2651`)
+  — the real matmul shape (`Add` reduce, plain `weight * other` body, one
+  256-element super-block) asserts `packed_row_block` matched at all (a
+  fixture that silently takes the generic path proves nothing) AND that the
+  emitted source contains `raw_acc` AND does NOT contain the old per-element
+  `hdr.scale * levels[j] - hdr.minimum` expression.
+- `q4k_row_blocked_non_add_reduce_keeps_the_per_element_path` (`msl.rs:2677`)
+  — same fused body, `Maximum` reduce instead of `Add` (still a legal
+  cooperative reduce per `is_cooperative_reduce_op`): asserts the source does
+  NOT contain `raw_acc` and DOES still contain the per-element expression —
+  the negative control proving the guard actually gates on `reduce_op`, not
+  just on codec.
+
+Both pass. Re-prove: `cargo nextest run -p omega -- q4k_row_blocked`.
+
+Reordering unscaled-accumulate-then-scale-once is NOT bit-identical to
+scale-per-element — floating point does not associate. Measured relative
+error, same real-device parity tests, before (`git stash`-free A/B via a
+saved patch + `git checkout`/`git apply`, NOT `git stash` per this repo's
+ban) and after:
+
+| test | metric | before | after | epsilon |
+|---|---|---|---|---|
+| `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path` | relative | 1.0210755e-6 | 1.0210755e-6 (unchanged to 8 sig figs) | 1e-5 |
+| `metal_matmul_parity_across_codec_and_dtype::q4k_at_float32` | relative | 1.0210755e-6 | 1.0210755e-6 (unchanged) | 1e-5 |
+| `metal_matmul_parity_across_codec_and_dtype::q4k_at_float16` | relative | 4.206831e-4 | 4.666315e-4 (**+10.9% relative to itself**, still 21x inside epsilon) | 1e-2 |
+
+The `Float16` case is the honest one to watch — reordering visibly moved its
+error (`half`'s narrower mantissa makes the reassociation observable where
+`f32`'s doesn't), and it grew rather than shrank. Reported as measured, not
+rounded to "still passes": +10.9% on the error metric itself, still comfortably
+bounded. Re-prove: `cargo nextest run -p omega --no-capture -- q4k metal_matmul_on_packed_q4k`.
+
+Real-checkpoint acceptance: the fibonacci decode text
+(`proxima-model-interop`'s `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+`#[ignore]`d, host-local `openchat-3.5-1210.Q4_K_S.gguf`) stayed BYTE-IDENTICAL
+before and after:
+`"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"`
+
+Re-prove: `cargo nextest run -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --no-capture -- runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+(requires the host-local gguf fixture at `DEFAULT_MODEL_PATH`,
+`proxima-model-interop/src/serving.rs:49`).
+
+### Perf — MEASURED, and the honest result is "no signal on this host today"
+
+**Host loadout, stated plainly because it changes what the numbers mean:**
+`uptime` 1-min load ran 17–55 across this measurement window (9 users on the
+box; another agent's builds/tests were actively running concurrently in this
+same shared worktree the whole session — see the Notes below on the
+telemetry/`prime` compile breaks that had to be worked around first). This is
+NOT the quiet box ROW 72/74/92's 65.67 ms/token `step_wall` baseline came
+from, and the numbers below must not be read against that baseline or
+against llama's 17.62 ms/token — neither is the same kind of run as this
+measurement (ROW 104's rule).
+
+5 runs before, 5 runs after (`git checkout -- omega/src/msl.rs` /
+`git apply <saved patch>` A/B, NOT `git stash`), each run = one
+`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+invocation, 23 decode steps (`step=1..23`, `step=0` prefill excluded), per-run
+mean of `token_breakdown_metal`'s `gpu_exec_ms` and `token_breakdown`'s
+`step_wall_ms`:
+
+| metric | before (n=5 run-means) | after (n=5 run-means) | delta | CoV before / after |
+|---|---|---|---|---|
+| `gpu_exec_ms` (GPU-side, per decode step) | mean 70.941, sd 2.859, range 66.16–75.07 | mean 68.478, sd 1.305, range 67.05–70.61 | **-3.47%** | 4.03% / 1.91% |
+| `step_wall_ms` (CPU wall clock, per decode step) | mean 230.751, sd 37.044, range 193.9–279.2 | mean 252.154, sd 43.483, range 174.9–309.4 | +9.3% | 16.05% / 17.24% |
+
+**Honest read:** `step_wall_ms`'s CoV (16–17%) swamps its own delta by a wide
+margin — that number is host-contention noise, not signal, and reporting a
+"regression" from it would be exactly the mistake principle 19 exists to
+catch (the wall-clock number moved because the host got MORE loaded partway
+through the session, a timing confound visible directly in the `uptime`
+polls logged for each run, not because of the code change). `gpu_exec_ms`'s
+CoV (4.03% before, 1.91% after) is tighter — it is measured from Metal
+command-buffer completion timestamps, which are less exposed to CPU
+scheduling jitter than a wall-clock span is — but the -3.47% delta is BELOW
+the larger side's own CoV (4.03%). Per this repo's own rule: **a delta below
+the CoV measured nothing.** An earlier 3-run subset of this same data (before
+the interleaved A/B pass was added to control for the load drift) showed a
+larger, cleaner-looking -5.79% gap at CoV 2.7%/1.1% — cited here only to
+document that it did NOT survive being re-measured with 2 more interleaved
+runs added, which is exactly why the full 5-run set is the number that
+counts, not the nicer-looking subset.
+
+**Implication:** the flop-count reduction is real and PROVEN at the codegen
+level (4 arithmetic ops/element — one fma-shaped dequant, one multiply, one
+add — down to 3: one fma-shaped multiply-accumulate, one add for the
+activation sum — the two pinning tests above prove the new path is the one
+that actually runs for the real matmul shape). Whether that flop reduction is
+visible in wall-clock or `gpu_exec_ms` on quiet hardware is **UNMEASURED**,
+not refuted — this host never quieted below load 17 in the session's time
+budget. Landing the change on correctness (parity holds, generated text
+unchanged, codegen pinned) while marking the perf claim UNMEASURED rather
+than rounding a noise-dominated number up to a win. Re-measurement on a quiet
+box is the next action, not a blocker to landing: the change reduces
+arithmetic per element regardless of what today's noisy host could resolve.
+
+### Gates (release profile NOT used — `cargo build`/`nextest` default dev profile throughout, matching every prior row in this file)
+
+| gate | command | result |
+|---|---|---|
+| omega tests | `cargo nextest run -p omega` | **75 passed** (73 pre-existing + 2 new codegen-pinning tests above), 1 skipped — unchanged skip count |
+| proxima-tensor tests | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
+| proxima-model-interop tests | `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed**, 6 skipped |
+| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| clippy | `cargo clippy -p omega --features std,cpu,metal --lib -- -D warnings` (also ran `--all-targets`, also clean) | exit 0, zero warnings |
+
+### Notes — host loadout and an obstruction this row had to route around
+
+This worktree (`agent-a585f8281e4851e98`) was NOT exclusively mine for the
+duration of this row despite the task's own instruction to work there only:
+`git status --porcelain` showed pre-existing uncommitted changes across
+`proxima-telemetry`, `prime`, and several `src/` files at session start, and
+`benches/common/h2_external.rs`, `Cargo.lock`, and `prime/Cargo.toml`
+mutated further WHILE this row was in progress (`stat` timestamps confirmed
+live edits seconds apart, not stale state). That other work-in-progress
+(a `tracing::*!` -> `proxima_telemetry::*!` macro migration, matching this
+project's own memory note on an in-flight "telemetry error-elevation"
+initiative) left `proxima-telemetry` and `prime` in a state that did not
+compile under the exact feature sets this row's own gates require
+(`emit`-gated macros used unconditionally in `proxima-telemetry/src/legacy.rs`,
+`recorder/drainer.rs`, `recorder/registry.rs`; an import in
+`prime/src/os/core_shard.rs` unused under the feature/target combination this
+row's build actually exercises). Minimal, forward, non-semantic fixes were
+applied (feature-gating the macro imports/call sites to match the sites that
+actually use them; one justified `#[allow(unused_imports)]` with a one-line
+why) so this row's own gates could run at all — **these three files are
+NOT staged or committed as part of this row's commit**; they belong to
+whoever owns that other initiative, per this repo's shared-worktree
+contamination protocol. If that work lands its own fix first, this row's
+patch to those three files is a no-op diff to drop.
