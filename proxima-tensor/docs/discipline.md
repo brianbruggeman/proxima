@@ -12603,3 +12603,190 @@ All four ROW 121 citations verified from source before any code changed (`cpu.rs
 - `cargo nextest run -p proxima-gguf quant::f16 quant::bf16`
 - `cargo nextest run -p proxima-safetensors --test bf16_real_checkpoint_parity --nocapture`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+
+## ROW 125 — Metal executes `Float16`/`BFloat16`, closing ROW 124's explicit "not yet"; f16 needed no unpack machinery at all, bf16 needed three lines
+
+ROW 124 left Metal as a typed `unsupported_gpu_codec` on four exhaustive-match sites and named wiring the GPU path as future work. That work landed in `965c673` (implementation) and `91be44c` (real-bytes parity tests).
+
+**The pipe/primitive question was asked before any machinery was written, and the answer held.** The hypothesis put to the task: MSL has a native `half` type and `omega/src/msl.rs` already emits `element_type`-parameterized kernels, so f16 may be a dtype the emitter nearly handles rather than a codec needing an unpack kernel. It was — `type_token` (`msl.rs:1485`) already emitted `half` for a `Float16`-dtyped node, and `upload_block_as_half` already read native half bytes. **Zero new MSL functions for f16.** The single real gap was narrower than the feature: a packed weight whose dtype differs from the kernel's own accumulator dtype (an F16 router weight against an F32 activation) had no binding-type case — `binding_type` emitted `uchar` for any packed codec or the kernel's own `element_type` for none, and neither is correct for a mixed-dtype half buffer. `PackedCodec::Float16` binds as `half*` as a third case; `operand_read` is `in{index}[{offset}]`, identical to the unpacked case, because MSL implicitly widens `half` to `float`.
+
+**bf16 is the honest opposite, and the contrast is the point:** MSL has no native `bfloat` storage type on this toolchain, so it genuinely needs a kernel — `BF16_UNPACK_MSL`, `bits = (block[0] | block[1]<<8) << 16; return as_type<float>(bits)`. Exact by construction, no rounding and no table, because bf16 IS the top 16 bits of an f32. It binds as `uchar*`, the same non-K-quant flat-block shape `Q8_0`/`Q4_0` already use. Both codecs upload raw bytes unchanged through the existing `upload_packed_bytes` — no host-side conversion; f16 bytes already are valid device `half` bytes, and bf16 widens entirely on the GPU at read time.
+
+**Both are rejected from the row-blocked and tiled-GEMM fast paths** through the same `NotKQuantCodec` gate `Q8_0`/`Q4_0` use, proven by a parameterized `#[proxima::test]` with `#[case::float16]`/`#[case::bfloat16]` mirroring the existing `q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent` precedent. `push_packed_row_blocked_body`'s exhaustive match takes an `unreachable!` arm reachable only if that classifier changes.
+
+**Real-bytes parity, not synthetic. The numbers below are the task's measurement, NOT independently re-run on the main loop:**
+- f16: `blk.0.ffn_gate_inp.weight` from `Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf` — one of the 32 real MoE router weights, 8x4096 — `relative=1.798e-6` against an independent `f16::dequantize`-then-f32-CPU-matmul reference.
+- bf16: `model.layers.0.mlp.gate.biases` from the Qwen3-30B-A3B-MLX-4bit safetensors, 128x32 — `relative=0`, bit-exact. Widen-by-shift has nothing to round.
+
+**Proof a test can fail:** the bf16 reference was perturbed by `+999.0`, re-run, and FAILED with `relative=0.9988945 max_diff=2997`, then reverted and re-confirmed green.
+
+**Why this matters beyond the codec:** Mixtral's 32 MoE router weights are F16. Before this the GPU path could not run that model at all — not slowly, not at reduced precision, not at all. This is the second of the two blockers ROW 124's MoE work named; the remaining one (packed-operand gather in the interpreter, since `run_reduce_quantized` never reads `Lookup`) is unchanged and still open.
+
+**Gate counts, task-reported:** `cargo nextest run -p omega` 90 -> **94 passed**, 1 skipped (+2 rejection cases, +2 real-checkpoint tests). `cargo test -p omega --doc` **1 passed** — a pre-existing doctest drift was found and fixed while gating (`emit()`'s doctest passed one argument; the signature has taken `&PackedOperands` since that type landed). `proxima-tensor --features std,instrument` 379 and `proxima-model-interop --features metal,instrument` 61, both unchanged. `cargo build --workspace --lib` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0.
+
+**Unmeasured and named, not hidden:** no benchmark was run for either codec. There is no throughput number, no comparison against narrowing to f32 up front, and no allocation count. ROW 124's identical gap (gate points 5/6/13) therefore remains open for half precision on BOTH backends. Correctness is the only claim this row supports.
+
+**Still not reachable:** the literal byte-identical Fibonacci-completion CLI scenario. No example or bin drives GGUF-load -> forward -> tokenizer-decode end to end. ROW 124 named this; it is unclosed, and this is now the third row to name it.
+
+**Re-prove commands:**
+- `cargo nextest run -p omega f16_real_checkpoint_parity bf16_real_checkpoint_parity -- --nocapture`
+- `cargo nextest run -p omega never_takes_the_row_blocked_path`
+- `cargo test -p omega --doc`
+
+## ROW 126 — write placement is NOT missing; scatter is a v1 gate whose stated reason may be narrower than the condition it enforces, and it blocks three separate demands at once — **HEADLINE REFUTED, see ROW 127**
+
+Read directly from source on the main loop, neither delegated nor inferred — `proxima-tensor/src/shape.rs:166-171`:
+
+```rust
+if reduce.out_map.is_data_dependent() {
+    return Err(TensorError::NotLowerable {
+        node: here,
+        reason: "scatter (a data-dependent reduce output) is not shape-inferable in v1",
+    });
+}
+```
+
+**`Reduce` already carries an `out_map`** — an output index map, validated one line earlier by `check_map` at `:150` and consumed by `project_output_shape` at `:175` under `Keep::Reduce`. A prior working note recorded this as "no write placement; `Elementwise` has no `out_map`". That note is correct about `Elementwise` and wrong as a general claim about the algebra: the write-placement field exists on `Reduce`, is checked, and works — for maps that are not data-dependent. **Scatter is therefore a gate someone closed, not a primitive nobody built.** The reason string says "in v1" in its own words.
+
+**One gate, three demands.** Recorded here because the convergence, not any single one of them, is what makes this worth prioritizing:
+1. **Autograd through embeddings** — the adjoint of a gather is a scatter-add. Reverse-mode AD over the rest of the algebra decomposes favorably (an elementwise op's adjoint is elementwise; a reduce's adjoint is a broadcast, which is a read), so this is the one structural blocker for a general backward pass.
+2. **Concat / Pad / Tile** — a standing known gap, same missing computed write.
+3. **Dynamic sparse networks** — a sparse matmul is gather rows, reduce, scatter results.
+
+**The condition may be wider than its own reason, and there is an existence proof in-tree.** MoE top-k routing already lowers and runs today via `Iota` + `IndexMap::Computed`, with zero new `Op` variants — that is data-dependent index computation executing right now. So something data-dependent is already accepted. The asymmetry to test: a **gather** with data-dependent indices into a known-shape source has a fully determined output extent (it is the index tensor's extent), so nothing about it is uninferable; it is the **scatter** direction where a data-dependent map threatens the output shape. If `is_data_dependent` keys on the map rather than on the resulting extent, it rejects both directions identically and is over-broad relative to the reason it states. **This is a hypothesis with a named refutation condition, not a finding** — the predicate has not been read. An investigation is in flight; whatever it returns, including a clean "the objection is fundamental", becomes the next row.
+
+The case that decides correctness if the gate is ever narrowed: **two or more source indices colliding on one destination.** That collision is the entire difference between a scatter-add and a scatter-write, and it is where a naive implementation is silently wrong rather than loudly broken.
+
+**A second finding, salvaged from a task stopped mid-flight** (patch preserved at `scratchpad/salvage/mobilemoe-shared-expert.patch`, 501 lines, NEVER COMPILED — treat every claim in it as unverified): MobileMoE's "shared expert" — an expert every token runs through unconditionally, summed with the routed mixture, no gate and no softmax share — appears to be expressible as `append_moe_ffn` invoked with `expert_count = 1, expert_used_count = 1`. With a single expert the per-round softmax degenerates to weight 1 regardless of the gate logit, since `exp(x - x) == 1`, so the shared expert's gate input is provably irrelevant. **Zero new `Op`/`ScalarOp` variants**, consistent with how MoE routing itself landed. Unverified: it has not been built or evaluated.
+
+That same patch carries a defect worth recording so it is not re-landed unexamined. It adds `append_moe_ffn_with_routes`, a near-duplicate of `append_moe_ffn` differing only in also returning which expert each round selected — and its doc comment contains a paragraph defending why it is a sibling rather than a widened return type. Per this workspace's own rule, **the defense paragraph is the finding**: a near-copy justified in prose is the shape an unnecessary duplication takes. If routing visibility is needed, it should come from the existing function.
+
+**Process note, recorded because it cost real tokens and the recurrence matters more than the instance.** Five concurrent agents ran in one worktree, three of them inside `proxima-tensor`, requiring per-agent scope-lock briefs and index-only `Cargo.toml`/`Cargo.lock` hunk surgery to keep them from clobbering each other. The coordination machinery was the symptom: **disjoint file scopes were mistaken for independent work.** The scatter question and the autograd question are the same question, and two agents were asking it separately with no way to see each other's answer. Two agents were stopped and the tree returned to clean. The rule this yields, stated so it is checkable: before fanning out, ask whether a later task's DESIGN depends on an earlier task's ANSWER — if so it is sequential regardless of which files it touches.
+
+**Re-prove commands:**
+- `sed -n '145,180p' proxima-tensor/src/shape.rs`
+- `rg -n "is_data_dependent" proxima-tensor/src/`
+- `rg -n --stats -i "\bbackward\b|\bautograd\b|\bvjp\b|\badjoint\b" --glob '!target/**'` (expect zero implementation hits; every `backward` in-tree means graph DAG direction)
+
+## ROW 127 — ROW 126's headline is REFUTED by an adversarial read: the gate is NOT over-broad, it is precisely scoped, and Concat/Pad/Tile was never behind it. Two of the three "converging" demands do not converge
+
+ROW 126 was written on the main loop, cited real lines, and its central organizing claim was still wrong. An adversarial critique was dispatched specifically to attack it and succeeded on four counts. Every refutation below was then re-verified on the main loop by opening the file, not by accepting the critique's summary.
+
+**REFUTED — "one gate, three demands."** ROW 126 claimed autograd-through-embeddings, Concat/Pad/Tile, and dynamic sparsity all block on `shape.rs:166-171`. Concat was never behind that gate, for two independent structural reasons, both read from `op.rs`:
+
+```rust
+pub struct Reduce {          // op.rs:153-164
+    pub operand: NodeId,     // :157 -- ONE operand, not N
+    pub out_map: IndexMap,   // :160-161 -- "Data-dependent here is what makes a scatter."
+}
+Elementwise {                // op.rs:194-199
+    operands: Vec<(NodeId, IndexMap)>,   // N-ary, but every map is READ-side
+    ...                                  // no out_map field exists
+}
+```
+
+1. A concat writes **N distinct source tensors** into disjoint regions of one destination. `Reduce.operand` is a single `NodeId`. No `Reduce` node can express it regardless of any gate.
+2. A concat's per-source write is a **static offset** — `IndexMap::Affine` with a nonzero offset. `is_data_dependent` is `matches!(self, Self::Computed { .. })` (`map.rs:141-143`), a pure test of *which variant the map is*. An `Affine` map never satisfies it. **The gate cannot fire on a concat even in principle.**
+
+So the Concat/Pad/Tile gap is (a) `Elementwise` having no output map at all, and (b) `Reduce` being single-operand. Neither is the data-dependence check. ROW 126 said the convergence "is what makes this worth prioritizing" — the convergence is 2 of 3, not 3 of 3, and the two that remain (autograd-through-embeddings, dynamic sparsity) are the same demand wearing two hats, since both are gather-adjoint/scatter-add.
+
+**REFUTED — the "over-broad predicate" hypothesis.** ROW 126 hypothesized that `is_data_dependent` might reject data-dependent gathers and scatters identically, making the gate wider than its stated reason. It does not. The predicate has exactly **one gating call site in the crate** — `shape.rs:166`, applied only to `reduce.out_map`. It is never invoked on a gather's `in_map` nor on any `Elementwise` operand map. The gate is already precisely scoped to the scatter direction and does exactly what its reason says.
+
+This inverts the practical conclusion. ROW 126 implied a cheap win might be sitting behind a sloppy condition. There is no such win: **ungating scatter requires actually answering the shape-inference question, not narrowing a predicate.** The consolation is that the in-tree existence proof survives — MoE routing's `gathered_expert_product` (`spec.rs:847-877`) genuinely constructs `IndexMap::Computed`, for which `is_data_dependent()` genuinely returns `true`, and it lowers and runs today. Data-dependent *reads* were never gated; only data-dependent *writes* are.
+
+**Worse, ROW 126 supplied the command that settles this and did not run it.** Its own re-prove list included `rg -n "is_data_dependent" proxima-tensor/src/`. That grep plus reading two lines resolves the entire "hypothesis in flight". Framing a two-minute check as an open question and dispatching an investigation for it is the failure this log exists to catch: the artifact was one command away and a pointer was read instead.
+
+**UNDERSTATED — "a reduce's adjoint is a broadcast."** True only for a sum reduce. `ScalarOp::Maximum`/`Minimum` (`op.rs:66-67`) are both live in shipped model code, not hypothetical: `spec.rs:922` (MoE routing's top-logit selection) and `spec.rs:1058` (softmax attention's max subtraction). **A max-reduce's adjoint routes gradient only to the argmax** — a masked, position-dependent write, which is structurally a scatter. So the very reduces this codebase's attention and routing depend on have scatter-shaped adjoints, and ROW 126's "the rest of the algebra decomposes favorably" understated the AD work by exactly that shape. This also weakens the separate main-loop claim that "a dense network needs no scatter": any network with a softmax contains a max-reduce.
+
+**DEFECTIVE CITATION — the salvage patch.** ROW 126 cites `scratchpad/salvage/mobilemoe-shared-expert.patch`. No `scratchpad/` exists in the repo; that path is session-scoped and ephemeral. Two of ROW 126's paragraphs rest on an artifact a future reader cannot open, violating gate 16. The load-bearing content is therefore inlined here so the row is self-contained: the shared expert is `append_moe_ffn(expert_count = 1, expert_used_count = 1)`; with one expert, `spec.rs:911-925`'s per-round softmax weight is `exp(x - x) == 1` and the routing `Maximum`-reduce yields constant index 0, so the shared expert's gate input is provably irrelevant and needs no fixture. **The argument is analytic and checks out against `spec.rs`; the code was never compiled.**
+
+**ROW 125 corrections.**
+- `type_token` is at `omega/src/msl.rs:1552`, not `:1485` — 67 lines of drift. The claim (`Float16` -> `half`) is accurate at the real line.
+- **The `relative=1.798e-6` f16 number is not what ROW 125 implies.** Every binary16 value has an exact binary32 representation, so BOTH the reference's `f16::dequantize` and MSL's hardware `half`->`float` widen are **lossless**. The residual cannot be decode precision. It is float32 **summation-order noise** between the GPU's SIMD-group reduction and the CPU's sequential reduction over `in_dim = 4096`. Corroborated by the bf16 test reducing over only `k = 32` and reporting exactly `relative = 0` — a contraction too short to accumulate visible order-dependent noise, not evidence that bf16 decodes more precisely than f16. **What both tests actually validate is GPU-vs-CPU agreement given identical decoded values, not the decode itself.** Reporting the measurement without its mechanism is the ladder violation the evidence rule names.
+- The four `unreachable!` arms (`msl.rs:2574-2597` — Q8_0, Q4_0, Float16, BFloat16, one each) are genuinely dead: `classify_packed_row_block` (`msl.rs:1137-1142`) rejects all four via `NotKQuantCodec` before `packed_row_block` can return `Some`. But the invariant lives in two functions kept in sync by comment, and `PackedRowBlock.codec` is typed as the full `PackedCodec` rather than a narrower type that would make the arms unrepresentable. Four near-identical `unreachable!`s growing by one per codec is the shape the no-panic rule exists to eliminate, not to document. Named as a defect, unfixed.
+- ROW 125 labels its parity numbers and gate counts as task-reported but does not apply that label to its mechanism narrative, which is equally second-hand. Provenance tagging must be per-claim, not per-section.
+
+**What survived the attack, verified:** `shape.rs:166-171` is quoted accurately; `Elementwise` genuinely has no `out_map` and `Reduce.out_map` genuinely exists, is checked at `:150` and consumed at `:175`; MoE routing genuinely builds `IndexMap::Computed` with zero new op variants; commits `965c673`/`91be44c` exist and match their descriptions; `emit()`'s live signature is `pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands)` (`msl.rs:653`).
+
+**The process lesson, which is the recurrence and not the instance.** ROW 126 cited real line numbers, quoted real source, and was still wrong at the headline — because the reasoning above the citations was never attacked. Quoting an artifact makes the *quote* trustworthy; it does nothing for the inference built on top. An adversarial pass is not optional polish on a row that proposes a direction, and the cheapest version of it is running the row's own re-prove commands before publishing rather than after.
+
+**Re-prove commands:**
+- `rg -n "is_data_dependent" proxima-tensor/src/` (expect exactly one gating call site, `shape.rs:166`, on `reduce.out_map`)
+- `sed -n '150,165p;190,200p' proxima-tensor/src/op.rs` (`Reduce.operand` single; `Elementwise` no out_map)
+- `sed -n '140,144p' proxima-tensor/src/map.rs` (the predicate is a variant test)
+- `rg -n "ScalarOp::Maximum" proxima-tensor/src/spec.rs` (expect routing and attention hits)
+
+## ROW 128 — scatter-add into a known destination ALREADY WORKS, by composition, with the gate untouched; and the gate itself turns out to be redundant. The cost is a dense `destination x source` mask, which is fatal at embedding scale
+
+Commit `5b96e4c`, `proxima-tensor --features std,instrument` 379 -> **381** (exact +2). `shape.rs`, `map.rs`, `op.rs` have **zero diff** — nothing was ungated, because nothing needed to be.
+
+**Read on the main loop at `cpu.rs:16062-16121`, not accepted from the report:**
+
+```rust
+Iota { dtype: Float32, extent: Extent::Static(3) }        // destination extent, externally supplied
+Elementwise{ Equal,     [iota -> axis0, indices -> axis1] }   // [3,4] selector
+Elementwise{ Multiply,  [mask -> (0,1), source -> axis1]  }   // [3,4] masked
+Reduce{ Add, in_map: Affine(proj(2,[0,1])), out_map: Affine(proj(2,[0])), Keep::Reduce }
+```
+
+**Every map is `IndexMap::Affine`. Not one `Computed`.** That is the whole trick: a scatter is a *masked reduce over the destination axis*, and the data-dependence lives in the mask's **values**, never in the index map's **variant**. Since `is_data_dependent` is `matches!(self, Self::Computed { .. })` (`map.rs:141-143`), an `Affine` out_map cannot trip `shape.rs:166` no matter what the indices contain.
+
+**Collision — the case that separates a scatter-add from a scatter-write — is correct.** Indices `[0, 2, 0, 1]`, source `[10, 20, 30, 40]` -> `[40, 40, 20]`. Destination 0 is targeted twice and `Reduce`'s `body: Add` sums it (`10 + 30 = 40`) rather than one write clobbering the other. **Proven able to fail:** the expectation was perturbed to `[30, 40, 20]` (scatter-*write* semantics) and fired with `left: [40.0, 40.0, 20.0] right: [30.0, 40.0, 20.0]`, then reverted and re-confirmed.
+
+**The gate is REDUNDANT, not load-bearing — established by experiment, then reverted.** `shape.rs:166-171` was temporarily deleted and the rejection test re-run. The error's `reason` changed from `"scatter (a data-dependent reduce output) is not shape-inferable in v1"` to `"reduce output maps must be pure projections in v1"` (`project_output_shape`, `shape.rs:448-451`) — **same `NotLowerable` variant**, so both existing rejection tests (`shape.rs:1077-1105`, `cpu.rs:13093-13123`) assert only `matches!(error, TensorError::NotLowerable { .. })` and would pass either way. `project_output_shape` independently rejects any `out_map` axis that is not a single `coeff == 1` term against a known `iter_extents[axis]`, and a `Computed` out_map's `gathered_dim` axis has empty terms by construction (`map.rs:89-92`). The named gate is a **better error message on top of a deeper structural rejection**, not the thing doing the rejecting. ROW 126 called it "a gate someone closed"; it is more accurately a diagnostic in front of a wall.
+
+**Why gather works and scatter does not, stated at the right level (this supersedes ROW 126's hand-waving).** A gather's output extent is resolved by `unify_iteration_space` from the **already-known shape of the `indices` operand** (`shape.rs:318-347`). A scatter's destination bin count is an **independent quantity** — not derivable from the iteration space, which is anchored solely to `reduce.operand`'s shape via `in_map` (`shape.rs:162-164`) and gives the number of *updates*, never the number of *bins*. Nothing in `Reduce`/`IndexMap` as typed carries that number. **The composition solves this by supplying the extent through `Iota`'s own `extent` field** — the same externally-supplied-extent mechanism `Op::Input`'s leaf shape already uses. That is why it needs no new field.
+
+**REPORT THE NUMBER THAT HURTS FIRST: the mask is dense, `O(destination x source)`.** For the motivating case — an embedding-table gradient with vocab 128,000 and 4,096 updated positions — the mask is 128,000 x 4,096 = **524 million elements materialized to accumulate 4,096 values**. That is not a viable embedding backward pass; it is a correct one. The composition is shippable for small destination extents and unshippable at LM head scale. Consistent with this workspace's prior finding that dynamic sparsity buys correctness, not asymptotic savings, absent a fixed topology. **Anyone reading "scatter-add works today" without this paragraph has been misled.**
+
+**Fixed-topology / structured sparsity works today, unmodified, proven by execution.** `a_static_block_sparse_matmul_needs_no_data_dependent_map` (`cpu.rs:15982-16058`) builds two independent 2x2 blocks entirely from `IndexMap::Affine`, zero `Computed` anywhere: **8 multiply-adds against the 16 a dense 4x4 costs.** The zero off-diagonal blocks are never emitted as ops at all. This confirms the hypothesis ROW 126 raised and could not settle, and it is the one unambiguously good piece of news here.
+
+**Design abandoned, named as the principles require.** The first shape was outcome (b) — a new destination-extent field on `Reduce` or `IndexMap::Computed` — and the justifying paragraph for it was written. Two things killed it: `Reduce { .. }` is literal-constructed at ~50 call sites across `bind.rs`/`cpu.rs`/`live.rs`/`partition.rs`/`spec.rs`, so any new field breaks all of them; and writing the expression against the existing algebra instead delivered the identical observable capability with no new type. **The paragraph-then-refutation is the finding**, and it is the third time this session the pipe question has returned "no new type" (f16 on Metal, the shared expert, this).
+
+**Corrections to ROW 127, which was itself a correction.** ROW 127 concluded "ungating scatter requires actually answering the shape-inference question, not narrowing a predicate." The first half stands and the practical implication was wrong: **you do not need to ungate it at all** for the gradient case. ROW 127 also said `is_data_dependent` has "exactly one gating call site" — precise but incomplete; there are **two** call sites total, `shape.rs:166` (the gate) and `bind.rs:831` (fusion legality, unrelated to shape inference). Only one gates shape, so the conclusion held, but the count as written was wrong.
+
+**What is still missing, stated so it is not mistaken for a solved problem.** No adjoint-generation pass exists anywhere in this crate — none was found and none was built. What is proven is that the *primitive an autodiff pass would need to emit* is expressible today, with real numbers and a real collision. That is a necessary condition, not a sufficient one, and the distance between them is a from-scratch graph-to-graph transform. Untested and explicitly not claimed: whether Concat/Pad reduce to the same `Iota`+`Select` mux (plausible, unbuilt), and whether `Tile` is reachable at all — it needs a modulo/wraparound term, and the affine grammar is `sum(coeff*axis) + offset`, which has no primitive for it.
+
+**Re-prove commands:**
+- `cargo nextest run -p proxima-tensor --features std,instrument scatter_add_into_a_known_destination_via_mask_composition -- --nocapture`
+- `cargo nextest run -p proxima-tensor --features std,instrument a_static_block_sparse_matmul_needs_no_data_dependent_map`
+- `rg -n "is_data_dependent" proxima-tensor/src/` (expect two sites: `shape.rs:166`, `bind.rs:831`)
+
+## ROW 129 — the `Receiver::recv` synchronisation hypothesis is REFUTED at zero occurrences: that code path never runs. Counts only; timing declined because the box was never quiet
+
+Commit `2c511d2`. `proxima-tensor --features std,instrument` 381 before and after.
+
+**The hypothesis.** CPU decode is 56.55 ms/token against llama.cpp `-ngl 0 -t 8` at 39.14 — 1.445x, 17.41 ms/token, never attributed. `cpu.rs:6391-6412` describes a shared persistent pool: rows split into `workers * ROW_OVERSUBSCRIBE` chunks, pullers claiming off a shared `AtomicUsize`, and `:6427-6428` states the calling thread "blocks in `Receiver::recv` for every spawned chunk." At ~1300 dispatches x 32 chunks that is ~40k channel round-trips per token, which looked like a candidate for a material share of the budget.
+
+**Measured, per single decoded token** (isolated by differencing a `max_tokens=2` run against `max_tokens=1` on the same loaded model and prompt, both deterministic, greedy tokens confirmed identical):
+
+| metric | value | counter |
+|---|---|---|
+| quantized-matmul dispatch decisions | **225** | `MATMUL_WORKERS_CALLS` |
+| sequential fallback | **0** | `MATMUL_WORKERS_NONE` |
+| unbatched matmul nodes | 65 | `reduce_quantized_calls` |
+| — via cohort branch | **65 (100%)** | `MATMUL_COHORT_DISPATCH_CALLS` |
+| — via pool/channel branch | **0 (0%)** | `MATMUL_DISPATCH_CALLS` |
+| chunks created | **2080** | `MATMUL_CHUNKS_CREATED` |
+| chunks actually run | **2080** | `MATMUL_CHUNK_RUNS` |
+| pool atomic-cursor claim attempts | **0** | `MATMUL_POOL_CLAIM_ATTEMPTS` |
+| `Receiver::recv` waits | **0** | `MATMUL_RECV_WAIT_TICKS` |
+| chunks per dispatch min/median/max | **32 / 32 / 32** | new histogram |
+
+The remaining 160 of 225 decisions go through `staged_batch` (`cpu.rs:3241-3328`), confirmed by code-read to also call `session.run(&round)` — the cohort path, never the channel path.
+
+**REFUTED, and the failure was in the reading, not the code.** The `Receiver::recv` mechanism quoted from `:6427-6428` executes **zero times** for this workload. That function's documented pool/channel protocol is dead code on the decode path; every dispatch takes the cohort branch. **A doc comment and a function body were read on the main loop and reported as the operative mechanism without establishing that the code runs.** This is the same error shape as ROW 127's headline (real citations, unexamined inference above them) and ROW 128's redundant-gate finding (the named gate was not the thing rejecting). Quoting a real line establishes the quote, never that the line executes.
+
+**The zero is trustworthy, and here is why it is not an N==0 artifact.** It is the complement of a nonzero-sum partition — `65 = 65 cohort + 0 pool` — with `MATMUL_WORKERS_CALLS = 225` and `reduce_quantized_calls = 65` both nonzero, proving the choke point fired. `MATMUL_CHUNK_RUNS == MATMUL_CHUNKS_CREATED` (2080 == 2080) is an independent correctness witness that no chunk was double-claimed or dropped. A bare zero from an uninstrumented path would prove nothing; this one is bracketed.
+
+**An unasked-for finding: `MIN_MACS_PER_CHUNK` appears inert on this workload.** Its documented purpose (`cpu.rs:6414-6421`) is to floor total work so a narrow call like `attn_k`/`attn_v`'s projection gets fewer, larger chunks instead of the same fixed split a wide call like `ffn_up`/`ffn_gate` earns. **Measured chunks-per-dispatch is 32/32/32 with zero variance** — every dispatch, narrow and wide alike, receives the full `workers * ROW_OVERSUBSCRIBE` = 8 x 4 split. Either the floor never binds at these shapes or it is not reached; unexplained, and recorded as unexplained rather than dropped.
+
+**Timing DECLINED, on the gate's own terms.** Load average was `47.41 / 20.89 / 14.21` at start and `9.52 / 42.98 / 40.48` before the run, `3.45 / 29.16 / 35.30` after — 5m and 15m stayed 4-5x the 8 P-core count throughout. **The load was this session's own concurrent agents.** No wall-clock, tick attribution, min-of-N or CoV is reported, and none should be inferred from the counts. Declining is the correct result here, not a failure: a timing taken at load 47 would have been worse than no timing, because it would have looked like data.
+
+**What the counts can and cannot support.** They establish the shape of the work — 2080 cohort chunk runs per token through `CohortSession::run`'s park/spin/wake protocol in `prime` — and they eliminate channel synchronisation entirely. They cannot say what any of it costs. If synchronisation is a real lever it now has exactly one place left to live, and that is `CohortSession::run`, which standing memory marks "tried twice, do not try a third time" without a quiet box. **The next honest step is a quiet box, not another hypothesis.**
+
+**Method note worth keeping.** The task initially added print statements to `proxima-model-interop/src/bind.rs`, outside its stated scope and inside a file another agent was concurrently editing. It caught this, reverted only its own inserted lines rather than `git checkout` (which would have destroyed the sibling's uncommitted work), and rebuilt the measurement as a standalone harness calling only public APIs. That is the correct recovery and the reason nothing was lost.
+
+**Re-prove commands:**
+- `cargo nextest run -p proxima-tensor --features std,instrument` (381, no drop)
+- harness and full table preserved at `scratchpad/mmcount/RESULTS.md` and `mmcount-harness-src.rs` — **session-scoped, and therefore a defective citation by gate 16's standard, same defect ROW 127 recorded against ROW 126.** The counters themselves are in-tree at `proxima-tensor/src/instrument.rs` and re-runnable; the harness is not.
