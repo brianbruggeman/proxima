@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use proxima_primitives::sync::task::JoinSet;
+use proxima_telemetry::error;
 use time::OffsetDateTime;
 use tokio::sync::watch;
-use tracing::error;
 
 use crate::error::ProximaError;
 use crate::log_buffer::{DEFAULT_LOG_BUFFER_CAPACITY, LogBuffer};

@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use proxima_primitives::sync::Mutex as TokioMutex;
+use proxima_telemetry::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::debug;
 
 use crate::app::{App, MountTarget};
 use crate::control_plane::{ControlPlane, PipeState, PipeStatus};
