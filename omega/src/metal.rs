@@ -345,7 +345,7 @@ impl Plan {
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
-/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`), keyed to its
+/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`), keyed to its
 /// [`PackedCodec`] — the single place this crate decides "packed AND which
 /// codec," shared by [`plan`] and [`prepare`] so the two cannot drift on it.
 fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
@@ -357,6 +357,7 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
             QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
+            QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
             QuantizedBlock::Float32(_) => None,
         })
         .collect()
@@ -442,9 +443,11 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) | QuantizedBlock::Q8_0(bytes) => {
-                upload_packed_bytes(&device, bytes, resident)?
-            }
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes) => upload_packed_bytes(&device, bytes, resident)?,
         };
         device_buffers.insert(*node, buffer);
     }
@@ -624,9 +627,11 @@ pub fn execute_plan_op_timed(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            QuantizedBlock::Q4K(bytes) | QuantizedBlock::Q5K(bytes) | QuantizedBlock::Q6K(bytes) | QuantizedBlock::Q8_0(bytes) => {
-                upload_packed_bytes(&device, bytes, resident)?
-            }
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes) => upload_packed_bytes(&device, bytes, resident)?,
         };
         device_buffers.insert(*node, buffer);
     }
@@ -824,6 +829,12 @@ fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> 
         QuantizedBlock::Q8_0(bytes) => {
             Ok((bytes.len() / crate::msl::Q8_0_BLOCK_BYTES) * crate::msl::Q8_0_BLOCK_ELEMENTS)
         }
+        // `Q4_0`'s block is the same flat shape as `Q8_0` (18 bytes
+        // carrying 32 elements, no super-block) but a different byte
+        // width -- its own constants, never `Q8_0_BLOCK_BYTES`.
+        QuantizedBlock::Q4_0(bytes) => {
+            Ok((bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS)
+        }
     }
 }
 
@@ -838,7 +849,8 @@ fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
         QuantizedBlock::Q4K(bytes)
         | QuantizedBlock::Q5K(bytes)
         | QuantizedBlock::Q6K(bytes)
-        | QuantizedBlock::Q8_0(bytes) => bytes.len(),
+        | QuantizedBlock::Q8_0(bytes)
+        | QuantizedBlock::Q4_0(bytes) => bytes.len(),
     }
 }
 

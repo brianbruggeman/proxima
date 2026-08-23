@@ -487,6 +487,42 @@ pub const Q8_0_BLOCK_BYTES: usize = 34;
 /// family's element count. Mirrors `proxima_gguf::quant::q8_0::QK8_0`.
 pub const Q8_0_BLOCK_ELEMENTS: usize = 32;
 
+/// `Q4_0`: llama.cpp's simplest and most widely distributed 4-bit legacy
+/// format -- a flat 32-element block, one `f16` scale, no sub-block
+/// scale/min pair (unlike `Q4_K`) and no second `min` field (unlike
+/// `Q4_1`). Same KIND-difference from the K-quant family that [`Q8_0`]'s
+/// own doc draws: no super-block, so this codec does not take the
+/// row-blocked ([`classify_packed_row_block`]) or tiled-GEMM
+/// ([`classify_tiled_gemm`]) fast paths either -- it always renders through
+/// the fully generic per-element accessor below.
+///
+/// Ports `proxima_gguf::quant::q4_0::dequantize_block` exactly: each packed
+/// byte carries two 4-bit levels, `value = (nibble - 8) * d`.
+///
+/// Layout, 18 bytes per 32 elements: `d` f16 at 0, 16 packed-nibble bytes
+/// at 2 (element `j`'s low nibble, element `16 + j`'s high nibble).
+pub const Q4_0_UNPACK_MSL: &str = r#"
+// element `index` (0..32) of one Q4_0 block, byte-for-byte the value
+// proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
+static inline float q4_0_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    uchar byte = block[2u + (index % 16u)];
+    int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
+    return (float)(nibble - 8) * d;
+}
+"#;
+
+/// Bytes one `Q4_0` block occupies. Mirrors
+/// `proxima_gguf::quant::q4_0::BLOCK_BYTES`; pinned in
+/// `omega/tests/q4_0_unpack.rs`, same posture as [`Q8_0_BLOCK_BYTES`].
+pub const Q4_0_BLOCK_BYTES: usize = 18;
+
+/// Elements one `Q4_0` block carries -- 32, the same flat block width as
+/// [`Q8_0_BLOCK_ELEMENTS`], NOT [`Q4K_BLOCK_ELEMENTS`]'s 256. Mirrors
+/// `proxima_gguf::quant::q4_0::QK4_0`.
+pub const Q4_0_BLOCK_ELEMENTS: usize = 32;
+
 /// Which packed codec one operand's bytes are — the second axis [`emit`]
 /// needs alongside "is this operand packed at all" (a plain `bool` cannot
 /// distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte one, or
@@ -508,6 +544,11 @@ pub enum PackedCodec {
     /// [`Q8_0_UNPACK_MSL`]'s own doc for how this differs in KIND from the
     /// three K-quants above, not just in size.
     Q8_0,
+    /// Flat 32-element block, one `f16` scale, no sub-block structure --
+    /// llama.cpp's simplest legacy 4-bit format. Same KIND-difference from
+    /// the K-quant family as [`Self::Q8_0`]; see [`Q4_0_UNPACK_MSL`]'s own
+    /// doc.
+    Q4_0,
 }
 
 impl PackedCodec {
@@ -522,6 +563,7 @@ impl PackedCodec {
             PackedCodec::Q5K => Q5K_BLOCK_BYTES,
             PackedCodec::Q6K => Q6K_BLOCK_BYTES,
             PackedCodec::Q8_0 => Q8_0_BLOCK_BYTES,
+            PackedCodec::Q4_0 => Q4_0_BLOCK_BYTES,
         }
     }
 }
@@ -610,6 +652,7 @@ pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOpera
             Some(PackedCodec::Q5K) => '5',
             Some(PackedCodec::Q6K) => '6',
             Some(PackedCodec::Q8_0) => '8',
+            Some(PackedCodec::Q4_0) => '0',
             None => 'f',
         });
     }
@@ -934,12 +977,19 @@ pub enum PackedRowBlockRejection {
     OperandCountNotTwo,
     /// Neither exactly zero nor exactly one operand is packed.
     NotExactlyOnePackedOperand,
-    /// The packed operand's codec is [`PackedCodec::Q8_0`] — this path's
-    /// lane amortization ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element
-    /// sub-block) is hard-coded to the K-quant family's shared 256-element
-    /// super-block, which `Q8_0`'s flat 32-element block has no analogue
-    /// for. `Q8_0` always takes the fully generic per-element path instead
-    /// (see [`Q8_0_UNPACK_MSL`]'s own doc).
+    /// The packed operand's codec is [`PackedCodec::Q8_0`] or
+    /// [`PackedCodec::Q4_0`] — this path's lane amortization
+    /// ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element sub-block) is
+    /// hard-coded to the K-quant family's shared 256-element super-block,
+    /// which neither flat 32-element codec has an analogue for. Both
+    /// always take the fully generic per-element path instead (see
+    /// [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`]'s own docs). Checked by
+    /// WHITELISTING the three K-quant variants rather than blacklisting
+    /// `Q8_0` alone -- an equality check against one non-K-quant codec
+    /// silently admits any OTHER non-K-quant codec whose extent happens to
+    /// be a multiple of 256 (`docs/discipline.md`'s own landmine: `Q8_0`'s
+    /// addition was caught only because this was rewritten as a match, not
+    /// because the single `==` check would have caught `Q4_0` too).
     NotKQuantCodec,
     /// The reduce folds ZERO axes into its output — degenerate, never
     /// observed on a real matmul (kept so the match stays exhaustive over
@@ -1013,8 +1063,15 @@ fn classify_packed_row_block(
     let Some(codec) = quantized[weight] else {
         unreachable!("weight index came from the is_some() filter above")
     };
-    if codec == PackedCodec::Q8_0 {
-        return Err(PackedRowBlockRejection::NotKQuantCodec);
+    // Whitelist the K-quant family explicitly rather than blacklisting one
+    // non-K-quant codec by `==` -- an equality check against `Q8_0` alone
+    // would have silently admitted `Q4_0` (or any future flat-block codec)
+    // the moment its extent happened to be a multiple of 256. This match
+    // is exhaustive over `PackedCodec`, so a new codec added later forces a
+    // decision here instead of slipping through.
+    match codec {
+        PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => {}
+        PackedCodec::Q8_0 | PackedCodec::Q4_0 => return Err(PackedRowBlockRejection::NotKQuantCodec),
     }
     let other = 1 - weight;
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
@@ -1778,6 +1835,8 @@ fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q8_0_UNPACK_MSL);
     source.push('\n');
+    source.push_str(Q4_0_UNPACK_MSL);
+    source.push('\n');
 }
 
 /// How operand `index` is READ, given the element-offset expression the
@@ -1804,6 +1863,11 @@ fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> Strin
         // [`Q8_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
         Some(PackedCodec::Q8_0) => format!(
             "q8_0_element(in{index} + ({offset} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, (uint)({offset} % {Q8_0_BLOCK_ELEMENTS}))"
+        ),
+        // `Q4_0`'s block is 32 elements, not 256 -- its own
+        // [`Q4_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
+        Some(PackedCodec::Q4_0) => format!(
+            "q4_0_element(in{index} + ({offset} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, (uint)({offset} % {Q4_0_BLOCK_ELEMENTS}))"
         ),
     }
 }
@@ -2421,6 +2485,12 @@ fn push_packed_row_blocked_body(
             PackedCodec::Q8_0 => {
                 unreachable!(
                     "classify_packed_row_block rejects PackedCodec::Q8_0 via NotKQuantCodec \
+                     before packed_row_block can ever return Some for it"
+                )
+            }
+            PackedCodec::Q4_0 => {
+                unreachable!(
+                    "classify_packed_row_block rejects PackedCodec::Q4_0 via NotKQuantCodec \
                      before packed_row_block can ever return Some for it"
                 )
             }
@@ -3424,6 +3494,42 @@ mod tests {
         assert!(
             !source.contains("hdr.scale * levels[j] - hdr.minimum"),
             "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
+        );
+    }
+
+    /// The landmine `Q8_0`'s own landing closed (`PackedRowBlockRejection::
+    /// NotKQuantCodec`, added because an EARLIER equality-only check would
+    /// have silently admitted any non-K-quant codec whose extent happened
+    /// to be a multiple of 256): `Q4_0`'s own block is 32 elements, and 256
+    /// is ALSO a whole multiple of that, so an extent-only gate could
+    /// wrongly admit it into the K-quant row-blocked kernel. The codec
+    /// check must reject `Q4_0` explicitly, before the extent is ever
+    /// consulted.
+    #[test]
+    fn q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4_0 = BTreeMap::new();
+        q4_0.insert(weight_node, PackedCodec::Q4_0);
+
+        assert_eq!(
+            classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).err(),
+            Some(PackedRowBlockRejection::NotKQuantCodec),
+            "Q4_0 must be rejected by codec, not admitted just because 256 is a multiple of its own block size"
+        );
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_none(),
+            "packed_row_block must agree with classify_packed_row_block's own rejection"
+        );
+
+        let source = emit(&bound, &q4_0).expect("emits").source;
+        assert!(
+            source.contains("q4_0_element("),
+            "a Q4_0 weight must render through the generic per-element accessor:\n{source}"
+        );
+        assert!(
+            !source.contains("q4k_run8(blk") && !source.contains("q5k_value(blk") && !source.contains("q6k_value(blk"),
+            "a Q4_0 weight must never emit a K-quant row-blocked unpack call:\n{source}"
         );
     }
 

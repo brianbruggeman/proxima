@@ -1720,11 +1720,12 @@ fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: D
 
 /// The stratified matrix the coordinator asked for: [`QuantizedBlock`]'s
 /// codec axis crossed with the compute dtype axis, one parameterized body
-/// instead of one test per cell. `float32`/`q4_k`/`q5_k`/`q6_k`/`q8_0` all
-/// have a real Metal unpack kernel today -- `q8_0`'s is the fully generic
-/// per-element path (`omega::msl::Q8_0_UNPACK_MSL`), not the row-blocked
-/// fast path the K-quants take, since its 32-element flat block has no
-/// analogue to their shared 256-element super-block.
+/// instead of one test per cell. `float32`/`q4_k`/`q5_k`/`q6_k`/`q8_0`/`q4_0`
+/// all have a real Metal unpack kernel today -- `q8_0`/`q4_0`'s are the
+/// fully generic per-element path (`omega::msl::Q8_0_UNPACK_MSL`/
+/// `Q4_0_UNPACK_MSL`), not the row-blocked fast path the K-quants take,
+/// since their 32-element flat blocks have no analogue to the K-quants'
+/// shared 256-element super-block.
 ///
 /// The oracle is always the plain-`f32` CPU path, weight dequantized first
 /// when the cell's codec is packed -- the same reasoning
@@ -1748,7 +1749,10 @@ fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: D
 #[case::q6k_at_float16("q6_k", DType::Float16, 1e-2)]
 #[case::q8_0_at_float32("q8_0", DType::Float32, 1e-5)]
 #[case::q8_0_at_float16("q8_0", DType::Float16, 1e-2)]
+#[case::q4_0_at_float32("q4_0", DType::Float32, 1e-5)]
+#[case::q4_0_at_float16("q4_0", DType::Float16, 1e-2)]
 async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case] compute_dtype: DType, #[case] epsilon: f32) {
+    use proxima_gguf::quant::q4_0;
     use proxima_gguf::quant::q4_k;
     use proxima_gguf::quant::q5_k;
     use proxima_gguf::quant::q6_k;
@@ -1816,6 +1820,20 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
             }
             Some(weight_blocks)
         }
+        "q4_0" => {
+            // `Q4_0`'s block is 32 elements too -- same axis reasoning as
+            // `q8_0` above, its own per-row block count, not the K-quant
+            // `blocks_per_row`.
+            let q4_0_blocks_per_row = k as usize / q4_0::QK4_0;
+            let mut weight_blocks = vec![0u8; rows as usize * q4_0_blocks_per_row * q4_0::BLOCK_BYTES];
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(weight_blocks.chunks_exact_mut(q4_0_blocks_per_row * q4_0::BLOCK_BYTES))
+            {
+                q4_0::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK4_0");
+            }
+            Some(weight_blocks)
+        }
         other => panic!("unhandled codec case in this matrix: {other}"),
     };
 
@@ -1826,6 +1844,7 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
         (Some(bytes), "q5_k") => QuantizedBlock::Q5K(bytes),
         (Some(bytes), "q6_k") => QuantizedBlock::Q6K(bytes),
         (Some(bytes), "q8_0") => QuantizedBlock::Q8_0(bytes),
+        (Some(bytes), "q4_0") => QuantizedBlock::Q4_0(bytes),
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
         (None, _) => QuantizedBlock::Float32(&weight_f32),
     };
@@ -1872,6 +1891,17 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
                 .zip(dequantized.chunks_exact_mut(k as usize))
             {
                 q8_0::dequantize(row_blocks, row_f32).expect("a whole number of q8_0 blocks");
+            }
+            dequantized
+        }
+        (Some(bytes), "q4_0") => {
+            let q4_0_blocks_per_row = k as usize / q4_0::QK4_0;
+            let mut dequantized = vec![0.0f32; rows as usize * k as usize];
+            for (row_blocks, row_f32) in bytes
+                .chunks_exact(q4_0_blocks_per_row * q4_0::BLOCK_BYTES)
+                .zip(dequantized.chunks_exact_mut(k as usize))
+            {
+                q4_0::dequantize(row_blocks, row_f32).expect("a whole number of q4_0 blocks");
             }
             dequantized
         }
