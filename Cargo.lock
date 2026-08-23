@@ -3753,7 +3753,6 @@ dependencies = [
  "redis-protocol",
  "regex",
  "ron",
- "rstest",
  "rustc-hash",
  "rustls",
  "serde",
