@@ -778,7 +778,12 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
+        let ids = proxima_tokenizer::encode_with_bos_eos(
+            prompt,
+            &self.vocab,
+            self.vocab.add_bos_token().unwrap_or(true),
+            self.vocab.add_eos_token().unwrap_or(false),
+        )?;
         // The repetition-penalty filter's own window: prompt tokens included,
         // matching upstream (`tools/main/main.cpp:725` feeds prompt tokens
         // through the same `common_sampler_accept` generated tokens use), grown
@@ -1077,7 +1082,12 @@ impl<'file> LoadedModel<'file> {
         let serving_config = supported_serving_config();
         let mut runtime = BackendRuntime::new(&serving_config);
 
-        let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
+        let ids = proxima_tokenizer::encode_with_bos_eos(
+            prompt,
+            &self.vocab,
+            self.vocab.add_bos_token().unwrap_or(true),
+            self.vocab.add_eos_token().unwrap_or(false),
+        )?;
         apply_serving_config(&serving_config, ids.len())?;
         let inputs = build_position_inputs(&ids, 0, self.architecture.head_dim, self.architecture.rope_freq_base);
 
@@ -1142,7 +1152,12 @@ impl<'file> LoadedModel<'file> {
     ///
     /// Whatever [`Self::forward_node_values`] can fail with.
     pub fn forward_logits(&self, prompt: &str) -> Result<Vec<f32>, InteropError> {
-        let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
+        let ids = proxima_tokenizer::encode_with_bos_eos(
+            prompt,
+            &self.vocab,
+            self.vocab.add_bos_token().unwrap_or(true),
+            self.vocab.add_eos_token().unwrap_or(false),
+        )?;
         let mut values = self.forward_node_values(prompt, &[self.logits_root])?;
         let logits = values.remove(0);
         let vocab_size = self.architecture.vocab as usize;
