@@ -6,10 +6,25 @@
 //! Subtract,Reciprocal,SquareRoot}` nodes over existing
 //! [`proxima_tensor::op::Op::Input`] leaves — every term genuinely
 //! elementwise, so [`adam_step`] is a graph-building function, the same
-//! shape [`crate::activation::relu`]/[`crate::activation::softmax`] are,
-//! not a new type. `m`/`v` are ordinary `Op::Input` leaves the caller
-//! creates and re-binds by name across steps
-//! (`proxima-tensor/src/cpu.rs:413` `evaluate_named`), exactly like `param`.
+//! shape [`crate::activation::relu`]/[`crate::activation::softmax`] are.
+//! `m`/`v` are ordinary `Op::Input` leaves the caller creates and re-binds
+//! by name across steps (`proxima-tensor/src/cpu.rs:413` `evaluate_named`),
+//! exactly like `param`.
+//!
+//! [`AdamStep`] is `adam_step` wearing this workspace's uniform `Pipe`
+//! shape (`In = AdamOperands`, `Out = (NodeId, NodeId, NodeId)`), for a
+//! caller that wants to compose it with other pipes rather than call it
+//! directly. Unlike [`crate::adjoint::Differentiate`] (zero-sized — a
+//! transform runs once with nothing to remember between calls), an
+//! `AdamStep` genuinely holds state across many calls: the same
+//! `AdamConfig`, `rank`, and `step` node are reused for every parameter in
+//! a program, and the program under construction grows with every call.
+//! `Pipe::call` takes `&self`, so that growth needs interior mutability —
+//! the same `RefCell` idiom
+//! `proxima_tensor::shape::ShapeTable`'s own `Pipe` impl uses for the
+//! identical reason (`proxima-tensor/src/shape.rs:69-73`, citing
+//! `proxima_primitives::pipe::isolate`'s `Rc`/`RefCell`/`!Send`
+//! per-thread-state pattern, `proxima-primitives/src/pipe/isolate.rs:34-36`).
 //!
 //! Bias correction needs `beta1^step`/`beta2^step`. `beta1`/`beta2` are
 //! compile-time [`AdamConfig`] values, so `ln(beta1)`/`ln(beta2)` are
@@ -24,7 +39,11 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::convert::Infallible;
+use core::future::Future;
 
+use proxima_primitives::pipe::Pipe;
 use proxima_tensor::dtype::DType;
 use proxima_tensor::op::{NodeId, Op, ScalarOp};
 
@@ -187,6 +206,54 @@ fn bias_correction(program: &mut Vec<Op>, step: NodeId, ln_beta: f32) -> NodeId 
     expr::binary(program, dtype, ScalarOp::Subtract, (one, zeroth.clone()), (beta_pow_step, zeroth))
 }
 
+/// [`adam_step`] wearing this workspace's uniform `Pipe` shape — see this
+/// module's own doc for why it needs a `RefCell` and [`Differentiate`]
+/// (crate::adjoint) does not.
+///
+/// `In = AdamOperands`, `Out = (new_param, new_m, new_v)`. Construct once
+/// per `(config, rank, step)` combination and `.call(operands)` once per
+/// parameter that shares them — the same parameter loop the free function
+/// already asked a caller to write, now composable as a `Pipe` chain.
+pub struct AdamStep {
+    program: RefCell<Vec<Op>>,
+    config: AdamConfig,
+    rank: u16,
+    step: NodeId,
+}
+
+impl AdamStep {
+    /// `program` is the shared graph every call appends to; `step` must
+    /// already be an `Op::Input` in it (see [`step_input`]).
+    #[must_use]
+    pub fn new(program: Vec<Op>, config: AdamConfig, rank: u16, step: NodeId) -> Self {
+        Self { program: RefCell::new(program), config, rank, step }
+    }
+
+    /// Hands the accumulated program back to the caller once every
+    /// parameter in it has been stepped — the same "read the state back
+    /// out" shape `proxima_tensor::shape::ShapeTable::finish` uses
+    /// (`proxima-tensor/src/shape.rs:111-113`).
+    #[must_use]
+    pub fn finish(self) -> Vec<Op> {
+        self.program.into_inner()
+    }
+}
+
+impl Pipe for AdamStep {
+    type In = AdamOperands;
+    type Out = (NodeId, NodeId, NodeId);
+    /// `adam_step` cannot fail — every input is an existing `NodeId` and
+    /// every output is a fresh `op::append`, so there is nothing to name.
+    type Err = Infallible;
+
+    fn call(&self, operands: Self::In) -> impl Future<Output = Result<Self::Out, Infallible>> {
+        async move {
+            let mut program = self.program.borrow_mut();
+            Ok(adam_step(&mut program, &self.config, self.rank, operands, self.step))
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -250,5 +317,44 @@ mod tests {
 
         let updated_m = evaluated.get(new_m).expect("new_m requested").0;
         assert!((updated_m[0] - 0.1).abs() < 1e-6, "m = (1-b1)*g, got {updated_m:?}");
+    }
+
+
+    /// Same reasoning as `adjoint::pipe_tests::block_on_once`: `AdamStep`'s
+    /// `RefCell` makes its `Pipe::call` future `!Send` by design (base
+    /// `Pipe` has no `Send` bound), so this polls it directly rather than
+    /// going through `#[proxima::test]`'s `Send`-bound harness.
+    fn block_on_once<F: Future>(future: F) -> F::Output {
+        let mut future = core::pin::pin!(future);
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            core::task::Poll::Ready(output) => output,
+            core::task::Poll::Pending => panic!("test future must be ready on first poll"),
+        }
+    }
+
+    #[test]
+    fn the_pipe_form_agrees_with_the_free_function() {
+        let mut program = Vec::new();
+        let param = leaf(&mut program, "param", 2);
+        let grad = leaf(&mut program, "grad", 2);
+        let m_prev = leaf(&mut program, "m", 2);
+        let v_prev = leaf(&mut program, "v", 2);
+        let step = step_input(&mut program, "step");
+        let config = AdamConfig::default();
+        let operands = AdamOperands { param, grad, m: m_prev, v: v_prev };
+
+        let mut via_function_program = program.clone();
+        let via_function = adam_step(&mut via_function_program, &config, 1, operands, step);
+
+        let pipe = AdamStep::new(program, config, 1, step);
+        let via_pipe = block_on_once(pipe.call(operands)).expect("adam_step never fails");
+        let via_pipe_program = pipe.finish();
+
+        assert_eq!(via_pipe, via_function, "the Pipe wrapper must append the exact same nodes");
+        assert_eq!(
+            via_pipe_program, via_function_program,
+            "the Pipe wrapper must grow the shared program identically to the free function"
+        );
     }
 }
