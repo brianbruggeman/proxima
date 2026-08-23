@@ -154,7 +154,10 @@ pub struct GridSpec {
 /// let shapes = proxima_tensor::infer(&program, &[])?;
 /// let bound_ops = proxima_tensor::bind(&program, &shapes, &[])?;
 ///
-/// let kernel = omega::emit(&bound_ops[0])?;
+/// // no packed (quantized/half-precision) operand in this program, so an
+/// // empty codec table is exactly right -- see `PackedOperands`'s own doc.
+/// let packed_operands = omega::PackedOperands::new();
+/// let kernel = omega::emit(&bound_ops[0], &packed_operands)?;
 /// assert!(kernel.source.contains("kernel void"));
 /// assert!(kernel.source.contains("tanh("));
 /// assert_eq!(kernel.bindings.len(), 3); // one input, one output, uniforms
@@ -523,6 +526,55 @@ pub const Q4_0_BLOCK_BYTES: usize = 18;
 /// `proxima_gguf::quant::q4_0::QK4_0`.
 pub const Q4_0_BLOCK_ELEMENTS: usize = 32;
 
+/// `Float16`: not a quantization at all -- MSL's `half` is IEEE-754 binary16
+/// natively, so a `Float16` weight's bytes ARE a valid `half` buffer with no
+/// unpack function required. It still needs a [`PackedCodec`] slot (rather
+/// than folding into the plain [`operand_read`]'s `None` arm) because the
+/// buffer must bind as `device const half*`, not whatever `float`/`half`
+/// [`type_token`] chose for the KERNEL's own accumulator dtype -- a router
+/// weight (`Float16`) multiplied against an `f32` activation is exactly the
+/// mixed-dtype case `type_token` never had to handle before this codec.
+/// Same non-K-quant, flat, one-element-per-block shape [`Q8_0`]/[`Q4_0`]
+/// take: never the row-blocked ([`classify_packed_row_block`]) or tiled-GEMM
+/// path, always the generic per-element accessor.
+pub const FLOAT16_BLOCK_BYTES: usize = 2;
+
+/// One `Float16` block is one element -- there is no super-block or
+/// sub-block structure to amortize over, unlike every K-quant codec.
+pub const FLOAT16_BLOCK_ELEMENTS: usize = 1;
+
+/// `BFloat16`: unlike [`Self::Float16`]/[`FLOAT16_BLOCK_BYTES`], MSL has no
+/// native `bfloat` storage type on this driver's baseline toolchain, so a
+/// `BFloat16` weight DOES need an unpack function -- [`BF16_UNPACK_MSL`]'s
+/// widen-by-shift, not a bit-packed dequantize. `bfloat16` is the top 16
+/// bits of an `f32` (1 sign + 8 exponent + 7 mantissa, IEEE binary32's
+/// exponent width exactly), so reconstructing the `f32` is `bits << 16`
+/// reinterpreted, no rounding or lookup table involved.
+pub const BFLOAT16_BLOCK_BYTES: usize = 2;
+
+/// Same one-element-per-block shape as [`FLOAT16_BLOCK_ELEMENTS`].
+pub const BFLOAT16_BLOCK_ELEMENTS: usize = 1;
+
+/// Widens one `bfloat16` element (2 little-endian bytes, the top half of an
+/// `f32`) to `float` by shifting it into the high 16 bits of a 32-bit word
+/// and reinterpreting -- the exact inverse of truncating an `f32`'s mantissa
+/// to 7 bits, no rounding needed since every bit already present is kept
+/// unchanged. `index` is threaded for the same call shape every other
+/// `*_element` accessor takes ([`operand_read`]'s block-offset arithmetic
+/// already folds a `BFloat16` weight's element index into the pointer, so
+/// this function always reads at `index == 0`), even though a flat
+/// one-element block never uses it for addressing.
+pub const BF16_UNPACK_MSL: &str = r#"
+// element `index` (always 0 -- BFloat16 has no super-block) of one BFloat16
+// block: the top 16 bits of the f32 this pair of bytes came from,
+// reconstructed by shifting them back into place.
+static inline float bf16_element(device const uchar *block, uint index) {
+    (void)index;
+    uint bits = ((uint)block[0] | ((uint)block[1] << 8)) << 16u;
+    return as_type<float>(bits);
+}
+"#;
+
 /// Which packed codec one operand's bytes are — the second axis [`emit`]
 /// needs alongside "is this operand packed at all" (a plain `bool` cannot
 /// distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte one, or
@@ -549,6 +601,15 @@ pub enum PackedCodec {
     /// the K-quant family as [`Self::Q8_0`]; see [`Q4_0_UNPACK_MSL`]'s own
     /// doc.
     Q4_0,
+    /// Not a quantization: `half`-native bytes, read directly through a
+    /// `device const half*` binding, no unpack function -- see
+    /// [`FLOAT16_BLOCK_BYTES`]'s own doc for why this still needs a codec
+    /// slot despite there being nothing to decode.
+    Float16,
+    /// Needs a real unpack (widen-by-shift, [`BF16_UNPACK_MSL`]) since MSL
+    /// has no native `bfloat` storage type -- see [`BFLOAT16_BLOCK_BYTES`]'s
+    /// own doc.
+    BFloat16,
 }
 
 impl PackedCodec {
@@ -564,6 +625,8 @@ impl PackedCodec {
             PackedCodec::Q6K => Q6K_BLOCK_BYTES,
             PackedCodec::Q8_0 => Q8_0_BLOCK_BYTES,
             PackedCodec::Q4_0 => Q4_0_BLOCK_BYTES,
+            PackedCodec::Float16 => FLOAT16_BLOCK_BYTES,
+            PackedCodec::BFloat16 => BFLOAT16_BLOCK_BYTES,
         }
     }
 }
@@ -653,6 +716,8 @@ pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOpera
             Some(PackedCodec::Q6K) => '6',
             Some(PackedCodec::Q8_0) => '8',
             Some(PackedCodec::Q4_0) => '0',
+            Some(PackedCodec::Float16) => 'h',
+            Some(PackedCodec::BFloat16) => 'b',
             None => 'f',
         });
     }
@@ -1071,7 +1136,9 @@ fn classify_packed_row_block(
     // decision here instead of slipping through.
     match codec {
         PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => {}
-        PackedCodec::Q8_0 | PackedCodec::Q4_0 => return Err(PackedRowBlockRejection::NotKQuantCodec),
+        PackedCodec::Q8_0 | PackedCodec::Q4_0 | PackedCodec::Float16 | PackedCodec::BFloat16 => {
+            return Err(PackedRowBlockRejection::NotKQuantCodec);
+        }
     }
     let other = 1 - weight;
     let reduce_dims: Vec<u16> = (0..resolved.extents.len() as u16)
@@ -1682,8 +1749,16 @@ fn kernel_signature(
         // a packed operand's buffer is BYTES, not elements — the shader
         // turns an element offset into a super-block plus a position inside
         // it at the read (`operand_read`), so the binding has to be typed
-        // for what is actually in the buffer.
-        let binding_type = if codec.is_some() { "uchar" } else { element_type };
+        // for what is actually in the buffer. `Float16` is the one codec
+        // whose buffer is neither raw bytes nor the kernel's own
+        // `element_type`: its bytes ARE valid `half` elements already, so it
+        // binds as `half` directly rather than `uchar` -- see
+        // `FLOAT16_BLOCK_BYTES`'s own doc.
+        let binding_type = match codec {
+            None => element_type,
+            Some(PackedCodec::Float16) => "half",
+            Some(_) => "uchar",
+        };
         source.push_str(&format!(
             "    device const {binding_type}* in{index} [[buffer({index})]],\n"
         ));
@@ -1837,6 +1912,8 @@ fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
     source.push('\n');
+    source.push_str(BF16_UNPACK_MSL);
+    source.push('\n');
 }
 
 /// How operand `index` is READ, given the element-offset expression the
@@ -1868,6 +1945,18 @@ fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> Strin
         // [`Q4_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
         Some(PackedCodec::Q4_0) => format!(
             "q4_0_element(in{index} + ({offset} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, (uint)({offset} % {Q4_0_BLOCK_ELEMENTS}))"
+        ),
+        // `Float16`'s buffer already binds as `device const half*`
+        // (`kernel_signature`'s own match), so reading it is a plain index
+        // exactly like a `None` operand -- MSL implicitly promotes the
+        // resulting `half` to `float` wherever the body assigns it into a
+        // `float` scratch slot, no cast needed.
+        Some(PackedCodec::Float16) => format!("in{index}[{offset}]"),
+        // `BFloat16`'s block is 1 element, 2 bytes -- its own
+        // [`BFLOAT16_BLOCK_ELEMENTS`]/[`BFLOAT16_BLOCK_BYTES`], never
+        // [`Q4K_BLOCK_ELEMENTS`].
+        Some(PackedCodec::BFloat16) => format!(
+            "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (uint)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         ),
     }
 }
@@ -2491,6 +2580,18 @@ fn push_packed_row_blocked_body(
             PackedCodec::Q4_0 => {
                 unreachable!(
                     "classify_packed_row_block rejects PackedCodec::Q4_0 via NotKQuantCodec \
+                     before packed_row_block can ever return Some for it"
+                )
+            }
+            PackedCodec::Float16 => {
+                unreachable!(
+                    "classify_packed_row_block rejects PackedCodec::Float16 via NotKQuantCodec \
+                     before packed_row_block can ever return Some for it"
+                )
+            }
+            PackedCodec::BFloat16 => {
+                unreachable!(
+                    "classify_packed_row_block rejects PackedCodec::BFloat16 via NotKQuantCodec \
                      before packed_row_block can ever return Some for it"
                 )
             }
@@ -3530,6 +3631,45 @@ mod tests {
         assert!(
             !source.contains("q4k_run8(blk") && !source.contains("q5k_value(blk") && !source.contains("q6k_value(blk"),
             "a Q4_0 weight must never emit a K-quant row-blocked unpack call:\n{source}"
+        );
+    }
+
+    /// Same landmine `q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent`
+    /// closes, proven for BOTH half-precision codecs at once: neither is a
+    /// K-quant, so both must reject via `NotKQuantCodec` and render through
+    /// the generic per-element accessor -- `Float16`'s direct `half` index,
+    /// `BFloat16`'s `bf16_element` widen -- never the row-blocked path's
+    /// `q4k_run8`/`q5k_value`/`q6k_value` calls.
+    #[proxima::test]
+    #[case::float16(PackedCodec::Float16, "in0[")]
+    #[case::bfloat16(PackedCodec::BFloat16, "bf16_element(")]
+    async fn half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent(
+        #[case] codec: PackedCodec,
+        #[case] expected_read: &str,
+    ) {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut operands = BTreeMap::new();
+        operands.insert(weight_node, codec);
+
+        assert_eq!(
+            classify_packed_row_block(&bound, &operand_codecs(&bound, &operands)).err(),
+            Some(PackedRowBlockRejection::NotKQuantCodec),
+            "{codec:?} must be rejected by codec, not admitted just because 256 is a multiple of its own block size"
+        );
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &operands)).is_none(),
+            "packed_row_block must agree with classify_packed_row_block's own rejection"
+        );
+
+        let source = emit(&bound, &operands).expect("emits").source;
+        assert!(
+            source.contains(expected_read),
+            "a {codec:?} weight must render through its own generic per-element accessor:\n{source}"
+        );
+        assert!(
+            !source.contains("q4k_run8(blk") && !source.contains("q5k_value(blk") && !source.contains("q6k_value(blk"),
+            "a {codec:?} weight must never emit a K-quant row-blocked unpack call:\n{source}"
         );
     }
 

@@ -345,9 +345,15 @@ impl Plan {
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
-/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`), keyed to its
-/// [`PackedCodec`] — the single place this crate decides "packed AND which
-/// codec," shared by [`plan`] and [`prepare`] so the two cannot drift on it.
+/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Float16`,
+/// `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
+/// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
+/// the two cannot drift on it. `Float16` earns a codec slot despite needing
+/// no unpack FUNCTION (see `msl::FLOAT16_BLOCK_BYTES`'s own doc) because its
+/// buffer still needs a non-`float`, non-`uchar` binding type -- `None`
+/// would route it through `Float32`'s plain-array path and bind it as the
+/// kernel's own accumulator type, which is wrong the moment a `Float16`
+/// weight multiplies an `f32` activation.
 fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
     block_nodes
         .iter()
@@ -358,13 +364,9 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
             QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
-            // no `PackedCodec` unpack kernel exists for either yet -- `None`
-            // here mirrors `Float32`'s "not a packed codec this driver has a
-            // kernel for" posture; the real rejection happens downstream in
-            // `block_element_count`.
-            QuantizedBlock::Float32(_)
-            | QuantizedBlock::Float16(_)
-            | QuantizedBlock::BFloat16(_) => None,
+            QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
+            QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
+            QuantizedBlock::Float32(_) => None,
         })
         .collect()
 }
@@ -449,23 +451,21 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
+            // every packed codec above -- there is no host-side narrowing
+            // step (unlike `upload_block`'s `Float32 -> Float16` path,
+            // which narrows a caller's `&[f32]`): a `Float16` weight's on-
+            // disk bytes already ARE its device buffer's bytes (native
+            // `half`), and a `BFloat16` weight's bytes are widened entirely
+            // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
+            // host.
             QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes) => upload_packed_bytes(&device, bytes, resident)?,
-            // `plan`'s own `prepare` -> `block_element_count` already
-            // rejects `Float16`/`BFloat16` with a typed `NotLowerable`
-            // before a `Plan` can exist -- this arm only exists so the
-            // match stays exhaustive as the enum grows, never reachable
-            // for a `Plan` this driver actually produced.
-            QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {
-                return Err(TensorError::NotLowerable {
-                    node: *node,
-                    reason: "metal has no f16/bf16 unpack kernel yet; cpu reaches it via dot_f16_f32/dot_bf16_f32",
-                }
-                .into());
-            }
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
         };
         device_buffers.insert(*node, buffer);
     }
@@ -645,23 +645,21 @@ pub fn execute_plan_op_timed(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
+            // every packed codec above -- there is no host-side narrowing
+            // step (unlike `upload_block`'s `Float32 -> Float16` path,
+            // which narrows a caller's `&[f32]`): a `Float16` weight's on-
+            // disk bytes already ARE its device buffer's bytes (native
+            // `half`), and a `BFloat16` weight's bytes are widened entirely
+            // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
+            // host.
             QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes) => upload_packed_bytes(&device, bytes, resident)?,
-            // `plan`'s own `prepare` -> `block_element_count` already
-            // rejects `Float16`/`BFloat16` with a typed `NotLowerable`
-            // before a `Plan` can exist -- this arm only exists so the
-            // match stays exhaustive as the enum grows, never reachable
-            // for a `Plan` this driver actually produced.
-            QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {
-                return Err(TensorError::NotLowerable {
-                    node: *node,
-                    reason: "metal has no f16/bf16 unpack kernel yet; cpu reaches it via dot_f16_f32/dot_bf16_f32",
-                }
-                .into());
-            }
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
         };
         device_buffers.insert(*node, buffer);
     }
@@ -831,8 +829,12 @@ struct Prepared {
 /// the identical type rather than an `&[&[f32]]` of its own, so the two
 /// evaluators cannot drift on what a block IS. A packed codec's element
 /// count is derived from its own block geometry, never from `data.len()` —
-/// packed bytes and elements are not the same unit.
-fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
+/// packed bytes and elements are not the same unit. Infallible now that
+/// every `QuantizedBlock` variant has a real Metal path (`Float16`/
+/// `BFloat16` were the last two arms that could still fail here); kept
+/// returning a `Result` regardless, so a future codec added without an
+/// entry here is still a typed error rather than a silent miscount.
+fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
     match block {
         QuantizedBlock::Float32(data) => Ok(data.len()),
         // packed bytes and elements are NOT the same unit: a `Q4_K`
@@ -865,18 +867,14 @@ fn block_element_count(node: NodeId, block: &QuantizedBlock<'_>) -> Result<usize
         QuantizedBlock::Q4_0(bytes) => {
             Ok((bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS)
         }
-        // Half-precision weights have no unpack kernel here yet -- CPU is
-        // the only path that reaches them (`dot_f16_f32`/`dot_bf16_f32`).
-        QuantizedBlock::Float16(_) => Err(TensorError::NotLowerable {
-            node,
-            reason: "metal has no f16 unpack kernel yet; cpu reaches it via dot_f16_f32",
+        // Half-precision weights are one element per block -- no
+        // super-block to divide out, unlike every quantized codec above.
+        QuantizedBlock::Float16(bytes) => {
+            Ok((bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS)
         }
-        .into()),
-        QuantizedBlock::BFloat16(_) => Err(TensorError::NotLowerable {
-            node,
-            reason: "metal has no bf16 unpack kernel yet; cpu reaches it via dot_bf16_f32",
+        QuantizedBlock::BFloat16(bytes) => {
+            Ok((bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES) * crate::msl::BFLOAT16_BLOCK_ELEMENTS)
         }
-        .into()),
     }
 }
 
@@ -946,7 +944,7 @@ fn prepare(
     }
     for (node, block) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
-        let found = block_element_count(*node, block)?;
+        let found = block_element_count(block)?;
         if found != expected {
             return Err(TensorError::InputSizeMismatch {
                 node: *node,
@@ -987,7 +985,10 @@ fn prepare(
 // this driver's own dtype ceiling is wider than the CPU oracle's: `Float32`
 // or `Float16` may reach a device buffer, since `msl.rs` now emits a
 // `half`-typed kernel for a `Float16` node instead of assuming `float`
-// unconditionally (see `msl.rs`'s own dtype doc). Any other dtype is still
+// unconditionally (see `msl.rs`'s own dtype doc). A `BFloat16` node clears
+// this gate only via the `packed_nodes` exemption below (it is never a bare
+// `Float32`/`Float16` node itself) -- `packed_operands_of` puts every
+// `BFloat16` block-input node into that set. Any other dtype is still
 // rejected exactly as before.
 fn reject_unsupported_gpu_dtype(
     program: &[Op],
